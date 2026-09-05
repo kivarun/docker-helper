@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 
@@ -93,8 +94,11 @@ func promptCredentialYesNo(question string, stdin io.Reader, stderr io.Writer) (
 // scope). Admin authentication must name the target explicitly (it is never
 // inferred and never searched globally); a Launcher credential has no
 // control-plane authority. adminErr and launcherErr carry the calling command
-// family's rejection messages.
-func resolveTargetPrincipalForCLI(client *apiClient, explicitPrincipal string, adminErr, launcherErr error) (string, error) {
+// family's rejection messages. adminResolver, when non-nil, gives admin
+// authentication one selector-driven way to name the target (the Launcher
+// selector rule: an ID-shaped selector resolves the owning Principal through
+// the daemon); returning handled=false falls back to adminErr.
+func resolveTargetPrincipalForCLI(client *apiClient, explicitPrincipal string, adminErr, launcherErr error, adminResolver func() (username string, handled bool, err error)) (string, error) {
 	if explicitPrincipal != "" {
 		return explicitPrincipal, nil
 	}
@@ -109,6 +113,15 @@ func resolveTargetPrincipalForCLI(client *apiClient, explicitPrincipal string, a
 		}
 		return auth.Principal, nil
 	case "admin":
+		if adminResolver != nil {
+			username, handled, err := adminResolver()
+			if err != nil {
+				return "", err
+			}
+			if handled {
+				return username, nil
+			}
+		}
 		return "", adminErr
 	case "launcher":
 		return "", launcherErr
@@ -125,7 +138,7 @@ func resolveTargetPrincipalForCLI(client *apiClient, explicitPrincipal string, a
 func resolveLauncherPrincipalForCLI(client *apiClient, explicitPrincipal string) (string, error) {
 	return resolveTargetPrincipalForCLI(client, explicitPrincipal,
 		errors.New("--principal is required for admin authentication"),
-		errors.New("Launcher credentials do not manage Launchers"))
+		errors.New("Launcher credentials do not manage Launchers"), nil)
 }
 
 // resolvePrincipalTargetForCLI returns the Principal targeted by a Principal
@@ -135,23 +148,52 @@ func resolveLauncherPrincipalForCLI(client *apiClient, explicitPrincipal string)
 func resolvePrincipalTargetForCLI(client *apiClient, explicitPrincipal string) (string, error) {
 	return resolveTargetPrincipalForCLI(client, explicitPrincipal,
 		errors.New("PRINCIPAL is required for admin authentication"),
-		errors.New("Launcher credentials do not manage Principal credentials"))
+		errors.New("Launcher credentials do not manage Principal credentials"), nil)
+}
+
+// resolveLauncherPrincipalByID resolves the owning Principal of an ID-shaped
+// Launcher selector through the daemon's scope-first launcher list query.
+// The daemon remains the authorization authority: the query narrows by the
+// exact Launcher ID server-side and never searches Launcher names globally.
+func resolveLauncherPrincipalByID(client *apiClient, selector string) (string, error) {
+	result, err := client.listLaunchersFiltered("", selector)
+	if err != nil {
+		return "", err
+	}
+	if len(result.Launchers) != 1 {
+		return "", ErrLauncherNotFound
+	}
+	return result.Launchers[0].Principal, nil
 }
 
 // launcherSelectorTarget resolves the CLI target for an individual Launcher
 // command: the Principal from --principal or auth introspection (target
 // construction only — the daemon remains the authorization authority) and the
 // Launcher selector (name or ID), 'default' when the positional selector is
-// omitted. Admin authentication must name the Principal explicitly; it is
-// never inferred and never searched globally.
+// omitted. Admin authentication must name the Principal explicitly for a
+// Launcher name or the omitted default; an ID-shaped selector (dhl_...)
+// resolves the owning Principal through the daemon's scope-first list query
+// and never searches Launcher names globally.
 func launcherSelectorTarget(client *apiClient, explicitPrincipal string, fs *flag.FlagSet) (username, selector string, err error) {
-	username, err = resolveLauncherPrincipalForCLI(client, explicitPrincipal)
-	if err != nil {
-		return "", "", err
-	}
 	selector = defaultLauncherName
 	if fs.NArg() > 0 {
 		selector = fs.Arg(0)
+	}
+	adminResolver := func() (string, bool, error) {
+		if !isLauncherIDSelector(selector) {
+			return "", false, nil
+		}
+		owner, err := resolveLauncherPrincipalByID(client, selector)
+		if err != nil {
+			return "", true, err
+		}
+		return owner, true, nil
+	}
+	username, err = resolveTargetPrincipalForCLI(client, explicitPrincipal,
+		errors.New("--principal is required for admin authentication"),
+		errors.New("Launcher credentials do not manage Launchers"), adminResolver)
+	if err != nil {
+		return "", "", err
 	}
 	return username, selector, nil
 }
@@ -184,6 +226,29 @@ var launcherCommand = &Command{
 	},
 }
 
+// launcherDefaultConflictHint is the CLI's pre-flight rejection for the
+// guaranteed conflict of creating the auto-provisioned 'default' Launcher:
+// every Principal gets a 'default' Launcher at creation, so a create without
+// --name can only collide. The check is a read-only show of the Launcher the
+// caller could fetch anyway; the create itself stays atomic on the daemon.
+const launcherDefaultConflictHint = "; use --name NAME to create a differently named launcher"
+
+// launcherDefaultExists reports whether the target Principal's 'default'
+// Launcher already exists. A 404 means it does not and creation may proceed;
+// any other pre-flight failure is ignored so the daemon's create response
+// remains the authority (a transient read failure must not block creation).
+func launcherDefaultExists(client *apiClient, username string) (bool, error) {
+	_, err := client.showLauncher(username, defaultLauncherName)
+	if err == nil {
+		return true, nil
+	}
+	var apiErr *apiError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+		return false, nil
+	}
+	return false, nil
+}
+
 var launcherCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a launcher",
@@ -206,23 +271,42 @@ var launcherCreateCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
+				username, err := resolveLauncherPrincipalForCLI(client, *principal)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				targetName := defaultLauncherName
+				if name.set {
+					targetName = name.value
+				}
+				// Without --name the request targets the auto-provisioned
+				// 'default' Launcher, which every Principal already has:
+				// reject before the credential prompt instead of walking
+				// into the daemon's guaranteed conflict. With --name the
+				// create stays atomic and the daemon's conflict response
+				// names the colliding Launcher and Principal.
+				if !name.set {
+					exists, err := launcherDefaultExists(client, username)
+					if err != nil {
+						fmt.Fprintf(stderr, "error: %v\n", err)
+						return 1
+					}
+					if exists {
+						fmt.Fprintf(stderr, "error: launcher %q already exists for principal %q%s\n",
+							defaultLauncherName, username, launcherDefaultConflictHint)
+						return 1
+					}
+				}
 				issue, err := resolveIssueCredential(*issueCredential, *noCredential,
 					"Create launcher credential now? [Y/n]", os.Stdin, stderr, term.IsTerminal(int(os.Stdin.Fd())))
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 2
 				}
-				username, err := resolveLauncherPrincipalForCLI(client, *principal)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
 
 				req := createLauncherClientRequest{IssueCredential: issue}
-				req.Name = defaultLauncherName
-				if name.set {
-					req.Name = name.value
-				}
+				req.Name = targetName
 				if len(allowedRoots.values) == 0 {
 					req.Scope = "inherit"
 					req.AllowedRoots = []string{}

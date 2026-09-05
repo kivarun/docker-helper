@@ -30,6 +30,7 @@ type recordedRequest struct {
 	method string
 	path   string
 	body   string
+	query  string
 }
 
 // startRecordingLauncherCLIServer is the shared stub operator endpoint: it
@@ -44,7 +45,7 @@ func startRecordingLauncherCLIServer(t *testing.T, respond func(w http.ResponseW
 		if err != nil {
 			t.Errorf("read body: %v", err)
 		}
-		*requests = append(*requests, recordedRequest{r.Method, r.URL.Path, string(buf)})
+		*requests = append(*requests, recordedRequest{r.Method, r.URL.Path, string(buf), r.URL.RawQuery})
 		r.Body = io.NopCloser(bytes.NewReader(buf))
 		respond(w, r)
 	}))
@@ -862,14 +863,20 @@ func writeJSONResponse(w http.ResponseWriter, status int, v any) {
 // ---- principal inference end-to-end ----
 
 // TestLauncherCreateCLIInfersPrincipalFromCredential proves the full CLI path:
-// --principal omitted -> GET /auth (principal authority) -> canonical nested
-// POST /principals/{username}/launchers with the returned username and the
-// simple-default body.
+// --principal omitted -> GET /auth (principal authority) -> pre-flight show of
+// the auto-provisioned default Launcher (404: absent, so creation may
+// proceed) -> canonical nested POST /principals/{username}/launchers with the
+// returned username and the simple-default body.
 func TestLauncherCreateCLIInfersPrincipalFromCredential(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
 			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
+		case r.URL.Path == "/principals/alice/launchers/default" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusNotFound, struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}{Code: "launcher_not_found", Message: "launcher not found"})
 		case r.URL.Path == "/principals/alice/launchers" && r.Method == http.MethodPost:
 			writeJSONResponse(w, http.StatusCreated, createLauncherResponse{
 				OK:       true,
@@ -888,21 +895,106 @@ func TestLauncherCreateCLIInfersPrincipalFromCredential(t *testing.T) {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
 
-	if len(*requests) != 2 {
-		t.Fatalf("requests = %+v, want exactly /auth then create", *requests)
+	if len(*requests) != 3 {
+		t.Fatalf("requests = %+v, want /auth, pre-flight default show, then create", *requests)
 	}
-	if (*requests)[0].path != "/auth" || (*requests)[1].path != "/principals/alice/launchers" {
-		t.Fatalf("request order = %s %s, %s %s", (*requests)[0].method, (*requests)[0].path, (*requests)[1].method, (*requests)[1].path)
+	if (*requests)[0].path != "/auth" || (*requests)[1].path != "/principals/alice/launchers/default" || (*requests)[2].path != "/principals/alice/launchers" {
+		t.Fatalf("request order = %+v, want /auth, show default, create", *requests)
 	}
 	var req createLauncherClientRequest
-	if err := json.Unmarshal([]byte((*requests)[1].body), &req); err != nil {
-		t.Fatalf("decode create body %q: %v", (*requests)[1].body, err)
+	if err := json.Unmarshal([]byte((*requests)[2].body), &req); err != nil {
+		t.Fatalf("decode create body %q: %v", (*requests)[2].body, err)
 	}
 	if req.Name != "default" || req.Scope != "inherit" || req.IssueCredential || len(req.AllowedRoots) != 0 {
 		t.Errorf("create body = %+v, want default/inherit/no-credential", req)
 	}
 	if !strings.Contains(stdout.String(), "alice") {
 		t.Errorf("stdout missing inferred principal: %s", stdout.String())
+	}
+}
+
+// TestLauncherCreateCLIDefaultPreFlightConflict proves the actionable
+// pre-flight rejection for the guaranteed default-Launcher conflict: without
+// --name, an existing default Launcher is rejected before the credential
+// prompt (the non-interactive prompt error would be a different message) and
+// before any mutating request — no create is issued. The message names the
+// Launcher, the Principal, and the --name escape hatch.
+func TestLauncherCreateCLIDefaultPreFlightConflict(t *testing.T) {
+	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "michael"})
+		case r.URL.Path == "/principals/michael/launchers/default" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "michael", Name: "default", Scope: "inherit", Enabled: true})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
+	}
+	for _, want := range []string{
+		`launcher "default" already exists for principal "michael"`,
+		"--name NAME",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want containing %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stderr.String(), "non-interactive") {
+		t.Errorf("credential prompt was reached before the pre-flight rejection: %q", stderr.String())
+	}
+	for _, req := range *requests {
+		if req.method == http.MethodPost {
+			t.Errorf("create was issued despite the pre-flight conflict: %+v", req)
+		}
+	}
+}
+
+// TestLauncherCreateCLITransientPreFlightFailureProceeds proves the pre-flight
+// is advisory only: when the read-only default check fails for another reason
+// (for example a transient daemon error), the create stays atomic on the
+// daemon and is still attempted — the daemon's response remains the authority.
+func TestLauncherCreateCLITransientPreFlightFailureProceeds(t *testing.T) {
+	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "michael"})
+		case r.URL.Path == "/principals/michael/launchers/default" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusInternalServerError, struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}{Code: "internal_error", Message: "internal server error"})
+		case r.URL.Path == "/principals/michael/launchers" && r.Method == http.MethodPost:
+			writeJSONResponse(w, http.StatusCreated, createLauncherResponse{
+				OK:       true,
+				Launcher: launcherJSON{ID: "dhl_9", Principal: "michael", Name: "default", Scope: "inherit", Enabled: true},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	found := false
+	for _, req := range *requests {
+		if req.method == http.MethodPost && req.path == "/principals/michael/launchers" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("create was not attempted after a transient pre-flight failure: %+v", *requests)
 	}
 }
 
@@ -1081,15 +1173,21 @@ func TestLauncherScopeSetCLIAtomicReplace(t *testing.T) {
 // means 'default'; an explicit name and an explicit ID are passed through as
 // the {launcher} segment; a Principal credential infers its Principal via
 // /auth; and an admin credential without --principal fails without issuing any
-// target request (never a global 'default' search).
+// target request (never a global 'default' or name search). The one exception
+// is the shared selector rule: an admin credential with an ID-shaped selector
+// (dhl_...) resolves the owning Principal through the daemon's scope-first
+// launcher list query (?launcher=<ID>), never a global Launcher-name search.
 func TestLauncherIndividualCLISelectorAndPrincipalTargeting(t *testing.T) {
+	idSelector := "dhl_" + strings.Repeat("ab", 16)
 	tests := []struct {
 		name       string
 		args       []string
 		selector   string
 		authBody   string
+		listBody   string
 		wantPath   string
 		wantMethod string
+		wantQuery  string
 		wantErr    string
 		wantReqs   int
 	}{
@@ -1134,6 +1232,45 @@ func TestLauncherIndividualCLISelectorAndPrincipalTargeting(t *testing.T) {
 			wantErr:  "--principal is required for admin authentication",
 			wantReqs: 1,
 		},
+		{
+			name:     "admin without principal never searches a Launcher name",
+			args:     []string{"launcher", "show"},
+			selector: "build-agent",
+			authBody: `{"authority":"admin"}`,
+			wantErr:  "--principal is required for admin authentication",
+			wantReqs: 1,
+		},
+		{
+			name:       "admin with ID selector resolves the owning principal via the daemon",
+			args:       []string{"launcher", "show"},
+			selector:   idSelector,
+			authBody:   `{"authority":"admin"}`,
+			listBody:   `{"ok":true,"launchers":[{"id":"` + idSelector + `","principal":"carol","name":"agent","enabled":true,"scope":"inherit","allowed_roots":[]}]}`,
+			wantPath:   "/principals/carol/launchers/" + idSelector,
+			wantMethod: http.MethodGet,
+			wantQuery:  "launcher=" + idSelector,
+			wantReqs:   3,
+		},
+		{
+			name:     "admin with unknown ID selector stays non-disclosing",
+			args:     []string{"launcher", "show"},
+			selector: idSelector,
+			authBody: `{"authority":"admin"}`,
+			listBody: `{"ok":true,"launchers":[]}`,
+			wantErr:  "launcher not found",
+			wantReqs: 2,
+		},
+		{
+			name:       "admin with ID selector delete resolves the owning principal too",
+			args:       []string{"launcher", "delete"},
+			selector:   idSelector,
+			authBody:   `{"authority":"admin"}`,
+			listBody:   `{"ok":true,"launchers":[{"id":"` + idSelector + `","principal":"carol","name":"agent","enabled":true,"scope":"inherit","allowed_roots":[]}]}`,
+			wantPath:   "/principals/carol/launchers/" + idSelector,
+			wantMethod: http.MethodDelete,
+			wantQuery:  "launcher=" + idSelector,
+			wantReqs:   3,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1143,6 +1280,14 @@ func TestLauncherIndividualCLISelectorAndPrincipalTargeting(t *testing.T) {
 					var auth authResponse
 					_ = json.Unmarshal([]byte(tc.authBody), &auth)
 					writeJSONResponse(w, http.StatusOK, auth)
+				case r.URL.Path == "/launchers" && r.Method == http.MethodGet:
+					if tc.listBody == "" {
+						http.NotFound(w, r)
+						return
+					}
+					var body any
+					_ = json.Unmarshal([]byte(tc.listBody), &body)
+					writeJSONResponse(w, http.StatusOK, body)
 				case strings.HasPrefix(r.URL.Path, "/principals/"):
 					writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "alice", Name: "default", Scope: "inherit", Enabled: true})
 				default:
@@ -1168,6 +1313,24 @@ func TestLauncherIndividualCLISelectorAndPrincipalTargeting(t *testing.T) {
 			}
 			if len(*requests) != tc.wantReqs {
 				t.Fatalf("requests = %+v, want %d", *requests, tc.wantReqs)
+			}
+			if tc.wantQuery != "" {
+				var listReq *recordedRequest
+				for i := range *requests {
+					if (*requests)[i].path == "/launchers" {
+						listReq = &(*requests)[i]
+						break
+					}
+				}
+				if listReq == nil {
+					t.Fatalf("no /launchers request among %+v", *requests)
+				}
+				if listReq.query != tc.wantQuery {
+					t.Errorf("list query = %q, want %q", listReq.query, tc.wantQuery)
+				}
+				if strings.Contains(listReq.query, "principal=") {
+					t.Errorf("list query %q must not narrow by principal for the ID resolution", listReq.query)
+				}
 			}
 			if tc.wantPath == "" {
 				return

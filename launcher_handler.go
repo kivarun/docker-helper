@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -320,7 +321,8 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		case isErrLauncherExists(err):
-			writeError(ctx, w, http.StatusConflict, "launcher_exists", "launcher already exists")
+			writeError(ctx, w, http.StatusConflict, "launcher_exists",
+				fmt.Sprintf("launcher %q already exists for principal %q", name, username))
 		case isErrInvalidLauncherName(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_launcher_name", "invalid launcher name")
 		case isErrInvalidScope(err):
@@ -505,7 +507,8 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
 		case isErrLauncherExists(err):
-			writeError(ctx, w, http.StatusConflict, "launcher_exists", "launcher already exists")
+			writeError(ctx, w, http.StatusConflict, "launcher_exists",
+				fmt.Sprintf("launcher %q already exists for principal %q", *req.Name, l.PrincipalName))
 		case isErrInvalidLauncherName(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_launcher_name", "invalid launcher name")
 		default:

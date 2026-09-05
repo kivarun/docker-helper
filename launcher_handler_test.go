@@ -212,7 +212,9 @@ func TestLauncherHandlerCreateValidation(t *testing.T) {
 		t.Fatalf("bogus scope: expected 400 invalid_scope, got %d %s", w.Code, w.Body.String())
 	}
 
-	// duplicate name -> 409 launcher_exists
+	// duplicate name -> 409 launcher_exists; the conflict message names the
+	// colliding Launcher and the Principal so an admin can act without a
+	// second lookup.
 	w = launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
 		`{"name":"agent","scope":"inherit"}`)
 	if w.Code != http.StatusCreated {
@@ -222,6 +224,17 @@ func TestLauncherHandlerCreateValidation(t *testing.T) {
 		`{"name":"agent","scope":"inherit"}`)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "launcher_exists") {
 		t.Fatalf("duplicate: expected 409 launcher_exists, got %d %s", w.Code, w.Body.String())
+	}
+	var conflict struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &conflict); err != nil {
+		t.Fatalf("decode conflict body %s: %v", w.Body.String(), err)
+	}
+	for _, want := range []string{`"agent"`, `"alice"`} {
+		if !strings.Contains(conflict.Message, want) {
+			t.Errorf("conflict message %q missing %q", conflict.Message, want)
+		}
 	}
 }
 

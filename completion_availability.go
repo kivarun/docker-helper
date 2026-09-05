@@ -249,7 +249,7 @@ func configureCompletionAuthorityQuery() {
 
 				username, err := resolveTargetPrincipalForCLI(client, *principal,
 					errors.New("--principal is required for admin authentication"),
-					errors.New("Launcher credentials cannot query Principal policy"))
+					errors.New("Launcher credentials cannot query Principal policy"), nil)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

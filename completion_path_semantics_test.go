@@ -1,7 +1,10 @@
 package main
 
 import (
+	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -103,6 +106,96 @@ func TestCompletionAuthorityQueryReusesExistingTree(t *testing.T) {
 	for _, want := range []string{"bash", "roots"} {
 		if !slices.Contains(results, want) {
 			t.Fatalf("completion suggestions %v missing %q", results, want)
+		}
+	}
+}
+
+// startPolicyRootsServer starts a stub daemon serving the Session-create
+// policy query with the given allowed root, and returns the endpoint and
+// token path for the completion harness.
+func startPolicyRootsServer(t *testing.T, root string) (endpoint, tokenPath string) {
+	t.Helper()
+	endpoint, tokenPath, _ = startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
+				OK: true, Principal: "alice", LauncherID: "dhl_x", Launcher: "agent",
+				AllowedRoots: []string{root},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	return endpoint, tokenPath
+}
+
+// TestCompletionPolicyWorkspaceDoubledSeparatorNotPropagated protects the
+// reported completion defect: completing a workspace word that already
+// carries a doubled separator (typed, or produced by an earlier completion)
+// must not hand Bash a candidate that carries it into the completed word.
+// Bash joins a directory prefix ending in a separator with directory
+// entries verbatim, so an unnormalized candidate would surface as for
+// example /home/michael/work//git/. The regression is driven through the
+// actually registered completion entrypoint with the filename-semantics
+// seam, so it proves the path-value stage was reached rather than failing
+// earlier with no candidates.
+func TestCompletionPolicyWorkspaceDoubledSeparatorNotPropagated(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "work")
+	if err := os.MkdirAll(filepath.Join(root, "git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath := startPolicyRootsServer(t, root)
+
+	script := completionPATHPreamble(t) + "\n" + completionScript(t)
+	reply, filenameMode := runCompletionEntrypoint(t, script, []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", root + "//",
+	})
+	if !filenameMode {
+		t.Fatal("path-valued completion did not enable filename semantics")
+	}
+	if len(reply) == 0 {
+		t.Fatal("no candidates produced; the doubled-separator stage was not reached")
+	}
+	for _, r := range reply {
+		if strings.Contains(r, "//") {
+			t.Errorf("candidate %q carries a doubled separator into the completed word", r)
+		}
+	}
+	if want := filepath.Join(root, "git"); !slices.Contains(reply, want) {
+		t.Errorf("candidates = %v, want the in-root child %q", reply, want)
+	}
+}
+
+// TestCompletionPolicyAnchorsNotPreSlashTerminated protects the other half
+// of the doubled-separator defect: the completion script never emits a
+// directory candidate that already ends in a separator. Bash's filename
+// semantics append the separator for a directory itself, so a
+// pre-terminated candidate could receive a second separator on Bash
+// versions that mark directories again, leaving the word with a doubled
+// separator that later completion steps then propagate.
+func TestCompletionPolicyAnchorsNotPreSlashTerminated(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "work")
+	if err := os.MkdirAll(filepath.Join(root, "git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath := startPolicyRootsServer(t, root)
+
+	script := completionPATHPreamble(t) + "\n" + completionScript(t)
+	reply, _ := runCompletionEntrypoint(t, script, []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", root,
+	})
+	if len(reply) == 0 {
+		t.Fatal("no candidates produced; the anchor stage was not reached")
+	}
+	if !slices.Contains(reply, root) {
+		t.Errorf("candidates = %v, want the policy root %q as an anchor", reply, root)
+	}
+	for _, r := range reply {
+		if strings.HasSuffix(r, "/") {
+			t.Errorf("candidate %q is pre-slash-terminated; Bash must add the directory separator itself", r)
 		}
 	}
 }

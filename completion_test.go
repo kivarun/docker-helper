@@ -1961,10 +1961,12 @@ func TestCompletionPolicyScopeSetAllowedRoot(t *testing.T) {
 }
 
 // TestCompletionPolicySessionWorkspaceAnchors proves session create
-// --workspace offers the Session-create policy roots as traversal prefixes
-// (with a trailing slash, because a workspace must be a proper child) and
-// that the query is the session policy query — the restricted Launcher's
-// narrowed roots, not a Principal's wider scope.
+// --workspace offers the Session-create policy roots as traversal anchors
+// and that the query is the session policy query — the restricted
+// Launcher's narrowed roots, not a Principal's wider scope. The anchor is
+// the bare root: Bash's filename semantics append the directory separator
+// on insertion, and a pre-slash-terminated candidate would risk a doubled
+// separator on Bash versions that mark directories again.
 func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
 	base := t.TempDir()
 	restricted := filepath.Join(base, "project-a")
@@ -1989,8 +1991,8 @@ func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("policy completion must not write to stderr: %q", stderr)
 	}
-	if len(results) != 1 || !strings.HasPrefix(results[0], restricted) || !strings.HasSuffix(results[0], "/") {
-		t.Fatalf("workspace anchors = %v, want the restricted root as a traversal prefix", results)
+	if len(results) != 1 || results[0] != restricted || strings.HasSuffix(results[0], "/") {
+		t.Fatalf("workspace anchors = %v, want the restricted root bare (no trailing separator)", results)
 	}
 	requests.waitFor(t, 1)
 	if got := requests.snapshot(); len(got) != 1 || got[0].path != "/sessions/create-policy" {
@@ -2377,7 +2379,7 @@ func startCompletionPolicyServer(t *testing.T, respond func(w http.ResponseWrite
 	t.Helper()
 	rec := &policyQueryRecorder{seen: make(chan recordedRequest, 32)}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec.record(recordedRequest{r.Method, r.URL.Path, ""})
+		rec.record(recordedRequest{r.Method, r.URL.Path, "", r.URL.RawQuery})
 		respond(w, r)
 	}))
 	t.Cleanup(server.Close)
