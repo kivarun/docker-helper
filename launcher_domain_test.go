@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,66 @@ func setupPrincipalForLauncherTest(t *testing.T, db *sql.DB, globalRoots []strin
 	return int64(p.ID), home
 }
 
+// testEffectivePrincipalRoots resolves the canonical effective Principal
+// ceiling for a system-mode test fixture through the production policy owner
+// (computeEffectivePrincipalRoots): the global roots narrowed by the
+// Principal's stored roots.
+func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, globalRoots []string) []string {
+	t.Helper()
+	stored, err := readPrincipalAllowedRoots(db, principalID)
+	if err != nil {
+		t.Fatalf("readPrincipalAllowedRoots: %v", err)
+	}
+	return computeEffectivePrincipalRoots(globalRoots, stored, principalID, 0, false)
+}
+
+// TestComputeEffectivePrincipalRootsMatrix proves the semantic matrix of the
+// canonical Principal-level effective-root policy owner. The App-aware
+// resolver and every consuming surface (Session creation, Launcher
+// restricted-scope create and replacement, Principal effective-roots
+// introspection) delegate the Principal-level rule to this single function,
+// so the matrix pins the rule exactly once:
+//
+//   - user mode + daemon-owner identity + zero stored roots => the global
+//     roots (the transparent ownership chain defers wholly to the global
+//     ceiling; the ONLY Principal for which empty roots mean the global
+//     ceiling);
+//   - user mode + daemon-owner identity + stray stored roots (a state the
+//     user-mode startup contract refuses) => the plain intersection,
+//     fail-closed;
+//   - everything else (system mode, user-mode non-owners) => the plain
+//     intersection: zero or disjoint stored roots mean an empty ceiling.
+func TestComputeEffectivePrincipalRootsMatrix(t *testing.T) {
+	global := []string{"/global"}
+	daemonOwner := int64(7)
+	other := int64(8)
+
+	cases := []struct {
+		name        string
+		userMode    bool
+		principalID int64
+		daemonID    int64
+		stored      []string
+		want        []string
+	}{
+		{"system principal with stored roots", false, other, 0, []string{"/global/home"}, []string{"/global/home"}},
+		{"system principal with zero stored roots", false, other, 0, nil, nil},
+		{"user-mode daemon-owner with zero stored roots", true, daemonOwner, daemonOwner, nil, global},
+		{"user-mode daemon-owner with stray stored roots (startup-refused state)", true, daemonOwner, daemonOwner, []string{"/elsewhere"}, nil},
+		{"user-mode non-owner with zero stored roots", true, other, daemonOwner, nil, nil},
+		{"user-mode non-owner with stored roots", true, other, daemonOwner, []string{"/global/home"}, []string{"/global/home"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeEffectivePrincipalRoots(global, tc.stored, tc.principalID, tc.daemonID, tc.userMode)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("computeEffectivePrincipalRoots(userMode=%v, principal=%d, owner=%d, stored=%v) = %v, want %v",
+					tc.userMode, tc.principalID, tc.daemonID, tc.stored, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLauncherCreateInheritRejectsRootsAtDomain(t *testing.T) {
 	db := openFreshTestDB(t)
 	globalRoots := []string{testAllowedRootDir(t)}
@@ -41,7 +102,7 @@ func TestLauncherCreateInheritRejectsRootsAtDomain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, []string{proj}, globalRoots, false)
+	_, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, []string{proj}, nil, false)
 	if !errors.Is(err, ErrInvalidAllowedRoots) {
 		t.Fatalf("expected ErrInvalidAllowedRoots for inherit+roots, got: %v", err)
 	}
@@ -72,7 +133,7 @@ func TestLauncherScopeReplaceInheritRejectsRootsAtDomain(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, home := setupPrincipalForLauncherTest(t, db, globalRoots, "c")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +156,7 @@ func TestLauncherScopeReplaceInheritRejectsRootsAtDomain(t *testing.T) {
 	}
 
 	// Restricted with empty roots must also be rejected at the domain boundary.
-	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, nil, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
+	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, nil, nil); !errors.Is(err, ErrInvalidAllowedRoots) {
 		t.Fatalf("expected ErrInvalidAllowedRoots for restricted without roots, got: %v", err)
 	}
 	after2, err := findLauncherByID(db, l.ID)
@@ -131,7 +192,7 @@ func TestLauncherCreateWithCredentialReturnsProjectionWithoutPostCommitLookup(t 
 	fq := newFailQueryAfterDB(t, path, 1, errMockQueryFail)
 	defer fq.Close()
 
-	l, cred, token, err := createLauncher(fq, pid, "work", LauncherScopeInherit, nil, globalRoots, true)
+	l, cred, token, err := createLauncher(fq, pid, "work", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatalf("createLauncher under post-commit-query failure: %v", err)
 	}
@@ -157,11 +218,11 @@ func TestLauncherUpdateNameUniqueConflictMappedToExists(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "e")
 
-	_, _, _, err := createLauncher(db, pid, "a", LauncherScopeInherit, nil, globalRoots, false)
+	_, _, _, err := createLauncher(db, pid, "a", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l2, _, _, err := createLauncher(db, pid, "b", LauncherScopeInherit, nil, globalRoots, false)
+	l2, _, _, err := createLauncher(db, pid, "b", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +242,7 @@ func TestLauncherCreateInherit(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "alice")
 
-	l, cred, token, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, cred, token, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}
@@ -205,7 +266,7 @@ func TestLauncherCreateRestricted(t *testing.T) {
 	if err := os.MkdirAll(proj, 0755); err != nil {
 		t.Fatal(err)
 	}
-	l, _, _, err := createLauncher(db, pid, "ci", LauncherScopeRestricted, []string{proj}, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "ci", LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots), false)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}
@@ -226,7 +287,7 @@ func TestLauncherCreateRestrictedOutsidePrincipalRejected(t *testing.T) {
 	if err := os.MkdirAll(outside, 0755); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err := createLauncher(db, pid, "ci", LauncherScopeRestricted, []string{outside}, globalRoots, false)
+	_, _, _, err := createLauncher(db, pid, "ci", LauncherScopeRestricted, []string{outside}, testEffectivePrincipalRoots(t, db, pid, globalRoots), false)
 	if err == nil || !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("expected ErrLauncherRootOutsidePrincipal, got: %v", err)
 	}
@@ -247,13 +308,13 @@ func TestLauncherDuplicateNameWithinPrincipal(t *testing.T) {
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "dave")
 	pid2, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "erin")
 
-	if _, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false); err != nil {
+	if _, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	if _, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false); !errors.Is(err, ErrLauncherExists) {
+	if _, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false); !errors.Is(err, ErrLauncherExists) {
 		t.Fatalf("expected ErrLauncherExists for duplicate name, got: %v", err)
 	}
-	if _, _, _, err := createLauncher(db, pid2, "work", LauncherScopeInherit, nil, globalRoots, false); err != nil {
+	if _, _, _, err := createLauncher(db, pid2, "work", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatalf("same name under another principal should be allowed: %v", err)
 	}
 }
@@ -267,12 +328,12 @@ func TestLauncherNameValidatorSharedByCreateAndRename(t *testing.T) {
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "frida")
 
 	for _, bad := range []string{"Foo", " agent1 ", "agent1 ", "foo_bar", "-agent", "agent-"} {
-		if _, _, _, err := createLauncher(db, pid, bad, LauncherScopeInherit, nil, globalRoots, false); !errors.Is(err, ErrInvalidLauncherName) {
+		if _, _, _, err := createLauncher(db, pid, bad, LauncherScopeInherit, nil, nil, false); !errors.Is(err, ErrInvalidLauncherName) {
 			t.Fatalf("create(%q): expected ErrInvalidLauncherName, got %v", bad, err)
 		}
 	}
 
-	l, _, _, err := createLauncher(db, pid, "agent1", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "agent1", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatalf("create(agent1): %v", err)
 	}
@@ -299,11 +360,11 @@ func TestLauncherFindListScoped(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "frank")
 
-	a, _, _, err := createLauncher(db, pid, "a", LauncherScopeInherit, nil, globalRoots, false)
+	a, _, _, err := createLauncher(db, pid, "a", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := createLauncher(db, pid, "b", LauncherScopeInherit, nil, globalRoots, false); err != nil {
+	if _, _, _, err := createLauncher(db, pid, "b", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -343,7 +404,7 @@ func TestLauncherScopedSelectorResolution(t *testing.T) {
 
 	aliceDefaultID := mustAddDefaultLauncher(t, db, pidA)
 	bobDefaultID := mustAddDefaultLauncher(t, db, pidB)
-	agent, _, _, err := createLauncher(db, pidA, "build-agent", LauncherScopeInherit, nil, globalRoots, false)
+	agent, _, _, err := createLauncher(db, pidA, "build-agent", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +454,7 @@ func TestLauncherScopedSelectorResolution(t *testing.T) {
 	// A foreign same-name Launcher is never found through the wrong Principal,
 	// proven against a real launcher: the name resolves for bob (its owner)
 	// but never for alice.
-	if _, _, _, err := createLauncher(db, pidB, "foreign-name", LauncherScopeInherit, nil, globalRoots, false); err != nil {
+	if _, _, _, err := createLauncher(db, pidB, "foreign-name", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatalf("create bob/foreign-name: %v", err)
 	}
 	if _, err := findLauncherForPrincipal(db, pidA, "foreign-name"); !errors.Is(err, ErrLauncherNotFound) {
@@ -413,7 +474,7 @@ func TestLauncherUpdateName(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "gina")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +491,7 @@ func TestLauncherUpdateName(t *testing.T) {
 	}
 
 	// Duplicate name within principal is rejected.
-	_, _, _, err = createLauncher(db, pid, "other", LauncherScopeInherit, nil, globalRoots, false)
+	_, _, _, err = createLauncher(db, pid, "other", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +506,7 @@ func TestLauncherUpdateEnabled(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "hank")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +528,7 @@ func TestLauncherScopeReplaceInheritToRestricted(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, home := setupPrincipalForLauncherTest(t, db, globalRoots, "iris")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +537,7 @@ func TestLauncherScopeReplaceInheritToRestricted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, []string{proj}, globalRoots)
+	updated, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots))
 	if err != nil {
 		t.Fatalf("replaceLauncherScope: %v", err)
 	}
@@ -494,7 +555,7 @@ func TestLauncherScopeReplaceRestrictedToInheritClearsRoots(t *testing.T) {
 	if err := os.MkdirAll(proj, 0755); err != nil {
 		t.Fatal(err)
 	}
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeRestricted, []string{proj}, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +586,7 @@ func TestLauncherScopeReplaceInvalidRootRejectedAtomically(t *testing.T) {
 	if err := os.MkdirAll(proj, 0755); err != nil {
 		t.Fatal(err)
 	}
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeRestricted, []string{proj}, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +595,7 @@ func TestLauncherScopeReplaceInvalidRootRejectedAtomically(t *testing.T) {
 	if err := os.MkdirAll(outside, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, []string{outside}, globalRoots); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
+	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, []string{outside}, testEffectivePrincipalRoots(t, db, pid, globalRoots)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("expected ErrLauncherRootOutsidePrincipal, got: %v", err)
 	}
 	// Old scope/roots unchanged.
@@ -556,7 +617,7 @@ func TestLauncherDeleteRemovesRootsAndCredential(t *testing.T) {
 	if err := os.MkdirAll(proj, 0755); err != nil {
 		t.Fatal(err)
 	}
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeRestricted, []string{proj}, globalRoots, true)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +652,7 @@ func TestLauncherCredentialIssueSingular(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "mia")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +678,7 @@ func TestLauncherCredentialMetadataNoSecret(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "noah")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +700,7 @@ func TestLauncherCredentialRotate(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "olivia")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +745,7 @@ func TestLauncherCredentialRotateNotFound(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "peter")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +759,7 @@ func TestLauncherCredentialDeleteAndReissue(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "quinn")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,7 +797,7 @@ func TestLauncherCredentialDeleteNotFound(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "rose")
 
-	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -750,7 +811,7 @@ func TestLauncherCredentialAuth(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "sam")
 
-	l, _, token, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, true)
+	l, _, token, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +832,7 @@ func TestLauncherCredentialAuthDisabledLauncher(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "tina")
 
-	l, _, token, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, true)
+	l, _, token, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,7 +850,7 @@ func TestLauncherCredentialAuthDisabledPrincipal(t *testing.T) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "uma")
 
-	_, _, token, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, true)
+	_, _, token, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +884,7 @@ func TestLauncherCredentialControlsOwnSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, token, err := createLauncher(app.DB, int64(p.ID), "work", LauncherScopeInherit, nil, globalRoots, true)
+	_, _, token, err := createLauncher(app.DB, int64(p.ID), "work", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -917,7 +978,7 @@ func TestLauncherCredentialNotRevocableByPrincipalPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Issue a Launcher credential.
-	l, launcherCred, launcherToken, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, true)
+	l, launcherCred, launcherToken, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}

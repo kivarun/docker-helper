@@ -196,8 +196,10 @@ expired rows.
 Session ownership and control authorities are implemented in
 `session_control.go` (`resolveCreateLauncher`, `resolveCreatePolicy`,
 `computeLauncherEffectiveRoots` — the single authoritative three-level
-root policy) and `session_control.go` scope filtering over the common
-ownership query in `session.go`.
+root policy, whose Principal-level ceiling is the canonical
+`computeEffectivePrincipalRoots` owner in `launcher.go`) and
+`session_control.go` scope filtering over the common ownership query in
+`session.go`.
 
 ### Release 2.1 Launcher ownership (implemented)
 

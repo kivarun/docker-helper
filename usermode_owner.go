@@ -134,8 +134,11 @@ func (a *App) removePrincipalAllowedRootWithLifecycle(username, rootPath string)
 }
 
 // replaceLauncherScopeWithLifecycle is the lock-owning App-level Launcher scope
-// replacement. It holds lifecycleMu across the reservation check and the
-// durable mutation (the same serialization boundary as Session creation) and
+// replacement. It holds lifecycleMu across the reservation check, the
+// canonical effective-Principal-root resolution (which reads the current
+// global policy snapshot — the same lifecycleMu -> a.mu ordering as config
+// reload), and the durable mutation, so the replacement is validated against
+// the ceiling committed by any reload that linearized before it, and it
 // refuses any narrowing or rooting of the reserved daemon-owner default
 // Launcher before any change.
 func (a *App) replaceLauncherScopeWithLifecycle(launcherID string, scope LauncherScopeMode, allowedRoots []string) (*LauncherWithPrincipal, error) {
@@ -144,6 +147,13 @@ func (a *App) replaceLauncherScopeWithLifecycle(launcherID string, scope Launche
 	if err := a.rejectReservedLauncherScopeReplace(launcherID, scope, allowedRoots); err != nil {
 		return nil, err
 	}
-	globalRoots := a.getConfig().AllowedRoots
-	return replaceLauncherScope(a.DB, launcherID, scope, allowedRoots, globalRoots)
+	cur, err := findLauncherByID(a.DB, launcherID)
+	if err != nil {
+		return nil, err
+	}
+	ceiling, err := a.resolveEffectivePrincipalRoots(cur.PrincipalID)
+	if err != nil {
+		return nil, err
+	}
+	return replaceLauncherScope(a.DB, launcherID, scope, allowedRoots, ceiling)
 }

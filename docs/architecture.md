@@ -947,13 +947,24 @@ path. Audit records of a rejected mutation carry the
 
 ### Launcher scope and effective roots
 
+The effective Principal ceiling is owned by one policy function
+(`computeEffectivePrincipalRoots`): in user mode the daemon-owner Principal
+with zero stored roots collapses onto the global allowed roots, every other
+Principal gets the intersection of the global and stored Principal roots.
+Session creation, Launcher restricted-scope create and replacement, and
+Principal effective-roots introspection (and completion through that
+introspection) all consume it; the App-level resolution
+(`resolveEffectivePrincipalRoots`) supplies the symlink-resolved global
+roots and the stored Principal roots, and lifecycle mutations resolve it
+inside their `lifecycleMu` critical section.
+
 Launcher scope narrows the Principal authorization ceiling for sessions
 created through that launcher; it never widens and never owns MAC state:
 
 | Launcher scope | Effective roots for new sessions |
 |---|---|
-| `inherit` | global allowed roots ∩ principal allowed roots |
-| `restricted` | global ∩ principal ∩ launcher allowed roots |
+| `inherit` | the effective Principal ceiling (canonical owner above) |
+| `restricted` | effective Principal ceiling ∩ launcher allowed roots |
 
 Evaluation happens at session-creation time against current state; a
 launcher root that is no longer under the principal ceiling is rejected

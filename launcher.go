@@ -275,15 +275,56 @@ func readPrincipalAllowedRoots(db *sql.DB, principalID int64) ([]string, error) 
 	return roots, nil
 }
 
-// effectivePrincipalRoots returns the writable ceiling for a system Principal:
-// the intersection of the global allowed roots and the current Principal
-// allowed roots. Launcher restricted roots must be under this ceiling.
-func effectivePrincipalRoots(db *sql.DB, principalID int64, globalAllowedRoots []string) ([]string, error) {
-	principalRoots, err := readPrincipalAllowedRoots(db, principalID)
+// computeEffectivePrincipalRoots is the canonical Principal-level effective
+// root policy, consumed by Session creation, Launcher restricted-scope create
+// and replacement validation, and Principal effective-roots introspection
+// (and, indirectly, completion through that introspection):
+//
+//   - in user mode, the daemon-owner Principal (identified by
+//     daemonOwnerPrincipalID, the startup-resolved App.userModeDefault
+//     identity) with zero stored root rows collapses onto the global allowed
+//     roots: the transparent ownership chain defers wholly to the global
+//     ceiling. This is the ONLY Principal for which empty roots mean the
+//     global ceiling.
+//   - every other Principal (and a daemon-owner Principal with unexpected
+//     stored roots, a state the user-mode startup contract refuses) gets the
+//     plain intersection: empty or disjoint stored roots mean an empty
+//     ceiling, fail-closed.
+//
+// It is a pure policy function: callers resolve the global roots, the stored
+// Principal roots, and the daemon-owner identity, and pass them in.
+func computeEffectivePrincipalRoots(globalRoots []string, storedPrincipalRoots []string, principalID int64, daemonOwnerPrincipalID int64, userMode bool) []string {
+	if userMode && principalID == daemonOwnerPrincipalID && len(storedPrincipalRoots) == 0 {
+		return append([]string(nil), globalRoots...)
+	}
+	return intersectAllowedRootScopes(globalRoots, storedPrincipalRoots)
+}
+
+// resolveEffectivePrincipalRoots resolves the canonical effective Principal
+// ceiling for principalID through the single policy owner
+// (computeEffectivePrincipalRoots): the symlink-resolved global allowed roots
+// (the config owner) and the Principal's stored roots.
+//
+// Callers that mutate ownership policy must hold lifecycleMu when calling
+// this, so the ceiling is resolved from the same policy snapshot as the
+// mutation it validates (the same lifecycleMu -> a.mu ordering as config
+// reload). Read-only introspection may call it without the boundary.
+func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error) {
+	cfg := a.getConfig()
+	globalRoots, err := resolveAllowedRootPaths(cfg.AllowedRoots)
 	if err != nil {
 		return nil, err
 	}
-	return intersectAllowedRootScopes(globalAllowedRoots, principalRoots), nil
+	stored, err := readPrincipalAllowedRoots(a.DB, principalID)
+	if err != nil {
+		return nil, err
+	}
+	userMode := cfg.Mode == ModeUser
+	var daemonOwnerPrincipalID int64
+	if userMode && a.userModeDefault != nil {
+		daemonOwnerPrincipalID = a.userModeDefault.principalID
+	}
+	return computeEffectivePrincipalRoots(globalRoots, stored, principalID, daemonOwnerPrincipalID, userMode), nil
 }
 
 // validateLauncherAllowedRoots canonicalizes each root using the same canonical
@@ -345,11 +386,12 @@ func validateLauncherName(name string) (string, error) {
 
 // createLauncher creates a Launcher (and its optional singular credential in
 // the same transaction) beneath the given Principal. Restricted roots are
-// canonicalized and validated against the current effective Principal ceiling
-// before any mutation. Returns the Launcher projection and, when
-// issueCredential is true, the issued credential metadata and its bearer secret
-// exactly once.
-func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherScopeMode, allowedRoots []string, globalAllowedRoots []string, issueCredential bool) (*LauncherWithPrincipal, *launcherCredential, string, error) {
+// canonicalized and validated against the supplied effective Principal ceiling
+// — resolved by the App/lifecycle boundary through the canonical
+// effective-Principal-root policy owner — before any mutation. Returns the
+// Launcher projection and, when issueCredential is true, the issued credential
+// metadata and its bearer secret exactly once.
+func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherScopeMode, allowedRoots []string, effectivePrincipalRoots []string, issueCredential bool) (*LauncherWithPrincipal, *launcherCredential, string, error) {
 	name, err := validateLauncherName(name)
 	if err != nil {
 		return nil, nil, "", err
@@ -372,11 +414,7 @@ func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherSc
 		if len(allowedRoots) == 0 {
 			return nil, nil, "", fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
 		}
-		effective, err := effectivePrincipalRoots(db, principalID, globalAllowedRoots)
-		if err != nil {
-			return nil, nil, "", err
-		}
-		canonicalRoots, err = validateLauncherAllowedRoots(allowedRoots, effective)
+		canonicalRoots, err = validateLauncherAllowedRoots(allowedRoots, effectivePrincipalRoots)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -453,10 +491,15 @@ func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherSc
 
 // replaceLauncherScope atomically replaces a Launcher's scope and complete
 // stored root set. For restricted scope all roots are canonicalized and
-// validated against the current effective Principal ceiling before any
-// mutation; a failed replacement leaves the old scope/roots unchanged.
-func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode, allowedRoots []string, globalAllowedRoots []string) (*LauncherWithPrincipal, error) {
-	cur, err := findLauncherByID(db, launcherID)
+// validated against the supplied effective Principal ceiling — resolved by
+// the App/lifecycle boundary through the canonical effective-Principal-root
+// policy owner — before any mutation; a failed replacement leaves the old
+// scope/roots unchanged.
+func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode, allowedRoots []string, effectivePrincipalRoots []string) (*LauncherWithPrincipal, error) {
+	// Existence check: the caller supplied the effective Principal ceiling, so
+	// the owner is not needed here — but a missing Launcher must still be the
+	// not-found contract rather than a silent zero-row update.
+	_, err := findLauncherByID(db, launcherID)
 	if err != nil {
 		return nil, err
 	}
@@ -469,11 +512,7 @@ func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode
 		if len(allowedRoots) == 0 {
 			return nil, fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
 		}
-		effective, err := effectivePrincipalRoots(db, cur.PrincipalID, globalAllowedRoots)
-		if err != nil {
-			return nil, err
-		}
-		canonicalRoots, err = validateLauncherAllowedRoots(allowedRoots, effective)
+		canonicalRoots, err = validateLauncherAllowedRoots(allowedRoots, effectivePrincipalRoots)
 		if err != nil {
 			return nil, err
 		}

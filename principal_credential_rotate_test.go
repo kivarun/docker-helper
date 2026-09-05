@@ -228,7 +228,7 @@ func TestPrincipalCredentialRotateErrors(t *testing.T) {
 	}
 
 	// A Launcher credential has no control-plane authority.
-	l, _, launcherToken, err := createLauncher(app.DB, principalIDByName(t, app.DB, "alice"), "agent", LauncherScopeInherit, nil, app.Config.AllowedRoots, true)
+	l, _, launcherToken, err := createLauncher(app.DB, principalIDByName(t, app.DB, "alice"), "agent", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestPrincipalCredentialListScope(t *testing.T) {
 	}
 
 	// Launcher credential: unauthorized.
-	_, _, launcherToken, err := createLauncher(app.DB, principalIDByName(t, app.DB, "alice"), "agent", LauncherScopeInherit, nil, app.Config.AllowedRoots, true)
+	_, _, launcherToken, err := createLauncher(app.DB, principalIDByName(t, app.DB, "alice"), "agent", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}

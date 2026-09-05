@@ -37,7 +37,7 @@ func launcherAuditApp(t *testing.T, username string) (*App, string, string, *Lau
 	if err != nil {
 		t.Fatalf("createCredential(%s): %v", username, err)
 	}
-	l, _, launcherToken, err := createLauncher(app.DB, int64(p.ID), "agent", LauncherScopeInherit, nil, globalRoots, true)
+	l, _, launcherToken, err := createLauncher(app.DB, int64(p.ID), "agent", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}

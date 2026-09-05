@@ -87,8 +87,8 @@ func decodeCreatePolicy(t *testing.T, body string) sessionCreatePolicyResponse {
 // an admin token targets any Principal; a Principal credential only its own;
 // a foreign selector is the same non-disclosing 404 as an unknown Principal;
 // a Launcher credential and an unauthenticated request are unauthorized; and
-// the returned roots are the daemon-side global ∩ Principal intersection
-// computed by the canonical effectivePrincipalRoots owner.
+// the returned roots are the daemon-side effective Principal ceiling computed
+// by the canonical computeEffectivePrincipalRoots policy owner.
 func TestPrincipalEffectiveRootsContractMatrix(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	proj := filepath.Join(app.Config.AllowedRoots[0], "home", "alice", "proj")

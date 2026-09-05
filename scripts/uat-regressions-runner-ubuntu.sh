@@ -146,6 +146,7 @@ REGRESSIONS=(
   "9:Daemon stale-runtime recovery:uat-regression-daemon-stale-runtime.sh"
   "10:RC5 selector and completion acceptance:uat-regression-rc5-selectors.sh"
   "11:User-mode owner reservation:uat-regression-user-mode-owner-reservation.sh"
+  "12:User-mode effective Principal roots:uat-regression-user-mode-effective-roots.sh"
 )
 
 declare -A RESULT

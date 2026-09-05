@@ -305,9 +305,14 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.lifecycleMu.Lock()
-	l, cred, token, err := createLauncher(a.DB, int64(p.ID), name, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots, req.IssueCredential)
-	a.lifecycleMu.Unlock()
+	// The Launcher creation is a policy-authority mutation: it shares the
+	// lifecycle serialization with Session creation so a concurrent create
+	// observes either the pre-creation or post-creation ownership, never a
+	// mix. createLauncherWithLifecycle owns that boundary and the canonical
+	// effective-Principal-root resolution inside it (the current global policy
+	// snapshot is read inside the boundary, the same lifecycleMu -> a.mu
+	// ordering as config reload).
+	l, cred, token, err := a.createLauncherWithLifecycle(int64(p.ID), name, scopeMode, req.AllowedRoots, req.IssueCredential)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {

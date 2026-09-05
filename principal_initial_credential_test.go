@@ -271,7 +271,7 @@ func TestMigrateDefaultLaunchersBackfillsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createPrincipalWithOptionalCredential: %v", err)
 	}
-	if _, _, _, err := createLauncher(db, int64(p.ID), "agent", LauncherScopeInherit, nil, globalRoots, false); err != nil {
+	if _, _, _, err := createLauncher(db, int64(p.ID), "agent", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}
 	// Remove the auto-provisioned default to reproduce the pre-invariant state.

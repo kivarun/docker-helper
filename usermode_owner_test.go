@@ -739,7 +739,7 @@ func TestRaceReloadSerializesLauncherScopeReplace(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := principalIDByName(t, app.DB, "mutator")
-	if _, _, _, err := createLauncher(app.DB, pid, "extra", LauncherScopeInherit, nil, app.Config.AllowedRoots, false); err != nil {
+	if _, _, _, err := createLauncher(app.DB, pid, "extra", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatalf("create launcher extra: %v", err)
 	}
 

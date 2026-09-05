@@ -15,8 +15,10 @@ type effectiveRootsResponse struct {
 
 // handlePrincipalEffectiveRoots answers GET
 // /principals/{username}/effective-allowed-roots: the effective Principal
-// filesystem authority (global allowed roots ∩ Principal allowed roots),
-// computed daemon-side by the canonical effectivePrincipalRoots owner. It is
+// filesystem authority, computed daemon-side by the canonical
+// effective-Principal-root policy owner (computeEffectivePrincipalRoots): in
+// user mode the daemon-owner Principal with zero stored roots collapses onto
+// the global allowed roots, every other Principal intersects with them. It is
 // a policy introspection Query for shell completion and read-only tooling, in
 // the same spirit as GET /auth: identity introspection stays separate from
 // this policy introspection, and neither widens the other. Authorization
@@ -39,17 +41,7 @@ func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	globalRoots, err := a.appResolvedGlobalRoots()
-	if err != nil {
-		opLog(ctx).Error("principal effective roots introspection failed",
-			slog.String("operation", "policy_introspect"),
-			slog.String("error", err.Error()),
-		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-
-	roots, err := effectivePrincipalRoots(a.DB, int64(p.ID), globalRoots)
+	roots, err := a.resolveEffectivePrincipalRoots(int64(p.ID))
 	if err != nil {
 		opLog(ctx).Error("principal effective roots introspection failed",
 			slog.String("operation", "policy_introspect"),

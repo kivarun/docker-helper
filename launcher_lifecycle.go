@@ -229,6 +229,23 @@ func (a *App) applyLauncherEnabledChange(launcherID string, enabled bool) (launc
 	return result, nil
 }
 
+// createLauncherWithLifecycle is the lock-owning App-level Launcher creation.
+// It holds lifecycleMu across the canonical effective-Principal-root
+// resolution (which reads the current global policy snapshot — the same
+// lifecycleMu -> a.mu ordering as config reload) and the durable mutation, so
+// a restricted-root validation observes the ceiling committed by any reload
+// that linearized before it, and the created Launcher cannot interleave with
+// another Launcher/Principal lifecycle mutation on the same ownership.
+func (a *App) createLauncherWithLifecycle(principalID int64, name string, scope LauncherScopeMode, allowedRoots []string, issueCredential bool) (*LauncherWithPrincipal, *launcherCredential, string, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	ceiling, err := a.resolveEffectivePrincipalRoots(principalID)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return createLauncher(a.DB, principalID, name, scope, allowedRoots, ceiling, issueCredential)
+}
+
 // updateLauncherWithLifecycle is the App-level lifecycle operation for a
 // Launcher PATCH (rename and/or enable/disable). Rename and enabled-state
 // change commit atomically, so a failed durable change leaves no partial

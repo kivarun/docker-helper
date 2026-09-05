@@ -403,7 +403,7 @@ func TestLauncherHandlerPrincipalCredentialForeignLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobsLauncher, _, _, err := createLauncher(app.DB, int64(pb.ID), "work", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
+	bobsLauncher, _, _, err := createLauncher(app.DB, int64(pb.ID), "work", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestLauncherHandlerScopedSelectorResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	aliceAlpha, _, _, err := createLauncher(app.DB, int64(pa.ID), "alpha", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
+	aliceAlpha, _, _, err := createLauncher(app.DB, int64(pa.ID), "alpha", LauncherScopeInherit, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

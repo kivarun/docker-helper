@@ -170,26 +170,19 @@ var ErrLauncherUnavailable = errors.New("launcher unavailable")
 
 // computeLauncherEffectiveRoots is the single authoritative three-level
 // Session-creation root policy. It consumes the global allowed roots (the
-// config owner), the Principal's current roots, and the Launcher scope.
+// config owner), the Principal's current roots, and the Launcher scope. The
+// Principal-level ceiling is the canonical effective-Principal-root policy
+// owner (computeEffectivePrincipalRoots): the user-mode daemon-owner
+// Principal with zero stored roots collapses onto the global roots, every
+// other Principal intersects with them.
 //
-//   - The effective Principal ceiling is global ∩ Principal roots, except that
-//     the user-mode daemon-owner Principal (identified by daemonOwnerPrincipalID
-//     in user mode) with zero stored root rows collapses onto the global roots.
-//     This is the ONLY Principal for which empty roots mean the global ceiling.
 //   - inherit Launcher scope adds no narrowing: the effective roots equal the
 //     effective Principal ceiling.
 //   - restricted Launcher scope first revalidates the Launcher's stored roots
 //     against the current effective Principal ceiling (rejecting stale or
 //     directly-injected out-of-ceiling roots), then intersects.
 func computeLauncherEffectiveRoots(globalAllowedRoots []string, snap *sessionOwnershipSnapshot, daemonOwnerPrincipalID int64, userMode bool) ([]string, error) {
-	var principalCeiling []string
-	if userMode && snap.principalID == daemonOwnerPrincipalID && len(snap.principalRoots) == 0 {
-		// Collapsed user-mode policy: the daemon-owner Principal defers wholly
-		// to the global allowed roots.
-		principalCeiling = append([]string(nil), globalAllowedRoots...)
-	} else {
-		principalCeiling = intersectAllowedRootScopes(globalAllowedRoots, snap.principalRoots)
-	}
+	principalCeiling := computeEffectivePrincipalRoots(globalAllowedRoots, snap.principalRoots, snap.principalID, daemonOwnerPrincipalID, userMode)
 
 	if snap.launcherScope == LauncherScopeRestricted {
 		// Revalidate stored roots against the current ceiling; fail closed on
@@ -217,13 +210,12 @@ var (
 	ErrMissingLauncherSelector = errors.New("missing launcher selector")
 )
 
-// appResolvedGlobalRoots returns the canonicalized global allowed roots (the
-// config owner). Each root is symlink-resolved; resolution failure of any root
-// fails closed with an error.
-func (a *App) appResolvedGlobalRoots() ([]string, error) {
-	cfg := a.getConfig()
-	out := make([]string, 0, len(cfg.AllowedRoots))
-	for _, r := range cfg.AllowedRoots {
+// resolveAllowedRootPaths returns each configured global allowed root
+// symlink-resolved (the same resolution semantics as workspace roots);
+// resolution failure of any root fails closed with an error.
+func resolveAllowedRootPaths(roots []string) ([]string, error) {
+	out := make([]string, 0, len(roots))
+	for _, r := range roots {
 		resolved, err := filepath.EvalSymlinks(r)
 		if err != nil {
 			return nil, fmt.Errorf("cannot resolve allowed root %q: %w: %w", r, err, ErrSystem)
@@ -231,6 +223,13 @@ func (a *App) appResolvedGlobalRoots() ([]string, error) {
 		out = append(out, resolved)
 	}
 	return out, nil
+}
+
+// appResolvedGlobalRoots returns the canonicalized global allowed roots (the
+// config owner). Each root is symlink-resolved; resolution failure of any root
+// fails closed with an error.
+func (a *App) appResolvedGlobalRoots() ([]string, error) {
+	return resolveAllowedRootPaths(a.getConfig().AllowedRoots)
 }
 
 // resolveCreateLauncher maps an authenticated authority and create selectors

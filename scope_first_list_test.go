@@ -35,14 +35,14 @@ func setupScopeListPrincipals(t *testing.T) (*App, string, string) {
 	}
 	createNamedCredential(t, app, "bob", "bobcred")
 
-	if _, _, _, err := createLauncher(app.DB, principalIDByName(t, app.DB, "alice"), "agent", LauncherScopeInherit, nil, app.Config.AllowedRoots, false); err != nil {
+	if _, _, _, err := createLauncher(app.DB, principalIDByName(t, app.DB, "alice"), "agent", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatalf("createLauncher(alice/agent): %v", err)
 	}
-	if _, _, _, err := createLauncher(app.DB, principalIDByName(t, app.DB, "bob"), "work", LauncherScopeInherit, nil, app.Config.AllowedRoots, false); err != nil {
+	if _, _, _, err := createLauncher(app.DB, principalIDByName(t, app.DB, "bob"), "work", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatalf("createLauncher(bob/work): %v", err)
 	}
 
-	_, _, launcherToken, err := createLauncher(app.DB, principalIDByName(t, app.DB, "alice"), "bearer", LauncherScopeInherit, nil, app.Config.AllowedRoots, true)
+	_, _, launcherToken, err := createLauncher(app.DB, principalIDByName(t, app.DB, "alice"), "bearer", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatalf("createLauncher(alice/bearer): %v", err)
 	}
