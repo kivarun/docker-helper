@@ -138,6 +138,13 @@ WORK="$WS/work"
 # uer_field FIELD: parse a control-plane --json document field.
 uer_field() { json_field "$1"; }
 
+# uer_roots_single DOC PATH: the pretty-printed control-plane document's
+# allowed_roots array is exactly [PATH]. The encoder renders each array
+# element on its own line, so the match is made across line breaks.
+uer_roots_single() {
+  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[[:space:]]+\"$2\"[[:space:]]+\]"
+}
+
 # --- A. effective-roots introspection reports the global user-mode ceiling ---
 
 if A_OUT="$(dhx completion roots principal --principal "$OWNER" 2>&1)"; then
@@ -157,9 +164,11 @@ mkdir -p "$WORK/proj" || reg_fail "B: cannot create the restricted workspace $WO
 B_OUT="$(dhx launcher create --principal "$OWNER" --name work --allowed-root "$WORK" --no-credential 2>&1)"
 WORK_ID="$(printf '%s' "$B_OUT" | uer_field id || true)"
 if [ -n "$WORK_ID" ]; then
-  if B_SHOW="$(dhx launcher show --principal "$OWNER" work --json 2>&1)" \
+  # `launcher show` always emits the JSON document (no --json flag); flags
+  # must precede positional arguments.
+  if B_SHOW="$(dhx launcher show --principal "$OWNER" work 2>&1)" \
       && [ "$(printf '%s' "$B_SHOW" | uer_field scope)" = "restricted" ] \
-      && printf '%s' "$B_SHOW" | grep -q "\"allowed_roots\": \[\"$WORK\"\]"; then
+      && uer_roots_single "$B_SHOW" "$WORK"; then
     reg_ok "B: restricted Launcher created under the global root; show reports scope=restricted and the stored root"
   else
     reg_fail "B: launcher show does not report the restricted root: $(printf '%s' "$B_SHOW" | head -3 | tr '\n' ' ' | redact)"
@@ -190,7 +199,7 @@ if [ -n "$(printf '%s' "$C_OUT" | uer_field id || true)" ]; then
   # `launcher scope set` always emits the launcher JSON document.
   if C_SHOW="$(dhx launcher scope set --principal "$OWNER" --allowed-root "$WORK" conv 2>&1)" \
       && [ "$(printf '%s' "$C_SHOW" | uer_field scope)" = "restricted" ] \
-      && printf '%s' "$C_SHOW" | grep -q "\"allowed_roots\": \[\"$WORK\"\]"; then
+      && uer_roots_single "$C_SHOW" "$WORK"; then
     reg_ok "C: inherit -> restricted scope replacement succeeds and returns the committed scope and root"
   else
     reg_fail "C: inherit -> restricted scope replacement failed: $(printf '%s' "$C_SHOW" | head -2 | tr '\n' ' ' | redact)"

@@ -137,13 +137,20 @@ um_field() { json_field "$1"; }
 
 # assert_owner_invariant WHAT: the transparent chain still matches the
 # contract, observed through the supported control paths.
+#
+# Both show commands always emit the JSON document and have no --json flag;
+# the CLI rejects flags placed after positional arguments. enabled is a JSON
+# boolean and uid/gid are ints (unquoted, so json_field cannot extract them),
+# and zero stored roots render as null (the loaders return a nil slice), so
+# the scalar assertions are direct document greps and the zero-roots check
+# accepts both the null and empty-array renderings.
 assert_owner_invariant() {
   local what="$1" p l
-  if p="$(dhx principal show "$OWNER" --json 2>/dev/null)"; then
-    if [ "$(printf '%s' "$p" | um_field enabled)" = "true" ] \
-        && [ "$(printf '%s' "$p" | um_field uid)" = "$U_UID" ] \
-        && [ "$(printf '%s' "$p" | um_field gid)" = "$(id -g "$U_USER")" ] \
-        && printf '%s' "$p" | grep -q '"allowed_roots": \[\]'; then
+  if p="$(dhx principal show "$OWNER" 2>/dev/null)"; then
+    if printf '%s' "$p" | grep -q '"enabled": true' \
+        && printf '%s' "$p" | grep -q "\"uid\": $U_UID" \
+        && printf '%s' "$p" | grep -q "\"gid\": $(id -g "$U_USER")" \
+        && printf '%s' "$p" | grep -Eq '"allowed_roots": (null|\[\])'; then
       :
     else
       reg_fail "$what: daemon-owner Principal invariant violated: $(printf '%s' "$p" | head -6 | tr '\n' ' ')"
@@ -153,11 +160,11 @@ assert_owner_invariant() {
     reg_fail "$what: daemon-owner Principal show failed"
     return
   fi
-  if l="$(dhx launcher show --principal "$OWNER" default --json 2>/dev/null)"; then
-    if [ "$(printf '%s' "$l" | um_field enabled)" = "true" ] \
+  if l="$(dhx launcher show --principal "$OWNER" default 2>/dev/null)"; then
+    if printf '%s' "$l" | grep -q '"enabled": true' \
         && [ "$(printf '%s' "$l" | um_field name)" = "default" ] \
         && [ "$(printf '%s' "$l" | um_field scope)" = "inherit" ] \
-        && printf '%s' "$l" | grep -q '"allowed_roots": \[\]'; then
+        && printf '%s' "$l" | grep -Eq '"allowed_roots": (null|\[\])'; then
       reg_ok "$what: transparent owner chain intact (Principal enabled/zero-roots, default Launcher enabled/inherit/zero-roots)"
     else
       reg_fail "$what: default Launcher invariant violated: $(printf '%s' "$l" | head -6 | tr '\n' ' ')"
