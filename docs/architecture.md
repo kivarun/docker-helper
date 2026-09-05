@@ -934,8 +934,16 @@ Launchers (and any additional Launchers under the daemon-owner Principal)
 remain fully mutable. Each guard runs inside the same `lifecycleMu`
 serialization boundary as the mutation it protects, before any quiesce or
 durable change, so a rejected mutation cannot strand the running daemon or
-turn the next startup into a fail-closed rejection. Audit records of a
-rejected mutation carry the `user_mode_owner_reserved` result.
+turn the next startup into a fail-closed rejection. The lock-owning wrappers
+also acquire the current policy snapshot (the global allowed roots) inside
+that same critical section, preserving the reload boundary's
+`lifecycleMu -> a.mu` ordering: a global-root narrowing that linearizes
+before a Principal allowed-root add or Launcher scope replacement is
+observed by that mutation. An unknown Principal is not reserved (the
+mutation path reports its normal `principal_not_found`); a Principal lookup
+failure aborts the mutation fail-closed through the normal internal-error
+path. Audit records of a rejected mutation carry the
+`user_mode_owner_reserved` result.
 
 ### Launcher scope and effective roots
 

@@ -357,9 +357,10 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	// shares the lifecycle serialization with Session creation so a concurrent
 	// create either linearizes before the mutation (and observed the old
 	// policy) or after it (and observes the narrowed/widened one).
-	// addPrincipalAllowedRootWithLifecycle owns that boundary and refuses the
-	// reserved user-mode daemon-owner Principal before any change.
-	changed, canonicalPath, err := a.addPrincipalAllowedRootWithLifecycle(username, req.Path, a.getConfig().AllowedRoots)
+	// addPrincipalAllowedRootWithLifecycle owns that boundary and the current
+	// policy snapshot inside it, and refuses the reserved user-mode
+	// daemon-owner Principal before any change.
+	changed, canonicalPath, err := a.addPrincipalAllowedRootWithLifecycle(username, req.Path)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {

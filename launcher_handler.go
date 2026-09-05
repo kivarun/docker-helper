@@ -614,10 +614,10 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 	// the lifecycle serialization with Session creation so a concurrent create
 	// observes either the pre-replacement or post-replacement scope, never a
 	// mix, and a narrowing that linearizes first prevents the Session.
-	// replaceLauncherScopeWithLifecycle owns that boundary and refuses any
-	// narrowing or rooting of the reserved user-mode daemon-owner default
-	// Launcher before any change.
-	updated, err := a.replaceLauncherScopeWithLifecycle(l.ID, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots)
+	// replaceLauncherScopeWithLifecycle owns that boundary and the current
+	// policy snapshot inside it, and refuses any narrowing or rooting of the
+	// reserved user-mode daemon-owner default Launcher before any change.
+	updated, err := a.replaceLauncherScopeWithLifecycle(l.ID, scopeMode, req.AllowedRoots)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		result := "error"

@@ -5,11 +5,16 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -526,4 +531,279 @@ func TestUserModeOwnerReservationCurrentRuntimeUsable(t *testing.T) {
 		t.Fatal("pre-existing session disappeared after rejected mutations")
 	}
 	createSession()
+}
+
+// gatedJSONBody is a request body that parks decodeJSONRequest's trailing-EOF
+// check: the first Read delivers the JSON payload and signals started; the
+// next Read blocks until opened is closed and then reports EOF. This pins a
+// mutation request inside the handler prologue (past admin authentication,
+// before the policy snapshot and the lifecycle lock) so a concurrent reload's
+// setConfig commit and the mutation's critical section are ordered with
+// channels only — no timing or sleep.
+type gatedJSONBody struct {
+	data    []byte
+	off     int
+	started chan struct{}
+	once    sync.Once
+	opened  <-chan struct{}
+}
+
+func newGatedJSONBody(payload string, started chan struct{}, opened <-chan struct{}) *gatedJSONBody {
+	return &gatedJSONBody{data: []byte(payload), started: started, opened: opened}
+}
+
+func (b *gatedJSONBody) Read(p []byte) (int, error) {
+	if b.off < len(b.data) {
+		n := copy(p, b.data[b.off:])
+		b.off += n
+		b.once.Do(func() { close(b.started) })
+		return n, nil
+	}
+	<-b.opened
+	return 0, io.EOF
+}
+
+// raceNarrowingReload deterministically orders a narrowing reload and one
+// public mutation request through their shared lifecycleMu boundary:
+//
+//  1. the reload parks inside its critical section (the injected
+//     loadAndPrepareRuntimeConfig barrier), holding lifecycleMu;
+//  2. the mutation request is served through the real public mux and pinned
+//     inside its handler prologue by the gated body;
+//  3. the prologue is released, then the reload commits the narrowed
+//     configuration and releases the boundary;
+//  4. the mutation's critical section therefore runs strictly after the
+//     reload's setConfig commit and must observe the narrowed ceiling.
+//
+// It returns the mutation response and the reload response code after both
+// complete.
+func raceNarrowingReload(t *testing.T, app *App, narrowRoot string, newMutationRequest func(started, opened chan struct{}) *http.Request) (*httptest.ResponseRecorder, int) {
+	t.Helper()
+
+	holding := make(chan struct{})
+	gate := make(chan struct{})
+	deps := reloadDeps{
+		loadAndPrepareRuntimeConfig: func() (*Config, error) {
+			close(holding)
+			<-gate
+			return narrowCfg(t, app, narrowRoot), nil
+		},
+	}
+	reloadCode := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/reload", nil)
+		req.Header.Set("Authorization", "Bearer "+testAdminToken)
+		app.handleReloadWithDeps(rec, req, deps)
+		reloadCode <- rec.Code
+	}()
+
+	// The reload holds lifecycleMu, parked before its setConfig commit.
+	<-holding
+
+	started := make(chan struct{})
+	opened := make(chan struct{})
+	req := newMutationRequest(started, opened)
+	mux := http.NewServeMux()
+	registerRoutes(mux, app)
+	rec := httptest.NewRecorder()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		mux.ServeHTTP(rec, req)
+		done <- rec
+	}()
+
+	// The mutation is past admin authentication, parked before its snapshot
+	// and its lifecycle critical section.
+	<-started
+	close(opened)
+	// Yield the test goroutine so the pinned request completes its prologue
+	// and parks at the lifecycle boundary before the gate opens. This is a
+	// scheduling hand-off, not a timing wait: with the regression, the
+	// request's pre-boundary snapshot read (handler argument evaluation) and
+	// its park on the held lifecycleMu both complete here; without it, the
+	// scheduler tends to run the reload (the last goroutine made runnable)
+	// before the request, which would mask the regression.
+	runtime.Gosched()
+	close(gate)
+
+	return <-done, <-reloadCode
+}
+
+// narrowCfg copies the app's current configuration with the global allowed
+// roots narrowed to narrowRoot. The real reload setConfig merges only
+// configurable fields, so the copy keeps the rest of the runtime state.
+func narrowCfg(t *testing.T, app *App, narrowRoot string) *Config {
+	t.Helper()
+	cfg := app.getConfig()
+	cfg.AllowedRoots = []string{narrowRoot}
+	return &cfg
+}
+
+// expectOutsideGlobalRoot asserts the 400 outside_global_root error contract.
+func expectOutsideGlobalRoot(t *testing.T, rec *httptest.ResponseRecorder, what string) {
+	t.Helper()
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("%s: expected 400, got %d (body=%s)", what, rec.Code, rec.Body.String())
+	}
+	if code := decodeAPIError(t, rec.Body.Bytes()).Code; code != "outside_global_root" {
+		t.Errorf("%s: expected outside_global_root, got %q", what, code)
+	}
+}
+
+// TestRaceReloadSerializesPrincipalRootAdd proves the reload boundary owns the
+// policy snapshot of a Principal allowed-root add: a reload that narrows the
+// global roots and linearizes before the add commits prevents the add, so the
+// mutation can never store a root allowed only by the pre-reload
+// configuration. The mutation linearizes strictly after the reload's setConfig
+// commit (the reload parks inside its lifecycleMu critical section while the
+// request is pinned in its handler prologue), so its snapshot is read inside
+// the boundary and rejects the stale root with 400 outside_global_root; a
+// pre-lock snapshot (the regression) would validate the same root against the
+// wider pre-reload ceiling and store it with 200.
+func TestRaceReloadSerializesPrincipalRootAdd(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	setupLauncherHandlerPrincipal(t, app, "mutator")
+	root := app.Config.AllowedRoots[0]
+	narrow := filepath.Join(root, "narrow")
+	stale := filepath.Join(root, "stale")
+	for _, d := range []string{narrow, stale} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// createPrincipal provisions the principal home as the initial stored
+	// root; the race must leave exactly that set unchanged.
+	before, err := findPrincipalByUsername(app.DB, "mutator")
+	if err != nil {
+		t.Fatalf("find principal mutator: %v", err)
+	}
+
+	narrowRoot := narrow
+	rec, reloadCode := raceNarrowingReload(t, app, narrowRoot, func(started, opened chan struct{}) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/principals/mutator/allowed-roots",
+			newGatedJSONBody(`{"path":"`+stale+`"}`, started, opened))
+		req.Header.Set("Authorization", "Bearer "+testAdminToken)
+		return req
+	})
+
+	if reloadCode != http.StatusOK {
+		t.Fatalf("reload: expected 200, got %d", reloadCode)
+	}
+	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0] != narrowRoot {
+		t.Fatalf("reload did not narrow the global roots: %v", got)
+	}
+	// The add linearized after the narrowed commit: the stale root is outside
+	// the new ceiling and must be refused, never stored.
+	expectOutsideGlobalRoot(t, rec, "principal allowed-root add")
+	p, err := findPrincipalByUsername(app.DB, "mutator")
+	if err != nil {
+		t.Fatalf("find principal mutator: %v", err)
+	}
+	if len(p.AllowedRoots) != len(before.AllowedRoots) {
+		t.Fatalf("stale root stored outside the narrowed ceiling: %v (was %v)", p.AllowedRoots, before.AllowedRoots)
+	}
+	for _, r := range before.AllowedRoots {
+		if !slices.Contains(p.AllowedRoots, r) {
+			t.Fatalf("principal roots changed by the refused add: %v (was %v)", p.AllowedRoots, before.AllowedRoots)
+		}
+	}
+}
+
+// TestRaceReloadSerializesLauncherScopeReplace proves the reload boundary owns
+// the policy snapshot of a Launcher scope replacement: a reload that narrows
+// the global roots and linearizes before the replacement commits prevents it,
+// so the replacement can never store a restricted root allowed only by the
+// pre-reload configuration (the effective Principal ceiling is the
+// intersection with the global roots the boundary owns). The replacement
+// linearizes strictly after the reload's setConfig commit and rejects the
+// stale root with 400 outside_principal_root; a pre-lock snapshot (the
+// regression) would validate the same root against the wider pre-reload
+// ceiling and store it with 200.
+func TestRaceReloadSerializesLauncherScopeReplace(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	home, _ := setupLauncherHandlerPrincipal(t, app, "mutator")
+	root := app.Config.AllowedRoots[0]
+	narrow := filepath.Join(root, "narrow")
+	if err := os.MkdirAll(narrow, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The candidate restricted root must be under the Principal's effective
+	// ceiling under the pre-reload configuration (home) but outside it once
+	// the reload narrows the global roots, so the outcome discriminates the
+	// snapshot the replacement validated against.
+	stale := filepath.Join(home, "proj")
+	if err := os.MkdirAll(stale, 0755); err != nil {
+		t.Fatal(err)
+	}
+	pid := principalIDByName(t, app.DB, "mutator")
+	if _, _, _, err := createLauncher(app.DB, pid, "extra", LauncherScopeInherit, nil, app.Config.AllowedRoots, false); err != nil {
+		t.Fatalf("create launcher extra: %v", err)
+	}
+
+	narrowRoot := narrow
+	rec, reloadCode := raceNarrowingReload(t, app, narrowRoot, func(started, opened chan struct{}) *http.Request {
+		req := httptest.NewRequest(http.MethodPut, "/principals/mutator/launchers/extra/allowed-roots",
+			newGatedJSONBody(`{"scope":"restricted","allowed_roots":["`+stale+`"]}`, started, opened))
+		req.Header.Set("Authorization", "Bearer "+testAdminToken)
+		return req
+	})
+
+	if reloadCode != http.StatusOK {
+		t.Fatalf("reload: expected 200, got %d", reloadCode)
+	}
+	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0] != narrowRoot {
+		t.Fatalf("reload did not narrow the global roots: %v", got)
+	}
+	// The replacement linearized after the narrowed commit: the root under the
+	// old wide ceiling is outside the narrowed effective Principal ceiling and
+	// must be refused, never stored.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("launcher scope replace: expected 400, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if code := decodeAPIError(t, rec.Body.Bytes()).Code; code != "outside_principal_root" {
+		t.Errorf("launcher scope replace: expected outside_principal_root, got %q", code)
+	}
+	var storedRoots int
+	if err := app.DB.QueryRow(
+		`SELECT COUNT(*) FROM launcher_allowed_roots WHERE launcher_id IN
+		   (SELECT id FROM launchers WHERE principal_id = ? AND name = 'extra')`,
+		pid).Scan(&storedRoots); err != nil {
+		t.Fatalf("count launcher roots: %v", err)
+	}
+	if storedRoots != 0 {
+		t.Fatalf("stale restricted root stored outside the narrowed ceiling: %d rows", storedRoots)
+	}
+}
+
+// TestUserModeOwnerReservationLookupFailureFailsClosed proves the reservation
+// guard never bypasses on a Principal lookup failure: only a genuine
+// not-found means "not the reserved Principal"; a database failure aborts the
+// mutation (fail-closed). A closed *sql.DB is the existing deterministic seam
+// for a lookup that fails with a non-not-found error.
+func TestUserModeOwnerReservationLookupFailureFailsClosed(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	if err := app.DB.Close(); err != nil {
+		t.Fatalf("close DB: %v", err)
+	}
+	err := app.rejectReservedPrincipalMutation("dhtestowner")
+	if err == nil {
+		t.Fatal("reservation lookup failure was bypassed (fail-open)")
+	}
+	if errors.Is(err, ErrUserModeOwnerReserved) {
+		t.Fatalf("reservation lookup failure misreported as the reservation conflict: %v", err)
+	}
+
+	// The propagated failure reaches the normal internal-error path through
+	// the public API; it is neither misclassified as the reservation conflict
+	// nor as principal_not_found.
+	w := launcherRequest(t, app, http.MethodPatch, "/principals/dhtestowner", testAdminToken, `{"enabled":false}`)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if code := decodeAPIError(t, w.Body.Bytes()).Code; code != "internal_error" {
+		t.Errorf("expected internal_error, got %q", code)
+	}
 }

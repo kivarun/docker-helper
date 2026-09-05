@@ -51,8 +51,11 @@ func (a *App) rejectReservedPrincipalMutation(username string) error {
 		return nil
 	}
 	principalID, err := findPrincipalIDByUsername(a.DB, username)
-	if err != nil {
+	if errors.Is(err, ErrPrincipalNotFound) {
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 	if a.isUserModeDaemonOwnerPrincipal(int64(principalID)) {
 		return ErrUserModeOwnerReserved
@@ -109,13 +112,14 @@ func (a *App) rejectReservedLauncherScopeReplace(launcherID string, scope Launch
 // durable mutation (the same serialization boundary as Session creation and
 // the other ownership lifecycle mutations) and refuses the reserved
 // daemon-owner Principal before any change.
-func (a *App) addPrincipalAllowedRootWithLifecycle(username, rootPath string, globalAllowedRoots []string) (changed bool, canonicalPath string, err error) {
+func (a *App) addPrincipalAllowedRootWithLifecycle(username, rootPath string) (changed bool, canonicalPath string, err error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 	if err := a.rejectReservedPrincipalMutation(username); err != nil {
 		return false, "", err
 	}
-	return addPrincipalAllowedRoot(a.DB, username, rootPath, globalAllowedRoots)
+	globalRoots := a.getConfig().AllowedRoots
+	return addPrincipalAllowedRoot(a.DB, username, rootPath, globalRoots)
 }
 
 // removePrincipalAllowedRootWithLifecycle is the lock-owning App-level
@@ -134,11 +138,12 @@ func (a *App) removePrincipalAllowedRootWithLifecycle(username, rootPath string)
 // durable mutation (the same serialization boundary as Session creation) and
 // refuses any narrowing or rooting of the reserved daemon-owner default
 // Launcher before any change.
-func (a *App) replaceLauncherScopeWithLifecycle(launcherID string, scope LauncherScopeMode, allowedRoots []string, globalAllowedRoots []string) (*LauncherWithPrincipal, error) {
+func (a *App) replaceLauncherScopeWithLifecycle(launcherID string, scope LauncherScopeMode, allowedRoots []string) (*LauncherWithPrincipal, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 	if err := a.rejectReservedLauncherScopeReplace(launcherID, scope, allowedRoots); err != nil {
 		return nil, err
 	}
-	return replaceLauncherScope(a.DB, launcherID, scope, allowedRoots, globalAllowedRoots)
+	globalRoots := a.getConfig().AllowedRoots
+	return replaceLauncherScope(a.DB, launcherID, scope, allowedRoots, globalRoots)
 }
