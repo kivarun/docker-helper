@@ -106,7 +106,7 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, token, err := createCredential(a.DB, username, req.Name)
+	result, token, err := createPrincipalCredential(a.DB, username, req.Name)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {

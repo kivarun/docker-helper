@@ -286,7 +286,7 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred, _, err := createCredential(app.DB, principal.Username, "test-cred")
+	cred, _, err := createPrincipalCredential(app.DB, principal.Username, "test-cred")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred, _, err := createCredential(app.DB, principal.Username, "test-cred")
+	cred, _, err := createPrincipalCredential(app.DB, principal.Username, "test-cred")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cred, _, err := createCredential(app.DB, principal.Username, "test-cred")
+	cred, _, err := createPrincipalCredential(app.DB, principal.Username, "test-cred")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -798,7 +798,7 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, pid)
 
 	// Create a credential and session for the principal.
-	_, credToken, err := createCredential(app.DB, username, "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, username, "laptop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -919,7 +919,7 @@ func TestSessionDeleteCleanupCorrelation(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, pid)
 
 	// Create a credential and session for the principal.
-	_, credToken, err := createCredential(app.DB, username, "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, username, "laptop")
 	if err != nil {
 		t.Fatal(err)
 	}

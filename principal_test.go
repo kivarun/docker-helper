@@ -1580,9 +1580,9 @@ func TestPrincipalListAuth(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "launchuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
-	_, credentialToken, err := createCredential(app.DB, "launchuser", "oc")
+	_, credentialToken, err := createPrincipalCredential(app.DB, "launchuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	tests := []struct {

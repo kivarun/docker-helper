@@ -34,9 +34,9 @@ func principalCredentialApp(t *testing.T, username string) (*App, string, *httpt
 	if _, err := createPrincipal(app.DB, username, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal(%s): %v", username, err)
 	}
-	_, callerToken, err := createCredential(app.DB, username, "caller")
+	_, callerToken, err := createPrincipalCredential(app.DB, username, "caller")
 	if err != nil {
-		t.Fatalf("createCredential(%s): %v", username, err)
+		t.Fatalf("createPrincipalCredential(%s): %v", username, err)
 	}
 	return app, callerToken, nil
 }
@@ -45,9 +45,9 @@ func principalCredentialApp(t *testing.T, username string) (*App, string, *httpt
 // the given username via the production path and returns its bearer.
 func createNamedCredential(t *testing.T, app *App, username, name string) string {
 	t.Helper()
-	_, token, err := createCredential(app.DB, username, name)
+	_, token, err := createPrincipalCredential(app.DB, username, name)
 	if err != nil {
-		t.Fatalf("createCredential(%s, %s): %v", username, name, err)
+		t.Fatalf("createPrincipalCredential(%s, %s): %v", username, name, err)
 	}
 	return token
 }

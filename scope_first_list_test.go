@@ -29,9 +29,9 @@ func setupScopeListPrincipals(t *testing.T) (*App, string, string) {
 			t.Fatalf("createPrincipal(%s): %v", u, err)
 		}
 	}
-	_, aliceToken, err := createCredential(app.DB, "alice", "caller")
+	_, aliceToken, err := createPrincipalCredential(app.DB, "alice", "caller")
 	if err != nil {
-		t.Fatalf("createCredential(alice): %v", err)
+		t.Fatalf("createPrincipalCredential(alice): %v", err)
 	}
 	createNamedCredential(t, app, "bob", "bobcred")
 

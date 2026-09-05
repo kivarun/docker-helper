@@ -38,9 +38,9 @@ func setupLauncherHandlerPrincipal(t *testing.T, app *App, username string) (str
 	if _, err := createPrincipal(app.DB, username, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal(%s): %v", username, err)
 	}
-	_, token, err := createCredential(app.DB, username, "oc")
+	_, token, err := createPrincipalCredential(app.DB, username, "oc")
 	if err != nil {
-		t.Fatalf("createCredential(%s): %v", username, err)
+		t.Fatalf("createPrincipalCredential(%s): %v", username, err)
 	}
 	return home, token
 }

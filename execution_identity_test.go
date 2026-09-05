@@ -83,9 +83,9 @@ func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "execuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "execuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -162,13 +162,13 @@ func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p2.ID))
 
-	_, token1, err := createCredential(app.DB, "diffuser1", "oc")
+	_, token1, err := createPrincipalCredential(app.DB, "diffuser1", "oc")
 	if err != nil {
-		t.Fatalf("createCredential(diffuser1) error: %v", err)
+		t.Fatalf("createPrincipalCredential(diffuser1) error: %v", err)
 	}
-	_, token2, err := createCredential(app.DB, "diffuser2", "oc")
+	_, token2, err := createPrincipalCredential(app.DB, "diffuser2", "oc")
 	if err != nil {
-		t.Fatalf("createCredential(diffuser2) error: %v", err)
+		t.Fatalf("createPrincipalCredential(diffuser2) error: %v", err)
 	}
 
 	reqBody1 := map[string]string{"workspace": filepath.Join(home1, "proj")}
@@ -242,9 +242,9 @@ func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "disabledexecuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "disabledexecuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -301,9 +301,9 @@ func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	cred, token, err := createCredential(app.DB, "revokedexecuser", "oc")
+	cred, token, err := createPrincipalCredential(app.DB, "revokedexecuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -398,9 +398,9 @@ func TestPrincipalIdentityDBError(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "dberruser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "dberruser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -458,9 +458,9 @@ func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "auditexecuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "auditexecuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -518,9 +518,9 @@ func TestResolveSessionExecutionIdentityFromDB(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "fromdbuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "fromdbuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}

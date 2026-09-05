@@ -111,47 +111,35 @@ func generateCredentialID() (string, error) {
 	return "dhcr_" + hex.EncodeToString(b), nil
 }
 
-func createCredential(db *sql.DB, username string, name string) (*CredentialWithPrincipal, string, error) {
-	if name == "" {
-		return nil, "", fmt.Errorf("credential name is required: %w", ErrInvalidCredentialName)
+// createPrincipalCredential creates a Principal credential for an existing
+// Principal as one atomic operation: the Principal resolution and the
+// credential insertion share a single transaction, and the canonical
+// insertPrincipalCredentialInTx owner generates the token, hash, credential
+// ID, timestamps, and row. The returned projection and one-time bearer secret
+// are the values that insertion owner produced; no DB read follows the
+// commit. A missing Principal fails with ErrPrincipalNotFound and an active
+// duplicate name with ErrCredentialExists.
+func createPrincipalCredential(db *sql.DB, username string, name string) (*CredentialWithPrincipal, string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, "", fmt.Errorf("cannot begin transaction: %w", err)
 	}
+	defer tx.Rollback()
 
-	principalID, err := findPrincipalIDByUsername(db, username)
+	principalID, err := findPrincipalIDByUsernameInTx(tx, username)
 	if err != nil {
 		return nil, "", err
 	}
 
-	token, err := generateCredentialToken()
+	cred, token, err := insertPrincipalCredentialInTx(tx, int64(principalID), username, name)
 	if err != nil {
 		return nil, "", err
 	}
-	tokenHash := hashCredentialToken(token)
-	credID, err := generateCredentialID()
-	if err != nil {
-		return nil, "", err
-	}
-	now := time.Now().Unix()
 
-	_, err = db.Exec(
-		`INSERT INTO credentials (id, principal_id, name, token_hash, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		credID, principalID, name, tokenHash, now,
-	)
-	if err != nil {
-		if isSQLiteUniqueError(err) {
-			return nil, "", fmt.Errorf("credential %q already exists for principal %q: %w", name, username, ErrCredentialExists)
-		}
-		return nil, "", fmt.Errorf("cannot create credential: %w", err)
+	if err := tx.Commit(); err != nil {
+		return nil, "", fmt.Errorf("cannot commit credential creation: %w", err)
 	}
-
-	return &CredentialWithPrincipal{
-		Credential: Credential{
-			ID:        credID,
-			Name:      name,
-			CreatedAt: time.Unix(now, 0),
-		},
-		PrincipalName: username,
-	}, token, nil
+	return cred, token, nil
 }
 
 // listCredentialsForScope returns the Principal credentials of one authorized
@@ -401,7 +389,9 @@ type PrincipalCredentialAuth struct {
 // LauncherCredentialAuth contains the information needed to authorize a
 // Launcher credential. It carries only narrow provenance/authorization fields:
 // the owning Launcher, the credential, and the derived owning Principal. A
-// Launcher credential is NOT yet authorized for Session control in this stage.
+// Launcher credential authorizes Session creation on, and Session control
+// over, exactly its own Launcher; Launcher and Principal management remain
+// operator authority.
 type LauncherCredentialAuth struct {
 	LauncherID    string
 	CredentialID  string

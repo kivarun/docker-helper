@@ -2826,7 +2826,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	}
 
 	// Create a credential for the principal.
-	_, token, err := createCredential(app.DB, "staleauthuser", "test-cred")
+	_, token, err := createPrincipalCredential(app.DB, "staleauthuser", "test-cred")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}

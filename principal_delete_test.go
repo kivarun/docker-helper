@@ -38,7 +38,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 		t.Fatalf("addAllowedRoot: %v", err)
 	}
 
-	_, credToken, err := createCredential(app.DB, "deluser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "deluser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestPrincipalDeleteSessionTokenInvalidated(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "deltokenuser"))
 
-	_, credToken, err := createCredential(app.DB, "deltokenuser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "deltokenuser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestPrincipalDeleteCredentialTokenInvalidated(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	_, credToken, err := createCredential(app.DB, "delcreduser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "delcreduser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestPrincipalDisableDeletesSessions(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "disuser"))
 
-	_, credToken, err := createCredential(app.DB, "disuser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "disuser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestPrincipalEnableDoesNotRestoreSessions(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "disenuser"))
 
-	_, credToken, err := createCredential(app.DB, "disenuser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "disenuser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestPrincipalCheckedDeleteCleansRuntimeDirsWhenOwnerRemovalFails(t *testing
 		t.Fatalf("createPrincipal: %v", err)
 	}
 	// Principal creation provisions the default Launcher (eager provisioning).
-	_, credToken, err := createCredential(app.DB, username, "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, username, "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -665,7 +665,7 @@ func TestPrincipalDisableCredentialStillWorks(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "discreduser"))
 
-	_, credToken, err := createCredential(app.DB, "discreduser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "discreduser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -722,7 +722,7 @@ func TestPrincipalDisableSessionTokenUnauthorized(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "disauthuser"))
 
-	_, credToken, err := createCredential(app.DB, "disauthuser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "disauthuser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -861,7 +861,7 @@ func TestPrincipalDeleteAuditNoTokenInOutput(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	_, credToken, err := createCredential(app.DB, "audittokenuser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "audittokenuser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -909,7 +909,7 @@ func TestPrincipalDeleteMultipleSessions(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "delsessuser"))
 
-	_, credToken, err := createCredential(app.DB, "delsessuser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "delsessuser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -971,7 +971,7 @@ func TestPrincipalDeleteWithExpiredSessions(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "delexpuser"))
 
-	_, credToken, err := createCredential(app.DB, "delexpuser", "laptop")
+	_, credToken, err := createPrincipalCredential(app.DB, "delexpuser", "laptop")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -1034,7 +1034,7 @@ func TestPrincipalDisableConcurrentConfigReload(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "configraceuser"))
 
 	// Create a credential and session for the principal.
-	_, credToken, err := createCredential(app.DB, "configraceuser", "test-cred")
+	_, credToken, err := createPrincipalCredential(app.DB, "configraceuser", "test-cred")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}
@@ -1131,7 +1131,7 @@ func TestPrincipalDeleteConcurrentConfigReload(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "delconfigraceuser"))
 
 	// Create a credential and session for the principal.
-	_, credToken, err := createCredential(app.DB, "delconfigraceuser", "test-cred")
+	_, credToken, err := createPrincipalCredential(app.DB, "delconfigraceuser", "test-cred")
 	if err != nil {
 		t.Fatalf("createCredential: %v", err)
 	}

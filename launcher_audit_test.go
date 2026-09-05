@@ -33,9 +33,9 @@ func launcherAuditApp(t *testing.T, username string) (*App, string, string, *Lau
 	if err != nil {
 		t.Fatalf("createPrincipal(%s): %v", username, err)
 	}
-	_, credToken, err := createCredential(app.DB, username, "audit")
+	_, credToken, err := createPrincipalCredential(app.DB, username, "audit")
 	if err != nil {
-		t.Fatalf("createCredential(%s): %v", username, err)
+		t.Fatalf("createPrincipalCredential(%s): %v", username, err)
 	}
 	l, _, launcherToken, err := createLauncher(app.DB, int64(p.ID), "agent", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
@@ -373,7 +373,7 @@ func TestLauncherControlAuditCreatorProvenance(t *testing.T) {
 func TestLauncherControlAuditInitiatorCredentialProvenance(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app, credAToken, _, l := launcherAuditApp(t, "lncinitiator")
-	_, credBToken, err := createCredential(app.DB, "lncinitiator", "second")
+	_, credBToken, err := createPrincipalCredential(app.DB, "lncinitiator", "second")
 	if err != nil {
 		t.Fatalf("create second principal credential: %v", err)
 	}

@@ -272,9 +272,9 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 	var credToken string
-	_, credToken, err = createCredential(app.DB, "rotateuser", "oc")
+	_, credToken, err = createPrincipalCredential(app.DB, "rotateuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	tests := []struct {

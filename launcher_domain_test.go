@@ -995,7 +995,7 @@ func TestLauncherCredentialNotRevocableByPrincipalPath(t *testing.T) {
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "w")
 
 	// Setup a Principal credential to prove the same path still revokes it.
-	if _, _, err := createCredential(db, "w", "oc"); err != nil {
+	if _, _, err := createPrincipalCredential(db, "w", "oc"); err != nil {
 		t.Fatal(err)
 	}
 	// Issue a Launcher credential.
@@ -1040,7 +1040,7 @@ func TestPrincipalRevokeUnchanged(t *testing.T) {
 	if _, err := createPrincipal(db, "x", globalRoots); err != nil {
 		t.Fatal(err)
 	}
-	pc, token, err := createCredential(db, "x", "oc")
+	pc, token, err := createPrincipalCredential(db, "x", "oc")
 	if err != nil {
 		t.Fatal(err)
 	}

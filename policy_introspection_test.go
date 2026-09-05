@@ -35,9 +35,9 @@ func setupPolicyPrincipal(t *testing.T, app *App, username, root string) string 
 	if w.Code != http.StatusOK {
 		t.Fatalf("add root %s: %d %s", root, w.Code, w.Body.String())
 	}
-	_, token, err := createCredential(app.DB, username, "oc")
+	_, token, err := createPrincipalCredential(app.DB, username, "oc")
 	if err != nil {
-		t.Fatalf("createCredential(%s): %v", username, err)
+		t.Fatalf("createPrincipalCredential(%s): %v", username, err)
 	}
 	return token
 }

@@ -79,9 +79,9 @@ func TestPrincipalListSessionsDBFailureIs500(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
-	_, token, err := createCredential(app.DB, "listdbfail", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "listdbfail", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -130,9 +130,9 @@ func TestPrincipalDeleteSessionsDBFailureIs500(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
-	_, token, err := createCredential(app.DB, "deldbfail", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "deldbfail", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	mux := http.NewServeMux()

@@ -202,9 +202,9 @@ func TestAuthAuditPrincipalCredentialRevoked_CreateSession(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, token, err := createCredential(app.DB, "auditrevoked", "oc")
+	cred, token, err := createPrincipalCredential(app.DB, "auditrevoked", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
@@ -255,9 +255,9 @@ func TestAuthAuditPrincipalDisabled_CreateSession(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	_, token, err := createCredential(app.DB, "auditdisabled", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "auditdisabled", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	if _, err := persistPrincipalEnabledChange(app.DB, "auditdisabled", false); err != nil {

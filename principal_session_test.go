@@ -34,9 +34,9 @@ func TestCredentialAuthValid(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, token, err := createCredential(app.DB, "authuser", "oc")
+	cred, token, err := createPrincipalCredential(app.DB, "authuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	auth, err := authenticateCredential(app.DB, token)
@@ -87,9 +87,9 @@ func TestCredentialAuthRevoked(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	_, token, err := createCredential(app.DB, "revokeduser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "revokeduser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	// Revoke the credential.
@@ -128,9 +128,9 @@ func TestCredentialAuthPrincipalDisabled(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	_, token, err := createCredential(app.DB, "disableduser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "disableduser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	// Disable the principal.
@@ -183,9 +183,9 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "sessuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "sessuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -305,9 +305,9 @@ func TestPrincipalWorkspaceInsideFirstRoot(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "wsuser1", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "wsuser1", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": subdir}
@@ -357,9 +357,9 @@ func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
-	_, token, err := createCredential(app.DB, "wsuser2", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "wsuser2", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": subdir}
@@ -405,9 +405,9 @@ func TestPrincipalWorkspaceOutsideAllRootsRejected(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Do NOT add outsideRoot as allowed root.
-	_, token, err := createCredential(app.DB, "wsuser3", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "wsuser3", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": subdir}
@@ -462,13 +462,13 @@ func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p2.ID))
 
-	_, token1, err := createCredential(app.DB, "owner1", "oc")
+	_, token1, err := createPrincipalCredential(app.DB, "owner1", "oc")
 	if err != nil {
-		t.Fatalf("createCredential(owner1) error: %v", err)
+		t.Fatalf("createPrincipalCredential(owner1) error: %v", err)
 	}
-	_, token2, err := createCredential(app.DB, "owner2", "oc")
+	_, token2, err := createPrincipalCredential(app.DB, "owner2", "oc")
 	if err != nil {
-		t.Fatalf("createCredential(owner2) error: %v", err)
+		t.Fatalf("createPrincipalCredential(owner2) error: %v", err)
 	}
 
 	// owner1 creates a session.
@@ -541,9 +541,9 @@ func TestPrincipalDoesNotSeeLegacySessions(t *testing.T) {
 	}
 	_ = adminResult
 
-	_, token, err := createCredential(app.DB, "legacyuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "legacyuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -595,9 +595,9 @@ func TestAdminSeesAllSessions(t *testing.T) {
 	_ = adminResult
 
 	// Create principal session.
-	_, token, err := createCredential(app.DB, "adminseesuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "adminseesuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -654,9 +654,9 @@ func TestPrincipalDeletesOwnSession(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "delownuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "delownuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -725,13 +725,13 @@ func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p2.ID))
 
-	_, token1, err := createCredential(app.DB, "delother1", "oc")
+	_, token1, err := createPrincipalCredential(app.DB, "delother1", "oc")
 	if err != nil {
-		t.Fatalf("createCredential(delother1) error: %v", err)
+		t.Fatalf("createPrincipalCredential(delother1) error: %v", err)
 	}
-	_, token2, err := createCredential(app.DB, "delother2", "oc")
+	_, token2, err := createPrincipalCredential(app.DB, "delother2", "oc")
 	if err != nil {
-		t.Fatalf("createCredential(delother2) error: %v", err)
+		t.Fatalf("createPrincipalCredential(delother2) error: %v", err)
 	}
 
 	// delother2 creates a session.
@@ -790,9 +790,9 @@ func TestPrincipalDeletingLegacySessionReturns404(t *testing.T) {
 		t.Fatalf("admin createSession() error: %v", err)
 	}
 
-	_, token, err := createCredential(app.DB, "dellegacyuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "dellegacyuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -829,9 +829,9 @@ func TestAdminDeletesAnySession(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "admindeluser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "admindeluser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -886,9 +886,9 @@ func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	cred, token, err := createCredential(app.DB, "surviveuser", "oc")
+	cred, token, err := createPrincipalCredential(app.DB, "surviveuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -944,9 +944,9 @@ func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, _, err := createCredential(app.DB, "concurrentuser", "oc")
+	cred, _, err := createPrincipalCredential(app.DB, "concurrentuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	const goroutines = 10
@@ -1002,9 +1002,9 @@ func TestSessionTokenInvalidatedOnPrincipalDisable(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "survivedisuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "survivedisuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -1159,9 +1159,9 @@ func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "noadminfail", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "noadminfail", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -1257,9 +1257,9 @@ func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
-	_, token, err := createCredential(app.DB, "principalresp", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "principalresp", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
@@ -1309,9 +1309,9 @@ func TestCredentialSessionListAudit(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, token, err := createCredential(app.DB, "listaudit", "oc")
+	cred, token, err := createPrincipalCredential(app.DB, "listaudit", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -1374,9 +1374,9 @@ func TestGlobalPolicyNarrowing(t *testing.T) {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
-	_, token, err := createCredential(app.DB, "narrowuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "narrowuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	// Narrow global policy to the narrower root.
@@ -1451,9 +1451,9 @@ func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
-	_, token, err := createCredential(app.DB, "staleuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "staleuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	// Change global policy so staleRoot is no longer covered.

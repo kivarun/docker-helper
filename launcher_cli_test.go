@@ -777,7 +777,7 @@ func TestHandleAuthRevokedCredential(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "alice", app.Config.AllowedRoots); err != nil {
 		t.Fatal(err)
 	}
-	cred, token, err := createCredential(app.DB, "alice", "oc")
+	cred, token, err := createPrincipalCredential(app.DB, "alice", "oc")
 	if err != nil {
 		t.Fatal(err)
 	}

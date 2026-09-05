@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -34,9 +35,9 @@ func TestCreateCredential(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, token, err := createCredential(app.DB, "creduser", "oc")
+	cred, token, err := createPrincipalCredential(app.DB, "creduser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	if cred.Name != "oc" {
@@ -59,12 +60,21 @@ func TestCreateCredential(t *testing.T) {
 func TestCreateCredentialPrincipalNotFound(t *testing.T) {
 	app := newTestApp(t)
 
-	_, _, err := createCredential(app.DB, "nonexistent", "oc")
+	_, _, err := createPrincipalCredential(app.DB, "nonexistent", "oc")
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if !isErrPrincipalNotFound(err) {
 		t.Errorf("expected ErrPrincipalNotFound, got: %v", err)
+	}
+
+	// A missing Principal creates no credential row.
+	var count int
+	if err := app.DB.QueryRow(`SELECT COUNT(*) FROM credentials`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("no credential row may be created for a missing Principal, got %d", count)
 	}
 }
 
@@ -86,16 +96,29 @@ func TestCreateCredentialDuplicateName(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := createCredential(app.DB, "dupnameuser", "oc"); err != nil {
-		t.Fatalf("first createCredential() error: %v", err)
+	if _, _, err := createPrincipalCredential(app.DB, "dupnameuser", "oc"); err != nil {
+		t.Fatalf("first createPrincipalCredential() error: %v", err)
 	}
 
-	_, _, err := createCredential(app.DB, "dupnameuser", "oc")
+	_, _, err := createPrincipalCredential(app.DB, "dupnameuser", "oc")
 	if err == nil {
 		t.Fatal("expected error for duplicate name")
 	}
 	if !isErrCredentialExists(err) {
 		t.Errorf("expected ErrCredentialExists, got: %v", err)
+	}
+
+	// The duplicate attempt must not add an additional active credential.
+	var count int
+	if err := app.DB.QueryRow(
+		`SELECT COUNT(*) FROM credentials
+		 WHERE principal_id = (SELECT id FROM principals WHERE username='dupnameuser')
+		   AND name='oc' AND revoked_at IS NULL`,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 active credential after duplicate rejection, got %d", count)
 	}
 }
 
@@ -130,11 +153,11 @@ func TestCreateCredentialSameNameDifferentPrincipals(t *testing.T) {
 		t.Fatalf("createPrincipal(user2) error: %v", err)
 	}
 
-	if _, _, err := createCredential(app.DB, "user1", "oc"); err != nil {
-		t.Fatalf("createCredential(user1, oc) error: %v", err)
+	if _, _, err := createPrincipalCredential(app.DB, "user1", "oc"); err != nil {
+		t.Fatalf("createPrincipalCredential(user1, oc) error: %v", err)
 	}
-	if _, _, err := createCredential(app.DB, "user2", "oc"); err != nil {
-		t.Fatalf("createCredential(user2, oc) error: %v", err)
+	if _, _, err := createPrincipalCredential(app.DB, "user2", "oc"); err != nil {
+		t.Fatalf("createPrincipalCredential(user2, oc) error: %v", err)
 	}
 }
 
@@ -156,9 +179,9 @@ func TestCreateCredentialTokenNotStored(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	_, token, err := createCredential(app.DB, "tokentestuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "tokentestuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	// Check that the plaintext token is NOT stored in the database.
@@ -201,11 +224,11 @@ func TestListCredentials(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := createCredential(app.DB, "listuser", "oc"); err != nil {
-		t.Fatalf("createCredential(oc) error: %v", err)
+	if _, _, err := createPrincipalCredential(app.DB, "listuser", "oc"); err != nil {
+		t.Fatalf("createPrincipalCredential(oc) error: %v", err)
 	}
-	if _, _, err := createCredential(app.DB, "listuser", "laptop"); err != nil {
-		t.Fatalf("createCredential(laptop) error: %v", err)
+	if _, _, err := createPrincipalCredential(app.DB, "listuser", "laptop"); err != nil {
+		t.Fatalf("createPrincipalCredential(laptop) error: %v", err)
 	}
 
 	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "listuser"))
@@ -263,9 +286,9 @@ func TestRevokeCredential(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, _, err := createCredential(app.DB, "revokeuser", "oc")
+	cred, _, err := createPrincipalCredential(app.DB, "revokeuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	changed, err := revokeCredential(app.DB, cred.ID)
@@ -304,9 +327,9 @@ func TestRevokeCredentialIdempotent(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, _, err := createCredential(app.DB, "idemrevokeuser", "oc")
+	cred, _, err := createPrincipalCredential(app.DB, "idemrevokeuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
@@ -352,9 +375,9 @@ func TestRevokedCredentialRemainsInList(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, _, err := createCredential(app.DB, "revlistuser", "oc")
+	cred, _, err := createPrincipalCredential(app.DB, "revlistuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
@@ -395,16 +418,16 @@ func TestCredentialNameReusableAfterRevoke(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred1, token1, err := createCredential(app.DB, "reuseuser", "oc")
+	cred1, token1, err := createPrincipalCredential(app.DB, "reuseuser", "oc")
 	if err != nil {
-		t.Fatalf("first createCredential() error: %v", err)
+		t.Fatalf("first createPrincipalCredential() error: %v", err)
 	}
 
 	if _, err := revokeCredential(app.DB, cred1.ID); err != nil {
 		t.Fatalf("revokeCredential() error: %v", err)
 	}
 
-	cred2, token2, err := createCredential(app.DB, "reuseuser", "oc")
+	cred2, token2, err := createPrincipalCredential(app.DB, "reuseuser", "oc")
 	if err != nil {
 		t.Fatalf("re-create same name after revoke error: %v", err)
 	}
@@ -492,7 +515,7 @@ func TestCredentialUpgradeRc18DBReusesName(t *testing.T) {
 	}
 
 	// Same name can now be created for the same principal.
-	cred2, _, err := createCredential(db, "alice", "oc")
+	cred2, _, err := createPrincipalCredential(db, "alice", "oc")
 	if err != nil {
 		t.Fatalf("create after upgrade error: %v", err)
 	}
@@ -511,7 +534,7 @@ func TestCredentialUpgradeRc18DBReusesName(t *testing.T) {
 	}
 
 	// Active-name uniqueness still enforced: creating "oc" again must fail.
-	if _, _, err := createCredential(db, "alice", "oc"); err == nil {
+	if _, _, err := createPrincipalCredential(db, "alice", "oc"); err == nil {
 		t.Fatal("expected duplicate active name to be rejected after upgrade")
 	}
 }
@@ -587,7 +610,7 @@ func TestCredentialUpgradeIdempotent(t *testing.T) {
 	}
 
 	// Name reuse still works after the idempotent second run.
-	cred2, _, err := createCredential(db, "alice", "oc")
+	cred2, _, err := createPrincipalCredential(db, "alice", "oc")
 	if err != nil {
 		t.Fatalf("create after idempotent migration error: %v", err)
 	}
@@ -714,6 +737,12 @@ func TestCredentialHTTPCreate(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("cannot decode response: %v", err)
 	}
+	if resp.Credential.ID == "" {
+		t.Error("credential id should not be empty")
+	}
+	if resp.Credential.Principal != "httpcreduser" {
+		t.Errorf("principal = %q, want %q", resp.Credential.Principal, "httpcreduser")
+	}
 	if resp.Credential.Name != "oc" {
 		t.Errorf("name = %q, want %q", resp.Credential.Name, "oc")
 	}
@@ -763,8 +792,8 @@ func TestCredentialHTTPCreateDuplicateName(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := createCredential(app.DB, "dupnamehttpuser", "oc"); err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+	if _, _, err := createPrincipalCredential(app.DB, "dupnamehttpuser", "oc"); err != nil {
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	reqBody := map[string]string{"name": "oc"}
@@ -802,8 +831,8 @@ func TestCredentialHTTPList(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := createCredential(app.DB, "listhttpuser", "oc"); err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+	if _, _, err := createPrincipalCredential(app.DB, "listhttpuser", "oc"); err != nil {
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -851,9 +880,9 @@ func TestCredentialHTTPRevoke(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, _, err := createCredential(app.DB, "revokehttpuser", "oc")
+	cred, _, err := createPrincipalCredential(app.DB, "revokehttpuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -950,8 +979,8 @@ func TestCredentialCascadeDelete(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := createCredential(app.DB, "cascadecreduser", "oc"); err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+	if _, _, err := createPrincipalCredential(app.DB, "cascadecreduser", "oc"); err != nil {
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	// Delete the principal directly to test cascade.
@@ -1151,8 +1180,8 @@ func TestCredentialMultipleForOnePrincipal(t *testing.T) {
 
 	names := []string{"oc", "laptop", "ci-launcher"}
 	for _, name := range names {
-		if _, _, err := createCredential(app.DB, "multiuser", name); err != nil {
-			t.Fatalf("createCredential(%s) error: %v", name, err)
+		if _, _, err := createPrincipalCredential(app.DB, "multiuser", name); err != nil {
+			t.Fatalf("createPrincipalCredential(%s) error: %v", name, err)
 		}
 	}
 
@@ -1240,9 +1269,9 @@ func TestCredentialCreatedAtIndex(t *testing.T) {
 	}
 
 	before := time.Now().Add(-time.Second)
-	cred, _, err := createCredential(app.DB, "timeuser", "oc")
+	cred, _, err := createPrincipalCredential(app.DB, "timeuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 	after := time.Now().Add(time.Second)
 
@@ -1398,9 +1427,9 @@ func TestCredentialHTTPRevokeDBError(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	cred, _, err := createCredential(app.DB, "dberruser", "oc")
+	cred, _, err := createPrincipalCredential(app.DB, "dberruser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	// Close the DB to simulate a DB error.
@@ -1440,9 +1469,9 @@ func TestCredentialDuplicateTokenHashRejected(t *testing.T) {
 	}
 
 	// Create a credential.
-	_, token, err := createCredential(app.DB, "duphashuser", "oc")
+	_, token, err := createPrincipalCredential(app.DB, "duphashuser", "oc")
 	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
+		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
 	// Try to manually insert a duplicate token_hash.
@@ -1457,5 +1486,119 @@ func TestCredentialDuplicateTokenHashRejected(t *testing.T) {
 	}
 	if !isSQLiteUniqueError(err) {
 		t.Errorf("expected UNIQUE constraint error, got: %v", err)
+	}
+}
+
+// TestCreatePrincipalCredentialCanonicalInsertion proves standalone Principal
+// credential creation consumes the canonical insertPrincipalCredentialInTx
+// owner end to end: the operation's only pre-commit query is the
+// in-transaction Principal lookup (the INSERT is an Exec and the commit is
+// not a query), so a throttled driver permitting exactly one query proves no
+// post-commit projection lookup exists. The committed row carries the
+// Principal ownership shape (principal_id set, launcher_id NULL, expected
+// name), the returned projection matches that row, and the one-time bearer
+// authenticates as the targeted Principal under the returned credential ID.
+func TestCreatePrincipalCredentialCanonicalInsertion(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/test.db"
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	globalRoots := []string{testAllowedRootDir(t)}
+	home := filepath.Join(globalRoots[0], "home", "canonuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"canonuser": home})
+	if _, err := createPrincipal(db, "canonuser", globalRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Permit exactly the in-transaction Principal lookup; any later query,
+	// including a post-commit projection read, fails the operation.
+	fq := newFailQueryAfterDB(t, path, 1, errMockQueryFail)
+	defer fq.Close()
+
+	cred, token, err := createPrincipalCredential(fq, "canonuser", "canon")
+	if err != nil {
+		t.Fatalf("createPrincipalCredential under throttled queries: %v", err)
+	}
+
+	// The committed row has the Principal ownership shape.
+	var principalID sql.NullInt64
+	var launcherID sql.NullString
+	var name string
+	if err := db.QueryRow(
+		`SELECT principal_id, launcher_id, name FROM credentials WHERE id = ?`,
+		cred.ID,
+	).Scan(&principalID, &launcherID, &name); err != nil {
+		t.Fatalf("created credential row missing: %v", err)
+	}
+	if !principalID.Valid {
+		t.Error("principal_id must be set")
+	}
+	if launcherID.Valid {
+		t.Errorf("launcher_id must be NULL, got %q", launcherID.String)
+	}
+	if name != "canon" {
+		t.Errorf("name = %q, want %q", name, "canon")
+	}
+
+	// The returned bearer authenticates as that Principal, under the
+	// returned credential ID.
+	res, err := authenticateCredential(db, token)
+	if err != nil || res.Principal == nil || res.Principal.PrincipalName != "canonuser" {
+		t.Fatalf("bearer should authenticate as canonuser, got err=%v res=%+v", err, res)
+	}
+	if res.Principal.CredentialID != cred.ID {
+		t.Errorf("authenticated credential ID = %q, want the returned ID %q", res.Principal.CredentialID, cred.ID)
+	}
+}
+
+// TestCreatePrincipalCredentialTokenFailureUsesCanonicalSeam proves standalone
+// creation generates the bearer through the shared generateCredentialTokenFn
+// seam, the same primitive the initial-credential path uses. A forced token
+// failure fails the whole operation, creates no credential row, and returns no
+// bearer or projection. The removed standalone implementation bypassed the
+// seam with a direct generateCredentialToken call, so a forced seam failure
+// left it succeeding with a usable credential.
+func TestCreatePrincipalCredentialTokenFailureUsesCanonicalSeam(t *testing.T) {
+	app := newTestApp(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "seamuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"seamuser": home})
+	if _, err := createPrincipal(app.DB, "seamuser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	orig := generateCredentialTokenFn
+	generateCredentialTokenFn = func() (string, error) {
+		return "", errors.New("forced token failure")
+	}
+	defer func() { generateCredentialTokenFn = orig }()
+
+	cred, token, err := createPrincipalCredential(app.DB, "seamuser", "seam")
+	if err == nil {
+		t.Fatal("expected token-generation failure to fail standalone creation")
+	}
+	if cred != nil || token != "" {
+		t.Errorf("failed creation must not return a projection or bearer, got cred=%v token=%q", cred, token)
+	}
+	var count int
+	if err := app.DB.QueryRow(
+		`SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id=c.principal_id WHERE p.username='seamuser'`,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected no credential row after token failure, got %d", count)
 	}
 }

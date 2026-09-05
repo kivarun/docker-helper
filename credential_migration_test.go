@@ -341,7 +341,7 @@ func TestMigrateHistoricalHardUniqueCompat(t *testing.T) {
 
 	// After revoking an old credential, a new active credential with the same
 	// name can be created (name reuse).
-	cred, _, err := createCredential(db, "alice", "oc")
+	cred, _, err := createPrincipalCredential(db, "alice", "oc")
 	if err != nil {
 		t.Fatalf("create same-name after upgrade: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestMigrateHistoricalHardUniqueCompat(t *testing.T) {
 	}
 
 	// Two simultaneous active credentials with the same name are rejected.
-	if _, _, err := createCredential(db, "alice", "oc"); err == nil {
+	if _, _, err := createPrincipalCredential(db, "alice", "oc"); err == nil {
 		t.Error("expected duplicate active name to be rejected")
 	}
 
