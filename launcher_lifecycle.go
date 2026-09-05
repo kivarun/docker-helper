@@ -475,17 +475,6 @@ func logLifecycleAdmissionSyncError(launcherID string, err error) {
 	)
 }
 
-// isLauncherQuiesced reports whether operation admission is currently refused
-// for launcherID.
-func (s *operationSupervisor) isLauncherQuiesced(launcherID string) bool {
-	if s == nil {
-		return false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.quiesced[launcherID]
-}
-
 // inspectHelperContainersForLauncher shells out to the Docker CLI to list
 // schema-coherent, launcher-attributable containers. Any unclassifiable output
 // fails closed so checked deletion never deletes a Launcher it cannot attribute.
@@ -620,27 +609,10 @@ func (a *App) restoreLauncherAdmissionAfterRefusal(launcherID string) {
 	}
 }
 
-// disableLauncher transitions a Launcher to disabled, invalidating its Sessions
-// (closing Session admission at the DB level via the enabled-conditional INSERT)
-// and closing Operation admission on the supervisor. The quiesce is set BEFORE
-// the DB transition so an in-flight request that already resolved its Session
-// before the disable cannot admit an Operation after it. On a successful
-// transition the Launcher stays quiesced: quiesce is the runtime companion of
-// the durable disabled state, and only a subsequent enable reopens admission.
-// If the DB transition fails before committing, admission is restored. Returns
-// the invalidated Session IDs for runtime-directory cleanup.
-//
-// disableLauncher is a lock-owning lifecycle mutator: it holds lifecycleMu for
-// the whole transition so it cannot interleave with another Launcher/Principal
-// lifecycle mutation on the same ownership.
-func (a *App) disableLauncher(launcherID string) ([]string, error) {
-	a.lifecycleMu.Lock()
-	defer a.lifecycleMu.Unlock()
-	return a.disableLauncherLocked(launcherID)
-}
-
-// disableLauncherLocked is the lock-already-held form of disableLauncher. It is
-// used internally by lifecycle mutators that already hold lifecycleMu.
+// disableLauncherLocked is the internal durable-disable stage of the Launcher
+// lifecycle: checked Launcher/Principal deletion consumes it while already
+// holding lifecycleMu, so the disable cannot interleave with another
+// Launcher/Principal lifecycle mutation on the same ownership.
 func (a *App) disableLauncherLocked(launcherID string) ([]string, error) {
 	// The reserved user-mode daemon-owner default Launcher refuses disable at
 	// its durable-transition owner. For the checked-delete paths this is
@@ -665,34 +637,6 @@ func (a *App) disableLauncherLocked(launcherID string) ([]string, error) {
 		return nil, err
 	}
 	return result.RevokedSessionIDs, nil
-}
-
-// enableLauncher re-enables a Launcher: the enabled state commits first, and
-// the final admission state — decided transactionally as part of the same
-// serialized durable decision — is applied in memory afterwards without
-// another DB read. When the Launcher's Principal is disabled, the Launcher's
-// launcher.enabled may become true but its runtime admission MUST remain
-// quiesced; admission reopens only once both authorities are enabled. Sessions
-// are never recreated; a fresh Session must be created against the enabled
-// Launcher and enabled Principal.
-//
-// enableLauncher is a lock-owning lifecycle mutator: it holds lifecycleMu for
-// the whole transition.
-func (a *App) enableLauncher(launcherID string) error {
-	a.lifecycleMu.Lock()
-	defer a.lifecycleMu.Unlock()
-	return a.enableLauncherLocked(launcherID)
-}
-
-// enableLauncherLocked is the lock-already-held form of enableLauncher. It is
-// used internally by lifecycle mutators that already hold lifecycleMu.
-func (a *App) enableLauncherLocked(launcherID string) error {
-	result, err := a.applyLauncherEnabledChange(launcherID, true)
-	if err != nil {
-		return err
-	}
-	a.OperationSupervisor.setQuiesced(launcherID, *result.AdmissionClosed)
-	return nil
 }
 
 // deleteLauncherChecked deletes a Launcher only after checked cleanup confirms
@@ -905,7 +849,7 @@ func (a *App) deletePrincipalCheckedLocked(ctx context.Context, username string)
 	for i, lid := range launchers {
 		revoked, err := a.disableLauncherLocked(lid)
 		if err != nil {
-			// disableLauncher restored admission for the Launcher whose DB
+			// The failed durable disable restored admission for the Launcher
 			// transition failed; Launchers already durably disabled in this
 			// attempt stay disabled + quiesced. The Launchers not yet reached
 			// are still enabled but were prologue-quiesced: re-sync their
@@ -951,8 +895,8 @@ func (a *App) principalLaunchersByUsername(username string) ([]string, error) {
 	return principalLaunchers(a.DB, int64(principalID))
 }
 
-// disablePrincipalLaunchers is the Principal-level companion of disableLauncher.
-// It quiesces Operation admission across every Launcher beneath the Principal
+// disablePrincipalLaunchers is the Principal-level disable transition: it
+// quiesces Operation admission across every Launcher beneath the Principal
 // BEFORE transitioning the Principal to disabled (so an in-flight request whose
 // Session resolved before the disable cannot admit an Operation afterward),
 // keeps them quiesced on a successful disable because quiesce is the runtime
@@ -1005,8 +949,8 @@ func (a *App) disablePrincipalLaunchersLocked(username string) (principalEnabled
 	return result, nil
 }
 
-// enablePrincipalLaunchers is the Principal-level companion of enableLauncher.
-// It persists the enabled=true transition first; every child Launcher's final
+// enablePrincipalLaunchers is the Principal-level enable transition: it
+// persists the enabled=true transition first; every child Launcher's final
 // admission state is computed transactionally as part of the same serialized
 // durable decision, and applying them after the commit is non-fallible and
 // requires no DB read: only Launchers whose own launcher.enabled=true are
