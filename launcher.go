@@ -82,6 +82,12 @@ var (
 	// ErrLauncherRootOutsidePrincipal is returned when a Launcher restricted
 	// root is not under the current effective Principal roots.
 	ErrLauncherRootOutsidePrincipal = errors.New("launcher root outside effective principal roots")
+	// ErrLauncherNameRequiresPrincipal is returned when a Launcher list Query
+	// narrows with a Launcher-name selector without a Principal context:
+	// Launcher names are unique only under one Principal, so a global name
+	// query is intentionally rejected instead of scanning names across
+	// Principals.
+	ErrLauncherNameRequiresPrincipal = errors.New("launcher name requires principal context")
 )
 
 // readLauncherAllowedRoots returns the canonical stored roots of a Launcher.
@@ -248,6 +254,43 @@ func listLaunchersForScope(db *sql.DB, principalID *int64) ([]LauncherWithPrinci
 		return nil, fmt.Errorf("iterate launchers: %w", err)
 	}
 	return out, nil
+}
+
+// queryLaunchersForScope is the single Launcher-list domain Query: it resolves
+// one authorized list scope (principalID nil = all-Principals admin scope)
+// narrowed by the optional Launcher selector, returning the matching rows as
+// one collection — a narrowed hit is a one-element collection, an empty scope
+// is a successful empty collection. The database remains the filtering
+// authority: the selector is resolved by its persistence lookup, never by
+// filtering a broader collection. Selector resolution reuses the mechanical
+// persistence lookups:
+//
+//   - selector empty: the authorized list scope (listLaunchersForScope);
+//   - selector under a resolved Principal: name or ID via
+//     findLauncherForPrincipal;
+//   - selector without Principal context: only an exact well-formed Launcher
+//     ID resolves globally (findLauncherByID); any other selector is
+//     ErrLauncherNameRequiresPrincipal — names are never searched globally.
+func queryLaunchersForScope(db *sql.DB, principalID *int64, launcherSelector string) ([]LauncherWithPrincipal, error) {
+	if launcherSelector == "" {
+		return listLaunchersForScope(db, principalID)
+	}
+	var (
+		l   *LauncherWithPrincipal
+		err error
+	)
+	switch {
+	case principalID != nil:
+		l, err = findLauncherForPrincipal(db, *principalID, launcherSelector)
+	case isLauncherIDSelector(launcherSelector):
+		l, err = findLauncherByID(db, launcherSelector)
+	default:
+		return nil, ErrLauncherNameRequiresPrincipal
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []LauncherWithPrincipal{*l}, nil
 }
 
 // readPrincipalAllowedRoots returns the canonical stored roots of a Principal.

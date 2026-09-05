@@ -380,9 +380,21 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 	writeJSONRaw(ctx, w, http.StatusCreated, resp)
 }
 
+// handleListLaunchersQuery serves GET /launchers: the top-level launcher list
+// entry. It authenticates the Principal-control authority once and delegates
+// the whole Query to the single launcher-list owner.
+func (a *App) handleListLaunchersQuery(w http.ResponseWriter, r *http.Request) {
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
+	if err != nil || auth == nil {
+		return
+	}
+	a.serveLauncherListQuery(w, r, auth, r.URL.Query().Get("principal"), r.URL.Query().Get("launcher"))
+}
+
 // handleListLaunchers serves GET /principals/{username}/launchers: the list of
 // one Principal's Launchers. The path Principal is a required single-Principal
-// filter of the shared scope-first list rule.
+// filter of the shared scope-first list rule; it authenticates once and
+// delegates to the same launcher-list owner with no Launcher selector.
 func (a *App) handleListLaunchers(w http.ResponseWriter, r *http.Request) {
 	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
@@ -393,26 +405,18 @@ func (a *App) handleListLaunchers(w http.ResponseWriter, r *http.Request) {
 		writeError(r.Context(), w, http.StatusBadRequest, "missing_username", "username is required")
 		return
 	}
-	a.serveLauncherList(w, r, auth, username)
+	a.serveLauncherListQuery(w, r, auth, username, "")
 }
 
-// handleListLaunchersForAuthority serves GET /launchers: the scope-first
-// launcher list. The authenticated authority establishes the maximum
-// visibility and the optional ?principal= filter can only narrow it; the
-// daemon remains the authorization authority.
-func (a *App) handleListLaunchersForAuthority(w http.ResponseWriter, r *http.Request) {
-	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
-	if err != nil || auth == nil {
-		return
-	}
-	a.serveLauncherList(w, r, auth, r.URL.Query().Get("principal"))
-}
-
-// serveLauncherList answers a launcher list Query under the scope-first list
-// rule: the authority scope plus the optional Principal filter resolve into
-// one authorized query predicate. A filtered or single-Principal list audits
-// the target Principal; the unfiltered admin list covers every Principal.
-func (a *App) serveLauncherList(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, principalFilter string) {
+// serveLauncherListQuery is the single launcher-list Query owner under the
+// scope-first list rule: resolveListScope resolves the authorized visibility
+// once (the authority establishes the maximum, the optional Principal filter
+// can only narrow it), then the optional ?launcher= selector narrows that
+// resolved scope through one domain Query. One error classification, one
+// audit path, and one response construction serve the unfiltered and the
+// narrowed Query; a narrowed hit is a one-element collection of the same
+// projection. The daemon remains the authorization and filtering authority.
+func (a *App) serveLauncherListQuery(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, principalFilter, launcherFilter string) {
 	started := time.Now()
 	ctx := r.Context()
 
@@ -428,21 +432,42 @@ func (a *App) serveLauncherList(w http.ResponseWriter, r *http.Request, auth *op
 		principalName = scope.principal.Username
 	}
 
-	launchers, err := listLaunchersForScope(a.DB, principalID)
+	launchers, err := queryLaunchersForScope(a.DB, principalID, launcherFilter)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
-		writeLauncherControlAudit(ctx, auditRecord{
+		rec := auditRecord{
 			Event:         "launcher.list",
 			PrincipalName: principalName,
-			Result:        "error",
 			Duration:      duration,
-		}, auth, nil)
-		opLog(ctx).Error("launcher list failed",
-			slog.String("operation", "launcher_list"),
-			slog.String("error", err.Error()),
-		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		switch {
+		case errors.Is(err, ErrLauncherNotFound):
+			rec.Result = "launcher_not_found"
+			writeLauncherControlAudit(ctx, rec, auth, nil)
+			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+		case errors.Is(err, ErrLauncherNameRequiresPrincipal):
+			rec.Result = "launcher_name_requires_principal"
+			writeLauncherControlAudit(ctx, rec, auth, nil)
+			writeError(ctx, w, http.StatusBadRequest,
+				"launcher_name_requires_principal",
+				"launcher name filter requires --principal; without a Principal use a Launcher ID")
+		default:
+			rec.Result = "error"
+			writeLauncherControlAudit(ctx, rec, auth, nil)
+			opLog(ctx).Error("launcher list failed",
+				slog.String("operation", "launcher_list"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
 		return
+	}
+
+	// A narrowed success carries the resolved Launcher's full target
+	// provenance; an unfiltered list carries no target Launcher provenance.
+	var target *LauncherWithPrincipal
+	if launcherFilter != "" {
+		target = &launchers[0]
 	}
 
 	resp := listLaunchersResponse{OK: true, Launchers: make([]launcherJSON, 0, len(launchers))}
@@ -455,7 +480,7 @@ func (a *App) serveLauncherList(w http.ResponseWriter, r *http.Request, auth *op
 		PrincipalName: principalName,
 		Result:        "success",
 		Duration:      duration,
-	}, auth, nil)
+	}, auth, target)
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
 }

@@ -711,6 +711,122 @@ func TestLauncherControlAuditTargetOwnerProvenance(t *testing.T) {
 	}
 }
 
+// TestLauncherListAuditProvenance proves the unified launcher.list audit
+// contract on the single Query path: unfiltered global success carries no
+// target provenance, a Principal-scoped success names the resolved target
+// Principal, a narrowed success carries the resolved Launcher's full target
+// provenance (plus initiator provenance for a Principal credential), a
+// narrowed miss stays launcher_not_found with the resolved Principal still
+// named, a name selector without Principal context stays
+// launcher_name_requires_principal, and no bearer secret reaches the stream.
+func TestLauncherListAuditProvenance(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, credToken, _, l := launcherAuditApp(t, "lnclist")
+	user := "lnclist"
+
+	// 1. Admin unfiltered global success: no target provenance at all.
+	if w := launcherAuditRequest(t, app, http.MethodGet, "/launchers", testAdminToken, ""); w.Code != http.StatusOK {
+		t.Fatalf("admin unfiltered list: expected 200, got %d", w.Code)
+	}
+	// 2. Admin Principal-scoped unfiltered success: the resolved target
+	// Principal is named, no Launcher provenance.
+	if w := launcherAuditRequest(t, app, http.MethodGet, "/launchers?principal="+user, testAdminToken, ""); w.Code != http.StatusOK {
+		t.Fatalf("admin principal list: expected 200, got %d", w.Code)
+	}
+	// 3. Admin narrowed success by Launcher ID: full target provenance.
+	if w := launcherAuditRequest(t, app, http.MethodGet, "/launchers?launcher="+l.ID, testAdminToken, ""); w.Code != http.StatusOK {
+		t.Fatalf("admin filtered list: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	// 4. Principal-credential narrowed success: full target provenance plus
+	// the initiating credential.
+	if w := launcherAuditRequest(t, app, http.MethodGet, "/launchers?launcher=agent", credToken, ""); w.Code != http.StatusOK {
+		t.Fatalf("principal filtered list: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	// 5. Admin narrowed miss under a resolved Principal scope: the Principal
+	// stays named, no Launcher provenance.
+	if w := launcherAuditRequest(t, app, http.MethodGet, "/launchers?principal="+user+"&launcher=nosuch", testAdminToken, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("principal-filtered miss: expected 404, got %d", w.Code)
+	}
+	// 6. Admin narrowed miss in the global scope: no Principal provenance.
+	if w := launcherAuditRequest(t, app, http.MethodGet, "/launchers?launcher=dhl_00000000000000000000000000000000", testAdminToken, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("global filtered miss: expected 404, got %d", w.Code)
+	}
+	// 7. Admin name selector without Principal context.
+	if w := launcherAuditRequest(t, app, http.MethodGet, "/launchers?launcher=agent", testAdminToken, ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("name without principal: expected 400, got %d", w.Code)
+	}
+
+	var credID string
+	if err := app.DB.QueryRow(
+		`SELECT id FROM credentials WHERE principal_id = (SELECT id FROM principals WHERE username = ?) AND name = 'audit'`,
+		user,
+	).Scan(&credID); err != nil {
+		t.Fatalf("resolve principal credential id: %v", err)
+	}
+
+	lines := findAuditLinesByEvent(auditBuf, "launcher.list")
+	if len(lines) != 7 {
+		t.Fatalf("expected 7 launcher.list audit lines, got %d\n%s", len(lines), auditBuf.String())
+	}
+	assertAuditLine := func(raw string, want map[string]any, absent []string) {
+		t.Helper()
+		m := parseAuditMap(t, raw)
+		for k, v := range want {
+			if m[k] != v {
+				t.Errorf("%s: %s = %v, want %v", raw, k, m[k], v)
+			}
+		}
+		for _, k := range absent {
+			if _, present := m[k]; present {
+				t.Errorf("%s: %s must be absent, got %v", raw, k, m[k])
+			}
+		}
+	}
+
+	// 1. Unfiltered global: success, no target Launcher or Principal name.
+	assertAuditLine(lines[0], map[string]any{"result": "success"},
+		[]string{"launcher_id", "launcher_name", "launcher_scope", "launcher_enabled", "principal_name"})
+	// 2. Principal-scoped unfiltered: the resolved target Principal is named.
+	assertAuditLine(lines[1], map[string]any{"result": "success", "principal_name": user},
+		[]string{"launcher_id", "launcher_name"})
+	// 3. Narrowed success by ID: full target Launcher provenance.
+	assertAuditLine(lines[2], map[string]any{
+		"result":           "success",
+		"principal_name":   user,
+		"launcher_id":      l.ID,
+		"launcher_name":    "agent",
+		"launcher_scope":   string(l.ScopeMode),
+		"launcher_enabled": true,
+	}, nil)
+	// 4. Principal-credential narrowed success: initiator provenance on top of
+	// the target provenance.
+	assertAuditLine(lines[3], map[string]any{
+		"result":                  "success",
+		"principal_name":          user,
+		"launcher_id":             l.ID,
+		"launcher_name":           "agent",
+		"initiator_credential_id": credID,
+		"credential_id":           credID,
+	}, nil)
+	// 5. Narrowed miss under a resolved Principal scope.
+	assertAuditLine(lines[4], map[string]any{"result": "launcher_not_found", "principal_name": user},
+		[]string{"launcher_id", "launcher_name"})
+	// 6. Narrowed miss in the global scope: no Principal provenance.
+	assertAuditLine(lines[5], map[string]any{"result": "launcher_not_found"},
+		[]string{"launcher_id", "launcher_name", "principal_name"})
+	// 7. Name selector without Principal context.
+	assertAuditLine(lines[6], map[string]any{"result": "launcher_name_requires_principal"},
+		[]string{"launcher_id", "launcher_name", "principal_name"})
+
+	for _, raw := range lines {
+		m := parseAuditMap(t, raw)
+		assertNoSecrets(t, raw, m, credToken, testAdminToken)
+	}
+	if strings.Contains(auditBuf.String(), credToken) {
+		t.Error("audit stream contains the principal credential bearer")
+	}
+}
+
 // TestRunAuditLauncherProvenance proves run.start and run.finish carry the
 // owning session's launcher identity (launcher_id, launcher_name), so a
 // Docker operation's audit trail names its Launcher owner directly.

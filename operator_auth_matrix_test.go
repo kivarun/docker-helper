@@ -387,7 +387,7 @@ func TestOperatorAuthPrincipalControlMatrix(t *testing.T) {
 				}
 			}
 			w := httptest.NewRecorder()
-			app.handleListLaunchersForAuthority(w, req)
+			app.handleListLaunchersQuery(w, req)
 
 			if w.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d, body: %s", w.Code, tc.wantStatus, w.Body.String())
@@ -424,7 +424,7 @@ func TestOperatorAuthPrincipalControlDatabaseError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/launchers", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
-	app.handleListLaunchersForAuthority(w, req)
+	app.handleListLaunchersQuery(w, req)
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d, body: %s", w.Code, http.StatusInternalServerError, w.Body.String())

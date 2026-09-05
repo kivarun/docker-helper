@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1063,6 +1064,21 @@ func TestLauncherListCLIPrincipalFilter(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "dhl_9") {
 		t.Errorf("stdout missing launcher id: %s", stdout.String())
+	}
+}
+
+// TestLauncherListCommandExposesLauncherFilter proves the launcher list CLI
+// keeps its selector surface: the narrowing --launcher and --principal flags
+// are passed to the daemon, which remains the filtering authority.
+func TestLauncherListCommandExposesLauncherFilter(t *testing.T) {
+	flags := collectFlagsForCommand(launcherListCommand)
+	for _, want := range []string{"--launcher", "--principal", "--json", "--system", "--endpoint", "--token-file"} {
+		if !slices.Contains(flags, want) {
+			t.Errorf("launcher list flags %v missing %s", flags, want)
+		}
+	}
+	if launcherListCommand.Usage != "docker-helper launcher list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]" {
+		t.Errorf("unexpected launcher list usage: %q", launcherListCommand.Usage)
 	}
 }
 
