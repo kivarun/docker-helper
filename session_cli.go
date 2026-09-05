@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -10,6 +11,82 @@ import (
 	"strings"
 	"text/tabwriter"
 )
+
+// resolveSessionCreateSelectors maps the session-create --principal/--launcher
+// selectors onto the daemon's mutually exclusive create selectors for the
+// authenticated authority. Name-shaped Launcher selectors are resolved to
+// their global ID through the daemon's scope-first launcher list query (the
+// typed selectors are sent as-is and the daemon authorizes visibility), so a
+// name only ever resolves within the caller's visible scope and a foreign or
+// missing Launcher is the daemon's non-disclosing not-found. ID-shaped
+// selectors are sent as-is; the daemon's create policy resolves ownership.
+// The daemon remains the selector-resolution and authorization authority.
+func resolveSessionCreateSelectors(client *apiClient, principal, launcher string, req *createSessionClientRequest) error {
+	auth, err := client.auth()
+	if err != nil {
+		return err
+	}
+	switch auth.Authority {
+	case "admin":
+		switch {
+		case launcher != "" && principal != "":
+			id, err := resolveLauncherIDBySelector(client, principal, launcher)
+			if err != nil {
+				return err
+			}
+			req.LauncherID = id
+		case launcher != "":
+			if isLauncherIDSelector(launcher) {
+				req.LauncherID = launcher
+				return nil
+			}
+			return errors.New("admin authentication requires --principal USER when --launcher is a Launcher name; use the Launcher's dhl_ ID to target it globally")
+		default:
+			req.Principal = principal
+		}
+	case "principal":
+		if principal != "" {
+			return errors.New("--principal is only valid with admin authentication")
+		}
+		if launcher != "" {
+			id, err := resolveLauncherIDBySelector(client, "", launcher)
+			if err != nil {
+				return err
+			}
+			req.LauncherID = id
+		}
+	case "launcher":
+		if principal != "" {
+			return errors.New("--principal is only valid with admin authentication")
+		}
+		if launcher != "" {
+			id, err := resolveLauncherIDBySelector(client, "", launcher)
+			if err != nil {
+				return err
+			}
+			req.LauncherID = id
+		}
+	default:
+		return fmt.Errorf("unknown authority %q", auth.Authority)
+	}
+	return nil
+}
+
+// resolveLauncherIDBySelector resolves one Launcher selector to its global ID
+// through the daemon's scope-first launcher list query. The same rule backs
+// the individual-Launcher admin selector: the query never searches Launcher
+// names globally, and fewer than one visible match is the non-disclosing
+// launcher-not-found.
+func resolveLauncherIDBySelector(client *apiClient, principal, launcher string) (string, error) {
+	result, err := client.listLaunchersFiltered(principal, launcher)
+	if err != nil {
+		return "", err
+	}
+	if len(result.Launchers) != 1 {
+		return "", ErrLauncherNotFound
+	}
+	return result.Launchers[0].ID, nil
+}
 
 var sessionCommand = &Command{
 	Name:    "session",
@@ -25,16 +102,26 @@ var sessionCommand = &Command{
 var sessionCreateCommand = &Command{
 	Name:    "create",
 	Summary: "Create a new session",
-	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--json]",
+	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--principal USER] [--launcher LAUNCHER] [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		workspace := fs.String("workspace", "", "Workspace directory")
+		principal := &launcherNameFlag{}
+		fs.Var(principal, "principal", "Principal username (admin authentication; targets the Principal's default Launcher)")
+		launcher := &launcherNameFlag{}
+		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...) to target instead of the default Launcher")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Validate: func() error {
 				if *workspace == "" || strings.HasPrefix(*workspace, "-") {
 					return fmt.Errorf("--workspace is required")
+				}
+				if principal.set && principal.value == "" {
+					return fmt.Errorf("--principal value must not be empty")
+				}
+				if launcher.set && launcher.value == "" {
+					return fmt.Errorf("--launcher value must not be empty")
 				}
 				return nil
 			},
@@ -55,7 +142,15 @@ var sessionCreateCommand = &Command{
 					return 1
 				}
 
-				result, err := client.createSession(absWorkspace)
+				req := createSessionClientRequest{Workspace: absWorkspace}
+				if launcher.set || principal.set {
+					if err := resolveSessionCreateSelectors(client, principal.value, launcher.value, &req); err != nil {
+						fmt.Fprintf(stderr, "error: %v\n", err)
+						return 1
+					}
+				}
+
+				result, err := client.createSession(req)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

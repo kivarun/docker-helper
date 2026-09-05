@@ -139,16 +139,21 @@ func (c *apiClient) listSessions() (*listSessionsResponse, error) {
 }
 
 // createSessionClientRequest is the narrow wire request the CLI sends to create
-// a Session. The CLI never supplies Session selectors (Launcher/Principal
-// selection is a Stage-1.5 feature); the daemon resolves ownership from the
-// authenticating client. It deliberately stays separate from the server-side
-// sessionRequest, which carries presence-aware selector fields.
+// a Session. The optional Launcher/Principal selectors map onto the daemon's
+// mutually exclusive create selectors: the CLI resolves a name-shaped
+// --launcher to its global ID through the daemon's scope-first launcher list
+// query, so the daemon remains the selector-resolution and authorization
+// authority. Unused selector fields are omitted from the JSON object, matching
+// the server-side presence-aware selector contract (an absent key is unset; an
+// explicitly empty key is a malformed selector).
 type createSessionClientRequest struct {
-	Workspace string `json:"workspace"`
+	Workspace  string `json:"workspace"`
+	LauncherID string `json:"launcher_id,omitempty"`
+	Principal  string `json:"principal,omitempty"`
 }
 
-func (c *apiClient) createSession(workspace string) (*createSessionResponse, error) {
-	body, err := json.Marshal(createSessionClientRequest{Workspace: workspace})
+func (c *apiClient) createSession(req createSessionClientRequest) (*createSessionResponse, error) {
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}

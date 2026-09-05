@@ -440,7 +440,7 @@ func TestCreateSessionRequest(t *testing.T) {
 		return readTokenFile(tokenPath)
 	}, nil)
 
-	result, err := client.createSession("/home/user/proj")
+	result, err := client.createSession(createSessionClientRequest{Workspace: "/home/user/proj"})
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
