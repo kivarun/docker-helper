@@ -148,8 +148,8 @@ func resolvePrincipalControlTarget(db *sql.DB, auth *operatorAuthority, username
 // operation log.
 func writePrincipalControlLookupError(ctx context.Context, w http.ResponseWriter, err error) {
 	if errors.Is(err, errInvalidControlAuthority) {
-		opLog(ctx).Error("launcher principal lookup failed",
-			slog.String("operation", "launcher_principal_lookup"),
+		opLog(ctx).Error("principal control target lookup failed",
+			slog.String("operation", "principal_control_target_lookup"),
 			slog.String("error", "invalid operator authority"),
 		)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -159,8 +159,8 @@ func writePrincipalControlLookupError(ctx context.Context, w http.ResponseWriter
 		writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
 	}
-	opLog(ctx).Error("launcher principal lookup failed",
-		slog.String("operation", "launcher_principal_lookup"),
+	opLog(ctx).Error("principal control target lookup failed",
+		slog.String("operation", "principal_control_target_lookup"),
 		slog.String("error", err.Error()),
 	)
 	writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")

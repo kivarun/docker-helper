@@ -128,23 +128,11 @@ var detectLSM = func() (LSMBackend, error) {
 	return LSMNone, nil
 }
 
-// requireMACBackend checks that exactly one supported MAC backend is active.
-// Returns nil if a backend is available, or a descriptive error if none is
-// active, both are active, or detection failed.
-func requireMACBackend() error {
-	backend, err := detectLSM()
-	if err != nil {
-		return err
-	}
-	if backend == LSMNone {
-		return fmt.Errorf("no MAC backend active (system mode requires AppArmor or enforcing SELinux)")
-	}
-	return nil
-}
-
 // requireMACConfinement checks that the process is confined under the
-// active MAC backend. Returns nil if properly confined, or a descriptive
-// error otherwise.
+// active MAC backend. It is the real production backend-requirement boundary:
+// it detects the active backend, rejects no active backend (and every
+// detection failure, which must not silently downgrade security), and
+// dispatches to the concrete confinement owner for the backend.
 func requireMACConfinement() error {
 	backend, err := detectLSM()
 	if err != nil {

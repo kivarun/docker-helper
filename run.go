@@ -463,7 +463,6 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Create run operation and register it.
 	op := newRunOperation(session.ID, req.Image, bufSize, session.PrincipalName, session.LauncherID, session.LauncherName)
-	op.LauncherID = session.LauncherID
 	op.auditCommandArgCount = cmdArgCount
 	op.auditMounts = mountAudit
 	op.auditEnvKeys = envNames
