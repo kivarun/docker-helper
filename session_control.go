@@ -309,6 +309,11 @@ func (a *App) resolveLauncherWithinPrincipal(launcherID string, principalID int6
 // resolveCreatePolicy resolves the complete Session-creation context (Launcher
 // target, ownership names, and three-level effective root scope) for an
 // authenticated authority and create request. It never mutates state.
+//
+// Callers must hold lifecycleMu when calling this, so the resolved projection
+// comes from one coherent policy snapshot: real Session creation holds the
+// boundary around resolution and persistence, and read-only create-policy
+// introspection goes through resolveCreatePolicySnapshot.
 func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
 	launcherID, err := a.resolveCreateLauncher(auth, sel)
 	if err != nil {
@@ -344,4 +349,17 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 		LauncherName:          snap.launcherName,
 		PrincipalName:         snap.principalName,
 	}, nil
+}
+
+// resolveCreatePolicySnapshot is the lock-owning read form of
+// resolveCreatePolicy for read-only create-policy introspection: the complete
+// Launcher + Principal + effective-roots projection is resolved under the
+// lifecycle serialization boundary, so it observes the same coherent
+// ownership-policy state as createSessionAuthorized — a concurrent config
+// reload or ownership mutation linearizes wholly before or wholly after the
+// read, never between its component reads.
+func (a *App) resolveCreatePolicySnapshot(auth *operatorAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.resolveCreatePolicy(auth, sel, workspace)
 }

@@ -348,10 +348,11 @@ func computeEffectivePrincipalRoots(globalRoots []string, storedPrincipalRoots [
 // (computeEffectivePrincipalRoots): the symlink-resolved global allowed roots
 // (the config owner) and the Principal's stored roots.
 //
-// Callers that mutate ownership policy must hold lifecycleMu when calling
-// this, so the ceiling is resolved from the same policy snapshot as the
-// mutation it validates (the same lifecycleMu -> a.mu ordering as config
-// reload). Read-only introspection may call it without the boundary.
+// Callers must hold lifecycleMu when calling this, so the ceiling is resolved
+// from one coherent policy snapshot: mutation paths hold the boundary around
+// their own validation (the same lifecycleMu -> a.mu ordering as config
+// reload), and read-only introspection goes through
+// resolveEffectivePrincipalRootsSnapshot.
 func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error) {
 	cfg := a.getConfig()
 	globalRoots, err := resolveAllowedRootPaths(cfg.AllowedRoots)
@@ -368,6 +369,18 @@ func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error
 		daemonOwnerPrincipalID = a.userModeDefault.principalID
 	}
 	return computeEffectivePrincipalRoots(globalRoots, stored, principalID, daemonOwnerPrincipalID, userMode), nil
+}
+
+// resolveEffectivePrincipalRootsSnapshot is the lock-owning read form of
+// resolveEffectivePrincipalRoots for read-only policy introspection: it
+// observes the same coherent ownership-policy state as createSessionAuthorized
+// and the ownership mutations, so a concurrent config reload, Principal-root
+// mutation, or Launcher/Principal lifecycle mutation linearizes wholly before
+// or wholly after the read instead of between its component reads.
+func (a *App) resolveEffectivePrincipalRootsSnapshot(principalID int64) ([]string, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.resolveEffectivePrincipalRoots(principalID)
 }
 
 // validateLauncherAllowedRoots canonicalizes each root using the same canonical

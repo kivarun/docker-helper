@@ -18,14 +18,17 @@ type effectiveRootsResponse struct {
 // filesystem authority, computed daemon-side by the canonical
 // effective-Principal-root policy owner (computeEffectivePrincipalRoots): in
 // user mode the daemon-owner Principal with zero stored roots collapses onto
-// the global allowed roots, every other Principal intersects with them. It is
-// a policy introspection Query for shell completion and read-only tooling, in
-// the same spirit as GET /auth: identity introspection stays separate from
-// this policy introspection, and neither widens the other. Authorization
-// follows the Principal control plane: an admin token may target any
-// Principal, a Principal credential only its own (a foreign selector is the
-// established non-disclosing 404), and a Launcher credential has no
-// control-plane authority. Like GET /auth, successful read-only
+// the global allowed roots, every other Principal intersects with them. The
+// policy projection is resolved under the lifecycle serialization boundary
+// (resolveEffectivePrincipalRootsSnapshot), so the response describes one
+// coherent policy state even while a config reload or ownership mutation is
+// concurrent. It is a policy introspection Query for shell completion and
+// read-only tooling, in the same spirit as GET /auth: identity introspection
+// stays separate from this policy introspection, and neither widens the
+// other. Authorization follows the Principal control plane: an admin token
+// may target any Principal, a Principal credential only its own (a foreign
+// selector is the established non-disclosing 404), and a Launcher credential
+// has no control-plane authority. Like GET /auth, successful read-only
 // introspection writes no per-request audit events; authentication failures
 // are audited by the shared auth helpers.
 func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +44,7 @@ func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	roots, err := a.resolveEffectivePrincipalRoots(int64(p.ID))
+	roots, err := a.resolveEffectivePrincipalRootsSnapshot(int64(p.ID))
 	if err != nil {
 		opLog(ctx).Error("principal effective roots introspection failed",
 			slog.String("operation", "policy_introspect"),
@@ -76,11 +79,15 @@ type sessionCreatePolicyResponse struct {
 // authority would use. It authenticates exactly like POST /sessions and
 // resolves through the same single owner as real Session creation
 // (resolveCreatePolicy: authority -> Launcher target -> three-level
-// effective roots). It adds none of the create side effects: no workspace
-// validation, no MAC preparation, no persistence. Release 2.1 session create
-// sends no selectors, so the query resolves with an empty selector set; a
-// system-mode admin without a resolvable Launcher therefore receives the
-// same missing-selector contract the real create would return.
+// effective roots), under the same lifecycle serialization boundary
+// (resolveCreatePolicySnapshot), so the whole projection — principal,
+// Launcher, and effective roots — corresponds to one coherent policy state
+// exactly like a real concurrent Session create would observe. It adds none
+// of the create side effects: no workspace validation, no MAC preparation,
+// no persistence. Release 2.1 session create sends no selectors, so the
+// query resolves with an empty selector set; a system-mode admin without a
+// resolvable Launcher therefore receives the same missing-selector contract
+// the real create would return.
 func (a *App) handleSessionCreatePolicy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -89,7 +96,7 @@ func (a *App) handleSessionCreatePolicy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	policy, err := a.resolveCreatePolicy(authCtx, createSelector{}, "")
+	policy, err := a.resolveCreatePolicySnapshot(authCtx, createSelector{}, "")
 	if err != nil {
 		if te := classifyCreateTargetError(err); te != nil {
 			writeError(ctx, w, te.status, te.code, te.msg)
