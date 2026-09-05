@@ -81,6 +81,27 @@ Develop from demonstrated use cases rather than inventing a platform in
 advance. A use case demonstrated by one real operator is still evidence; scale
 of adoption is not a prerequisite for solving a real problem.
 
+## Presumption of non-existence
+
+For product and design decisions, anything not established by evidence does not
+exist. A capability, domain entity, owner, lifecycle state, compatibility
+promise, or future requirement must be supported by an accepted contract,
+reachable production behavior, an authoritative dependency guarantee, a
+reproducible observation, or an explicit use case. A suggestive name, field,
+backend object, old code path, or speculative future is not proof by itself.
+
+Unproven identity, ownership, or state must not grant authority or become normal
+managed product state. This does not authorize destructive cleanup of
+unclassified external resources; error, recovery, and cleanup behavior still
+requires an explicit contract.
+
+Every additional noun, state, abstraction, owner, alias, and production path
+raises conceptual entropy and therefore carries a burden of proof. Prefer one
+canonical term, one production owner, and one path for equivalent semantics.
+Consolidate or delete representations whose distinction is no longer supported
+by evidence. Architecture should avoid increasing entropy and reduce it as the
+code evolves.
+
 ## Local agent workloads, not production orchestration
 
 docker-helper is designed for local and small shared-host agent workflows where
@@ -100,6 +121,8 @@ platform.
 - integration optional;
 - agent-specific integrations live at the client edge, not in the daemon core;
 - standardize contracts and conventions, not mandatory shared runtime code;
+- presume non-existence until evidence establishes a product concept or need;
+- keep one canonical term and one production owner for equivalent semantics;
 - preserve remote and multi-session futures without predesigning them;
 - prefer the smallest implementation that solves a demonstrated problem;
 - keep common workflows simple through safe defaults and progressive

@@ -1,8 +1,9 @@
 # docker-helper — developer instructions
 
 Long-lived development rules for docker-helper, the policy-enforcing Docker
-proxy daemon for sandboxed agents. Read the Orientation first. The rules below
-encode architectural decisions and lessons from real regressions; treat them as
+capability daemon for sandboxed agents. Read the Orientation first and
+`docs/manifesto.md` for the stable product boundary. The rules below encode
+architectural decisions and lessons from real regressions; treat them as
 governance, not as a substitute for `docs/architecture.md`.
 
 ## Orientation
@@ -17,10 +18,11 @@ governance, not as a substitute for `docs/architecture.md`.
   `./docker-helper`. Release/static tooling: `build-static.sh <version>`,
   `build-bundle.sh`, `build-packages.sh`, `build-manpages.sh`; artifacts land
   in gitignored `dist/`.
-- **Entrypoints:** `main.go` (wiring), `cli.go` + `config_cli.go` +
-  `agent_cli.go` (command tree), `app.go` (daemon startup), `operation.go`
-  (async build/run lifecycle), `mac_lifecycle.go` (AppArmor/SELinux
-  confinement lifecycle). Canonical design reference: `docs/architecture.md`.
+- **Entrypoints:** `main.go` (process entry, daemon startup, route wiring),
+  `cli.go` + `*_cli.go` (command tree and command families), `app.go` (shared
+  App state and synchronized policy), `operation.go` (async build/run
+  lifecycle), `mac_lifecycle.go` (AppArmor/SELinux confinement lifecycle).
+  Canonical current design reference: `docs/architecture.md`.
 - **Mode model:** the same binary runs non-root (user mode) or root (system
   mode), decided at runtime by effective UID. Tests simulate both modes
   without root by reassigning package-global seams — `EffectiveUID`
@@ -43,10 +45,12 @@ governance, not as a substitute for `docs/architecture.md`.
 - **Version:** `var version = "dev"` in `main.go`. Official versions come only
   from ldflags (`-X main.version=...`) in the build scripts. Never hardcode a
   release number in source.
-- **Docs roles:** `README.md` = operator quick start; `docs/architecture.md` =
-  canonical design/API/audit reference; `docs/roadmap.md` + `docs/release-*.md`
-  = release scope and plans; `.claude/skills/docker-helper/SKILL.md` =
-  instructions for agents USING docker-helper, not developing it.
+- **Docs roles:** `docs/manifesto.md` = stable product purpose, boundary, and
+  design principles; `README.md` = operator quick start;
+  `docs/architecture.md` = canonical current design/API/audit reference;
+  `docs/roadmap.md` + `docs/release-*.md` = release scope and plans;
+  `.claude/skills/docker-helper/SKILL.md` = instructions for agents USING
+  docker-helper, not developing it.
 - **Validation gate** (same core gate as CI): `gofmt -l .` (must be empty),
   `go test ./...`, `go test -race ./...`, `go vet ./...`, `git diff --check`.
   CI-only extras needing additional tools include
@@ -71,7 +75,25 @@ For non-trivial cleanup/refactoring tasks:
 If the task explicitly says `analyze`, `inspect`, `review`, or `do not modify`,
 do not edit files or create commits.
 
-2. Do not solve hypothetical problems.
+2. Presume non-existence until evidence proves otherwise.
+
+For product and implementation decisions, a capability, domain entity,
+ownership relation, lifecycle state, compatibility requirement, failure mode,
+or separate abstraction does not exist until evidence establishes it. Evidence
+may be an accepted current contract, a reachable production path, an
+authoritative dependency guarantee, a reproducible observation/regression, or
+an explicit requirement of the current task.
+
+A suggestive name, field, type, database column, backend object, stale branch,
+comment, TODO, test helper, or roadmap idea is a lead to investigate, not proof
+by itself. Trace it to its authoritative boundary before treating it as current
+product state or semantics.
+
+When identity, ownership, or state cannot be proved at its owning boundary,
+normal product behavior must not grant it authority or treat it as an existing
+managed resource. Handle uncertainty according to the accepted error, recovery,
+and cleanup contract. This principle does not authorize destructive cleanup of
+unclassified external state.
 
 Do not add abstractions, generic frameworks, background workers, retry systems,
 migration infrastructure, or configuration switches for possible future needs.
@@ -82,6 +104,12 @@ architecture now.
 Generalizing an existing owner so another caller with the same semantics can use
 it is not speculative framework-building. Consolidating an already shared
 responsibility is different from inventing a framework for hypothetical reuse.
+
+Every new noun, state, owner, adapter, alias, compatibility path, and production
+flow increases conceptual entropy and carries the same burden of proof. Prefer
+an existing canonical concept and owner; consolidate equivalent paths and delete
+obsolete representations. A change should avoid increasing entropy and reduce
+existing entropy whenever that reduction belongs to the same responsibility.
 
 3. Prefer deletion and simplification.
 
@@ -108,7 +136,19 @@ compatibility requirements.
 
 # Scope and contracts
 
-4. Preserve task scope.
+4. Keep mutation scope narrow and inspection scope wide.
+
+The task bounds what may be changed, not what must be inspected. Before changing
+a responsibility, trace far enough upstream, downstream, and sideways to see:
+- every production entry point that reaches it;
+- sibling operations that share its semantics;
+- persistence and runtime state it reads or writes;
+- API, CLI, audit, documentation, and tests that expose or depend on it;
+- an existing owner, alias, compatibility path, or implementation that the new
+  work might accidentally duplicate.
+
+Expand the change only as far as needed to keep that responsibility and its
+contracts coherent. This is not permission for opportunistic cleanup.
 
 Do not opportunistically fix unrelated code. Report additional findings
 separately unless they are necessary to preserve the requested behavior or the
@@ -167,6 +207,20 @@ because their structures look similar.
 Before introducing a new noun, field, selector, reference type, default, or
 validation rule, search for the existing domain concept and the abstraction that
 owns its semantics.
+
+Naming is end-to-end. The same domain concept must keep one canonical semantic
+stem across domain types, production owners, persistence, HTTP/JSON, CLI/help
+and completion, audit/log fields, documentation, and tests. Layer-native syntax
+such as `LauncherID` in Go and `launcher_id` in JSON/SQL is expected; replacing
+the term with a synonym at another layer is not. Choose the term at the domain
+owner and carry it outward; do not let persistence, transport, or backend
+vocabulary silently rename the product concept.
+
+If an external backend or an established compatibility contract uses different
+vocabulary, translate it once at the boundary, keep the internal domain term
+canonical, and document why the exception remains. Before adding or renaming a
+term, inventory its end-to-end surfaces. A rename is incomplete while an old
+synonym still names the same concept outside an explicit compatibility adapter.
 
 Backend-native terminology is appropriate when the concept really is
 backend-specific (`AppArmor` profile, `SELinux` fcontext, distro trust anchor),
@@ -479,6 +533,9 @@ behaved as single-value.
 
 20. Keep documentation roles distinct.
 
+`docs/manifesto.md` owns project purpose, product boundary, and long-lived
+design principles.
+
 `README.md` owns project introduction, quick start, common operator workflows,
 and concise examples.
 
@@ -531,7 +588,10 @@ For non-trivial feature/refactor work, identify:
 - the concrete problem;
 - behavior that must remain unchanged;
 - where current behavior lives;
+- which entry points and sibling operations share the responsibility;
 - which production abstraction owns its lifecycle/invariants;
+- which persistence, API, CLI, audit, documentation, and test surfaces consume
+  it;
 - whether the new behavior can use that owner unchanged;
 - if not, whether that owner should be generalized or replaced.
 
@@ -570,6 +630,11 @@ paths again and verify:
 - no caller bypasses the authoritative path;
 - superseded helpers/seams are no longer reachable;
 - tests exercise the authoritative path.
+
+If a domain concept was introduced or renamed, search its canonical term and all
+known old synonyms across code, schema/queries, JSON, CLI/help/completion, audit,
+documentation, and tests. Any surviving exception must be a deliberate contract
+or boundary adapter, not residue.
 
 Run policy/static-build checks as required by the changed area and available
 tooling.
