@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -112,18 +113,6 @@ func setupSessionListQueryFixture(t *testing.T) *sessionListQueryFixture {
 	return f
 }
 
-// sessionListScopeIDs decodes a resolved scope into the comparable identity
-// fields for matrix assertions.
-type sessionListScopeIDs struct {
-	admin       bool
-	principalID int64
-	launcherID  string
-}
-
-func scopeIDsOf(scope sessionControlScope) sessionListScopeIDs {
-	return sessionListScopeIDs{admin: scope.admin, principalID: scope.principalID, launcherID: scope.launcherID}
-}
-
 // TestSessionListScopeSelectorMatrix proves the scope-first Session-list
 // narrowing rule through the real resolver: the authority establishes the
 // maximum visibility (resolveSessionControlScope), the optional selectors can
@@ -154,15 +143,15 @@ func TestSessionListScopeSelectorMatrix(t *testing.T) {
 		auth      *operatorAuthority
 		principal string
 		launcher  string
-		want      sessionListScopeIDs
+		want      sessionControlScope
 		wantErr   error
 	}{
 		// --- Admin authority ---
-		{name: "admin no selector keeps full scope", auth: adminAuth, want: sessionListScopeIDs{admin: true}},
-		{name: "admin principal selector narrows to that principal", auth: adminAuth, principal: "alice", want: sessionListScopeIDs{principalID: f.aliceID}},
-		{name: "admin global launcher id narrows to that launcher", auth: adminAuth, launcher: f.alphaID, want: sessionListScopeIDs{launcherID: f.alphaID}},
-		{name: "admin principal plus launcher name narrows to that launcher", auth: adminAuth, principal: "alice", launcher: "alpha", want: sessionListScopeIDs{launcherID: f.alphaID}},
-		{name: "admin principal plus launcher id narrows to that launcher", auth: adminAuth, principal: "alice", launcher: f.alphaID, want: sessionListScopeIDs{launcherID: f.alphaID}},
+		{name: "admin no selector keeps full scope", auth: adminAuth, want: sessionControlScope{admin: true}},
+		{name: "admin principal selector narrows to that principal", auth: adminAuth, principal: "alice", want: sessionControlScope{principalID: f.aliceID}},
+		{name: "admin global launcher id narrows to that launcher", auth: adminAuth, launcher: f.alphaID, want: sessionControlScope{launcherID: f.alphaID}},
+		{name: "admin principal plus launcher name narrows to that launcher", auth: adminAuth, principal: "alice", launcher: "alpha", want: sessionControlScope{launcherID: f.alphaID}},
+		{name: "admin principal plus launcher id narrows to that launcher", auth: adminAuth, principal: "alice", launcher: f.alphaID, want: sessionControlScope{launcherID: f.alphaID}},
 		{name: "admin principal plus foreign launcher id is launcher_not_found", auth: adminAuth, principal: "alice", launcher: f.betaID, wantErr: ErrLauncherNotFound},
 		{name: "admin launcher name without principal is rejected, never global", auth: adminAuth, launcher: "alpha", wantErr: ErrLauncherNameRequiresPrincipal},
 		{name: "admin unknown launcher id is launcher_not_found", auth: adminAuth, launcher: unknownID, wantErr: ErrLauncherNotFound},
@@ -170,15 +159,15 @@ func TestSessionListScopeSelectorMatrix(t *testing.T) {
 		{name: "admin unknown principal is principal_not_found", auth: adminAuth, principal: "nosuch", wantErr: ErrPrincipalNotFound},
 		{name: "admin unknown principal wins over launcher selector", auth: adminAuth, principal: "nosuch", launcher: "alpha", wantErr: ErrPrincipalNotFound},
 		// --- Principal-credential authority (alice) ---
-		{name: "principal no selector keeps own scope", auth: aliceAuth, want: sessionListScopeIDs{principalID: f.aliceID}},
-		{name: "principal own launcher name narrows inside scope", auth: aliceAuth, launcher: "alpha", want: sessionListScopeIDs{launcherID: f.alphaID}},
-		{name: "principal own launcher id narrows inside scope", auth: aliceAuth, launcher: f.alphaID, want: sessionListScopeIDs{launcherID: f.alphaID}},
+		{name: "principal no selector keeps own scope", auth: aliceAuth, want: sessionControlScope{principalID: f.aliceID}},
+		{name: "principal own launcher name narrows inside scope", auth: aliceAuth, launcher: "alpha", want: sessionControlScope{launcherID: f.alphaID}},
+		{name: "principal own launcher id narrows inside scope", auth: aliceAuth, launcher: f.alphaID, want: sessionControlScope{launcherID: f.alphaID}},
 		{name: "principal foreign launcher name is non-disclosing not-found", auth: aliceAuth, launcher: "beta", wantErr: ErrLauncherNotFound},
 		{name: "principal foreign launcher id is non-disclosing not-found", auth: aliceAuth, launcher: f.betaID, wantErr: ErrLauncherNotFound},
 		{name: "principal own principal selector is invalid", auth: aliceAuth, principal: "alice", wantErr: ErrInvalidSelector},
 		{name: "principal foreign principal selector is invalid", auth: aliceAuth, principal: "bob", wantErr: ErrInvalidSelector},
 		// --- Launcher-credential authority (alice/alpha) ---
-		{name: "launcher no selector keeps own scope", auth: alphaAuth, want: sessionListScopeIDs{launcherID: f.alphaID}},
+		{name: "launcher no selector keeps own scope", auth: alphaAuth, want: sessionControlScope{launcherID: f.alphaID}},
 		{name: "launcher own id selector is invalid", auth: alphaAuth, launcher: f.alphaID, wantErr: ErrInvalidSelector},
 		{name: "launcher principal selector is invalid", auth: alphaAuth, principal: "alice", wantErr: ErrInvalidSelector},
 	}
@@ -195,8 +184,8 @@ func TestSessionListScopeSelectorMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveSessionListScope() error: %v", err)
 			}
-			if got := scopeIDsOf(scope); got != tc.want {
-				t.Fatalf("scope = %+v, want %+v", got, tc.want)
+			if scope != tc.want {
+				t.Fatalf("scope = %+v, want %+v", scope, tc.want)
 			}
 		})
 	}
@@ -422,7 +411,7 @@ func TestSessionListQueryHTTPMatrix(t *testing.T) {
 			// Absence proof: every fixture Session outside the narrowed set
 			// must be missing from the response.
 			for label, id := range f.sessions {
-				if slicesContains(tc.wantIDs, label) {
+				if slices.Contains(tc.wantIDs, label) {
 					continue
 				}
 				if got[id] {
@@ -446,14 +435,4 @@ func sessionListIDsFromBody(t *testing.T, body []byte) map[string]bool {
 		out[s.ID] = true
 	}
 	return out
-}
-
-// slicesContains reports whether the slice contains the value.
-func slicesContains(set []string, value string) bool {
-	for _, v := range set {
-		if v == value {
-			return true
-		}
-	}
-	return false
 }

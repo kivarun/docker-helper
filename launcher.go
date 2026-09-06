@@ -217,6 +217,26 @@ func findLauncherForPrincipal(db *sql.DB, principalID int64, selector string) (*
 	return findLauncherByNameUnderPrincipal(db, principalID, selector)
 }
 
+// resolveLauncherSelector is the single mechanical owner of resolving one
+// non-empty Launcher selector under an optional Principal context. With a
+// Principal context the selector may be a Principal-scoped Launcher name or a
+// dhl_ ID under that Principal (findLauncherForPrincipal); without one only an
+// exact well-formed global Launcher ID resolves (findLauncherByID) — a name is
+// never searched globally, so any other selector is
+// ErrLauncherNameRequiresPrincipal. Malformed, foreign, and missing selectors
+// are ErrLauncherNotFound (non-disclosing); a database failure keeps its own
+// error and is never collapsed into not-found.
+func resolveLauncherSelector(db *sql.DB, principalID *int64, selector string) (*LauncherWithPrincipal, error) {
+	switch {
+	case principalID != nil:
+		return findLauncherForPrincipal(db, *principalID, selector)
+	case isLauncherIDSelector(selector):
+		return findLauncherByID(db, selector)
+	default:
+		return nil, ErrLauncherNameRequiresPrincipal
+	}
+}
+
 // listLaunchersForScope returns the Launchers of one authorized list scope:
 // every Launcher when principalID is nil, otherwise only that Principal's,
 // each row carrying its owning Principal's username, ordered by owning
@@ -267,27 +287,13 @@ func listLaunchersForScope(db *sql.DB, principalID *int64) ([]LauncherWithPrinci
 // persistence lookups:
 //
 //   - selector empty: the authorized list scope (listLaunchersForScope);
-//   - selector under a resolved Principal: name or ID via
-//     findLauncherForPrincipal;
-//   - selector without Principal context: only an exact well-formed Launcher
-//     ID resolves globally (findLauncherByID); any other selector is
-//     ErrLauncherNameRequiresPrincipal — names are never searched globally.
+//   - selector non-empty: the shared Launcher-selector resolution owner
+//     (resolveLauncherSelector), honoring the optional Principal context.
 func queryLaunchersForScope(db *sql.DB, principalID *int64, launcherSelector string) ([]LauncherWithPrincipal, error) {
 	if launcherSelector == "" {
 		return listLaunchersForScope(db, principalID)
 	}
-	var (
-		l   *LauncherWithPrincipal
-		err error
-	)
-	switch {
-	case principalID != nil:
-		l, err = findLauncherForPrincipal(db, *principalID, launcherSelector)
-	case isLauncherIDSelector(launcherSelector):
-		l, err = findLauncherByID(db, launcherSelector)
-	default:
-		return nil, ErrLauncherNameRequiresPrincipal
-	}
+	l, err := resolveLauncherSelector(db, principalID, launcherSelector)
 	if err != nil {
 		return nil, err
 	}

@@ -112,27 +112,21 @@ func (a *App) resolveSessionListScope(auth *operatorAuthority, principalSel, lau
 
 // narrowSessionScopeToLauncher resolves one Session-list Launcher selector
 // inside an already-narrowed ownership scope and returns the exact Launcher
-// scope. Under a resolved Principal scope (a Principal credential's own
-// scope, or an admin narrowed by a Principal selector) the selector may be a
-// Principal-scoped Launcher name or a dhl_ ID under that Principal
-// (findLauncherForPrincipal); with no Principal scope it must be an exact
-// well-formed global Launcher ID (findLauncherByID) — a name is never
-// searched globally. A missing, foreign, or malformed selector is
-// ErrLauncherNotFound (non-disclosing); a database failure keeps its own
-// error and is never collapsed into not-found.
+// scope. The selector resolves through the shared Launcher-selector resolution
+// owner (resolveLauncherSelector): under a resolved Principal scope (a
+// Principal credential's own scope, or an admin narrowed by a Principal
+// selector) the selector may be a Principal-scoped Launcher name or a dhl_ ID
+// under that Principal; with no Principal scope it must be an exact
+// well-formed global Launcher ID — a name is never searched globally. A
+// missing, foreign, or malformed selector is ErrLauncherNotFound
+// (non-disclosing); a database failure keeps its own error and is never
+// collapsed into not-found.
 func (a *App) narrowSessionScopeToLauncher(principalID int64, launcherSel string) (sessionControlScope, error) {
-	var (
-		l   *LauncherWithPrincipal
-		err error
-	)
+	var principalCtx *int64
 	if principalID != 0 {
-		l, err = findLauncherForPrincipal(a.DB, principalID, launcherSel)
-	} else {
-		if !isLauncherIDSelector(launcherSel) {
-			return sessionControlScope{}, ErrLauncherNameRequiresPrincipal
-		}
-		l, err = findLauncherByID(a.DB, launcherSel)
+		principalCtx = &principalID
 	}
+	l, err := resolveLauncherSelector(a.DB, principalCtx, launcherSel)
 	if err != nil {
 		return sessionControlScope{}, err
 	}
