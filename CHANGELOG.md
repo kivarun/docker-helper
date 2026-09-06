@@ -2,6 +2,10 @@
 
 This file summarizes user-visible release changes. Commit-level history remains available through the GitHub compare links for each release.
 
+## [Unreleased]
+
+- Restored scope-first Session-list narrowing: `docker-helper session list` (and `GET /sessions`) accepts optional `--principal USER` / `--launcher LAUNCHER` selectors that only narrow the authenticated authority's visible sessions — admin by Principal and/or Launcher (a `dhl_...` Launcher ID is sufficient without `--principal`; a Launcher name requires it and is never searched globally), a Principal credential by Launcher inside its own scope, and a Launcher credential without selectors. Missing or foreign targets stay non-disclosing and authority-illegal selectors are stable selector errors.
+
 ## [2.1.0-rc.6] - 2026-09-06
 
 RC6 hardens the RC5 delegated-ownership model without expanding Release 2.1 feature scope.
@@ -11,7 +15,6 @@ RC6 hardens the RC5 delegated-ownership model without expanding Release 2.1 feat
 - Coherent effective-policy introspection: the session create-policy endpoint projects the principal, Launcher, and effective roots of a Session that would be created right now, as one consistent snapshot.
 - Principal credentials remain bound to the exact Principal identity: deleting and recreating a Principal with the same username does not reattach old credentials.
 - Launcher and Principal scope-first control paths were converged without expanding authority: Session management, listing, and deletion authorize through one boundary per authority class.
-- Restored scope-first Session-list narrowing: `docker-helper session list` (and `GET /sessions`) accepts optional `--principal USER` / `--launcher LAUNCHER` selectors that only narrow the authenticated authority's visible sessions — admin by Principal and/or Launcher (a `dhl_...` Launcher ID is sufficient without `--principal`; a Launcher name requires it and is never searched globally), a Principal credential by Launcher inside its own scope, and a Launcher credential without selectors. Missing or foreign targets stay non-disclosing and authority-illegal selectors are stable selector errors.
 - The public `allowed_roots` contract is always a JSON array: an empty set serializes as `[]`, never `null`.
 - Launcher allowed-root projection is deterministic (stable ordering) across list, introspection, and audit output.
 - Documentation reconciliation: completion, help text, man pages, and documented contracts now match the implemented model, including the AppArmor state model (profile `/etc/apparmor.d/docker-helper-system` with dynamic helper-owned boundary state at `/var/lib/docker-helper/apparmor/managed-boundaries`) and the authority-sensitive bearer requirements for direct HTTP clients.
