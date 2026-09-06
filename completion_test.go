@@ -1436,6 +1436,20 @@ func TestCompletionTreeLeafLongFlags(t *testing.T) {
 	}
 }
 
+// TestCompletionSessionListNarrowingSelectors protects the exact RC6 escaped
+// defect: `docker-helper session list --` must offer the narrowing selectors
+// --principal and --launcher in addition to the operator and JSON flags, so
+// the flags cannot disappear from the generated completion script unnoticed.
+func TestCompletionSessionListNarrowingSelectors(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, treeProbeWords([]string{"session", "list"}, "--"))
+	for _, want := range []string{"--principal", "--launcher", "--json", "--system"} {
+		if !slices.Contains(results, want) {
+			t.Errorf("session list --<TAB>: missing %q, got %v", want, results)
+		}
+	}
+}
+
 // TestCompletionTreeFlagOnlyLeafEmptyWord proves that every leaf command
 // with MaxPosArgs == 0 offers its own flags on an empty current word — the
 // generic fallback for commands with no applicable positional or subcommand
