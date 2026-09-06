@@ -194,7 +194,7 @@ run_runner_all() { # runner rc
            daemon-stale-runtime selinux-workspace-lifecycle \
            selinux-operator-boundary selinux-fs-boundary selinux-mount-guard \
            selinux-relabel-avc rc5-selectors user-mode-owner-reservation \
-           user-mode-effective-roots; do
+           user-mode-effective-roots rc6-session-list-narrowing; do
     printf '%s\n' "$rc" > "$WORK/rc/uat-regression-$g.sh"
   done
   local out
