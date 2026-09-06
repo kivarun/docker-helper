@@ -2444,8 +2444,11 @@ func assertNoDuplicates(t *testing.T, got []string) {
 // TestCompletionSelectorsPrincipalCommandContext proves the --principal
 // selector completion is command-context aware: a Principal credential
 // receives its own username on the command families where the explicit own
-// selector is legal and nothing on session create, where the selector is
-// structurally illegal; an admin keeps the daemon's Principal list.
+// selector is legal and nothing on both Session command paths, where the
+// selector is contractually illegal (session create rejects every
+// --principal under a Principal credential; session list rejects every
+// Principal selector, even the credential's own Principal); an admin keeps
+// the daemon's Principal list.
 func TestCompletionSelectorsPrincipalCommandContext(t *testing.T) {
 	script := completionScript(t)
 
@@ -2460,6 +2463,16 @@ func TestCompletionSelectorsPrincipalCommandContext(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Fatalf("session create --principal under a Principal credential must offer nothing, got %v", results)
+	}
+
+	// Principal credential + session list: nothing — the daemon rejects
+	// every Principal selector there, even the credential's own Principal.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "list", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "",
+	})
+	if len(results) != 0 {
+		t.Fatalf("session list --principal under a Principal credential must offer nothing, got %v", results)
 	}
 
 	// Principal credential + launcher family: the own username.

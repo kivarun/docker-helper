@@ -582,13 +582,15 @@ full syntax:
   Machine-facing selector introspection for the values of the
   `--principal`/`--launcher` flags and of the positional `[LAUNCHER]`
   argument (the same owner for both). The daemon remains the ownership and
-  authorization authority: `selectors principal` is command-context aware
-  through the `--command` flag — an admin receives the daemon's Principal
-  names on every command carrying the selector, a Principal credential
-  receives exactly its own username wherever the explicit own selector is
-  legal (the Launcher command families and the session-list narrowing) and
-  nothing on session create, where the selector is structurally illegal,
-  and a Launcher credential receives nothing. `selectors launcher` honors
+   authorization authority: `selectors principal` is command-context aware
+   through the `--command` flag — an admin receives the daemon's Principal
+   names on every command carrying the selector, a Principal credential
+   receives exactly its own username on the Launcher command families (where
+   the explicit own selector is legal) and nothing on both Session command
+   paths — session create rejects every `--principal` under a Principal
+   credential and session list rejects every Principal selector, even the
+   credential's own Principal — and a Launcher credential receives nothing.
+   `selectors launcher` honors
   the typed `--principal` context — an admin with a context receives that
   Principal's Launcher names, an admin without one receives only globally
   resolvable `dhl_` Launcher IDs (a name is never searched globally), a

@@ -227,13 +227,14 @@ var completionSelectorsCommand = &Command{
 //
 // An admin authority may target any Principal on every command that carries
 // the selector, so it receives the daemon's Principal list. A Principal
-// credential may explicitly target exactly its own Principal wherever the
-// selector is legal (the Launcher command families and the session-list
-// narrowing) and the selector is structurally illegal on session create, so
-// it receives its own username for every other command path and nothing
-// otherwise. A Launcher credential receives nothing: the selector is not
-// applicable to it. With no command context nothing is offered, and a
-// query failure degrades silently.
+// credential may explicitly target exactly its own Principal on the Launcher
+// command families; the selector is illegal on both Session command paths —
+// session create rejects every --principal under a Principal credential and
+// session list rejects every Principal selector, even the credential's own
+// Principal — so it receives its own username for every other command path
+// and nothing on the illegal ones. A Launcher credential receives nothing:
+// the selector is not applicable to it. With no command context nothing is
+// offered, and a query failure degrades silently.
 var completionSelectorsPrincipalCommand = &Command{
 	Name:       "principal",
 	Summary:    "Print the Principal names selectable with --principal",
@@ -265,12 +266,18 @@ var completionSelectorsPrincipalCommand = &Command{
 				case "launcher":
 					return 0
 				case "principal":
-					// The selector is structurally illegal on session
-					// create (conflicting selectors) and unknown without
-					// a command context; everywhere else the Principal
+					// The selector is illegal on both Session command
+					// paths: session create rejects every --principal
+					// under a Principal credential (conflicting
+					// selectors) and session list rejects every
+					// Principal selector, even the credential's own
+					// Principal — a narrowing selector may only narrow,
+					// never redefine authority. Unknown without a
+					// command context; everywhere else the Principal
 					// credential may explicitly target exactly its own
 					// Principal.
-					if command.value == "" || command.value == "session create" {
+					switch command.value {
+					case "", "session create", "session list":
 						return 0
 					}
 					fmt.Fprintln(stdout, auth.Principal)

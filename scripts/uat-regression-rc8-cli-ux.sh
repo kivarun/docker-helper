@@ -721,7 +721,8 @@ subcase_f() {
   fi
 
   # 9. command-context-aware --principal: the own username on the launcher
-  #    family, nothing on session create.
+  #    family, nothing on either Session command path — the daemon rejects
+  #    every Principal selector on session list, even the own Principal.
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher create --token-file "$cred" --principal "")"
   if printf '%s\n' "$out" | grep -qx "$user"; then
     reg_ok "F: launcher create --principal <TAB> under a Principal credential offers its own username"
@@ -733,6 +734,12 @@ subcase_f() {
     reg_ok "F: session create --principal <TAB> under a Principal credential offers nothing"
   else
     reg_fail "F: session create --principal <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session list --token-file "$cred" --principal "")"
+  if [ -z "$out" ]; then
+    reg_ok "F: session list --principal <TAB> under a Principal credential offers nothing"
+  else
+    reg_fail "F: session list --principal <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
   fi
 
   cleanup_principal "$user"
