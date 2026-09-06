@@ -116,11 +116,12 @@ assert_unique() {
 }
 
 # launcher_credential_token USER LAUNCHER creates a launcher credential
-# through the packaged CLI and prints the token.
+# through the packaged CLI and prints the token (the JSON document's token
+# field).
 launcher_credential_token() {
   local user="$1" launcher="$2" out
   out="$(dh launcher credential create --system --principal "$user" "$launcher" 2>/dev/null)" || return 1
-  printf '%s\n' "$out" | sed -n 's/^  Token: //p' | tr -d '[:space:]'
+  printf '%s' "$out" | json_field token
 }
 
 # ---------------------------------------------------------------------------
@@ -212,7 +213,7 @@ subcase_b() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
+  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential 2>&1)" || {
     reg_fail "B: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -236,7 +237,7 @@ subcase_b() {
 
   local out
   # 1. admin + --principal USER --launcher NAME: only the restricted root.
-  out="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --principal "$user" --launcher killme --workspace "")"
   assert_completion "B: admin --principal+--launcher offers only the restricted root" "$opt" "$out" || true
 
@@ -249,7 +250,7 @@ subcase_b() {
 
   # 3. --launcher=NAME reaches the same query (identical suggestions).
   local out_eq
-  out_eq="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out_eq="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --principal="$user" --launcher=killme --workspace "")"
   if [ "$out" = "$out_eq" ]; then
     reg_ok "B: --launcher=NAME form offers the same suggestions"
@@ -259,7 +260,7 @@ subcase_b() {
 
   # 4. Principal credential + --launcher NAME: the daemon resolves the
   #    selector inside the credential's own scope.
-  out="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --launcher killme --workspace "")"
   assert_completion "B: principal credential --launcher offers only the restricted root" "$opt" "$out" || true
   if printf '%s' "$out" | grep -qx "$home"; then
@@ -270,17 +271,17 @@ subcase_b() {
 
   # 5. selectorless completion keeps the default-target semantics: the
   #    default Launcher inherits the Principal ceiling (the home root).
-  out="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --workspace "")"
   assert_completion "B: selectorless principal-credential completion keeps the default target" "$home" "$out" || true
 
   # 6. continuation inside the restricted root: only its subdirectories.
-  out="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --launcher killme --workspace "$opt/")"
   assert_completion "B: continuation offers the restricted subdirectories" "$opt/proj" "$out" || true
 
   # 7. a foreign selector fails silently: no policy guess, no suggestion.
-  out="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --launcher does-not-exist --workspace "")"
   if [ -z "$out" ]; then
     reg_ok "B: foreign --launcher selector degrades silently"
@@ -325,13 +326,13 @@ subcase_c() {
 
   # Completing inside the wider root offers the nested root once: it
   # qualifies both as an entry anchor and as a directory under home.
-  out="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --workspace "$home/")"
   assert_unique "C: nested roots produce no duplicate suggestions" "$out"
   assert_completion "C: nested root is offered" "$home/opt" "$out" || true
 
   # Deterministic: the same typed line yields the same COMPREPLY.
-  out2="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out2="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --workspace "$home/")"
   if [ "$out" = "$out2" ]; then
     reg_ok "C: the same input yields the same ordered COMPREPLY"
@@ -397,7 +398,7 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
+  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential 2>&1)" || {
     reg_fail "E: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -421,7 +422,7 @@ subcase_e() {
 
   local out
   # 1. admin --principal <TAB>: Principal names.
-  out="$(run_completion "$script" /usr/bin/docker-helper launcher create --principal "")"
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher create --principal "")"
   if printf '%s\n' "$out" | grep -qx "$user"; then
     reg_ok "E: admin --principal offers the daemon's Principal names"
   else
@@ -429,7 +430,7 @@ subcase_e() {
   fi
 
   # 2. admin + typed --principal: that Principal's Launcher names.
-  out="$(run_completion "$script" /usr/bin/docker-helper session create --principal "$user" --launcher "")"
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create --principal "$user" --launcher "")"
   if printf '%s\n' "$out" | grep -qx 'killme'; then
     reg_ok "E: admin --launcher under a typed --principal offers the Principal's Launcher names"
   else
@@ -439,7 +440,7 @@ subcase_e() {
   # 3. admin without a Principal context: only globally resolvable IDs.
   local id_out
   id_out="$(dh launcher list --system --principal "$user" --json 2>/dev/null | json_field id)"
-  out="$(run_completion "$script" /usr/bin/docker-helper session create --launcher "")"
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create --launcher "")"
   if printf '%s\n' "$out" | grep -qx "$id_out" && ! printf '%s\n' "$out" | grep -qx 'killme'; then
     reg_ok "E: admin --launcher without a context offers only the resolvable Launcher ID"
   else
@@ -448,7 +449,7 @@ subcase_e() {
 
   # 4. Principal credential: its own Launchers only (foreign names absent —
   #    the fixture has none, so any name leak would be visible).
-  out="$(run_completion "$script" /usr/bin/docker-helper session create --token-file "$cred" --launcher "")"
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create --token-file "$cred" --launcher "")"
   if printf '%s\n' "$out" | grep -qx 'killme'; then
     reg_ok "E: principal credential --launcher offers its own Launchers"
   else
@@ -457,7 +458,7 @@ subcase_e() {
 
   # 5. the inline --flag=value form completes like the separated form.
   local out_eq
-  out_eq="$(run_completion "$script" /usr/bin/docker-helper session create --principal="$user" --launcher=ki)"
+  out_eq="$(run_completion "$script" /usr/bin/docker-helper --system session create --principal="$user" --launcher=ki)"
   if [ "$out_eq" = "$out" ] || printf '%s\n' "$out_eq" | grep -qx 'killme'; then
     reg_ok "E: the --launcher=value form offers the same selector"
   else
@@ -467,7 +468,7 @@ subcase_e() {
   # 6. integration invariant: the offered selector resolves to exactly the
   #    Session-create target a real create with that selector would use —
   #    the restricted root, never the wider Principal ceiling.
-  out="$(run_completion "$script" /usr/bin/docker-helper session create \
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --launcher killme --workspace "")"
   assert_completion "E: the offered selector resolves the restricted create target" "$opt" "$out" || true
 
