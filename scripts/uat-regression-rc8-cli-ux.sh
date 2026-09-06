@@ -62,9 +62,10 @@ mkdir -p "$TMPDIR_REG14"
 run_completion() {
   local script="$1"
   shift
-  local words="" w
+  local words="" w wq
   for w in "$@"; do
-    words+="${words:+ }"'\"'"$w"'"'
+    printf -v wq '%q' "$w"
+    words+="${words:+ }${wq}"
   done
   bash -c '
     set -u
