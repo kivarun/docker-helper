@@ -187,7 +187,9 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("workspace must be inside an allowed root: %w", ErrInvalidWorkspace)
 	}
 
-	// Generate session ID and token before entering lifecycle critical section.
+	// Generate Session identity and bearer after policy resolution and before
+	// MAC/persistence work; lifecycleMu is already held by
+	// createSessionAuthorized.
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
 		return nil, fmt.Errorf("cannot generate session ID: %w: %w", err, ErrSystem)

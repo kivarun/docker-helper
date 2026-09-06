@@ -133,8 +133,9 @@ Skills must preserve these invariants:
 - never access `docker.sock`;
 - never expose `DOCKER_HELPER_SESSION_TOKEN`;
 - never look for the administrative token;
-- never create or manage sessions unless the integration is explicitly running
-  in an operator/admin context.
+- never create or manage Sessions unless the environment explicitly provides
+  a Principal or Launcher credential with that delegated authority;
+  a Session token alone never authorizes Session management.
 
 ## Native tools
 

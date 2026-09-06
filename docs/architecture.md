@@ -97,13 +97,13 @@ daemon restart to take effect.
 System mode requires exactly one supported enforcing backend:
 
 - AppArmor confines the daemon with `docker-helper-system` and uses explicit
-  managed roots for path-level workspace defense in depth;
+  managed workspace boundaries for path-level workspace defense in depth;
 - SELinux confines the daemon as `docker_helper_t` and system-mode containers
   as the MCS-constrained `docker_helper_container_t` type.
 
 Neither backend, both backends, and permissive SELinux fail closed. SELinux
 workspace access is type-based and does not reproduce AppArmor's per-path
-managed-root boundary; canonical application-level allowed-root validation
+managed-boundary rule; canonical application-level allowed-root validation
 remains authoritative in both modes.
 
 ## Transports
@@ -263,7 +263,7 @@ PATCH /principals/{username}  (admin token, body: {"enabled": false})
     Subsequent session token lookup:
     │
     ├── findSessionByToken rejects sessions whose launcher's principal is disabled
-    ├── principal-owned sessions of disabled principal are rejected
+    ├── Sessions whose owning Launcher belongs to the disabled Principal are rejected
     └── disabled launchers' credentials are rejected at authentication time
 ```
 
@@ -315,14 +315,23 @@ Session token semantics:
 - session expiry or deletion blocks future requests;
 - an already-started Docker operation continues its lifecycle.
 
-A Principal credential stays with the operator or provisioning tool that
-starts the agent; the coding agent never receives it. For delegated agents,
-the operator issues a Launcher credential and gives that to the agent
-instead. The agent only gets a credential (which creates sessions) or a
-session token (which grants access to a single workspace and expires after
-the configured TTL). This separation ensures the agent cannot create
-sessions for other workspaces, reach other launchers' sessions, or manage
-sessions it does not own.
+A credential is a bearer key, never an owner. The authority model
+distinguishes three delegation tiers:
+
+- Principal credential — broader delegated operator capability; may be
+  given to a sufficiently trusted agent;
+- Launcher credential — narrower delegated operator capability; exact
+  Launcher scope;
+- Session token — narrow data-plane Session capability for a single
+  workspace that expires after the configured TTL.
+
+The tiers bound what the agent can reach: a Session token alone grants
+access to one workspace and cannot create or manage Sessions; a Launcher
+credential can create and manage only its Launcher's Sessions; a Principal
+credential can reach the Sessions owned by that Principal's Launchers.
+Choosing the delegation tier is the operator's trust decision; giving an
+agent a Principal credential delegates broader operator capability and is
+never a default recommendation.
 
 Expired sessions are rejected immediately by the `expires_at` check in
 `findSessionByToken`. Their database rows are physically removed the next
@@ -381,8 +390,9 @@ or `launcher_id`, never both. Default resolution without selectors: a
 Principal credential resolves its principal's default launcher, a
 Launcher credential is forced to its own launcher, and a user-mode admin
 token resolves the local daemon-owner default. A system-mode admin token
-requires an explicit selector (`400 missing_launcher_selector`), so
-system-mode admin session creation goes through the HTTP API.
+requires an explicit selector (`400 missing_launcher_selector`); the CLI
+supports this with `--principal` or `--launcher` and sends the
+corresponding API selector.
 
 ### docker-helper session list
 
@@ -1216,7 +1226,7 @@ instance lock:
 | Legacy state | Result |
 |---|---|
 | v2.0 principal credential rows | preserved byte-for-byte as Principal credentials (`launcher_id NULL`, no launcher credential fabricated) |
-| attributable principal-owned sessions | re-owned by that principal's `default` launcher |
+| attributable v2.0 sessions owned directly by the Principal | re-owned by that principal's `default` launcher |
 | user-mode NULL-owner sessions | attributed to the daemon-owner default launcher |
 | system-mode NULL-owner (admin) sessions | invalidated (removed; never left ownerless) |
 | dangling principal reference | migration fails closed, legacy table intact (transaction rollback) |
@@ -1295,7 +1305,7 @@ daemon configuration. The standalone `credential install` command exposes the
 same user-scoped credential store directly.
 
 Application acceptance of a root does not by itself prove MAC access. AppArmor
-requires the corresponding managed-root rule. SELinux requires a permitted
+requires the corresponding managed boundary rule. SELinux requires a permitted
 workspace file type.
 
 ### Three-level authorization model
@@ -1333,7 +1343,7 @@ Authorization flows through four narrowing steps:
 
 MAC state is derived from the concrete live session/workspace lifecycle,
 not from the authorization ceiling. Only the session workspace participates
-in MAC preparation: AppArmor managed-root coverage for the workspace, or
+in MAC preparation: AppArmor managed-boundary coverage for the workspace, or
 SELinux Session workspace fcontext labeling with MCS constraints. The
 authorization roots never own MAC state; a broader ceiling never causes
 recursive MAC relabeling.
@@ -2055,7 +2065,7 @@ fields.
 | `time` | string | UTC timestamp, RFC 3339 with nanoseconds |
 | `stream` | string | always `audit` for these records |
 | `event` | string | event name |
-| `result` | string | outcome code (omitted on `build.start`) |
+| `result` | string | outcome code when the event represents an outcome; omitted on start events |
 | `session_id` | string | session identifier (omitted on `auth.failure`) |
 | `duration` | string | wall-clock duration, e.g. `"1s"`, `"150ms"` |
 

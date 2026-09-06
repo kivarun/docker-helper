@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 )
 
-// sessionControlScope is the single internal boundary through which all
-// Session create/list/delete handlers authorize their ownership scope. Exactly
+// sessionControlScope is the single internal boundary through which the
+// Session list/delete handlers authorize their management scope. Exactly
 // one discriminator is effective: admin -> all Launchers; principalID -> the
 // Sessions owned by that Principal's Launchers; launcherID -> the Sessions
-// owned by exactly that Launcher. It carries no preloaded Launcher enumeration;
-// the boundary is expressed in Session SQL directly.
+// owned by exactly that Launcher. Session create authorizes through a
+// different path: createSelector -> resolveCreatePolicy. It carries no
+// preloaded Launcher enumeration; the boundary is expressed in Session SQL
+// directly.
 type sessionControlScope struct {
 	// admin is true for the system/user admin token authority.
 	admin bool

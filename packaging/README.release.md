@@ -26,7 +26,6 @@ post-Release-2.
 - `systemd/system/docker-helper.service` — systemd system service unit
 - `apparmor/docker-helper` — user-mode AppArmor profile template (manual install)
 - `apparmor/docker-helper-system` — system-mode AppArmor profile
-- `apparmor/docker-helper.d/managed-roots` — managed workspace roots fragment
 - `apparmor/local/curl` — AppArmor local-profile snippet for curl
 - `selinux/docker_helper.pp` — system-mode SELinux policy module (docker_helper)
 - `skills/docker-helper/SKILL.md` — agent-facing skill file
@@ -85,7 +84,8 @@ profile and removes the SELinux `docker_helper` policy module (best-effort, as
 in RPM final-erase) plus the tarball-installed policy artifact, without
 requiring the currently active LSM to match the backend that was installed.
 
-With `--purge` to also remove config, state, and managed-roots:
+With `--purge` to also remove config, state, and managed AppArmor boundary
+state:
 
 ```bash
 sudo ./uninstall-system.sh --yes --purge
@@ -215,7 +215,8 @@ For a native package installation, the snippet is at
 `/usr/share/docker-helper/apparmor/local/curl`.
 
 Allowing socket access does not bypass docker-helper authorization.
-API requests still require a valid session token or admin token.
+API requests still require the bearer appropriate for the endpoint:
+the admin token, a Principal or Launcher credential, or a Session token.
 
 ## Agent-side artifacts
 

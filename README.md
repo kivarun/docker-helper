@@ -283,8 +283,6 @@ Package installation paths:
 
 - Final erase stops/disables the service and removes packaged assets;
   persistent config and state are preserved.
-- Modified managed-roots follows native RPM `%config(noreplace)`
-  semantics.
 
 ### Release tarball
 
@@ -1109,8 +1107,11 @@ time for the concrete workspace.
 ### AppArmor
 
 System mode uses mandatory AppArmor confinement with the
-`docker-helper-system` profile. Managed workspace roots are stored in
-`/etc/apparmor.d/docker-helper.d/managed-roots`.
+`/etc/apparmor.d/docker-helper-system` profile. The profile includes the
+dynamic helper-owned boundary state file
+`/var/lib/docker-helper/apparmor/managed-boundaries`; managed workspace
+boundaries are stored there, outside config.json. Authorization roots do
+not own MAC state.
 
 MAC preparation occurs at session creation time for the concrete workspace.
 `docker-helper init` does NOT prepare MAC state for the bootstrap allowed root.
@@ -1174,12 +1175,12 @@ container-side development workspace semantics.
 The RPM contains `/usr/share/selinux/docker_helper.pp` and its lifecycle script
 loads the module on an enforcing SELinux host. The DEB does not install the
 SELinux module. See [docs/selinux-support-plan.md](docs/selinux-support-plan.md)
-for the policy contract and outstanding distribution UAT.
+for the SELinux policy and acceptance record.
 
 #### Why SELinux has no `selinux root add/remove`
 
 The AppArmor and SELinux sections are intentionally asymmetric. AppArmor
-keeps persistent backend-specific managed-root rules
+keeps persistent backend-specific managed workspace boundaries
 (`apparmor root list/add/remove`), while SELinux MAC state is owned by the
 Session lifecycle (`sessionMACCoordinator`): concrete Session workspaces
 receive the necessary SELinux file-context coverage and labels at session
@@ -1237,7 +1238,8 @@ owner /run/user/*/docker-helper/docker-helper.sock rw,
 ```
 
 Allowing socket access does not bypass docker-helper authorization.
-API requests still require a valid session token or admin token.
+API requests still require the bearer appropriate for the endpoint:
+the admin token, a Principal or Launcher credential, or a Session token.
 
 ## Workspace root policy
 

@@ -96,7 +96,7 @@ Runs as root. Configuration at
 .IR /etc/docker-helper/config.json ,
 state at
 .IR /var/lib/docker-helper .
-Requires exactly one MAC backend: AppArmor with managed workspace roots, or
+Requires exactly one MAC backend: AppArmor with managed workspace boundaries, or
 enforcing SELinux with the daemon in \fBdocker_helper_t\fR.
 .SH COMMANDS
 .SS General Commands
@@ -389,13 +389,13 @@ response.
 .SS AppArmor Commands (AppArmor System Mode)
 .TP
 .B docker-helper apparmor root list
-List managed workspace roots in the AppArmor profile.
+List managed workspace boundaries in the AppArmor profile.
 .TP
 .B docker-helper apparmor root add PATH
-Add a workspace root to the AppArmor profile.
+Add a managed workspace boundary to the AppArmor profile.
 .TP
 .B docker-helper apparmor root remove PATH
-Remove a workspace root from the AppArmor profile.
+Remove a managed workspace boundary from the AppArmor profile.
 .TP
 .B docker-helper apparmor check
 Validate the AppArmor profile.
@@ -411,7 +411,7 @@ SELinux state. It requires root and uses the existing host MAC authority.
 .PP
 Unlike the AppArmor command family, there is no
 \fBselinux root list/add/remove\fR. The asymmetry is intentional: AppArmor
-keeps persistent backend-specific managed-root rules, while SELinux MAC
+keeps persistent backend-specific managed workspace boundaries, while SELinux MAC
 state is owned by the Session lifecycle — concrete Session workspaces
 receive the necessary SELinux coverage and labels at session creation
 time, and authorization roots are not a second persistent SELinux

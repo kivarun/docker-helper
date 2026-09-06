@@ -202,8 +202,12 @@ SELinux. Neither, both, and permissive SELinux fail closed.
 \fBallowed_roots\fR is the global authorization ceiling. MAC coverage
 for a concrete workspace is prepared at session creation time.
 .SS AppArmor
-AppArmor uses profile \fBdocker-helper-system\fR.
-Managed workspace roots are stored in \fI/etc/apparmor.d/docker-helper.d/managed-roots\fR.
+AppArmor uses profile \fBdocker-helper-system\fR at
+\fI/etc/apparmor.d/docker-helper-system\fR. The profile includes the dynamic
+helper-owned boundary state file
+\fI/var/lib/docker-helper/apparmor/managed-boundaries\fR; managed workspace
+boundaries are stored there, outside \fIconfig.json\fR. Authorization roots
+do not own MAC state.
 \fBconfig allowed-root add\fR changes the authorization ceiling only;
 MAC coverage is prepared at session creation time.
 Advanced backend-specific management: \fBdocker-helper apparmor root\fR.

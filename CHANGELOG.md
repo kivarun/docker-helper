@@ -2,6 +2,22 @@
 
 This file summarizes user-visible release changes. Commit-level history remains available through the GitHub compare links for each release.
 
+## [2.1.0-rc.6] - 2026-09-06
+
+RC6 hardens the RC5 delegated-ownership model without expanding Release 2.1 feature scope.
+
+- The reserved transparent user-mode owner chain (daemon-owner Principal and its `default` Launcher) cannot be mutated into an invalid next-start state: control-plane mutations that would corrupt it are rejected with a stable conflict before any durable or runtime change.
+- One canonical effective-root policy across Principal, Launcher, and Session creation: the same three-level narrowing (global roots, Principal ceiling, Launcher scope) is evaluated through a single owner everywhere.
+- Coherent effective-policy introspection: the session create-policy endpoint projects the principal, Launcher, and effective roots of a Session that would be created right now, as one consistent snapshot.
+- Principal credentials remain bound to the exact Principal identity: deleting and recreating a Principal with the same username does not reattach old credentials.
+- Launcher and Principal scope-first control paths were converged without expanding authority: Session management, listing, and deletion authorize through one boundary per authority class.
+- The public `allowed_roots` contract is always a JSON array: an empty set serializes as `[]`, never `null`.
+- Launcher allowed-root projection is deterministic (stable ordering) across list, introspection, and audit output.
+- Documentation reconciliation: completion, help text, man pages, and documented contracts now match the implemented model, including the AppArmor state model (profile `/etc/apparmor.d/docker-helper-system` with dynamic helper-owned boundary state at `/var/lib/docker-helper/apparmor/managed-boundaries`) and the authority-sensitive bearer requirements for direct HTTP clients.
+- Security/authority and lifecycle hardening throughout, without expanding Release 2.1 feature scope.
+
+Full changes since RC5: https://github.com/kivarun/docker-helper/compare/v2.1.0-rc.5...v2.1.0-rc.6
+
 ## [2.1.0-rc.5] - 2026-09-05
 
 Release 2.1 is a focused control-plane release that adds stable delegated Launcher ownership between Principals and Sessions without expanding docker-helper into a general orchestration system.
@@ -74,5 +90,6 @@ Release 2.0 remains local-first. Non-loopback listeners, TLS-based remote access
 
 Full changes since 1.0.2: https://github.com/kivarun/docker-helper/compare/v1.0.2...v2.0.0
 
+[2.1.0-rc.6]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0-rc.6
 [2.1.0-rc.5]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0-rc.5
 [2.0.0]: https://github.com/kivarun/docker-helper/releases/tag/v2.0.0
