@@ -330,7 +330,7 @@ subcase_b() {
   # 7. a foreign selector never leaks policy-derived suggestions: the
   #    daemon rejects the selector and the accepted degradation is the
   #    generic filesystem fallback, never the restricted roots.
-  roots_out="$(dh completion roots session --system --token-file "$cred" --launcher does-not-exist 2>&1)"; roots_rc=$?
+  roots_out="$(dh completion roots session --system --token-file "$cred" --launcher does-not-exist 2>/dev/null)"; roots_rc=$?
   if [ "$roots_rc" -ne 0 ] && [ -z "$roots_out" ]; then
     reg_ok "B: introspection query with a foreign launcher selector fails silently"
   else
