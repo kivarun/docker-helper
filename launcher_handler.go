@@ -68,7 +68,9 @@ func writeControlAudit(ctx context.Context, rec auditRecord, auth *operatorAutho
 }
 
 // Launcher JSON contract uses "scope" as the public term and "allowed_roots"
-// for the canonical stored roots (restricted scope only). principal_id is never
+// for the canonical stored roots (restricted scope only), always serialized
+// as a JSON array — zero roots are the empty array, never null
+// (launcherToJSON owns the projection). principal_id is never
 // exposed as public authorization state.
 type launcherJSON struct {
 	ID           string   `json:"id"`

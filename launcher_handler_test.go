@@ -385,6 +385,28 @@ func TestLauncherHandlerAllowedRootsDeterministicCanonicalOrder(t *testing.T) {
 	}
 }
 
+// TestLauncherToJSONZeroRootsWireArray proves the Launcher projection owner
+// serializes zero stored roots (inherit scope) as the public empty JSON
+// array: the public wire contract has no null representation for zero roots.
+func TestLauncherToJSONZeroRootsWireArray(t *testing.T) {
+	data, err := json.Marshal(launcherToJSON(LauncherWithPrincipal{
+		ID:        "dhl_zero",
+		Name:      "default",
+		ScopeMode: LauncherScopeInherit,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	roots, ok := doc["allowed_roots"].([]any)
+	if !ok || len(roots) != 0 {
+		t.Fatalf("nil stored roots must serialize as the empty array, got: %s", data)
+	}
+}
+
 func TestLauncherHandlerPrincipalCredentialManagesOwn(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	_, credToken := setupLauncherHandlerPrincipal(t, app, "alice")

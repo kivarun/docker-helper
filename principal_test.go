@@ -533,6 +533,85 @@ func TestPrincipalHTTPShow(t *testing.T) {
 	}
 }
 
+// TestPrincipalToResponseZeroRootsWireArray proves the Principal projection
+// owner serializes zero stored roots as the public empty JSON array: the
+// public wire contract has no null representation for zero roots.
+func TestPrincipalToResponseZeroRootsWireArray(t *testing.T) {
+	data, err := json.Marshal(principalToResponse(&PrincipalWithRoots{
+		Principal: Principal{Username: "zeros"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	roots, ok := doc["allowed_roots"].([]any)
+	if !ok || len(roots) != 0 {
+		t.Fatalf("nil stored roots must serialize as the empty array, got: %s", data)
+	}
+}
+
+// TestPrincipalShowZeroRootsWireArray proves the real principal show handler
+// reports a Principal whose stored root set was emptied through the control
+// plane with "allowed_roots": [] on the wire, never null.
+func TestPrincipalShowZeroRootsWireArray(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "zeroshow")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1016", "1016", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "zeroshow", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
+	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemovePrincipalAllowedRoot)
+
+	// Empty the stored root set through the real control path.
+	removeBody, _ := json.Marshal(allowedRootRequest{Path: home})
+	req := httptest.NewRequest(http.MethodDelete, "/principals/zeroshow/allowed-roots", bytes.NewReader(removeBody))
+	withAdminToken(req)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("remove seeded root: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var changed principalChangedResponse
+	if err := json.NewDecoder(w.Body).Decode(&changed); err != nil {
+		t.Fatal(err)
+	}
+	if !changed.Changed {
+		t.Fatalf("seeded root removal reported unchanged: %s", w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/principals/zeroshow", nil)
+	withAdminToken(req)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("show: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var doc map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	roots, ok := doc["allowed_roots"].([]any)
+	if !ok || len(roots) != 0 {
+		t.Fatalf("zero-root principal show must serialize allowed_roots as [], body: %s", w.Body.String())
+	}
+}
+
 func TestPrincipalHTTPSetEnabled(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 

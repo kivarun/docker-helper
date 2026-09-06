@@ -40,7 +40,15 @@ type principalChangedResponse struct {
 	Message  string `json:"message,omitempty"`
 }
 
+// principalToResponse is the single projection owner for the public
+// Principal resource document (create and show). allowed_roots is always
+// serialized as a JSON array: zero stored roots project the empty array,
+// never null. Internal nil slices are not mutated.
 func principalToResponse(p *PrincipalWithRoots) principalResponse {
+	roots := p.AllowedRoots
+	if roots == nil {
+		roots = []string{}
+	}
 	return principalResponse{
 		OK:           true,
 		Username:     p.Username,
@@ -48,7 +56,7 @@ func principalToResponse(p *PrincipalWithRoots) principalResponse {
 		GID:          p.GID,
 		Home:         p.Home,
 		Enabled:      p.Enabled,
-		AllowedRoots: p.AllowedRoots,
+		AllowedRoots: roots,
 	}
 }
 

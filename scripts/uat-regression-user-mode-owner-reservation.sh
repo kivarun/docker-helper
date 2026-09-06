@@ -135,22 +135,29 @@ WS="$U_HOME/ws"
 # um_field FIELD: parse a control-plane --json document field.
 um_field() { json_field "$1"; }
 
+# um_roots_empty DOC: the pretty-printed control-plane document's
+# allowed_roots is the empty JSON array. The public wire contract represents
+# zero roots as [], never null.
+um_roots_empty() {
+  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[[:space:]]*\]"
+}
+
 # assert_owner_invariant WHAT: the transparent chain still matches the
 # contract, observed through the supported control paths.
 #
 # Both show commands always emit the JSON document and have no --json flag;
 # the CLI rejects flags placed after positional arguments. enabled is a JSON
 # boolean and uid/gid are ints (unquoted, so json_field cannot extract them),
-# and zero stored roots render as null (the loaders return a nil slice), so
-# the scalar assertions are direct document greps and the zero-roots check
-# accepts both the null and empty-array renderings.
+# so the scalar assertions are direct document greps, and the zero-roots
+# check is the structural um_roots_empty helper: the public wire contract
+# serializes zero roots as the empty array, never null.
 assert_owner_invariant() {
   local what="$1" p l
   if p="$(dhx principal show "$OWNER" 2>/dev/null)"; then
     if printf '%s' "$p" | grep -q '"enabled": true' \
         && printf '%s' "$p" | grep -q "\"uid\": $U_UID" \
         && printf '%s' "$p" | grep -q "\"gid\": $(id -g "$U_USER")" \
-        && printf '%s' "$p" | grep -Eq '"allowed_roots": (null|\[\])'; then
+        && um_roots_empty "$p"; then
       :
     else
       reg_fail "$what: daemon-owner Principal invariant violated: $(printf '%s' "$p" | head -6 | tr '\n' ' ')"
@@ -164,7 +171,7 @@ assert_owner_invariant() {
     if printf '%s' "$l" | grep -q '"enabled": true' \
         && [ "$(printf '%s' "$l" | um_field name)" = "default" ] \
         && [ "$(printf '%s' "$l" | um_field scope)" = "inherit" ] \
-        && printf '%s' "$l" | grep -Eq '"allowed_roots": (null|\[\])'; then
+        && um_roots_empty "$l"; then
       reg_ok "$what: transparent owner chain intact (Principal enabled/zero-roots, default Launcher enabled/inherit/zero-roots)"
     else
       reg_fail "$what: default Launcher invariant violated: $(printf '%s' "$l" | head -6 | tr '\n' ' ')"

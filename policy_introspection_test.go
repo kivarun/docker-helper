@@ -149,6 +149,23 @@ func TestPrincipalEffectiveRootsContractMatrix(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated: %d %s", w.Code, w.Body.String())
 	}
+
+	// Zero stored roots: a non-owner Principal with an empty stored set has
+	// an empty effective ceiling, and the wire contract serializes it as the
+	// empty JSON array, never null.
+	zoeToken := setupPolicyPrincipal(t, app, "zoe", app.Config.AllowedRoots[0])
+	w = launcherRequest(t, app, http.MethodDelete, "/principals/zoe/allowed-roots", testAdminToken,
+		fmt.Sprintf(`{"path":%q}`, app.Config.AllowedRoots[0]))
+	if w.Code != http.StatusOK {
+		t.Fatalf("remove zoe root: %d %s", w.Code, w.Body.String())
+	}
+	w = launcherRequest(t, app, http.MethodGet, "/principals/zoe/effective-allowed-roots", zoeToken, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("zero-roots query: %d %s", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, `"allowed_roots":[]`) || strings.Contains(body, `"allowed_roots":null`) {
+		t.Fatalf("zero-roots allowed_roots = %s", body)
+	}
 }
 
 // TestSessionCreatePolicyContractMatrix proves the Session-create policy
@@ -201,6 +218,23 @@ func TestSessionCreatePolicyContractMatrix(t *testing.T) {
 	}
 	if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0] != proj {
 		t.Fatalf("launcher-restricted allowed_roots = %v, want [%s]", resp.AllowedRoots, proj)
+	}
+
+	// Zero stored roots: a Principal with an empty stored set has an empty
+	// effective ceiling for its default Launcher, and the wire contract
+	// serializes it as the empty JSON array, never null.
+	zoeToken := setupPolicyPrincipal(t, app, "zoe", app.Config.AllowedRoots[0])
+	w = launcherRequest(t, app, http.MethodDelete, "/principals/zoe/allowed-roots", testAdminToken,
+		fmt.Sprintf(`{"path":%q}`, app.Config.AllowedRoots[0]))
+	if w.Code != http.StatusOK {
+		t.Fatalf("remove zoe root: %d %s", w.Code, w.Body.String())
+	}
+	w = launcherRequest(t, app, http.MethodGet, "/sessions/create-policy", zoeToken, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("zero-roots create-policy: %d %s", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, `"allowed_roots":[]`) || strings.Contains(body, `"allowed_roots":null`) {
+		t.Fatalf("zero-roots create-policy allowed_roots = %s", body)
 	}
 
 	// System-mode admin with no selector: the same missing-selector
