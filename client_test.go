@@ -91,7 +91,7 @@ func TestListSessionsAuthHeader(t *testing.T) {
 		return readTokenFile(tokenPath)
 	}, nil)
 
-	if _, err := client.listSessions(); err != nil {
+	if _, err := client.listSessions("", ""); err != nil {
 		t.Fatalf("listSessions: %v", err)
 	}
 
@@ -789,7 +789,7 @@ func TestAPIErrorStructured(t *testing.T) {
 		return readTokenFile(tokenPath)
 	}, nil)
 
-	_, err := client.listSessions()
+	_, err := client.listSessions("", "")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -831,7 +831,7 @@ func TestAPIErrorMalformedBody(t *testing.T) {
 		return readTokenFile(tokenPath)
 	}, nil)
 
-	_, err := client.listSessions()
+	_, err := client.listSessions("", "")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -872,7 +872,7 @@ func TestAPIErrorEmptyBody(t *testing.T) {
 		return readTokenFile(tokenPath)
 	}, nil)
 
-	_, err := client.listSessions()
+	_, err := client.listSessions("", "")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -896,7 +896,7 @@ func TestTransportErrorNotAPIError(t *testing.T) {
 		return "token", nil
 	}, nil)
 
-	_, err := client.listSessions()
+	_, err := client.listSessions("", "")
 	if err == nil {
 		t.Fatal("expected error for nonexistent socket")
 	}

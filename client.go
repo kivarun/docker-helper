@@ -118,8 +118,31 @@ func (c *apiClient) doAuthenticatedRequestWithCtx(ctx context.Context, method, p
 	return resp, nil
 }
 
-func (c *apiClient) listSessions() (*listSessionsResponse, error) {
-	resp, err := c.doAuthenticatedRequest("GET", "/sessions", nil)
+// listSessionsQueryPath is the single canonical Session-list request builder:
+// each optional narrowing selector is appended only when non-empty, with
+// net/url escaping, and with no selectors the request path is exactly
+// /sessions (never a query string of empty parameters).
+func listSessionsQueryPath(principalFilter, launcherFilter string) string {
+	values := url.Values{}
+	if principalFilter != "" {
+		values.Set("principal", principalFilter)
+	}
+	if launcherFilter != "" {
+		values.Set("launcher", launcherFilter)
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return "/sessions?" + encoded
+	}
+	return "/sessions"
+}
+
+// listSessions runs the scope-first session list Query: the daemon authorizes
+// the query against the authenticated bearer and the optional Principal and
+// Launcher selectors can only narrow visibility server-side. An empty
+// selector lists everything visible to the caller; filtering is never
+// performed client-side.
+func (c *apiClient) listSessions(principalFilter, launcherFilter string) (*listSessionsResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", listSessionsQueryPath(principalFilter, launcherFilter), nil)
 	if err != nil {
 		return nil, err
 	}

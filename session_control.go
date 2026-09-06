@@ -47,6 +47,98 @@ func (a *App) resolveSessionControlScope(auth *operatorAuthority) (sessionContro
 	}
 }
 
+// resolveSessionListScope composes the authenticated authority's maximum
+// Session management scope (resolveSessionControlScope) with the optional
+// list narrowing selectors into the final sessionControlScope: the authority
+// establishes the maximum visibility and the selectors can only narrow it,
+// never expand it. Selector resolution stays inside the authority-visible
+// ownership through the existing lookup owners: an admin Principal selector
+// resolves through the stable Principal-control target owner, and a Launcher
+// selector resolves through the Launcher persistence lookups. Launcher names
+// are Principal-scoped and are never searched globally: a Launcher selector
+// without a Principal scope must be an exact well-formed global Launcher ID,
+// otherwise ErrLauncherNameRequiresPrincipal. A missing or foreign Launcher
+// is ErrLauncherNotFound (non-disclosing, whether under a Principal scope or
+// globally); a database failure keeps its own error and is never collapsed
+// into not-found. A Principal credential rejects every Principal selector —
+// even one naming its own Principal — and a Launcher credential rejects every
+// narrowing selector as ErrInvalidSelector: a narrowing selector may only
+// narrow the established maximum, never redefine authority.
+func (a *App) resolveSessionListScope(auth *operatorAuthority, principalSel, launcherSel string) (sessionControlScope, error) {
+	base, err := a.resolveSessionControlScope(auth)
+	if err != nil {
+		return sessionControlScope{}, err
+	}
+	switch {
+	case base.launcherID != "":
+		// A Launcher credential controls exactly itself: narrowing selectors
+		// would be a redundant second contract, so any selector is an
+		// authority-illegal selector.
+		if principalSel != "" || launcherSel != "" {
+			return sessionControlScope{}, ErrInvalidSelector
+		}
+		return base, nil
+	case base.principalID != 0:
+		// A Principal credential narrows only with a Launcher selector inside
+		// its own scope; a Principal selector is illegal even when it names
+		// the credential's own Principal.
+		if principalSel != "" {
+			return sessionControlScope{}, ErrInvalidSelector
+		}
+		if launcherSel == "" {
+			return base, nil
+		}
+		return a.narrowSessionScopeToLauncher(base.principalID, launcherSel)
+	case base.admin:
+		principalID := int64(0)
+		if principalSel != "" {
+			target, err := resolvePrincipalControlTarget(a.DB, auth, principalSel)
+			if err != nil {
+				return sessionControlScope{}, err
+			}
+			principalID = target.ID
+		}
+		if launcherSel == "" {
+			if principalID != 0 {
+				return sessionControlScope{principalID: principalID}, nil
+			}
+			return base, nil
+		}
+		return a.narrowSessionScopeToLauncher(principalID, launcherSel)
+	default:
+		return sessionControlScope{}, errors.New("session list authorization has no scope")
+	}
+}
+
+// narrowSessionScopeToLauncher resolves one Session-list Launcher selector
+// inside an already-narrowed ownership scope and returns the exact Launcher
+// scope. Under a resolved Principal scope (a Principal credential's own
+// scope, or an admin narrowed by a Principal selector) the selector may be a
+// Principal-scoped Launcher name or a dhl_ ID under that Principal
+// (findLauncherForPrincipal); with no Principal scope it must be an exact
+// well-formed global Launcher ID (findLauncherByID) — a name is never
+// searched globally. A missing, foreign, or malformed selector is
+// ErrLauncherNotFound (non-disclosing); a database failure keeps its own
+// error and is never collapsed into not-found.
+func (a *App) narrowSessionScopeToLauncher(principalID int64, launcherSel string) (sessionControlScope, error) {
+	var (
+		l   *LauncherWithPrincipal
+		err error
+	)
+	if principalID != 0 {
+		l, err = findLauncherForPrincipal(a.DB, principalID, launcherSel)
+	} else {
+		if !isLauncherIDSelector(launcherSel) {
+			return sessionControlScope{}, ErrLauncherNameRequiresPrincipal
+		}
+		l, err = findLauncherByID(a.DB, launcherSel)
+	}
+	if err != nil {
+		return sessionControlScope{}, err
+	}
+	return sessionControlScope{launcherID: l.ID}, nil
+}
+
 // createSelector carries the optional create request selectors for a Session.
 type createSelector struct {
 	launcherID string

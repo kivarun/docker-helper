@@ -366,25 +366,62 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	scope, err := a.resolveSessionControlScope(authCtx)
+	// Optional list narrowing selectors: an empty query value is absent,
+	// matching the launcher-list selector contract. The daemon remains the
+	// selector-resolution and authorization authority: the selectors are
+	// resolved only inside the authority-visible ownership and composed into
+	// the final sessionControlScope, which is then served by the single
+	// Session ownership query.
+	principalSel := r.URL.Query().Get("principal")
+	launcherSel := r.URL.Query().Get("launcher")
+
+	scope, err := a.resolveSessionListScope(authCtx, principalSel, launcherSel)
+
+	duration := time.Since(started).Round(time.Millisecond).String()
+
 	if err != nil {
-		duration := time.Since(started).Round(time.Millisecond).String()
-		writeRequestContextAudit(ctx, auditRecord{
+		// Selector and lookup failures keep their classified, non-disclosing
+		// contracts; a database/system failure stays the internal-error
+		// contract and is never collapsed into not-found.
+		auditRec := auditRecord{
 			Event:    "session.list",
 			Result:   "database_error",
 			Duration: duration,
-		})
-		opLog(ctx).Error("list sessions error",
-			slog.String("operation", "session_list"),
-			slog.String("error", err.Error()),
-		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		switch {
+		case errors.Is(err, ErrPrincipalNotFound):
+			auditRec.Result = "principal_not_found"
+			writeRequestContextAudit(ctx, auditRec)
+			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+		case errors.Is(err, ErrLauncherNotFound):
+			auditRec.Result = "launcher_not_found"
+			writeRequestContextAudit(ctx, auditRec)
+			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+		case errors.Is(err, ErrLauncherNameRequiresPrincipal):
+			auditRec.Result = "launcher_name_requires_principal"
+			writeRequestContextAudit(ctx, auditRec)
+			writeError(ctx, w, http.StatusBadRequest,
+				"launcher_name_requires_principal",
+				"launcher name filter requires --principal; without a Principal use a Launcher ID")
+		case errors.Is(err, ErrInvalidSelector):
+			auditRec.Result = "invalid_selector"
+			writeRequestContextAudit(ctx, auditRec)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_selector", "invalid session selector")
+		default:
+			writeRequestContextAudit(ctx, auditRec)
+			opLog(ctx).Error("list sessions error",
+				slog.String("operation", "session_list"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
 		return
 	}
 
 	sessions, err := a.listSessionsInScope(scope)
 
-	duration := time.Since(started).Round(time.Millisecond).String()
+	duration = time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
 		auditRec := auditRecord{
