@@ -703,6 +703,25 @@ export DOCKER_HELPER_SESSION_TOKEN='dht_...'
 docker-helper session list
 ```
 
+The list can be narrowed with optional selectors, which only restrict what
+the authenticated authority may already see:
+
+```bash
+# Admin: all sessions, optionally narrowed by principal and/or launcher
+docker-helper session list --system
+docker-helper session list --system --principal USER
+docker-helper session list --system --principal USER --launcher alpha
+docker-helper session list --system --launcher dhl_...   # global launcher ID
+
+# Principal credential: own sessions, optionally narrowed by launcher
+docker-helper session list --launcher alpha
+```
+
+A launcher name is principal-scoped and is never searched globally: an
+admin narrowing by name must also pass `--principal`; without it only the
+global `dhl_...` launcher ID is accepted. Foreign or missing targets fail
+with the non-disclosing not-found error.
+
 ### Delete a session
 
 ```bash

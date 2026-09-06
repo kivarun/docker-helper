@@ -158,8 +158,19 @@ found\fR, while a name is rejected locally with a hint to use the
 token. The two selectors are mutually exclusive on the wire: the resolved
 target is sent as either \fBprincipal\fR or \fBlauncher_id\fR, never both.
 .TP
-.B docker-helper session list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
-List active sessions. With \-\-json, output in JSON format.
+.B docker-helper session list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
+List active sessions. With \-\-json, output in JSON format. The optional
+selectors can only narrow the authenticated authority's visible sessions,
+never expand it: with an admin token \fB\-\-principal USER\fR narrows the
+list to that Principal's sessions and \fB\-\-launcher LAUNCHER\fR to one
+Launcher's sessions (a name requires \fB\-\-principal USER\fR because
+Launcher names are principal-scoped and are never searched globally; a
+global Launcher ID \fIdhl_...\fR is sufficient without it). With a
+principal credential \fB\-\-launcher\fR accepts a name or ID inside that
+credential's own scope and \fB\-\-principal\fR is invalid; with a launcher
+credential the list stays restricted to that launcher's sessions and the
+selectors are invalid. A missing or foreign target is the non-disclosing
+\fBlauncher not found\fR / \fBprincipal not found\fR.
 .TP
 .B docker-helper session delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-id SESSION_ID [\-\-json]
 Delete a session by ID. With \-\-json, output in JSON format.

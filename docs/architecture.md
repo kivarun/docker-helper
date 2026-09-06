@@ -404,21 +404,46 @@ List active sessions. Requires admin token, Principal credential, or
 Launcher credential.
 
 ```
-docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]
+docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
 ```
 
 Flags:
 
 | Flag | Description |
 |------|-------------|
+| `--principal USER` | Principal username filter (admin authentication; narrowing only; the daemon authorizes visibility) |
+| `--launcher LAUNCHER` | Launcher name or ID filter (admin without `--principal` must use an ID) |
 | `--json` | Output in JSON format |
 
 Returns a table of active sessions with ID, workspace, launcher, creation
 time, and expiration time.
 
-With admin token: lists all sessions.
-With Principal credential: lists only sessions for the credential's principal.
-With Launcher credential: lists only sessions owned by the credential's launcher.
+The list is a scope-first Query, matching the launcher and credential
+lists: authentication establishes the maximum visibility and the optional
+selectors can only narrow it, never expand it. The selectors are resolved
+server-side inside the authority-visible ownership and composed into the
+final Session scope, which one existing Session ownership query serves;
+filtering is never performed client-side.
+
+With admin token: lists all sessions, optionally narrowed with
+`--principal USER` (that Principal's sessions) and/or
+`--launcher LAUNCHER` (one Launcher's sessions; `principal + launcher`
+means that Launcher under that Principal). A `dhl_...` Launcher ID is
+valid without `--principal`; a Launcher name is Principal-scoped and is
+never searched globally, so an admin narrowing by name must also name the
+Principal (otherwise `400 launcher_name_requires_principal`). With
+Principal credential: lists only that principal's sessions, optionally
+narrowed with `--launcher` (name or ID inside its own scope);
+`--principal` is invalid even for the credential's own Principal. With
+Launcher credential: lists only that launcher's sessions; the selectors
+are invalid (there is no narrowing contract for this authority).
+
+Selector resolution reuses the existing lookup owners: a missing or
+unknown Principal is the non-disclosing `404 principal_not_found`, a
+missing or foreign Launcher (name or ID) is the non-disclosing
+`404 launcher_not_found`, an authority-illegal selector is
+`400 invalid_selector`, and a database or system failure keeps its own
+error (never collapsed into not-found).
 
 ### docker-helper session delete
 
@@ -869,12 +894,20 @@ Endpoint and token resolution for default (no `--system`) mode:
 
 Session management is authenticated by authority:
 - admin token -> global session management (create with explicit selector,
-  list all, delete any);
+  list all with optional `?principal=`/`?launcher=` narrowing, delete any);
 - Principal credential -> principal-scoped session management (create for
   the principal's default or an explicit launcher, list and delete only that
-  principal's sessions, manage that principal's launchers);
+  principal's sessions with optional `?launcher=` narrowing inside that
+  scope, manage that principal's launchers);
 - Launcher credential -> launcher-scoped session management (create for its
   own launcher, list and delete only its launcher's sessions).
+
+List visibility follows the scope-first rule shared with the launcher and
+credential lists: the authority establishes the maximum visible scope and
+the optional selectors only narrow it, never expand it. Selector
+resolution reuses the existing Principal-control target and Launcher
+lookup owners inside the authority-visible ownership; Launcher names are
+Principal-scoped and are never searched globally.
 
 `GET /auth` reports the authenticated authority to the caller as
 `{"authority": "admin"}`, `{"authority": "principal", "principal": "..."}`
@@ -1195,6 +1228,17 @@ Launcher and its Principal).
   authenticated principal (same non-disclosure rules as before);
 - admin token (system mode): exactly one selector is required; admin token
   (user mode): omission resolves the local daemon-owner default launcher.
+
+`GET /sessions` narrowing selectors are deliberately different from the
+create selectors: `principal + launcher` on the list is not a conflicting
+pair — it means "this Launcher under this Principal" — so create-selector
+conflict semantics are not reused for listing. The list pipeline is one
+path: authenticate the authority, derive the maximum Session management
+scope (`resolveSessionControlScope`), parse the optional narrowing
+selectors, resolve them only inside the authority-visible ownership, and
+serve the resulting scope through the single Session ownership query
+(`listSessionsInScope`) — never a client-side filter and never a
+Launcher-ID enumeration in memory.
 
 ### Launcher lifecycle and cleanup
 
@@ -1895,6 +1939,10 @@ Current error codes (non-exhaustive):
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
 | `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
+| `principal_not_found` | `GET /sessions?principal=` | the selected Principal does not exist (list narrowing; non-disclosing) |
+| `launcher_not_found` | `GET /sessions?launcher=` | the selected Launcher does not exist inside the narrowed scope (list narrowing; non-disclosing) |
+| `launcher_name_requires_principal` | `GET /sessions?launcher=` | a Launcher-name narrowing selector was supplied without a Principal scope (names are never searched globally) |
+| `invalid_selector` | `GET /sessions` | a narrowing selector is illegal for the authenticated authority (a Principal selector under a Principal credential, any selector under a Launcher credential) |
 | `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero and the failure is not classified |
 | `image_not_found` | `POST /pull` | docker pull: image/repository not found |
