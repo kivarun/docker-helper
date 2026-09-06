@@ -100,8 +100,8 @@ cleanup_principal() {
 
 # setup_pair USER_A USER_B: provision the A/B Principal pair, create each
 # Principal's extra Launcher (alpha/beta), and print one line with the
-# fixture state (ALPHA_ID BETA_ID HOME_A HOME_B, space separated). Returns
-# non-zero on setup failure.
+# fixture state (alpha dhl_ ID, beta dhl_ ID, home A, home B — bare values,
+# space separated, read positionally). Returns non-zero on setup failure.
 setup_pair() {
   local user_a="$1" user_b="$2" home_a home_b alpha_out beta_out
   home_a="$(reg_setup_principal "$user_a")" || return 1
@@ -116,16 +116,22 @@ setup_pair() {
     return 1
   }
 
-  printf 'ALPHA_ID=%s BETA_ID=%s HOME_A=%s HOME_B=%s\n' \
+  printf '%s %s %s %s\n' \
     "$(printf '%s' "$alpha_out" | json_field id)" \
     "$(printf '%s' "$beta_out" | json_field id)" \
     "$home_a" "$home_b"
 }
 
 create_session() { # cred workspace extra-args...
-  local cred="$1" ws="$2"
+  local cred="$1" ws="$2" out rc
   shift 2
-  dh session create --system --token-file "$cred" --workspace "$ws" --json "$@" 2>/dev/null | json_field id
+  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json "$@" 2>"$TMPDIR_REG13/last-session-create.err")"
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    head -2 "$TMPDIR_REG13/last-session-create.err" >&2
+    return 1
+  fi
+  printf '%s' "$out" | json_field id
 }
 
 # ---------------------------------------------------------------------------
@@ -290,9 +296,12 @@ subcase_c() {
   # Issue the alpha Launcher credential (the positional selector is the
   # Launcher's global dhl_ ID).
   local lc_out lc_token lc_cred
-  lc_out="$(dh launcher credential create --system --principal "$user_a" "$ALPHA_ID" 2>/dev/null)"
+  lc_out="$(dh launcher credential create --system --principal "$user_a" "$ALPHA_ID" 2>"$TMPDIR_REG13/lc.err")"
   lc_token="$(printf '%s' "$lc_out" | json_field token || true)"
-  [ -n "$lc_token" ] || { reg_fail "C: launcher credential create failed"; return; }
+  if [ -z "$lc_token" ]; then
+    reg_fail "C: launcher credential create failed: $(head -2 "$TMPDIR_REG13/lc.err" 2>/dev/null | tr '\n' ' ')"
+    return
+  fi
   lc_cred="$TMPDIR_REG13/c.lc.token"
   printf '%s\n' "$lc_token" > "$lc_cred"; chmod 600 "$lc_cred"
 
