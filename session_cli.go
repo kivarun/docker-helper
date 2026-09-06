@@ -197,12 +197,25 @@ var sessionCreateCommand = &Command{
 var sessionListCommand = &Command{
 	Name:    "list",
 	Summary: "List active sessions",
-	Usage:   "docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
+	Usage:   "docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := &explicitStringFlag{}
+		fs.Var(principal, "principal", "Principal username filter (admin authentication; narrowing only; the daemon authorizes visibility)")
+		launcher := &explicitStringFlag{}
+		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...) filter (admin without --principal must use an ID)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
+			Validate: func() error {
+				if principal.set && principal.value == "" {
+					return fmt.Errorf("--principal value must not be empty")
+				}
+				if launcher.set && launcher.value == "" {
+					return fmt.Errorf("--launcher value must not be empty")
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -214,7 +227,11 @@ var sessionListCommand = &Command{
 					return 1
 				}
 
-				result, err := client.listSessions()
+				// Scope-first list: the daemon authorizes the query against the
+				// authenticated bearer and performs the narrowing server-side;
+				// both selectors are sent as-is and the CLI never filters a
+				// broader collection locally.
+				result, err := client.listSessions(principal.value, launcher.value)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
