@@ -2426,6 +2426,41 @@ func TestCompletionPolicyOperatorFlagForwarding(t *testing.T) {
 	}
 }
 
+// TestCompletionPolicyFlagBeforeCommandWords proves the generated word walk
+// resolves the command path when a flag is typed before the command words:
+// while the path is unknown the value-taking rule is not decidable, so the
+// next word stays in the walk and the policy query still reaches the
+// canonical owner.
+func TestCompletionPolicyFlagBeforeCommandWords(t *testing.T) {
+	base := t.TempDir()
+	rootA := filepath.Join(base, "root-a")
+	if err := os.MkdirAll(rootA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	script := completionScript(t)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "--json", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--allowed-root", "",
+	})
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{rootA}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("anchors = %v, want %v", results, want)
+	}
+	requests.waitFor(t, 1)
+}
+
 // TestCompletionPolicyForwardedEndpointForm proves the --endpoint=VALUE form
 // reaches the same daemon: the inner query is issued through the forwarded
 // endpoint and the token file forwarded from the typed line.
