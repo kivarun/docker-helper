@@ -96,7 +96,12 @@ run_completion() {
     eval "COMP_WORDS=($2)"
     COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
     COMPREPLY=()
+    # Trace the completion function into the snippet stderr: on failure
+    # assert_completion prints the trace tail, which shows the exact
+    # machine-facing query the harness drove and its result.
+    set -x
     "$func" || exit 4
+    set +x
     printf "%s\n" "${COMPREPLY[@]}"
   ' _ "$script" "$words" 2>"$err_file"
   local rc=$?
@@ -108,8 +113,8 @@ run_completion() {
 completion_harness_diag() {
   local rc err
   rc="$(cat "$TMPDIR_REG14/comp.rc" 2>/dev/null)" || rc="none"
-  err="$(head -2 "$TMPDIR_REG14/comp.err" 2>/dev/null | tr '\n' ' ')"
-  printf 'harness rc=%s err=%s' "$rc" "$err"
+  err="$(tail -c 900 "$TMPDIR_REG14/comp.err" 2>/dev/null | tail -4 | tr '\n' ' ')"
+  printf 'harness rc=%s trace=[%s]' "$rc" "$err"
 }
 
 # assert_completion LABEL EXPECTED ACTUAL: EXPECTED and ACTUAL are
