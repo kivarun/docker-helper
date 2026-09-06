@@ -238,7 +238,7 @@ func waitForOperationWithSignalCh(c *apiClient, opID string, stdout, stderr io.W
 var pullCommand = &Command{
 	Name:       "pull",
 	Summary:    "Pull a Docker image",
-	Usage:      "docker-helper pull IMAGE",
+	Usage:      "docker-helper pull [--system] [--endpoint ENDPOINT] IMAGE",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

@@ -243,8 +243,15 @@ selects another named credential. The principal defaults to the owner of
 the authenticated principal credential; with an admin token USER is
 required.
 .SS Launcher Commands
+Like the other operator command families, every launcher command accepts
+the common operator flags
+.BR \-\-system ,
+.B \-\-endpoint\ ENDPOINT ,
+and
+.BR \-\-token-file\ FILE ;
+they appear in each synopsis below.
 .TP
-.B docker-helper launcher create [\-\-principal USER] [\-\-name NAME] [\-\-allowed-root PATH]... [\-\-issue-credential | \-\-no-credential]
+.B docker-helper launcher create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-name NAME] [\-\-allowed-root PATH]... [\-\-issue-credential | \-\-no-credential]
 Create a launcher for a principal. If \fB\-\-principal\fR is omitted it is
 inferred from the authenticated credential via \fBGET /auth\fR. The launcher
 name defaults to \fBdefault\fR; every principal always has its \fBdefault\fR
@@ -279,39 +286,42 @@ launcher names are principal-scoped and are never searched globally
 non-disclosing \fB404 launcher_not_found\fR. No principal inference happens
 in the CLI.
 .TP
-.B docker-helper launcher show [\-\-principal USER] [LAUNCHER]
+.B docker-helper launcher show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
 Show launcher details.
 .TP
-.B docker-helper launcher set [\-\-principal USER] [\-\-name NAME] [\-\-enabled true|false] [LAUNCHER]
+.B docker-helper launcher set [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-name NAME] [\-\-enabled true|false] [LAUNCHER]
 Modify a launcher with at least one of \fB\-\-name\fR or \fB\-\-enabled\fR.
 .TP
-.B docker-helper launcher delete [\-\-principal USER] [LAUNCHER]
+.B docker-helper launcher delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
 Delete a launcher.
 .TP
-.B docker-helper launcher scope set [\-\-principal USER] [\-\-inherit | \-\-allowed-root PATH [\-\-allowed-root PATH]...] [LAUNCHER]
+.B docker-helper launcher scope set [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-inherit | \-\-allowed-root PATH [\-\-allowed-root PATH]...] [LAUNCHER]
 Replace a launcher scope atomically. \fB\-\-inherit\fR and
 \fB\-\-allowed-root\fR are mutually exclusive; restricted scope requires at
 least one allowed root.
 .TP
-.B docker-helper launcher credential create [\-\-principal USER] [LAUNCHER]
+.B docker-helper launcher credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
 Create a launcher credential and print its bearer secret once.
 Because a launcher holds at most one credential, a second create returns
 the normal already-exists conflict error.
 .TP
-.B docker-helper launcher credential show [\-\-principal USER] [LAUNCHER]
+.B docker-helper launcher credential show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
 Show a launcher's credential metadata. No secret is printed.
 .TP
-.B docker-helper launcher credential rotate [\-\-principal USER] [LAUNCHER]
+.B docker-helper launcher credential rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
 Rotate a launcher credential and print the new bearer secret once.
 .TP
-.B docker-helper launcher credential delete [\-\-principal USER] [LAUNCHER]
+.B docker-helper launcher credential delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
 Delete a launcher's credential. No secret is printed.
 .PP
 LAUNCHER is a launcher name or ID (\fBdhl_\fR + 32 hex characters),
 resolved under the principal selected by \fB\-\-principal\fR or inferred
 from the authenticated principal credential; omitting it selects that
 principal's \fBdefault\fR launcher. With an admin token \fB\-\-principal\fR
-is required; the CLI never searches launchers globally by name.
+is required; the single exception is an admin targeting an individual
+launcher by its globally-unique \fBdhl_\fR ID, where the owning principal
+is resolved from the daemon's scope-first launcher list query instead of
+being named. The CLI never searches launchers globally by name.
 .SS Credential Commands
 The canonical credential lifecycle commands live under
 .BR "principal credential" ;
@@ -431,7 +441,8 @@ The presence of \fBXDG_RUNTIME_DIR\fR alone does not select a user socket;
 agent commands fall back to the system socket when no user-mode daemon is
 present. \fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
 .SH OPERATOR ENDPOINT SELECTION
-For reload, session, principal, credential, and admin-token rotate commands, select the target daemon:
+For launcher, reload, session, principal, credential, completion, and
+admin-token rotate commands, select the target daemon:
 .IP \(bu 4
 \fB\-\-system\fR: Connect to system daemon (default for system mode)
 .IP \(bu 4

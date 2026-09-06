@@ -88,3 +88,81 @@ func TestDocsNoLegacyAdminPath(t *testing.T) {
 		}
 	}
 }
+
+// TestManpageSynopsesMatchParser proves the man-page command synopses stay
+// aligned with the parser tree:
+//
+//   - every `.B docker-helper <path>` synopsis line resolves to a registered
+//     command path (a stale command name such as a retired verb fails this);
+//   - every registered Launcher leaf command has a man synopsis;
+//   - every Launcher leaf synopsis lists the three common operator flags its
+//     parser registers (--system, --endpoint, --token-file), the known-drift
+//     area where Launcher synopses historically omitted them.
+//
+// It is a line-level smoke check, not a roff parser: only lines that start
+// with the `.B docker-helper` synopsis macro are considered.
+func TestManpageSynopsesMatchParser(t *testing.T) {
+	data, err := os.ReadFile("docs/man/docker-helper.1")
+	if err != nil {
+		t.Fatalf("cannot read manpage source: %v", err)
+	}
+
+	allowed := map[string]bool{}
+	for _, p := range walkCommandPaths(rootCommand, nil) {
+		allowed[strings.Join(p, " ")] = true
+	}
+
+	launcherLeaves := map[string]bool{}
+	for _, p := range walkCommandPaths(rootCommand, nil) {
+		if len(p) == 0 || p[0] != "launcher" {
+			continue
+		}
+		cmd, _ := rootCommand.resolveCommandPath(p)
+		if cmd != nil && cmd.NewInvocation != nil {
+			launcherLeaves[strings.Join(p, " ")] = true
+		}
+	}
+	if len(launcherLeaves) < 10 {
+		t.Fatalf("only %d launcher leaf paths walked; tree walk is incomplete", len(launcherLeaves))
+	}
+
+	synopses := map[string]bool{}
+	for i, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, ".B docker-helper ") {
+			continue
+		}
+		var path []string
+		for _, tok := range strings.Fields(trimmed)[2:] {
+			// Stop at the first flag/bracket/roff escape or uppercase
+			// positional placeholder: everything after the command path is
+			// synopsis arguments, not path components.
+			if strings.HasPrefix(tok, "-") || strings.HasPrefix(tok, "[") || strings.HasPrefix(tok, `\`) ||
+				strings.ContainsAny(tok, "AZERTYUIOPQSDFGHJKLMWXCVBN&|<") {
+				break
+			}
+			path = append(path, tok)
+		}
+		if len(path) == 0 {
+			continue
+		}
+		joined := strings.Join(path, " ")
+		synopses[joined] = true
+		if !allowed[joined] {
+			t.Errorf("docs/man/docker-helper.1:%d: synopsis names unknown command %q", i+1, joined)
+		}
+		if launcherLeaves[joined] {
+			for _, flag := range []string{`\-\-system`, `\-\-endpoint`, `\-\-token-file`} {
+				if !strings.Contains(trimmed, flag) {
+					t.Errorf("docs/man/docker-helper.1:%d: launcher synopsis %q is missing operator flag %s", i+1, joined, flag)
+				}
+			}
+		}
+	}
+
+	for path := range launcherLeaves {
+		if !synopses[path] {
+			t.Errorf("registered launcher command %q has no man synopsis", path)
+		}
+	}
+}

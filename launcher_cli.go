@@ -242,7 +242,7 @@ func launcherDefaultExists(client *apiClient, username string) bool {
 var launcherCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a launcher",
-	Usage:      "docker-helper launcher create [--principal USER] [--name NAME] [--allowed-root PATH]... [--issue-credential | --no-credential]",
+	Usage:      "docker-helper launcher create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--allowed-root PATH]... [--issue-credential | --no-credential]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -364,7 +364,7 @@ var launcherListCommand = &Command{
 var launcherShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show launcher details",
-	Usage:      "docker-helper launcher show [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -400,7 +400,7 @@ var launcherShowCommand = &Command{
 var launcherSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Modify a launcher name or enabled state",
-	Usage:      "docker-helper launcher set [--principal USER] [--name NAME] [--enabled true|false] [LAUNCHER]",
+	Usage:      "docker-helper launcher set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--enabled true|false] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -457,7 +457,7 @@ var launcherSetCommand = &Command{
 var launcherDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a launcher",
-	Usage:      "docker-helper launcher delete [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -497,7 +497,7 @@ var launcherScopeCommand = &Command{
 var launcherScopeSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Replace launcher scope",
-	Usage:      "docker-helper launcher scope set [--principal USER] [--inherit | --allowed-root PATH [--allowed-root PATH]...] [LAUNCHER]",
+	Usage:      "docker-helper launcher scope set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--inherit | --allowed-root PATH [--allowed-root PATH]...] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -568,7 +568,7 @@ var launcherCredentialCommand = &Command{
 var launcherCredentialCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a launcher credential",
-	Usage:      "docker-helper launcher credential create [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -604,7 +604,7 @@ var launcherCredentialCreateCommand = &Command{
 var launcherCredentialShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show a launcher credential",
-	Usage:      "docker-helper launcher credential show [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher credential show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -640,7 +640,7 @@ var launcherCredentialShowCommand = &Command{
 var launcherCredentialRotateCommand = &Command{
 	Name:       "rotate",
 	Summary:    "Rotate a launcher credential",
-	Usage:      "docker-helper launcher credential rotate [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -676,7 +676,7 @@ var launcherCredentialRotateCommand = &Command{
 var launcherCredentialDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a launcher credential",
-	Usage:      "docker-helper launcher credential delete [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher credential delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

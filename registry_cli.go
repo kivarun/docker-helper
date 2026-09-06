@@ -23,7 +23,7 @@ var registryCommand = &Command{
 var registryLoginCommand = &Command{
 	Name:    "login",
 	Summary: "Log in to a container registry",
-	Usage:   "docker-helper registry login --registry REGISTRY --username USER",
+	Usage:   "docker-helper registry login --registry REGISTRY --username USER [--password-stdin] [--json]",
 	Help: `Log in to a container registry for the current session.
 
 Credentials are session-scoped and ephemeral. They are stored in the

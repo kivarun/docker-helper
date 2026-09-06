@@ -90,8 +90,8 @@ Enable the audit event stream. When absent, the effective value
 depends on deployment mode: in system mode (effective UID 0) audit is always
 \fBtrue\fR; in user mode it is \fBtrue\fR only when effective \fBlog_level\fR is
 \fBdebug\fR, \fBfalse\fR otherwise. An explicit value always overrides the default.
-The audit stream covers authentication, session, principal, credential,
-admin, and Docker-operation events.
+The audit stream covers authentication, session, principal, launcher,
+credential, admin, and Docker-operation events.
 .TP
 .B shutdown_timeout (string, optional, default="30s", maximum="30s")
 Graceful shutdown timeout using Go duration syntax. The maximum is 30s: the
@@ -193,7 +193,8 @@ The admin token is always located at \fIdirname(config_path)/admin.token\fR.
 When \fBDOCKER_HELPER_CONFIG\fR overrides the config path, the admin token
 is also resolved relative to the overridden config directory.
 .PP
-Principal allowed_roots are stored in the state database, not in \fIconfig.json\fR.
+Principal and Launcher allowed roots are stored in the state database, not
+in \fIconfig.json\fR.
 .SH MANDATORY ACCESS CONTROL
 System mode requires exactly one active backend: AppArmor or enforcing
 SELinux. Neither, both, and permissive SELinux fail closed.
