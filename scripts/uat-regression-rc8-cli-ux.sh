@@ -55,11 +55,19 @@ reg_require_cmd bash "completion acceptance drives a real Bash"
 TMPDIR_REG14="/tmp/uat-reg14"
 mkdir -p "$TMPDIR_REG14"
 
+# cleanup_principal USER removes the fixture Principal and its OS user.
+cleanup_principal() {
+  local user="$1"
+  dh principal delete --system "$user" >/dev/null 2>&1 || true
+  userdel -r "$user" >/dev/null 2>&1 || true
+}
+
 # run_completion SCRIPT WORDS... drives the completion function Bash actually
 # registered for docker-helper (discovered through `complete -p`, one -F
 # registration) with the given command line; prints one COMPREPLY entry per
-# line. The snippet's exit code and stderr are surfaced through
-# RC_COMPLETION / ERR_COMPLETION for failure attribution.
+# line. The snippet's exit code and stderr are persisted to files under
+# TMPDIR_REG14 (command substitution would lose shell variables) and are
+# reported by assert_completion for failure attribution.
 run_completion() {
   local script="$1"
   shift
@@ -69,8 +77,7 @@ run_completion() {
     words+="${words:+ }${wq}"
   done
   err_file="$TMPDIR_REG14/comp.err"
-  RC_COMPLETION=0
-  ERR_COMPLETION=""
+  : > "$err_file"
   bash -c '
     set -u
     source "$1" || exit 3
@@ -92,11 +99,17 @@ run_completion() {
     "$func" || exit 4
     printf "%s\n" "${COMPREPLY[@]}"
   ' _ "$script" "$words" 2>"$err_file"
-  RC_COMPLETION=$?
-  if [ "$RC_COMPLETION" -ne 0 ]; then
-    ERR_COMPLETION="$(head -2 "$err_file" | tr '\n' ' ')"
-  fi
-  rm -f "$err_file"
+  local rc=$?
+  printf '%s\n' "$rc" > "$TMPDIR_REG14/comp.rc"
+}
+
+# completion_harness_diag LABEL-free diagnostic of the last run_completion
+# invocation (rc + stderr head), safe under set -u when nothing ran yet.
+completion_harness_diag() {
+  local rc err
+  rc="$(cat "$TMPDIR_REG14/comp.rc" 2>/dev/null)" || rc="none"
+  err="$(head -2 "$TMPDIR_REG14/comp.err" 2>/dev/null | tr '\n' ' ')"
+  printf 'harness rc=%s err=%s' "$rc" "$err"
 }
 
 # assert_completion LABEL EXPECTED ACTUAL: EXPECTED and ACTUAL are
@@ -111,7 +124,7 @@ assert_completion() {
     reg_ok "$label"
     return 0
   fi
-  reg_fail "$label: suggestions = [$(printf '%s' "$actual" | tr '\n' ' ' | redact)] want [$expected_csv] (harness rc=$RC_COMPLETION err=$ERR_COMPLETION)"
+  reg_fail "$label: suggestions = [$(printf '%s' "$actual" | tr '\n' ' ' | redact)] want [$expected_csv] ($(completion_harness_diag))"
   return 1
 }
 
