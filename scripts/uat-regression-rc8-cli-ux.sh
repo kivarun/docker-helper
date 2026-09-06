@@ -109,11 +109,12 @@ run_completion() {
 }
 
 # completion_harness_diag LABEL-free diagnostic of the last run_completion
-# invocation (rc + stderr head), safe under set -u when nothing ran yet.
+# invocation (rc + key trace lines: the driven introspection query and the
+# values it returned), safe under set -u when nothing ran yet.
 completion_harness_diag() {
   local rc err
   rc="$(cat "$TMPDIR_REG14/comp.rc" 2>/dev/null)" || rc="none"
-  err="$(tail -c 900 "$TMPDIR_REG14/comp.err" 2>/dev/null | tail -4 | tr '\n' ' ')"
+  err="$(grep -E 'docker-helper completion|(\+ )?(\+\+ )?(roots|vals|mode)=' "$TMPDIR_REG14/comp.err" 2>/dev/null | tail -6 | tr '\n' '; ')"
   printf 'harness rc=%s trace=[%s]' "$rc" "$err"
 }
 
