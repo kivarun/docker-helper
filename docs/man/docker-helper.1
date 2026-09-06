@@ -262,9 +262,12 @@ they appear in each synopsis below.
 .B docker-helper launcher create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-name NAME] [\-\-allowed-root PATH]... [\-\-issue-credential | \-\-no-credential]
 Create a launcher for a principal. If \fB\-\-principal\fR is omitted it is
 inferred from the authenticated credential via \fBGET /auth\fR. The launcher
-name defaults to \fBdefault\fR; every principal always has its \fBdefault\fR
-launcher (provisioned automatically at principal creation), so an omitted
+name defaults to \fBdefault\fR; a principal's \fBdefault\fR launcher is
+provisioned automatically at principal creation, so an omitted
 name conflicts if the principal already has a launcher named \fBdefault\fR.
+That launcher is a normal, mutable launcher and can later be renamed or
+deleted; only the reserved user-mode daemon-owner default Launcher is
+permanently protected.
 Before prompting for a credential the CLI checks for an existing
 \fBdefault\fR launcher and, when one exists, fails with
 \fBlauncher "<name>" already exists for principal "<user>"\fR and a hint to

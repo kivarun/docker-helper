@@ -75,4 +75,3 @@ adding a parallel renewal mechanism or changing Session ownership.
 - desired state, automatic resurrection, adoption, or background orchestration;
 - durable workflow-result collection, which remains separate from Session
   lifetime.
-

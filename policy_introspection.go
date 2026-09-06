@@ -96,10 +96,12 @@ type sessionCreatePolicyResponse struct {
 // Launcher, and effective roots — corresponds to one coherent policy state
 // exactly like a real concurrent Session create would observe. It adds none
 // of the create side effects: no workspace validation, no MAC preparation,
-// no persistence. Release 2.1 session create sends no selectors, so the
-// query resolves with an empty selector set; a system-mode admin without a
-// resolvable Launcher therefore receives the same missing-selector contract
-// the real create would return.
+// no persistence. The query resolves with an empty selector set because the
+// endpoint shows the policy for creating a Session without an explicit
+// owner selection; Session create itself supports selectors. A system-mode
+// admin without a resolvable Launcher therefore receives the same
+// missing-selector contract the real create would return in that
+// no-selector case.
 func (a *App) handleSessionCreatePolicy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
