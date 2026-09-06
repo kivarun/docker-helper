@@ -31,6 +31,7 @@ type auditRecord struct {
 	LauncherName          string       `json:"launcher_name,omitempty"`
 	LauncherScope         string       `json:"launcher_scope,omitempty"`
 	LauncherEnabled       *bool        `json:"launcher_enabled,omitempty"`
+	LauncherAllowedRoot   string       `json:"launcher_path,omitempty"`
 	Result                string       `json:"result,omitempty"`
 	ExitCode              *int         `json:"exit_code,omitempty"`
 	Duration              string       `json:"duration,omitempty"`

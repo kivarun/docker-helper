@@ -295,7 +295,45 @@ var principalAllowedRootCommand = &Command{
 	Summary: "Manage principal allowed roots",
 	Subcommands: []*Command{
 		principalAllowedRootAddCommand,
+		principalAllowedRootListCommand,
 		principalAllowedRootRemoveCommand,
+	},
+}
+
+var principalAllowedRootListCommand = &Command{
+	Name:       "list",
+	Summary:    "List a principal's allowed roots",
+	Usage:      "docker-helper principal allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] USER",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				username := fs.Args()[0]
+
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				result, err := client.showPrincipal(username)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				for _, root := range result.AllowedRoots {
+					fmt.Fprintln(stdout, root)
+				}
+				return 0
+			},
+		}
 	},
 }
 

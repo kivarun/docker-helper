@@ -872,10 +872,11 @@ func TestCompletionNoWorkspaceRoot(t *testing.T) {
 		t.Error("prefix 'wo' must NOT yield workspace-root")
 	}
 
-	// completion must complete "bash" and the roots query namespace.
+	// completion must complete "bash", the roots query namespace, and the
+	// selectors query namespace.
 	results = runCompletion(t, script, []string{"docker-helper", "completion", ""})
-	if !slices.Equal(results, []string{"bash", "roots"}) {
-		t.Errorf("expected [bash roots], got %v", results)
+	if !slices.Equal(results, []string{"bash", "roots", "selectors"}) {
+		t.Errorf("expected [bash roots selectors], got %v", results)
 	}
 }
 
@@ -1939,41 +1940,6 @@ func TestCompletionPolicySymlinkInsideSuggested(t *testing.T) {
 	}
 }
 
-// TestCompletionPolicyScopeSetAllowedRoot proves launcher scope set shares
-// the same principal roots provider.
-func TestCompletionPolicyScopeSetAllowedRoot(t *testing.T) {
-	base := t.TempDir()
-	rootA := filepath.Join(base, "root-a")
-	if err := os.MkdirAll(rootA, 0755); err != nil {
-		t.Fatal(err)
-	}
-	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
-			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
-			})
-			return
-		}
-		http.NotFound(w, r)
-	})
-
-	script := completionScript(t)
-	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--principal", "alice", "--allowed-root", "",
-	})
-	if stderr != "" {
-		t.Fatalf("policy completion must not write to stderr: %q", stderr)
-	}
-	if want := []string{rootA}; !slices.Equal(sortedTrimmed(results), want) {
-		t.Errorf("anchors = %v, want %v", results, want)
-	}
-	requests.waitFor(t, 1)
-	if got := requests.snapshot(); len(got) != 1 || got[0].path != "/principals/alice/effective-allowed-roots" {
-		t.Fatalf("requests = %+v", got)
-	}
-}
-
 // TestCompletionPolicySessionWorkspaceAnchors proves session create
 // --workspace offers the Session-create policy roots as traversal anchors
 // and that the query is the session policy query — the restricted
@@ -2030,6 +1996,378 @@ func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
 		if r != restricted && !strings.HasPrefix(r, restricted+"/") {
 			t.Errorf("inside restricted root must stay confined, got %q", r)
 		}
+	}
+}
+
+// TestCompletionPolicySessionSelectorsNarrowWorkspace proves the manual-UAT
+// regression: completing `session create --launcher killme2 --workspace`
+// forwards the typed launcher selector through docker-helper, and the daemon
+// answers with exactly the effective roots the real create would use — the
+// restricted Launcher's roots only, never the wider Principal scope. Both
+// selector forms (--launcher VALUE and --launcher=VALUE) reach the same
+// normalized query. The typed selectors travel as separate Bash arguments,
+// never as policy guessed in the shell.
+func TestCompletionPolicySessionSelectorsNarrowWorkspace(t *testing.T) {
+	base := t.TempDir()
+	opt := filepath.Join(base, "opt", "michael")
+	home := filepath.Join(base, "home", "michael")
+	for _, dir := range []string{opt, filepath.Join(opt, "src"), home} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sessions/create-policy" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		// The stub answers as the canonical owner would: the typed selector
+		// resolves the restricted Launcher; the selectorless query resolves
+		// the default Launcher with the wider Principal ceiling.
+		roots := []string{home, opt}
+		if r.URL.Query().Get("launcher") == "killme2" {
+			roots = []string{opt}
+		}
+		writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
+			OK: true, Principal: "michael", LauncherID: "dhl_x", Launcher: "killme2",
+			AllowedRoots: roots,
+		})
+	})
+
+	script := completionScript(t)
+
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--launcher", "killme2", "--workspace", "",
+	})
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	requests.waitFor(t, 1)
+	if got := requests.snapshot()[0].query; got != "launcher=killme2" {
+		t.Fatalf("typed --launcher must reach the normalized create-policy query, got %q", got)
+	}
+	if !slices.Contains(results, opt) {
+		t.Errorf("restricted root must be offered, got %v", results)
+	}
+	if slices.Contains(results, home) {
+		t.Errorf("the wider Principal root must not be offered, got %v", results)
+	}
+
+	// The --launcher=VALUE form reaches the same query and the same result.
+	resultsEq, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--launcher=killme2", "--workspace", "",
+	})
+	if got := requests.snapshot()[1].query; got != "launcher=killme2" {
+		t.Fatalf("--launcher= form must reach the same normalized query, got %q", got)
+	}
+	if !slices.Equal(results, resultsEq) {
+		t.Errorf("selector forms differ: %v vs %v", results, resultsEq)
+	}
+
+	// Selectorless completion keeps the default-target semantics: the wider
+	// Principal ceiling is offered (the default Launcher inherits it).
+	resultsDefault, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", "",
+	})
+	if !slices.Contains(resultsDefault, home) || !slices.Contains(resultsDefault, opt) {
+		t.Errorf("selectorless completion must keep the default-target roots, got %v", resultsDefault)
+	}
+}
+
+// TestCompletionPolicyNoDuplicateCandidates proves the manual-UAT duplicate
+// regression is fixed: a path that qualifies both as an entry anchor and as
+// a directory under a wider root (nested roots) is suggested once, and the
+// final COMPREPLY is unique and deterministic.
+func TestCompletionPolicyNoDuplicateCandidates(t *testing.T) {
+	base := t.TempDir()
+	wide := filepath.Join(base, "wide")
+	nested := filepath.Join(wide, "nested")
+	if err := os.MkdirAll(filepath.Join(nested, "deeper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
+			OK: true, Principal: "alice", LauncherID: "dhl_x", Launcher: "default",
+			AllowedRoots: []string{wide, nested},
+		})
+	})
+
+	script := completionScript(t)
+	results, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", wide + "/",
+	})
+	seen := make(map[string]int)
+	for _, r := range results {
+		seen[r]++
+	}
+	for r, n := range seen {
+		if n > 1 {
+			t.Errorf("candidate %q suggested %d times, COMPREPLY must be unique", r, n)
+		}
+	}
+	if !slices.Contains(results, nested) {
+		t.Errorf("nested root must be offered, got %v", results)
+	}
+	// Deterministic: the same input yields the same ordered reply.
+	resultsAgain, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", wide + "/",
+	})
+	if !slices.Equal(results, resultsAgain) {
+		t.Errorf("COMPREPLY must be deterministic: %v vs %v", results, resultsAgain)
+	}
+}
+
+// startSelectorsPolicyServer stubs every daemon surface the selector and
+// policy completion queries may touch, with the authority carried by the
+// recorded bearer and the exact ownership state of the manual-UAT
+// regression: alice's Principal with a wider ceiling and a restricted
+// killme2 Launcher plus a foreign bob/worker Launcher.
+func startSelectorsPolicyServer(t *testing.T) (endpoint, tokenPath string, requests *policyQueryRecorder, home, opt string) {
+	base := t.TempDir()
+	opt = filepath.Join(base, "opt", "alice")
+	home = filepath.Join(base, "home", "alice")
+	for _, dir := range []string{opt, home} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := &policyQueryRecorder{seen: make(chan recordedRequest, 32)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(recordedRequest{r.Method, r.URL.Path, "", r.URL.RawQuery})
+		switch {
+		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "admin"})
+			return
+		case r.URL.Path == "/principals" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, listPrincipalsResponse{
+				OK: true,
+				Principals: []principalSummary{
+					{Username: "alice"}, {Username: "bob"},
+				},
+			})
+			return
+		case r.URL.Path == "/launchers" && r.Method == http.MethodGet:
+			if r.URL.Query().Get("principal") == "alice" {
+				writeJSONResponse(w, http.StatusOK, listLaunchersResponse{
+					OK: true,
+					Launchers: []launcherJSON{
+						{ID: "dhl_alicekillme", Principal: "alice", Name: "killme2"},
+						{ID: "dhl_aliceagent", Principal: "alice", Name: "agent"},
+					},
+				})
+				return
+			}
+			writeJSONResponse(w, http.StatusOK, listLaunchersResponse{
+				OK: true,
+				Launchers: []launcherJSON{
+					{ID: "dhl_alicekillme", Principal: "alice", Name: "killme2"},
+					{ID: "dhl_bobworker", Principal: "bob", Name: "worker"},
+				},
+			})
+			return
+		case r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet:
+			// The canonical owner answers: the typed launcher selector
+			// resolves the restricted Launcher; the selectorless query
+			// resolves the default Launcher with the wider ceiling.
+			roots := []string{home, opt}
+			if r.URL.Query().Get("launcher") == "killme2" {
+				roots = []string{opt}
+			}
+			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
+				OK: true, Principal: "alice", LauncherID: "dhl_alicekillme", Launcher: "killme2",
+				AllowedRoots: roots,
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	tokenPath = filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	return server.URL, tokenPath, rec, home, opt
+}
+
+// TestCompletionSelectorValuesAuthorityMatrix proves the scope-aware
+// selector-value completion: `--principal <TAB>` offers Principal names for
+// an admin and nothing where the selector is contractually inapplicable;
+// `--launcher <TAB>` offers the typed --principal context's Launcher names
+// for an admin, only globally resolvable Launcher IDs (never names) without
+// a context, and a Principal credential's own Launchers — foreign scopes
+// never leak.
+func TestCompletionSelectorValuesAuthorityMatrix(t *testing.T) {
+	endpoint, tokenPath, requests, _, _ := startSelectorsPolicyServer(t)
+	script := completionScript(t)
+
+	// Admin --principal <TAB>: Principal names.
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "",
+	})
+	if stderr != "" {
+		t.Fatalf("selector completion must not write to stderr: %q", stderr)
+	}
+	if !slices.Equal(results, []string{"alice", "bob"}) {
+		t.Fatalf("--principal suggestions = %v, want the daemon's Principal names", results)
+	}
+
+	// Prefix filtering: the typed prefix narrows the word list.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "al",
+	})
+	if !slices.Equal(results, []string{"alice"}) {
+		t.Fatalf("prefix-filtered --principal suggestions = %v, want [alice]", results)
+	}
+
+	// Admin + typed --principal: that Principal's Launcher names.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--launcher", "",
+	})
+	if !slices.Equal(results, []string{"killme2", "agent"}) {
+		t.Fatalf("--launcher suggestions under --principal alice = %v, want alice's Launcher names", results)
+	}
+
+	// Admin without a Principal context: only globally resolvable IDs,
+	// never Launcher names.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--launcher", "",
+	})
+	if slices.Contains(results, "killme2") || slices.Contains(results, "worker") {
+		t.Fatalf("names must not be offered without a Principal context, got %v", results)
+	}
+	if !slices.Contains(results, "dhl_alicekillme") || !slices.Contains(results, "dhl_bobworker") {
+		t.Fatalf("ID suggestions = %v, want the globally resolvable Launcher IDs", results)
+	}
+
+	// The queries reached the daemon: /principals and the launcher list
+	// scoped to alice.
+	snap := requests.snapshot()
+	if !slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/principals"
+	}) || !slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers" && q.query == "principal=alice"
+	}) {
+		t.Fatalf("selector queries missing from %+v", snap)
+	}
+}
+
+// TestCompletionSelectorEqualsForm proves the partially typed inline
+// --launcher=PREFIX form completes exactly like the separated --launcher
+// PREFIX form.
+func TestCompletionSelectorEqualsForm(t *testing.T) {
+	endpoint, tokenPath, _, _, _ := startSelectorsPolicyServer(t)
+	script := completionScript(t)
+
+	resultsEq, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--launcher=ki",
+	})
+	if stderr != "" {
+		t.Fatalf("selector completion must not write to stderr: %q", stderr)
+	}
+	resultsSep, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--launcher", "ki",
+	})
+	if !slices.Equal(resultsEq, resultsSep) {
+		t.Fatalf("inline form %v != separated form %v", resultsEq, resultsSep)
+	}
+	if !slices.Equal(resultsEq, []string{"killme2"}) {
+		t.Fatalf("suggestions = %v, want the prefix-filtered Launcher name", resultsEq)
+	}
+}
+
+// TestCompletionSelectorLauncherCredentialOffersNothing proves a Launcher
+// credential gets no --principal suggestions and no --launcher suggestions:
+// explicit selectors are contractually inapplicable to it, and the daemon
+// remains the authority (the empty offer is the daemon's answer, not a
+// local guess).
+func TestCompletionSelectorLauncherCredentialOffersNothing(t *testing.T) {
+	rec := &policyQueryRecorder{seen: make(chan recordedRequest, 32)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(recordedRequest{r.Method, r.URL.Path, "", r.URL.RawQuery})
+		switch {
+		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "launcher", LauncherID: "dhl_own"})
+			return
+		case r.URL.Path == "/principals" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusUnauthorized, map[string]any{
+				"ok": false, "code": "unauthorized", "message": "Administrative authentication required.",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	script := completionScript(t)
+	results, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint", server.URL, "--token-file", tokenPath,
+		"--principal", "",
+	})
+	if len(results) != 0 {
+		t.Fatalf("launcher credential must get no --principal suggestions, got %v", results)
+	}
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", server.URL, "--token-file", tokenPath,
+		"--launcher", "",
+	})
+	if len(results) != 0 {
+		t.Fatalf("launcher credential must get no --launcher suggestions, got %v", results)
+	}
+}
+
+// TestCompletionSelectorsResolveSameTargetAsCreatePolicy proves the
+// integration invariant: the Launcher name the selector completion offers
+// resolves to exactly the Session-create target a real create with that
+// selector would use — completing --launcher offers killme2 and completing
+// the workspace with that same typed selector yields only killme2's
+// restricted roots, never the wider Principal ceiling.
+func TestCompletionSelectorsResolveSameTargetAsCreatePolicy(t *testing.T) {
+	base := t.TempDir()
+	opt := filepath.Join(base, "opt", "alice")
+	home := filepath.Join(base, "home", "alice")
+	for _, dir := range []string{opt, home} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpoint, tokenPath, _, home, opt := startSelectorsPolicyServer(t)
+	script := completionScript(t)
+
+	// The offered launcher selector...
+	offered, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--launcher", "",
+	})
+	if !slices.Contains(offered, "killme2") {
+		t.Fatalf("selector completion must offer killme2, got %v", offered)
+	}
+
+	// ...resolves, through the same canonical owner, to the restricted
+	// workspace roots the real create would use.
+	results, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--launcher", "killme2", "--workspace", "",
+	})
+	if !slices.Equal(results, []string{opt}) {
+		t.Fatalf("workspace completion with the offered selector = %v, want only the restricted root %s", results, opt)
+	}
+	if slices.Contains(results, home) {
+		t.Fatalf("the wider Principal ceiling leaked into the restricted suggestions: %v", results)
 	}
 }
 

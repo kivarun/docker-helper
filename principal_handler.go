@@ -146,12 +146,24 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 	writeJSONRaw(ctx, w, http.StatusCreated, resp)
 }
 
+// handleShowPrincipal answers GET /principals/{username}: the public
+// Principal resource document (create and show share principalToResponse).
+// Read authority is scope-first through the stable Principal-control target
+// owner (resolvePrincipalControlTarget): an admin authority may read any
+// Principal, a Principal credential may read exactly the Principal it
+// authenticated as, and a foreign selector is the established non-disclosing
+// not-found; a Launcher credential has no Principal-read authority and gets
+// the family's non-disclosing unauthorized contract. The CLI performs no
+// local self-check: it always sends the request and the daemon authorizes
+// the target, so principal show and its FIELD extraction consume the same
+// response for an own-Principal read as for an admin read.
 func (a *App) handleShowPrincipal(w http.ResponseWriter, r *http.Request) {
-	if !a.requireAdmin(w, r) {
+	ctx := r.Context()
+
+	authCtx, err := a.authenticatePrincipalControlRequest(w, r, "principal")
+	if err != nil || authCtx == nil {
 		return
 	}
-
-	ctx := r.Context()
 
 	username := r.PathValue("username")
 	if username == "" {
@@ -159,21 +171,36 @@ func (a *App) handleShowPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := findPrincipalByUsername(a.DB, username)
+	target, err := resolvePrincipalControlTarget(a.DB, authCtx, username)
 	if err != nil {
-		if isErrPrincipalNotFound(err) {
-			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		} else {
-			opLog(ctx).Error("principal show failed",
-				slog.String("operation", "principal_show"),
-				slog.String("error", err.Error()),
-			)
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-		}
+		writePrincipalControlLookupError(ctx, w, err)
 		return
 	}
 
-	writeJSONRaw(ctx, w, http.StatusOK, principalToResponse(result))
+	result, err := findPrincipalByID(a.DB, int(target.ID))
+	if err != nil {
+		if isErrPrincipalNotFound(err) {
+			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+			return
+		}
+		opLog(ctx).Error("principal show failed",
+			slog.String("operation", "principal_show"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	roots, err := readPrincipalAllowedRoots(a.DB, target.ID)
+	if err != nil {
+		opLog(ctx).Error("principal show failed",
+			slog.String("operation", "principal_show"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	writeJSONRaw(ctx, w, http.StatusOK, principalToResponse(&PrincipalWithRoots{Principal: *result, AllowedRoots: roots}))
 }
 
 func (a *App) handleListPrincipals(w http.ResponseWriter, r *http.Request) {

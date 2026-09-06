@@ -907,7 +907,10 @@ docker-helper launcher list [--principal USER]
 docker-helper launcher show [--principal USER] [LAUNCHER]
 docker-helper launcher set [--principal USER] [--name NAME] [--enabled true|false] [LAUNCHER]
 docker-helper launcher delete [--principal USER] [LAUNCHER]
-docker-helper launcher scope set [--principal USER] [--inherit | --allowed-root PATH [--allowed-root PATH]...] [LAUNCHER]
+docker-helper launcher allowed-root add [--principal USER] [LAUNCHER] PATH
+docker-helper launcher allowed-root list [--principal USER] [LAUNCHER]
+docker-helper launcher allowed-root remove [--principal USER] [LAUNCHER] PATH
+docker-helper launcher allowed-root inherit [--principal USER] [LAUNCHER]
 docker-helper launcher credential create [--principal USER] [LAUNCHER]
 docker-helper launcher credential show [--principal USER] [LAUNCHER]
 docker-helper launcher credential rotate [--principal USER] [LAUNCHER]
@@ -925,11 +928,15 @@ Launchers (admin without a filter: every Principal; a Principal credential
 without a filter: its own) and the optional `--principal` selector is only
 a filter that can narrow visibility, never expand it.
 
-`launcher scope set` sends one complete
+The launcher scope verbs (RC8 revision): `launcher allowed-root add/remove`
+send the single-request narrow `POST`/`DELETE`
+`/principals/{username}/launchers/{launcher}/allowed-roots` operations; an
+add on an inherit launcher narrows it to restricted atomically with the
+insert, and removing the last root leaves the launcher restricted with an
+empty root set. `launcher allowed-root inherit` sends one complete
 `PUT /principals/{username}/launchers/{launcher}/allowed-roots`
-replacement. It never fetches the current list and performs local
-read-modify-write. `--inherit` and one-or-more `--allowed-root` are mutually
-exclusive; the latter selects `restricted` scope.
+replacement with the fixed inherit body and never fetches the current list
+(no local read-modify-write).
 
 ### Prompt / default behavior
 

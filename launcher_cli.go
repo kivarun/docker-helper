@@ -163,19 +163,14 @@ func resolveLauncherPrincipalByID(client *apiClient, selector string) (string, e
 	return result.Launchers[0].Principal, nil
 }
 
-// launcherSelectorTarget resolves the CLI target for an individual Launcher
-// command: the Principal from --principal or auth introspection (target
+// launcherSelectorTargetSelector resolves the CLI target for one Launcher
+// selector: the Principal from --principal or auth introspection (target
 // construction only — the daemon remains the authorization authority) and the
-// Launcher selector (name or ID), 'default' when the positional selector is
-// omitted. Admin authentication must name the Principal explicitly for a
-// Launcher name or the omitted default; an ID-shaped selector (dhl_...)
+// given Launcher selector (name or ID). Admin authentication must name the
+// Principal explicitly for a Launcher name; an ID-shaped selector (dhl_...)
 // resolves the owning Principal through the daemon's scope-first list query
 // and never searches Launcher names globally.
-func launcherSelectorTarget(client *apiClient, explicitPrincipal string, fs *flag.FlagSet) (username, selector string, err error) {
-	selector = defaultLauncherName
-	if fs.NArg() > 0 {
-		selector = fs.Arg(0)
-	}
+func launcherSelectorTargetSelector(client *apiClient, explicitPrincipal, selector string) (string, error) {
 	adminResolver := func() (string, bool, error) {
 		if !isLauncherIDSelector(selector) {
 			return "", false, nil
@@ -186,13 +181,23 @@ func launcherSelectorTarget(client *apiClient, explicitPrincipal string, fs *fla
 		}
 		return owner, true, nil
 	}
-	username, err = resolveTargetPrincipalForCLI(client, explicitPrincipal,
+	return resolveTargetPrincipalForCLI(client, explicitPrincipal,
 		errors.New("--principal is required for admin authentication"),
 		errors.New("Launcher credentials do not manage Launchers"), adminResolver)
-	if err != nil {
-		return "", "", err
+}
+
+// launcherSelectorTarget resolves the CLI target for an individual Launcher
+// command: the Principal from --principal or auth introspection (target
+// construction only — the daemon remains the authorization authority) and the
+// Launcher selector (name or ID), 'default' when the positional selector is
+// omitted.
+func launcherSelectorTarget(client *apiClient, explicitPrincipal string, fs *flag.FlagSet) (username, selector string, err error) {
+	selector = defaultLauncherName
+	if fs.NArg() > 0 {
+		selector = fs.Arg(0)
 	}
-	return username, selector, nil
+	username, err = launcherSelectorTargetSelector(client, explicitPrincipal, selector)
+	return username, selector, err
 }
 
 func encodeJSONOut(w io.Writer, v any) error {
@@ -218,7 +223,7 @@ var launcherCommand = &Command{
 		launcherShowCommand,
 		launcherSetCommand,
 		launcherDeleteCommand,
-		launcherScopeCommand,
+		launcherAllowedRootCommand,
 		launcherCredentialCommand,
 	},
 }
@@ -486,36 +491,85 @@ var launcherDeleteCommand = &Command{
 	},
 }
 
-var launcherScopeCommand = &Command{
-	Name:    "scope",
-	Summary: "Manage launcher scope",
+// launcherAllowedRootTarget resolves the CLI target for the positional
+// launcher allowed-root add/remove forms: [LAUNCHER] PATH. One positional is
+// the PATH under the Principal's 'default' Launcher; two positionals are the
+// LAUNCHER selector and the PATH. The Principal resolves once through the
+// shared selector owner (launcherSelectorTargetSelector): the daemon remains
+// the authorization authority.
+func launcherAllowedRootTarget(client *apiClient, explicitPrincipal string, fs *flag.FlagSet) (username, selector, path string, err error) {
+	args := fs.Args()
+	path = args[0]
+	selector = defaultLauncherName
+	if len(args) == 2 {
+		selector = args[0]
+		path = args[1]
+	}
+	username, err = launcherSelectorTargetSelector(client, explicitPrincipal, selector)
+	if err != nil {
+		return "", "", "", err
+	}
+	return username, selector, path, nil
+}
+
+var launcherAllowedRootCommand = &Command{
+	Name:    "allowed-root",
+	Summary: "Manage launcher allowed roots",
 	Subcommands: []*Command{
-		launcherScopeSetCommand,
+		launcherAllowedRootAddCommand,
+		launcherAllowedRootListCommand,
+		launcherAllowedRootRemoveCommand,
+		launcherAllowedRootInheritCommand,
 	},
 }
 
-var launcherScopeSetCommand = &Command{
-	Name:       "set",
-	Summary:    "Replace launcher scope",
-	Usage:      "docker-helper launcher scope set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--inherit | --allowed-root PATH [--allowed-root PATH]...] [LAUNCHER]",
+var launcherAllowedRootAddCommand = &Command{
+	Name:       "add",
+	Summary:    "Add an allowed root to a launcher",
+	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH",
+	MinPosArgs: 1,
+	MaxPosArgs: 2,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				username, selector, path, err := launcherAllowedRootTarget(client, *principal, fs)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.addLauncherAllowedRoot(username, selector, path)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				fmt.Fprintf(stdout, "added %q to launcher %s\n", path, selector)
+				if result.Message == "unchanged" {
+					fmt.Fprintln(stdout, "(already present)")
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var launcherAllowedRootListCommand = &Command{
+	Name:       "list",
+	Summary:    "List a launcher's allowed roots",
+	Usage:      "docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		inherit := fs.Bool("inherit", false, "Inherit the principal's scope")
-		allowedRoots := &stringListFlag{}
-		fs.Var(allowedRoots, "allowed-root", "Allowed root path (restricted scope)")
 		return Invocation{
-			Validate: func() error {
-				if *inherit && len(allowedRoots.values) > 0 {
-					return errors.New("--inherit and --allowed-root are mutually exclusive")
-				}
-				if !*inherit && len(allowedRoots.values) == 0 {
-					return errors.New("restricted scope requires at least one --allowed-root (or use --inherit)")
-				}
-				return nil
-			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -527,15 +581,85 @@ var launcherScopeSetCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				req := allowedRootsReplaceRequest{}
-				if *inherit {
-					req.Scope = "inherit"
-					req.AllowedRoots = []string{}
-				} else {
-					req.Scope = "restricted"
-					req.AllowedRoots = append([]string{}, allowedRoots.values...)
+				l, err := client.showLauncher(username, selector)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
 				}
-				l, err := client.replaceLauncherScope(username, selector, req)
+				for _, root := range l.AllowedRoots {
+					fmt.Fprintln(stdout, root)
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var launcherAllowedRootRemoveCommand = &Command{
+	Name:       "remove",
+	Summary:    "Remove an allowed root from a launcher",
+	Usage:      "docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH",
+	MinPosArgs: 1,
+	MaxPosArgs: 2,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				username, selector, path, err := launcherAllowedRootTarget(client, *principal, fs)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.removeLauncherAllowedRoot(username, selector, path)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				fmt.Fprintf(stdout, "removed %q from launcher %s\n", path, selector)
+				if result.Message == "unchanged" {
+					fmt.Fprintln(stdout, "(was not present)")
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var launcherAllowedRootInheritCommand = &Command{
+	Name:       "inherit",
+	Summary:    "Return a launcher to inherited allowed roots",
+	Usage:      "docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	MinPosArgs: 0,
+	MaxPosArgs: 1,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				// Returning to inherited roots is the explicit atomic
+				// replacement: the complete inherit body is sent in one
+				// request — never a read-modify-write.
+				l, err := client.replaceLauncherScope(username, selector, allowedRootsReplaceRequest{
+					Scope:        string(LauncherScopeInherit),
+					AllowedRoots: []string{},
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

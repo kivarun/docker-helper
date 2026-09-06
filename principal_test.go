@@ -612,6 +612,98 @@ func TestPrincipalShowZeroRootsWireArray(t *testing.T) {
 	}
 }
 
+// TestPrincipalShowSelfReadAuthority proves the scope-first read contract of
+// principal show: a Principal credential reads exactly the Principal it
+// authenticated as through the stable Principal-control target owner
+// (resolvePrincipalControlTarget) — the own username resolves the full
+// document, a foreign selector is the established non-disclosing not-found
+// identical to a genuinely missing Principal, and a Launcher credential has
+// no Principal-read authority (the family's non-disclosing unauthorized
+// contract). Admin read of any Principal is unchanged.
+func TestPrincipalShowSelfReadAuthority(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "michael")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1021", "1021", home, nil
+	}
+	if _, err := createPrincipal(app.DB, "michael", app.Config.AllowedRoots); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createPrincipal(app.DB, "alice", app.Config.AllowedRoots); err != nil {
+		t.Fatal(err)
+	}
+	_, michaelToken, err := createPrincipalCredential(app.DB, "michael", "oc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultLauncherID, err := findDefaultLauncher(app.DB, principalIDByName(t, app.DB, "michael"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, launcherToken, err := issueLauncherCredential(app.DB, defaultLauncherID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
+	get := func(path, bearer string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+
+	// Principal credential + own username: success, the full document.
+	w := get("/principals/michael", michaelToken)
+	if w.Code != http.StatusOK {
+		t.Fatalf("self show: %d %s", w.Code, w.Body.String())
+	}
+	var doc principalResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Username != "michael" || doc.UID != 1021 || doc.GID != 1021 || doc.Home != home || !doc.Enabled {
+		t.Fatalf("self show document = %+v", doc)
+	}
+	if len(doc.AllowedRoots) == 0 {
+		t.Fatalf("self show must carry the seeded allowed_roots, got %+v", doc)
+	}
+
+	// Principal credential + foreign username: the established non-disclosing
+	// not-found, indistinguishable from a missing Principal.
+	w = get("/principals/alice", michaelToken)
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "principal_not_found") {
+		t.Fatalf("foreign show: %d %s", w.Code, w.Body.String())
+	}
+	w = get("/principals/nobody", michaelToken)
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "principal_not_found") {
+		t.Fatalf("missing show: %d %s", w.Code, w.Body.String())
+	}
+
+	// Launcher credential: no Principal-read authority, the family's
+	// non-disclosing unauthorized contract.
+	w = get("/principals/michael", launcherToken)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("launcher credential show: %d %s", w.Code, w.Body.String())
+	}
+
+	// Unauthenticated: 401.
+	w = get("/principals/michael", "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated show: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestPrincipalHTTPSetEnabled(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
@@ -1039,6 +1131,68 @@ func TestExtractPrincipalField(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("extractPrincipalField(%q) = %q, want %q", tt.field, got, tt.want)
 		}
+	}
+}
+
+// TestPrincipalShowSelfReadFieldsCLI proves the black-box CLI contract of the
+// scope-first Principal read: a Principal credential reads its own Principal
+// and every FIELD extraction consumes the same show response (username, uid,
+// gid, home, enabled, allowed_roots), while a foreign selector surfaces the
+// non-disclosing failure exactly as the daemon returned it.
+func TestPrincipalShowSelfReadFieldsCLI(t *testing.T) {
+	endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/principals/michael" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, principalResponse{
+				OK: true, Username: "michael", UID: 1021, GID: 1021,
+				Home: "/home/michael", Enabled: true,
+				AllowedRoots: []string{"/home/michael"},
+			})
+			return
+		case r.URL.Path == "/principals/alice" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusNotFound, map[string]any{
+				"ok": false, "code": "principal_not_found", "message": "principal not found",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	for field, want := range map[string]string{
+		"username":      "michael",
+		"uid":           "1021",
+		"gid":           "1021",
+		"home":          "/home/michael",
+		"enabled":       "true",
+		"allowed_roots": `["/home/michael"]`,
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{
+			"principal", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+			"michael", field,
+		}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("show %s: exit = %d, stderr=%s", field, code, stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != want {
+			t.Errorf("principal show michael %s = %q, want %q", field, got, want)
+		}
+	}
+
+	// Foreign selector: the daemon's non-disclosing failure, forwarded.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"principal", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"alice", "username",
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("foreign principal show must fail")
+	}
+	if stdout.String() != "" {
+		t.Errorf("no fields may be printed, got %q", stdout.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "principal_not_found") || strings.Contains(got, "alice") {
+		t.Errorf("foreign failure must be non-disclosing, stderr=%q", got)
 	}
 }
 

@@ -449,10 +449,10 @@ func TestLauncherCreateCLINamePresence(t *testing.T) {
 	})
 }
 
-// ---- scope set / set validation ----
+// ---- allowed-root add / remove positional validation ----
 
-func TestLauncherScopeSetValidation(t *testing.T) {
-	endpoint, tokenPath := startLauncherCLITestServer(t, func(w http.ResponseWriter, r *http.Request) {
+func TestLauncherAllowedRootPositionalValidation(t *testing.T) {
+	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
 
@@ -461,21 +461,15 @@ func TestLauncherScopeSetValidation(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{"inherit valid", []string{"launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath, "--inherit", "dhl_1"}, ""},
-		{"restricted valid", []string{"launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath, "--allowed-root", "/a", "dhl_1"}, ""},
-		{"neither", []string{"launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath, "dhl_1"}, "requires at least one"},
-		{"both exclusive", []string{"launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath, "--inherit", "--allowed-root", "/a", "dhl_1"}, "mutually exclusive"},
+		{"add missing path", []string{"launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath}, "expected at least 1"},
+		{"add too many", []string{"launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath, "a", "b", "c"}, "expected at most 2"},
+		{"remove missing path", []string{"launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath}, "expected at least 1"},
+		{"remove too many", []string{"launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath, "a", "b", "c"}, "expected at most 2"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := runCommandWithWriters(tc.args, &stdout, &stderr)
-			if tc.wantErr == "" {
-				if code != 1 {
-					t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
-				}
-				return
-			}
 			if code != 2 {
 				t.Fatalf("exit = %d, want 2; stderr=%s", code, stderr.String())
 			}
@@ -483,6 +477,9 @@ func TestLauncherScopeSetValidation(t *testing.T) {
 				t.Errorf("stderr = %q, want containing %q", stderr.String(), tc.wantErr)
 			}
 		})
+	}
+	if len(*requests) != 0 {
+		t.Fatalf("local validation failures must issue no HTTP request, got %+v", *requests)
 	}
 }
 
@@ -1125,55 +1122,75 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 	}
 }
 
-// ---- scope set: single atomic PUT, no read-modify-write ----
+// ---- allowed-root: single atomic request, no read-modify-write ----
 
-// TestLauncherScopeSetCLIAtomicReplace proves launcher scope set issues exactly
-// one PUT /launchers/{id}/allowed-roots with the complete replacement body —
-// no GET and no read-modify-write — for both inherit and restricted forms.
-func TestLauncherScopeSetCLIAtomicReplace(t *testing.T) {
+// TestLauncherAllowedRootCLISingleRequest proves the launcher allowed-root
+// commands issue exactly one request each — no GET and no read-modify-write:
+// the daemon owns the policy mutation and its concurrency semantics.
+func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 	tests := []struct {
-		name     string
-		args     []string
-		wantBody string
+		name       string
+		args       []string
+		positional []string
+		wantPath   string
+		wantMethod string
+		wantBody   string
 	}{
 		{
-			name:     "inherit",
-			args:     []string{"--inherit"},
-			wantBody: `{"scope":"inherit","allowed_roots":[]}`,
+			name:       "add one positional is the path under the default launcher",
+			args:       []string{"launcher", "allowed-root", "add", "--principal", "alice"},
+			positional: []string{"/a"},
+			wantPath:   "/principals/alice/launchers/default/allowed-roots",
+			wantMethod: http.MethodPost,
+			wantBody:   `{"path":"/a"}`,
 		},
 		{
-			name:     "restricted single root",
-			args:     []string{"--allowed-root", "/a"},
-			wantBody: `{"scope":"restricted","allowed_roots":["/a"]}`,
+			name:       "add two positionals are the launcher and the path",
+			args:       []string{"launcher", "allowed-root", "add", "--principal", "alice"},
+			positional: []string{"build-agent", "/a"},
+			wantPath:   "/principals/alice/launchers/build-agent/allowed-roots",
+			wantMethod: http.MethodPost,
+			wantBody:   `{"path":"/a"}`,
 		},
 		{
-			name:     "restricted multiple roots",
-			args:     []string{"--allowed-root", "/a", "--allowed-root", "/b"},
-			wantBody: `{"scope":"restricted","allowed_roots":["/a","/b"]}`,
+			name:       "remove",
+			args:       []string{"launcher", "allowed-root", "remove", "--principal", "alice"},
+			positional: []string{"build-agent", "/a"},
+			wantPath:   "/principals/alice/launchers/build-agent/allowed-roots",
+			wantMethod: http.MethodDelete,
+			wantBody:   `{"path":"/a"}`,
+		},
+		{
+			name:       "inherit sends the complete inherit replacement",
+			args:       []string{"launcher", "allowed-root", "inherit", "--principal", "alice"},
+			positional: []string{"dhl_1"},
+			wantPath:   "/principals/alice/launchers/dhl_1/allowed-roots",
+			wantMethod: http.MethodPut,
+			wantBody:   `{"scope":"inherit","allowed_roots":[]}`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/principals/alice/launchers/dhl_1/allowed-roots" && r.Method == http.MethodPut {
-					writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "alice", Name: "default", Scope: "inherit", Enabled: true})
+				if strings.HasPrefix(r.URL.Path, "/principals/") && r.Method != http.MethodGet {
+					writeJSONResponse(w, http.StatusOK, launcherAllowedRootResponse{OK: true, LauncherID: "dhl_1", Field: "allowed_roots", Changed: true})
 					return
 				}
 				http.NotFound(w, r)
 			})
 
-			args := append([]string{"launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice"}, tc.args...)
-			args = append(args, "dhl_1")
+			args := append(append([]string{}, tc.args...), "--endpoint", endpoint, "--token-file", tokenPath)
+			args = append(args, tc.positional...)
 			var stdout, stderr bytes.Buffer
 			code := runCommandWithWriters(args, &stdout, &stderr)
 			if code != 0 {
 				t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 			}
 			if len(*requests) != 1 {
-				t.Fatalf("requests = %+v, want exactly one PUT (no read-modify-write)", *requests)
+				t.Fatalf("requests = %+v, want exactly one mutation request (no read-modify-write)", *requests)
 			}
-			if (*requests)[0].method != http.MethodPut || (*requests)[0].path != "/principals/alice/launchers/dhl_1/allowed-roots" {
-				t.Fatalf("request = %s %s, want PUT /principals/alice/launchers/dhl_1/allowed-roots", (*requests)[0].method, (*requests)[0].path)
+			if (*requests)[0].method != tc.wantMethod || (*requests)[0].path != tc.wantPath {
+				t.Fatalf("request = %s %s, want %s %s", (*requests)[0].method, (*requests)[0].path, tc.wantMethod, tc.wantPath)
 			}
 			if strings.TrimSpace((*requests)[0].body) != tc.wantBody {
 				t.Errorf("body = %q, want %q", (*requests)[0].body, tc.wantBody)
@@ -1368,6 +1385,7 @@ func TestLauncherIndividualCLIAllTargetScopedPath(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       []string
+		positional string
 		wantPath   string
 		wantMethod string
 	}{
@@ -1384,8 +1402,28 @@ func TestLauncherIndividualCLIAllTargetScopedPath(t *testing.T) {
 			wantMethod: http.MethodDelete,
 		},
 		{
-			name:       "scope set",
-			args:       []string{"launcher", "scope", "set", "--inherit"},
+			name:       "allowed-root add",
+			args:       []string{"launcher", "allowed-root", "add"},
+			positional: "/a",
+			wantPath:   "/principals/alice/launchers/default/allowed-roots",
+			wantMethod: http.MethodPost,
+		},
+		{
+			name:       "allowed-root list",
+			args:       []string{"launcher", "allowed-root", "list"},
+			wantPath:   "/principals/alice/launchers/default",
+			wantMethod: http.MethodGet,
+		},
+		{
+			name:       "allowed-root remove",
+			args:       []string{"launcher", "allowed-root", "remove"},
+			positional: "/a",
+			wantPath:   "/principals/alice/launchers/default/allowed-roots",
+			wantMethod: http.MethodDelete,
+		},
+		{
+			name:       "allowed-root inherit",
+			args:       []string{"launcher", "allowed-root", "inherit"},
 			wantPath:   "/principals/alice/launchers/default/allowed-roots",
 			wantMethod: http.MethodPut,
 		},
@@ -1414,6 +1452,8 @@ func TestLauncherIndividualCLIAllTargetScopedPath(t *testing.T) {
 				switch {
 				case r.URL.Path == "/auth" && r.Method == http.MethodGet:
 					writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
+				case strings.HasSuffix(r.URL.Path, "/allowed-roots") && (r.Method == http.MethodDelete || r.Method == http.MethodPost):
+					writeJSONResponse(w, http.StatusOK, launcherAllowedRootResponse{OK: true, LauncherID: "dhl_1", Field: "allowed_roots", Changed: true})
 				case strings.HasPrefix(r.URL.Path, "/principals/"):
 					if r.Method == http.MethodDelete {
 						w.WriteHeader(http.StatusNoContent)
@@ -1426,6 +1466,9 @@ func TestLauncherIndividualCLIAllTargetScopedPath(t *testing.T) {
 			})
 
 			args := append(append([]string{}, tc.args...), "--endpoint", endpoint, "--token-file", tokenPath)
+			if tc.positional != "" {
+				args = append(args, tc.positional)
+			}
 			var stdout, stderr bytes.Buffer
 			exit := runCommandWithWriters(args, &stdout, &stderr)
 			if exit != 0 {

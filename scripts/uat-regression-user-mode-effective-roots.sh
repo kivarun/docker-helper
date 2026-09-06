@@ -196,13 +196,15 @@ fi
 
 C_OUT="$(dhx launcher create --principal "$OWNER" --name conv --no-credential 2>&1)"
 if [ -n "$(printf '%s' "$C_OUT" | uer_field id || true)" ]; then
-  # `launcher scope set` always emits the launcher JSON document.
-  if C_SHOW="$(dhx launcher scope set --principal "$OWNER" --allowed-root "$WORK" conv 2>&1)" \
+  # `launcher allowed-root add` prints a short confirmation; the committed
+  # scope and root set are asserted through the launcher show document.
+  if C_ADD="$(dhx launcher allowed-root add --principal "$OWNER" conv "$WORK" 2>&1)" \
+      && C_SHOW="$(dhx launcher show --principal "$OWNER" conv 2>&1)" \
       && [ "$(printf '%s' "$C_SHOW" | uer_field scope)" = "restricted" ] \
       && uer_roots_single "$C_SHOW" "$WORK"; then
-    reg_ok "C: inherit -> restricted scope replacement succeeds and returns the committed scope and root"
+    reg_ok "C: adding the first allowed root narrows the inherit Launcher to restricted with the committed root"
   else
-    reg_fail "C: inherit -> restricted scope replacement failed: $(printf '%s' "$C_SHOW" | head -2 | tr '\n' ' ' | redact)"
+    reg_fail "C: inherit -> restricted allowed-root add failed: $(printf '%s' "${C_ADD}${C_SHOW}" | head -2 | tr '\n' ' ' | redact)"
   fi
 else
   reg_fail "C: inherit Launcher create failed: $(printf '%s' "$C_OUT" | head -2 | tr '\n' ' ' | redact)"
@@ -248,9 +250,9 @@ fi
 
 # --- E. the reserved default Launcher is still not restrictable --------------
 
-E_OUT="$(dhx launcher scope set --principal "$OWNER" --allowed-root "$WORK" default 2>&1)"
+E_OUT="$(dhx launcher allowed-root add --principal "$OWNER" default "$WORK" 2>&1)"
 if [ "$?" -ne 0 ] && printf '%s' "$E_OUT" | grep -q 'code user_mode_owner_reserved'; then
-  reg_ok "E: the reserved default Launcher still refuses a restricted scope (user_mode_owner_reserved)"
+  reg_ok "E: the reserved default Launcher still refuses an allowed-root add (user_mode_owner_reserved)"
 else
   reg_fail "E: the reserved default Launcher not refused with user_mode_owner_reserved: $(printf '%s' "$E_OUT" | head -2 | tr '\n' ' ' | redact)"
 fi

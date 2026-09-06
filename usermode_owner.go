@@ -167,3 +167,47 @@ func (a *App) replaceLauncherScopeWithLifecycle(launcherID string, scope Launche
 	}
 	return replaceLauncherScope(a.DB, cur, scope, allowedRoots, ceiling)
 }
+
+// addLauncherAllowedRootWithLifecycle is the lock-owning App-level Launcher
+// allowed-root add, the narrow sibling of replaceLauncherScopeWithLifecycle. It
+// holds lifecycleMu across the Launcher resolution, the reservation check, the
+// canonical effective-Principal-root resolution (the same lifecycleMu -> a.mu
+// ordering as config reload), and the durable mutation, so the added root is
+// validated against the ceiling committed by any reload that linearized before
+// it, and it refuses rooting the reserved daemon-owner default Launcher before
+// any change (the reserved chain stays inherit with zero stored roots).
+func (a *App) addLauncherAllowedRootWithLifecycle(launcherID, rootPath string) (changed bool, canonicalPath string, err error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	cur, err := findLauncherByID(a.DB, launcherID)
+	if err != nil {
+		return false, "", err
+	}
+	if a.isUserModeDefaultLauncher(launcherID) {
+		return false, "", ErrUserModeOwnerReserved
+	}
+	ceiling, err := a.resolveEffectivePrincipalRoots(cur.PrincipalID)
+	if err != nil {
+		return false, "", err
+	}
+	return addLauncherAllowedRoot(a.DB, launcherID, rootPath, ceiling)
+}
+
+// removeLauncherAllowedRootWithLifecycle is the lock-owning App-level Launcher
+// allowed-root remove. See addLauncherAllowedRootWithLifecycle for the
+// serialization boundary. Removal never changes the scope mode and never
+// broadens authority (a restricted Launcher whose last root is removed stays
+// restricted with zero roots, fail-closed), and the reserved daemon-owner
+// default Launcher — which carries no stored roots — is refused like every
+// other mutation of the reserved chain.
+func (a *App) removeLauncherAllowedRootWithLifecycle(launcherID, rootPath string) (changed bool, canonicalPath string, err error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	if _, err := findLauncherByID(a.DB, launcherID); err != nil {
+		return false, "", err
+	}
+	if a.isUserModeDefaultLauncher(launcherID) {
+		return false, "", ErrUserModeOwnerReserved
+	}
+	return removeLauncherAllowedRoot(a.DB, launcherID, rootPath)
+}

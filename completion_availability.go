@@ -93,6 +93,7 @@ func configureCompletionAvailability() {
 		principalSetCommand,
 		principalDeleteCommand,
 		principalAllowedRootAddCommand,
+		principalAllowedRootListCommand,
 		principalAllowedRootRemoveCommand,
 		principalCredentialCreateCommand,
 		principalCredentialRevokeCommand,
@@ -109,7 +110,10 @@ func configureCompletionAvailability() {
 		launcherShowCommand,
 		launcherSetCommand,
 		launcherDeleteCommand,
-		launcherScopeSetCommand,
+		launcherAllowedRootAddCommand,
+		launcherAllowedRootListCommand,
+		launcherAllowedRootRemoveCommand,
+		launcherAllowedRootInheritCommand,
 		launcherCredentialCreateCommand,
 		launcherCredentialShowCommand,
 		launcherCredentialRotateCommand,
@@ -122,6 +126,13 @@ func configureCompletionAvailability() {
 		sessionListCommand,
 		sessionDeleteCommand,
 		completionRootsSessionCommand,
+	)
+
+	setCompletionAuthorities(admin,
+		completionSelectorsPrincipalCommand,
+	)
+	setCompletionAuthorities(control,
+		completionSelectorsLauncherCommand,
 	)
 }
 

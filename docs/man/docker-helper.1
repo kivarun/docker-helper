@@ -131,6 +131,12 @@ Machine-facing completion query: print the target Principal's effective allowed 
 .TP
 .B docker-helper completion roots session [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Machine-facing completion query: print the effective allowed roots of the Launcher a Session created right now with this authority would use, one path per line.
+.TP
+.B docker-helper completion selectors principal [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+Machine-facing completion query: print the Principal names the authenticated authority may target with a \-\-principal selector, one per line. Only an admin authority receives names; the daemon authorizes the query and every other authority degrades silently.
+.TP
+.B docker-helper completion selectors launcher [\-\-principal USER] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+Machine-facing completion query: print the Launcher selectors the authenticated authority may target with a \-\-launcher selector, one per line, honoring the typed \-\-principal context. An admin with a context receives that Principal's Launcher names; an admin without one receives only globally resolvable \fBdhl_\fR Launcher IDs; a Principal credential receives its own Launchers' names; a Launcher credential and any foreign scope receive nothing.
 .SS Session Commands
 .TP
 .B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
@@ -218,7 +224,11 @@ In non-interactive use one of these flags is required.
 List all principals (username, UID, GID, home, enabled).
 .TP
 .B docker-helper principal show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER [FIELD]
-Show principal details.
+Show principal details. Read authority is scope-first: an admin token
+reads any Principal, a principal credential reads exactly the Principal
+it authenticated as (the daemon authorizes the target; the CLI performs
+no local self-check), and a foreign selector is the same non-disclosing
+not-found as a missing Principal.
 .TP
 .B docker-helper principal set [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER FIELD VALUE
 Modify principal settings. FIELD currently supports only \fBenabled\fR;
@@ -235,6 +245,11 @@ Add an allowed root for a principal.
 .TP
 .B docker-helper principal allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Remove an allowed root from a principal.
+.TP
+.B docker-helper principal allowed-root list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
+List a principal's stored allowed roots, one path per line. The read
+follows the principal show contract: an admin token lists any Principal,
+a principal credential lists exactly its own.
 .TP
 .B docker-helper principal credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] USER
 Create a new credential for a principal. If \-\-name is not specified, defaults to "default".
@@ -317,10 +332,22 @@ Modify a launcher with at least one of \fB\-\-name\fR or \fB\-\-enabled\fR.
 .B docker-helper launcher delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
 Delete a launcher.
 .TP
-.B docker-helper launcher scope set [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-inherit | \-\-allowed-root PATH [\-\-allowed-root PATH]...] [LAUNCHER]
-Replace a launcher scope atomically. \fB\-\-inherit\fR and
-\fB\-\-allowed-root\fR are mutually exclusive; restricted scope requires at
-least one allowed root.
+.B docker-helper launcher allowed-root add [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER] PATH
+Add one allowed root to a launcher. With no LAUNCHER the Principal's
+default launcher is targeted. An add on an inherit launcher narrows it
+to restricted scope atomically with the insert.
+.TP
+.B docker-helper launcher allowed-root list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
+List a launcher's stored allowed roots, one path per line.
+.TP
+.B docker-helper launcher allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER] PATH
+Remove one allowed root from a launcher. Removing the last root leaves
+the launcher restricted with an empty root set (fail-closed); only an
+explicit inherit returns the launcher to the Principal ceiling.
+.TP
+.B docker-helper launcher allowed-root inherit [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
+Return the launcher to inherit scope (the Principal's effective ceiling)
+by the same atomic scope replacement the daemon always used.
 .TP
 .B docker-helper launcher credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
 Create a launcher credential and print its bearer secret once.

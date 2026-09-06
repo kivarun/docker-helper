@@ -684,6 +684,207 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 	writeJSONRaw(ctx, w, http.StatusOK, launcherToJSON(*updated))
 }
 
+// launcherAllowedRootResponse is the narrow Launcher allowed-root mutation
+// result: the changed flag plus the allowed_roots field identity, mirroring
+// the Principal allowed-root mutation contract (principalChangedResponse).
+// The full Launcher projection remains the show owner.
+type launcherAllowedRootResponse struct {
+	OK         bool   `json:"ok"`
+	LauncherID string `json:"launcher_id"`
+	Field      string `json:"field"`
+	Changed    bool   `json:"changed"`
+	Message    string `json:"message,omitempty"`
+}
+
+// launcherAllowedRootResponseOf composes the narrow mutation response from the
+// domain result: a changed=false mutation carries the stable "unchanged"
+// message exactly like the Principal allowed-root contract.
+func launcherAllowedRootResponseOf(launcherID string, changed bool) launcherAllowedRootResponse {
+	resp := launcherAllowedRootResponse{
+		OK:         true,
+		LauncherID: launcherID,
+		Field:      "allowed_roots",
+		Changed:    changed,
+	}
+	if !changed {
+		resp.Message = "unchanged"
+	}
+	return resp
+}
+
+// handleAddLauncherAllowedRoot adds one allowed root to a Launcher through the
+// daemon-owned narrow mutation: the target Launcher is resolved under the
+// request authority (requireScopedLauncher), then
+// addLauncherAllowedRootWithLifecycle owns the lifecycle serialization, the
+// current Principal ceiling, and the reservation guard. Adding the first root
+// to an inherit-scope Launcher is the inherit -> restricted narrowing (never an
+// authority broadening); the reserved daemon-owner default Launcher is refused.
+func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
+	if err != nil || auth == nil {
+		return
+	}
+	ctx := r.Context()
+
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
+		return
+	}
+
+	var req allowedRootRequest
+	if err := decodeJSONRequest(w, r, &req); err != nil {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_add",
+			LauncherID: l.ID,
+			Result:     "invalid_json",
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
+		}, auth, nil)
+		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		return
+	}
+	if req.Path == "" {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_add",
+			LauncherID: l.ID,
+			Result:     "missing_path",
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
+		}, auth, nil)
+		writeError(ctx, w, http.StatusBadRequest, "missing_path", "path is required")
+		return
+	}
+
+	// The narrow add shares the lifecycle serialization with Session creation
+	// and the other ownership mutations (see handleReplaceLauncherAllowedRoots):
+	// addLauncherAllowedRootWithLifecycle owns that boundary, the current
+	// policy snapshot inside it, and the reserved-launcher refusal.
+	changed, canonicalPath, err := a.addLauncherAllowedRootWithLifecycle(l.ID, req.Path)
+	duration := time.Since(started).Round(time.Millisecond).String()
+	if err != nil {
+		result := "error"
+		if isErrUserModeOwnerReserved(err) {
+			result = "user_mode_owner_reserved"
+		}
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_add",
+			LauncherID: l.ID,
+			Result:     result,
+			Duration:   duration,
+		}, auth, nil)
+		switch {
+		case isErrLauncherNotFound(err):
+			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+		case isErrUserModeOwnerReserved(err):
+			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
+				"this launcher is managed by transparent user mode and cannot be mutated in this way")
+		case isErrInvalidAllowedRoot(err):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
+		case isErrLauncherRootOutsidePrincipal(err):
+			writeError(ctx, w, http.StatusBadRequest, "outside_principal_root", "launcher root is not under the effective principal roots")
+		default:
+			opLog(ctx).Error("launcher allowed_root_add failed",
+				slog.String("operation", "launcher_allowed_root_add"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+
+	writeLauncherControlAudit(ctx, auditRecord{
+		Event:               "launcher.allowed_root_add",
+		LauncherAllowedRoot: canonicalPath,
+		Result:              "success",
+		Duration:            duration,
+	}, auth, l)
+
+	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(l.ID, changed))
+}
+
+// handleRemoveLauncherAllowedRoot removes one stored root from a Launcher
+// through the daemon-owned narrow mutation (see handleAddLauncherAllowedRoot
+// for the authorization and serialization boundary). The scope mode is never
+// changed by removal: removing the last restricted root leaves the Launcher
+// restricted with zero roots (fail-closed), and returning to inherited roots is
+// the explicit inherit replacement.
+func (a *App) handleRemoveLauncherAllowedRoot(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
+	if err != nil || auth == nil {
+		return
+	}
+	ctx := r.Context()
+
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
+		return
+	}
+
+	var req allowedRootRequest
+	if err := decodeJSONRequest(w, r, &req); err != nil {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_remove",
+			LauncherID: l.ID,
+			Result:     "invalid_json",
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
+		}, auth, nil)
+		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		return
+	}
+	if req.Path == "" {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_remove",
+			LauncherID: l.ID,
+			Result:     "missing_path",
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
+		}, auth, nil)
+		writeError(ctx, w, http.StatusBadRequest, "missing_path", "path is required")
+		return
+	}
+
+	// Same lifecycle serialization boundary as the add and the scope
+	// replacement; removeLauncherAllowedRootWithLifecycle owns it.
+	changed, canonicalPath, err := a.removeLauncherAllowedRootWithLifecycle(l.ID, req.Path)
+	duration := time.Since(started).Round(time.Millisecond).String()
+	if err != nil {
+		result := "error"
+		if isErrUserModeOwnerReserved(err) {
+			result = "user_mode_owner_reserved"
+		}
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_remove",
+			LauncherID: l.ID,
+			Result:     result,
+			Duration:   duration,
+		}, auth, nil)
+		switch {
+		case isErrLauncherNotFound(err):
+			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+		case isErrUserModeOwnerReserved(err):
+			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
+				"this launcher is managed by transparent user mode and cannot be mutated in this way")
+		case isErrInvalidAllowedRoot(err):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
+		default:
+			opLog(ctx).Error("launcher allowed_root_remove failed",
+				slog.String("operation", "launcher_allowed_root_remove"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+
+	writeLauncherControlAudit(ctx, auditRecord{
+		Event:               "launcher.allowed_root_remove",
+		LauncherAllowedRoot: canonicalPath,
+		Result:              "success",
+		Duration:            duration,
+	}, auth, l)
+
+	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(l.ID, changed))
+}
+
 func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")

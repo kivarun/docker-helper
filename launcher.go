@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -664,4 +665,92 @@ func replaceLauncherScope(db *sql.DB, current *LauncherWithPrincipal, scope Laun
 		updated.AllowedRoots = nil
 	}
 	return &updated, nil
+}
+
+// addLauncherAllowedRoot adds one allowed root to a Launcher's stored root set
+// and, when the root is new, commits the inherit -> restricted narrowing in the
+// same transaction. The root must be a valid absolute directory under the
+// supplied effective Principal ceiling (the same canonical path semantics as
+// Principal roots); a root outside the ceiling is ErrLauncherRootOutsidePrincipal.
+// The caller owns the lifecycle serialization boundary and Launcher existence
+// (the same contract as replaceLauncherScope): a concurrently deleted Launcher
+// cannot interleave.
+func addLauncherAllowedRoot(db *sql.DB, launcherID string, rootPath string, effectivePrincipalRoots []string) (changed bool, canonicalPath string, err error) {
+	resolved, err := validatePrincipalAllowedRootForAdd(rootPath)
+	if err != nil {
+		return false, "", err
+	}
+	if !isWithinAnyAllowedRoot(resolved, effectivePrincipalRoots) {
+		return false, "", fmt.Errorf("path %q is not under the effective principal roots: %w", resolved, ErrLauncherRootOutsidePrincipal)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return false, "", fmt.Errorf("cannot begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(
+		`INSERT OR IGNORE INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`,
+		launcherID, resolved,
+	)
+	if err != nil {
+		return false, "", fmt.Errorf("cannot add launcher allowed root: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, "", fmt.Errorf("cannot check insert result: %w", err)
+	}
+	if affected > 0 {
+		// A new stored root narrows an inherit-scope Launcher to restricted
+		// scope. inherit => zero stored roots, so a new root is always the
+		// first one; a restricted Launcher keeps its scope.
+		if _, err := tx.Exec(
+			`UPDATE launchers SET scope_mode = ? WHERE id = ?`,
+			string(LauncherScopeRestricted), launcherID,
+		); err != nil {
+			return false, "", fmt.Errorf("cannot narrow launcher scope: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, "", fmt.Errorf("cannot commit launcher allowed root: %w", err)
+	}
+	return affected > 0, resolved, nil
+}
+
+// removeLauncherAllowedRoot removes one stored root from a Launcher's root set.
+// It never changes the scope mode: removing the last restricted root leaves the
+// Launcher restricted with zero stored roots (fail-closed — no Session
+// workspace is admissible there) and returning to inherited roots is the
+// explicit inherit operation, never an automatic side effect. Remove semantics
+// mirror the Principal remove: the path must be absolute, a stored root is
+// matched by its canonical (symlink-resolved) form, and a path that no longer
+// exists on the filesystem is still removable.
+func removeLauncherAllowedRoot(db *sql.DB, launcherID string, rootPath string) (changed bool, canonicalPath string, err error) {
+	if rootPath == "" {
+		return false, "", fmt.Errorf("path is required: %w", ErrInvalidAllowedRoot)
+	}
+	if !filepath.IsAbs(rootPath) {
+		return false, "", fmt.Errorf("path must be absolute: %w", ErrInvalidAllowedRoot)
+	}
+	resolved, err := filepath.Abs(rootPath)
+	if err != nil {
+		return false, "", fmt.Errorf("cannot resolve path: %w: %w", err, ErrInvalidAllowedRoot)
+	}
+	if canonical, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = canonical
+	}
+
+	result, err := db.Exec(
+		`DELETE FROM launcher_allowed_roots WHERE launcher_id = ? AND root_path = ?`,
+		launcherID, resolved,
+	)
+	if err != nil {
+		return false, "", fmt.Errorf("cannot remove launcher allowed root: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, "", fmt.Errorf("cannot check delete result: %w", err)
+	}
+	return affected > 0, resolved, nil
 }

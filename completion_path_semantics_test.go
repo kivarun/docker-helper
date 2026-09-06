@@ -59,7 +59,6 @@ func TestCompletionPathFlagsEnableFilenameSemantics(t *testing.T) {
 	for _, words := range [][]string{
 		{"docker-helper", "session", "create", "--workspace", "/home/michael/"},
 		{"docker-helper", "launcher", "create", "--allowed-root", "/home/michael/"},
-		{"docker-helper", "launcher", "scope", "set", "--allowed-root", "/home/michael/"},
 		{"docker-helper", "config", "set", "trusted_ca_path", "/etc/ssl/"},
 		{"docker-helper", "session", "create", "--workspace=/home/michael/"},
 	} {

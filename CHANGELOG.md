@@ -2,6 +2,20 @@
 
 This file summarizes user-visible release changes. Commit-level history remains available through the GitHub compare links for each release.
 
+## [2.1.0-rc.8] - unreleased
+
+RC8 fixes the CLI/UX defects manual UAT found on top of RC7, without expanding Release 2.1 feature scope.
+
+- Removed the `launcher scope` command family from the CLI: launcher filesystem scope is managed with the narrow `launcher allowed-root add/list/remove/inherit` verbs (backed by new single-request `POST`/`DELETE` server operations plus the existing atomic scope replacement), and `principal allowed-root list` completes the allowed-root read surface.
+- Narrow allowed-root mutations preserve the established scope semantics: an add on an `inherit` launcher narrows it to `restricted` atomically with the insert, removing the last root leaves the launcher restricted with an empty root set (fail-closed), and only an explicit inherit returns it to the Principal ceiling. The user-mode reserved default launcher stays immutable for both directions.
+- `session create --workspace` completion now resolves exactly the Session-create target the typed selectors resolve: the typed `--principal`/`--launcher` values (both `--flag VALUE` and `--flag=VALUE` forms) are forwarded to the daemon's Session-create policy introspection, which resolves them through the same canonical owners real Session creation uses — completing with a restricted launcher offers only that launcher's effective roots, never the wider Principal ceiling.
+- Policy-root completion suggestions are now deterministic and duplicate-free: a path qualifying both as an entry anchor and as a directory under a wider root is suggested once.
+- `principal show` read authority is scope-first: a principal credential reads exactly its own Principal (including FIELD extraction), a foreign selector is the established non-disclosing not-found, and admin read is unchanged. The CLI still performs no local self-check; the daemon authorizes the target.
+- The values of the `--principal`/`--launcher` selector flags now complete from the daemon's scope-aware selector introspection (`completion selectors principal|launcher`): an admin sees Principal names and, with a typed `--principal` context, that Principal's Launcher names (only globally resolvable `dhl_` IDs without a context), a Principal credential sees its own Launchers, a Launcher credential and any foreign scope see nothing. Both `--flag VALUE` and `--flag=VALUE` forms complete, and a partially typed inline form filters like the separated one.
+- Help, completion, man pages, README, and the architecture document reflect the actual read/mutation contracts; the UAT regression suite gained an RC8 CLI/UX acceptance group covering the packaged CLI.
+
+Full changes since RC7: https://github.com/kivarun/docker-helper/compare/v2.1.0-rc.7...v2.1.0-rc.8
+
 ## [2.1.0-rc.7] - 2026-09-06
 
 RC7 restores the Release-2.1 scope-first Session-list narrowing contract that escaped the published RC6.

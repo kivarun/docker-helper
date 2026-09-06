@@ -518,11 +518,16 @@ full syntax:
 - `config` — Inspect and modify configuration. Subcommands: `show`, `set`,
   `unset`, `allowed-root` (`list`, `add`, `remove`).
 - `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
-  `set`, `delete`, `allowed-root`, `credential` (`create`, `list`, `revoke`,
-  `rotate`).
+  `set`, `delete`, `allowed-root` (`add`, `list`, `remove`), `credential`
+  (`create`, `list`, `revoke`, `rotate`). `principal show` read authority is
+  scope-first: an admin token reads any Principal, a principal credential
+  reads exactly its own (the daemon authorizes the target; the CLI performs
+  no local self-check), a foreign selector is the non-disclosing not-found,
+  and a Launcher credential has no Principal-read authority.
 - `launcher` — Manage launchers. Subcommands: `create`, `list`, `show`,
-  `set`, `delete`, `scope` (`set`), `credential` (`create`, `show`, `rotate`,
-  `delete`). See Launcher ownership above for the full contract.
+  `set`, `delete`, `allowed-root` (`add`, `list`, `remove`, `inherit`),
+  `credential` (`create`, `show`, `rotate`, `delete`). See Launcher ownership
+  above for the full contract.
 - `credential` — Install a non-admin credential token and host the Release
   2.0 principal-credential aliases. Subcommands: `install` (canonical local
   install command), `create`, `list`, `revoke` (compatibility aliases for the
@@ -554,6 +559,10 @@ full syntax:
   `help` pseudo-subcommand (`docker-helper principal help` is an unknown
   subcommand).
 - `completion bash` — Generate Bash completion.
+- `completion selectors <principal|launcher>` — Machine-facing selector
+  introspection consumed by the generated Bash completion for the
+  `--principal`/`--launcher` flag values (authority- and scope-applicable
+  candidates only; see the CLI reference details above).
 - `completion roots principal` — Machine-facing completion query: print the
   target Principal's effective allowed roots (target from `--principal` or
   inferred from the credential; the daemon authorizes the query). With
@@ -562,7 +571,24 @@ full syntax:
   this surface so the parser tree, help tree, and completion tree remain
   identical (no hidden command nodes).
 - `completion roots session` — Machine-facing completion query: print the
-  Session-create effective allowed roots for the current authority.
+  Session-create effective allowed roots for the current authority. The
+  typed `--principal`/`--launcher` selectors (both `--flag VALUE` and
+  `--flag=VALUE` forms) are forwarded to the daemon; the daemon resolves
+  the same target a real `session create` with those selectors would use
+  through its canonical owners, and a rejected selector fails silently so
+  completion degrades.
+- `completion selectors principal` / `completion selectors launcher` —
+  Machine-facing selector introspection for the values of the
+  `--principal`/`--launcher` flags. The daemon remains the ownership and
+  authorization authority: `selectors principal` prints the daemon's
+  Principal names for an admin authority and degrades silently for every
+  other authority; `selectors launcher` honors the typed `--principal`
+  context — an admin with a context receives that Principal's Launcher
+  names, an admin without one receives only globally resolvable `dhl_`
+  Launcher IDs (a name is never searched globally), a Principal credential
+  receives its own Launchers' names, and a Launcher credential receives
+  nothing. A foreign or missing context fails with the daemon's
+  non-disclosing contract and degrades silently.
 
 ### Signal cancellation (agent commands)
 
@@ -1049,11 +1075,22 @@ launcher root that is no longer under the principal ceiling is rejected
 then (never silently truncated), so stale out-of-ceiling roots cannot
 produce a session outside the principal's allowed roots.
 
-Scope is replaced atomically:
+Scope replacement remains the one complete-scope mutation:
 `PUT /principals/{username}/launchers/{launcher}/allowed-roots` accepts
 the complete scope (`{"scope": "inherit", "allowed_roots": []}` or
-`{"scope": "restricted", "allowed_roots": [...]}`); there is no
-read-modify-write policy mutation through the CLI.
+`{"scope": "restricted", "allowed_roots": [...]}`); the CLI exposes it
+only as the fixed single-request `launcher allowed-root inherit` verb —
+there is no read-modify-write policy mutation through the CLI. The narrow
+per-root mutations are separate single-request operations:
+`POST .../allowed-roots` adds one root (narrowing an inherit launcher to
+restricted scope atomically with the insert) and `DELETE
+.../allowed-roots` removes one root; removal never changes the scope mode,
+so removing the last root leaves the launcher restricted with an empty
+root set (fail-closed: no admissible session workspace until an explicit
+inherit). Both reject the user-mode reserved default launcher with
+`409 user_mode_owner_reserved`. The CLI verbs are `launcher allowed-root
+add/list/remove/inherit` and `principal allowed-root add/list/remove`;
+`launcher scope` no longer exists in the CLI.
 
 ### Policy introspection
 
@@ -1074,12 +1111,19 @@ real mutations use, and neither surface widens authority.
   is `401`. Consumed by `completion roots principal`.
 - `GET /sessions/create-policy` — the complete Session-create projection
   (target Launcher, ownership names, and the three-level effective root
-  scope) that a Session created right now with this authority and no
-  explicit selector would use, resolved by the same owner as real creation
-  (`resolveCreatePolicy`) with an empty selector set and the normal
-  authority-specific default resolution. The endpoint accepts no ownership
-  selectors; a system-mode admin without a resolvable Launcher receives the
-  same missing-selector contract a real create would. Consumed by
+  scope) that a Session created right now with this authority would use,
+  resolved by the same owner as real creation (`resolveCreatePolicy`). The
+  query optionally carries the typed create selectors (`principal` = a
+  Principal username, `launcher` = a Launcher name or `dhl_` ID); the
+  launcher selector is resolved daemon-side through the shared
+  Launcher-selector owner (`resolveLauncherSelector`, under the selected
+  Principal context for an admin and the authenticated Principal's own
+  scope for a Principal credential), so the projection is exactly the
+  target a real create with those selectors would use, with the same
+  non-disclosing contract for foreign, missing, or authority-illegal
+  selectors. Selectorless requests keep the authority-specific default
+  resolution (a system-mode admin without a resolvable Launcher receives
+  the same missing-selector contract a real create would). Consumed by
   `completion roots session`.
 
 `GET /auth` is the separate identity introspection surface; it reports the
@@ -1090,8 +1134,8 @@ daemon-backed policy completions are exactly:
 | Command flag | Policy query consumed |
 |---|---|
 | `launcher create --allowed-root` | Principal effective-root query |
-| `launcher scope set --allowed-root` | Principal effective-root query |
-| `session create --workspace` | Session create-policy query |
+| `launcher allowed-root add` | Principal effective-root query |
+| `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
 
 `config allowed-root add` and `principal allowed-root add` remain generic
 filesystem completion, as do all other path-valued flags. When a policy
@@ -1111,6 +1155,8 @@ credential cannot manage launchers):
 | `GET /principals/{username}/launchers/{launcher}` | show launcher |
 | `PATCH /principals/{username}/launchers/{launcher}` | rename / enable / disable |
 | `PUT /principals/{username}/launchers/{launcher}/allowed-roots` | atomic scope replacement |
+| `POST /principals/{username}/launchers/{launcher}/allowed-roots` | add one allowed root (narrow-to-restricted on the first add) |
+| `DELETE /principals/{username}/launchers/{launcher}/allowed-roots` | remove one allowed root (never changes scope mode) |
 | `DELETE /principals/{username}/launchers/{launcher}` | delete launcher (checked delete) |
 | `PUT /principals/{username}/launchers/{launcher}/credential` | issue the launcher's single credential |
 | `GET /principals/{username}/launchers/{launcher}/credential` | show credential metadata |
@@ -1159,9 +1205,14 @@ docker-helper launcher set [--system] [--endpoint ENDPOINT]
     [--enabled true|false] [LAUNCHER]
 docker-helper launcher delete [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER]
-docker-helper launcher scope set [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER]
-    [--inherit | --allowed-root PATH]... [LAUNCHER]
+docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
+    [--token-file PATH] [--principal USER] [LAUNCHER] PATH
+docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
+    [--token-file PATH] [--principal USER] [LAUNCHER]
+docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
+    [--token-file PATH] [--principal USER] [LAUNCHER] PATH
+docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT]
+    [--token-file PATH] [--principal USER] [LAUNCHER]
 docker-helper launcher credential create [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER]
 docker-helper launcher credential show [--system] [--endpoint ENDPOINT]
@@ -2136,7 +2187,7 @@ Implemented event families are:
 | Authentication | `auth.failure`, `auth.session` |
 | Sessions | `session.create`, `session.list`, `session.delete` |
 | Principals | `principal.create`, `principal.enabled_change`, `principal.allowed_root_add`, `principal.allowed_root_remove`, `principal.delete` |
-| Launchers | `launcher.create`, `launcher.list`, `launcher.update`, `launcher.scope_replace`, `launcher.delete`, `launcher.credential_issue`, `launcher.credential_rotate`, `launcher.credential_delete` |
+| Launchers | `launcher.create`, `launcher.list`, `launcher.update`, `launcher.scope_replace`, `launcher.allowed_root_add`, `launcher.allowed_root_remove`, `launcher.delete`, `launcher.credential_issue`, `launcher.credential_rotate`, `launcher.credential_delete` |
 | Credentials/admin | `principal.credential_create`, `principal.credential_list`, `principal.credential_rotate`, `principal.credential_revoke`, `admin_token.rotate` |
 | Docker operations | `pull.start`, `pull.finish`, `pull.rejected`, `build.start`, `build.finish`, `build.rejected`, `run.start`, `run.finish`, `run.rejected`, `registry.login.start`, `registry.login.finish` |
 | Configuration | `config.reload` |
@@ -2292,6 +2343,7 @@ rotate when the credential was replaced).
 | `launcher_id` | string | launcher identifier |
 | `launcher_name` | string | launcher name (present where known) |
 | `launcher_scope` | string | `inherit` or `restricted` (create/scope_replace) |
+| `launcher_path` | string | the allowed root a narrow allowed-root mutation touched (allowed_root_add/allowed_root_remove) |
 | `launcher_enabled` | boolean | requested enabled state (update) |
 | `principal_name` | string | owning principal |
 | `result` | string | outcome code |

@@ -96,12 +96,20 @@ type sessionCreatePolicyResponse struct {
 // Launcher, and effective roots — corresponds to one coherent policy state
 // exactly like a real concurrent Session create would observe. It adds none
 // of the create side effects: no workspace validation, no MAC preparation,
-// no persistence. The query resolves with an empty selector set because the
-// endpoint shows the policy for creating a Session without an explicit
-// owner selection; Session create itself supports selectors. A system-mode
-// admin without a resolvable Launcher therefore receives the same
-// missing-selector contract the real create would return in that
-// no-selector case.
+// no persistence. The query optionally carries the typed Session-create
+// selectors as query parameters (principal = Principal username, launcher =
+// Launcher name or dhl_ ID), exactly as the completing command line has
+// them. The daemon resolves them through the same canonical owners real
+// Session creation uses: a launcher selector goes through the shared
+// Launcher-selector resolution owner (resolveLauncherSelector, under the
+// selected Principal context for an admin and under the authenticated
+// Principal's own scope for a Principal credential), a principal selector
+// re-enters resolveCreatePolicy untouched. The mapped selector therefore
+// resolves to exactly the target a real Session create with the same
+// selectors would use, with the same non-disclosing contract for foreign,
+// missing, malformed, or authority-illegal selectors (shell completion
+// fails silently on any rejection). Selectorless requests keep the
+// default-target policy.
 func (a *App) handleSessionCreatePolicy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -110,7 +118,67 @@ func (a *App) handleSessionCreatePolicy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	policy, err := a.resolveCreatePolicySnapshot(authCtx, createSelector{}, "")
+	q := r.URL.Query()
+	sel := createSelector{principal: q.Get("principal")}
+	if launcher := q.Get("launcher"); launcher != "" {
+		switch {
+		case authCtx.class == operatorAuthorityLauncher:
+			// A Launcher credential's selector is compared against its own
+			// exact ID by the create policy owner; a name or foreign ID is
+			// the non-disclosing launcher-not-found.
+			sel.launcherID = launcher
+		case authCtx.class == operatorAuthorityPrincipal && sel.principal != "":
+			// Authority-illegal combination: keep both fields so the create
+			// policy owner rejects it with the structural create contract.
+			sel.launcherID = launcher
+		default:
+			var principalCtx *int64
+			if authCtx.class == operatorAuthorityPrincipal {
+				// A Principal credential resolves the selector inside its own
+				// scope, exactly like a real create's --launcher.
+				ownID := authCtx.principal.PrincipalID
+				principalCtx = &ownID
+			} else if sel.principal != "" {
+				target, terr := resolvePrincipalControlTarget(a.DB, authCtx, sel.principal)
+				if terr != nil {
+					if isErrPrincipalNotFound(terr) {
+						// Real create maps a missing selected Principal to
+						// the non-disclosing launcher-not-found.
+						writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+						return
+					}
+					if !errors.Is(terr, errInvalidControlAuthority) {
+						opLog(ctx).Error("session create-policy introspection failed",
+							slog.String("operation", "policy_introspect"),
+							slog.String("error", terr.Error()),
+						)
+					}
+					writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+					return
+				}
+				principalCtx = &target.ID
+			}
+			l, lerr := resolveLauncherSelector(a.DB, principalCtx, launcher)
+			if lerr != nil {
+				if errors.Is(lerr, ErrLauncherNotFound) || errors.Is(lerr, ErrLauncherNameRequiresPrincipal) {
+					writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+					return
+				}
+				opLog(ctx).Error("session create-policy introspection failed",
+					slog.String("operation", "policy_introspect"),
+					slog.String("error", lerr.Error()),
+				)
+				writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+				return
+			}
+			// The resolved Launcher supersedes the principal selector's
+			// defaulting, exactly like the real create request whose
+			// launcher_id the CLI resolved under that Principal.
+			sel = createSelector{launcherID: l.ID}
+		}
+	}
+
+	policy, err := a.resolveCreatePolicySnapshot(authCtx, sel, "")
 	if err != nil {
 		if te := classifyCreateTargetError(err); te != nil {
 			writeError(ctx, w, te.status, te.code, te.msg)

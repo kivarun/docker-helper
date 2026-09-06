@@ -1307,6 +1307,8 @@ sudo docker-helper principal create --system alice
 
 # 2. Review the principal's allowed roots.
 sudo docker-helper principal show --system alice
+#    A principal credential reads exactly its own principal:
+#    docker-helper principal show --token-file alice.token alice
 
 # 3. Add a global allowed root.
 #    config allowed-root add updates the authorization ceiling only;
@@ -1475,12 +1477,19 @@ Launcher-scoped sessions use the launcher's effective roots:
 - `inherit` scope (the default): the principal's allowed roots apply
   unchanged;
 - `restricted` scope: sessions must be inside the launcher's own allowed
-  roots as well — set at creation with `--allowed-root` and replaced
-  atomically:
+  roots — set at creation with `--allowed-root`, adjusted with the
+  narrow add/remove commands (an add on an inherit launcher narrows it to
+  restricted atomically; removing the last root leaves it restricted with
+  an empty set, and only an explicit inherit returns it to the principal
+  ceiling):
 
 ```bash
-sudo docker-helper launcher scope set --principal alice \
-    --allowed-root /srv/workspaces/alice/agent build-agent
+sudo docker-helper launcher allowed-root add --principal alice \
+    build-agent /srv/workspaces/alice/agent
+sudo docker-helper launcher allowed-root list --principal alice build-agent
+sudo docker-helper launcher allowed-root remove --principal alice \
+    build-agent /srv/workspaces/alice/agent
+sudo docker-helper launcher allowed-root inherit --principal alice build-agent
 ```
 
 ### Managing launchers

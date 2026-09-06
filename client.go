@@ -497,9 +497,24 @@ func (c *apiClient) principalEffectiveRoots(username string) (*effectiveRootsRes
 // sessionCreatePolicy queries the read-only Session-create policy
 // introspection endpoint: the ownership and effective roots a Session
 // created right now with this authority would use, resolved by the same
-// daemon-side owner as real Session creation.
-func (c *apiClient) sessionCreatePolicy() (*sessionCreatePolicyResponse, error) {
-	resp, err := c.doAuthenticatedRequest("GET", "/sessions/create-policy", nil)
+// daemon-side owner as real Session creation. The optional selectors are
+// forwarded untouched in their typed form (principal = Principal username,
+// launcher = Launcher name or dhl_ ID); the daemon resolves them through the
+// same canonical owners real Session creation uses, with the same
+// authority-dependent semantics.
+func (c *apiClient) sessionCreatePolicy(principal, launcher string) (*sessionCreatePolicyResponse, error) {
+	values := url.Values{}
+	if principal != "" {
+		values.Set("principal", principal)
+	}
+	if launcher != "" {
+		values.Set("launcher", launcher)
+	}
+	path := "/sessions/create-policy"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	resp, err := c.doAuthenticatedRequest("GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -888,6 +903,44 @@ func (c *apiClient) deleteLauncher(username, selector string) error {
 
 	_, err = c.readResponseBody(resp)
 	return err
+}
+
+// addLauncherAllowedRoot sends the daemon-owned narrow allowed-root add
+// (POST .../allowed-roots). The CLI never performs a read-modify-write over
+// the replace operation: the daemon owns the policy mutation and its
+// concurrency semantics.
+func (c *apiClient) addLauncherAllowedRoot(username, selector, path string) (*launcherAllowedRootResponse, error) {
+	return c.mutateLauncherAllowedRoot(http.MethodPost, username, selector, path)
+}
+
+// removeLauncherAllowedRoot sends the daemon-owned narrow allowed-root remove
+// (DELETE .../allowed-roots). Removal never changes the Launcher scope.
+func (c *apiClient) removeLauncherAllowedRoot(username, selector, path string) (*launcherAllowedRootResponse, error) {
+	return c.mutateLauncherAllowedRoot(http.MethodDelete, username, selector, path)
+}
+
+func (c *apiClient) mutateLauncherAllowedRoot(method, username, selector, path string) (*launcherAllowedRootResponse, error) {
+	body, err := json.Marshal(allowedRootRequest{Path: path})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest(method, launcherControlPath(username, selector, "/allowed-roots"), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result launcherAllowedRootResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
 }
 
 // getLauncherCredential sends GET .../credential and returns the credential's

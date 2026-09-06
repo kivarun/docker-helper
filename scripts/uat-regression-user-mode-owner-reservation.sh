@@ -231,14 +231,14 @@ expect_reserved "B principal allowed-root remove" principal allowed-root remove 
 expect_reserved "B default launcher disable"      launcher set --principal "$OWNER" --enabled false default
 expect_reserved "B default launcher rename"       launcher set --principal "$OWNER" --name moved default
 expect_reserved "B default launcher delete"       launcher delete --principal "$OWNER" default
-expect_reserved "B default launcher restricted"   launcher scope set --principal "$OWNER" --allowed-root "$WS" default
+expect_reserved "B default launcher restricted"   launcher allowed-root add --principal "$OWNER" default "$WS"
 assert_owner_invariant "B after rejections"
 
 # --- C. harmless no-ops remain coherent --------------------------------------
 
 if dhx principal set "$OWNER" enabled true >/dev/null 2>&1 \
     && dhx launcher set --principal "$OWNER" --enabled true default >/dev/null 2>&1 \
-    && dhx launcher scope set --principal "$OWNER" --inherit default >/dev/null 2>&1; then
+    && dhx launcher allowed-root inherit --principal "$OWNER" default >/dev/null 2>&1; then
   reg_ok "C: invariant-preserving no-ops remain ordinary successes"
 else
   reg_fail "C: an invariant-preserving no-op was rejected"

@@ -41,7 +41,7 @@ Install for Bash:
 
 Or install persistently:
   docker-helper completion bash > ~/.local/share/bash-completion/completions/docker-helper`,
-	Subcommands: []*Command{completionBashCommand, completionRootsCommand},
+	Subcommands: []*Command{completionBashCommand, completionRootsCommand, completionSelectorsCommand},
 }
 
 // completionBashCommand generates the canonical capability-aware Bash
@@ -161,12 +161,75 @@ var completionRootsPrincipalCommand = &Command{
 
 // completionRootsSessionCommand prints the effective allowed roots of the
 // Launcher that a Session created right now with this authority would use,
-// one path per line, resolved by the same daemon-side owner as real Session
-// creation.
+// one path per line. The typed --principal/--launcher selectors are
+// forwarded to the daemon untouched; the daemon resolves them through the
+// same canonical owners real Session creation uses, so the printed roots
+// are exactly the roots a real create with the typed selectors would use. A
+// rejected selector makes the query unavailable so completion falls back
+// silently.
 var completionRootsSessionCommand = &Command{
 	Name:       "session",
 	Summary:    "Print the Session-create effective allowed roots",
-	Usage:      "docker-helper completion roots session [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion roots session [--principal USER] [--launcher LAUNCHER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	MinPosArgs: 0,
+	MaxPosArgs: 0,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := &explicitStringFlag{}
+		fs.Var(principal, "principal", "Principal username (admin authentication; targets the Principal's default Launcher)")
+		launcher := &explicitStringFlag{}
+		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...) to target instead of the default Launcher")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+					Timeout:   completionQueryTimeout,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.sessionCreatePolicy(principal.value, launcher.value)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				for _, root := range result.AllowedRoots {
+					fmt.Fprintln(stdout, root)
+				}
+				return 0
+			},
+		}
+	},
+}
+
+// completionSelectorsCommand is the machine-facing selector introspection
+// surface used by generated Bash completion to complete the values of the
+// --principal/--launcher selector flags. The daemon remains the ownership
+// and authorization authority: this command only formats the scope-applicable
+// selectors the daemon returns for the authenticated authority, and a query
+// failure or an unauthorized scope degrades silently (no suggestions, no
+// local policy).
+var completionSelectorsCommand = &Command{
+	Name:        "selectors",
+	Summary:     "Query scope-applicable selector values for shell completion",
+	Usage:       "docker-helper completion selectors <principal|launcher> [...]",
+	Subcommands: []*Command{completionSelectorsPrincipalCommand, completionSelectorsLauncherCommand},
+}
+
+// completionSelectorsPrincipalCommand prints the Principal names the
+// authenticated authority may target with a --principal selector, one per
+// line: an admin authority receives the daemon's Principal list, a
+// Principal or Launcher credential receives nothing because the selector is
+// contractually inapplicable to its commands (the daemon answers the
+// admin-only list query with its non-disclosing unauthorized contract and
+// the command degrades silently).
+var completionSelectorsPrincipalCommand = &Command{
+	Name:       "principal",
+	Summary:    "Print the Principal names selectable with --principal",
+	Usage:      "docker-helper completion selectors principal [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -183,13 +246,92 @@ var completionRootsSessionCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				result, err := client.sessionCreatePolicy()
+				result, err := client.listPrincipals()
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				for _, root := range result.AllowedRoots {
-					fmt.Fprintln(stdout, root)
+				for _, p := range result.Principals {
+					fmt.Fprintln(stdout, p.Username)
+				}
+				return 0
+			},
+		}
+	},
+}
+
+// completionSelectorsLauncherCommand prints the Launcher selectors the
+// authenticated authority may target with a --launcher selector, one per
+// line, honoring the typed --principal context: an admin with a Principal
+// context receives that Principal's Launcher names; an admin without one
+// receives only globally resolvable Launcher IDs (a name is never searched
+// globally); a Principal credential receives its own Launchers' names; a
+// Launcher credential receives nothing because explicit selectors are
+// contractually inapplicable to it. A foreign or missing context fails with
+// the daemon's non-disclosing contract and the command degrades silently.
+var completionSelectorsLauncherCommand = &Command{
+	Name:       "launcher",
+	Summary:    "Print the Launcher selectors selectable with --launcher",
+	Usage:      "docker-helper completion selectors launcher [--principal USER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	MinPosArgs: 0,
+	MaxPosArgs: 0,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := &explicitStringFlag{}
+		fs.Var(principal, "principal", "Principal context (admin authority; its Launcher names become selectable)")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+					Timeout:   completionQueryTimeout,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				auth, err := client.auth()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				var print func(l launcherJSON) string
+				switch auth.Authority {
+				case "launcher":
+					return 0
+				case "principal":
+					if principal.set && principal.value != "" {
+						// The selector is authority-illegal for a Principal
+						// credential; the daemon rejects it and the command
+						// degrades silently.
+						if _, err := client.listLaunchersFiltered(principal.value, ""); err != nil {
+							fmt.Fprintf(stderr, "error: %v\n", err)
+							return 1
+						}
+						return 0
+					}
+					print = func(l launcherJSON) string { return l.Name }
+				case "admin":
+					if principal.value == "" {
+						// Without a Principal context only a globally unique
+						// Launcher ID resolves; a name is never searched
+						// globally.
+						print = func(l launcherJSON) string { return l.ID }
+					} else {
+						print = func(l launcherJSON) string { return l.Name }
+					}
+				default:
+					fmt.Fprintf(stderr, "error: unknown authority %q\n", auth.Authority)
+					return 1
+				}
+				result, err := client.listLaunchersFiltered(principal.value, "")
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				for _, l := range result.Launchers {
+					fmt.Fprintln(stdout, print(l))
 				}
 				return 0
 			},
@@ -297,7 +439,6 @@ type policyValueCompletion struct {
 
 var policyValueCompletions = []policyValueCompletion{
 	{commandPath: "launcher create", flag: "allowed-root", query: "principal"},
-	{commandPath: "launcher scope set", flag: "allowed-root", query: "principal"},
 	{commandPath: "session create", flag: "workspace", query: "session"},
 }
 
@@ -446,7 +587,18 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "        esac")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "    # If current word starts with -, complete flags")
+	fmt.Fprintln(w, "    # If current word starts with -, complete flags. A partially typed")
+	fmt.Fprintln(w, "    # --flag=VALUE word completes the flag's VALUE with the typed")
+	fmt.Fprintln(w, "    # prefix, exactly like the separated --flag VALUE form.")
+	fmt.Fprintln(w, "    if [[ \"$cur\" == --*=* ]]; then")
+	fmt.Fprintln(w, "        local inline_name=\"${cur%%=*}\"")
+	fmt.Fprintln(w, "        local clean_inline=\"${inline_name#-}\"")
+	fmt.Fprintln(w, "        clean_inline=\"${clean_inline#-}\"")
+	fmt.Fprintln(w, "        if _docker_helper_flag_takes_value \"$flag_path\" \"$clean_inline\"; then")
+	fmt.Fprintln(w, "            _docker_helper_complete_flag_value \"$flag_path\" \"$clean_inline\" \"${cur#*=}\"")
+	fmt.Fprintln(w, "            return")
+	fmt.Fprintln(w, "        fi")
+	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    case \"$cur\" in")
 	fmt.Fprintln(w, "        -*)")
 	fmt.Fprintln(w, "            local flags=($(_docker_helper_flags \"$flag_path\"))")
@@ -461,11 +613,13 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            ;;")
 	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "    # If previous word was a flag that takes a value, complete the value")
+	fmt.Fprintln(w, "    # If previous word was a flag that takes a value, complete the value.")
+	fmt.Fprintln(w, "    # The typed value prefix (the current word for the separated form,")
+	fmt.Fprintln(w, "    # the part after --flag= for the inline form) is passed explicitly.")
 	fmt.Fprintln(w, "    if [ -n \"$prev\" ] && [[ \"$prev\" == -* ]]; then")
 	fmt.Fprintln(w, "        local clean_prev=\"${prev#-}\"")
 	fmt.Fprintln(w, "        clean_prev=\"${clean_prev#-}\"")
-	fmt.Fprintln(w, "        _docker_helper_complete_flag_value \"$flag_path\" \"$clean_prev\"")
+	fmt.Fprintln(w, "        _docker_helper_complete_flag_value \"$flag_path\" \"$clean_prev\" \"$cur\"")
 	fmt.Fprintln(w, "        return")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w)
@@ -475,6 +629,36 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    local nofallback=0")
 	fmt.Fprintln(w, "    if [ $seen_double_dash -eq 1 ] || [ $seen_positional -eq 1 ]; then nofallback=1; fi")
 	fmt.Fprintln(w, "    _docker_helper_complete_positional \"$cmd_path\" \"$in_help\" \"$nofallback\"")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Count the positional arguments already typed before the current")
+	fmt.Fprintln(w, "# word for a command path: command-path words are skipped and the")
+	fmt.Fprintln(w, "# values of value-taking flags (for example --principal USER) are")
+	fmt.Fprintln(w, "# consumed with their flag, so a typed flag never shifts the PATH")
+	fmt.Fprintln(w, "# position.")
+	fmt.Fprintln(w, "_docker_helper_positional_count() {")
+	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
+	fmt.Fprintln(w, "    local count=0")
+	fmt.Fprintln(w, "    local i=1")
+	fmt.Fprintln(w, "    while [ $i -lt $COMP_CWORD ]; do")
+	fmt.Fprintln(w, "        local w=\"${COMP_WORDS[$i]}\"")
+	fmt.Fprintln(w, "        case \"$w\" in")
+	fmt.Fprintln(w, "            -*)")
+	fmt.Fprintln(w, "                if [[ \"$w\" != *=* ]] && _docker_helper_flag_takes_value \"$cmd_path\" \"$w\"; then")
+	fmt.Fprintln(w, "                    i=$((i + 2))")
+	fmt.Fprintln(w, "                    continue")
+	fmt.Fprintln(w, "                fi")
+	fmt.Fprintln(w, "                ;;")
+	fmt.Fprintln(w, "            *)")
+	fmt.Fprintln(w, "                case \" $cmd_path \" in")
+	fmt.Fprintln(w, "                    *\" $w \"*) ;;")
+	fmt.Fprintln(w, "                    *) count=$((count + 1)) ;;")
+	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "                ;;")
+	fmt.Fprintln(w, "        esac")
+	fmt.Fprintln(w, "        i=$((i + 1))")
+	fmt.Fprintln(w, "    done")
+	io.WriteString(w, "    printf '%s\\n' \"$count\"\n")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Complete positional arguments or subcommands")
@@ -643,6 +827,23 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            _docker_helper_normalize_path_candidates")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
+	fmt.Fprintln(w, `        "principal allowed-root add"|"principal allowed-root remove"|"launcher allowed-root add"|"launcher allowed-root remove")`)
+	fmt.Fprintln(w, "            # USER (principal) and [LAUNCHER] positionals take no")
+	fmt.Fprintln(w, "            # suggestions; the next position is the PATH. add suggests")
+	fmt.Fprintln(w, "            # directories only (a managed root must be a directory);")
+	fmt.Fprintln(w, "            # remove accepts any filesystem entry.")
+	fmt.Fprintln(w, "            local pos")
+	fmt.Fprintln(w, "            pos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
+	fmt.Fprintln(w, "            if [ \"$pos\" -eq 1 ]; then")
+	fmt.Fprintln(w, "                compopt -o filenames 2>/dev/null || true")
+	fmt.Fprintln(w, "                case \"$cmd_path\" in")
+	fmt.Fprintln(w, `                    *add) COMPREPLY=( $(compgen -d -- "$cur") ) ;;`)
+	fmt.Fprintln(w, `                    *remove) COMPREPLY=( $(compgen -f -- "$cur") ) ;;`)
+	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "                _docker_helper_normalize_path_candidates")
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            return")
+	fmt.Fprintln(w, "            ;;")
 	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "    # Flag-only leaf fallback (parser tree == completion tree): a leaf")
@@ -748,16 +949,30 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "# Complete flag values (for flags that take values)")
+	fmt.Fprintln(w, "# Complete flag values (for flags that take values). The third argument")
+	fmt.Fprintln(w, "# is the typed value prefix: the current word for the separated")
+	fmt.Fprintln(w, "# --flag VALUE form, the part after --flag= for the inline form.")
 	fmt.Fprintln(w, "_docker_helper_complete_flag_value() {")
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
 	fmt.Fprintln(w, "    local flag=\"$2\"")
+	fmt.Fprintln(w, "    local prefix=\"$3\"")
+	fmt.Fprintln(w, "    # Selector-value flags complete from the daemon's scope-aware")
+	fmt.Fprintln(w, "    # selector introspection; the daemon remains the ownership and")
+	fmt.Fprintln(w, "    # authorization authority and an unauthorized or unavailable query")
+	fmt.Fprintln(w, "    # degrades silently.")
+	fmt.Fprintln(w, "    case \"$flag\" in")
+	fmt.Fprintln(w, "        principal|launcher)")
+	fmt.Fprintln(w, "            if _docker_helper_complete_selector_value \"$flag\" \"$prefix\"; then")
+	fmt.Fprintln(w, "                return")
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            ;;")
+	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w, "    # Daemon-backed policy roots take precedence for their registered")
 	fmt.Fprintln(w, "    # (command, flag) pairs. Convenience only: on any query failure")
 	fmt.Fprintln(w, "    # completion degrades silently to the generic filesystem completion.")
 	fmt.Fprintln(w, "    local mode")
 	fmt.Fprintln(w, "    if mode=\"$(_docker_helper_policy_value_mode \"$cmd_path\" \"$flag\")\"; then")
-	fmt.Fprintln(w, "        if _docker_helper_complete_policy_roots \"$mode\"; then")
+	fmt.Fprintln(w, "        if _docker_helper_complete_policy_roots \"$mode\" \"$prefix\"; then")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "        fi")
 	fmt.Fprintln(w, "    fi")
@@ -766,7 +981,7 @@ func generateBashCompletion(w io.Writer) {
 	for _, f := range pathValuedFlags {
 		fmt.Fprintf(w, "        %q)\n", f)
 		fmt.Fprintln(w, "            compopt -o filenames 2>/dev/null || true")
-		fmt.Fprintln(w, "            COMPREPLY=( $(compgen -f -- \"$cur\") )")
+		fmt.Fprintln(w, "            COMPREPLY=( $(compgen -f -- \"$prefix\") )")
 		fmt.Fprintln(w, "            _docker_helper_normalize_path_candidates")
 		fmt.Fprintln(w, "            ;;")
 	}
@@ -843,28 +1058,67 @@ func generateBashCompletion(w io.Writer) {
 	io.WriteString(w, "    printf '%s\\n' \"$value\"\n")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "# Run the daemon-backed roots query through docker-helper itself and")
-	fmt.Fprintln(w, "# complete from the returned policy anchors. The forwarded operator")
-	fmt.Fprintln(w, "# overrides and the typed --principal value stay Bash arrays end to")
-	fmt.Fprintln(w, "# end, so values with spaces reach the helper as single arguments.")
-	fmt.Fprintln(w, "# Prints nothing and fails silently when the query is unavailable.")
-	fmt.Fprintln(w, "_docker_helper_complete_policy_roots() {")
-	fmt.Fprintln(w, "    local mode=\"$1\"")
-	fmt.Fprintln(w, "    local -a opargs=()")
+	fmt.Fprintln(w, "# Complete the values of the --principal/--launcher selector flags from")
+	fmt.Fprintln(w, "# the daemon's scope-aware selector introspection (docker-helper")
+	fmt.Fprintln(w, "# completion selectors): an admin sees Principal names for --principal")
+	fmt.Fprintln(w, "# and, for --launcher, the typed --principal context's Launcher names")
+	fmt.Fprintln(w, "# (both forms) or, without one, only globally resolvable Launcher IDs;")
+	fmt.Fprintln(w, "# a Principal credential sees its own Launchers; a Launcher credential")
+	fmt.Fprintln(w, "# and any unauthorized or foreign scope offer nothing. The word list is")
+	fmt.Fprintln(w, "# filtered by the typed prefix, so --launcher=ki completes like")
+	fmt.Fprintln(w, "# --launcher ki. Prints nothing and fails silently when the query is")
+	fmt.Fprintln(w, "# unavailable.")
+	fmt.Fprintln(w, "_docker_helper_complete_selector_value() {")
+	fmt.Fprintln(w, "    local flag=\"$1\"")
+	fmt.Fprintln(w, "    local prefix=\"$2\"")
+	fmt.Fprintln(w, "    local -a opargs=() selargs=()")
 	fmt.Fprintln(w, "    mapfile -d '' -t opargs < <(_docker_helper_operator_args \"$cmd_path\")")
-	fmt.Fprintln(w, "    local -a principal_qargs=()")
-	fmt.Fprintln(w, "    if [ \"$mode\" = principal ]; then")
-	fmt.Fprintln(w, "        local principal_arg")
-	fmt.Fprintln(w, "        principal_arg=\"$(_docker_helper_typed_flag_value principal)\"")
-	fmt.Fprintln(w, "        if [ -n \"$principal_arg\" ]; then")
-	fmt.Fprintln(w, "            principal_qargs=(--principal \"$principal_arg\")")
+	fmt.Fprintln(w, "    if [ \"$flag\" = launcher ]; then")
+	fmt.Fprintln(w, "        local p")
+	fmt.Fprintln(w, "        p=\"$(_docker_helper_typed_flag_value principal)\"")
+	fmt.Fprintln(w, "        if [ -n \"$p\" ]; then")
+	fmt.Fprintln(w, "            selargs+=(--principal \"$p\")")
 	fmt.Fprintln(w, "        fi")
 	fmt.Fprintln(w, "    fi")
-	fmt.Fprintln(w, "    local roots")
-	fmt.Fprintln(w, "    if ! roots=\"$(\"${COMP_WORDS[0]}\" completion roots \"$mode\" \"${opargs[@]}\" \"${principal_qargs[@]}\" 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "    local vals")
+	fmt.Fprintln(w, "    if ! vals=\"$(${COMP_WORDS[0]} completion selectors \"$flag\" \"${opargs[@]}\" \"${selargs[@]}\" 2>/dev/null)\"; then")
 	fmt.Fprintln(w, "        return 1")
 	fmt.Fprintln(w, "    fi")
-	fmt.Fprintln(w, "    _docker_helper_complete_within_roots \"$flag\" \"$roots\"")
+	fmt.Fprintln(w, "    [ -n \"$vals\" ] || return 1")
+	fmt.Fprintln(w, "    mapfile -t COMPREPLY < <(compgen -W \"$vals\" -- \"$prefix\")")
+	fmt.Fprintln(w, "    [ ${#COMPREPLY[@]} -gt 0 ]")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Run the daemon-backed roots query through docker-helper itself and")
+	fmt.Fprintln(w, "# complete from the returned policy anchors. The forwarded operator")
+	fmt.Fprintln(w, "# overrides and the typed selector values stay Bash arrays end to")
+	fmt.Fprintln(w, "# end, so values with spaces reach the helper as single arguments.")
+	fmt.Fprintln(w, "# For a Session-create query the typed --principal/--launcher")
+	fmt.Fprintln(w, "# selectors (either --flag VALUE or --flag=VALUE) are forwarded to")
+	fmt.Fprintln(w, "# docker-helper, which normalizes them exactly like a real Session")
+	fmt.Fprintln(w, "# create; the daemon resolves the same target the real command")
+	fmt.Fprintln(w, "# would. Prints nothing and fails silently when the query is")
+	fmt.Fprintln(w, "# unavailable.")
+	fmt.Fprintln(w, "_docker_helper_complete_policy_roots() {")
+	fmt.Fprintln(w, "    local mode=\"$1\"")
+	fmt.Fprintln(w, "    local prefix=\"$2\"")
+	fmt.Fprintln(w, "    local -a opargs=() selargs=()")
+	fmt.Fprintln(w, "    mapfile -d '' -t opargs < <(_docker_helper_operator_args \"$cmd_path\")")
+	fmt.Fprintln(w, "    local arg")
+	fmt.Fprintln(w, "    for arg in principal launcher; do")
+	fmt.Fprintln(w, "        if [ \"$mode\" = \"$arg\" ] || [ \"$mode\" = session ]; then")
+	fmt.Fprintln(w, "            local sel")
+	fmt.Fprintln(w, "            sel=\"$(_docker_helper_typed_flag_value \"$arg\")\"")
+	fmt.Fprintln(w, "            if [ -n \"$sel\" ]; then")
+	fmt.Fprintln(w, "                selargs+=(--\"$arg\" \"$sel\")")
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "        fi")
+	fmt.Fprintln(w, "    done")
+	fmt.Fprintln(w, "    local roots")
+	fmt.Fprintln(w, "    if ! roots=\"$(\"${COMP_WORDS[0]}\" completion roots \"$mode\" \"${opargs[@]}\" \"${selargs[@]}\" 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "        return 1")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    _docker_helper_complete_within_roots \"$flag\" \"$roots\" \"$prefix\"")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Collapse doubled separators in the current filesystem candidates.")
@@ -903,6 +1157,7 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "_docker_helper_complete_within_roots() {")
 	fmt.Fprintln(w, "    local flag=\"$1\"")
 	fmt.Fprintln(w, "    local roots=\"$2\"")
+	fmt.Fprintln(w, "    local prefix=\"$3\"")
 	fmt.Fprintln(w, "    local -a anchors=() roots_can=()")
 	fmt.Fprintln(w, "    local r")
 	fmt.Fprintln(w, "    while IFS= read -r r; do")
@@ -914,10 +1169,10 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    local a d d_can i root_can")
 	fmt.Fprintln(w, "    for a in \"${anchors[@]}\"; do")
 	fmt.Fprintln(w, "        case \"$a\" in")
-	fmt.Fprintln(w, "            \"$cur\"*) comp+=(\"$a\") ;;")
+	fmt.Fprintln(w, "            \"$prefix\"*) comp+=(\"$a\") ;;")
 	fmt.Fprintln(w, "        esac")
 	fmt.Fprintln(w, "    done")
-	fmt.Fprintln(w, "    if [[ \"$cur\" == */* ]]; then")
+	fmt.Fprintln(w, "    if [[ \"$prefix\" == */* ]]; then")
 	fmt.Fprintln(w, "        while IFS= read -r d; do")
 	fmt.Fprintln(w, "            [ -n \"$d\" ] || continue")
 	fmt.Fprintln(w, "            d_can=\"$(realpath -m -- \"$d\" 2>/dev/null)\"")
@@ -931,6 +1186,13 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "                fi")
 	fmt.Fprintln(w, "            done")
 	fmt.Fprintln(w, "        done < <(compgen -d -- \"$cur\" 2>/dev/null)")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "# COMPREPLY is made deterministic and unique: a path can qualify both")
+	fmt.Fprintln(w, "# as an entry anchor and as a directory under a wider root (nested")
+	fmt.Fprintln(w, "# roots), and duplicate candidates would surface twice in the")
+	fmt.Fprintln(w, "# suggestions.")
+	fmt.Fprintln(w, "    if [ ${#comp[@]} -gt 0 ]; then")
+	io.WriteString(w, "        mapfile -t comp < <(printf '%s\\n' \"${comp[@]}\" | LC_ALL=C sort -u)\n")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    COMPREPLY=(\"${comp[@]}\")")
 	fmt.Fprintln(w, "    _docker_helper_normalize_path_candidates")

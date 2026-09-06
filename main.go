@@ -227,6 +227,8 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("GET /principals/{username}/launchers/{launcher}", app.handleShowLauncher)
 	mux.HandleFunc("PATCH /principals/{username}/launchers/{launcher}", app.handlePatchLauncher)
 	mux.HandleFunc("PUT /principals/{username}/launchers/{launcher}/allowed-roots", app.handleReplaceLauncherAllowedRoots)
+	mux.HandleFunc("POST /principals/{username}/launchers/{launcher}/allowed-roots", app.handleAddLauncherAllowedRoot)
+	mux.HandleFunc("DELETE /principals/{username}/launchers/{launcher}/allowed-roots", app.handleRemoveLauncherAllowedRoot)
 	mux.HandleFunc("DELETE /principals/{username}/launchers/{launcher}", app.handleDeleteLauncher)
 	mux.HandleFunc("PUT /principals/{username}/launchers/{launcher}/credential", app.handleIssueLauncherCredential)
 	mux.HandleFunc("GET /principals/{username}/launchers/{launcher}/credential", app.handleGetLauncherCredential)

@@ -148,6 +148,7 @@ REGRESSIONS=(
   "11:User-mode owner reservation:uat-regression-user-mode-owner-reservation.sh"
   "12:User-mode effective Principal roots:uat-regression-user-mode-effective-roots.sh"
   "13:RC6 session-list narrowing acceptance:uat-regression-rc6-session-list-narrowing.sh"
+  "14:RC8 CLI/UX acceptance:uat-regression-rc8-cli-ux.sh"
 )
 
 declare -A RESULT
