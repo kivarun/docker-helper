@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -102,6 +103,89 @@ func TestLauncherCreateAuditProvenance(t *testing.T) {
 		t.Errorf("principal_name = %v, want lncaudit", m["principal_name"])
 	}
 	assertNoSecrets(t, raw, m, credToken, testAdminToken)
+}
+
+// TestLauncherAllowedRootAddAuditCommittedProjection proves the allowed-root
+// add success audit describes the committed post-mutation state, not the
+// pre-mutation snapshot. The first add on an inherit-scope Launcher commits the
+// inherit -> restricted narrowing: the HTTP response succeeds, the database
+// holds the narrowed state, and the audit reports the committed restricted
+// scope — all three observed after the public endpoint. A subsequent add and
+// the unchanged retry keep reporting the actual committed/current state.
+func TestLauncherAllowedRootAddAuditCommittedProjection(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, credToken, _, l := launcherAuditApp(t, "lnaradd")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "lnaradd")
+	inRoot := filepath.Join(home, "proj")
+	if err := os.MkdirAll(inRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := "/principals/lnaradd/launchers/" + l.Name + "/allowed-roots"
+
+	// First add on an inherit-scope Launcher.
+	w := launcherAuditRequest(t, app, http.MethodPost, path, credToken, `{"path":"`+inRoot+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first add: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if got := readLauncherScopeMode(t, app.DB, l.ID); got != LauncherScopeRestricted {
+		t.Fatalf("db scope after first add = %q, want restricted", got)
+	}
+	if got := readLauncherStoredRoots(t, app.DB, l.ID); !slices.Equal(got, []string{inRoot}) {
+		t.Fatalf("db stored roots = %v, want [%s]", got, inRoot)
+	}
+	raw := findAuditLine(auditBuf, "launcher.allowed_root_add")
+	if raw == "" {
+		t.Fatalf("expected launcher.allowed_root_add audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["result"] != "success" {
+		t.Errorf("result = %v, want success", m["result"])
+	}
+	if m["launcher_scope"] != string(LauncherScopeRestricted) {
+		t.Errorf("launcher_scope = %v, want restricted (the committed scope, not the pre-mutation inherit snapshot)", m["launcher_scope"])
+	}
+	if m["launcher_path"] != inRoot {
+		t.Errorf("launcher_path = %v, want %s", m["launcher_path"], inRoot)
+	}
+	if m["launcher_id"] != l.ID {
+		t.Errorf("launcher_id = %v, want %s", m["launcher_id"], l.ID)
+	}
+	assertNoSecrets(t, raw, m, credToken, testAdminToken)
+
+	// A subsequent add on the already restricted Launcher keeps reporting the
+	// committed restricted scope.
+	auditBuf.Reset()
+	second := filepath.Join(home, "proj2")
+	if err := os.MkdirAll(second, 0755); err != nil {
+		t.Fatal(err)
+	}
+	w = launcherAuditRequest(t, app, http.MethodPost, path, credToken, `{"path":"`+second+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("second add: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	raw = findAuditLine(auditBuf, "launcher.allowed_root_add")
+	if raw == "" {
+		t.Fatalf("expected second launcher.allowed_root_add audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["launcher_scope"] != string(LauncherScopeRestricted) {
+		t.Errorf("second add launcher_scope = %v, want restricted", m["launcher_scope"])
+	}
+
+	// The unchanged retry keeps reporting the committed/current state.
+	auditBuf.Reset()
+	w = launcherAuditRequest(t, app, http.MethodPost, path, credToken, `{"path":"`+inRoot+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("retry add: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	raw = findAuditLine(auditBuf, "launcher.allowed_root_add")
+	if raw == "" {
+		t.Fatalf("expected retry launcher.allowed_root_add audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["launcher_scope"] != string(LauncherScopeRestricted) {
+		t.Errorf("retry add launcher_scope = %v, want restricted (the committed/current state)", m["launcher_scope"])
+	}
 }
 
 // TestLauncherCredentialRotateAuditNoBearerLeak proves the rotation audit

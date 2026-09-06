@@ -1,0 +1,332 @@
+//go:build linux
+
+package main
+
+// The interactive Readline completion regression: a real PTY, a real
+// interactive Bash, and a real TAB. The synthetic harness tests set COMP_WORDS
+// by hand, which can never reproduce the physical tokenization production
+// completion faces: Readline breaks words at COMP_WORDBREAKS characters, so
+// the inline --flag=VALUE form arrives as three physical words (--flag, =,
+// VALUE). These tests type real lines and send real TAB keystrokes, proving
+// the canonical normalized word view makes the separated --flag VALUE and
+// inline --flag=VALUE forms drive identical daemon query semantics and offer
+// identical suggestions under real Bash.
+
+import (
+	"bytes"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+// completionPTY drives an interactive bash over a real PTY.
+type completionPTY struct {
+	master *os.File
+	cmd    *exec.Cmd
+
+	mu       sync.Mutex
+	out      bytes.Buffer
+	consumed int
+}
+
+// startCompletionPTY starts an interactive bash with the completion script
+// sourced, reading and writing through a freshly allocated PTY. The built
+// docker-helper binary directory is prepended to PATH so the completed line
+// and the completion's inner daemon queries resolve the same binary.
+func startCompletionPTY(t *testing.T, script string) *completionPTY {
+	t.Helper()
+	binary := getCompletionBinary(t)
+
+	masterFD, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("cannot open /dev/ptmx: %v", err)
+	}
+	master := os.NewFile(uintptr(masterFD), "/dev/ptmx")
+	ptyNum, err := unix.IoctlGetUint32(masterFD, unix.TIOCGPTN)
+	if err != nil {
+		t.Fatalf("TIOCGPTN: %v", err)
+	}
+	if err := unix.IoctlSetPointerInt(masterFD, unix.TIOCSPTLCK, 0); err != nil {
+		t.Fatalf("TIOCSPTLCK: %v", err)
+	}
+	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", ptyNum), os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatalf("open pty slave: %v", err)
+	}
+	// A sane window size keeps Readline's redisplay deterministic.
+	if err := unix.IoctlSetWinsize(masterFD, unix.TIOCSWINSZ, &unix.Winsize{Row: 40, Col: 120}); err != nil {
+		t.Fatalf("TIOCSWINSZ: %v", err)
+	}
+
+	// The script is sourced through a file: typing a multi-KB here-document
+	// through the PTY would be slow and fragile.
+	scriptPath := filepath.Join(t.TempDir(), "completion.bash")
+	if err := os.WriteFile(scriptPath, []byte(script), 0644); err != nil {
+		t.Fatalf("write completion script: %v", err)
+	}
+
+	cmd := exec.Command("bash", "--noprofile", "--norc", "-i")
+	cmd.Env = append(os.Environ(),
+		"PS1=R> ",
+		"TERM=xterm",
+		"PATH="+filepath.Dir(binary)+":"+os.Getenv("PATH"),
+	)
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start interactive bash: %v", err)
+	}
+
+	p := &completionPTY{master: master, cmd: cmd}
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := master.Read(buf)
+			p.mu.Lock()
+			p.out.Write(buf[:n])
+			p.mu.Unlock()
+			if err != nil {
+				break
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		_ = master.Close()
+		_ = slave.Close()
+	})
+
+	// The first prompt proves the shell is reading input.
+	p.waitNext(t, "R> ", 10*time.Second)
+	p.send(t, "source "+scriptPath+"\n")
+	// The next prompt proves sourcing finished.
+	p.waitNext(t, "R> ", 10*time.Second)
+	return p
+}
+
+// send writes raw bytes to the PTY master, i.e. types them into the shell.
+func (p *completionPTY) send(t *testing.T, s string) {
+	t.Helper()
+	if _, err := p.master.WriteString(s); err != nil {
+		t.Fatalf("write to pty: %v", err)
+	}
+}
+
+// waitNext waits until want appears in the output after the consumed offset,
+// then consumes through it and returns the segment. Bounded polling of the
+// actual PTY state, never an estimated sleep.
+func (p *completionPTY) waitNext(t *testing.T, want string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		p.mu.Lock()
+		out := p.out.String()
+		idx := strings.Index(out[p.consumed:], want)
+		if idx >= 0 {
+			p.consumed += idx + len(want)
+			p.mu.Unlock()
+			return out[:p.consumed]
+		}
+		p.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %q after offset %d; pty output:\n%s", want, p.consumed, out)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// typeAndTab types a partial command line and sends a real TAB, then waits
+// until the expected completion insertion appears in the PTY output and
+// returns the segment produced by the completion. The insertion itself is the
+// completion's observable result: Readline echoes every character it inserts.
+func (p *completionPTY) typeAndTab(t *testing.T, line, expect string) string {
+	t.Helper()
+	p.send(t, line+"\t")
+	return p.waitNext(t, expect, 10*time.Second)
+}
+
+// resetLine clears any half-typed input with Ctrl-U so the next case starts
+// from an empty line.
+func (p *completionPTY) resetLine(t *testing.T) {
+	t.Helper()
+	p.send(t, "\x15")
+}
+
+// startCompletionPTYServer stubs the daemon surfaces the interactive cases
+// drive, recording every request: an admin bearer answers --principal
+// completion from the Principal list, a Principal bearer answers --launcher
+// completion with its own Launchers, and the Session-create policy query
+// narrows to the restricted root only for the typed killme launcher selector.
+// The endpoint is a Unix socket path: the default COMP_WORDBREAKS breaks URLs
+// at ':' and '/', which would degrade the typed operator flags for reasons
+// outside this regression.
+func startCompletionPTYServer(t *testing.T) (sockPath, adminTokenPath, principalTokenPath string, rec *policyQueryRecorder, optDir string) {
+	t.Helper()
+	base := t.TempDir()
+	optDir = filepath.Join(base, "opt", "alice")
+	homeDir := filepath.Join(base, "home", "alice")
+	for _, dir := range []string{optDir, homeDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sockPath = filepath.Join(base, "dh-completion.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	rec = &policyQueryRecorder{seen: make(chan recordedRequest, 64)}
+	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(recordedRequest{r.Method, r.URL.Path, "", r.URL.RawQuery})
+		admin := r.Header.Get("Authorization") == "Bearer admin-pty-token"
+		switch {
+		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+			if admin {
+				writeJSONResponse(w, http.StatusOK, authResponse{Authority: "admin"})
+			} else {
+				writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "michael"})
+			}
+		case r.URL.Path == "/principals" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, listPrincipalsResponse{
+				OK: true,
+				Principals: []principalSummary{
+					{Username: "foobar"}, {Username: "zebra"},
+				},
+			})
+		case r.URL.Path == "/launchers" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, listLaunchersResponse{
+				OK: true,
+				Launchers: []launcherJSON{
+					{ID: "dhl_michaelkillme", Principal: "michael", Name: "killme"},
+				},
+			})
+		case r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet:
+			roots := []string{homeDir}
+			if r.URL.Query().Get("launcher") == "killme" {
+				roots = []string{optDir}
+			}
+			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
+				OK: true, Principal: "alice", LauncherID: "dhl_michaelkillme", Launcher: "killme",
+				AllowedRoots: roots,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+		_ = os.Remove(sockPath)
+	})
+
+	adminTokenPath = filepath.Join(base, "admin.token")
+	if err := os.WriteFile(adminTokenPath, []byte("admin-pty-token"), 0600); err != nil {
+		t.Fatalf("write admin token: %v", err)
+	}
+	principalTokenPath = filepath.Join(base, "principal.token")
+	if err := os.WriteFile(principalTokenPath, []byte("principal-pty-token"), 0600); err != nil {
+		t.Fatalf("write principal token: %v", err)
+	}
+	return sockPath, adminTokenPath, principalTokenPath, rec, optDir
+}
+
+// TestCompletionInteractiveFlagFormsUnderRealBash types real interactive
+// command lines and sends real TAB keystrokes over a PTY, proving the
+// separated --flag VALUE and inline --flag=VALUE physical forms produce the
+// same daemon query semantics and the same applicable suggestions under the
+// default Readline word breaking: the inline form arrives as the three
+// physical words (--flag, =, VALUE), which the canonical normalized word view
+// merges back into one logical --flag=VALUE word.
+func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
+	sockPath, adminTokenPath, principalTokenPath, rec, optDir := startCompletionPTYServer(t)
+	p := startCompletionPTY(t, completionScript(t))
+
+	// --launcher ki<TAB> under a Principal credential: the own Launcher name.
+	p.resetLine(t)
+	out := p.typeAndTab(t, "docker-helper launcher create --endpoint "+sockPath+" --token-file "+principalTokenPath+" --launcher ki", "killme")
+	if !strings.Contains(out, "killme") {
+		t.Fatalf("separated --launcher ki<TAB>: completion output missing killme:\n%s", out)
+	}
+
+	// --launcher=ki<TAB>: the inline form, physically broken by Readline into
+	// --launcher, =, ki — the same suggestion as the separated form.
+	p.resetLine(t)
+	out = p.typeAndTab(t, "docker-helper launcher create --endpoint "+sockPath+" --token-file "+principalTokenPath+" --launcher=ki", "killme")
+	if !strings.Contains(out, "killme") {
+		t.Fatalf("inline --launcher=ki<TAB>: completion output missing killme:\n%s", out)
+	}
+
+	// --principal foo<TAB> under an admin: the daemon's Principal list.
+	p.resetLine(t)
+	out = p.typeAndTab(t, "docker-helper launcher create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --principal foo", "foobar")
+	if !strings.Contains(out, "foobar") {
+		t.Fatalf("separated --principal foo<TAB>: completion output missing foobar:\n%s", out)
+	}
+
+	// --principal=foo<TAB>: the inline form, same suggestion.
+	p.resetLine(t)
+	out = p.typeAndTab(t, "docker-helper launcher create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --principal=foo", "foobar")
+	if !strings.Contains(out, "foobar") {
+		t.Fatalf("inline --principal=foo<TAB>: completion output missing foobar:\n%s", out)
+	}
+
+	// Session-create workspace completion with a typed separated selector:
+	// the forwarded --launcher killme resolves the restricted root.
+	p.resetLine(t)
+	rec.snapshot() // drain prior requests
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher killme --workspace ", optDir)
+	if !strings.Contains(out, optDir) {
+		t.Fatalf("separated selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
+	}
+	assertCompletionPTYPolicyQuery(t, rec, "separated", optDir)
+
+	// The inline selector form: the typed-selector extraction must reach the
+	// policy query as launcher=killme — never as the bare = boundary — so the
+	// same restricted root is offered and the daemon query carries the same
+	// semantics.
+	p.resetLine(t)
+	rec.snapshot()
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher=killme --workspace ", optDir)
+	if !strings.Contains(out, optDir) {
+		t.Fatalf("inline selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
+	}
+	assertCompletionPTYPolicyQuery(t, rec, "inline", optDir)
+}
+
+// assertCompletionPTYPolicyQuery proves the workspace completion's policy
+// query carried the typed killme launcher selector (never the bare = physical
+// boundary), so the restricted root came from the daemon's create-policy
+// resolution and not from the generic filesystem fallback.
+func assertCompletionPTYPolicyQuery(t *testing.T, rec *policyQueryRecorder, form, optDir string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		for _, req := range rec.snapshot() {
+			if req.path != "/sessions/create-policy" {
+				continue
+			}
+			if strings.Contains(req.query, "launcher=killme") {
+				return
+			}
+			t.Fatalf("%s form: policy query carried %q, want launcher=killme", form, req.query)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s form: no /sessions/create-policy query arrived", form)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

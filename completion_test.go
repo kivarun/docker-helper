@@ -2212,7 +2212,9 @@ func startSelectorsPolicyServer(t *testing.T) (endpoint, tokenPath string, reque
 // startAuthoritySelectorServer stubs the /auth, /principals, and /launchers
 // surfaces the selector introspection drives, with the authority and
 // Principal identity carried by the stub configuration and the launcher
-// list narrowed by the typed principal context the way the daemon does.
+// list narrowed the way the daemon's resolveListScope does: a Principal
+// bearer may list its own scope (with or without its own --principal
+// context) and a foreign context is the non-disclosing 404.
 func startAuthoritySelectorServer(t *testing.T, authority, principal string, launchers []launcherJSON) (endpoint, tokenPath string, requests *policyQueryRecorder) {
 	rec := &policyQueryRecorder{seen: make(chan recordedRequest, 32)}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2231,6 +2233,26 @@ func startAuthoritySelectorServer(t *testing.T, authority, principal string, lau
 			return
 		case r.URL.Path == "/launchers" && r.Method == http.MethodGet:
 			context := r.URL.Query().Get("principal")
+			if authority == "principal" {
+				// A Principal bearer's maximum visibility is its own scope:
+				// a foreign context is the non-disclosing 404, and an empty
+				// context lists the own scope, never everything.
+				if context != "" && context != principal {
+					writeJSONResponse(w, http.StatusNotFound, struct {
+						Code    string `json:"code"`
+						Message string `json:"message"`
+					}{Code: "principal_not_found", Message: "principal not found"})
+					return
+				}
+				narrowed := make([]launcherJSON, 0, len(launchers))
+				for _, l := range launchers {
+					if l.Principal == principal {
+						narrowed = append(narrowed, l)
+					}
+				}
+				writeJSONResponse(w, http.StatusOK, listLaunchersResponse{OK: true, Launchers: narrowed})
+				return
+			}
 			narrowed := make([]launcherJSON, 0, len(launchers))
 			for _, l := range launchers {
 				if context == "" || context == l.Principal {
@@ -2495,13 +2517,14 @@ func TestCompletionSelectorsPrincipalCommandContext(t *testing.T) {
 	}
 }
 
-// TestCompletionSelectorValuesAuthorityMatrix proves the scope-aware
-// selector-value completion: `--principal <TAB>` offers Principal names for
-// an admin and nothing where the selector is contractually inapplicable;
-// `--launcher <TAB>` offers the typed --principal context's Launcher names
-// for an admin, only globally resolvable Launcher IDs (never names) without
-// a context, and a Principal credential's own Launchers — foreign scopes
-// never leak.
+// TestCompletionSelectorValuesAuthorityMatrix proves the admin's scope-aware
+// selector-value completion: `--principal <TAB>` offers the daemon's
+// Principal names with the typed prefix narrowing them; `--launcher <TAB>`
+// offers the typed --principal context's Launcher names and only globally
+// resolvable Launcher IDs (never names) without a context. The Principal-
+// credential visibility matrix lives in
+// TestCompletionPrincipalSelfPrincipalLauncherSuggestions and the positional
+// completion matrix in TestCompletionPositionalLauncherMatrix.
 func TestCompletionSelectorValuesAuthorityMatrix(t *testing.T) {
 	endpoint, tokenPath, requests, _, _ := startSelectorsPolicyServer(t)
 	script := completionScript(t)
@@ -2558,6 +2581,82 @@ func TestCompletionSelectorValuesAuthorityMatrix(t *testing.T) {
 		return q.path == "/launchers" && q.query == "principal=alice"
 	}) {
 		t.Fatalf("selector queries missing from %+v", snap)
+	}
+}
+
+// TestCompletionPrincipalSelfPrincipalLauncherSuggestions proves a Principal
+// credential's Launcher completion treats the daemon as the selector
+// authority instead of a local explicit-self rule: the typed own Principal
+// context is authorized exactly like a real launcher list narrowing and
+// prints the own Launcher names, while a foreign Principal context is
+// rejected non-disclosing and offers nothing. The sequential shell UX stays
+// consistent: --principal <TAB> offers the own username and, once it is
+// chosen, --launcher <TAB> still offers the own Launchers.
+func TestCompletionPrincipalSelfPrincipalLauncherSuggestions(t *testing.T) {
+	launchers := []launcherJSON{
+		{ID: "dhl_alicekillme", Principal: "alice", Name: "killme"},
+		{ID: "dhl_bobworker", Principal: "bob", Name: "worker"},
+	}
+	endpoint, tokenPath, requests := startAuthoritySelectorServer(t, "principal", "alice", launchers)
+	script := completionScript(t)
+
+	// The sequential UX, step one: --principal <TAB> offers the own username.
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "",
+	})
+	if stderr != "" {
+		t.Fatalf("selector completion must not write to stderr: %q", stderr)
+	}
+	if !slices.Equal(results, []string{"alice"}) {
+		t.Fatalf("--principal <TAB> = %v, want the own username", results)
+	}
+
+	// Step two with the chosen own context: --launcher <TAB> offers the own
+	// Launcher names — the daemon authorized the in-scope narrowing.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "list", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--launcher", "",
+	})
+	if !slices.Equal(results, []string{"killme"}) {
+		t.Fatalf("--launcher under the own --principal = %v, want the own Launcher names", results)
+	}
+
+	// The positional and the explicitly flagged form offer the same own
+	// Launchers.
+	positional, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"",
+	})
+	flagged, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "",
+	})
+	if !slices.Equal(positional, flagged) {
+		t.Fatalf("positional %v != flagged positional %v", positional, flagged)
+	}
+	if !slices.Contains(positional, "killme") {
+		t.Fatalf("own-context suggestions = %v, want the own Launcher names", positional)
+	}
+	if slices.Contains(positional, "worker") || slices.Contains(positional, "dhl_bobworker") {
+		t.Fatalf("foreign scope leaked into the own-context suggestions: %v", positional)
+	}
+
+	// A foreign Principal context is rejected non-disclosing: nothing.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "bob", "--launcher", "",
+	})
+	if len(results) != 0 {
+		t.Fatalf("foreign --principal context suggestions = %v, want nothing", results)
+	}
+
+	// The daemon actually served the authorized own-context query.
+	snap := requests.snapshot()
+	if !slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers" && q.query == "principal=alice"
+	}) {
+		t.Fatalf("own-context launcher query missing from %+v", snap)
 	}
 }
 
@@ -2689,6 +2788,7 @@ func TestCompletionPolicyOperatorFlagForwarding(t *testing.T) {
 	sb.WriteString("COMP_WORDS=(docker-helper launcher create --system --endpoint " + endpoint +
 		" --endpoint=" + endpoint + " --token-file '" + spacey + "' --token-file=/tmp/t2 --principal alice --principal bob)\n")
 	sb.WriteString("COMP_CWORD=${#COMP_WORDS[@]}\n")
+	sb.WriteString("_docker_helper_normalize_line\n")
 	sb.WriteString("mapfile -d '' -t opargs < <(_docker_helper_operator_args 'launcher create')\n")
 	sb.WriteString("if [ ${#opargs[@]} -gt 0 ]; then printf 'ARG:%s\\n' \"${opargs[@]}\"; fi\n")
 	sb.WriteString("echo \"principal=$(_docker_helper_typed_flag_value principal)\"\n")

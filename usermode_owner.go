@@ -175,22 +175,25 @@ func (a *App) replaceLauncherScopeWithLifecycle(launcherID string, scope Launche
 // ordering as config reload), and the durable mutation, so the added root is
 // validated against the ceiling committed by any reload that linearized before
 // it, and it refuses rooting the reserved daemon-owner default Launcher before
-// any change (the reserved chain stays inherit with zero stored roots).
-func (a *App) addLauncherAllowedRootWithLifecycle(launcherID, rootPath string) (changed bool, canonicalPath string, err error) {
+// any change (the reserved chain stays inherit with zero stored roots). On
+// success it returns the committed post-mutation Launcher projection, composed
+// without any post-commit DB read (the same committed-projection contract as
+// replaceLauncherScopeWithLifecycle).
+func (a *App) addLauncherAllowedRootWithLifecycle(launcherID, rootPath string) (committed *LauncherWithPrincipal, changed bool, canonicalPath string, err error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 	cur, err := findLauncherByID(a.DB, launcherID)
 	if err != nil {
-		return false, "", err
+		return nil, false, "", err
 	}
 	if a.isUserModeDefaultLauncher(launcherID) {
-		return false, "", ErrUserModeOwnerReserved
+		return nil, false, "", ErrUserModeOwnerReserved
 	}
 	ceiling, err := a.resolveEffectivePrincipalRoots(cur.PrincipalID)
 	if err != nil {
-		return false, "", err
+		return nil, false, "", err
 	}
-	return addLauncherAllowedRoot(a.DB, launcherID, rootPath, ceiling)
+	return addLauncherAllowedRoot(a.DB, cur, rootPath, ceiling)
 }
 
 // removeLauncherAllowedRootWithLifecycle is the lock-owning App-level Launcher

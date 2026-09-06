@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -672,34 +673,38 @@ func replaceLauncherScope(db *sql.DB, current *LauncherWithPrincipal, scope Laun
 // same transaction. The root must be a valid absolute directory under the
 // supplied effective Principal ceiling (the same canonical path semantics as
 // Principal roots); a root outside the ceiling is ErrLauncherRootOutsidePrincipal.
-// The caller owns the lifecycle serialization boundary and Launcher existence
-// (the same contract as replaceLauncherScope): a concurrently deleted Launcher
-// cannot interleave.
-func addLauncherAllowedRoot(db *sql.DB, launcherID string, rootPath string, effectivePrincipalRoots []string) (changed bool, canonicalPath string, err error) {
+// The caller owns the lifecycle serialization boundary and the Launcher
+// existence (the same contract as replaceLauncherScope): a concurrently deleted
+// Launcher cannot interleave. On success the committed post-mutation Launcher
+// projection is composed from the caller's pre-mutation read and the mutation
+// outcome — never from a post-commit DB read — so a successful durable
+// mutation reports exactly the state it committed (the same committed-projection
+// contract as replaceLauncherScope).
+func addLauncherAllowedRoot(db *sql.DB, current *LauncherWithPrincipal, rootPath string, effectivePrincipalRoots []string) (committed *LauncherWithPrincipal, changed bool, canonicalPath string, err error) {
 	resolved, err := validatePrincipalAllowedRootForAdd(rootPath)
 	if err != nil {
-		return false, "", err
+		return nil, false, "", err
 	}
 	if !isWithinAnyAllowedRoot(resolved, effectivePrincipalRoots) {
-		return false, "", fmt.Errorf("path %q is not under the effective principal roots: %w", resolved, ErrLauncherRootOutsidePrincipal)
+		return nil, false, "", fmt.Errorf("path %q is not under the effective principal roots: %w", resolved, ErrLauncherRootOutsidePrincipal)
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return false, "", fmt.Errorf("cannot begin transaction: %w", err)
+		return nil, false, "", fmt.Errorf("cannot begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	result, err := tx.Exec(
 		`INSERT OR IGNORE INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`,
-		launcherID, resolved,
+		current.ID, resolved,
 	)
 	if err != nil {
-		return false, "", fmt.Errorf("cannot add launcher allowed root: %w", err)
+		return nil, false, "", fmt.Errorf("cannot add launcher allowed root: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return false, "", fmt.Errorf("cannot check insert result: %w", err)
+		return nil, false, "", fmt.Errorf("cannot check insert result: %w", err)
 	}
 	if affected > 0 {
 		// A new stored root narrows an inherit-scope Launcher to restricted
@@ -707,15 +712,22 @@ func addLauncherAllowedRoot(db *sql.DB, launcherID string, rootPath string, effe
 		// first one; a restricted Launcher keeps its scope.
 		if _, err := tx.Exec(
 			`UPDATE launchers SET scope_mode = ? WHERE id = ?`,
-			string(LauncherScopeRestricted), launcherID,
+			string(LauncherScopeRestricted), current.ID,
 		); err != nil {
-			return false, "", fmt.Errorf("cannot narrow launcher scope: %w", err)
+			return nil, false, "", fmt.Errorf("cannot narrow launcher scope: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return false, "", fmt.Errorf("cannot commit launcher allowed root: %w", err)
+		return nil, false, "", fmt.Errorf("cannot commit launcher allowed root: %w", err)
 	}
-	return affected > 0, resolved, nil
+
+	committed = &LauncherWithPrincipal{}
+	*committed = *current
+	if affected > 0 {
+		committed.ScopeMode = LauncherScopeRestricted
+		committed.AllowedRoots = append(slices.Clone(current.AllowedRoots), resolved)
+	}
+	return committed, affected > 0, resolved, nil
 }
 
 // removeLauncherAllowedRoot removes one stored root from a Launcher's root set.

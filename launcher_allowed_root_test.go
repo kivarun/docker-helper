@@ -70,7 +70,7 @@ func readLauncherStoredRoots(t *testing.T, db *sql.DB, launcherID string) []stri
 func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 
-	changed, canonical, err := addLauncherAllowedRoot(db, l.ID, inRoot, testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot}))
+	committed, changed, canonical, err := addLauncherAllowedRoot(db, l, inRoot, testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot}))
 	if err != nil {
 		t.Fatalf("addLauncherAllowedRoot: %v", err)
 	}
@@ -83,10 +83,20 @@ func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 	if got := readLauncherStoredRoots(t, db, l.ID); !slices.Equal(got, []string{inRoot}) {
 		t.Fatalf("stored roots = %v, want [%s]", got, inRoot)
 	}
+	// The committed projection reports the post-mutation state without any
+	// post-commit read: the first add commits the restricted scope with the
+	// added root as the stored root set.
+	if committed.ScopeMode != LauncherScopeRestricted {
+		t.Fatalf("committed projection scope = %q, want restricted", committed.ScopeMode)
+	}
+	if !slices.Equal(committed.AllowedRoots, []string{inRoot}) {
+		t.Fatalf("committed projection roots = %v, want [%s]", committed.AllowedRoots, inRoot)
+	}
 
 	// Adding the same root again is the idempotent no-op and must not disturb
-	// the committed scope.
-	changed, _, err = addLauncherAllowedRoot(db, l.ID, inRoot, testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot}))
+	// the committed scope; the committed projection keeps reflecting the
+	// actual committed state (restricted, unchanged roots).
+	committed, changed, _, err = addLauncherAllowedRoot(db, committed, inRoot, testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot}))
 	if err != nil {
 		t.Fatalf("second addLauncherAllowedRoot: %v", err)
 	}
@@ -96,12 +106,15 @@ func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 	if got := readLauncherScopeMode(t, db, l.ID); got != LauncherScopeRestricted {
 		t.Fatalf("scope after duplicate add = %q, want unchanged restricted", got)
 	}
+	if committed.ScopeMode != LauncherScopeRestricted || !slices.Equal(committed.AllowedRoots, []string{inRoot}) {
+		t.Fatalf("committed projection after duplicate add = (%q, %v), want (restricted, [%s])", committed.ScopeMode, committed.AllowedRoots, inRoot)
+	}
 }
 
 func TestLauncherAllowedRootRemoveLastStaysRestricted(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
-	if _, _, err := addLauncherAllowedRoot(db, l.ID, inRoot, ceiling); err != nil {
+	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, ceiling); err != nil {
 		t.Fatalf("addLauncherAllowedRoot: %v", err)
 	}
 
@@ -137,7 +150,7 @@ func TestLauncherAllowedRootRemoveLastStaysRestricted(t *testing.T) {
 func TestLauncherAllowedRootExplicitInheritRestoresCeiling(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
-	if _, _, err := addLauncherAllowedRoot(db, l.ID, inRoot, ceiling); err != nil {
+	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, ceiling); err != nil {
 		t.Fatalf("addLauncherAllowedRoot: %v", err)
 	}
 	cur, err := findLauncherByID(db, l.ID)
@@ -178,7 +191,7 @@ func TestLauncherAllowedRootOutsideCeilingRejected(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(outside) })
 
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
-	_, _, err := addLauncherAllowedRoot(db, l.ID, outside, ceiling)
+	_, _, _, err := addLauncherAllowedRoot(db, l, outside, ceiling)
 	if !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("add outside the ceiling = %v, want ErrLauncherRootOutsidePrincipal", err)
 	}
@@ -193,7 +206,7 @@ func TestLauncherAllowedRootOutsideCeilingRejected(t *testing.T) {
 func TestLauncherAllowedRootRemoveMatchesCanonicalPath(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
-	if _, _, err := addLauncherAllowedRoot(db, l.ID, inRoot, ceiling); err != nil {
+	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, ceiling); err != nil {
 		t.Fatalf("addLauncherAllowedRoot: %v", err)
 	}
 
@@ -233,18 +246,23 @@ func TestLauncherAllowedRootLifecycleOwners(t *testing.T) {
 	}
 
 	// The add owner resolves the ceiling and refuses an outside-ceiling root.
-	if _, _, err := app.addLauncherAllowedRootWithLifecycle(l.ID, filepath.Dir(root)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
+	if _, _, _, err := app.addLauncherAllowedRootWithLifecycle(l.ID, filepath.Dir(root)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("owner add outside ceiling = %v, want ErrLauncherRootOutsidePrincipal", err)
 	}
-	changed, _, err := app.addLauncherAllowedRootWithLifecycle(l.ID, inRoot)
+	committed, changed, _, err := app.addLauncherAllowedRootWithLifecycle(l.ID, inRoot)
 	if err != nil {
 		t.Fatalf("owner add: %v", err)
 	}
 	if !changed {
 		t.Fatal("owner add reported no change")
 	}
+	// The owner returns the committed post-mutation projection without any
+	// post-commit read: the first add commits the restricted scope.
+	if committed.ScopeMode != LauncherScopeRestricted {
+		t.Fatalf("owner committed projection scope = %q, want restricted", committed.ScopeMode)
+	}
 	// Unknown Launcher is not found.
-	if _, _, err := app.addLauncherAllowedRootWithLifecycle("dhl_00000000000000000000000000000000", inRoot); !errors.Is(err, ErrLauncherNotFound) {
+	if _, _, _, err := app.addLauncherAllowedRootWithLifecycle("dhl_00000000000000000000000000000000", inRoot); !errors.Is(err, ErrLauncherNotFound) {
 		t.Fatalf("owner add unknown launcher = %v, want ErrLauncherNotFound", err)
 	}
 	// The remove owner never changes the scope mode.

@@ -591,12 +591,14 @@ full syntax:
    credential and session list rejects every Principal selector, even the
    credential's own Principal — and a Launcher credential receives nothing.
    `selectors launcher` honors
-  the typed `--principal` context — an admin with a context receives that
-  Principal's Launcher names, an admin without one receives only globally
-  resolvable `dhl_` Launcher IDs (a name is never searched globally), a
-  Principal credential receives its own Launchers' names, and a Launcher
-  credential receives nothing. A foreign or missing context fails with the
-  daemon's non-disclosing contract and degrades silently.
+   the typed `--principal` context — an admin with a context receives that
+   Principal's Launcher names, an admin without one receives only globally
+   resolvable `dhl_` Launcher IDs (a name is never searched globally), a
+   Principal credential receives its own Launchers' names — including with
+   its own typed `--principal` context, which the daemon authorizes as an
+   in-scope narrowing — and a Launcher credential receives nothing. A
+   foreign or missing context fails with the daemon's non-disclosing
+   contract and degrades silently.
 
 ### Signal cancellation (agent commands)
 
@@ -1142,13 +1144,17 @@ daemon-backed policy completions are exactly:
 | Command flag | Policy query consumed |
 |---|---|
 | `launcher create --allowed-root` | Principal effective-root query |
-| `launcher allowed-root add` | Principal effective-root query |
 | `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
 
-`config allowed-root add` and `principal allowed-root add` remain generic
-filesystem completion, as do all other path-valued flags. When a policy
-query fails (for example when the daemon is unavailable), completion
-degrades silently to the generic filesystem completion for the flag value.
+Positional `[LAUNCHER] ... PATH` completion on
+`launcher allowed-root add/remove` is generic filesystem completion
+(directories for add, any filesystem entry for remove); the daemon remains
+the final policy boundary and rejects a root outside the effective
+Principal ceiling at execution time. `config allowed-root add` and
+`principal allowed-root add` remain generic filesystem completion, as do all
+other path-valued flags. When a policy query fails (for example when the
+daemon is unavailable), completion degrades silently to the generic
+filesystem completion for the flag value.
 
 ### Launcher control plane
 

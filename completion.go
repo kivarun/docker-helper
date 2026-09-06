@@ -306,10 +306,12 @@ var completionSelectorsPrincipalCommand = &Command{
 // line, honoring the typed --principal context: an admin with a Principal
 // context receives that Principal's Launcher names; an admin without one
 // receives only globally resolvable Launcher IDs (a name is never searched
-// globally); a Principal credential receives its own Launchers' names; a
-// Launcher credential receives nothing because explicit selectors are
-// contractually inapplicable to it. A foreign or missing context fails with
-// the daemon's non-disclosing contract and the command degrades silently.
+// globally); a Principal credential receives its own Launchers' names —
+// including when it types its own --principal context, which the daemon
+// authorizes as an in-scope narrowing — and a Launcher credential receives
+// nothing because explicit selectors are contractually inapplicable to it.
+// A foreign or missing context fails with the daemon's non-disclosing
+// contract and the command degrades silently.
 var completionSelectorsLauncherCommand = &Command{
 	Name:       "launcher",
 	Summary:    "Print the Launcher selectors selectable with --launcher",
@@ -342,16 +344,11 @@ var completionSelectorsLauncherCommand = &Command{
 				case "launcher":
 					return 0
 				case "principal":
-					if principal.set && principal.value != "" {
-						// The selector is authority-illegal for a Principal
-						// credential; the daemon rejects it and the command
-						// degrades silently.
-						if _, err := client.listLaunchersFiltered(principal.value, ""); err != nil {
-							fmt.Fprintf(stderr, "error: %v\n", err)
-							return 1
-						}
-						return 0
-					}
+					// The daemon is the selector authority: no local
+					// explicit-self rule. The own Principal context is an
+					// in-scope narrowing the daemon authorizes and the
+					// authorized result is printed; a foreign context is
+					// rejected non-disclosing and degrades silently.
 					print = func(l launcherJSON) string { return l.Name }
 				case "admin":
 					if principal.value == "" {
@@ -546,11 +543,60 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Build the canonical logical word view of the completion input.")
+	fmt.Fprintln(w, "#")
+	fmt.Fprintln(w, "# Readline breaks words at COMP_WORDBREAKS characters, so with the")
+	fmt.Fprintln(w, "# default breaking the inline --flag=VALUE form reaches completion")
+	fmt.Fprintln(w, "# as three physical words (--flag, =, VALUE), while the separated")
+	fmt.Fprintln(w, "# --flag VALUE form arrives as two plain words and a fully typed")
+	fmt.Fprintln(w, "# inline word arrives as one word when = is not a break character.")
+	fmt.Fprintln(w, "# Every consumer of the word list — the command-path walk, the")
+	fmt.Fprintln(w, "# current flag/value recognition, the typed selector extraction, the")
+	fmt.Fprintln(w, "# operator-argument forwarding, the positional counting, and the")
+	fmt.Fprintln(w, "# policy-root query forwarding — shares ONE normalized view built")
+	fmt.Fprintln(w, "# here: the physical pieces of one inline --flag=VALUE word merge")
+	fmt.Fprintln(w, "# back into that single canonical word at the position of the dash")
+	fmt.Fprintln(w, "# word it started from, so both physical forms carry identical")
+	fmt.Fprintln(w, "# logical semantics. A bare = after a non-dash word stays its own")
+	fmt.Fprintln(w, "# word. The cursor word is normalized with the line: a completed")
+	fmt.Fprintln(w, "# inline triplet reports the merged --flag=VALUE word, a cursor on")
+	fmt.Fprintln(w, "# the = boundary reports the unfinished --flag= word.")
+	fmt.Fprintln(w, "_docker_helper_normalize_line() {")
+	fmt.Fprintln(w, "    _docker_helper_WORDS=(\"${COMP_WORDS[0]}\")")
+	fmt.Fprintln(w, "    local i=1")
+	fmt.Fprintln(w, "    while [ \"$i\" -le \"$COMP_CWORD\" ]; do")
+	fmt.Fprintln(w, "        local w=\"${COMP_WORDS[$i]}\"")
+	fmt.Fprintln(w, "        if [ \"$w\" = \"=\" ]; then")
+	fmt.Fprintln(w, "            local n=${#_docker_helper_WORDS[@]}")
+	fmt.Fprintln(w, "            local prevw=\"\"")
+	fmt.Fprintln(w, "            if [ \"$n\" -gt 0 ]; then prevw=\"${_docker_helper_WORDS[n-1]}\"; fi")
+	fmt.Fprintln(w, "            case \"$prevw\" in")
+	fmt.Fprintln(w, "                -*)")
+	fmt.Fprintln(w, "                    local val=\"\"")
+	fmt.Fprintln(w, "                    if [ \"$((i + 1))\" -lt \"${#COMP_WORDS[@]}\" ]; then val=\"${COMP_WORDS[i+1]}\"; fi")
+	fmt.Fprintln(w, "                    if [ -n \"$val\" ]; then")
+	fmt.Fprintln(w, "                        _docker_helper_WORDS[n-1]=\"$prevw=$val\"")
+	fmt.Fprintln(w, "                        i=$((i + 2))")
+	fmt.Fprintln(w, "                    else")
+	fmt.Fprintln(w, "                        _docker_helper_WORDS[n-1]=\"$prevw=\"")
+	fmt.Fprintln(w, "                        i=$((i + 1))")
+	fmt.Fprintln(w, "                    fi")
+	fmt.Fprintln(w, "                    continue")
+	fmt.Fprintln(w, "                    ;;")
+	fmt.Fprintln(w, "            esac")
+	fmt.Fprintln(w, "        fi")
+	fmt.Fprintln(w, "        _docker_helper_WORDS+=(\"$w\")")
+	fmt.Fprintln(w, "        i=$((i + 1))")
+	fmt.Fprintln(w, "    done")
+	fmt.Fprintln(w, "    _docker_helper_CWORD=$(( ${#_docker_helper_WORDS[@]} - 1 ))")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "_docker_helper_completion() {")
-	fmt.Fprintln(w, "    local cur=\"${COMP_WORDS[COMP_CWORD]}\"")
-	fmt.Fprintln(w, "    local prev=\"${COMP_WORDS[COMP_CWORD-1]:-}\"")
-	fmt.Fprintln(w, "    local words=(\"${COMP_WORDS[@]}\")")
-	fmt.Fprintln(w, "    local cword=${COMP_CWORD}")
+	fmt.Fprintln(w, "    _docker_helper_normalize_line")
+	fmt.Fprintln(w, "    local cur=\"${_docker_helper_WORDS[_docker_helper_CWORD]:-}\"")
+	fmt.Fprintln(w, "    local prev=\"${_docker_helper_WORDS[_docker_helper_CWORD-1]:-}\"")
+	fmt.Fprintln(w, "    local words=(\"${_docker_helper_WORDS[@]}\")")
+	fmt.Fprintln(w, "    local cword=${_docker_helper_CWORD}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "    # Enable filename semantics up front when the value being completed")
 	fmt.Fprintln(w, "    # belongs to a path-valued flag — the previous word is the flag, or")
@@ -679,13 +725,14 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "# word for a command path: command-path words are skipped and the")
 	fmt.Fprintln(w, "# values of value-taking flags (for example --principal USER) are")
 	fmt.Fprintln(w, "# consumed with their flag, so a typed flag never shifts the PATH")
-	fmt.Fprintln(w, "# position.")
+	fmt.Fprintln(w, "# position. Reads the canonical normalized word view, so an inline")
+	fmt.Fprintln(w, "# --flag=VALUE counts like the separated --flag VALUE form.")
 	fmt.Fprintln(w, "_docker_helper_positional_count() {")
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
 	fmt.Fprintln(w, "    local count=0")
 	fmt.Fprintln(w, "    local i=1")
-	fmt.Fprintln(w, "    while [ $i -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "        local w=\"${COMP_WORDS[$i]}\"")
+	fmt.Fprintln(w, "    while [ \"$i\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "        local w=\"${_docker_helper_WORDS[$i]}\"")
 	fmt.Fprintln(w, "        case \"$w\" in")
 	fmt.Fprintln(w, "            -*)")
 	fmt.Fprintln(w, "                if [[ \"$w\" != *=* ]] && _docker_helper_flag_takes_value \"$cmd_path\" \"$w\"; then")
@@ -727,8 +774,8 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            # Determine if we need FIELD or VALUE")
 	fmt.Fprintln(w, "            local pos_count=0")
 	fmt.Fprintln(w, "            local j=1")
-	fmt.Fprintln(w, "            while [ $j -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "                local w=\"${COMP_WORDS[$j]}\"")
+	fmt.Fprintln(w, "            while [ \"$j\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "                local w=\"${_docker_helper_WORDS[$j]}\"")
 	fmt.Fprintln(w, "                case \"$w\" in")
 	fmt.Fprintln(w, "                    docker-helper|config|set) ;;")
 	fmt.Fprintln(w, "                    -*)")
@@ -749,8 +796,8 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "                local field=\"\"")
 	fmt.Fprintln(w, "                pos_count=0")
 	fmt.Fprintln(w, "                j=1")
-	fmt.Fprintln(w, "                while [ $j -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "                    local w=\"${COMP_WORDS[$j]}\"")
+	fmt.Fprintln(w, "                while [ \"$j\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "                    local w=\"${_docker_helper_WORDS[$j]}\"")
 	fmt.Fprintln(w, "                    case \"$w\" in")
 	fmt.Fprintln(w, "                        docker-helper|config|set) ;;")
 	fmt.Fprintln(w, "                        -*)")
@@ -779,8 +826,8 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            # Count positional args to check if PATH was provided")
 	fmt.Fprintln(w, "            local pos_count=0")
 	fmt.Fprintln(w, "            local j=1")
-	fmt.Fprintln(w, "            while [ $j -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "                local w=\"${COMP_WORDS[$j]}\"")
+	fmt.Fprintln(w, "            while [ \"$j\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "                local w=\"${_docker_helper_WORDS[$j]}\"")
 	fmt.Fprintln(w, "                case \"$w\" in")
 	fmt.Fprintln(w, "                    docker-helper|config|allowed-root|add) ;;")
 	fmt.Fprintln(w, "                    -*) ;;")
@@ -802,8 +849,8 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            # Count positional args to check if PATH was provided")
 	fmt.Fprintln(w, "            local pos_count=0")
 	fmt.Fprintln(w, "            local j=1")
-	fmt.Fprintln(w, "            while [ $j -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "                local w=\"${COMP_WORDS[$j]}\"")
+	fmt.Fprintln(w, "            while [ \"$j\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "                local w=\"${_docker_helper_WORDS[$j]}\"")
 	fmt.Fprintln(w, "                case \"$w\" in")
 	fmt.Fprintln(w, "                    docker-helper|config|allowed-root|remove) ;;")
 	fmt.Fprintln(w, "                    -*) ;;")
@@ -829,8 +876,8 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            # Count positional args to check if PATH was provided")
 	fmt.Fprintln(w, "            local pos_count=0")
 	fmt.Fprintln(w, "            local j=1")
-	fmt.Fprintln(w, "            while [ $j -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "                local w=\"${COMP_WORDS[$j]}\"")
+	fmt.Fprintln(w, "            while [ \"$j\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "                local w=\"${_docker_helper_WORDS[$j]}\"")
 	fmt.Fprintln(w, "                case \"$w\" in")
 	fmt.Fprintln(w, "                    docker-helper|apparmor|root|add) ;;")
 	fmt.Fprintln(w, "                    -*) ;;")
@@ -852,8 +899,8 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            # Count positional args to check if PATH was provided")
 	fmt.Fprintln(w, "            local pos_count=0")
 	fmt.Fprintln(w, "            local j=1")
-	fmt.Fprintln(w, "            while [ $j -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "                local w=\"${COMP_WORDS[$j]}\"")
+	fmt.Fprintln(w, "            while [ \"$j\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "                local w=\"${_docker_helper_WORDS[$j]}\"")
 	fmt.Fprintln(w, "                case \"$w\" in")
 	fmt.Fprintln(w, "                    docker-helper|apparmor|root|remove) ;;")
 	fmt.Fprintln(w, "                    -*) ;;")
@@ -1098,12 +1145,12 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
 	fmt.Fprintln(w, "    local out=()")
 	fmt.Fprintln(w, "    local i=1")
-	fmt.Fprintln(w, "    while [ $i -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "        local w=\"${COMP_WORDS[$i]}\"")
+	fmt.Fprintln(w, "    while [ \"$i\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "        local w=\"${_docker_helper_WORDS[$i]}\"")
 	fmt.Fprintln(w, "        case \"$w\" in")
 	fmt.Fprintln(w, "            --system) out+=(\"--system\") ;;")
 	fmt.Fprintln(w, "            --endpoint|--token-file)")
-	fmt.Fprintln(w, "                out+=(\"$w\" \"${COMP_WORDS[$((i+1))]:-}\")")
+	fmt.Fprintln(w, "                out+=(\"$w\" \"${_docker_helper_WORDS[$((i+1))]:-}\")")
 	fmt.Fprintln(w, "                i=$((i + 2))")
 	fmt.Fprintln(w, "                continue")
 	fmt.Fprintln(w, "                ;;")
@@ -1126,18 +1173,21 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Print the value already typed for a flag on the current command line")
 	fmt.Fprintln(w, "# (--flag VALUE or --flag=VALUE); last occurrence wins, mirroring flag")
-	fmt.Fprintln(w, "# parsing. Empty output when the flag has no typed value yet.")
+	fmt.Fprintln(w, "# parsing. Empty output when the flag has no typed value yet. Reads")
+	fmt.Fprintln(w, "# the canonical normalized word view, so the physical inline")
+	fmt.Fprintln(w, "# tokenization (--flag = VALUE) yields the same value as the one-word")
+	fmt.Fprintln(w, "# and separated forms.")
 	fmt.Fprintln(w, "_docker_helper_typed_flag_value() {")
 	fmt.Fprintln(w, "    local name=\"$1\"")
 	fmt.Fprintln(w, "    local value=\"\"")
 	fmt.Fprintln(w, "    local i=1")
-	fmt.Fprintln(w, "    while [ $i -lt $COMP_CWORD ]; do")
-	fmt.Fprintln(w, "        local w=\"${COMP_WORDS[$i]}\"")
+	fmt.Fprintln(w, "    while [ \"$i\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "        local w=\"${_docker_helper_WORDS[$i]}\"")
 	fmt.Fprintln(w, "        case \"$w\" in")
 	fmt.Fprintln(w, "            \"--$name=\"*) value=\"${w#--$name=}\" ;;")
 	fmt.Fprintln(w, "            \"--$name\")")
 	fmt.Fprintln(w, "                i=$((i + 1))")
-	fmt.Fprintln(w, "                if [ $i -lt $COMP_CWORD ]; then value=\"${COMP_WORDS[$i]}\"; fi")
+	fmt.Fprintln(w, "                if [ \"$i\" -lt \"$_docker_helper_CWORD\" ]; then value=\"${_docker_helper_WORDS[$i]}\"; fi")
 	fmt.Fprintln(w, "                ;;")
 	fmt.Fprintln(w, "        esac")
 	fmt.Fprintln(w, "        i=$((i + 1))")
@@ -1171,7 +1221,7 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "        selargs+=(--command \"$cmd_path\")")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    local vals")
-	fmt.Fprintln(w, "    if ! vals=\"$(${COMP_WORDS[0]} completion selectors \"$flag\" \"${opargs[@]}\" \"${selargs[@]}\" 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "    if ! vals=\"$(${_docker_helper_WORDS[0]} completion selectors \"$flag\" \"${opargs[@]}\" \"${selargs[@]}\" 2>/dev/null)\"; then")
 	fmt.Fprintln(w, "        return 1")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    [ -n \"$vals\" ] || return 1")
@@ -1205,7 +1255,7 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "        fi")
 	fmt.Fprintln(w, "    done")
 	fmt.Fprintln(w, "    local roots")
-	fmt.Fprintln(w, "    if ! roots=\"$(\"${COMP_WORDS[0]}\" completion roots \"$mode\" \"${opargs[@]}\" \"${selargs[@]}\" 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "    if ! roots=\"$(\"${_docker_helper_WORDS[0]}\" completion roots \"$mode\" \"${opargs[@]}\" \"${selargs[@]}\" 2>/dev/null)\"; then")
 	fmt.Fprintln(w, "        return 1")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    _docker_helper_complete_within_roots \"$flag\" \"$roots\" \"$prefix\"")

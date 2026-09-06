@@ -719,6 +719,9 @@ func launcherAllowedRootResponseOf(launcherID string, changed bool) launcherAllo
 // current Principal ceiling, and the reservation guard. Adding the first root
 // to an inherit-scope Launcher is the inherit -> restricted narrowing (never an
 // authority broadening); the reserved daemon-owner default Launcher is refused.
+// The success audit reports the committed post-mutation Launcher projection
+// returned by the lifecycle owner — for the first add that is the committed
+// restricted scope, never the pre-mutation inherit snapshot.
 func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
@@ -758,7 +761,7 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 	// and the other ownership mutations (see handleReplaceLauncherAllowedRoots):
 	// addLauncherAllowedRootWithLifecycle owns that boundary, the current
 	// policy snapshot inside it, and the reserved-launcher refusal.
-	changed, canonicalPath, err := a.addLauncherAllowedRootWithLifecycle(l.ID, req.Path)
+	committed, changed, canonicalPath, err := a.addLauncherAllowedRootWithLifecycle(l.ID, req.Path)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		result := "error"
@@ -796,9 +799,9 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 		LauncherAllowedRoot: canonicalPath,
 		Result:              "success",
 		Duration:            duration,
-	}, auth, l)
+	}, auth, committed)
 
-	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(l.ID, changed))
+	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(committed.ID, changed))
 }
 
 // handleRemoveLauncherAllowedRoot removes one stored root from a Launcher
@@ -806,7 +809,10 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 // for the authorization and serialization boundary). The scope mode is never
 // changed by removal: removing the last restricted root leaves the Launcher
 // restricted with zero roots (fail-closed), and returning to inherited roots is
-// the explicit inherit replacement.
+// the explicit inherit replacement. Because the removal contract guarantees the
+// scope mode and every other audited provenance field are identical before and
+// after the committed mutation, the pre-mutation read is exactly the committed
+// projection for the success audit.
 func (a *App) handleRemoveLauncherAllowedRoot(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
