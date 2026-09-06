@@ -699,7 +699,7 @@ func TestCompletionSelectorsCLI(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusOK, authResponse{Authority: authority})
+			writeJSONResponse(w, http.StatusOK, authResponse{Authority: authority, Principal: "michael"})
 			return
 		case r.URL.Path == "/principals" && r.Method == http.MethodGet:
 			if authority != "admin" {
@@ -758,26 +758,63 @@ func TestCompletionSelectorsCLI(t *testing.T) {
 	if got, want := stdout.String(), "alice\nbob\n"; got != want {
 		t.Errorf("selectors principal (admin) stdout = %q, want %q", got, want)
 	}
-	if len(*requests) != 1 || (*requests)[0].path != "/principals" {
-		t.Fatalf("requests = %+v, want the single /principals query", *requests)
+	if len(*requests) != 2 || (*requests)[0].path != "/auth" || (*requests)[1].path != "/principals" {
+		t.Fatalf("requests = %+v, want /auth then the /principals query", *requests)
 	}
 
-	// Principal credential: the admin-only query's unauthorized contract
-	// degrades silently.
+	// Principal credential without a command context: nothing is offered
+	// (the applicability of the selector is undecidable without the
+	// completed command path).
 	authority = "principal"
 	*requests = (*requests)[:0]
 	stdout.Reset()
 	code = runCommandWithWriters([]string{
 		"completion", "selectors", "principal", "--endpoint", endpoint, "--token-file", tokenPath,
 	}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("selectors principal must degrade for a Principal credential")
+	if code != 0 {
+		t.Fatalf("selectors principal (principal credential, no context): exit = %d, stderr=%s", code, stderr.String())
 	}
 	if stdout.String() != "" {
 		t.Errorf("no names may be printed, got %q", stdout.String())
 	}
-	if len(*requests) != 1 || (*requests)[0].path != "/principals" {
-		t.Fatalf("requests = %+v, want the single /principals query", *requests)
+	if len(*requests) != 1 || (*requests)[0].path != "/auth" {
+		t.Fatalf("requests = %+v, want only /auth", *requests)
+	}
+
+	// Principal credential on a Launcher-family command: the explicit own
+	// Principal selector is legal, so the own username is offered.
+	*requests = (*requests)[:0]
+	stdout.Reset()
+	code = runCommandWithWriters([]string{
+		"completion", "selectors", "principal", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--command", "launcher create",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("selectors principal (principal credential, launcher create): exit = %d, stderr=%s", code, stderr.String())
+	}
+	if got, want := stdout.String(), "michael\n"; got != want {
+		t.Errorf("selectors principal (launcher create) stdout = %q, want the own username %q", got, want)
+	}
+	if len(*requests) != 1 || (*requests)[0].path != "/auth" {
+		t.Fatalf("requests = %+v, want only /auth", *requests)
+	}
+
+	// Principal credential on session create: the selector is structurally
+	// illegal (conflicting selectors), so nothing is offered.
+	*requests = (*requests)[:0]
+	stdout.Reset()
+	code = runCommandWithWriters([]string{
+		"completion", "selectors", "principal", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--command", "session create",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("selectors principal (principal credential, session create): exit = %d, stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("no names may be printed, got %q", stdout.String())
+	}
+	if len(*requests) != 1 || (*requests)[0].path != "/auth" {
+		t.Fatalf("requests = %+v, want only /auth", *requests)
 	}
 
 	// Admin + typed Principal context: that Principal's Launcher names.

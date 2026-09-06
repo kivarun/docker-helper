@@ -34,6 +34,14 @@
 #      resolvable Launcher IDs, never names); a Principal credential sees
 #      its own Launchers; the offered selector resolves to the same
 #      Session-create target a real create with that selector would use.
+#   F. command visibility and positional Launcher completion — the
+#      completion tree reflects the real authority contract (a Principal
+#      credential sees principal show and principal allowed-root list, not
+#      the admin mutations), the positional [LAUNCHER] reuses the --launcher
+#      selector-introspection owner, the grammar-ambiguous first positional
+#      of launcher allowed-root add/remove offers both continuations as a
+#      unique union, and the --principal selector completion is
+#      command-context aware.
 #
 # Each subcase is independent (collect-all). Docker is not required.
 #
@@ -574,11 +582,167 @@ subcase_e() {
   rm -f "$cred" "$script"
 }
 
+# ---------------------------------------------------------------------------
+# F. command visibility and positional Launcher completion
+# ---------------------------------------------------------------------------
+subcase_f() {
+  reg_info "subcase F: command visibility and positional Launcher completion"
+  local user="uatreg14f" script home
+  home="$(reg_setup_principal "$user")" || { reg_fail "F: fixture setup failed"; return; }
+  local opt="$home/opt"
+  mkdir -p "$opt"
+  chown -R "$user:$user" "$home"
+
+  local create_out
+  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential 2>&1)" || {
+    reg_fail "F: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
+    cleanup_principal "$user"
+    return
+  }
+  printf '%s' "$create_out" | json_field id >/dev/null || {
+    reg_fail "F: restricted launcher create returned no launcher id"
+    cleanup_principal "$user"
+    return
+  }
+
+  local cred="$TMPDIR_REG14/f.token"
+  reg_principal_credential "$user" "$cred" || { reg_fail "F: principal credential create failed"; cleanup_principal "$user"; return; }
+
+  script="$TMPDIR_REG14/completion-f.bash"
+  if ! dh completion bash > "$script" 2>/dev/null || [ ! -s "$script" ]; then
+    reg_fail "F: completion script generation failed"
+    cleanup_principal "$user"
+    rm -f "$cred"
+    return
+  fi
+
+  # 1. Principal credential: the read surfaces it owns are visible.
+  local out
+  out="$(run_completion "$script" /usr/bin/docker-helper --system principal --token-file "$cred" "")"
+  if printf '%s\n' "$out" | grep -qx 'show' && ! printf '%s\n' "$out" | grep -qx 'delete'; then
+    reg_ok "F: principal <TAB> under a Principal credential offers show and hides the admin mutations"
+  else
+    reg_fail "F: principal <TAB> under a Principal credential = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+  out="$(run_completion "$script" /usr/bin/docker-helper --system principal allowed-root --token-file "$cred" "")"
+  if printf '%s\n' "$out" | grep -qx 'list' && ! printf '%s\n' "$out" | grep -qx 'add' && ! printf '%s\n' "$out" | grep -qx 'remove'; then
+    reg_ok "F: principal allowed-root <TAB> offers list and hides add/remove"
+  else
+    reg_fail "F: principal allowed-root <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+
+  # 2. Positional [LAUNCHER]: the admin --principal context sees names.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher show --principal "$user" "")"
+  if printf '%s\n' "$out" | grep -qx 'killme'; then
+    reg_ok "F: launcher show <TAB> under a typed --principal offers the Principal's Launcher names"
+  else
+    reg_fail "F: launcher show <TAB> (typed --principal) = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+  # The override typed after the command words selects the same context.
+  local out_after
+  out_after="$(run_completion "$script" /usr/bin/docker-helper launcher show --system --principal "$user" "")"
+  if [ "$out_after" = "$out" ]; then
+    reg_ok "F: the override after the command words selects the same context"
+  else
+    reg_fail "F: the override position changes the positional result: [$(printf '%s' "$out_after" | tr '\n' ' ' | redact)] vs [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+
+  # 3. Admin without a context: only the globally resolvable Launcher ID.
+  local id_out
+  id_out="$(dh launcher list --system --principal "$user" --json 2>/dev/null | json_field id)"
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher show "")"
+  if printf '%s\n' "$out" | grep -qx "$id_out" && ! printf '%s\n' "$out" | grep -qx 'killme'; then
+    reg_ok "F: launcher show <TAB> without a context offers only the resolvable Launcher ID"
+  else
+    reg_fail "F: launcher show <TAB> (no context) = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want the ID $id_out only"
+  fi
+
+  # 4. Principal credential: its own Launcher names in the positional.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher show --token-file "$cred" "")"
+  if printf '%s\n' "$out" | grep -qx 'killme'; then
+    reg_ok "F: principal credential launcher show <TAB> offers its own Launchers"
+  else
+    reg_fail "F: principal credential launcher show <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+
+  # 5. Launcher credential: no control-plane targets.
+  local lc_token
+  lc_token="$(launcher_credential_token "$user" killme)" || lc_token=""
+  if [ -n "$lc_token" ]; then
+    printf '%s\n' "$lc_token" > "$TMPDIR_REG14/f-lc.token"
+    out="$(run_completion "$script" /usr/bin/docker-helper --system launcher show --token-file "$TMPDIR_REG14/f-lc.token" "")"
+    if [ -z "$out" ]; then
+      reg_ok "F: launcher credential launcher show <TAB> offers no control-plane targets"
+    else
+      reg_fail "F: launcher credential launcher show <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+    fi
+  else
+    reg_fail "F: launcher credential create failed"
+  fi
+
+  # 6. launcher allowed-root add <TAB>: the ambiguous first positional
+  #    offers both continuations, uniquely.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" "")"
+  if printf '%s\n' "$out" | grep -qx 'killme' && printf '%s\n' "$out" | grep -qx "$opt"; then
+    reg_ok "F: launcher allowed-root add <TAB> offers the Launcher selector and the directory candidate"
+  else
+    reg_fail "F: launcher allowed-root add <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+  local dups
+  dups="$(printf '%s' "$out" | LC_ALL=C sort | uniq -d)"
+  if [ -z "$dups" ]; then
+    reg_ok "F: the first-positional union is unique"
+  else
+    reg_fail "F: duplicate first-positional candidates: $(printf '%s' "$dups" | tr '\n' ' ' | redact)"
+  fi
+
+  # 7. launcher allowed-root add NAME <TAB>: PATH only.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" killme "")"
+  if ! printf '%s\n' "$out" | grep -qx 'killme' && printf '%s\n' "$out" | grep -qx "$opt"; then
+    reg_ok "F: launcher allowed-root add NAME <TAB> completes PATH only"
+  else
+    reg_fail "F: launcher allowed-root add NAME <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+
+  # 8. launcher allowed-root remove equivalents.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" "")"
+  if printf '%s\n' "$out" | grep -qx 'killme'; then
+    reg_ok "F: launcher allowed-root remove <TAB> offers the Launcher selector"
+  else
+    reg_fail "F: launcher allowed-root remove <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" killme "")"
+  if ! printf '%s\n' "$out" | grep -qx 'killme'; then
+    reg_ok "F: launcher allowed-root remove NAME <TAB> completes filesystem PATH only"
+  else
+    reg_fail "F: launcher allowed-root remove NAME <TAB> re-offered the selector: [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+
+  # 9. command-context-aware --principal: the own username on the launcher
+  #    family, nothing on session create.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher create --token-file "$cred" --principal "")"
+  if printf '%s\n' "$out" | grep -qx "$user"; then
+    reg_ok "F: launcher create --principal <TAB> under a Principal credential offers its own username"
+  else
+    reg_fail "F: launcher create --principal <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create --token-file "$cred" --principal "")"
+  if [ -z "$out" ]; then
+    reg_ok "F: session create --principal <TAB> under a Principal credential offers nothing"
+  else
+    reg_fail "F: session create --principal <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+
+  cleanup_principal "$user"
+  rm -f "$cred" "$TMPDIR_REG14/f-lc.token" "$script"
+}
+
 subcase_a
 subcase_b
 subcase_c
 subcase_d
 subcase_e
+subcase_f
 
 rm -rf "$TMPDIR_REG14"
 reg_result

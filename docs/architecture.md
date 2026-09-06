@@ -561,8 +561,9 @@ full syntax:
 - `completion bash` — Generate Bash completion.
 - `completion selectors <principal|launcher>` — Machine-facing selector
   introspection consumed by the generated Bash completion for the
-  `--principal`/`--launcher` flag values (authority- and scope-applicable
-  candidates only; see the CLI reference details above).
+  `--principal`/`--launcher` flag values and the positional `[LAUNCHER]`
+  argument (authority-, command-context-, and scope-applicable candidates
+  only; see the CLI reference details above).
 - `completion roots principal` — Machine-facing completion query: print the
   target Principal's effective allowed roots (target from `--principal` or
   inferred from the credential; the daemon authorizes the query). With
@@ -579,16 +580,21 @@ full syntax:
   completion degrades.
 - `completion selectors principal` / `completion selectors launcher` —
   Machine-facing selector introspection for the values of the
-  `--principal`/`--launcher` flags. The daemon remains the ownership and
-  authorization authority: `selectors principal` prints the daemon's
-  Principal names for an admin authority and degrades silently for every
-  other authority; `selectors launcher` honors the typed `--principal`
-  context — an admin with a context receives that Principal's Launcher
-  names, an admin without one receives only globally resolvable `dhl_`
-  Launcher IDs (a name is never searched globally), a Principal credential
-  receives its own Launchers' names, and a Launcher credential receives
-  nothing. A foreign or missing context fails with the daemon's
-  non-disclosing contract and degrades silently.
+  `--principal`/`--launcher` flags and of the positional `[LAUNCHER]`
+  argument (the same owner for both). The daemon remains the ownership and
+  authorization authority: `selectors principal` is command-context aware
+  through the `--command` flag — an admin receives the daemon's Principal
+  names on every command carrying the selector, a Principal credential
+  receives exactly its own username wherever the explicit own selector is
+  legal (the Launcher command families and the session-list narrowing) and
+  nothing on session create, where the selector is structurally illegal,
+  and a Launcher credential receives nothing. `selectors launcher` honors
+  the typed `--principal` context — an admin with a context receives that
+  Principal's Launcher names, an admin without one receives only globally
+  resolvable `dhl_` Launcher IDs (a name is never searched globally), a
+  Principal credential receives its own Launchers' names, and a Launcher
+  credential receives nothing. A foreign or missing context fails with the
+  daemon's non-disclosing contract and degrades silently.
 
 ### Signal cancellation (agent commands)
 

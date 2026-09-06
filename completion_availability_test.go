@@ -62,7 +62,10 @@ func TestCompletionAvailabilityMetadataAuthority(t *testing.T) {
 		reloadCommand,
 		adminTokenRotateCommand,
 		principalCreateCommand,
+		principalSetCommand,
 		principalDeleteCommand,
+		principalAllowedRootAddCommand,
+		principalAllowedRootRemoveCommand,
 		principalCredentialCreateCommand,
 		principalCredentialRevokeCommand,
 		mustCompletionSubcommand(credentialCommand, "create"),
@@ -74,6 +77,8 @@ func TestCompletionAvailabilityMetadataAuthority(t *testing.T) {
 	}
 
 	for _, cmd := range []*Command{
+		principalShowCommand,
+		principalAllowedRootListCommand,
 		principalCredentialListCommand,
 		principalCredentialRotateCommand,
 		mustCompletionSubcommand(credentialCommand, "list"),
@@ -106,8 +111,12 @@ func TestCompletionAvailabilityPrincipalNonRoot(t *testing.T) {
 	requireCompletionOmits(t, root, "selinux", "apparmor", "admin-token", "reload")
 
 	principal := runCompletion(t, script, []string{"docker-helper", "principal", ""})
-	if !slices.Equal(principal, []string{"credential"}) {
-		t.Errorf("principal authority should see only principal credential branch, got %v", principal)
+	requireCompletionContains(t, principal, "show", "allowed-root", "credential")
+	requireCompletionOmits(t, principal, "create", "set", "delete")
+
+	principalAllowedRoot := runCompletion(t, script, []string{"docker-helper", "principal", "allowed-root", ""})
+	if !slices.Equal(principalAllowedRoot, []string{"list"}) {
+		t.Errorf("principal authority under principal allowed-root should see only list, got %v", principalAllowedRoot)
 	}
 
 	principalCredentials := runCompletion(t, script, []string{"docker-helper", "principal", "credential", ""})

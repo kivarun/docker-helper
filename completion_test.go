@@ -1377,6 +1377,21 @@ var treeProviderLeafPaths = []string{
 	"config allowed-root remove",
 	"apparmor root add",
 	"apparmor root remove",
+	// The [LAUNCHER] positional completes from the daemon-backed selector
+	// introspection, and the grammar-ambiguous first positional of the
+	// allowed-root add/remove pair offers those selectors as part of its
+	// union completion.
+	"launcher show",
+	"launcher set",
+	"launcher delete",
+	"launcher credential create",
+	"launcher credential show",
+	"launcher credential rotate",
+	"launcher credential delete",
+	"launcher allowed-root list",
+	"launcher allowed-root inherit",
+	"launcher allowed-root add",
+	"launcher allowed-root remove",
 	"help",
 }
 
@@ -2192,6 +2207,279 @@ func startSelectorsPolicyServer(t *testing.T) (endpoint, tokenPath string, reque
 		t.Fatalf("write token: %v", err)
 	}
 	return server.URL, tokenPath, rec, home, opt
+}
+
+// startAuthoritySelectorServer stubs the /auth, /principals, and /launchers
+// surfaces the selector introspection drives, with the authority and
+// Principal identity carried by the stub configuration and the launcher
+// list narrowed by the typed principal context the way the daemon does.
+func startAuthoritySelectorServer(t *testing.T, authority, principal string, launchers []launcherJSON) (endpoint, tokenPath string, requests *policyQueryRecorder) {
+	rec := &policyQueryRecorder{seen: make(chan recordedRequest, 32)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(recordedRequest{r.Method, r.URL.Path, "", r.URL.RawQuery})
+		switch {
+		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, authResponse{Authority: authority, Principal: principal})
+			return
+		case r.URL.Path == "/principals" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, listPrincipalsResponse{
+				OK: true,
+				Principals: []principalSummary{
+					{Username: "alice"}, {Username: "bob"},
+				},
+			})
+			return
+		case r.URL.Path == "/launchers" && r.Method == http.MethodGet:
+			context := r.URL.Query().Get("principal")
+			narrowed := make([]launcherJSON, 0, len(launchers))
+			for _, l := range launchers {
+				if context == "" || context == l.Principal {
+					narrowed = append(narrowed, l)
+				}
+			}
+			writeJSONResponse(w, http.StatusOK, listLaunchersResponse{OK: true, Launchers: narrowed})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	tokenPath = filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	return server.URL, tokenPath, rec
+}
+
+// TestCompletionPositionalLauncherMatrix proves the [LAUNCHER] positional
+// completion reuses the --launcher flag's selector-introspection owner: an
+// admin with a typed --principal sees that Principal's Launcher names, an
+// admin without one sees only globally resolvable Launcher IDs, a Principal
+// credential sees its own Launchers, and a Launcher credential sees no
+// control-plane targets at all. The operator overrides work before and
+// after the command words alike.
+func TestCompletionPositionalLauncherMatrix(t *testing.T) {
+	launchers := []launcherJSON{
+		{ID: "dhl_alicekillme", Principal: "alice", Name: "killme"},
+		{ID: "dhl_bobworker", Principal: "bob", Name: "worker"},
+	}
+
+	// Admin without a Principal context: only globally resolvable IDs.
+	endpoint, tokenPath, requests := startAuthoritySelectorServer(t, "admin", "", launchers)
+	script := completionScript(t)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"",
+	})
+	if stderr != "" {
+		t.Fatalf("positional completion must not write to stderr: %q", stderr)
+	}
+	if slices.Contains(results, "killme") || slices.Contains(results, "worker") {
+		t.Fatalf("names must not be offered without a Principal context, got %v", results)
+	}
+	if !slices.Contains(results, "dhl_alicekillme") {
+		t.Fatalf("ID suggestions = %v, want the globally resolvable Launcher IDs", results)
+	}
+	snap := requests.snapshot()
+	if !slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers"
+	}) {
+		t.Fatalf("selector query missing from %+v", snap)
+	}
+
+	// Admin with a typed --principal: that Principal's Launcher names.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "",
+	})
+	if !slices.Equal(results, []string{"killme"}) {
+		t.Fatalf("launcher show <TAB> under --principal alice = %v, want alice's Launcher names", results)
+	}
+
+	// The operator override typed before the command words selects the same
+	// context (the walk keeps the override's value from swallowing words).
+	resultsBefore, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "--endpoint", endpoint, "--token-file", tokenPath,
+		"launcher", "show", "--principal", "alice", "",
+	})
+	if !slices.Equal(resultsBefore, []string{"killme"}) {
+		t.Fatalf("launcher show <TAB> with the override before the words = %v, want alice's Launcher names", resultsBefore)
+	}
+	resultsAfter, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "",
+	})
+	if !slices.Equal(resultsBefore, resultsAfter) {
+		t.Fatalf("the override position changes the result: %v vs %v", resultsBefore, resultsAfter)
+	}
+
+	// Principal credential: its own Launchers' names.
+	authorityEndpoint, authorityToken, _ := startAuthoritySelectorServer(t, "principal", "alice", launchers)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", authorityEndpoint, "--token-file", authorityToken,
+		"",
+	})
+	if !slices.Contains(results, "killme") {
+		t.Fatalf("principal credential positional suggestions = %v, want its own Launchers", results)
+	}
+	if slices.Contains(results, "dhl_bobworker") {
+		t.Fatalf("foreign Launcher ID leaked: %v", results)
+	}
+
+	// Launcher credential: no control-plane targets at all — the stub keeps
+	// the launcher list available, so an empty offer proves the CLI never
+	// presented it.
+	launcherEndpoint, launcherToken, launcherRequests := startAuthoritySelectorServer(t, "launcher", "", launchers)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "show", "--endpoint", launcherEndpoint, "--token-file", launcherToken,
+		"",
+	})
+	if len(results) != 0 {
+		t.Fatalf("launcher credential positional suggestions = %v, want none", results)
+	}
+	snap = launcherRequests.snapshot()
+	if !slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/auth"
+	}) || slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers"
+	}) {
+		t.Fatalf("requests = %+v, want only /auth (no launcher-list disclosure)", snap)
+	}
+}
+
+// TestCompletionAllowedRootFirstPositionUnion proves the grammar-ambiguous
+// first positional of launcher allowed-root add/remove offers both legal
+// continuations — the daemon-backed Launcher selectors and the PATH
+// candidates for the default Launcher — as a deterministic unique union,
+// and that once the first positional is typed the completion narrows to
+// PATH only.
+func TestCompletionAllowedRootFirstPositionUnion(t *testing.T) {
+	launchers := []launcherJSON{
+		{ID: "dhl_ownkillme", Principal: "alice", Name: "killme"},
+	}
+	endpoint, tokenPath, requests := startAuthoritySelectorServer(t, "principal", "alice", launchers)
+	script := completionScript(t)
+
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "workspaces")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// First positional, add: Launcher selectors and directory candidates.
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
+		"",
+	})
+	if stderr != "" {
+		t.Fatalf("union completion must not write to stderr: %q", stderr)
+	}
+	if !slices.Contains(results, "killme") || !slices.Contains(results, "workspaces") {
+		t.Fatalf("add first-positional union = %v, want the Launcher selector and the directory candidate", results)
+	}
+	assertNoDuplicates(t, results)
+	snap := requests.snapshot()
+	if !slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers"
+	}) {
+		t.Fatalf("selector query missing from %+v", snap)
+	}
+
+	// First positional typed: PATH only, no selector names.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
+		"killme", "",
+	})
+	if slices.Contains(results, "killme") {
+		t.Fatalf("PATH completion must not re-offer the typed selector: %v", results)
+	}
+	if !slices.Contains(results, "workspaces") {
+		t.Fatalf("add second-positional PATH completion = %v, want the directory candidates", results)
+	}
+
+	// First positional, remove: Launcher selectors and filesystem entries.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
+		"",
+	})
+	if !slices.Contains(results, "killme") {
+		t.Fatalf("remove first-positional union = %v, want the Launcher selector", results)
+	}
+	assertNoDuplicates(t, results)
+
+	// First positional typed: filesystem entries only.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
+		"killme", "",
+	})
+	if slices.Contains(results, "killme") {
+		t.Fatalf("PATH completion must not re-offer the typed selector: %v", results)
+	}
+}
+
+// assertNoDuplicates asserts the completion candidates are unique.
+func assertNoDuplicates(t *testing.T, got []string) {
+	t.Helper()
+	seen := make(map[string]bool, len(got))
+	for _, value := range got {
+		if seen[value] {
+			t.Errorf("duplicate completion candidate %q in %v", value, got)
+			return
+		}
+		seen[value] = true
+	}
+}
+
+// TestCompletionSelectorsPrincipalCommandContext proves the --principal
+// selector completion is command-context aware: a Principal credential
+// receives its own username on the command families where the explicit own
+// selector is legal and nothing on session create, where the selector is
+// structurally illegal; an admin keeps the daemon's Principal list.
+func TestCompletionSelectorsPrincipalCommandContext(t *testing.T) {
+	script := completionScript(t)
+
+	// Principal credential + session create: nothing (illegal selector).
+	endpoint, tokenPath, _ := startAuthoritySelectorServer(t, "principal", "alice", nil)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "",
+	})
+	if stderr != "" {
+		t.Fatalf("selector completion must not write to stderr: %q", stderr)
+	}
+	if len(results) != 0 {
+		t.Fatalf("session create --principal under a Principal credential must offer nothing, got %v", results)
+	}
+
+	// Principal credential + launcher family: the own username.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "",
+	})
+	if !slices.Equal(results, []string{"alice"}) {
+		t.Fatalf("launcher create --principal under a Principal credential = %v, want its own username", results)
+	}
+
+	// Admin: the daemon's Principal list regardless of the command family.
+	adminEndpoint, adminToken, _ := startAuthoritySelectorServer(t, "admin", "", nil)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", adminEndpoint, "--token-file", adminToken,
+		"--principal", "",
+	})
+	if !slices.Equal(results, []string{"alice", "bob"}) {
+		t.Fatalf("admin --principal suggestions = %v, want the daemon's Principal names", results)
+	}
 }
 
 // TestCompletionSelectorValuesAuthorityMatrix proves the scope-aware

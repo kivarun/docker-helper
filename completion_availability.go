@@ -89,11 +89,9 @@ func configureCompletionAvailability() {
 		adminTokenRotateCommand,
 		principalCreateCommand,
 		principalListCommand,
-		principalShowCommand,
 		principalSetCommand,
 		principalDeleteCommand,
 		principalAllowedRootAddCommand,
-		principalAllowedRootListCommand,
 		principalAllowedRootRemoveCommand,
 		principalCredentialCreateCommand,
 		principalCredentialRevokeCommand,
@@ -102,6 +100,8 @@ func configureCompletionAvailability() {
 	)
 
 	setCompletionAuthorities(adminPrincipal,
+		principalShowCommand,
+		principalAllowedRootListCommand,
 		principalCredentialListCommand,
 		principalCredentialRotateCommand,
 		mustCompletionSubcommand(credentialCommand, "list"),

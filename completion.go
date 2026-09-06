@@ -220,20 +220,30 @@ var completionSelectorsCommand = &Command{
 }
 
 // completionSelectorsPrincipalCommand prints the Principal names the
-// authenticated authority may target with a --principal selector, one per
-// line: an admin authority receives the daemon's Principal list, a
-// Principal or Launcher credential receives nothing because the selector is
-// contractually inapplicable to its commands (the daemon answers the
-// admin-only list query with its non-disclosing unauthorized contract and
-// the command degrades silently).
+// authenticated authority may target with a --principal selector on the
+// typed command path (--command), one per line. The command context comes
+// from the generated completion walk; the daemon remains the ownership and
+// authorization authority.
+//
+// An admin authority may target any Principal on every command that carries
+// the selector, so it receives the daemon's Principal list. A Principal
+// credential may explicitly target exactly its own Principal wherever the
+// selector is legal (the Launcher command families and the session-list
+// narrowing) and the selector is structurally illegal on session create, so
+// it receives its own username for every other command path and nothing
+// otherwise. A Launcher credential receives nothing: the selector is not
+// applicable to it. With no command context nothing is offered, and a
+// query failure degrades silently.
 var completionSelectorsPrincipalCommand = &Command{
 	Name:       "principal",
 	Summary:    "Print the Principal names selectable with --principal",
-	Usage:      "docker-helper completion selectors principal [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion selectors principal [--command PATH] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		command := &explicitStringFlag{}
+		fs.Var(command, "command", "Completed command path (context for the selector's applicability)")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
@@ -246,15 +256,39 @@ var completionSelectorsPrincipalCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				result, err := client.listPrincipals()
+				auth, err := client.auth()
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				for _, p := range result.Principals {
-					fmt.Fprintln(stdout, p.Username)
+				switch auth.Authority {
+				case "launcher":
+					return 0
+				case "principal":
+					// The selector is structurally illegal on session
+					// create (conflicting selectors) and unknown without
+					// a command context; everywhere else the Principal
+					// credential may explicitly target exactly its own
+					// Principal.
+					if command.value == "" || command.value == "session create" {
+						return 0
+					}
+					fmt.Fprintln(stdout, auth.Principal)
+					return 0
+				case "admin":
+					result, err := client.listPrincipals()
+					if err != nil {
+						fmt.Fprintf(stderr, "error: %v\n", err)
+						return 1
+					}
+					for _, p := range result.Principals {
+						fmt.Fprintln(stdout, p.Username)
+					}
+					return 0
+				default:
+					fmt.Fprintf(stderr, "error: unknown authority %q\n", auth.Authority)
+					return 1
 				}
-				return 0
 			},
 		}
 	},
@@ -830,6 +864,21 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            _docker_helper_normalize_path_candidates")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
+	fmt.Fprintln(w, `        "launcher show"|"launcher set"|"launcher delete"|"launcher credential create"|"launcher credential show"|"launcher credential rotate"|"launcher credential delete"|"launcher allowed-root list"|"launcher allowed-root inherit")`)
+	fmt.Fprintln(w, "            # [LAUNCHER] positional: the same daemon-backed selector")
+	fmt.Fprintln(w, "            # introspection the --launcher flag uses (one owner for")
+	fmt.Fprintln(w, "            # Launcher selector semantics: an admin with a typed")
+	fmt.Fprintln(w, "            # --principal sees that Principal's Launcher names, an admin")
+	fmt.Fprintln(w, "            # without one sees only globally resolvable Launcher IDs, a")
+	fmt.Fprintln(w, "            # Principal credential sees its own Launchers, and a Launcher")
+	fmt.Fprintln(w, "            # credential sees no control-plane targets).")
+	fmt.Fprintln(w, "            local lpos")
+	fmt.Fprintln(w, "            lpos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
+	fmt.Fprintln(w, "            if [ \"$lpos\" -eq 0 ]; then")
+	fmt.Fprintln(w, "                _docker_helper_complete_selector_value launcher \"$cur\"")
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            return")
+	fmt.Fprintln(w, "            ;;")
 	fmt.Fprintln(w, `        "principal allowed-root add"|"principal allowed-root remove"|"launcher allowed-root add"|"launcher allowed-root remove")`)
 	fmt.Fprintln(w, "            # USER (principal) and [LAUNCHER] positionals take no")
 	fmt.Fprintln(w, "            # suggestions; the next position is the PATH. add suggests")
@@ -844,6 +893,34 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, `                    *remove) COMPREPLY=( $(compgen -f -- "$cur") ) ;;`)
 	fmt.Fprintln(w, "                esac")
 	fmt.Fprintln(w, "                _docker_helper_normalize_path_candidates")
+	fmt.Fprintln(w, "            elif [ \"$pos\" -eq 0 ]; then")
+	fmt.Fprintln(w, "                case \"$cmd_path\" in")
+	fmt.Fprintln(w, `                "launcher allowed-root add"|"launcher allowed-root remove")`)
+	fmt.Fprintln(w, "                    # The first positional is grammar-ambiguous (PATH for")
+	fmt.Fprintln(w, "                    # the default Launcher, or the Launcher selector).")
+	fmt.Fprintln(w, "                    # Completion offers both legal continuations: the")
+	fmt.Fprintln(w, "                    # daemon-backed Launcher selectors and the PATH")
+	fmt.Fprintln(w, "                    # candidates for the default Launcher (directories")
+	fmt.Fprintln(w, "                    # for add, any filesystem entry for remove). The")
+	fmt.Fprintln(w, "                    # union is deterministic and unique; resolving the")
+	fmt.Fprintln(w, "                    # ambiguity stays a matter for the daemon.")
+	fmt.Fprintln(w, "                    local -a sel=()")
+	fmt.Fprintln(w, "                    if _docker_helper_complete_selector_value launcher \"$cur\"; then")
+	fmt.Fprintln(w, "                        sel=(\"${COMPREPLY[@]}\")")
+	fmt.Fprintln(w, "                    fi")
+	fmt.Fprintln(w, "                    COMPREPLY=()")
+	fmt.Fprintln(w, "                    compopt -o filenames 2>/dev/null || true")
+	fmt.Fprintln(w, "                    case \"$cmd_path\" in")
+	fmt.Fprintln(w, `                        "launcher allowed-root add") COMPREPLY=( $(compgen -d -- "$cur") ) ;;`)
+	fmt.Fprintln(w, `                        "launcher allowed-root remove") COMPREPLY=( $(compgen -f -- "$cur") ) ;;`)
+	fmt.Fprintln(w, "                    esac")
+	fmt.Fprintln(w, "                    _docker_helper_normalize_path_candidates")
+	fmt.Fprintln(w, "                    COMPREPLY=( \"${sel[@]}\" \"${COMPREPLY[@]}\" )")
+	fmt.Fprintln(w, "                    if [ ${#COMPREPLY[@]} -gt 0 ]; then")
+	io.WriteString(w, "                        mapfile -t COMPREPLY < <(printf '%s\\n' \"${COMPREPLY[@]}\" | LC_ALL=C sort -u)\n")
+	fmt.Fprintln(w, "                    fi")
+	fmt.Fprintln(w, "                    ;;")
+	fmt.Fprintln(w, "                esac")
 	fmt.Fprintln(w, "            fi")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
@@ -1082,6 +1159,9 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "        if [ -n \"$p\" ]; then")
 	fmt.Fprintln(w, "            selargs+=(--principal \"$p\")")
 	fmt.Fprintln(w, "        fi")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    if [ \"$flag\" = principal ] && [ -n \"$cmd_path\" ]; then")
+	fmt.Fprintln(w, "        selargs+=(--command \"$cmd_path\")")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    local vals")
 	fmt.Fprintln(w, "    if ! vals=\"$(${COMP_WORDS[0]} completion selectors \"$flag\" \"${opargs[@]}\" \"${selargs[@]}\" 2>/dev/null)\"; then")
