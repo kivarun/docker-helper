@@ -63,7 +63,9 @@ privileged run of the acceptance scenarios
 (`scripts/uat-release2-acceptance.sh`). This plan does not claim release
 acceptance or promotion.
 
-This plan is the binding contract. The concept document remains the rationale
+During implementation, this plan was the binding implementation contract.
+It is now a historical implementation record; `docs/architecture.md` is the
+current behavior contract. The concept document remains the rationale
 and is not duplicated here; readers needing the *why* should start there.
 
 Release 3 is **not** implementation scope here. It is a downstream consumer and

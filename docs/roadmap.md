@@ -378,10 +378,10 @@ These flows do not add desired state, managed-container lifecycle, restart
 policy, interactive exec, networking, port publishing, or resource-limit
 semantics.
 
-The binding concept, migration direction, and expected CLI/HTTP/database/test
+The historical design rationale, migration direction, and expected CLI/HTTP/database/test
 work are recorded in
 [`docs/release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md);
-the binding implementation contract is
+the historical completed implementation plan is
 [`docs/release-2.1-implementation-plan.md`](release-2.1-implementation-plan.md).
 
 Release 2.1 implementation is complete on `main`: the Launcher ownership
@@ -392,10 +392,10 @@ are all implemented. This is an implementation statement, not release
 acceptance: promotion still requires the artifact gate to pass, including a
 privileged run of the acceptance scenarios
 (`scripts/uat-release2-acceptance.sh`). Release 2.1 production code is
-frozen for the RC6 candidate: remaining pre-release work is documentation,
-help/man, and documented-contract/UAT consistency only, plus the final
-pre-release review and the RC6 exact-SHA gate. The current behavior contract
-lives in
+frozen for the RC6 candidate: documentation/help/man and
+documented-contract reconciliation are complete; remaining pre-release work
+is the final pre-release review and the RC6 exact-SHA gate. The current
+behavior contract lives in
 [`docs/architecture.md`](architecture.md) ("Launcher ownership"); the Release 3
 vocabulary map has been updated to the final 2.1 symbols
 ([`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md)).
