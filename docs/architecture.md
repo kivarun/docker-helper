@@ -96,8 +96,12 @@ daemon restart to take effect.
 
 System mode requires exactly one supported enforcing backend:
 
-- AppArmor confines the daemon with `docker-helper-system` and uses explicit
-  managed workspace boundaries for path-level workspace defense in depth;
+- AppArmor confines the daemon with the `/etc/apparmor.d/docker-helper-system`
+  profile and uses explicit managed workspace boundaries for path-level
+  workspace defense in depth. The profile includes the dynamic helper-owned
+  boundary state file `/var/lib/docker-helper/apparmor/managed-boundaries`;
+  managed boundaries are stored there, outside config.json. These managed
+  boundaries are MAC state, not authorization roots;
 - SELinux confines the daemon as `docker_helper_t` and system-mode containers
   as the MCS-constrained `docker_helper_container_t` type.
 
@@ -504,7 +508,10 @@ full syntax:
 - `admin-token` — Manage the admin token. Subcommand: `rotate` (rotate the
   admin token; requires the current token, new token shown once, old token
   invalid immediately, no restart).
-- `apparmor` — Manage/check AppArmor roots for an AppArmor system deployment.
+- `apparmor` — Manage/check managed AppArmor workspace boundaries for an
+  AppArmor system deployment (the public `apparmor root` command spelling is
+  retained compatibility; it manages managed workspace boundaries, not
+  authorization roots).
 - `selinux` — Inspect SELinux system-policy state for a SELinux system
   deployment. Subcommand: `check` (validate that the `docker_helper` policy
   module is loaded and docker-helper-owned file contexts are consistent with

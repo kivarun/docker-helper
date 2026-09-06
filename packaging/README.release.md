@@ -25,7 +25,8 @@ post-Release-2.
 - `systemd/user/docker-helper.service` — systemd user service unit
 - `systemd/system/docker-helper.service` — systemd system service unit
 - `apparmor/docker-helper` — user-mode AppArmor profile template (manual install)
-- `apparmor/docker-helper-system` — system-mode AppArmor profile
+- `apparmor/docker-helper-system` — system-mode AppArmor profile, installed
+  as `/etc/apparmor.d/docker-helper-system`
 - `apparmor/local/curl` — AppArmor local-profile snippet for curl
 - `selinux/docker_helper.pp` — system-mode SELinux policy module (docker_helper)
 - `skills/docker-helper/SKILL.md` — agent-facing skill file
@@ -56,7 +57,12 @@ The system installer is MAC-backend neutral. It selects the single supported
 active backend from kernel state and configures it:
 
 - AppArmor host (AppArmor active, SELinux not enforcing): installs and loads
-  the AppArmor system profile and prepares the managed-boundary state.
+  the AppArmor system profile (bundle member `apparmor/docker-helper-system`,
+  installed as `/etc/apparmor.d/docker-helper-system`) and prepares the
+  managed-boundary state: dynamic helper-owned boundary state lives at
+  `/var/lib/docker-helper/apparmor/managed-boundaries`. That state file is
+  runtime/persistent helper-owned state, not a bundle member; the installed
+  profile includes it.
 - SELinux host (enforcing SELinux, AppArmor inactive): loads the bundled
   `selinux/docker_helper.pp` module with `semodule`, installs the policy
   artifact to `/usr/share/selinux/docker_helper.pp`, and applies the narrow
