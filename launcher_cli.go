@@ -27,19 +27,17 @@ func (f *stringListFlag) Set(v string) error {
 	return nil
 }
 
-// launcherNameFlag collects the optional --name value of the Launcher create
-// and set commands with explicit flag presence: an explicitly supplied empty
-// value is an invalid Launcher name submitted as-is, not omission, and is
-// never silently dropped or defaulted. The daemon remains the name-grammar
-// authority.
-type launcherNameFlag struct {
+// explicitStringFlag is a presence-aware string flag. It distinguishes an
+// omitted flag from an explicitly supplied value, including the empty string.
+// Command-specific validation decides whether the explicit value is valid.
+type explicitStringFlag struct {
 	set   bool
 	value string
 }
 
-func (f *launcherNameFlag) String() string { return f.value }
+func (f *explicitStringFlag) String() string { return f.value }
 
-func (f *launcherNameFlag) Set(v string) error {
+func (f *explicitStringFlag) Set(v string) error {
 	f.set = true
 	f.value = v
 	return nil
@@ -250,7 +248,7 @@ var launcherCreateCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		name := &launcherNameFlag{}
+		name := &explicitStringFlag{}
 		fs.Var(name, "name", "Launcher name (default: \"default\"; provisioned automatically at principal creation)")
 		allowedRoots := &stringListFlag{}
 		fs.Var(allowedRoots, "allowed-root", "Allowed root path (restricted scope)")
@@ -408,7 +406,7 @@ var launcherSetCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		name := &launcherNameFlag{}
+		name := &explicitStringFlag{}
 		fs.Var(name, "name", "New launcher name")
 		enabled := fs.String("enabled", "", "Enable or disable the launcher (true|false)")
 		return Invocation{

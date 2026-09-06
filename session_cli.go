@@ -116,9 +116,9 @@ var sessionCreateCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		workspace := fs.String("workspace", "", "Workspace directory")
-		principal := &launcherNameFlag{}
+		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal username (admin authentication; targets the Principal's default Launcher)")
-		launcher := &launcherNameFlag{}
+		launcher := &explicitStringFlag{}
 		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...) to target instead of the default Launcher")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
