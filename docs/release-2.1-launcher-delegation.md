@@ -2,6 +2,11 @@
 
 ## Status and scope
 
+> Historical design rationale for Release 2.1.
+> The model has been implemented.
+> Current behavior contract: [`architecture.md`](architecture.md).
+> Implementation history: [`release-2.1-implementation-plan.md`](release-2.1-implementation-plan.md).
+
 This document records the proposed Release 2.1 authorization and ownership
 model for delegated Launchers. It is a design input for the first minor release
 after 2.0, not part of the Release 2.0 contract and not yet an implementation

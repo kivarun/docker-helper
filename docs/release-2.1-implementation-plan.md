@@ -1,13 +1,35 @@
-# Release 2.1 Launcher Delegation — Binding Implementation Plan
+# Release 2.1 Launcher Delegation — Implementation Plan (historical, completed)
 
 ## Status / exact baseline
 
+**Historical completed Release-2.1 implementation plan.**
+
+- The current behavior contract is [`architecture.md`](architecture.md)
+  ("Launcher ownership" and the rest of the current sections).
+- The current-to-target sections below describe the historical baseline
+  recorded when this implementation plan was written: the symbol, file, and
+  route references there are historical implementation evidence, not the
+  current production map.
+- Release 2.1 production was subsequently corrected through RC6 (flag-name
+  presence semantics, public `allowed_roots` JSON-array contract, and other
+  audit-driven fixes).
+- Production freeze baseline:
+  `b6bf645a021b79826a61ee8fcab5c75e46a198a4`.
+
+The stages and baseline mapping below are kept intact as implementation
+history. They must not be read as a statement about the *actual current
+code*; in particular, the claim that commits after
+`44281a84591cff6bb75cd069a5032ecdf947a282` were only UAT/docs corrections
+was false — later commits included production corrections through the RC6
+passes before the freeze at `b6bf645a021b79826a61ee8fcab5c75e46a198a4`.
+
 This document freezes the binding implementation contract for **Release 2.1
-Launcher Delegation** against the *actual* current code. It is the reviewed
-gate between the design concept and the Stage 1.1 production implementation. It
-maps the agreed concept to concrete owners, symbols, tables, and migration
-steps. It is documentation only; no production Go, tests, workflows, scripts,
-packaging, README, or man pages are changed by this stage.
+Launcher Delegation** against the *actual* current code at the time it was
+written. It is the reviewed gate between the design concept and the Stage 1.1
+production implementation. It maps the agreed concept to concrete owners,
+symbols, tables, and migration steps. It is documentation only; no production
+Go, tests, workflows, scripts, packaging, README, or man pages are changed by
+this stage.
 
 - Repository: `kivarun/docker-helper`
 - Branch: `main` (default branch is `release/2.0`; this work is on `main` only)
@@ -29,9 +51,11 @@ RC-blocker correction passes; `main` has since advanced beyond it, so this
 plan no longer pins a final implementation commit. The canonical
 current-behavior reference is [`architecture.md`](architecture.md)
 ("Launcher ownership"); the Release 3 vocabulary map has already been
-reconciled against the final implemented Release 2.1 production baseline at
-`44281a84591cff6bb75cd069a5032ecdf947a282`. Commits after that baseline are
-UAT/docs-only corrections and do not change the mapped production symbols.
+reconciled against the Release-2.1 production baseline at
+`44281a84591cff6bb75cd069a5032ecdf947a282`; commits after that baseline
+continued to evolve the Release-2.1 production code through the RC6
+correction passes until the production freeze at
+`b6bf645a021b79826a61ee8fcab5c75e46a198a4`.
 
 Implementation completion is distinct from release acceptance: the Release
 2.1 promotion claim requires the artifact gate to pass, including a
