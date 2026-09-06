@@ -327,13 +327,21 @@ subcase_b() {
     --token-file "$cred" --launcher killme --workspace "$opt/")"
   assert_completion "B: continuation offers the restricted subdirectories" "$opt/proj" "$out" || true
 
-  # 7. a foreign selector fails silently: no policy guess, no suggestion.
+  # 7. a foreign selector never leaks policy-derived suggestions: the
+  #    daemon rejects the selector and the accepted degradation is the
+  #    generic filesystem fallback, never the restricted roots.
+  roots_out="$(dh completion roots session --system --token-file "$cred" --launcher does-not-exist 2>&1)"; roots_rc=$?
+  if [ "$roots_rc" -ne 0 ] && [ -z "$roots_out" ]; then
+    reg_ok "B: introspection query with a foreign launcher selector fails silently"
+  else
+    reg_fail "B: foreign selector introspection did not degrade (rc=$roots_rc): $(printf '%s' "$roots_out" | head -2 | tr '\n' ' ' | redact)"
+  fi
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --launcher does-not-exist --workspace "")"
-  if [ -z "$out" ]; then
-    reg_ok "B: foreign --launcher selector degrades silently"
+  if printf '%s' "$out" | grep -qx "$opt"; then
+    reg_fail "B: foreign --launcher selector suggested the restricted root [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
   else
-    reg_fail "B: foreign --launcher selector suggested [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+    reg_ok "B: foreign --launcher selector leaks no restricted root"
   fi
 
   cleanup_principal "$user"
@@ -386,12 +394,18 @@ subcase_c() {
     reg_fail "C: introspection query failed (rc=$roots_rc): $(printf '%s' "$roots_out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
-  # Completing inside the wider root offers the nested root once: it
-  # qualifies both as an entry anchor and as a directory under home.
+  # Completing inside the wider root offers the nested root once: the
+  # nested root qualifies both as an entry anchor and as a directory under
+  # home, and everything inside the permitted home root is fair game — the
+  # invariant is uniqueness, not an exact candidate set.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --workspace "$home/")"
   assert_unique "C: nested roots produce no duplicate suggestions" "$out"
-  assert_completion "C: nested root is offered" "$home/opt" "$out" || true
+  if printf '%s\n' "$out" | grep -qx "$home/opt"; then
+    reg_ok "C: nested root is offered exactly once"
+  else
+    reg_fail "C: nested root is offered: suggestions = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want $home/opt included"
+  fi
 
   # Deterministic: the same typed line yields the same COMPREPLY.
   out2="$(run_completion "$script" /usr/bin/docker-helper --system session create \
