@@ -74,7 +74,7 @@ run_completion() {
       echo "registrations: ${specs[*]:-none}" >&2
       exit 5
     fi
-    local func="${specs[0]#*-F }"
+    func="${specs[0]#*-F }"
     if [ "$func" = "${specs[0]}" ]; then
       echo "no -F function in compspec: ${specs[0]}" >&2
       exit 6
