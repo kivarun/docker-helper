@@ -2,9 +2,13 @@
 
 This file summarizes user-visible release changes. Commit-level history remains available through the GitHub compare links for each release.
 
-## [Unreleased]
+## [2.1.0-rc.7] - 2026-09-06
+
+RC7 restores the Release-2.1 scope-first Session-list narrowing contract that escaped the published RC6.
 
 - Restored scope-first Session-list narrowing: `docker-helper session list` (and `GET /sessions`) accepts optional `--principal USER` / `--launcher LAUNCHER` selectors that only narrow the authenticated authority's visible sessions — admin by Principal and/or Launcher (a `dhl_...` Launcher ID is sufficient without `--principal`; a Launcher name requires it and is never searched globally), a Principal credential by Launcher inside its own scope, and a Launcher credential without selectors. Missing or foreign targets stay non-disclosing and authority-illegal selectors are stable selector errors.
+
+Full changes since RC6: https://github.com/kivarun/docker-helper/compare/v2.1.0-rc.6...v2.1.0-rc.7
 
 ## [2.1.0-rc.6] - 2026-09-06
 
@@ -94,6 +98,7 @@ Release 2.0 remains local-first. Non-loopback listeners, TLS-based remote access
 
 Full changes since 1.0.2: https://github.com/kivarun/docker-helper/compare/v1.0.2...v2.0.0
 
+[2.1.0-rc.7]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0-rc.7
 [2.1.0-rc.6]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0-rc.6
 [2.1.0-rc.5]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0-rc.5
 [2.0.0]: https://github.com/kivarun/docker-helper/releases/tag/v2.0.0
