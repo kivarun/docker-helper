@@ -58,15 +58,19 @@ mkdir -p "$TMPDIR_REG14"
 # run_completion SCRIPT WORDS... drives the completion function Bash actually
 # registered for docker-helper (discovered through `complete -p`, one -F
 # registration) with the given command line; prints one COMPREPLY entry per
-# line.
+# line. The snippet's exit code and stderr are surfaced through
+# RC_COMPLETION / ERR_COMPLETION for failure attribution.
 run_completion() {
   local script="$1"
   shift
-  local words="" w wq
+  local words="" w wq err_file
   for w in "$@"; do
     printf -v wq '%q' "$w"
     words+="${words:+ }${wq}"
   done
+  err_file="$TMPDIR_REG14/comp.err"
+  RC_COMPLETION=0
+  ERR_COMPLETION=""
   bash -c '
     set -u
     source "$1" || exit 3
@@ -87,11 +91,17 @@ run_completion() {
     COMPREPLY=()
     "$func" || exit 4
     printf "%s\n" "${COMPREPLY[@]}"
-  ' _ "$script" "$words"
+  ' _ "$script" "$words" 2>"$err_file"
+  RC_COMPLETION=$?
+  if [ "$RC_COMPLETION" -ne 0 ]; then
+    ERR_COMPLETION="$(head -2 "$err_file" | tr '\n' ' ')"
+  fi
+  rm -f "$err_file"
 }
 
 # assert_completion LABEL EXPECTED ACTUAL: EXPECTED and ACTUAL are
-# '|'-separated COMPREPLY entries compared as exact ordered sets.
+# '|'-separated COMPREPLY entries compared as exact ordered sets. The
+# harness rc/stderr from the last run_completion are reported on failure.
 assert_completion() {
   local label="$1" expected_csv="$2" actual="$3"
   local want have
@@ -101,7 +111,7 @@ assert_completion() {
     reg_ok "$label"
     return 0
   fi
-  reg_fail "$label: suggestions = [$(printf '%s' "$actual" | tr '\n' ' ' | redact)] want [$expected_csv]"
+  reg_fail "$label: suggestions = [$(printf '%s' "$actual" | tr '\n' ' ' | redact)] want [$expected_csv] (harness rc=$RC_COMPLETION err=$ERR_COMPLETION)"
   return 1
 }
 
@@ -237,6 +247,17 @@ subcase_b() {
   fi
 
   local out
+  # The machine-facing introspection surface the completion harness drives
+  # must answer on the packaged CLI before the COMPREPLY contract is
+  # asserted; its failure would attribute to the CLI, not the harness.
+  local roots_out roots_rc
+  roots_out="$(dh completion roots session --system --principal "$user" --launcher killme 2>&1)"; roots_rc=$?
+  if [ "$roots_rc" -eq 0 ] && printf '%s' "$roots_out" | grep -qx "$opt"; then
+    reg_ok "B: introspection query (admin + typed selectors) answers the restricted root"
+  else
+    reg_fail "B: introspection query (admin + typed selectors) failed (rc=$roots_rc): $(printf '%s' "$roots_out" | head -2 | tr '\n' ' ' | redact)"
+  fi
+
   # 1. admin + --principal USER --launcher NAME: only the restricted root.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --principal "$user" --launcher killme --workspace "")"
@@ -272,6 +293,12 @@ subcase_b() {
 
   # 5. selectorless completion keeps the default-target semantics: the
   #    default Launcher inherits the Principal ceiling (the home root).
+  roots_out="$(dh completion roots session --system --token-file "$cred" 2>&1)"; roots_rc=$?
+  if [ "$roots_rc" -eq 0 ] && printf '%s' "$roots_out" | grep -qx "$home"; then
+    reg_ok "B: introspection query (principal credential, selectorless) answers the default target"
+  else
+    reg_fail "B: introspection query (principal credential, selectorless) failed (rc=$roots_rc): $(printf '%s' "$roots_out" | head -2 | tr '\n' ' ' | redact)"
+  fi
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --workspace "")"
   assert_completion "B: selectorless principal-credential completion keeps the default target" "$home" "$out" || true
@@ -323,6 +350,21 @@ subcase_c() {
     cleanup_principal "$user"
     rm -f "$cred"
     return
+  fi
+
+  # The nested roots must reach the introspection surface before the
+  # COMPREPLY contract is asserted.
+  local roots_out roots_rc
+  roots_out="$(dh completion roots session --system --token-file "$cred" 2>&1)"; roots_rc=$?
+  if [ "$roots_rc" -eq 0 ]; then
+    assert_unique "C: introspection output is duplicate-free" "$roots_out"
+    if printf '%s' "$roots_out" | grep -qx "$opt"; then
+      reg_ok "C: introspection query carries the nested root"
+    else
+      reg_fail "C: introspection query lacks the nested root: [$(printf '%s' "$roots_out" | tr '\n' ' ' | redact)]"
+    fi
+  else
+    reg_fail "C: introspection query failed (rc=$roots_rc): $(printf '%s' "$roots_out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
   # Completing inside the wider root offers the nested root once: it
@@ -422,6 +464,28 @@ subcase_e() {
   fi
 
   local out
+  # The selector introspection surface the completion harness drives must
+  # answer on the packaged CLI before the COMPREPLY contract is asserted.
+  local sel_out sel_rc
+  sel_out="$(dh completion selectors principal --system 2>&1)"; sel_rc=$?
+  if [ "$sel_rc" -eq 0 ] && printf '%s\n' "$sel_out" | grep -qx "$user"; then
+    reg_ok "E: introspection selectors principal answers for admin"
+  else
+    reg_fail "E: selectors principal query failed (rc=$sel_rc): $(printf '%s' "$sel_out" | head -2 | tr '\n' ' ' | redact)"
+  fi
+  sel_out="$(dh completion selectors launcher --system --principal "$user" 2>&1)"; sel_rc=$?
+  if [ "$sel_rc" -eq 0 ] && printf '%s\n' "$sel_out" | grep -qx 'killme'; then
+    reg_ok "E: introspection selectors launcher answers with the Principal context"
+  else
+    reg_fail "E: selectors launcher (context) query failed (rc=$sel_rc): $(printf '%s' "$sel_out" | head -2 | tr '\n' ' ' | redact)"
+  fi
+  sel_out="$(dh completion selectors launcher --system --token-file "$cred" 2>&1)"; sel_rc=$?
+  if [ "$sel_rc" -eq 0 ] && printf '%s\n' "$sel_out" | grep -qx 'killme'; then
+    reg_ok "E: introspection selectors launcher answers for a principal credential"
+  else
+    reg_fail "E: selectors launcher (principal credential) query failed (rc=$sel_rc): $(printf '%s' "$sel_out" | head -2 | tr '\n' ' ' | redact)"
+  fi
+
   # 1. admin --principal <TAB>: Principal names.
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher create --principal "")"
   if printf '%s\n' "$out" | grep -qx "$user"; then
