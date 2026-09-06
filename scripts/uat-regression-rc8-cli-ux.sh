@@ -681,8 +681,10 @@ subcase_f() {
   fi
 
   # 6. launcher allowed-root add <TAB>: the ambiguous first positional
-  #    offers both continuations, uniquely.
-  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" "")"
+  #    offers both continuations, uniquely. The PATH candidates for the
+  #    default Launcher are the current directory's entries, so the union
+  #    is driven with the fixture home as the working directory.
+  out="$(cd "$home" && run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" "")"
   if printf '%s\n' "$out" | grep -qx 'killme' && printf '%s\n' "$out" | grep -qx "$opt"; then
     reg_ok "F: launcher allowed-root add <TAB> offers the Launcher selector and the directory candidate"
   else
@@ -697,7 +699,7 @@ subcase_f() {
   fi
 
   # 7. launcher allowed-root add NAME <TAB>: PATH only.
-  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" killme "")"
+  out="$(cd "$home" && run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" killme "")"
   if ! printf '%s\n' "$out" | grep -qx 'killme' && printf '%s\n' "$out" | grep -qx "$opt"; then
     reg_ok "F: launcher allowed-root add NAME <TAB> completes PATH only"
   else
