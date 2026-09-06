@@ -161,8 +161,13 @@ for entry in "${REGRESSIONS[@]}"; do
   script="${rest#*:}"
   say "== group $num: $label =="
   # Re-ensure the service so a prior group's cleanup cannot BLOCK later groups
-  # (a previous regression failure is never a valid BLOCKED reason).
+  # (a previous regression failure is never a valid BLOCKED reason). reset-failed
+  # clears a systemd start-limit-hit unit state: the earlier groups' deliberate
+  # kill/restart cycles (group 9) and system-daemon stops (user-mode groups) can
+  # otherwise exhaust StartLimitBurst within its 60s window and leave the unit
+  # permanently refused for the rest of the collect-all run.
   if ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then
+    systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
     systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
     for _ in $(seq 1 30); do
       systemctl is-active --quiet docker-helper.service && break
