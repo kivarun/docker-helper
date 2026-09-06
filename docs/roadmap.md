@@ -391,7 +391,11 @@ propagation, helper-owned runtime correlation labels, and the `launcher` CLI
 are all implemented. This is an implementation statement, not release
 acceptance: promotion still requires the artifact gate to pass, including a
 privileged run of the acceptance scenarios
-(`scripts/uat-release2-acceptance.sh`). The current behavior contract lives in
+(`scripts/uat-release2-acceptance.sh`). Release 2.1 production code is
+frozen for the RC6 candidate: remaining pre-release work is documentation,
+help/man, and documented-contract/UAT consistency only, plus the final
+pre-release review and the RC6 exact-SHA gate. The current behavior contract
+lives in
 [`docs/architecture.md`](architecture.md) ("Launcher ownership"); the Release 3
 vocabulary map has been updated to the final 2.1 symbols
 ([`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md)).

@@ -12,7 +12,7 @@ Docker and enforces policy:
 - host paths accepted as build contexts and bind-mount sources are
   restricted to the session workspace;
 - build, pull, and run require a session token; session management
-  requires an admin token or Principal credential;
+  requires an admin token, Principal credential, or Launcher credential;
 - all supported Docker operations are mediated by the daemon;
 - the developer controls which workspace each session can access.
 
@@ -187,8 +187,9 @@ docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
 ```
 
 User mode does not require principals or credentials. Ownership is
-transparently mapped to an internal daemon-owner principal and its
-default launcher, so the current user creates sessions directly.
+transparently mapped to the reserved daemon-owner principal and its
+auto-provisioned `default` launcher, so the current user creates sessions
+directly.
 
 ### Quick start: system mode
 
@@ -212,9 +213,9 @@ docker-helper session create --workspace ~/myproject
 ```
 
 Sessions created with a Principal credential are owned by that principal's
-implicit `default` launcher. To delegate an agent with a narrower,
-revocable key, create a launcher and give the agent its credential
-instead — see
+`default` launcher, auto-provisioned at principal creation. To delegate an
+agent with a narrower, revocable key, create a launcher and give the agent
+its credential instead — see
 [Delegated ownership: launchers](#delegated-ownership-launchers).
 
 Export the `TOKEN` printed by `session create` (starts with `dht_...`):
@@ -741,8 +742,11 @@ reload, admin-token rotate) support explicit endpoint selection:
 
 Default behavior: select the user socket when it exists; otherwise select the
 system socket. The token source changes with the selected socket: user-mode
-`admin.token` for the user socket, and the installed Principal credential (or
-root system `admin.token`) for the system socket.
+`admin.token` for the user socket, and the installed credential (a Principal
+or Launcher credential, or the root `admin.token` when running as root) for
+the system socket. The same operator credential file
+(`${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`) may
+hold whichever non-admin operator bearer applies.
 
 `--endpoint` requires `--token-file`. `--system` and `--endpoint` are
 mutually exclusive. Selection happens before the request; if the selected
@@ -1034,8 +1038,8 @@ Note: `docker-helper config show` (without a field) displays
   through bearer authentication and authorization, not socket
   permissions alone.
 - **Container policy** — containers run with `--rm` and
-  `--user <uid>:<gid>` (principal UID:GID for principal-owned sessions,
-  daemon UID:GID for legacy/admin sessions). User mode and AppArmor system mode
+  `--user <uid>:<gid>` (the owning Principal's UID:GID, or the daemon
+  UID:GID for user-mode daemon-owner Sessions). User mode and AppArmor system mode
   use `--security-opt label=disable`; SELinux system mode uses the confined
   `docker_helper_container_t` type.
 - **Mandatory access control** — system mode requires exactly one active
@@ -1463,16 +1467,19 @@ sudo docker-helper launcher delete --principal alice build-agent                
 
 A launcher is addressed by name or `dhl_...` ID, always under one
 principal; the selector may be omitted to mean that principal's
-`default` launcher. Names are path-safe identifiers (lowercase letters,
-digits, and internal hyphens, 1..63 characters). With a principal
-credential the principal is inferred; the admin token must pass
-`--principal USER` explicitly.
+`default` launcher (a real, auto-provisioned Launcher object). Names are
+path-safe identifiers (lowercase letters, digits, and internal hyphens,
+1..63 characters). With a principal credential the principal is inferred;
+the admin token must pass `--principal USER` explicitly — the single
+exception is an admin targeting an individual launcher by its globally
+unique `dhl_...` ID, where the owning principal is resolved by the daemon.
+Launcher names are never searched globally.
 
 `launcher create` infers the principal from the authenticated credential
-when `--principal` is omitted. Without `--name` it targets the implicit
-`default` launcher and refuses locally with an actionable hint to pass
-`--name NAME` when that principal already has one, instead of prompting
-for a credential and failing on the daemon. Upgrading from v2.0.0:
+when `--principal` is omitted. Without `--name` it targets the
+auto-provisioned `default` launcher and refuses locally with an actionable
+hint to pass `--name NAME` when that principal already has one, instead of
+prompting for a credential and failing on the daemon. Upgrading from v2.0.0:
 existing principal
 credentials and attributable sessions migrate automatically at first
 2.1 daemon startup (credentials preserved byte-for-byte; sessions move to
