@@ -732,7 +732,7 @@ admin token is required.
 ## Operator CLI
 
 API-backed operator commands (principal, launcher, credential, session,
-reload, admin-token rotate) support explicit endpoint selection:
+reload, admin-token rotate, completion roots) support explicit endpoint selection:
 
 ```
 --system              connect to system daemon (Unix socket)
@@ -1418,6 +1418,8 @@ As the operator (or the principal, using their credential):
 
 ```bash
 # Create a launcher for agent work; issue its credential.
+# (Admin form. A Principal-credential caller normally omits
+#  sudo and --principal, which is then inferred from the credential.)
 sudo docker-helper launcher create --principal alice \
     --name build-agent --issue-credential
 ```
@@ -1438,8 +1440,14 @@ The agent can verify its delegated identity through the HTTP API
 With multiple launchers, a Principal credential can target one explicitly
 at session creation time with `--launcher` (name or `dhl_...` ID); a
 Launcher credential targets launchers with its `dhl_...` ID only (`GET
-/auth` reports it). Without the flag the daemon uses the authority's
-default launcher.
+/auth` reports it). Without a selector the resolution is
+authority-specific: a Principal credential creates the Session on its
+principal's `default` launcher (the real Launcher auto-provisioned at
+principal creation), while a Launcher credential creates the Session on
+its own launcher — which does not need to be named `default`. A Launcher
+credential that passes `--launcher` can represent only its own `dhl_...`
+ID; a name has no resolvable representation for that authority and is
+rejected locally.
 
 Launcher-scoped sessions use the launcher's effective roots:
 

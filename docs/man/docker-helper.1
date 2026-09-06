@@ -135,8 +135,13 @@ Machine-facing completion query: print the effective allowed roots of the Launch
 .TP
 .B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
 Create a new session for a workspace. With \-\-json, output in JSON format.
-The target Launcher is chosen by the daemon: without selectors the
-authenticated authority's default Launcher is used. With an admin token,
+The target Launcher is chosen by the daemon. Without a selector the
+authority-specific defaults apply: a Principal credential resolves its
+Principal's \fBdefault\fR Launcher; a Launcher credential is forced to its
+own Launcher (which does not need to be named \fBdefault\fR); a user-mode
+admin token resolves the local daemon-owner default Launcher; a system-mode
+admin token requires an explicit selector (\fB400
+missing_launcher_selector\fR). With an admin token,
 \fB\-\-principal USER\fR targets that Principal's default Launcher and
 \fB\-\-launcher LAUNCHER\fR a specific Launcher (a name requires
 \fB\-\-principal USER\fR because names are principal-scoped; a Launcher ID
@@ -209,7 +214,10 @@ Modify principal settings. FIELD currently supports only \fBenabled\fR;
 VALUE must be \fBtrue\fR or \fBfalse\fR.
 .TP
 .B docker-helper principal delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
-Delete a principal and all its sessions, credentials, and allowed roots.
+Delete a principal and all its launchers, sessions, credentials, and
+allowed roots. The delete is a checked teardown: it fails with
+\fB409 launcher_runtime_active\fR while any launcher still has active
+runtime, then removes the principal (launchers via FK cascade).
 .TP
 .B docker-helper principal allowed-root add [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Add an allowed root for a principal.

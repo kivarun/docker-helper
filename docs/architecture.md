@@ -1024,17 +1024,29 @@ real mutations use, and neither surface widens authority.
   is `401`. Consumed by `completion roots principal`.
 - `GET /sessions/create-policy` — the complete Session-create projection
   (target Launcher, ownership names, and the three-level effective root
-  scope) that a Session created right now with this authority and selectors
-  would use, resolved by the same owner as real creation
-  (`resolveCreatePolicy`). Consumed by `completion roots session`.
+  scope) that a Session created right now with this authority and no
+  explicit selector would use, resolved by the same owner as real creation
+  (`resolveCreatePolicy`) with an empty selector set and the normal
+  authority-specific default resolution. The endpoint accepts no ownership
+  selectors; a system-mode admin without a resolvable Launcher receives the
+  same missing-selector contract a real create would. Consumed by
+  `completion roots session`.
 
 `GET /auth` is the separate identity introspection surface; it reports the
 authenticated authority class, not policy. The `completion` CLI consumes
-these daemon policy queries and never reproduces policy locally — Bash
-completion for `config allowed-root add`, `launcher scope set
---allowed-root`, and `principal allowed-root add` paths comes from these
-daemon answers, degrading to generic filesystem completion when the daemon
-is unavailable.
+these daemon policy queries and never reproduces policy locally. The
+daemon-backed policy completions are exactly:
+
+| Command flag | Policy query consumed |
+|---|---|
+| `launcher create --allowed-root` | Principal effective-root query |
+| `launcher scope set --allowed-root` | Principal effective-root query |
+| `session create --workspace` | Session create-policy query |
+
+`config allowed-root add` and `principal allowed-root add` remain generic
+filesystem completion, as do all other path-valued flags. When a policy
+query fails (for example when the daemon is unavailable), completion
+degrades silently to the generic filesystem completion for the flag value.
 
 ### Launcher control plane
 

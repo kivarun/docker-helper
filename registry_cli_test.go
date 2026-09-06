@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -136,5 +137,29 @@ func TestRegistryLoginNoConfigFile(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Login succeeded") {
 		t.Errorf("expected success message, got: %s", out.String())
+	}
+}
+
+// TestRegistryLoginUsageListsAgentEndpointFlags proves the explicit
+// registry login Usage names the agent endpoint flags its parser
+// registers (--system/--endpoint; agent commands authenticate only with
+// the Session token and accept no --token-file). This is the agent-family
+// counterpart of the launcher synopsis drift protection.
+func TestRegistryLoginUsageListsAgentEndpointFlags(t *testing.T) {
+	for _, want := range []string{"--system", "--endpoint ENDPOINT"} {
+		if !strings.Contains(registryLoginCommand.Usage, want) {
+			t.Errorf("registry login usage %q is missing %s", registryLoginCommand.Usage, want)
+		}
+	}
+	flags := collectFlagsForCommand(registryLoginCommand)
+	for _, want := range []string{"--system", "--endpoint"} {
+		if !slices.Contains(flags, want) {
+			t.Errorf("registry login flags %v missing %s", flags, want)
+		}
+	}
+	for _, flag := range flags {
+		if flag == "--token-file" {
+			t.Errorf("agent command registry login must not register --token-file: %v", flags)
+		}
 	}
 }

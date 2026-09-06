@@ -13,12 +13,11 @@ import (
 // pathValuedFlags are flags whose value is a filesystem path (or endpoint
 // socket path); Bash completion completes them with filesystem paths.
 //
-// Daemon-backed effective-root completion for --allowed-root/--workspace is
-// a separate follow-up UX story: it must respect the real authority model
-// (Principal credential -> default Launcher -> effective roots; Launcher
-// credential -> authenticated Launcher), and the local config is not a
-// substitute for daemon policy. Until that exists, path-valued flags keep
-// generic filesystem completion.
+// Selected path-valued flags additionally receive daemon-backed
+// effective-root completion through policyValueCompletions (below): the
+// daemon is the authorization and policy authority and the local config is
+// never interpreted as policy. When the query fails, completion degrades
+// silently to the generic filesystem completion for the flag value.
 var pathValuedFlags = []string{
 	"endpoint",
 	"token-file",
