@@ -66,7 +66,8 @@ or backend container is created.
 If an administrator later connects docker-helper to an older Engine while
 published Managed Containers already exist, integrity observation reports
 `policy_mismatch` with the unsupported publishing backend as its reason.
-docker-helper blocks create, start, and restart for affected containers but
+docker-helper blocks start and restart for affected containers and rejects
+any new publication-bearing create with `publishing_backend_unsupported`, but
 keeps show, stop, remove, and Session cleanup available. It emits an operator
 warning and an audit event, but does not stop a running container
 autonomously. Docker Engine selection and downgrade remain trusted
