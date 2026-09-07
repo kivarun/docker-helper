@@ -126,7 +126,7 @@ as_user bash -c 'mkdir -p ~/.config/docker && printf "{ \"live-restore\": true }
 # inherits the system defaults (/run/containerd) and dies in the userns.
 # Pre-launch a user-owned containerd at the exact address the rootless
 # daemon probes, so the managed launch never happens.
-as_user bash -c 'CTR=""; for cand in /usr/sbin/containerd /usr/bin/containerd; do [ -x $cand ] && CTR=$cand && break; done; echo "FACT: containerd-binary=$CTR"; [ -n "$CTR" ] || { echo "containerd binary not found"; exit 1; }; mkdir -p $XDG_RUNTIME_DIR/docker/containerd $HOME/.local/share/docker/containerd/dir; nohup $CTR --root=$HOME/.local/share/docker/containerd/dir --state=$XDG_RUNTIME_DIR/docker/containerd/state --address=$XDG_RUNTIME_DIR/docker/containerd/containerd.sock --log-level=warn >> $HOME/containerd-feas.log 2>&1 < /dev/null & sleep 1' \
+as_user bash -c 'CTR=""; for cand in /usr/sbin/containerd /usr/bin/containerd; do [ -x $cand ] && CTR=$cand && break; done; echo "FACT: containerd-binary=$CTR"; [ -n "$CTR" ] || { echo "containerd binary not found"; exit 1; }; mkdir -p $XDG_RUNTIME_DIR/docker/containerd $HOME/.local/share/docker/containerd/dir; nohup $CTR --config=/dev/null --root=$HOME/.local/share/docker/containerd/dir --state=$XDG_RUNTIME_DIR/docker/containerd/state --address=$XDG_RUNTIME_DIR/docker/containerd/containerd.sock --log-level=warn >> $HOME/containerd-feas.log 2>&1 < /dev/null & sleep 1' \
   || die "could not launch the user-owned containerd"
 as_user bash -c 'for i in 1 2 3 4 5; do [ -S $XDG_RUNTIME_DIR/docker/containerd/containerd.sock ] && exit 0; sleep 1; done; echo "NO-CONTAINERD-SOCKET"; tail -5 $HOME/containerd-feas.log; exit 1' \
   || die "the user-owned containerd socket did not appear"
