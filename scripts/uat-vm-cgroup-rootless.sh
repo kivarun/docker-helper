@@ -141,8 +141,8 @@ if command -v getsubids >/dev/null 2>&1; then
 else
   echo "FACT: getsubids=absent"
 fi
-ls -l /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/slirp4netns 2>&1 | sed 's/^/FACT: bin /'
-ls -l /etc/apparmor.d/rootlesskit 2>&1 | sed 's/^/FACT: apparmor-profile /'
+ls -l /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/slirp4netns 2>&1 | sed 's/^/FACT: bin /' || true
+ls -l /etc/apparmor.d/rootlesskit 2>&1 | sed 's/^/FACT: apparmor-profile /' || true
 echo "FACT: apparmor-restrict-unprivileged-userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo unknown)"
 echo "FACT: user-max-namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo unknown)"
 echo "FACT: kernel=$(uname -r) mem-mb=$(free -m | awk '/^Mem:/{print $2}')"
