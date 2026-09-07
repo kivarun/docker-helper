@@ -7,10 +7,14 @@ name: Release 3 Phase-0 evidence gates
 #   engine-current    D0.1 matrix vs the runner's own current Docker Engine
 #   engine-floor      D0.1 matrix vs a pinned older DinD daemon (API lower
 #                     bound actually exercised, not a compile-time constant)
+#   engine-restart    D0.1 restart procedures (daemon-shutdown cancellation,
+#                     one-shot lifecycle across restart) against disposable
+#                     pinned DinD daemons, killed while requests are active
 #   cgroup-system     aggregate-cgroup feasibility in a real Tumbleweed VM
 #                     (system deployment)
-#   cgroup-rootless   aggregate-cgroup feasibility in a real Tumbleweed VM
-#                     (rootless/user deployment)
+#   cgroup-rootless   aggregate-cgroup feasibility in a real Ubuntu 24.04 VM
+#                     (rootless/user deployment, official rootless Docker
+#                     installation)
 #
 # Dispatching on main checks out exactly github.sha and prints it; the tested
 # source SHA recorded in the owner documents is that SHA.
@@ -180,6 +184,133 @@ jobs:
             -e D01_GATE_REQUIRED=1 -e DOCKER_HOST=tcp://127.0.0.1:2375 \
             golang:1.26 \
             go test -v ./...
+
+  engine-restart:
+    name: D0.1 restart procedures (disposable DinD engines)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    # The two restart-procedure rows the matrix deliberately does not run
+    # against a shared daemon: the daemon-shutdown cancellation during an
+    # active operation and the one-shot lifecycle across an Engine restart.
+    # Each step boots its own disposable DinD Engine, publishes its API on
+    # host loopback, and runs the restart-procedure tests against it. The
+    # tests kill/restart that engine through a second, explicitly declared
+    # supervisor endpoint (the runner host daemon); the kill target is
+    # asserted to be a running DinD container before anything is killed.
+    # D01_GATE_RESTART=1 is the operator declaration that the DOCKER_HOST
+    # endpoint is disposable and may be killed and restarted.
+
+    steps:
+      - uses:  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Print tested source SHA
+        run: echo "tested source SHA ${{ github.sha }}"
+
+      - name: Restart procedures — pinned floor Engine (20.10.24-dind)
+        run: |
+          set -uo pipefail
+          docker pull -q docker:20.10.24-dind
+          docker image inspect docker:20.10.24-dind --format 'FACT: floor-image-digest={{index .RepoDigests 0}}' || true
+          boot_dind() {
+            docker rm -f dind-restart 2>/dev/null || true
+            docker run -d --privileged --name dind-restart \
+              -e DOCKER_TLS_CERTDIR= \
+              -p 127.0.0.1:2375:2375 \
+              docker:20.10.24-dind \
+              dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
+          }
+          ping_engine() {
+            for i in $(seq 1 60); do
+              if curl -fsS http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+          started=""
+          for attempt in 1 2; do
+            boot_dind
+            if ping_engine; then
+              started=yes
+              break
+            fi
+            echo "EVIDENCE: disposable floor engine boot attempt $attempt did not become ready"
+            docker ps -a --filter name=dind-restart --format '{{.Status}}'
+            docker logs dind-restart 2>&1 | tail -40 || true
+          done
+          if [ "$started" != "yes" ]; then
+            echo "EVIDENCE: disposable floor engine did not start on this CI host after 2 attempts"
+            exit 1
+          fi
+          echo "EVIDENCE: disposable floor engine 20.10.24 ready (demonstrated supported lower bound)"
+          set -e
+          cd scripts/d01-engine-gate
+          D01_GATE_REQUIRED=1 D01_GATE_RESTART=1 \
+          D01_RESTART_SUPERVISOR_HOST=unix:///var/run/docker.sock \
+          D01_DISPOSABLE_ENGINE_NAME=dind-restart \
+          DOCKER_HOST=tcp://127.0.0.1:2375 \
+          go test -v -run 'TestEngineRestartDuringActiveOperation|TestEngineOneShotLifecycleAcrossRestart' ./...
+          cd ../..
+          docker rm -f dind-restart >/dev/null
+          echo "EVIDENCE: floor-engine restart procedures passed"
+
+      - name: Restart procedures — representative newer disposable Engine (27.5.1-dind)
+        run: |
+          set -uo pipefail
+          docker pull -q docker:27.5.1-dind
+          docker image inspect docker:27.5.1-dind --format 'FACT: newer-image-digest={{index .RepoDigests 0}}' || true
+          boot_dind() {
+            docker rm -f dind-restart 2>/dev/null || true
+            docker run -d --privileged --name dind-restart \
+              -e DOCKER_TLS_CERTDIR= \
+              -p 127.0.0.1:2375:2375 \
+              docker:27.5.1-dind \
+              dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
+          }
+          ping_engine() {
+            for i in $(seq 1 60); do
+              if curl -fsS http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+          started=""
+          for attempt in 1 2; do
+            boot_dind
+            if ping_engine; then
+              started=yes
+              break
+            fi
+            echo "EVIDENCE: disposable newer engine boot attempt $attempt did not become ready"
+            docker ps -a --filter name=dind-restart --format '{{.Status}}'
+            docker logs dind-restart 2>&1 | tail -40 || true
+          done
+          if [ "$started" != "yes" ]; then
+            echo "EVIDENCE: disposable newer engine did not start on this CI host after 2 attempts"
+            exit 1
+          fi
+          echo "EVIDENCE: disposable newer engine 27.5.1 ready"
+          set -e
+          cd scripts/d01-engine-gate
+          D01_GATE_REQUIRED=1 D01_GATE_RESTART=1 \
+          D01_RESTART_SUPERVISOR_HOST=unix:///var/run/docker.sock \
+          D01_DISPOSABLE_ENGINE_NAME=dind-restart \
+          DOCKER_HOST=tcp://127.0.0.1:2375 \
+          go test -v -run 'TestEngineRestartDuringActiveOperation|TestEngineOneShotLifecycleAcrossRestart' ./...
+          cd ../..
+          docker rm -f dind-restart >/dev/null
+          echo "EVIDENCE: newer-engine restart procedures passed"
 
   cgroup-system:
     name: Aggregate cgroup feasibility (system mode, Tumbleweed VM)
