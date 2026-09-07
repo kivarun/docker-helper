@@ -134,17 +134,16 @@ step 6 "aggregate memory ceiling enforced over sibling workloads"
 echo "134217728" > "$S1/memory.max" || die "cannot set aggregate memory.max on $S1"
 fact "session-memory-max=$(cat "$S1/memory.max")"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
-# /dev/shm is tmpfs: an 80M shmem file is charged to memory.current, so two
-# 80M allocations together exceed the 128M Session ceiling while each stays
-# under its own 96M container limit. busybox head does not parse the M
-# suffix, so the size comes from dd's bs=1M; the container log records the
-# written size as direct allocation evidence.
-ALLOCATOR='sleep 3; dd if=/dev/zero of=/dev/shm/blob bs=1M count=80 2>/dev/null; echo wrote=$(stat -c %s /dev/shm/blob 2>/dev/null); sleep 120'
-docker run -d --name cgm1 --cgroup-parent="$S1_REL" --memory 96m --shm-size 128m \
+# Anonymous RSS allocation: 90M shell-string variables, each under its own
+# 96M container limit; together they exceed the 128M Session ceiling, and
+# the anonymous charge failure is a deterministic parent-level OOM kill.
+# The container log records the allocated size as direct evidence.
+ALLOCATOR='sleep 3; x=$(dd if=/dev/zero bs=1M count=90 2>/dev/null | tr "\000" "A"); echo allocated=${#x}; sleep 120'
+docker run -d --name cgm1 --cgroup-parent="$S1_REL" --memory 96m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
-docker run -d --name cgm2 --cgroup-parent="$S1_REL" --memory 96m --shm-size 128m \
+docker run -d --name cgm2 --cgroup-parent="$S1_REL" --memory 96m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
-sleep 14
+sleep 16
 for c in cgm1 cgm2; do
   fact "allocator-$c=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$c")"
   fact "allocator-$c-log=$(docker logs "$c" 2>&1 | tail -1)"

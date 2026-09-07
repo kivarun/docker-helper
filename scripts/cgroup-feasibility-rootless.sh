@@ -42,7 +42,21 @@ L_SLICE=dhfeas-principal1-launcher1.slice
 P_SLICE=dhfeas-principal1.slice
 export DOCKER_HOST="unix://$RUN_DIR/docker.sock"
 
-as_user() { runuser -u "$FEAS_USER" -- env XDG_RUNTIME_DIR="$RUN_DIR" "$@"; }
+# Runs a command inside a REAL login session of the unprivileged user
+# (su -l): systemctl --user method calls issued from a runuser-executed
+# process (no PAM session, wrong SELinux context) are denied by the user
+# manager with "Access denied" before the start machinery even runs. The
+# command payload is written to a temp script so quoting survives su.
+as_user() {
+  local tmp rc
+  tmp="$(mktemp /tmp/dh-feas-user-script.XXXXXX)"
+  chmod 0644 "$tmp"
+  printf '#!/bin/bash\nset -u\nexport XDG_RUNTIME_DIR=%q\n%s\n' "$RUN_DIR" "$*" > "$tmp"
+  su -l "$FEAS_USER" -c "bash $tmp"
+  rc=$?
+  rm -f "$tmp"
+  return $rc
+}
 
 step 1 "cgroup v2 + user delegation facts"
 [ -f /sys/fs/cgroup/cgroup.controllers ] || die "no cgroup v2 unified hierarchy (contract requires cgroup v2)"
@@ -56,6 +70,12 @@ for want in cpu memory pids; do
   grep -qw "$want" "$USER_TREE/cgroup.controllers" \
     || die "user delegation did not grant controller $want to the user manager (rootless contract)"
 done
+if command -v getenforce >/dev/null 2>&1; then
+  fact "selinux-mode=$(getenforce 2>/dev/null || echo unknown)"
+fi
+if [ -r /sys/kernel/security/lsm ]; then
+  fact "active-lsm=$(cat /sys/kernel/security/lsm)"
+fi
 echo "STEP-1-DONE"
 
 step 2 "rootless daemon as a systemd user service"
@@ -106,19 +126,10 @@ as_user systemctl is-active --quiet docker.service \
     as_user systemctl --user status docker.service --no-pager 2>&1 | head -20 || true
     echo "DIAG: system journal for the user manager:"
     journalctl -u "user@$FEAS_UID.service" -n 60 --no-pager 2>&1 | tail -40 || true
-    echo "DIAG: recent AVC denials:"
-    dmesg 2>/dev/null | grep -i "avc" | tail -20 || true
-    if command -v audit2allow >/dev/null 2>&1 && dmesg 2>/dev/null | grep -i "avc" | grep -qi cgroup; then
-      echo "DIAG: cgroup AVCs observed; attempting the narrow delegation policy module"
-      dmesg 2>/dev/null | grep "avc:" > /tmp/dh-feas-avc.log || true
-      if audit2allow -M dh-feas-cg-deleg < /tmp/dh-feas-avc.log >/dev/null 2>&1 \
-        && semodule -i /tmp/dh-feas-cg-deleg.pp 2>/dev/null; then
-        fact "selinux-delegation-module=installed (narrow module generated from observed cgroup AVCs)"
-        as_user systemctl start docker.service 2>/dev/null && echo "MODULE-RETRY-OK" || true
-      fi
-    fi
-    as_user systemctl is-active --quiet docker.service \
-      || die "rootless docker user service did not start"
+    echo "DIAG: recent SELinux denials (journal + audit):"
+    journalctl -b --no-pager 2>/dev/null | grep -iE "avc|denied|selinux" | tail -20 || true
+    ausearch -m AVC -ts recent 2>/dev/null | tail -20 || true
+    die "rootless docker user service did not start"
   }
 for i in $(seq 1 30); do
   docker info >/dev/null 2>&1 && break
@@ -185,14 +196,15 @@ echo "STEP-4-DONE"
 
 step 5 "aggregate memory ceiling enforced over sibling workloads"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
-# Same allocation mechanism as the system harness (dd sizes, not busybox head
-# suffix parsing; the container log records the written size).
-ALLOCATOR='sleep 3; dd if=/dev/zero of=/dev/shm/blob bs=1M count=80 2>/dev/null; echo wrote=$(stat -c %s /dev/shm/blob 2>/dev/null); sleep 120'
-docker run -d --name cgm1 --cgroup-parent="$SESS_SLICE" --memory 96m --shm-size 128m \
+# Same anonymous RSS allocation mechanism as the system harness: two 90M
+# shell strings under a 128M Session-slice ceiling with 96M container
+# limits; the anonymous charge failure is a deterministic parent OOM.
+ALLOCATOR='sleep 3; x=$(dd if=/dev/zero bs=1M count=90 2>/dev/null | tr "\000" "A"); echo allocated=${#x}; sleep 120'
+docker run -d --name cgm1 --cgroup-parent="$SESS_SLICE" --memory 96m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
-docker run -d --name cgm2 --cgroup-parent="$SESS_SLICE" --memory 96m --shm-size 128m \
+docker run -d --name cgm2 --cgroup-parent="$SESS_SLICE" --memory 96m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
-sleep 14
+sleep 16
 for c in cgm1 cgm2; do
   fact "allocator-$c=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$c")"
   fact "allocator-$c-log=$(docker logs "$c" 2>&1 | tail -1)"

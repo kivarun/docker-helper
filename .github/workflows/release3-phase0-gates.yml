@@ -66,37 +66,57 @@ jobs:
       - name: Print tested source SHA
         run: echo "tested source SHA ${{ github.sha }}"
 
-      - name: Recorded attempt — pinned 19.03 floor daemon (DinD, privileged, loopback only)
+      - name: Recorded attempt — pinned 19.03 floor daemon (DinD, privileged)
         run: |
-          set -euo pipefail
+          set -uo pipefail
           docker pull docker:19.03.15-dind
           docker image inspect docker:19.03.15-dind --format 'FACT: floor-image-digest={{index .RepoDigests 0}}' || true
-          docker rm -f dind-floor 2>/dev/null || true
-          # TLS disabled; vfs storage driver so the inner daemon never depends
-          # on the runner filesystem. No host publication is required: the
-          # probe runs in a container sharing the DinD network namespace, so
-          # the daemon (0.0.0.0:2375) and any inner-published registry port
-          # are reachable at the DinD loopback.
-          docker run -d --privileged --name dind-floor \
-            -e DOCKER_TLS_CERTDIR= \
-            docker:19.03.15-dind \
-            dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
-          ready=""
-          for i in $(seq 1 60); do
-            if docker exec dind-floor wget -q -O- http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
-              ready=yes
+          boot_dind() {
+            docker rm -f dind-floor 2>/dev/null || true
+            # TLS disabled; vfs storage driver so the inner daemon never
+            # depends on the runner filesystem. No host publication is
+            # required: the probe runs in a container sharing the DinD
+            # network namespace, so the daemon (0.0.0.0:2375) and any
+            # inner-published registry port are reachable at the DinD
+            # loopback. Readiness is probed through an alpine container in
+            # the same network namespace (the exact path the probe uses).
+            docker run -d --privileged --name dind-floor \
+              -e DOCKER_TLS_CERTDIR= \
+              docker:19.03.15-dind \
+              dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
+          }
+          ping_dind() {
+            docker pull -q alpine:3.24 >/dev/null 2>&1 || true
+            for i in $(seq 1 45); do
+              if docker run --rm --network container:dind-floor alpine:3.24 \
+                  wget -q -O- http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+          started=""
+          for attempt in 1 2; do
+            boot_dind
+            if ping_dind; then
+              started=yes
               break
             fi
-            sleep 2
-          done
-          if [ "$ready" != "yes" ]; then
-            echo "EVIDENCE: pinned 19.03 floor daemon did not start on this CI host"
+            echo "EVIDENCE: floor daemon boot attempt $attempt did not become ready"
+            docker ps -a --filter name=dind-floor --format '{{.Status}}'
             docker logs dind-floor 2>&1 | tail -40 || true
+            docker exec dind-floor sh -c 'ps w | head -5; busybox wget -q -O- http://127.0.0.1:2375/_ping' 2>&1 || true
+          done
+          if [ "$started" != "yes" ]; then
+            echo "EVIDENCE: pinned 19.03 floor daemon did not start on this CI host after 2 attempts"
             exit 1
           fi
           echo "EVIDENCE: floor daemon 19.03.15 (API 1.40, the client's declared MinAPIVersion) started"
-          docker exec dind-floor wget -q -O- http://127.0.0.1:2375/version | head -c 2000
+          docker run --rm --network container:dind-floor alpine:3.24 \
+            wget -q -O- http://127.0.0.1:2375/version | head -c 2000
           echo
+          set -e
           # The 19.03 matrix run is a RECORDED attempt: rows that fail here are
           # evidence about the declared lower bound, not job failures. The
           # required-mode run below (20.10) is the binding one.
@@ -113,30 +133,47 @@ jobs:
 
       - name: Binding floor proof — pinned 20.10 daemon (first cgroup-v2-capable engine)
         run: |
-          set -euo pipefail
+          set -uo pipefail
           docker pull docker:20.10.24-dind
           docker image inspect docker:20.10.24-dind --format 'FACT: floor-image-digest={{index .RepoDigests 0}}' || true
-          docker rm -f dind-floor 2>/dev/null || true
-          docker run -d --privileged --name dind-floor \
-            -e DOCKER_TLS_CERTDIR= \
-            docker:20.10.24-dind \
-            dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
-          ready=""
-          for i in $(seq 1 60); do
-            if docker exec dind-floor wget -q -O- http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
-              ready=yes
+          boot_dind() {
+            docker rm -f dind-floor 2>/dev/null || true
+            docker run -d --privileged --name dind-floor \
+              -e DOCKER_TLS_CERTDIR= \
+              docker:20.10.24-dind \
+              dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
+          }
+          ping_dind() {
+            docker pull -q alpine:3.24 >/dev/null 2>&1 || true
+            for i in $(seq 1 45); do
+              if docker run --rm --network container:dind-floor alpine:3.24 \
+                  wget -q -O- http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+          started=""
+          for attempt in 1 2; do
+            boot_dind
+            if ping_dind; then
+              started=yes
               break
             fi
-            sleep 2
-          done
-          if [ "$ready" != "yes" ]; then
-            echo "EVIDENCE: pinned 20.10 floor daemon did not start on this CI host"
+            echo "EVIDENCE: floor daemon boot attempt $attempt did not become ready"
+            docker ps -a --filter name=dind-floor --format '{{.Status}}'
             docker logs dind-floor 2>&1 | tail -40 || true
+          done
+          if [ "$started" != "yes" ]; then
+            echo "EVIDENCE: pinned 20.10 floor daemon did not start on this CI host after 2 attempts"
             exit 1
           fi
           echo "EVIDENCE: floor daemon 20.10.24 started (first moby release supporting cgroup v2 hosts)"
-          docker exec dind-floor wget -q -O- http://127.0.0.1:2375/version | head -c 2000
+          docker run --rm --network container:dind-floor alpine:3.24 \
+            wget -q -O- http://127.0.0.1:2375/version | head -c 2000
           echo
+          set -e
           docker run --rm \
             --network container:dind-floor \
             -v "${{ github.workspace }}:/src" -w /src/scripts/d01-engine-gate \
