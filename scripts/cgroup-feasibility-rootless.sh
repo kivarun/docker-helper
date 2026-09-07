@@ -59,6 +59,33 @@ done
 echo "STEP-1-DONE"
 
 step 2 "rootless daemon as a systemd user service"
+# Prefer the package-shipped user unit; the openSUSE docker RPM does not
+# ship dockerd-rootless.sh, so when no user unit exists the harness provides
+# the documented rootlesskit invocation as a harness-owned unit.
+if [ ! -f /usr/lib/systemd/user/docker.service ] && [ ! -f /etc/systemd/user/docker.service ] \
+  && ! as_user systemctl cat --quiet docker.service >/dev/null 2>&1; then
+  mkdir -p "$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config/systemd/user"
+  UNIT_DIR="$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config/systemd/user"
+  cat > "$UNIT_DIR/docker.service" <<'EOF'
+[Unit]
+Description=rootless docker (cgroup feasibility harness)
+
+[Service]
+ExecStart=/usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc/resolv.conf --copy-up=/etc/hosts --disable-host-loopback /usr/bin/dockerd
+TimeoutSec=0
+Restart=on-failure
+StartLimitBurst=3
+StartLimitIntervalSec=60s
+
+[Install]
+WantedBy=default.target
+EOF
+  chown -R "$FEAS_USER:$FEAS_USER" "$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config"
+  fact "rootless-unit-source=harness-owned (documented rootlesskit invocation)"
+else
+  fact "rootless-unit-source=package-shipped"
+fi
+as_user systemctl --user daemon-reload
 as_user systemctl is-active --quiet docker.service \
   || as_user systemctl start docker.service \
   || die "rootless docker user service did not start"

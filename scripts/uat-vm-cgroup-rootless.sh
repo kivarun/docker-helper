@@ -102,7 +102,20 @@ for b in dockerd-rootless.sh rootlesskit slirp4netns fuse-overlayfs newuidmap; d
     log "tool $b -> MISSING"
   fi
 done
-command -v dockerd-rootless.sh >/dev/null 2>&1 || { echo "ROOTLESS-SCRIPT-MISSING" >&2; exit 1; }
+log "rootless tool providers:"
+for b in dockerd-rootless.sh rootlesskit slirp4netns fuse-overlayfs newuidmap; do
+  p="$(command -v "$b" 2>/dev/null || true)"
+  if [ -n "$p" ]; then
+    log "tool $b -> $p"
+  else
+    log "tool $b -> MISSING"
+  fi
+done
+if [ -f /usr/lib/systemd/user/docker.service ]; then
+  log "package ships a systemd user unit for docker"
+else
+  log "no systemd user unit for docker in the package; the harness provides one"
+fi
 
 FEAS_USER=feasu
 if ! id "$FEAS_USER" >/dev/null 2>&1; then

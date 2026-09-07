@@ -603,7 +603,7 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	}
 	htPath := htFile.Name()
 	defer os.Remove(htPath)
-	if _, err := htFile.WriteString("gate: " + string(hash) + "\n"); err != nil {
+	if _, err := htFile.WriteString("gate:" + string(hash) + "\n"); err != nil {
 		htFile.Close()
 		t.Fatalf("write htpasswd: %v", err)
 	}
