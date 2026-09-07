@@ -97,7 +97,6 @@ fi
 # the unprivileged user those directories (the config also gets read by
 # the pre-launched user containerd and by the daemon's managed one).
 opensuse_zypper install -y --no-recommends docker containerd rootlesskit slirp4netns fuse-overlayfs checkpolicy policycoreutils curl
-install -d -o feasu -g feasu /run/containerd /var/lib/containerd
 log "rootless tool providers:"
 for b in dockerd-rootless.sh rootlesskit slirp4netns fuse-overlayfs newuidmap; do
   p="$(command -v "$b" 2>/dev/null || true)"
@@ -143,6 +142,11 @@ Restart=always
 EOF
 systemctl daemon-reload
 loginctl enable-linger "$FEAS_USER"
+# containerd resolves its root/state dirs from the shipped config even
+# against explicit flags; this probe VM runs no system containerd, so give
+# the unprivileged user those directories (the config also gets read by
+# the pre-launched user containerd and by the daemon's managed one).
+install -d -o feasu -g feasu /run/containerd /var/lib/containerd
 UID_VALUE="$(id -u "$FEAS_USER")"
 systemctl restart "user@$UID_VALUE.service"
 systemctl is-active "user@$UID_VALUE.service" || { echo "USER-MANAGER-INACTIVE" >&2; exit 1; }
