@@ -1203,6 +1203,46 @@ Exactly one mode flag is required. The optional Launcher target follows the
 common `default` rule above. Every command sends one complete replacement and
 never performs hidden read-modify-write.
 
+Principal and Launcher Session-count quotas are concrete configured values,
+not inherited policy; their show shape is therefore simpler:
+
+```json
+{
+  "session_quota": {
+    "value": 100,
+    "effective": 80
+  }
+}
+```
+
+`value` is the stored configured maximum and `effective` is the minimum of
+that value and every ancestor quota plus the compiled daemon hard limit.
+There is no `inherit` mode, usage counter, remaining-capacity field, or
+reservation list. The projection appears in `principal show` and `launcher
+show`; the Root configured quota and the daemon hard limit are server
+configuration and compiled policy, not show resources.
+
+Quota mutation is administrator-only in Release 3 and replaces one value
+atomically through:
+
+```text
+PUT /principals/{username}/session-quota
+PUT /principals/{username}/launchers/{launcher}/session-quota
+```
+
+The request is exactly `{"value": 100}`. A value outside `0..10000` or above
+the current effective parent quota returns `400 invalid_session_quota`. A
+successful HTTP `200` returns the updated `session_quota` projection. Any
+other valid authority receives `403 forbidden`. The CLI forms are:
+
+```text
+docker-helper principal session-quota set USERNAME VALUE
+docker-helper launcher session-quota set [NAME_OR_ID] [--principal USERNAME] VALUE
+```
+
+Both send the complete new value and never perform hidden read-modify-write.
+Lowering any quota never closes or removes an existing Session.
+
 Foreign and nonexistent Sessions return the same
 `404 session_not_found`. A Session bearer becomes invalid when cleanup claims
 its Session, so a `closing`, `cleanup_failed`, or `closed` Session is observed
@@ -1336,6 +1376,70 @@ docker-helper session repair --id SESSION_ID [--detach]
 troubleshooting include the Session ID so recovery never depends on guessing a
 target.
 
+## Release 3 configuration fields
+
+Configuration ownership does not change: the existing flat configuration
+owner parses, validates, materializes, and reloads every field, and feature
+packages never parse configuration independently. Release 3 changes the field
+set as follows.
+
+Retired with the legacy Operation workflow:
+
+- `operation_retention_ttl` and `operation_max_completed` are removed;
+  Release 3 has no independent Operation retention period, and Operation
+  lifetime is Session lifetime.
+- `operation_log_max_bytes` is renamed to `command_output_max_bytes` under
+  the accepted rename rule; its default remains 4 MiB. It bounds the combined
+  synchronous output of `pull`, `build`, `run`, and non-interactive exec.
+
+New reloadable server settings:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `container_stop_timeout` | `10s` | Graceful stop budget shared by stop, restart, remove, and Session cleanup. |
+| `container_log_max_bytes` | 1 MiB | Byte limit for one bounded container-log snapshot. |
+| `exec_max_per_container` | 16 | All-exec ceiling per Managed Container. |
+| `exec_max_per_session` | 32 | All-exec ceiling per Session. |
+| `exec_max_per_principal` | 32 | All-exec ceiling per Principal. |
+| `exec_max_per_daemon` | 64 | All-exec ceiling per daemon. |
+| `exec_interactive_max_per_container` | 4 | Interactive subset per Managed Container. |
+| `exec_interactive_max_per_session` | 16 | Interactive subset per Session. |
+| `exec_interactive_max_per_principal` | 16 | Interactive subset per Principal. |
+| `exec_interactive_max_per_daemon` | 64 | Interactive subset per daemon. |
+
+Exec-ceiling configuration must stay coherent per column:
+`container <= session <= principal <= daemon`, and each interactive value no
+greater than the matching all-exec value. Raising a child value above its
+current parent is rejected until the parent is raised first.
+
+New Root policy fields. Initialization materializes each as an explicit value
+derived from the connected Docker Engine and writes them atomically; a failed
+materialization fails startup closed. They are never recomputed from a later
+capacity change:
+
+| Field | Materialized default | Meaning |
+| --- | --- | --- |
+| `root_cpu` | Engine `NCPU` minus the larger of 0.5 CPU or 10%, rounded down to 0.1 CPU | Root aggregate CPU ceiling. |
+| `root_memory_bytes` | 75% of Engine `MemTotal`, rounded down to 256 MiB | Root aggregate memory ceiling. |
+| `root_pids` | 512 | Root aggregate process/thread ceiling. |
+| `root_publishing_grant` | `20000-29999` | Root publishing grant: one inclusive `START-END` range or `disabled`. |
+| `root_session_quota` | 10000 | Root configured Session-count quota. |
+
+`root_session_quota` and the daemon hard limit are distinct: the compiled
+daemon limit of 10,000 is policy, not configuration, and cannot be widened.
+Principal and Launcher quota values live with those resources in SQLite,
+materialized once as 100 and 20; they are never configuration fields.
+
+Fixed Release 3 constants are deliberately not configuration: the
+once-per-minute integrity scan interval, the 10-minute closed-tombstone
+observation grace, the 16-publication limit, HTTP pagination defaults and
+maxima, the container-log `tail` maximum, WebSocket transport and message
+bounds, and the daemon hard Session limit.
+
+`session_ttl` remains the required global Session lifetime authority and
+gains the renewal role defined in this document; no per-Principal,
+per-Launcher, or per-Session TTL field exists.
+
 ## Operation read surface
 
 Durable Operations have two read-only HTTP routes:
@@ -1417,8 +1521,7 @@ and `Location: /operations/{id}`. The list response is:
 
 ```json
 {
-  "operations": [],
-  "next_cursor": null
+  "operations": []
 }
 ```
 
@@ -1563,3 +1666,51 @@ reference:
 
 `active_operation_id` remains the field used by a Managed Container
 representation. It is not duplicated under that name in an error envelope.
+
+### Stable error-code reference
+
+Capability tables above own each code's meaning and its `details` contract,
+and the codes whose status is already fixed there (`build_failed`,
+`container_exit_nonzero`, `image_not_found`, `pull_access_denied`,
+`registry_unavailable`, `registry_auth_denied`, `invalid_registry_login`,
+`invalid_tail`, `missing_session`, `ambiguous_session`, `unauthorized`,
+`forbidden`, `container_not_found`, `operation_not_found`,
+`session_not_found`, `operation_in_progress`) are not repeated. This
+reference fixes the default HTTP status for the remaining stable Release 3
+codes so no implementation chooses its own. When one of these codes appears
+inside an Operation terminal `error`, the Operation lookup route itself
+returns `200`; the listed status applies only to a direct HTTP rejection.
+WebSocket control codes (`exec_interrupted`, `session_expired`,
+`protocol_error`) are transport messages, not HTTP codes. Existing Release 2
+codes keep their current statuses.
+
+| Code | HTTP | Owning design |
+| --- | --- | --- |
+| `session_not_renewable` | 409 | Session management surface (this document). |
+| `session_network_missing` | 409 | Session networking. |
+| `network_name_conflict` | 409 | Session networking. |
+| `session_quota_exceeded` | 409 | Resource constraints. |
+| `invalid_session_quota` | 400 | Resource constraints. |
+| `invalid_resource_limit` | 400 | Resource constraints. |
+| `resource_limit_exceeded` | 403 | Resource constraints. |
+| `resource_limit_update_blocked` | 409 | Resource constraints. |
+| `resource_enforcement_unavailable` | 503 | Resource constraints. |
+| `invalid_publication` | 400 | Port publishing. |
+| `port_not_allowed` | 403 | Port publishing. |
+| `host_port_unavailable` | 409 | Port publishing. |
+| `port_range_exhausted` | 409 | Port publishing. |
+| `port_grant_in_use` | 409 | Port publishing. |
+| `publishing_backend_unsupported` | 422 | Port publishing. |
+| `backend_transition_in_progress` | 409 | Managed-container lifecycle. |
+| `backend_missing` | 409 | Managed-container lifecycle. |
+| `container_dead` | 409 | Managed-container lifecycle. |
+| `ownership_mismatch` | 409 | Managed-container lifecycle and exec. |
+| `policy_mismatch` | 409 | Managed-container lifecycle and exec. |
+| `backend_unavailable` | 503 | Docker Engine failures (above). |
+| `backend_failure` | 502 | Docker Engine failures (above). |
+| `logs_unavailable` | 409 | Container logs. |
+| `container_not_running` | 409 | Exec. |
+| `container_paused` | 409 | Exec. |
+| `exec_start_failed` | 422 | Exec. |
+| `exec_capacity_exhausted` | 429 | Exec. |
+| `idempotency_key_reused` | 409 | Operation model. |
