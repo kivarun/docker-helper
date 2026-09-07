@@ -45,7 +45,6 @@ set -euo pipefail
 
 PREFIX="[cgroup-rootless-vm]"
 log()  { printf '%s %s\n' "$PREFIX" "$*"; }
-fail() { printf '%s FAILED: %s\n' "$PREFIX" "$*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UAT_REPO_DIR="${UAT_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -78,6 +77,7 @@ on_err() {
   echo "============================================================"
 }
 trap on_err ERR
+fail() { printf '%s FAILED: %s\n' "$PREFIX" "$*" >&2; on_err; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 1. start the Ubuntu VM through the common harness
@@ -130,6 +130,23 @@ grep -q '^feasu:' /etc/subgid 2>/dev/null || echo 'feasu:100000:65536' >> /etc/s
 loginctl enable-linger feasu
 log "feasibility user feasu created (subuid/subgid 100000:65536, linger enabled)"
 
+# Rootless-prerequisite facts: subordinate-ID state, uid-mapping binaries,
+# the distro AppArmor rootlesskit profile, and userns sysctls. This is the
+# evidence trail for the recorded gate run.
+echo "FACT: subuid=$(tr '\n' ';' < /etc/subuid)"
+echo "FACT: subgid=$(tr '\n' ';' < /etc/subgid)"
+if command -v getsubids >/dev/null 2>&1; then
+  echo "FACT: getsubids-u=$(getsubids feasu 2>&1 || true)"
+  echo "FACT: getsubids-g=$(getsubids -g feasu 2>&1 || true)"
+else
+  echo "FACT: getsubids=absent"
+fi
+ls -l /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/newgidmap /usr/bin/slirp4netns 2>&1 | sed 's/^/FACT: bin /'
+ls -l /etc/apparmor.d/rootlesskit 2>&1 | sed 's/^/FACT: apparmor-profile /'
+echo "FACT: apparmor-restrict-unprivileged-userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo unknown)"
+echo "FACT: user-max-namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo unknown)"
+echo "FACT: kernel=$(uname -r) mem-mb=$(free -m | awk '/^Mem:/{print $2}')"
+
 # Daemon configuration through the documented per-user path, before the
 # first rootless start, so live-restore is active from the first boot.
 install -d -o feasu -g feasu -m 0700 /home/feasu/.config/docker
@@ -148,8 +165,14 @@ cat > /tmp/feasu-rootless-install.sh <<'USR'
 #!/bin/bash
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+echo "[vm] env: HOME=$HOME USER=$(id -un) UID=$(id -u) XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-unset}"
 echo "[vm] running dockerd-rootless-setuptool.sh install as $(id -un)"
-/usr/bin/dockerd-rootless-setuptool.sh install
+STRC=0
+bash -x /usr/bin/dockerd-rootless-setuptool.sh install >/tmp/feasu-setuptool.out 2>&1 || STRC=$?
+echo "[vm] setuptool-exit=$STRC"
+cat /tmp/feasu-setuptool.out
+rm -f /tmp/feasu-setuptool.out
+[ "$STRC" = 0 ] || exit "$STRC"
 echo "[vm] user unit:"
 cat ~/.config/systemd/user/docker.service
 systemctl --user is-active docker.service || { systemctl --user status docker.service --no-pager || true; exit 1; }
@@ -158,6 +181,17 @@ echo ROOTLESS-INSTALL-DONE
 USR
 chmod 0755 /tmp/feasu-rootless-install.sh
 FEASU_UID=$(id -u feasu)
+
+# Direct RootlessKit smoke test, isolated from the setup tool (the tool runs
+# the same test as its first install step). Captured to a file so nothing is
+# lost to session teardown; the result is recorded and the setup attempts
+# still run so one CI run collects the full evidence trail.
+RKRC=0
+timeout 60 sudo -u feasu env XDG_RUNTIME_DIR="/run/user/$FEASU_UID" \
+  /usr/bin/rootlesskit true >/tmp/feasu-rk-smoke.out 2>&1 || RKRC=$?
+echo "FACT: rootlesskit-smoke-rc=$RKRC"
+cat /tmp/feasu-rk-smoke.out
+rm -f /tmp/feasu-rk-smoke.out
 
 # The setup tool refuses su/sudo invocations because they carry no
 # XDG_RUNTIME_DIR and cannot see the user manager. Its own documented
@@ -175,7 +209,7 @@ done
 INSTALLED=""
 if [ "$MANAGER" = "yes" ]; then
   log "user manager active; running the setup tool with the documented XDG_RUNTIME_DIR export"
-  if sudo -u feasu env XDG_RUNTIME_DIR="/run/user/$FEASU_UID" bash /tmp/feasu-rootless-install.sh; then
+  if sudo -u feasu env XDG_RUNTIME_DIR="/run/user/$FEASU_UID" bash /tmp/feasu-rootless-install.sh </dev/null; then
     INSTALLED=xdg-linger
   else
     echo "sudo -u setup attempt failed; falling back to a real ssh login session"
@@ -193,13 +227,13 @@ if [ -z "$INSTALLED" ]; then
   SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o IdentitiesOnly=yes"
   READY=0
   for i in 1 2 3 4 5; do
-    OUT=$(ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 feasu@localhost true 2>&1) && { READY=1; break; }
+    OUT=$(ssh -n $SSHOPTS -i /home/feasu/.ssh/id_ed25519 feasu@localhost true 2>&1) && { READY=1; break; }
     echo "ssh login-session probe attempt $i failed: $OUT"
     sleep 2
   done
   if [ "$READY" = 1 ]; then
     log "running the rootless setup tool in a real feasu login session"
-    if ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 feasu@localhost bash /tmp/feasu-rootless-install.sh; then
+    if ssh -n $SSHOPTS -i /home/feasu/.ssh/id_ed25519 feasu@localhost bash /tmp/feasu-rootless-install.sh; then
       INSTALLED=ssh-login
     else
       echo "ssh login-session setup attempt failed"
@@ -211,7 +245,16 @@ if [ -z "$INSTALLED" ]; then
   fi
 fi
 rm -f /tmp/feasu-rootless-install.sh
-[ -n "$INSTALLED" ] || { echo "could not run the rootless setup tool through a documented login path"; exit 1; }
+[ -n "$INSTALLED" ] || {
+  echo "could not run the rootless setup tool through a documented login path"
+  echo "FACT: rootless user-unit state:"
+  ls -la /home/feasu/.config/systemd/user/ 2>&1 | sed 's/^/FACT: /' || true
+  echo "FACT: docker.service user-unit journal (tail):"
+  journalctl _SYSTEMD_USER_UNIT=docker.service -b --no-pager 2>/dev/null | tail -20 || true
+  echo "FACT: kernel apparmor/oom messages (tail):"
+  dmesg 2>/dev/null | grep -iE "apparmor|oom|killed process" | tail -20 || true
+  exit 1
+}
 echo "FACT: rootless-install-path=$INSTALLED"
 
 # Verify the rootless daemon as root through the user socket.
