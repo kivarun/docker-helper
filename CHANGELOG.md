@@ -2,75 +2,25 @@
 
 This file summarizes user-visible release changes. Commit-level history remains available through the GitHub compare links for each release.
 
-## [2.1.0-rc.8] - unreleased
+## [2.1.0] - 2026-09-07
 
-RC8 fixes the CLI/UX defects manual UAT found on top of RC7, without expanding Release 2.1 feature scope.
-
-- Removed the `launcher scope` command family from the CLI: launcher filesystem scope is managed with the narrow `launcher allowed-root add/list/remove/inherit` verbs (backed by new single-request `POST`/`DELETE` server operations plus the existing atomic scope replacement), and `principal allowed-root list` completes the allowed-root read surface.
-- Narrow allowed-root mutations preserve the established scope semantics: an add on an `inherit` launcher narrows it to `restricted` atomically with the insert, removing the last root leaves the launcher restricted with an empty root set (fail-closed), and only an explicit inherit returns it to the Principal ceiling. The user-mode reserved default launcher stays immutable for both directions.
-- `session create --workspace` completion now resolves exactly the Session-create target the typed selectors resolve: the typed `--principal`/`--launcher` values (both `--flag VALUE` and `--flag=VALUE` forms) are forwarded to the daemon's Session-create policy introspection, which resolves them through the same canonical owners real Session creation uses — completing with a restricted launcher offers only that launcher's effective roots, never the wider Principal ceiling.
-- Policy-root completion suggestions are now deterministic and duplicate-free: a path qualifying both as an entry anchor and as a directory under a wider root is suggested once.
-- `principal show` read authority is scope-first: a principal credential reads exactly its own Principal (including FIELD extraction), a foreign selector is the established non-disclosing not-found, and admin read is unchanged. The CLI still performs no local self-check; the daemon authorizes the target.
-- The values of the `--principal`/`--launcher` selector flags now complete from the daemon's scope-aware selector introspection (`completion selectors principal|launcher`): an admin sees Principal names and, with a typed `--principal` context, that Principal's Launcher names (only globally resolvable `dhl_` IDs without a context), a Principal credential sees its own Launchers, a Launcher credential and any foreign scope see nothing. Both `--flag VALUE` and `--flag=VALUE` forms complete, and a partially typed inline form filters like the separated one.
-- The positional `[LAUNCHER]` argument of the individual Launcher commands completes from the same selector-introspection owner, and the grammar-ambiguous first positional of `launcher allowed-root add/remove` offers both legal continuations — the applicable Launcher selectors plus the PATH candidates for the default Launcher — as a unique union; with the first positional typed, completion narrows to PATH only.
-- The `--principal` selector completion is command-context aware: a Principal credential sees its own username where the explicit own selector is legal (the Launcher command families) and nothing on both Session command paths — `session create` rejects every `--principal` under a Principal credential and `session list` rejects every Principal selector, even the credential's own Principal; the completion tree reflects the real read authority (a Principal credential sees `principal show` and `principal allowed-root list`, not the admin-only mutations).
-- Help, completion, man pages, README, and the architecture document reflect the actual read/mutation contracts; the UAT regression suite gained an RC8 CLI/UX acceptance group covering the packaged CLI.
-- Bash completion now reconstructs the real CLI arguments once, in a single canonical input owner: Readline's default word breaking splits typed arguments at characters like `=` and `:` (the inline `--flag=VALUE` form arrives as three words and an `http://HOST:PORT` endpoint value as five), and the owner rebuilds every argument whole from the completion line, so both physical forms carry identical logical semantics for every consumer — command-path walk, flag/value recognition, typed selector extraction, operator-argument forwarding, positional counting, and the policy-root query forwarding — proven by real interactive PTY regressions including an explicit HTTP endpoint reaching exactly the specified daemon.
-- A Principal credential's `--launcher` completion no longer discards the daemon's authorized result when the own `--principal` context is typed: the daemon authorizes the in-scope narrowing exactly like a real `launcher list`, a foreign context stays non-disclosing, and the sequential `--principal <TAB>` → `--launcher <TAB>` UX stays consistent.
-- The `launcher allowed-root add` success audit reports the committed post-mutation Launcher projection returned by the lifecycle owner: the first add on an inherit launcher audits the committed `restricted` scope, never the pre-mutation `inherit` snapshot, with no post-commit database read, and the committed root set carries the same canonical lexical ordering as a fresh projection.
-- `principal show USER [FIELD]` now completes positionally: USER offers the daemon's scope-aware Principal selector introspection (admin sees the daemon-visible Principal names, a Principal credential exactly its own Principal, a Launcher credential nothing, query failure degrades silently), and FIELD offers the canonical show-field vocabulary shared with the command's field extraction — one owner, so completion can never offer a field the command rejects. Operator flags never shift the positional counting, and a complete USER+FIELD pair offers nothing further.
-- The packaged package lifecycle now holds a long-lived container bind-mounting `/run/docker-helper` across the real package upgrade and reinstall on BOTH package families: the DEB acceptance asserts the RuntimeDirectory inode identity and the recreated daemon socket survive the scriptlet restarts exactly as the openSUSE RPM regression already does (the shipped `RuntimeDirectoryPreserve=restart` contract, with the inactive-service no-restart guard unchanged).
-
-Full changes since RC7: https://github.com/kivarun/docker-helper/compare/v2.1.0-rc.7...v2.1.0-rc.8
-
-## [2.1.0-rc.7] - 2026-09-06
-
-RC7 restores the Release-2.1 scope-first Session-list narrowing contract that escaped the published RC6.
-
-- Restored scope-first Session-list narrowing: `docker-helper session list` (and `GET /sessions`) accepts optional `--principal USER` / `--launcher LAUNCHER` selectors that only narrow the authenticated authority's visible sessions — admin by Principal and/or Launcher (a `dhl_...` Launcher ID is sufficient without `--principal`; a Launcher name requires it and is never searched globally), a Principal credential by Launcher inside its own scope, and a Launcher credential without selectors. Missing or foreign targets stay non-disclosing and authority-illegal selectors are stable selector errors.
-
-Full changes since RC6: https://github.com/kivarun/docker-helper/compare/v2.1.0-rc.6...v2.1.0-rc.7
-
-## [2.1.0-rc.6] - 2026-09-06
-
-RC6 hardens the RC5 delegated-ownership model without expanding Release 2.1 feature scope.
-
-- The reserved transparent user-mode owner chain (daemon-owner Principal and its `default` Launcher) cannot be mutated into an invalid next-start state: control-plane mutations that would corrupt it are rejected with a stable conflict before any durable or runtime change.
-- One canonical effective-root policy across Principal, Launcher, and Session creation: the same three-level narrowing (global roots, Principal ceiling, Launcher scope) is evaluated through a single owner everywhere.
-- Coherent effective-policy introspection: the session create-policy endpoint projects the principal, Launcher, and effective roots of a Session that would be created right now, as one consistent snapshot.
-- Principal credentials remain bound to the exact Principal identity: deleting and recreating a Principal with the same username does not reattach old credentials.
-- Launcher and Principal scope-first control paths were converged without expanding authority: Session management, listing, and deletion authorize through one boundary per authority class.
-- The public `allowed_roots` contract is always a JSON array: an empty set serializes as `[]`, never `null`.
-- Launcher allowed-root projection is deterministic (stable ordering) across list, introspection, and audit output.
-- Documentation reconciliation: completion, help text, man pages, and documented contracts now match the implemented model, including the AppArmor state model (profile `/etc/apparmor.d/docker-helper-system` with dynamic helper-owned boundary state at `/var/lib/docker-helper/apparmor/managed-boundaries`) and the authority-sensitive bearer requirements for direct HTTP clients.
-- Security/authority and lifecycle hardening throughout, without expanding Release 2.1 feature scope.
-
-Full changes since RC5: https://github.com/kivarun/docker-helper/compare/v2.1.0-rc.5...v2.1.0-rc.6
-
-## [2.1.0-rc.5] - 2026-09-05
-
-Release 2.1 is a focused control-plane release that adds stable delegated Launcher ownership between Principals and Sessions without expanding docker-helper into a general orchestration system.
+Release 2.1 adds stable delegated Launcher ownership between Principals and Sessions while preserving docker-helper's local-first, policy-enforcing scope.
 
 ### Highlights
 
 - Added the `Principal -> Launcher -> Session` ownership hierarchy. A Launcher is the stable delegated Session/runtime owner; credentials remain rotatable authentication keys and are never resource owners.
-- Added automatically provisioned `default` Launchers so the normal Principal workflow remains short while still allowing explicit non-default Launcher selection.
-- Added Launcher-scoped filesystem policy:
-  - `inherit` uses the Principal's current effective roots;
-  - `restricted` further narrows them with Launcher-owned allowed roots.
-- Session creation now evaluates the full current authorization chain: global roots, Principal roots, then Launcher scope.
-- Added Launcher credentials with zero-or-one cardinality per Launcher. Rotation replaces the bearer secret atomically while preserving the same credential ID and Launcher ownership.
+- Added automatically provisioned `default` Launchers so the normal Principal workflow remains short while explicit non-default Launchers can be used for delegated workloads.
+- Added Launcher credentials with zero-or-one cardinality per Launcher. Rotation replaces the bearer secret while preserving Launcher ownership and existing Sessions.
 - Added delegated Session control: a Launcher credential can create, list, and delete only Sessions owned by its Launcher.
-- Added Principal control of attached Launchers and their optional credentials without granting the Principal credential administrative authority over the Principal's OS identity or maximum policy.
-- Added `session create --launcher ...` for selecting non-default Launchers. Principal credentials may target an attached Launcher by Principal-scoped name or `dhl_...` ID; Launcher credentials use their `dhl_...` ID or implicit self-selection.
-- Added global `dhl_...` targeting for individual Launcher administration without requiring a redundant `--principal`; Launcher names remain Principal-scoped and are never searched globally.
-- Added scope-first Launcher and credential listing: authentication establishes the maximum visible scope and selectors only narrow it.
-- Preserved non-disclosing cross-Principal and cross-Launcher behavior for foreign resources.
+- Added Launcher-scoped filesystem policy. Launchers either `inherit` the Principal ceiling or use a `restricted` allowed-root set that can only narrow it; Session creation evaluates the full global -> Principal -> Launcher policy chain.
+- Added narrow Launcher allowed-root operations through `launcher allowed-root add/list/remove/inherit`. Adding a root to an inheriting Launcher atomically narrows it to `restricted`; removing the last restricted root remains fail-closed until explicit `inherit`.
+- Added `session create --launcher ...` and scope-first Session listing. Principal and Launcher selectors can only narrow the authenticated authority's visible scope; foreign resources remain non-disclosing, and globally ambiguous Launcher names are never searched without Principal context.
+- Added Principal self-read for `principal show` and `principal allowed-root list`: a Principal credential can read exactly its own Principal state while administrative mutations remain admin-only.
+- Added global `dhl_...` Launcher-ID targeting for individual Launcher administration without requiring a redundant Principal selector; Launcher names remain Principal-scoped.
 - Added `docker-helper selinux check` as the read-only SELinux diagnostics counterpart to `docker-helper apparmor check`.
-- Improved Bash completion, including authority-aware command availability and policy-aware path completion.
-- Added stronger CLI diagnostics for default/duplicate Launcher creation and selector errors.
+- Improved Bash completion across the new control plane: authority-aware command availability, scope-aware Principal/Launcher selectors, policy-aware workspace/root paths, positional Launcher and Principal fields, and equivalent behavior for separated and inline flag forms.
 
-### Ownership and credential model
+### Ownership and authorization
 
 ```text
 Principal
@@ -80,13 +30,25 @@ Principal
 
 A Principal remains the OS execution identity and authorization ceiling. A Launcher is the stable delegation and Session ownership boundary. A Credential is only a bearer key: rotating or replacing it does not move ownership of Sessions or runtime resources.
 
-Existing Release 2.0 Principal credentials remain Principal credentials through the 2.1 migration and are not silently reclassified. Existing Principal-owned Sessions are migrated into the Launcher hierarchy through the Principal's default Launcher where attribution is valid.
+The reserved user-mode owner chain remains transparent to normal user-mode operation and cannot be mutated into an invalid next-start state. Principal and Launcher enablement, ownership, allowed-root policy, Session creation, listing, and deletion are enforced server-side through the authenticated authority; CLI selectors never widen that authority.
 
-### Compatibility and scope
+Existing Release 2.0 Principal credentials remain Principal credentials through the 2.1 migration and are not silently reclassified. Existing Principal-owned Sessions are migrated into the Launcher hierarchy through the Principal's default Launcher where attribution is valid. Principal credentials remain bound to the stable Principal identity rather than to a reusable username.
 
-Release 2.1 intentionally does not add managed-container lifecycle, desired state, restart policy, interactive exec, networking, port publishing, or resource-limit semantics. Those remain later-release work.
+### API, CLI, and policy behavior
 
-Full changes since 2.0.0: https://github.com/kivarun/docker-helper/compare/v2.0.0...v2.1.0-rc.5
+- Launcher filesystem scope is managed with the narrow allowed-root verbs rather than a generic scope mutation command.
+- `session create` and its workspace completion resolve the same current Launcher target and effective roots, so completion does not offer workspaces that the selected Launcher policy would reject.
+- `session list` and `GET /sessions` expose server-side scope-first narrowing for admin, Principal, and Launcher authorities without client-side filtering.
+- Empty public `allowed_roots` values serialize as `[]`, not `null`, and Launcher allowed-root projections are deterministic.
+- CLI help, man pages, README, completion, and the HTTP contract are aligned with the final Principal/Launcher/Session authority model.
+
+### Compatibility and packaging
+
+- Systemd package lifecycle preserves `/run/docker-helper` across service restarts with `RuntimeDirectoryPreserve=restart`, so long-lived containers bind-mounting that runtime directory continue to see the recreated daemon socket during supported DEB/RPM upgrade and reinstall paths.
+- AppArmor system mode uses the shipped `docker-helper-system` profile plus helper-owned dynamic boundary state; SELinux remains the alternative supported enforcing backend.
+- Release 2.1 intentionally does not add managed-container lifecycle, desired state, restart policy, interactive exec, networking, port publishing, or resource-limit semantics. Those remain later-release work.
+
+Full changes since 2.0.0: https://github.com/kivarun/docker-helper/compare/v2.0.0...v2.1.0
 
 ## [2.0.0] - 2026-09-01
 
@@ -119,7 +81,5 @@ Release 2.0 remains local-first. Non-loopback listeners, TLS-based remote access
 
 Full changes since 1.0.2: https://github.com/kivarun/docker-helper/compare/v1.0.2...v2.0.0
 
-[2.1.0-rc.7]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0-rc.7
-[2.1.0-rc.6]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0-rc.6
-[2.1.0-rc.5]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0-rc.5
+[2.1.0]: https://github.com/kivarun/docker-helper/releases/tag/v2.1.0
 [2.0.0]: https://github.com/kivarun/docker-helper/releases/tag/v2.0.0
