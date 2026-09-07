@@ -9,11 +9,13 @@ Phase-0 inspected baseline:
 
 - repository: `kivarun/docker-helper`;
 - branch: `main`;
-- code/document baseline at inspection start:
-  `5dbccdfbc71df9b00639f46bff48ed8201966578`;
+- code/document baseline at Phase-0 close: the head of the Phase-0
+  documentation series on `main`; the full SHA is recorded in
+  `docs/release-3-vocabulary-and-implementation-map.md`;
 - Release 2.1 production behavior is the parent code at
-  `54cc853c87ad3706dfe28829a0147a0dc62afbc6`; the baseline adds only the
-  consolidated final 2.1 changelog.
+  `54cc853c87ad3706dfe28829a0147a0dc62afbc6`; every commit above it is
+  documentation only: the consolidated final 2.1 changelog and the Release 3
+  Phase-0 design reconciliation.
 
 If `main` moves before an executor starts D0, the executor must compare the new
 head with this baseline and stop on any change touching the owners listed
@@ -151,7 +153,14 @@ R3 startup ordering is binding:
 
 1. open SQLite and enable foreign keys;
 2. apply the Session lifecycle/schema migration without deleting expired rows;
-3. materialize/validate new configuration defaults required by R3;
+3. materialize/validate the new R3 configuration defaults exactly once: the
+   Root resource ceiling computed from Engine-reported capacity, the Root
+   publishing grant, and the Principal/Launcher Session-count quotas
+   materialized as 100 and 20. Existing Session rows are counted against the
+   materialized quotas immediately, including rows that later startup steps
+   claim as `closing`; new Session admission stays blocked until counted
+   population falls below an effective quota. A failed materialization leaves
+   the previous configuration unchanged and fails startup closed;
 4. register durable Operation handlers and validate persisted type/payload
    versions;
 5. recover interrupted `creating` Managed Containers before Session cleanup can
@@ -286,6 +295,9 @@ this step or D0.5 but there is one final store.
   cleanup claim;
 - change Principal/Launcher disable and delete semantics as specified above;
 - make MAC/runtime reconciliation lifecycle-aware;
+- implement explicit Session renewal in the same lifecycle owner, serialized
+  with expiry claiming and computed from the current global `session_ttl`
+  (no delegated, per-owner, or caller-selected TTL);
 - add the final `session.cleanup` admission/retry/tombstone contract.
 
 **Ready boundary:** no production path can erase a Session ownership row before
