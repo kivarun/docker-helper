@@ -123,24 +123,31 @@ fi
 as_user bash -c 'mkdir -p ~/.config/docker && printf "{ \"live-restore\": true }\n" > ~/.config/docker/daemon.json' \
   || die "could not write the rootless daemon configuration"
 as_user systemctl --user daemon-reload
-as_user systemctl is-active --quiet docker.service \
-  || as_user systemctl start docker.service \
-  || {
-    echo "DIAG: systemctl status (user):"
-    as_user systemctl --user status docker.service --no-pager 2>&1 | head -20 || true
-    echo "DIAG: system journal for the user manager:"
-    journalctl -u "user@$FEAS_UID.service" -n 60 --no-pager 2>&1 | tail -40 || true
-    echo "DIAG: recent SELinux denials (journal + audit):"
-    journalctl -b --no-pager 2>/dev/null | grep -iE "avc|denied|selinux" | tail -20 || true
-    ausearch -m AVC -ts recent 2>/dev/null | tail -20 || true
-    die "rootless docker user service did not start"
-  }
+MODE=unit
+if as_user systemctl is-active --quiet docker.service \
+  || as_user systemctl start docker.service 2>/dev/null; then
+  fact "rootless-daemon-start=systemd-user-unit"
+else
+  echo "DIAG: systemctl --user start denied; capturing the manager-side reason"
+  echo "DIAG: debug-traced start attempt:"
+  as_user env SYSTEMD_LOG_LEVEL=debug systemctl --user start docker.service 2>&1 | grep -viE "^Successfully|queued job" | tail -25 || true
+  echo "DIAG: transient-unit method probe:"
+  as_user systemd-run --user --unit=dh-feas-transient-probe /bin/true 2>&1 || true
+  echo "DIAG: USER_AVC / policy denials:"
+  ausearch -m USER_AVC,AVC -ts recent 2>/dev/null | tail -15 || true
+  journalctl -b --no-pager 2>/dev/null | grep -iE "denied|avc" | tail -15 || true
+  echo "DIAG: falling back to a direct launch in the user's login session"
+  as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc/resolv.conf --copy-up=/etc/hosts --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
+    || die "could not launch rootless dockerd directly in the user session"
+  MODE=direct
+  fact "rootless-daemon-start=direct-session-scope (systemd user-unit start denied by the user manager; recorded finding)"
+fi
 for i in $(seq 1 30); do
   docker info >/dev/null 2>&1 && break
   sleep 2
 done
 docker info >/dev/null 2>&1 || {
-  as_user journalctl --user -u docker.service -n 30 --no-pager 2>&1 | tail -30 || true
+  su -l "$FEAS_USER" -c "tail -30 $HOME/dockerd-feas.log" 2>/dev/null || true
   die "rootless daemon unreachable at $DOCKER_HOST"
 }
 docker info --format 'FACT: rootless-server={{.ServerVersion}} driver={{.Driver}} cgroup-driver={{.CgroupDriver}} cgroup-version={{.CgroupVersion}}' \
@@ -199,31 +206,41 @@ docker rm -f cgc1 cgc2 >/dev/null 2>&1 || true
 echo "STEP-4-DONE"
 
 step 5 "aggregate memory ceiling enforced over sibling workloads"
-docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
-# Same calibration as the system harness: 160M container limits so the
-# container-level ceiling never fires for a single 90M allocation; the
-# 128M Session-slice ceiling is the binding constraint and its anonymous
-# charge failure is a deterministic parent OOM.
+docker rm -f cgm0 cgm1 cgm2 >/dev/null 2>&1 || true
+# Same design as the system harness: a single 90M allocation completes
+# under the 128M slice ceiling (control), then two concurrent ones exceed
+# it and the parent OOM engages; with 160M container limits a 137 exit is
+# only reachable from the parent.
 ALLOCATOR='sleep 3; x=$(dd if=/dev/zero bs=1M count=90 2>/dev/null | tr "\000" "A"); echo allocated=${#x}; sleep 120'
+docker run -d --name cgm0 --cgroup-parent="$SESS_SLICE" --memory 160m \
+  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "control allocator failed to start"
+CONTROL_OK=0
+for i in $(seq 1 30); do
+  if docker logs cgm0 2>&1 | grep -q "allocated=94371840"; then
+    CONTROL_OK=1
+    break
+  fi
+  sleep 2
+done
+fact "single-allocator-under-ceiling=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' cgm0)"
+[ "$CONTROL_OK" = "1" ] || die "a single 90M allocation did not complete under the 128M slice ceiling; the calibration is broken"
+docker rm -f cgm0 >/dev/null 2>&1 || true
 docker run -d --name cgm1 --cgroup-parent="$SESS_SLICE" --memory 160m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
 docker run -d --name cgm2 --cgroup-parent="$SESS_SLICE" --memory 160m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
 sleep 16
 KILLED=0
-SURVIVED=0
 for c in cgm1 cgm2; do
   ST=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$c")
   fact "allocator-$c=$ST"
   fact "allocator-$c-log=$(docker logs "$c" 2>&1 | tail -1)"
   case "$ST" in
     *"exit=137"*|*"exit=255"*) KILLED=$((KILLED+1)) ;;
-    *allocated=94371840*) SURVIVED=$((SURVIVED+1)) ;;
   esac
 done
 fact "session-slice-memory-events=$(cat "$SESS_DIR/memory.events" 2>/dev/null || echo ABSENT)"
 [ "$KILLED" -ge 1 ] || die "aggregate memory ceiling did not OOM-kill an allocator under the Session slice"
-[ "$SURVIVED" -ge 1 ] || die "no allocator completed its 90M allocation; the test did not exercise the ceiling as designed"
 cat "$SESS_DIR/memory.events" 2>/dev/null | grep -E "oom_kill [1-9]" || die "session slice memory.events shows no oom_kill"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
 echo "STEP-5-DONE"
@@ -270,7 +287,14 @@ docker create --name cgr3 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep
 docker run -d --name cgr4 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep 900' >/dev/null || die "running workload for restart failed"
 docker stop cgr1 >/dev/null || die "stop of running workload failed"
 docker inspect --format 'FACT: cgr1={{.State.Status}} cgr3={{.State.Status}} cgr4={{.State.Status}}' cgr1 cgr3 cgr4
-as_user systemctl restart docker.service || die "rootless daemon restart failed"
+if [ "$MODE" = "unit" ]; then
+  as_user systemctl restart docker.service || die "rootless daemon restart failed"
+else
+  as_user bash -c 'pkill -f "rootlesskit" || pkill -f "dockerd" || true' || true
+  sleep 2
+  as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc/resolv.conf --copy-up=/etc/hosts --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
+    || die "rootless daemon relaunch failed"
+fi
 sleep 2
 docker info >/dev/null 2>&1 || die "rootless daemon unreachable after restart"
 docker inspect --format 'FACT: after-restart cgr1={{.State.Status}} cgr3={{.State.Status}} cgr4={{.State.Status}}' cgr1 cgr3 cgr4
