@@ -143,7 +143,8 @@ func startDisposableEngine(t *testing.T, sup *client.Client, name string, cli *c
 
 // logDisposableEngineDiagnostics prints the disposable engine container's
 // state and daemon log tail through the supervisor endpoint so a failed
-// recovery is evidence, not a mystery.
+// recovery is evidence, not a mystery. dockerd logs to stderr while its
+// spawned containerd child writes to stdout, so both streams are kept.
 func logDisposableEngineDiagnostics(t *testing.T, sup *client.Client, name string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -153,21 +154,27 @@ func logDisposableEngineDiagnostics(t *testing.T, sup *client.Client, name strin
 			insp.Container.State.Status, insp.Container.State.Running,
 			insp.Container.State.OOMKilled, insp.Container.State.ExitCode)
 	}
-	logs, err := sup.ContainerLogs(ctx, name, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Tail: "60"})
+	logs, err := sup.ContainerLogs(ctx, name, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Tail: "80"})
 	if err != nil {
 		t.Logf("FACT: engine-container-log-unavailable=%v", err)
 		return
 	}
 	defer logs.Close()
-	var plain bytes.Buffer
-	if _, err := stdcopy.StdCopy(&plain, io.Discard, logs); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+	var stdOut, stdErr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdOut, &stdErr, logs); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Logf("FACT: engine-container-log-demux-error=%v", err)
 	}
-	lines := strings.Split(strings.TrimRight(plain.String(), "\n"), "\n")
-	if len(lines) > 40 {
-		lines = lines[len(lines)-40:]
+	t.Logf("FACT: engine-container-stdout-tail:\n%s", boundedLines(stdOut.String(), 20))
+	t.Logf("FACT: engine-container-stderr-tail:\n%s", boundedLines(stdErr.String(), 40))
+}
+
+// boundedLines returns at most max trailing lines of s.
+func boundedLines(s string, max int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > max {
+		lines = lines[len(lines)-max:]
 	}
-	t.Logf("FACT: engine-container-log-tail:\n%s", strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }
 
 // isBoundedTransportContextError classifies the bounded caller termination

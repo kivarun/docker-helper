@@ -221,7 +221,17 @@ jobs:
           docker image inspect docker:20.10.24-dind --format 'FACT: floor-image-digest={{index .RepoDigests 0}}' || true
           boot_dind() {
             docker rm -f dind-restart 2>/dev/null || true
+            # /run is a tmpfs: the daemon's runtime state (its spawned
+            # containerd pid/socket under /var/run/docker/containerd) must
+            # not persist across the unclean container restart, exactly as
+            # no supported deployment persists it (system mode runs an
+            # externally managed containerd under systemd's RuntimeDirectory;
+            # a clean restart removes the pidfile). With a persistent /run a
+            # restarted dockerd can attach to a stale containerd pidfile and
+            # fatally fail to boot — a DinD-harness artifact, not engine
+            # behavior under any supported deployment.
             docker run -d --privileged --name dind-restart \
+              --tmpfs /run:rw \
               -e DOCKER_TLS_CERTDIR= \
               -p 127.0.0.1:2375:2375 \
               docker:20.10.24-dind \
@@ -275,7 +285,14 @@ jobs:
           docker image inspect docker:27.5.1-dind --format 'FACT: newer-image-digest={{index .RepoDigests 0}}' || true
           boot_dind() {
             docker rm -f dind-restart 2>/dev/null || true
+            # /run is a tmpfs for the same reason as in the floor step: the
+            # daemon's spawned-containerd runtime state must not persist
+            # across the unclean restart (a stale containerd pidfile makes a
+            # restarted dockerd attach to a nonexistent containerd and fail
+            # fatally), matching supported deployments where that state does
+            # not survive a daemon restart.
             docker run -d --privileged --name dind-restart \
+              --tmpfs /run:rw \
               -e DOCKER_TLS_CERTDIR= \
               -p 127.0.0.1:2375:2375 \
               docker:27.5.1-dind \
