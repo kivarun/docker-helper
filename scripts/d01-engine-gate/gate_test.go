@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -9,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +22,7 @@ import (
 	"github.com/moby/moby/api/pkg/stdcopy"
 	buildtypes "github.com/moby/moby/api/types/build"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
 	"golang.org/x/crypto/bcrypt"
@@ -32,6 +36,21 @@ const reviewedClientVersion = "v0.6.0"
 // that cannot occur accidentally. It contains a '-' so it cannot appear in
 // base64 output by construction.
 const registryCanary = "d01-canary-pass-zone"
+
+// gateRequired reports the CI-required mode: with D01_GATE_REQUIRED=1 an
+// unreachable Engine or a missing prerequisite is a hard failure, never a
+// skip. Local runs without the variable keep the historical skip behavior.
+func gateRequired() bool { return os.Getenv("D01_GATE_REQUIRED") == "1" }
+
+// engineEnvIssue records an environment problem that blocks an Engine-matrix
+// row: skip locally, fail hard in required mode.
+func engineEnvIssue(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if gateRequired() {
+		t.Fatalf("D0.1 required mode: "+format, args...)
+	}
+	t.Skipf(format, args...)
+}
 
 func pinnedClient(t *testing.T) *client.Client {
 	t.Helper()
@@ -48,15 +67,15 @@ func engineClient(t *testing.T) *client.Client {
 	t.Helper()
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		t.Skipf("D0.1 Engine matrix needs a reachable Docker Engine endpoint: construct client: %v", err)
+		engineEnvIssue(t, "D0.1 Engine matrix needs a reachable Docker Engine endpoint: construct client: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	ping, err := cli.Ping(ctx, client.PingOptions{})
 	if err != nil {
-		t.Skipf("D0.1 Engine matrix needs a reachable Docker Engine endpoint (set DOCKER_HOST or mount the host docker.sock into the probe environment; never the docker-helper API socket): ping: %v", err)
+		engineEnvIssue(t, "D0.1 Engine matrix needs a reachable Docker Engine endpoint (set DOCKER_HOST or mount the host docker.sock into the probe environment; never the docker-helper API socket): ping: %v", err)
 	}
-	t.Logf("engine: APIVersion=%q OSType=%q", ping.APIVersion, ping.OSType)
+	t.Logf("engine: APIVersion=%q OSType=%q required=%v", ping.APIVersion, ping.OSType, gateRequired())
 	return cli
 }
 
@@ -279,14 +298,15 @@ func TestEngineNegotiationAndInfo(t *testing.T) {
 	if v := cli.ClientVersion(); !strings.HasPrefix(v, "1.") {
 		t.Fatalf("negotiated client version %q is not a 1.x API version", v)
 	}
-	t.Logf("negotiated-api=%s engine-server=%s os=%s", cli.ClientVersion(), info.Info.ServerVersion, info.Info.OSType)
+	t.Logf("negotiated-api=%s engine-server=%s os=%s",
+		cli.ClientVersion(), info.Info.ServerVersion, info.Info.OSType)
 }
 
 // TestEnginePublicPullBuild proves public pull, BuildKit build, and the
 // documented legacy-build behavior against the real Engine.
 func TestEnginePublicPullBuild(t *testing.T) {
 	cli := engineClient(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	pull, err := cli.ImagePull(ctx, "alpine:3.24", client.ImagePullOptions{})
@@ -299,8 +319,9 @@ func TestEnginePublicPullBuild(t *testing.T) {
 	}
 	t.Log("public pull alpine:3.24 succeeded")
 
-	buildRes, err := cli.ImageBuild(ctx, buildContext(t, "FROM alpine:3.24\nRUN echo built > /gate-marker\n"),
-		client.ImageBuildOptions{Tags: []string{"d01-gate:buildkit"}, Version: buildtypes.BuilderBuildKit})
+	buildRes, err := cli.ImageBuild(ctx, buildContext(t, map[string]string{
+		"Dockerfile": "FROM alpine:3.24\nRUN echo built > /gate-marker\n",
+	}), client.ImageBuildOptions{Tags: []string{"d01-gate:buildkit"}, Version: buildtypes.BuilderBuildKit})
 	if err != nil {
 		t.Fatalf("BuildKit build: %v", err)
 	}
@@ -310,8 +331,9 @@ func TestEnginePublicPullBuild(t *testing.T) {
 	}
 	t.Log("BuildKit build succeeded")
 
-	legacyRes, legacyErr := cli.ImageBuild(ctx, buildContext(t, "FROM alpine:3.24\nRUN echo legacy > /gate-marker\n"),
-		client.ImageBuildOptions{Tags: []string{"d01-gate:legacy"}, Version: buildtypes.BuilderV1})
+	legacyRes, legacyErr := cli.ImageBuild(ctx, buildContext(t, map[string]string{
+		"Dockerfile": "FROM alpine:3.24\nRUN echo legacy > /gate-marker\n",
+	}), client.ImageBuildOptions{Tags: []string{"d01-gate:legacy"}, Version: buildtypes.BuilderV1})
 	if legacyErr != nil {
 		// A buildkit-only Engine may refuse the legacy builder; that refusal is
 		// itself the recorded legacy-build behavior for this matrix row.
@@ -328,28 +350,107 @@ func TestEnginePublicPullBuild(t *testing.T) {
 	t.Log("legacy build succeeded")
 }
 
-// TestEnginePullCancellation proves request cancellation: canceling the pull
-// context stops the client operation with a context error.
+// TestEnginePullCancellation proves the cancellation contract against a real
+// Engine: the target is removed first so the pull must be a real network
+// fetch, the context is canceled immediately after the Engine accepts the
+// request, and the daemon must not have produced the image afterwards.
 func TestEnginePullCancellation(t *testing.T) {
 	cli := engineClient(t)
+	target := "ubuntu:24.04"
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := cli.ImageRemove(ctx, target, client.ImageRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+		t.Fatalf("pre-remove %s: %v", target, err)
+	}
 	pullCtx, pullCancel := context.WithCancel(context.Background())
 	defer pullCancel()
-
-	resp, err := cli.ImagePull(pullCtx, "alpine:3.24", client.ImagePullOptions{})
+	resp, err := cli.ImagePull(pullCtx, target, client.ImagePullOptions{})
 	if err != nil {
-		t.Skipf("pull did not start; cancellation row needs a pullable image: %v", err)
+		t.Fatalf("pull request was not accepted by the engine: %v", err)
 	}
 	defer resp.Close()
-	time.AfterFunc(200*time.Millisecond, pullCancel)
+	pullCancel() // cancel immediately after the engine accepted the request
 	err = resp.Wait(pullCtx)
 	if err == nil {
-		t.Log("pull completed before cancellation; row exercised with a fast engine")
-		return
+		t.Fatalf("pull completed despite immediate cancellation; cancellation contract not demonstrated against this engine")
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled pull returned %v, not a context error", err)
 	}
-	t.Log("pull cancellation returned a context error")
+	if _, err := cli.ImageInspect(ctx, target); err == nil {
+		t.Fatalf("canceled pull nevertheless produced %s; daemon-side cancellation not proven", target)
+	} else if !errdefs.IsNotFound(err) {
+		t.Fatalf("inspect after canceled pull: %v", err)
+	}
+	t.Log("canceled pull returned a context error and left no image behind")
+}
+
+// TestEngineBuildCancellation is the deterministic cancellation row: the
+// build runs a long sleep step so it cannot finish before the cancel, and the
+// canceled build must neither stream success nor produce the tagged image.
+func TestEngineBuildCancellation(t *testing.T) {
+	cli := engineClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	target := "d01-gate:cancel"
+	defer func() {
+		if _, err := cli.ImageRemove(ctx, target, client.ImageRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+			t.Logf("cleanup of %s: %v", target, err)
+		}
+	}()
+
+	ensureImagePresent(ctx, cli, t, "alpine:3.24")
+
+	buildCtx, buildCancel := context.WithCancel(ctx)
+	defer buildCancel()
+	res, err := cli.ImageBuild(buildCtx, buildContext(t, map[string]string{
+		"Dockerfile": "FROM alpine:3.24\nRUN sleep 300\n",
+	}), client.ImageBuildOptions{Tags: []string{target}, Version: buildtypes.BuilderBuildKit})
+	if err != nil {
+		t.Fatalf("cancel-target build start: %v", err)
+	}
+	defer res.Body.Close()
+
+	// Give the solve enough time to be inside the long RUN step, then cancel.
+	time.Sleep(3 * time.Second)
+	buildCancel()
+	streamErr := readBuildStream(t, res.Body)
+	t.Logf("canceled build stream ended: err=%v", streamErr)
+
+	if _, err := cli.ImageInspect(ctx, target); err == nil {
+		t.Fatalf("canceled build nevertheless produced %s; daemon-side cancellation not proven", target)
+	} else if !errdefs.IsNotFound(err) {
+		t.Fatalf("inspect after canceled build: %v", err)
+	}
+	t.Log("canceled BuildKit build terminated and produced no tagged image")
+}
+
+// readBuildStream drains a build response, returning the last observed error
+// event if the builder reported one.
+func readBuildStream(t *testing.T, r io.Reader) error {
+	t.Helper()
+	var lastErr string
+	for {
+		var event struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(r).Decode(&event); err != nil {
+			if errors.Is(err, io.EOF) {
+				if lastErr != "" {
+					return errors.New(lastErr)
+				}
+				return nil
+			}
+			if lastErr != "" {
+				return fmt.Errorf("%w (last event: %s)", err, lastErr)
+			}
+			return err
+		}
+		if event.Error != "" {
+			lastErr = event.Error
+		}
+	}
 }
 
 // TestEngineOneShotLifecycle proves create/start/wait/remove, including a
@@ -358,6 +459,7 @@ func TestEngineOneShotLifecycle(t *testing.T) {
 	cli := engineClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	ensureImagePresent(ctx, cli, t, "alpine:3.24")
 
 	created, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "d01-gate-one-shot",
@@ -404,6 +506,7 @@ func TestEngineLogsExecPrimitives(t *testing.T) {
 	cli := engineClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	ensureImagePresent(ctx, cli, t, "alpine:3.24")
 
 	created, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Config: &container.Config{
@@ -472,14 +575,13 @@ func TestEngineLogsExecPrimitives(t *testing.T) {
 // TestEnginePrivateRegistryMatrix proves private pull, private FROM build,
 // exact registry matching, and the secret canary against a disposable
 // authenticated registry the test provisions through the Engine itself. The
-// probe must run where the Engine-published 127.0.0.1 port is reachable
-// (host, or a container sharing the host network).
+// registry publishes only on the host loopback.
 func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	cli := engineClient(t)
 	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
-		t.Skip("loopback publishing reachability is required; run the probe on the deployment host or in a host-network container")
+		engineEnvIssue(t, "loopback publishing reachability is required; run the probe on the deployment host or in a host-network container")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	seedPull, err := cli.ImagePull(ctx, "registry:2", client.ImagePullOptions{})
@@ -509,10 +611,15 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 		t.Fatalf("close htpasswd: %v", err)
 	}
 
+	port, err := network.ParsePort("5000/tcp")
+	if err != nil {
+		t.Fatalf("parse container port: %v", err)
+	}
 	reg, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "d01-gate-registry",
 		Config: &container.Config{
-			Image: "registry:2",
+			Image:        "registry:2",
+			ExposedPorts: network.PortSet{port: {}},
 			Env: []string{
 				"REGISTRY_AUTH=htpasswd",
 				"REGISTRY_AUTH_HTPASSWD_REALM=d01-gate",
@@ -520,6 +627,10 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 			},
 		},
 		HostConfig: &container.HostConfig{
+			PortBindings: network.PortMap{port: []network.PortBinding{{
+				HostIP:   netip.MustParseAddr("127.0.0.1"),
+				HostPort: "",
+			}}},
 			Binds: []string{htPath + ":/auth/htpasswd:ro"},
 		},
 	})
@@ -540,7 +651,7 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	var hostPort string
 	for _, bindings := range inspected.Container.NetworkSettings.Ports {
 		for _, binding := range bindings {
-			if binding.HostPort != "" && binding.HostIP.IsValid() {
+			if binding.HostPort != "" && binding.HostIP == netip.MustParseAddr("127.0.0.1") {
 				hostPort = binding.HostPort
 				break
 			}
@@ -550,10 +661,10 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 		}
 	}
 	if hostPort == "" {
-		t.Fatal("engine did not publish a reachable loopback port for the registry")
+		t.Fatal("engine did not publish the requested loopback port for the registry")
 	}
 	registryHost := "localhost:" + hostPort
-	t.Logf("disposable registry at 127.0.0.1:%s", hostPort)
+	t.Logf("disposable registry: container 5000/tcp published on 127.0.0.1:%s", hostPort)
 	waitRegistryReady(t, "127.0.0.1:"+hostPort)
 
 	auth := registry.AuthConfig{Username: "gate", Password: registryCanary, ServerAddress: registryHost}
@@ -578,12 +689,13 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	}
 	t.Log("private pull with session-equivalent credentials succeeded")
 
-	buildRes, err := cli.ImageBuild(ctx, buildContext(t, "FROM "+privateRef+"\nRUN echo private-from > /gate-marker\n"),
-		client.ImageBuildOptions{
-			Tags:        []string{"d01-gate:private-from"},
-			Version:     buildtypes.BuilderBuildKit,
-			AuthConfigs: map[string]registry.AuthConfig{registryHost: auth},
-		})
+	buildRes, err := cli.ImageBuild(ctx, buildContext(t, map[string]string{
+		"Dockerfile": "FROM " + privateRef + "\nRUN echo private-from > /gate-marker\n",
+	}), client.ImageBuildOptions{
+		Tags:        []string{"d01-gate:private-from"},
+		Version:     buildtypes.BuilderBuildKit,
+		AuthConfigs: map[string]registry.AuthConfig{registryHost: auth},
+	})
 	if err != nil {
 		t.Fatalf("private FROM build: %v", err)
 	}
@@ -654,9 +766,47 @@ func pushPrivateImage(ctx context.Context, cli *client.Client, privateRef, encod
 	return push.Wait(ctx)
 }
 
-func buildContext(t *testing.T, dockerfile string) io.Reader {
+// buildContext returns a tar build context carrying exactly the named files
+// (the Dockerfile contract of ImageBuild), not raw Dockerfile bytes.
+func buildContext(t *testing.T, files map[string]string) io.Reader {
 	t.Helper()
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	var buf bytes.Buffer
-	buf.WriteString(dockerfile)
+	tw := tar.NewWriter(&buf)
+	for _, name := range names {
+		body := []byte(files[name])
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}); err != nil {
+			t.Fatalf("tar header %s: %v", name, err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatalf("tar body %s: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
 	return bytes.NewReader(buf.Bytes())
+}
+
+// ensureImagePresent pulls the image only when it is absent locally, so rows
+// stay independent of execution order.
+func ensureImagePresent(ctx context.Context, cli *client.Client, t *testing.T, ref string) {
+	t.Helper()
+	if _, err := cli.ImageInspect(ctx, ref); err == nil {
+		return
+	} else if !errdefs.IsNotFound(err) {
+		t.Fatalf("inspect %s: %v", ref, err)
+	}
+	pull, err := cli.ImagePull(ctx, ref, client.ImagePullOptions{})
+	if err != nil {
+		t.Fatalf("pull %s: %v", ref, err)
+	}
+	defer pull.Close()
+	if err := pull.Wait(ctx); err != nil {
+		t.Fatalf("pull %s: %v", ref, err)
+	}
 }
