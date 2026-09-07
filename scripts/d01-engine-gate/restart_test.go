@@ -387,7 +387,7 @@ func TestEngineOneShotLifecycleAcrossRestart(t *testing.T) {
 		Name: restartCreatedName,
 		Config: &container.Config{
 			Image: "alpine:3.24",
-			Cmd:   []string{"/bin/sh", "-c", "sleep 60"},
+			Cmd:   []string{"/bin/sh", "-c", "sleep 30"},
 		},
 	})
 	if err != nil {
@@ -464,10 +464,12 @@ func TestEngineOneShotLifecycleAcrossRestart(t *testing.T) {
 		t.Fatal("started created-state workload did not exit within 120s")
 	}
 	t.Logf("continued one-shot lifecycle after Engine recovery: exit status %+v", exitStatus)
-	if _, err := cli.ContainerRemove(removeCtx, createdEarly.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cleanupCancel()
+	if _, err := cli.ContainerRemove(cleanupCtx, createdEarly.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
 		t.Fatalf("cleanup remove of the continued workload: %v", err)
 	}
-	if _, err := cli.ContainerInspect(removeCtx, createdEarly.ID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+	if _, err := cli.ContainerInspect(cleanupCtx, createdEarly.ID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
 		t.Fatalf("removed continued workload must be absent with a typed NotFound error, got: %v", err)
 	}
 
