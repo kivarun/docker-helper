@@ -39,27 +39,39 @@ An active Session may be renewed explicitly by:
 
 The Session's own bearer token cannot renew the Session.
 
-Renewal accepts no caller-selected duration. The server computes:
+Renewal accepts no caller-selected duration. Release 3 has one Session lifetime
+configuration authority: the existing global `session_ttl`. It does not add a
+Principal TTL, Launcher TTL, Session lease ceiling, or another delegated TTL
+hierarchy. The server snapshots the current effective `session_ttl` at the
+renewal transaction and computes:
 
 ```text
-new_expires_at = server_now + effective_max_session_ttl
+new_expires_at = server_now + current_session_ttl
 ```
 
-The effective maximum TTL is derived from the renewing actor's authorization and delegation boundary.
+A later `session_ttl` reload affects subsequent Session creation and renewal;
+it never rewrites an existing `expires_at` asynchronously. The R3.1 lease
+concept is not part of this Release 3 contract.
 
 Renewal has the following properties:
 
 - the existing Session bearer remains unchanged;
 - the number of renewals is not limited;
-- each renewal grants at most one effective maximum TTL from the renewal time;
+- each renewal assigns exactly one current configured Session TTL from the
+  server renewal time;
 - renewal is explicit and audited;
 - activity, heartbeat, and ordinary Session requests never extend the deadline;
 - only an active Session can be renewed;
-- a Session in teardown or cleanup failure cannot be revived.
+- a Session in teardown, cleanup failure, or the closed tombstone cannot be
+  revived.
 
-Renewal and expiration teardown are serialized. Exactly one transition wins: either the new deadline commits while the Session is active, or teardown claims the expired Session and renewal fails.
+Renewal and expiration teardown are serialized. Exactly one transition wins:
+either the new deadline commits while the Session is still `active`, or
+teardown claims the Session first and renewal fails. Re-enabling a previously
+disabled Principal or Launcher does not reactivate a Session already claimed
+for teardown.
 
-The audit event records the actor, Session ID, previous expiration, and new expiration without recording bearer material.
+The audit event records the initiator, Session ID, previous expiration, and new expiration without recording bearer material.
 
 ## Session teardown
 
@@ -67,19 +79,42 @@ Session expiration and explicit Session closure have the same resource-lifetime 
 
 Teardown:
 
-1. prevents new Session-authorized operations;
-2. terminates active synchronous and interactive exec work as part of container lifecycle shutdown;
-3. stops and removes Session-owned Managed Containers;
-4. releases their external port publications;
-5. removes the Session network;
-6. transitions the Session to `closed` after backend cleanup succeeds;
-7. physically removes the closed Session and all dependent records after a fixed internal 10-minute observation grace period.
+1. atomically claims the Session out of `active`, invalidating its bearer and
+   preventing every new Session-authorized admission;
+2. requests internal cancellation of pending/running durable Operations under
+   the common Session-closing contract and closes synchronous/exec admission;
+3. terminates active synchronous and interactive exec work as part of container lifecycle shutdown;
+4. stops and removes Session-owned Managed Containers whose ownership is
+   proven;
+5. releases their external port publications;
+6. removes the Session network;
+7. releases Session runtime and MAC state only after dependent resources no
+   longer require it;
+8. transitions the Session to `closed` after cleanup succeeds;
+9. physically removes the closed Session and all dependent records after a fixed internal 10-minute observation grace period.
 
 This is deterministic resource teardown at the end of an ownership lease. It is not desired-state reconciliation or automatic workload recovery. An open interactive stream never extends Session TTL. Expiration closes the stream and removes the owning container through this same teardown path; active exec receives no separate lease or grace period.
 
-If teardown cannot finish transiently, the Session remains `closing` and accepts no normal workload operations. One `session.cleanup` Operation records one immutable attempt: a failed attempt becomes terminal, while the Session stores its attempt count and `cleanup_retry_at`; the due retry creates a new Operation. The owning Principal, owning Launcher, or administrator may request an immediate new attempt when none is active. Ownership mismatch or ambiguous authority moves the Session to `cleanup_failed`, is never resolved through automatic deletion, and requires administrator action.
+If teardown cannot finish transiently, the Session remains `closing` and accepts no normal workload operations. One `session.cleanup` Operation records one immutable attempt: a failed attempt becomes terminal, while the Session stores its attempt count and `cleanup_retry_at`; the due retry creates a new Operation. The owning Principal, owning Launcher, or administrator may request an immediate new attempt when none is active. Ownership mismatch or ambiguous authority moves the Session to `cleanup_failed`, is never resolved through automatic deletion, and requires administrator action. After the administrator resolves the ambiguity, only an administrator may request the next cleanup attempt from `cleanup_failed`.
 
-The Session bearer is invalid from the moment teardown claims the Session. A `closed` tombstone exists only so an authorized Principal, owning Launcher, or administrator can observe the terminal `session.cleanup` result. The observation grace is not an extension of Session TTL or configurable retention. Closed Sessions cannot be renewed. Physical Session deletion cascades to Managed Containers, Operations, and idempotency records. Audit events remain subject to the independent journald or external audit-retention policy.
+Every teardown trigger uses this same lifecycle owner. Startup expiry and the
+offline `docker-helper session cleanup` command may claim/schedule due cleanup,
+but neither may bypass `session.cleanup` by physically deleting an expired
+ownership row. The offline command holds the daemon instance lock and performs
+no Docker/MAC teardown itself; backend cleanup is executed later by the same
+durable handler when the daemon dispatches the admitted Operation. It may also
+purge already-`closed` tombstones whose fixed grace has elapsed.
+
+Disabling a Launcher or Principal closes new admission and claims its currently
+active child Sessions for the same cleanup lifecycle without deleting their
+rows. The ownership chain `Principal -> Launcher -> Session` is retained until
+each Session reaches `closed` and its tombstone grace expires. Re-enabling the
+parent affects only future admission and never revives claimed Sessions.
+Physical Launcher/Principal deletion is therefore a checked ownership removal:
+it cannot cascade away child Session rows and succeeds only after no child
+Session row remains, including closed tombstones.
+
+The Session bearer is invalid from the moment teardown claims the Session. A `closed` tombstone exists only so an authorized Principal, owning Launcher, or administrator can observe the terminal `session.cleanup` result. The observation grace is not an extension of Session TTL or configurable retention. Closed Sessions cannot be renewed. Physical Session deletion cascades to Managed Containers, Operations, and idempotency records only after all owned backend/runtime/MAC resources have already reached their deletion postconditions. Audit events remain subject to the independent journald or external audit-retention policy.
 
 ## Operation integration
 
