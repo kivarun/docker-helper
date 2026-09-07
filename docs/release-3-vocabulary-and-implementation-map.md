@@ -12,7 +12,7 @@ Inspected baseline:
 - repository: `kivarun/docker-helper`;
 - branch: `main`;
 - Phase-0 start SHA: `5dbccdfbc71df9b00639f46bff48ed8201966578`;
-- Phase-0 close SHA: `71b6a96d3367d76d4bef2c675ee8686ce9aebe12`;
+- Phase-0 close SHA: `695987b436c4dff821fb59ff8edebffcb6e3699f`;
 - Release 2.1 production parent: `54cc853c87ad3706dfe28829a0147a0dc62afbc6`.
 
 Every commit between the Phase-0 start and close SHAs is documentation plus
