@@ -14,6 +14,15 @@
 # cgroupfs as root outside the delegation. Root reads are used only for
 # evidence.
 #
+# Aggregate slice properties are applied through systemd USER-unit runtime
+# drop-ins ($XDG_RUNTIME_DIR/systemd/user/<unit>.d): the user manager refuses
+# `systemctl --user set-property` (polkit org.freedesktop.systemd1.
+# set-unit-properties defaults to auth_admin_keep, so an unprivileged user
+# cannot set unit properties over D-Bus), while unit-file configuration plus
+# a user-manager daemon-reload is the standard delegated path. The drop-ins
+# are written before the first workload so systemd reads them when it
+# materializes the (implicitly created) slices.
+#
 # Hierarchy mapping (systemd slice grammar encodes the R3 chain):
 #
 #   Root          -> the user's delegated cgroup subtree
@@ -62,6 +71,21 @@ as_user() {
   rc=$?
   rm -f "$tmp"
   return $rc
+}
+
+# Writes a runtime drop-in for a systemd USER unit as the unprivileged user
+# and reloads the user manager. This is the one owner of the aggregate-slice
+# configuration mechanism: properties land in
+# $XDG_RUNTIME_DIR/systemd/user/<unit>.d/50-dh-feas.conf and are applied by
+# systemd when the unit materializes.
+apply_user_unit_props() {
+  local unit="$1" props="" p
+  shift
+  for p in "$@"; do props+=" $p"; done
+  as_user bash -c "set -e
+mkdir -p \"\$XDG_RUNTIME_DIR/systemd/user/$unit.d\"
+printf '%s\n' '[Slice]'$props > \"\$XDG_RUNTIME_DIR/systemd/user/$unit.d/50-dh-feas.conf\"
+systemctl --user daemon-reload"
 }
 
 step 1 "cgroup v2 + user delegation facts"
@@ -119,9 +143,14 @@ echo "STEP-2-DONE"
 
 step 3 "workload placement under the delegated Session slice"
 docker pull -q alpine:3.24 >/dev/null 2>&1 || die "could not pull alpine:3.24 (rootless pull gate)"
-as_user systemctl set-property --runtime "$SESS_SLICE" CPUQuota=50% MemoryMax=128M TasksMax=24 \
-  || die "user manager refused set-property on the Session slice (delegation gate)"
-fact "session-slice-set=CPUQuota=50% MemoryMax=128M TasksMax=24"
+# Aggregate ceilings are configured before the first workload under the
+# hierarchy so systemd reads the drop-ins when it materializes the slices.
+apply_user_unit_props "$SESS_SLICE" "CPUQuota=50%" "MemoryMax=128M" "TasksMax=24" \
+  || die "could not configure the Session slice runtime drop-in (delegation gate)"
+apply_user_unit_props "$L_SLICE" "CPUQuota=70%" \
+  || die "could not configure the Launcher slice runtime drop-in (delegation gate)"
+fact "session-slice-set=CPUQuota=50% MemoryMax=128M TasksMax=24 (runtime drop-in)"
+fact "launcher-slice-set=CPUQuota=70% (runtime drop-in)"
 docker rm -f cgr1 cgr2 >/dev/null 2>&1 || true
 docker run -d --name cgr1 --cgroup-parent="$SESS_SLICE" --cpus 0.8 --memory 96m --pids-limit 200 \
   alpine:3.24 sh -c 'sleep 900' >/dev/null || die "rootless run under $SESS_SLICE failed (placement gate)"
@@ -223,9 +252,8 @@ docker run -d --name cgc1 --cgroup-parent="$SESS_SLICE" --cpus 0.8 \
   alpine:3.24 sh -c 'while :; do :; done' >/dev/null || die "session-1 burner failed to start"
 docker run -d --name cgs2 --cgroup-parent="$SESS2_SLICE" --cpus 0.8 \
   alpine:3.24 sh -c 'while :; do :; done' >/dev/null || die "session-2 burner failed to start"
-as_user systemctl set-property --runtime "$L_SLICE" CPUQuota=70% \
-  || die "user manager refused set-property on the Launcher slice"
-fact "launcher-slice-set=CPUQuota=70%"
+[ -f "$RUN_DIR/systemd/user/$L_SLICE.d/50-dh-feas.conf" ] \
+  || die "Launcher slice runtime drop-in missing (applied in step 3)"
 LA=$(awk '/usage_usec/ {print $2}' "$USER_TREE/$L_SLICE/cpu.stat")
 sleep 10
 LB=$(awk '/usage_usec/ {print $2}' "$USER_TREE/$L_SLICE/cpu.stat")
