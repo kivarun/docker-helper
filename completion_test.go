@@ -1600,6 +1600,21 @@ func TestCompletionTreeLeafDashWordFlags(t *testing.T) {
 // function with the given words. Returns the suggested words and the
 // separate stderr text, so tests can prove completion never pollutes the
 // user's terminal.
+// completionCompLine renders the harness's argument-level words as the shell
+// source of a real command line: an argument containing whitespace (or a
+// quote) is single-quoted the way the shell would hold it in the line.
+func completionCompLine(compWords []string) string {
+	quoted := make([]string, len(compWords))
+	for i, w := range compWords {
+		if strings.ContainsAny(w, " \t") {
+			quoted[i] = "'" + strings.ReplaceAll(w, "'", `'\''`) + "'"
+			continue
+		}
+		quoted[i] = w
+	}
+	return strings.Join(quoted, " ")
+}
+
 func runCompletionWithPreamble(t *testing.T, script, preamble string, compWords []string) ([]string, string) {
 	t.Helper()
 	cword := len(compWords) - 1
@@ -1616,6 +1631,11 @@ func runCompletionWithPreamble(t *testing.T, script, preamble string, compWords 
 	}
 	sb.WriteString(")\n")
 	sb.WriteString("COMP_CWORD=" + strconv.Itoa(cword) + "\n")
+	// The canonical completion-input owner reconstructs the argument view
+	// from COMP_LINE up to COMP_POINT; the harness feeds the same
+	// argument-level words through that owner.
+	sb.WriteString("COMP_LINE=" + strconv.Quote(completionCompLine(compWords)) + "\n")
+	sb.WriteString("COMP_POINT=${#COMP_LINE}\n")
 	sb.WriteString("COMPREPLY=()\n")
 	sb.WriteString("_docker_helper_completion\n")
 	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
@@ -1665,6 +1685,11 @@ func runCompletionWithDeadline(t *testing.T, script, preamble string, compWords 
 	}
 	sb.WriteString(")\n")
 	sb.WriteString("COMP_CWORD=" + strconv.Itoa(cword) + "\n")
+	// The canonical completion-input owner reconstructs the argument view
+	// from COMP_LINE up to COMP_POINT; the harness feeds the same
+	// argument-level words through that owner.
+	sb.WriteString("COMP_LINE=" + strconv.Quote(completionCompLine(compWords)) + "\n")
+	sb.WriteString("COMP_POINT=${#COMP_LINE}\n")
 	sb.WriteString("COMPREPLY=()\n")
 	sb.WriteString("_docker_helper_completion\n")
 	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")

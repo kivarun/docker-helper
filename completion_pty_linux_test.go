@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,31 +166,13 @@ func (p *completionPTY) resetLine(t *testing.T) {
 	p.send(t, "\x15")
 }
 
-// startCompletionPTYServer stubs the daemon surfaces the interactive cases
+// completionPTYStubHandler builds the daemon surface the interactive cases
 // drive, recording every request: an admin bearer answers --principal
 // completion from the Principal list, a Principal bearer answers --launcher
 // completion with its own Launchers, and the Session-create policy query
 // narrows to the restricted root only for the typed killme launcher selector.
-// The endpoint is a Unix socket path: the default COMP_WORDBREAKS breaks URLs
-// at ':' and '/', which would degrade the typed operator flags for reasons
-// outside this regression.
-func startCompletionPTYServer(t *testing.T) (sockPath, adminTokenPath, principalTokenPath string, rec *policyQueryRecorder, optDir string) {
-	t.Helper()
-	base := t.TempDir()
-	optDir = filepath.Join(base, "opt", "alice")
-	homeDir := filepath.Join(base, "home", "alice")
-	for _, dir := range []string{optDir, homeDir} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	sockPath = filepath.Join(base, "dh-completion.sock")
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen unix: %v", err)
-	}
-	rec = &policyQueryRecorder{seen: make(chan recordedRequest, 64)}
-	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func completionPTYStubHandler(rec *policyQueryRecorder, optDir, homeDir string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.record(recordedRequest{r.Method, r.URL.Path, "", r.URL.RawQuery})
 		admin := r.Header.Get("Authorization") == "Bearer admin-pty-token"
 		switch {
@@ -225,23 +208,68 @@ func startCompletionPTYServer(t *testing.T) (sockPath, adminTokenPath, principal
 		default:
 			http.NotFound(w, r)
 		}
-	})}
+	})
+}
+
+// writeCompletionPTYToken writes one stub bearer token file.
+func writeCompletionPTYToken(t *testing.T, base, name, token string) string {
+	t.Helper()
+	path := filepath.Join(base, name)
+	if err := os.WriteFile(path, []byte(token), 0600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+// startCompletionPTYServer stubs the daemon over a Unix socket path. The
+// endpoint is a socket path: the default COMP_WORDBREAKS breaks URLs at ':'
+// and '/', which the HTTP cases below exercise deliberately.
+func startCompletionPTYServer(t *testing.T) (sockPath, adminTokenPath, principalTokenPath string, rec *policyQueryRecorder, optDir string) {
+	t.Helper()
+	base := t.TempDir()
+	optDir = filepath.Join(base, "opt", "alice")
+	homeDir := filepath.Join(base, "home", "alice")
+	for _, dir := range []string{optDir, homeDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sockPath = filepath.Join(base, "dh-completion.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	rec = &policyQueryRecorder{seen: make(chan recordedRequest, 64)}
+	server := http.Server{Handler: completionPTYStubHandler(rec, optDir, homeDir)}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = server.Close()
 		_ = listener.Close()
 		_ = os.Remove(sockPath)
 	})
-
-	adminTokenPath = filepath.Join(base, "admin.token")
-	if err := os.WriteFile(adminTokenPath, []byte("admin-pty-token"), 0600); err != nil {
-		t.Fatalf("write admin token: %v", err)
-	}
-	principalTokenPath = filepath.Join(base, "principal.token")
-	if err := os.WriteFile(principalTokenPath, []byte("principal-pty-token"), 0600); err != nil {
-		t.Fatalf("write principal token: %v", err)
-	}
+	adminTokenPath = writeCompletionPTYToken(t, base, "admin.token", "admin-pty-token")
+	principalTokenPath = writeCompletionPTYToken(t, base, "principal.token", "principal-pty-token")
 	return sockPath, adminTokenPath, principalTokenPath, rec, optDir
+}
+
+// startCompletionPTYHTTPServer stubs the same daemon surface over an explicit
+// loopback HTTP endpoint, with its own request recorder so the tests can
+// prove the completion query reached exactly the specified HTTP daemon.
+func startCompletionPTYHTTPServer(t *testing.T) (httpEndpoint, adminTokenPath string, rec *policyQueryRecorder, optDir string) {
+	t.Helper()
+	base := t.TempDir()
+	optDir = filepath.Join(base, "opt", "alice")
+	homeDir := filepath.Join(base, "home", "alice")
+	for _, dir := range []string{optDir, homeDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec = &policyQueryRecorder{seen: make(chan recordedRequest, 64)}
+	server := httptest.NewServer(completionPTYStubHandler(rec, optDir, homeDir))
+	t.Cleanup(server.Close)
+	adminTokenPath = writeCompletionPTYToken(t, base, "admin.token", "admin-pty-token")
+	return server.URL, adminTokenPath, rec, optDir
 }
 
 // TestCompletionInteractiveFlagFormsUnderRealBash types real interactive
@@ -295,9 +323,9 @@ func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
 	assertCompletionPTYPolicyQuery(t, rec, "separated", optDir)
 
 	// The inline selector form: the typed-selector extraction must reach the
-	// policy query as launcher=killme — never as the bare = boundary — so the
-	// same restricted root is offered and the daemon query carries the same
-	// semantics.
+	// policy query as launcher=killme — never as the bare = physical
+	// boundary — so the same restricted root is offered and the daemon query
+	// carries the same semantics.
 	p.resetLine(t)
 	rec.snapshot()
 	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher=killme --workspace ", optDir)
@@ -305,6 +333,70 @@ func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
 		t.Fatalf("inline selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
 	}
 	assertCompletionPTYPolicyQuery(t, rec, "inline", optDir)
+}
+
+// TestCompletionInteractiveExplicitHTTPEndpoint proves the explicit HTTP
+// endpoint forms survive real Readline word breaking and drive the
+// daemon-backed completion against the specified daemon: the default
+// COMP_WORDBREAKS breaks http://HOST:PORT into the physical pieces
+// (http, :, //HOST, :, PORT), which the canonical argument view reassembles
+// into the full argument — so the operator forwarding carries the complete
+// URL and the query hits exactly that daemon, with the same suggestions the
+// Unix-socket control case offers and no generic filesystem fallback.
+func TestCompletionInteractiveExplicitHTTPEndpoint(t *testing.T) {
+	httpEndpoint, adminTokenPath, httpRec, httpOpt := startCompletionPTYHTTPServer(t)
+	p := startCompletionPTY(t, completionScript(t))
+
+	// Separated --endpoint with an http://HOST:PORT URL: --principal foo<TAB>
+	// consults the specified HTTP daemon and offers its Principal names.
+	p.resetLine(t)
+	out := p.typeAndTab(t, "docker-helper launcher create --endpoint "+httpEndpoint+" --token-file "+adminTokenPath+" --principal foo", "foobar")
+	if !strings.Contains(out, "foobar") {
+		t.Fatalf("separated HTTP endpoint --principal foo<TAB>: completion output missing foobar:\n%s", out)
+	}
+	assertCompletionPTYHTTPQuery(t, httpRec, "separated endpoint", "/principals", "")
+
+	// Inline --endpoint=URL: the same query semantics and suggestions.
+	p.resetLine(t)
+	httpRec.snapshot()
+	out = p.typeAndTab(t, "docker-helper launcher create --endpoint="+httpEndpoint+" --token-file "+adminTokenPath+" --principal=foo", "foobar")
+	if !strings.Contains(out, "foobar") {
+		t.Fatalf("inline HTTP endpoint --principal=foo<TAB>: completion output missing foobar:\n%s", out)
+	}
+	assertCompletionPTYHTTPQuery(t, httpRec, "inline endpoint", "/principals", "")
+
+	// Session-create workspace completion over the explicit HTTP endpoint
+	// with a typed inline launcher selector: the restricted root, resolved by
+	// the daemon the URL names — never the generic filesystem fallback.
+	p.resetLine(t)
+	httpRec.snapshot()
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+httpEndpoint+" --token-file "+adminTokenPath+" --launcher=killme --workspace ", httpOpt)
+	if !strings.Contains(out, httpOpt) {
+		t.Fatalf("HTTP endpoint session workspace <TAB>: completion output missing %s:\n%s", httpOpt, out)
+	}
+	assertCompletionPTYHTTPQuery(t, httpRec, "session policy", "/sessions/create-policy", "launcher=killme")
+}
+
+// assertCompletionPTYHTTPQuery proves the specified HTTP daemon received the
+// expected completion query after the preceding snapshot: the completion
+// consulted exactly the endpoint named on the typed command line.
+func assertCompletionPTYHTTPQuery(t *testing.T, rec *policyQueryRecorder, form, path, queryContains string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		for _, req := range rec.snapshot() {
+			if req.path == path && (queryContains == "" || strings.Contains(req.query, queryContains)) {
+				return
+			}
+			if req.path == path {
+				t.Fatalf("%s: the HTTP daemon received %s with %q, want a query containing %q", form, path, req.query, queryContains)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: the specified HTTP daemon received no %s query", form, path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // assertCompletionPTYPolicyQuery proves the workspace completion's policy

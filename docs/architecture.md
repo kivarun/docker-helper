@@ -558,7 +558,18 @@ full syntax:
   canonical command tree as the parser; each branch does not carry its own
   `help` pseudo-subcommand (`docker-helper principal help` is an unknown
   subcommand).
-- `completion bash` — Generate Bash completion.
+- `completion bash` — Generate Bash completion. The generated script keeps
+  ONE canonical completion-input owner: it reconstructs the real CLI
+  arguments of the completion line from `COMP_LINE` up to `COMP_POINT`
+  (the shell's own argument rules — whitespace, backslash escapes, and
+  quotes) because Readline's default word breaking splits typed arguments
+  at characters like `=` and `:`; every consumer of the word list — the
+  command-path walk, flag/value recognition, typed selector extraction,
+  operator-argument forwarding, positional counting, and the policy-root
+  query forwarding — reads that normalized view, so both the separated
+  `--flag VALUE` and the inline `--flag=VALUE` form, and values physically
+  broken such as `http://HOST:PORT` endpoints, carry identical logical
+  semantics. The user's `COMP_WORDBREAKS` is never modified.
 - `completion selectors <principal|launcher>` — Machine-facing selector
   introspection consumed by the generated Bash completion for the
   `--principal`/`--launcher` flag values and the positional `[LAUNCHER]`

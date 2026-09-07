@@ -725,7 +725,11 @@ func addLauncherAllowedRoot(db *sql.DB, current *LauncherWithPrincipal, rootPath
 	*committed = *current
 	if affected > 0 {
 		committed.ScopeMode = LauncherScopeRestricted
+		// The committed projection carries the canonical lexical root
+		// ordering a fresh readLauncherAllowedRoots projection has, composed
+		// without any post-commit DB read.
 		committed.AllowedRoots = append(slices.Clone(current.AllowedRoots), resolved)
+		slices.Sort(committed.AllowedRoots)
 	}
 	return committed, affected > 0, resolved, nil
 }

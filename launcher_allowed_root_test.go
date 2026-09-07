@@ -203,6 +203,48 @@ func TestLauncherAllowedRootOutsideCeilingRejected(t *testing.T) {
 	}
 }
 
+// TestLauncherAllowedRootCommittedProjectionCanonicalOrder proves the
+// committed Launcher projection carries the same canonical lexical root
+// ordering as a fresh DB projection, composed without any post-commit read:
+// adding /a to a launcher whose stored root is /z commits [/a /z].
+func TestLauncherAllowedRootCommittedProjectionCanonicalOrder(t *testing.T) {
+	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
+	zRoot := filepath.Join(inRoot, "z-dir")
+	aRoot := filepath.Join(inRoot, "a-dir")
+	for _, dir := range []string{zRoot, aRoot} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
+
+	// current roots: [/z]; then add /a.
+	committed, changed, _, err := addLauncherAllowedRoot(db, l, zRoot, ceiling)
+	if err != nil {
+		t.Fatalf("add z root: %v", err)
+	}
+	if !changed {
+		t.Fatal("z add reported no change")
+	}
+	committed, changed, _, err = addLauncherAllowedRoot(db, committed, aRoot, ceiling)
+	if err != nil {
+		t.Fatalf("add a root: %v", err)
+	}
+	if !changed {
+		t.Fatal("a add reported no change")
+	}
+
+	// The committed projection is canonically ordered: [/a /z], never the
+	// append order [/z /a].
+	if !slices.Equal(committed.AllowedRoots, []string{aRoot, zRoot}) {
+		t.Fatalf("committed projection roots = %v, want [%s %s]", committed.AllowedRoots, aRoot, zRoot)
+	}
+	// The fresh DB projection has the same canonical order.
+	if got := readLauncherStoredRoots(t, db, l.ID); !slices.Equal(got, []string{aRoot, zRoot}) {
+		t.Fatalf("fresh DB roots = %v, want [%s %s]", got, aRoot, zRoot)
+	}
+}
+
 func TestLauncherAllowedRootRemoveMatchesCanonicalPath(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
