@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/moby/moby/api/pkg/stdcopy"
 	buildtypes "github.com/moby/moby/api/types/build"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -132,10 +134,40 @@ func startDisposableEngine(t *testing.T, sup *client.Client, name string, cli *c
 			return
 		}
 		if time.Now().After(deadline) {
+			logDisposableEngineDiagnostics(t, sup, name)
 			t.Fatalf("Engine did not recover within %s after restarting %q: last ping error: %v", restartPingTimeout, name, err)
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// logDisposableEngineDiagnostics prints the disposable engine container's
+// state and daemon log tail through the supervisor endpoint so a failed
+// recovery is evidence, not a mystery.
+func logDisposableEngineDiagnostics(t *testing.T, sup *client.Client, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if insp, err := sup.ContainerInspect(ctx, name, client.ContainerInspectOptions{}); err == nil {
+		t.Logf("FACT: engine-container-state=%s running=%v oomkilled=%v exitcode=%d",
+			insp.Container.State.Status, insp.Container.State.Running,
+			insp.Container.State.OOMKilled, insp.Container.State.ExitCode)
+	}
+	logs, err := sup.ContainerLogs(ctx, name, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Tail: "60"})
+	if err != nil {
+		t.Logf("FACT: engine-container-log-unavailable=%v", err)
+		return
+	}
+	defer logs.Close()
+	var plain bytes.Buffer
+	if _, err := stdcopy.StdCopy(&plain, io.Discard, logs); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Logf("FACT: engine-container-log-demux-error=%v", err)
+	}
+	lines := strings.Split(strings.TrimRight(plain.String(), "\n"), "\n")
+	if len(lines) > 40 {
+		lines = lines[len(lines)-40:]
+	}
+	t.Logf("FACT: engine-container-log-tail:\n%s", strings.Join(lines, "\n"))
 }
 
 // isBoundedTransportContextError classifies the bounded caller termination
