@@ -1706,8 +1706,6 @@ codes keep their current statuses.
 | `container_dead` | 409 | Managed-container lifecycle. |
 | `ownership_mismatch` | 409 | Managed-container lifecycle and exec. |
 | `policy_mismatch` | 409 | Managed-container lifecycle and exec. |
-| `backend_unavailable` | 503 | Docker Engine failures (above). |
-| `backend_failure` | 502 | Docker Engine failures (above). |
 | `logs_unavailable` | 409 | Container logs. |
 | `container_not_running` | 409 | Exec. |
 | `container_paused` | 409 | Exec. |
