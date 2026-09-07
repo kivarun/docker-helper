@@ -122,6 +122,12 @@ fi
 # contract the system-mode harness proves).
 as_user bash -c 'mkdir -p ~/.config/docker && printf "{ \"live-restore\": true }\n" > ~/.config/docker/daemon.json' \
   || die "could not write the rootless daemon configuration"
+# Rootless dockerd would otherwise launch a managed containerd that
+# inherits the system defaults (/run/containerd) and dies in the userns.
+# Pre-launch a user-owned containerd at the exact address the rootless
+# daemon probes, so the managed launch never happens.
+as_user bash -c 'mkdir -p $XDG_RUNTIME_DIR/docker/containerd $HOME/.local/share/docker/containerd/dir; nohup /usr/bin/containerd --root=$HOME/.local/share/docker/containerd/dir --state=$XDG_RUNTIME_DIR/docker/containerd/state --address=$XDG_RUNTIME_DIR/docker/containerd/containerd.sock --log-level=warn >> $HOME/containerd-feas.log 2>&1 < /dev/null & sleep 1' \
+  || die "could not launch the user-owned containerd"
 as_user systemctl --user daemon-reload
 MODE=unit
 STARTED=no
