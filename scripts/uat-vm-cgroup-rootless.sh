@@ -149,6 +149,9 @@ echo "FACT: kernel=$(uname -r) mem-mb=$(free -m | awk '/^Mem:/{print $2}')"
 
 # Daemon configuration through the documented per-user path, before the
 # first rootless start, so live-restore is active from the first boot.
+# install -d applies its owner/mode only to the final component, so the
+# parent chain is created explicitly to keep it owned by feasu.
+install -d -o feasu -g feasu -m 0700 /home/feasu/.config
 install -d -o feasu -g feasu -m 0700 /home/feasu/.config/docker
 printf '{ "live-restore": true }\n' > /tmp/feasu-daemon.json
 install -o feasu -g feasu -m 0644 /tmp/feasu-daemon.json \
