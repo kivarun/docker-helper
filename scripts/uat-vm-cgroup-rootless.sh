@@ -157,24 +157,62 @@ ls -l "$XDG_RUNTIME_DIR/docker.sock"
 echo ROOTLESS-INSTALL-DONE
 USR
 chmod 0755 /tmp/feasu-rootless-install.sh
-install -d -o fea-su -g fea-su -m 0700 /home/feasu/.ssh
-ssh-keygen -t ed25519 -N "" -C fea-su-bootstrap -f /home/feasu/.ssh/id_ed25519 >/dev/null
-cat /home/feasu/.ssh/id_ed25519.pub >> /home/feasu/.ssh/authorized_keys
-chown fea-su:fea-su /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/id_ed25519.pub /home/feasu/.ssh/authorized_keys
-chmod 0600 /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/authorized_keys
-SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
-READY=0
-for i in 1 2 3 4 5; do
-  if ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 fea-su@localhost true 2>/dev/null; then
-    READY=1
+FEASU_UID=$(id -u fea-su)
+
+# The setup tool refuses su/sudo invocations because they carry no
+# XDG_RUNTIME_DIR and cannot see the user manager. Its own documented
+# remedies: (1) enable-linger + export XDG_RUNTIME_DIR, (2) log in as the
+# user (ssh works). Both are used below, in that order, and the chosen path
+# is recorded as evidence. Nothing here repairs or emulates runtime internals.
+MANAGER=""
+for i in $(seq 1 30); do
+  if systemctl is-active --quiet "user@$FEASU_UID.service"; then
+    MANAGER=yes
     break
   fi
   sleep 2
 done
-[ "$READY" = 1 ] || { echo "could not open a login session for fea-su via ssh (user manager prerequisite)"; exit 1; }
-log "running the rootless setup tool in a real fea-su login session"
-ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 fea-su@localhost bash /tmp/feasu-rootless-install.sh
+INSTALLED=""
+if [ "$MANAGER" = "yes" ]; then
+  log "user manager active; running the setup tool with the documented XDG_RUNTIME_DIR export"
+  if sudo -u fea-su env XDG_RUNTIME_DIR="/run/user/$FEASU_UID" bash /tmp/feasu-rootless-install.sh; then
+    INSTALLED=xdg-linger
+  else
+    echo "sudo -u setup attempt failed; falling back to a real ssh login session"
+  fi
+else
+  echo "user manager not active after linger; starting it with a real login session (documented remedy)"
+fi
+
+if [ -z "$INSTALLED" ]; then
+  install -d -o fea-su -g fea-su -m 0700 /home/feasu/.ssh
+  ssh-keygen -t ed25519 -N "" -C fea-su-bootstrap -f /home/feasu/.ssh/id_ed25519 >/dev/null
+  cat /home/feasu/.ssh/id_ed25519.pub >> /home/feasu/.ssh/authorized_keys
+  chown fea-su:fea-su /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/id_ed25519.pub /home/feasu/.ssh/authorized_keys
+  chmod 0600 /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/authorized_keys
+  SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o IdentitiesOnly=yes"
+  READY=0
+  for i in 1 2 3 4 5; do
+    OUT=$(ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 fea-su@localhost true 2>&1) && { READY=1; break; }
+    echo "ssh login-session probe attempt $i failed: $OUT"
+    sleep 2
+  done
+  if [ "$READY" = 1 ]; then
+    log "running the rootless setup tool in a real fea-su login session"
+    if ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 fea-su@localhost bash /tmp/feasu-rootless-install.sh; then
+      INSTALLED=ssh-login
+    else
+      echo "ssh login-session setup attempt failed"
+    fi
+  else
+    echo "ssh diagnostics:"
+    journalctl -u ssh -n 30 --no-pager 2>/dev/null | tail -30 || true
+    echo "could not open a login session for fea-su via ssh (user manager prerequisite)"
+  fi
+fi
 rm -f /tmp/feasu-rootless-install.sh
+[ -n "$INSTALLED" ] || { echo "could not run the rootless setup tool through a documented login path"; exit 1; }
+echo "FACT: rootless-install-path=$INSTALLED"
 
 # Verify the rootless daemon as root through the user socket.
 mkdir -p /opt/cg-feas
