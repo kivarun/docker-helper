@@ -319,6 +319,13 @@ as_user timeout 180 systemctl --user restart docker.service \
 sleep 2
 docker info >/dev/null 2>&1 || die "rootless daemon unreachable after restart"
 docker inspect --format 'FACT: after-restart cgr1={{.State.Status}} cgr3={{.State.Status}} cgr4={{.State.Status}}' cgr1 cgr3 cgr4
+if [ "$(docker inspect --format '{{.State.Running}}' cgr4)" != "true" ]; then
+  echo "DIAG: docker.service user-unit journal around the restart:"
+  as_user journalctl --user -u docker.service --since "-2 min" --no-pager 2>/dev/null | tail -25 || true
+  C4SCOPE="$SESS_DIR/docker-$(docker inspect --format '{{.Id}}' cgr4).scope"
+  echo "DIAG: cgr4 scope after restart: dir=$([ -d "$C4SCOPE" ] && echo present || echo absent) pids.current=$(cat "$C4SCOPE/pids.current" 2>/dev/null || echo ABSENT)"
+  die "running workload did not survive rootless daemon restart (live-restore contract)"
+fi
 [ "$(docker inspect --format '{{.State.Running}}' cgr4)" = "true" ] || die "running workload did not survive rootless daemon restart (live-restore contract)"
 [ "$(docker inspect --format '{{.State.Status}}' cgr3)" = "created" ] || die "created workload changed state across daemon restart"
 [ "$(docker inspect --format '{{.State.Status}}' cgr1)" = "exited" ] || die "stopped workload changed state across daemon restart"
