@@ -27,10 +27,16 @@
 #
 #   Root          -> the user's delegated cgroup subtree
 #                    user.slice/user-<uid>.slice/user@<uid>.service
+#   hierarchy top -> dhfeas.slice (top-level slice of the user manager)
 #   Principal     -> dhfeas-principal1.slice
 #   Launcher      -> dhfeas-principal1-launcher1.slice
 #   Session       -> dhfeas-principal1-launcher1-session1.slice
 #   workload      -> docker-<id>.scope under the Session slice
+#
+# systemd derives a slice's parent from its name (a-b-c.slice is a child of
+# a-b.slice), so the cgroup path of the Session slice is
+# <user tree>/dhfeas.slice/<Principal>/<Launcher>/<Session>; the ancestors
+# materialize implicitly when the first workload is placed.
 #
 # Every observable fact is printed as a stable key:value line; every step ends
 # with a STEP-<n>-DONE marker; any failed assertion exits nonzero with the
@@ -47,10 +53,15 @@ FEAS_USER=feasu
 FEAS_UID=$(id -u "$FEAS_USER" 2>/dev/null) || die "feasibility user $FEAS_USER missing (bootstrap step missing)"
 RUN_DIR="/run/user/$FEAS_UID"
 USER_TREE="/sys/fs/cgroup/user.slice/user-$FEAS_UID.slice/user@$FEAS_UID.service"
+TOP_SLICE=dhfeas.slice
+P_SLICE=dhfeas-principal1.slice
+L_SLICE=dhfeas-principal1-launcher1.slice
 SESS_SLICE=dhfeas-principal1-launcher1-session1.slice
 SESS2_SLICE=dhfeas-principal1-launcher1-session2.slice
-L_SLICE=dhfeas-principal1-launcher1.slice
-P_SLICE=dhfeas-principal1.slice
+P_DIR="$USER_TREE/$TOP_SLICE/$P_SLICE"
+L_DIR="$P_DIR/$L_SLICE"
+SESS_DIR="$L_DIR/$SESS_SLICE"
+SESS2_DIR="$L_DIR/$SESS2_SLICE"
 export DOCKER_HOST="unix://$RUN_DIR/docker.sock"
 
 # Runs a command inside a REAL login session of the unprivileged user
@@ -157,8 +168,13 @@ docker run -d --name cgr1 --cgroup-parent="$SESS_SLICE" --cpus 0.8 --memory 96m 
 docker run -d --name cgr2 --cgroup-parent="$SESS_SLICE" --cpus 0.8 --memory 96m --pids-limit 200 \
   alpine:3.24 sh -c 'sleep 900' >/dev/null || die "rootless sibling run under $SESS_SLICE failed (placement gate)"
 fact "container-cgroup-parent=$(docker inspect --format '{{.HostConfig.CgroupParent}}' cgr1)"
-SESS_DIR="$USER_TREE/$SESS_SLICE"
-[ -d "$SESS_DIR" ] || die "Session slice cgroup dir $SESS_DIR not created under the user subtree"
+if [ ! -d "$SESS_DIR" ]; then
+  echo "DIAG: materialized user subtree (top 40):"
+  find "$USER_TREE" -maxdepth 4 2>/dev/null | head -40 || true
+  echo "DIAG: docker scopes in cgroupfs:"
+  find /sys/fs/cgroup -maxdepth 6 -name 'docker-*.scope' 2>/dev/null | head -20 || true
+  die "Session slice cgroup dir $SESS_DIR not created under the user subtree"
+fi
 CG1ID=$(docker inspect --format '{{.Id}}' cgr1)
 CGDIR="$SESS_DIR/docker-$CG1ID.scope"
 [ -d "$CGDIR" ] || die "no workload scope at $CGDIR (systemd-driver placement contract)"
@@ -254,9 +270,9 @@ docker run -d --name cgs2 --cgroup-parent="$SESS2_SLICE" --cpus 0.8 \
   alpine:3.24 sh -c 'while :; do :; done' >/dev/null || die "session-2 burner failed to start"
 [ -f "$RUN_DIR/systemd/user/$L_SLICE.d/50-dh-feas.conf" ] \
   || die "Launcher slice runtime drop-in missing (applied in step 3)"
-LA=$(awk '/usage_usec/ {print $2}' "$USER_TREE/$L_SLICE/cpu.stat")
+LA=$(awk '/usage_usec/ {print $2}' "$L_DIR/cpu.stat")
 sleep 10
-LB=$(awk '/usage_usec/ {print $2}' "$USER_TREE/$L_SLICE/cpu.stat")
+LB=$(awk '/usage_usec/ {print $2}' "$L_DIR/cpu.stat")
 LDELTA=$((LB - LA))
 fact "launcher-cpu-usage-usec-per-10s=$LDELTA"
 # session-1 remains capped at 0.5 CPU (STEP-3) and the session-2 burner at
@@ -322,7 +338,7 @@ echo "STEP-10-DONE"
 step 11 "cleanup without leaked cgroups"
 docker rm -f cgr1 cgr2 cgr3 cgr4 >/dev/null 2>&1 || true
 sleep 2
-for d in "$SESS_DIR" "$USER_TREE/$SESS2_SLICE" "$USER_TREE/$L_SLICE" "$USER_TREE/$P_SLICE"; do
+for d in "$SESS_DIR" "$SESS2_DIR" "$L_DIR" "$P_DIR"; do
   if [ -d "$d" ] && ! ls -A "$d" | grep -q .; then
     rmdir "$d" 2>/dev/null || fact "slice-dir-not-removable=$d (systemd-owned; recorded, not a leak)"
   fi
