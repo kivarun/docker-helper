@@ -103,8 +103,12 @@ DELETE /containers/{container}
 
 Start, stop, restart, and repair have empty request bodies and may accept the
 durable Operation `Idempotency-Key` header. Removal has no body and does not
-accept that header; its resource-level retry converges to `204 No Content`
-after deletion. The only request option is administrator-only
+accept that header. A retry after successful removal resolves the target again;
+once the persistent Managed Container record is gone, absent and foreign
+resources both return the same `404 container_not_found`. `204 No Content` is
+reserved for a request that successfully removes an authorized persistent
+resource, including the synchronous case where that record still exists but
+its backend is already absent. The only request option is administrator-only
 `?force=true` for the narrow ownership-mismatch case defined below. Exact
 selector, query-validation, and CLI contracts are canonical in
 `release-3-api-cli.md`.
@@ -171,8 +175,8 @@ field merely to assert that the represented object exists.
 | Start already running | `200 OK` with the current Container; no Operation. |
 | Stop already stopped | `200 OK` with the current Container; no Operation. |
 | Accepted lifecycle mutation | `202 Accepted` with the Operation and `Location`. |
-| Remove a persistent record whose backend is already missing | `204 No Content`; no Operation. |
-| Target absent from persistent state or outside caller scope | `404 Not Found`. |
+| Remove an authorized persistent record whose backend is already missing | `204 No Content`; no Operation. |
+| Target absent from persistent state or outside caller scope, including a repeated DELETE after completed removal | `404 container_not_found`. |
 
 ## Listing
 
@@ -350,8 +354,11 @@ postcondition is satisfied.
 
 Conditions override ordinary state handling:
 
-- `policy_mismatch` rejects start, stop, and restart; normal remove remains
-  available because ownership is proven;
+- `policy_mismatch` rejects start and restart, but allows stop and normal remove
+  when immutable ownership is still proven. Stop follows the same verified
+  backend path and `container_stop_timeout` as an ordinary stop; a policy
+  mismatch is never a reason to keep a workload running. This is the same rule
+  used when publishing becomes unsupported after an Engine downgrade;
 - `ownership_mismatch` rejects every ordinary lifecycle Command;
 - `cleanup_failed` permits only the recovery or removal path authorized for the
   proven ownership state;
@@ -387,6 +394,11 @@ Callers cannot select a stop signal, force mode, or timeout. One reloadable
 administrator setting, `container_stop_timeout`, defaults to 10 seconds and is
 used consistently by stop, restart, remove, and Session cleanup.
 
+A verified `policy_mismatch` never blocks stop. The stop Operation does not
+repair or rewrite mismatched policy; it only reaches the stopped postcondition
+through the exact recorded backend object. Start and restart remain blocked
+until the mismatch is repaired or the container is removed.
+
 ### Restart
 
 Restart is one public `container.restart` Operation composed of persisted
@@ -408,8 +420,11 @@ backend object, confirms absence, releases publications and other owned
 resources, and finally deletes the persistent Managed Container record.
 
 If the backend is already missing, absence is the achieved backend
-postcondition. The Command removes the record and leases synchronously and
-returns `204 No Content` without manufacturing an Operation.
+postcondition. The Command removes the authorized persistent record and leases
+synchronously and returns `204 No Content` without manufacturing an Operation.
+Once that persistent record is gone, a repeated DELETE returns the same
+`404 container_not_found` as a foreign target; Release 3 does not weaken
+non-disclosure to provide delete idempotency across resource disappearance.
 
 `--force` has one narrow administrator-only meaning: permit removal of the
 exact BackendContainerID recorded for a Managed Container whose ownership
@@ -505,7 +520,7 @@ Troubleshooting sections rather than relying on one context-free error list.
 | `paused` | Use `container start` to resume or `container stop` to stop; pause/unpause are not public capabilities. |
 | `backend_missing` | Use `container remove` to remove the persistent record and release leases; no recreation occurs. |
 | `backend_unavailable` | Restore Docker Engine availability or helper access, then retry; no mutation was admitted. |
-| `policy_mismatch` | Administrator uses `container repair`, or an authorized owner chooses normal remove. |
+| `policy_mismatch` | Stop and remove remain available when ownership is proven; administrator may use `container repair` before a later start/restart. |
 | `ownership_mismatch` | Administrator inspects the exact recorded backend and explicitly uses `container remove dhmc_... --force` if deletion is intended. |
 | `dead` | Remove the container; Release 3 does not attempt workload recovery. |
 | persistent `transitioning` | Check `active_operation_id`; if no helper Operation owns the transition, an authorized caller may choose remove. |
@@ -537,6 +552,10 @@ The lifecycle implementation is not complete without tests for:
 - name resolution with an explicit Session and globally unique ID resolution;
 - state-matching no-ops versus accepted durable mutations;
 - active-Operation conflict and idempotent replay ordering;
+- repeated DELETE after completed removal returning the same
+  `404 container_not_found` as an absent or foreign target;
+- `policy_mismatch` permitting verified stop/remove while blocking
+  start/restart;
 - persisted restart steps and crash recovery;
 - paused-state reporting and start/stop behavior;
 - normal removal, missing-backend synchronous removal, policy repair, and
