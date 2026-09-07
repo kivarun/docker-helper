@@ -356,6 +356,24 @@ under `AGENTS.md`, not a silent system-only scope reduction.
 At the Phase-0 rebaseline no checked-in evidence was found that satisfies this
 matrix. The gate remains **OPEN** until the reproducible host runs exist.
 
+The gate instrument is the committed probe
+`scripts/cgroup-feasibility-probe` (`go run ./scripts/cgroup-feasibility-probe`).
+It prints stable key/value facts for the kernel, init system, capability set,
+cgroup version, controller and delegation state, one disposable child-cgroup
+delegation write test, user-namespace support, Docker Engine endpoints, and
+shipped systemd unit presence. It is an evidence-collection instrument for
+the spike runs, not a substitute for them.
+
+One Phase-0 diagnostic run is recorded from the Phase-0 agent sandbox: an
+unprivileged Alpine 3.24 container (pid 1 `docker-init`, uid 1000, zero
+effective capabilities, cgroup v2 with an empty `cgroup.subtree_control` and
+a read-only cgroup filesystem, no systemd, no usable user-namespace
+delegation, no Docker Engine socket). That environment cannot execute either
+mandatory deployment mode and proves no hierarchy property; it records only
+why the gate could not be closed there. Closing the gate requires the real
+system-mode run under the shipped systemd unit and the supported
+rootless/user-mode run on a supported host.
+
 System cgroup paths, Docker backend errors, and controller internals are
 sanitized from ordinary client errors and remain available only in bounded
 operator diagnostics.

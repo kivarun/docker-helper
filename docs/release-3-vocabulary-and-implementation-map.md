@@ -15,12 +15,13 @@ Inspected baseline:
 - Phase-0 close SHA: `71b6a96d3367d76d4bef2c675ee8686ce9aebe12`;
 - Release 2.1 production parent: `54cc853c87ad3706dfe28829a0147a0dc62afbc6`.
 
-Every commit between the Phase-0 start and close SHAs is documentation only:
-the consolidated final 2.1 changelog and the Release 3 Phase-0 design
-reconciliation. The previous `44281a8` binding is obsolete. If `main` changes
+Every commit between the Phase-0 start and close SHAs is documentation plus
+the committed Phase-0 gate instruments under `scripts/`: the consolidated
+final 2.1 changelog, the Release 3 Phase-0 design reconciliation, and gate
+instrumentation. The previous `44281a8` binding is obsolete. If `main` changes
 before executor handoff, compare the new head with the Phase-0 close SHA and
-revalidate every touched owner below; new documentation-only commits do not
-change the ownership facts. A SHA-only edit is not a rebaseline.
+revalidate every touched owner below; new documentation or instrumentation
+commits do not change the ownership facts. A SHA-only edit is not a rebaseline.
 
 `docs/architecture.md` owns implemented truth. Release-3 documents own target
 behavior.
@@ -246,16 +247,25 @@ The exact public R3 config fields and upgrade behavior are canonical in
 
 ### D0.1 Engine adapter
 
-No checked-in evidence at the inspected baseline proves the selected Moby
-version, minimum Engine API, BuildKit/legacy build behavior, private pull,
-private `FROM`, cancellation, or cleanup matrix. `go.mod` has no Moby client.
-The single D0.1 gate in `release-3-d0-execution-plan.md` is therefore **OPEN**.
+The gate instrument is the committed tool module `scripts/d01-engine-gate`;
+its mechanism layer (pinned client `github.com/moby/moby/client v0.6.0`,
+API bounds 1.40..1.56, pull/build auth encoding, exact registry canonical-
+ization, stream framing, typed error classification, logs/exec surfaces) has
+recorded passing runs, while every Engine-matrix row (negotiation, public and
+private pull, BuildKit and legacy build, disposable-registry canary, one-shot
+lifecycle, live cancellation, D4/D5 primitives) still needs one real Engine
+run. `go.mod` has no Moby client. The single D0.1 gate in
+`release-3-d0-execution-plan.md` is therefore **OPEN** until that recorded
+Engine-matrix run exists.
 
 ### Aggregate cgroup enforcement
 
-No checked-in result at the inspected baseline proves the mandatory aggregate
-CPU/memory/PIDs hierarchy and Docker placement in both system and supported
-rootless/user deployment. The feasibility gate defined by
+The gate instrument is the committed probe `scripts/cgroup-feasibility-probe`.
+The recorded Phase-0 diagnostic run (unprivileged agent sandbox: no systemd,
+read-only cgroupfs, zero capabilities, no Engine socket) proves no hierarchy
+property. No checked-in result proves the mandatory aggregate CPU/memory/PIDs
+hierarchy and Docker placement in both system and supported rootless/user
+deployment. The feasibility gate defined by
 `release-3-resource-constraints.md` and moved forward by the D0 plan is
 therefore **OPEN**.
 

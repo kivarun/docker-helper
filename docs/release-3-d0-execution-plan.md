@@ -14,8 +14,10 @@ Phase-0 inspected baseline:
   `docs/release-3-vocabulary-and-implementation-map.md`;
 - Release 2.1 production behavior is the parent code at
   `54cc853c87ad3706dfe28829a0147a0dc62afbc6`; every commit above it is
-  documentation only: the consolidated final 2.1 changelog and the Release 3
-  Phase-0 design reconciliation.
+  documentation plus the committed Phase-0 gate instruments under `scripts/`
+  (`d01-engine-gate`, `cgroup-feasibility-probe`): the consolidated final 2.1
+  changelog, the Release 3 Phase-0 design reconciliation, and gate
+  instrumentation. No production code changed above that parent.
 
 If `main` moves before an executor starts D0, the executor must compare the new
 head with this baseline and stop on any change touching the owners listed
@@ -229,6 +231,57 @@ At the Phase-0 baseline there is no Moby dependency in `go.mod` and no
 repository evidence satisfying this gate. **D0.1 is OPEN.** This is a production
 migration blocker, not an architecture blocker: its contract is fixed here.
 
+### D0.1 instrument and recorded Phase-0 mechanism evidence
+
+The gate instrument is the committed tool module `scripts/d01-engine-gate`
+(`go test -v ./...` inside that directory). Mechanism-layer rows run on any
+machine; every Engine-dependent row skips with an actionable reason until a
+real Engine endpoint is provided (`DOCKER_HOST` or a mounted host Docker
+socket; never the docker-helper API socket, which does not proxy the Engine
+API). No second spike or framework is created; the instrument covers the
+matrix rows above, including the disposable authenticated registry it
+provisions itself for the private pull / private `FROM` / canary rows.
+
+Recorded Phase-0 mechanism run, with no Engine dependency, on the Phase-0
+sandbox (`go1.26.8`, toolchain gate green):
+
+- reviewed pin candidate: `github.com/moby/moby/client v0.6.0`
+  (module `github.com/moby/moby/api v1.56.0`). It requires Go 1.24; the
+  repository toolchain (go 1.23 directive, 1.26.7 toolchain) satisfies it;
+- supported Engine API bounds of the pinned client: `MinAPIVersion 1.40`,
+  `MaxAPIVersion 1.56`, client default API `1.56`; negotiation and
+  environment options compose without contacting an Engine;
+- `go test`, `go test -race`, and `go vet` pass for the mechanism rows:
+  pull `RegistryAuth` base64-JSON encoding round-trip with plaintext canary
+  containment, build `AuthConfigs` keyed by registry address with both
+  `BuilderV1` and `BuilderBuildKit` present, normalized reference-domain
+  canonicalization for exact registry matching, stdcopy multiplexed-stream
+  demultiplexing including split frames, typed `errdefs` classification
+  (NotFound, Conflict, Unauthorized, PermissionDenied, wrapped errors), and
+  the logs/exec option surfaces required by D4/D5.
+
+The remaining D0.1 rows are the Engine-matrix rows and stay **OPEN**: live
+negotiation and `/info`, public pull and build, live BuildKit and legacy-build
+behavior, private pull and private `FROM`, the live wrong-credential canary
+through the disposable registry, one-shot create/start/disconnected
+wait/inspect/remove, live request cancellation, and the D4/D5 log/exec
+primitive runs. They execute on the deployment host — or a privileged
+container with the Engine socket — using this same instrument, and the run
+output is the recorded gate evidence. Two matrix bullets are operator-executed
+procedures rather than instrument tests, because the instrument must not
+restart a shared daemon: daemon-shutdown cancellation (restart the Engine
+during an active long pull/build; the operation must fail with a typed
+transport/context error instead of hanging) and the one-shot lifecycle after
+shutdown (the same restart procedure repeated with a waiting container).
+The Session credential parsing/storage row stays OPEN with D0.2: the
+mechanism rows prove the exact-registry matching and both auth encodings;
+the protected-Session credential-store bridge and its SQLite/audit/log canary
+storage proof are D0.2 production work verified against the migration map.
+
+`registry login` remains part of this migration map: the mechanism rows prove
+the exact-registry-address matching and both auth encodings its stored
+credentials flow through.
+
 ## Resource-enforcement prerequisite
 
 The cgroup hierarchy feasibility proof moves from the late D7 risk list to an
@@ -253,9 +306,13 @@ spike must prove:
   proved.
 
 At the Phase-0 baseline no checked-in result proves this matrix. **The cgroup
-feasibility gate is OPEN.** User-mode/rootless remains mandatory for R3; failure
-of the spike therefore requires an architecture escalation under `AGENTS.md`,
-not a silent system-mode-only implementation.
+feasibility gate is OPEN.** The committed probe
+`scripts/cgroup-feasibility-probe` is the evidence-collection instrument for
+the spike; its recorded Phase-0 sandbox diagnostic (read-only cgroupfs, no
+systemd, no capabilities, no Engine socket) proves no hierarchy property and
+records why the gate could not be closed there. User-mode/rootless remains
+mandatory for R3; failure of the spike therefore requires an architecture
+escalation under `AGENTS.md`, not a silent system-mode-only implementation.
 
 ## Ordered implementation tasks
 
