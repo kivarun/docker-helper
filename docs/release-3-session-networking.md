@@ -146,9 +146,20 @@ cleanup remain available. Commands whose result requires a valid Session
 Network, including new create/run admission and container start or restart, are
 rejected with `session_network_missing` until repair succeeds.
 
-A missing individual attachment or alias on an otherwise valid network remains
-a Managed Container `policy_mismatch` and follows the administrator-only
-`container repair` contract. A missing whole Session Network uses the
+`network_missing` names the broken whole-Session network invariant, not merely
+the instantaneous fact that the Docker network object is absent. Once a
+`session.repair` attempt has recreated the network, the Session keeps
+`network_missing` until every Managed Container whose ownership is proven is
+attached to that exact network with its immutable Session-local alias. This
+makes a partially completed repair retryable without inventing a second Session
+Condition. The Condition clears only after the complete Session postcondition
+is verified.
+
+A missing individual attachment or alias discovered while the Session network
+was otherwise valid remains a Managed Container `policy_mismatch` and follows
+the administrator-only `container repair` contract. It does not retroactively
+turn the Session into `network_missing`. A missing whole Session Network, and
+any incomplete restoration that began from that whole-network loss, uses the
 Session-level repair path because restoring it affects multiple containers.
 
 Backend unavailability is not network absence. It returns the common
@@ -174,26 +185,48 @@ authority remains available for every Session. Selectors never expand token
 scope, and foreign and nonexistent Sessions remain indistinguishable.
 
 `session repair` is deliberately narrower than a general network management
-command. For an active Session with a missing network and existing Managed
-Containers, it creates one durable `session.repair` Operation. The handler:
+command. For an active Session with `condition: network_missing` and existing
+Managed Containers, it creates one durable `session.repair` Operation. The
+handler:
 
-1. rechecks that the Session is active and the correlated network is absent;
-2. refuses a foreign object occupying the diagnostic name;
-3. creates and durably correlates the canonical Session Network;
+1. rechecks that the Session is active and that the whole-Session repair
+   invariant is still outstanding;
+2. if the correlated network is absent, refuses a foreign object occupying the
+   diagnostic name, then creates and durably correlates the canonical Session
+   Network;
+3. if a prior failed attempt already recreated the correlated network, verifies
+   its exact identity and ownership and reuses it rather than trying to create
+   a second network;
 4. reconnects every existing Managed Container whose backend identity and
-   Session ownership are proven;
-5. restores each immutable Session-local alias;
-6. confirms the complete network postcondition before succeeding.
+   Session ownership are proven and whose required attachment is not already
+   correct;
+5. restores each missing immutable Session-local alias while leaving already
+   correct attachments unchanged;
+6. confirms the complete network-and-attachment postcondition and clears
+   `network_missing` before succeeding.
 
 The Operation is restart-recoverable and idempotent at each internal step.
-Partial attachment failure leaves the Operation `failed` and the
-`network_missing` condition observable; a later explicit request creates new
-work. docker-helper never claims success for a partially restored Session.
+Partial attachment failure leaves the Operation `failed` and keeps
+`network_missing` observable even when the network object itself now exists. A
+later explicit request therefore creates a new repair Operation, reuses the
+verified network, and continues only the unsatisfied attachment/alias steps.
+docker-helper never claims success for a partially restored Session.
 
-If the Session already has a valid network, or has no Managed Containers and
-therefore no broken network invariant, repair is a synchronous successful
-no-op with HTTP `200` and `{\"ok\":true}` and creates no Operation or
-idempotency record. It does not provision an unused network.
+If the Session has no `network_missing` Condition and either already has a
+valid network or has no Managed Containers and therefore no broken network
+invariant, repair is a synchronous successful no-op with HTTP `200` and
+`{\"ok\":true}` and creates no Operation or idempotency record. In particular,
+a standalone Managed Container `policy_mismatch` on an otherwise valid Session
+network is not repaired by `session repair`; the administrator uses
+`container repair` for that container. Repair never provisions an unused
+network.
+
+If observation finds that a previously incomplete Session repair now has its
+entire network postcondition satisfied (for example after an administrator
+resolved an external cause), the normal Condition classifier may clear
+`network_missing`; a subsequent `session repair` is then the same synchronous
+successful no-op. Observation may update the durable Condition projection used
+for deduplicated diagnostics, but it still performs no Docker mutation.
 
 Only one Session network repair or cleanup mutation may be active. While repair
 is active, new network-dependent Commands return `409 operation_in_progress`
@@ -234,9 +267,9 @@ paths:
 | Observation | Supported action |
 | --- | --- |
 | No network and no Managed Containers | No action; the next create or run provisions it lazily. |
-| `network_missing` | Run `docker-helper session repair --id SESSION_ID`. |
+| `network_missing` | Run `docker-helper session repair --id SESSION_ID`; this remains correct after a partial prior repair recreated the network. |
 | `network_name_conflict` | Administrator inspects and resolves the conflicting object with Docker, then retries repair. |
-| One container has `policy_mismatch` | Administrator uses `container repair`, or an authorized owner removes the container. |
+| One container has `policy_mismatch` while the Session network is otherwise valid | Administrator uses `container repair`, or an authorized owner removes the container. |
 | `backend_unavailable` | Restore Docker Engine availability or helper access, then retry. |
 | Session `closing` | Observe or retry the existing Session cleanup contract; do not repair the network. |
 | Session `cleanup_failed` | Administrator resolves the reported ownership ambiguity; never edit SQLite manually. |
@@ -256,7 +289,12 @@ Implementation is not complete without tests for:
 - missing-network observation with and without existing Managed Containers;
 - successful and partially failed `session.repair`, including daemon-restart
   recovery;
-- individual attachment and alias mismatch remaining `policy_mismatch`;
+- retry after partial repair where the network already exists but only some
+  container attachments or aliases were restored;
+- clearing `network_missing` only after the complete Session postcondition is
+  verified, followed by a synchronous successful no-op repair;
+- individual attachment and alias mismatch on an otherwise valid network
+  remaining Managed Container `policy_mismatch`;
 - cleanup success when the network is already absent;
 - cleanup refusal when ownership cannot be proved;
 - warning and audit deduplication across repeated scan passes;
