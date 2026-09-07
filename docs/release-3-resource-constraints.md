@@ -356,6 +356,72 @@ under `AGENTS.md`, not a silent system-only scope reduction.
 At the Phase-0 rebaseline no checked-in evidence was found that satisfies this
 matrix. The gate remains **OPEN** until the reproducible host runs exist.
 
+#### Recorded Phase-0 cgroup gate run (GitHub Actions)
+
+The manual Phase-0 workflow (`.github/workflows/release3-phase0-gates.yml`)
+executed the feasibility harnesses in full openSUSE Tumbleweed VMs on hosted
+`ubuntu-24.04` runners:
+
+- tested source SHA: `9a60c6ad1d58b04251afd1449f9219009c1da752`;
+- workflow run ID: `34150959659`;
+
+**System-mode gate: PASSED.** The 13-step harness
+(`scripts/cgroup-feasibility-system.sh`) ran as root inside the Tumbleweed VM
+(kernel `7.2.2-1-default`, systemd 261, cgroup v2, SELinux Enforcing, active
+LSM list `lockdown,capability,landlock,yama,selinux,bpf,ima,evm`) and
+recorded, among others:
+
+- controller facts: root `cgroup.controllers`
+  `cpuset cpu io memory hugetlb pids rdma misc dmem`, root subtree control
+  enabled for `cpuset cpu io memory pids`;
+- the full `dh-feas/principal-1/launcher-1/{session-1,session-2}` hierarchy
+  with `cpu memory pids` delegation at every level;
+- Docker `29.4.0-ce` with the `cgroupfs` driver on cgroup v2
+  (`storage=overlayfs`) placing workloads under the exact Session cgroup
+  (`--cgroup-parent=/dh-feas/principal-1/launcher-1/session-1`, verified
+  `0::/dh-feas/...` host-side path and per-container `cpu.max`, `memory.max`,
+  `pids.max`) while aggregate Session ceilings were simultaneously set
+  (`cpu.max 50000 100000`, `memory.max 134217728`, `pids.max 24`);
+- aggregate enforcement over sibling workloads: Session CPU measured at the
+  ceiling (5014196 µs per 10s window); a 90M single allocation completes
+  under the 128M ceiling (control row) and two concurrent ones trigger the
+  parent-level OOM (`oom_kill 1` at the Session cgroup, one container exit
+  137 — container limits are 160M, so the kill can only come from the
+  aggregate); PIDs ceiling enforced (`pids.current` bounded, `pids.events
+  max 1`);
+- Launcher-level aggregate over sibling Sessions (`cpu.max 70000 100000`);
+- running and stopped workloads survive a daemon restart (`live-restore`)
+  and a container restart with placement preserved; a stopped container's
+  cgroup directory is absent;
+- the shipped systemd hardening directives (parsed from
+  `packaging/systemd/system/docker-helper.service`) applied to transient
+  services: `NoNewPrivileges`, `RestrictNamespaces`, `RestrictRealtime`,
+  `RestrictAddressFamilies`, `MemoryDenyWriteExecute`, `LockPersonality`,
+  `PrivateTmp=false`, `ProtectClock`, `ProtectHostname`, `UMask=0077`;
+- fail-closed evidence: with controller enablement stripped from the
+  placement parent, the container sees the full controller set and the
+  harness rejects the placement; cleanup leaves no leaked cgroups.
+
+**Rootless-mode gate: BLOCKED at the environment boundary (repo owner
+decision, commit `9a60c6ad1d58b04251afd1449f9219009c1da752`).** Iterating
+the probe against a plain Tumbleweed rootless Docker install surfaced
+environment-level defects (transient `Access denied` on `systemctl --user
+start` for a freshly started user manager; netconfig-managed
+`/etc/resolv.conf` and `/etc/hosts` symlinks that break every rootlesskit
+copy-up; a shipped containerd config whose root/state dirs
+(`/run/containerd`, `/var/lib/containerd`) are unreachable from an
+unprivileged user and override explicit flags). Making the environment green
+required host-runtime surgery — a harness-owned rootlesskit fallback, a
+manually pre-launched user containerd, and ownership changes to global
+containerd paths — which would no longer prove the accepted Release 3
+deployment contract. The wrapper
+(`scripts/uat-vm-cgroup-rootless.sh`) is therefore an intentional stop
+guard: the guest harness `scripts/cgroup-feasibility-rootless.sh` is kept
+unchanged and runs against a supported, normally configured rootless Docker
+deployment once one is provisioned. User-mode/rootless support remains
+mandatory for Release 3; this block is an environment-provisioning
+prerequisite, not a scope reduction to system-only.
+
 The gate instrument is the committed probe
 `scripts/cgroup-feasibility-probe` (`go run ./scripts/cgroup-feasibility-probe`).
 It prints stable key/value facts for the kernel, init system, capability set,

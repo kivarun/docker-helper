@@ -260,19 +260,15 @@ sandbox (`go1.26.8`, toolchain gate green):
   (NotFound, Conflict, Unauthorized, PermissionDenied, wrapped errors), and
   the logs/exec option surfaces required by D4/D5.
 
-The remaining D0.1 rows are the Engine-matrix rows and stay **OPEN**: live
-negotiation and `/info`, public pull and build, live BuildKit and legacy-build
-behavior, private pull and private `FROM`, the live wrong-credential canary
-through the disposable registry, one-shot create/start/disconnected
-wait/inspect/remove, live request cancellation, and the D4/D5 log/exec
-primitive runs. They execute on the deployment host — or a privileged
-container with the Engine socket — using this same instrument, and the run
-output is the recorded gate evidence. Two matrix bullets are operator-executed
-procedures rather than instrument tests, because the instrument must not
-restart a shared daemon: daemon-shutdown cancellation (restart the Engine
-during an active long pull/build; the operation must fail with a typed
-transport/context error instead of hanging) and the one-shot lifecycle after
-shutdown (the same restart procedure repeated with a waiting container).
+The Engine-matrix rows below are the live rows that stayed OPEN at the
+mechanism baseline; the instrument covers them and its Engine-dependent rows
+skip with an actionable reason where no real Engine endpoint is provided.
+Two matrix bullets are operator-executed procedures rather than instrument
+tests, because the instrument must not restart a shared daemon:
+daemon-shutdown cancellation (restart the Engine during an active long
+pull/build; the operation must fail with a typed transport/context error
+instead of hanging) and the one-shot lifecycle after shutdown (the same
+restart procedure repeated with a waiting container).
 The Session credential parsing/storage row stays OPEN with D0.2: the
 mechanism rows prove the exact-registry matching and both auth encodings;
 the protected-Session credential-store bridge and its SQLite/audit/log canary
@@ -281,6 +277,52 @@ storage proof are D0.2 production work verified against the migration map.
 `registry login` remains part of this migration map: the mechanism rows prove
 the exact-registry-address matching and both auth encodings its stored
 credentials flow through.
+
+#### Recorded Phase-0 Engine-matrix run (GitHub Actions)
+
+The instrument matrix executed in required mode
+(`D01_GATE_REQUIRED=1`) inside the manual Phase-0 workflow
+(`.github/workflows/release3-phase0-gates.yml`, `workflow_dispatch`-only,
+checkout pinned to `github.sha`):
+
+- tested source SHA: `9a60c6ad1d58b04251afd1449f9219009c1da752`;
+- workflow run ID: `34150959659` (fix trail: runs
+  `34133347326`–`34150959659`; every earlier failure was resolved by a
+  recorded probe/workflow fix, never by reclassifying a failed row as
+  optional);
+- **current Engine row: PASS, 15/15 required-mode rows** against the
+  hosted `ubuntu-24.04` Engine, negotiated API `1.48`: negotiation and
+  info, public pull, BuildKit build, supported legacy-build behavior,
+  deterministic pull and build cancellation (image/absence asserted after
+  cancellation), one-shot create/start/disconnected-wait/remove, logs and
+  exec primitives, disposable authenticated registry (loopback-only
+  publication, actual host port taken from inspect, credentials
+  provisioned through a disposable volume), private pull, private `FROM`,
+  exact registry matching, wrong-credential canary rejected at the
+  registry boundary, typed Engine-error classification, and
+  registry-auth bisect facts (registry image
+  `sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373`);
+- **minimum supported Engine row: PASS with the exercised lower bound**
+  `docker:20.10.24-dind` (image
+  `sha256:af96c680a7e1f853ebdd50c1e0577e5df4089b033102546dd6417419564df3b5`,
+  negotiated API `1.41`, probe run inside a container sharing the DinD
+  network namespace): the full required-mode matrix passes. A recorded
+  attempt with `docker:19.03.15-dind` (API `1.40`, the client's declared
+  `MinAPIVersion`) proves that version cannot serve container rows on a
+  cgroup-v2 host (`cgroups: cgroup mountpoint does not exist`), so the
+  demonstrated, actually workable lower Engine is 20.10 (API `1.41`);
+- still **OPEN** (operator-executed procedures the instrument
+  deliberately does not perform against a shared daemon): the
+  daemon-shutdown cancellation procedure and the one-shot lifecycle after
+  an Engine restart. They require an owned disposable daemon restart
+  during an active pull/build; a disposable DinD engine can host them
+  without touching a shared daemon.
+
+The Session credential parsing/storage row stays OPEN with D0.2: the
+mechanism rows prove the exact-registry matching and both auth encodings;
+the protected-Session credential-store bridge and its SQLite/audit/log
+canary storage proof are D0.2 production work verified against the
+migration map.
 
 ## Resource-enforcement prerequisite
 
@@ -305,14 +347,22 @@ spike must prove:
 - fail-closed behavior when a required controller or placement cannot be
   proved.
 
-At the Phase-0 baseline no checked-in result proves this matrix. **The cgroup
-feasibility gate is OPEN.** The committed probe
-`scripts/cgroup-feasibility-probe` is the evidence-collection instrument for
-the spike; its recorded Phase-0 sandbox diagnostic (read-only cgroupfs, no
-systemd, no capabilities, no Engine socket) proves no hierarchy property and
-records why the gate could not be closed there. User-mode/rootless remains
-mandatory for R3; failure of the spike therefore requires an architecture
-escalation under `AGENTS.md`, not a silent system-mode-only implementation.
+At the Phase-0 baseline no checked-in result proved this matrix. The committed
+probe `scripts/cgroup-feasibility-probe` is the evidence-collection
+instrument for the spike; its recorded Phase-0 sandbox diagnostic
+(read-only cgroupfs, no systemd, no capabilities, no Engine socket) proves no
+hierarchy property and records why the gate could not be closed there.
+
+Phase-0 closure status (recorded in `docs/release-3-resource-constraints.md`):
+the **system-mode** feasibility gate is closed by the recorded GitHub Actions
+run `34150959659`; the **rootless/user-mode** gate is blocked at the
+environment boundary (repo owner decision
+`9a60c6ad1d58b04251afd1449f9219009c1da752`) until a supported, normally
+configured rootless Docker deployment is provisioned for the unchanged guest
+harness. User-mode/rootless remains mandatory for R3; the block is an
+environment-provisioning prerequisite and requires either the supported
+deployment or an architecture escalation under `AGENTS.md` — not a silent
+system-mode-only implementation.
 
 ## Ordered implementation tasks
 
