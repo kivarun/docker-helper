@@ -92,6 +92,14 @@ if ! opensuse_zypper_refresh; then
   echo "REPO-FAILURE: zypper refresh exhausted attempts; aborting bootstrap" >&2
   exit 1
 fi
+# The system containerd config forces its own state dir on every
+# containerd process that reads it (including the user-owned one the
+# rootless daemon probes); this probe VM runs no system containerd, so
+# move the shipped config aside and record the action.
+if [ -f /etc/containerd/config.toml ]; then
+  mv /etc/containerd/config.toml /etc/containerd/config.toml.probe-disabled
+  echo "EVIDENCE: moved the shipped /etc/containerd/config.toml aside (no system containerd is used by this gate)"
+fi
 opensuse_zypper install -y --no-recommends docker containerd rootlesskit slirp4netns fuse-overlayfs checkpolicy policycoreutils curl
 log "rootless tool providers:"
 for b in dockerd-rootless.sh rootlesskit slirp4netns fuse-overlayfs newuidmap; do
