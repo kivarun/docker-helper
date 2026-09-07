@@ -96,7 +96,7 @@ This package must define behavior when:
 - the backend container is missing;
 - the backend container was changed outside docker-helper;
 - persistent helper state and backend state disagree;
-- the owning Session expires or is removed.
+- the owning Session expires or is closed.
 
 The package also defines the closed-Session tombstone required to observe cleanup completion. A successfully closed Session has one fixed internal ten-minute observation grace; it is not an extension of Session TTL or an operator retention setting. Physical Session deletion cascades to its Managed Containers, Operations, and idempotency records; audit retention remains independent. `closing` and `cleanup_failed` Sessions are never removed by this grace timer. Each cleanup attempt is one immutable Operation; after a transient failure the Session remains `closing`, persists its retry time and attempt count, and creates a new Operation when retry is due. Ownership ambiguity requires administrative resolution.
 

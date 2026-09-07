@@ -7,9 +7,11 @@ gate for Release 3. It does not replace the capability-specific verification
 requirements in the other Release 3 design documents. It connects those
 requirements into one threat model, environment matrix, and acceptance process.
 
-The implementation baseline is Release 2.1 at
-`694ca5944c87b17303b761c5f38e4afd390a7d89`. Release 3 must preserve the
-authentication, workspace, MAC, secret-handling, packaging, and deployment
+The implementation baseline is Release 2.1 production behavior at
+`54cc853c87ad3706dfe28829a0147a0dc62afbc6`; the Phase-0 document baseline is
+the head of the Phase-0 documentation series recorded in
+`docs/release-3-vocabulary-and-implementation-map.md`. Release 3 must preserve
+the authentication, workspace, MAC, secret-handling, packaging, and deployment
 boundaries already established there while adding Managed Containers, durable
 Operations, Session networking, exec, resource ceilings, and loopback port
 publishing.
@@ -134,6 +136,11 @@ containers created outside docker-helper, or the Docker daemon itself.
   administrator decision; it is never converted into automatic deletion.
 - Only successfully `closed` Sessions receive the fixed ten-minute observation
   grace. The grace is not TTL renewal or configurable retention.
+- No maintenance or CLI path physically deletes an ownership row whose
+  resources have not completed cleanup. The offline `session cleanup` command
+  may only purge already-`closed` tombstones whose fixed grace has elapsed;
+  the durable `session.cleanup` Operation and the Session lifecycle service
+  remain the only production teardown owner.
 
 ### Secrets and workload-controlled data
 
