@@ -594,23 +594,37 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bcrypt: %v", err)
 	}
-	htFile, err := os.CreateTemp("", "d01-htpasswd-*")
+	// Provision the htpasswd credential through a disposable volume instead
+	// of a bind-mounted host path: when the probe runs in a container (the
+	// DinD floor setup), its filesystem is invisible to the daemon, so a
+	// host-path bind would silently mount an empty file. The volume is
+	// written by a disposable helper container and read by the registry.
+	const authVolume = "d01-gate-auth"
+	if _, err := cli.VolumeCreate(ctx, client.VolumeCreateOptions{Name: authVolume}); err != nil {
+		t.Fatalf("create auth volume: %v", err)
+	}
+	defer func() {
+		_, _ = cli.VolumeRemove(context.WithoutCancel(ctx), authVolume, client.VolumeRemoveOptions{Force: true})
+	}()
+	seed, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
+			Image: "alpine:3.24",
+			Cmd:   []string{"sh", "-c", `printf 'gate:%s\n' "$D01_HASH" > /auth/htpasswd`},
+			Env:   []string{"D01_HASH=" + string(hash)},
+		},
+		HostConfig: &container.HostConfig{Binds: []string{authVolume + ":/auth"}},
+	})
 	if err != nil {
-		t.Fatalf("tempfile: %v", err)
+		t.Fatalf("create htpasswd helper: %v", err)
 	}
-	htPath := htFile.Name()
-	defer os.Remove(htPath)
-	if _, err := htFile.WriteString("gate:" + string(hash) + "\n"); err != nil {
-		htFile.Close()
-		t.Fatalf("write htpasswd: %v", err)
+	if _, err := cli.ContainerStart(ctx, seed.ID, client.ContainerStartOptions{}); err != nil {
+		t.Fatalf("start htpasswd helper: %v", err)
 	}
-	if err := htFile.Close(); err != nil {
-		t.Fatalf("close htpasswd: %v", err)
-	}
-	// The registry container may run as a non-root user; keep the credential
-	// file readable inside the container.
-	if err := os.Chmod(htPath, 0o644); err != nil {
-		t.Fatalf("chmod htpasswd: %v", err)
+	waitResult := cli.ContainerWait(ctx, seed.ID, client.ContainerWaitOptions{})
+	select {
+	case <-waitResult.Result:
+	case err := <-waitResult.Error:
+		t.Fatalf("wait htpasswd helper: %v", err)
 	}
 
 	port, err := network.ParsePort("5000/tcp")
@@ -633,7 +647,7 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 				HostIP:   netip.MustParseAddr("127.0.0.1"),
 				HostPort: "",
 			}}},
-			Binds: []string{htPath + ":/auth/htpasswd:ro"},
+			Binds: []string{authVolume + ":/auth:ro"},
 		},
 	})
 	if err != nil {
@@ -812,10 +826,12 @@ func checkRegistryCredentials(t *testing.T, addr string) {
 	if err != nil {
 		t.Fatalf("authenticated registry ping: %v", err)
 	}
-	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("canary credential pair rejected by the registry boundary (status %d); htpasswd mismatch", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("canary credential pair rejected by the registry boundary (status %d): %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
+	resp.Body.Close()
 	t.Log("FACT: registry-canary-credentials=accepted at the registry boundary")
 }
 

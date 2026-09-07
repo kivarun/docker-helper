@@ -51,7 +51,11 @@ as_user() {
   local tmp rc
   tmp="$(mktemp /tmp/dh-feas-user-script.XXXXXX)"
   chmod 0644 "$tmp"
-  printf '#!/bin/bash\nset -u\nexport XDG_RUNTIME_DIR=%q\n%s\n' "$RUN_DIR" "$*" > "$tmp"
+  {
+    printf '#!/bin/bash\nset -u\nexport XDG_RUNTIME_DIR=%q\n' "$RUN_DIR"
+    printf '%q ' "$@"
+    printf '\n'
+  } > "$tmp"
   su -l "$FEAS_USER" -c "bash $tmp"
   rc=$?
   rm -f "$tmp"
@@ -196,26 +200,30 @@ echo "STEP-4-DONE"
 
 step 5 "aggregate memory ceiling enforced over sibling workloads"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
-# Same anonymous RSS allocation mechanism as the system harness: two 90M
-# shell strings under a 128M Session-slice ceiling with 96M container
-# limits; the anonymous charge failure is a deterministic parent OOM.
+# Same calibration as the system harness: 160M container limits so the
+# container-level ceiling never fires for a single 90M allocation; the
+# 128M Session-slice ceiling is the binding constraint and its anonymous
+# charge failure is a deterministic parent OOM.
 ALLOCATOR='sleep 3; x=$(dd if=/dev/zero bs=1M count=90 2>/dev/null | tr "\000" "A"); echo allocated=${#x}; sleep 120'
-docker run -d --name cgm1 --cgroup-parent="$SESS_SLICE" --memory 96m \
+docker run -d --name cgm1 --cgroup-parent="$SESS_SLICE" --memory 160m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
-docker run -d --name cgm2 --cgroup-parent="$SESS_SLICE" --memory 96m \
+docker run -d --name cgm2 --cgroup-parent="$SESS_SLICE" --memory 160m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
 sleep 16
-for c in cgm1 cgm2; do
-  fact "allocator-$c=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$c")"
-  fact "allocator-$c-log=$(docker logs "$c" 2>&1 | tail -1)"
-done
-EX1=$(docker inspect --format '{{.State.ExitCode}}' cgm1)
-EX2=$(docker inspect --format '{{.State.ExitCode}}' cgm2)
-fact "session-slice-memory-events=$(cat "$SESS_DIR/memory.events" 2>/dev/null || echo ABSENT)"
 KILLED=0
-{ [ "$EX1" = "137" ] || [ "$EX1" = "255" ]; } && KILLED=1
-{ [ "$EX2" = "137" ] || [ "$EX2" = "255" ]; } && KILLED=1
-[ "$KILLED" = "1" ] || die "aggregate memory ceiling did not OOM-kill an allocator under the Session slice (exits $EX1/$EX2)"
+SURVIVED=0
+for c in cgm1 cgm2; do
+  ST=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$c")
+  fact "allocator-$c=$ST"
+  fact "allocator-$c-log=$(docker logs "$c" 2>&1 | tail -1)"
+  case "$ST" in
+    *"exit=137"*|*"exit=255"*) KILLED=$((KILLED+1)) ;;
+    *allocated=94371840*) SURVIVED=$((SURVIVED+1)) ;;
+  esac
+done
+fact "session-slice-memory-events=$(cat "$SESS_DIR/memory.events" 2>/dev/null || echo ABSENT)"
+[ "$KILLED" -ge 1 ] || die "aggregate memory ceiling did not OOM-kill an allocator under the Session slice"
+[ "$SURVIVED" -ge 1 ] || die "no allocator completed its 90M allocation; the test did not exercise the ceiling as designed"
 cat "$SESS_DIR/memory.events" 2>/dev/null | grep -E "oom_kill [1-9]" || die "session slice memory.events shows no oom_kill"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
 echo "STEP-5-DONE"

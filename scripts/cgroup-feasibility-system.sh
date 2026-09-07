@@ -134,28 +134,32 @@ step 6 "aggregate memory ceiling enforced over sibling workloads"
 echo "134217728" > "$S1/memory.max" || die "cannot set aggregate memory.max on $S1"
 fact "session-memory-max=$(cat "$S1/memory.max")"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
-# Anonymous RSS allocation: 90M shell-string variables, each under its own
-# 96M container limit; together they exceed the 128M Session ceiling, and
-# the anonymous charge failure is a deterministic parent-level OOM kill.
-# The container log records the allocated size as direct evidence.
+# Anonymous RSS allocation: 90M shell-string variables. Each container limit
+# is 160M so the container-level ceiling can never fire for a single 90M
+# allocation; together they exceed the 128M Session ceiling, and the
+# anonymous charge failure is a deterministic parent-level OOM kill. The
+# surviving container's log records the allocated size as direct evidence.
 ALLOCATOR='sleep 3; x=$(dd if=/dev/zero bs=1M count=90 2>/dev/null | tr "\000" "A"); echo allocated=${#x}; sleep 120'
-docker run -d --name cgm1 --cgroup-parent="$S1_REL" --memory 96m \
+docker run -d --name cgm1 --cgroup-parent="$S1_REL" --memory 160m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
-docker run -d --name cgm2 --cgroup-parent="$S1_REL" --memory 96m \
+docker run -d --name cgm2 --cgroup-parent="$S1_REL" --memory 160m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
 sleep 16
+KILLED=0
+SURVIVED=0
 for c in cgm1 cgm2; do
-  fact "allocator-$c=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$c")"
+  ST=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$c")
+  fact "allocator-$c=$ST"
   fact "allocator-$c-log=$(docker logs "$c" 2>&1 | tail -1)"
+  case "$ST" in
+    *"exit=137"*|*"exit=255"*) KILLED=$((KILLED+1)) ;;
+    *allocated=94371840*) SURVIVED=$((SURVIVED+1)) ;;
+  esac
 done
 fact "session-memory-current=$(cat "$S1/memory.current")"
-EX1=$(docker inspect --format '{{.State.ExitCode}}' cgm1)
-EX2=$(docker inspect --format '{{.State.ExitCode}}' cgm2)
 fact "session-memory-events=$(cat "$S1/memory.events")"
-KILLED=0
-{ [ "$EX1" = "137" ] || [ "$EX1" = "255" ]; } && KILLED=1
-{ [ "$EX2" = "137" ] || [ "$EX2" = "255" ]; } && KILLED=1
-[ "$KILLED" = "1" ] || die "aggregate memory ceiling did not OOM-kill an allocator under $S1 (exits $EX1/$EX2)"
+[ "$KILLED" -ge 1 ] || die "aggregate memory ceiling did not OOM-kill an allocator under the Session (no container was killed)"
+[ "$SURVIVED" -ge 1 ] || die "no allocator completed its 90M allocation; the test did not exercise the ceiling as designed"
 echo "$S1/memory.events" | grep -E "oom_kill [1-9]" || die "session memory.events shows no oom_kill"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
 echo "STEP-6-DONE"
