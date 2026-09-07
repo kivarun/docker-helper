@@ -134,16 +134,18 @@ step 6 "aggregate memory ceiling enforced over sibling workloads"
 echo "134217728" > "$S1/memory.max" || die "cannot set aggregate memory.max on $S1"
 fact "session-memory-max=$(cat "$S1/memory.max")"
 docker rm -f cgm0 cgm1 cgm2 >/dev/null 2>&1 || true
-# Anonymous RSS allocation: 90M shell-string variables. Each container limit
-# is 160M so the container-level ceiling can never fire for a single 90M
-# allocation; the parent Session ceiling of 128M is the binding constraint.
-ALLOCATOR='sleep 3; x=$(dd if=/dev/zero bs=1M count=90 2>/dev/null | tr "\000" "A"); echo allocated=${#x}; sleep 120'
+# Anonymous RSS allocation: a single 90M python bytearray (no realloc
+# transient, so the allocation peak stays near 90M plus the interpreter).
+# Each container limit is 160M so the container-level ceiling can never
+# fire for one allocation; the parent Session ceiling of 128M is the
+# binding constraint. The process prints the allocated size as evidence.
+ALLOCATOR="apk add --no-cache python3 >/dev/null 2>&1; python3 -c 'import time; d=bytearray(94371840); print(\"allocated\", len(d), flush=True); time.sleep(120)'"
 # Control row: one 90M allocation completes under the 128M ceiling.
 docker run -d --name cgm0 --cgroup-parent="$S1_REL" --memory 160m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "control allocator failed to start"
 CONTROL_OK=0
-for i in $(seq 1 30); do
-  if docker logs cgm0 2>&1 | grep -q "allocated=94371840"; then
+for i in $(seq 1 45); do
+  if docker logs cgm0 2>&1 | grep -q "allocated 94371840"; then
     CONTROL_OK=1
     break
   fi

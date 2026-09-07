@@ -207,16 +207,16 @@ echo "STEP-4-DONE"
 
 step 5 "aggregate memory ceiling enforced over sibling workloads"
 docker rm -f cgm0 cgm1 cgm2 >/dev/null 2>&1 || true
-# Same design as the system harness: a single 90M allocation completes
-# under the 128M slice ceiling (control), then two concurrent ones exceed
-# it and the parent OOM engages; with 160M container limits a 137 exit is
-# only reachable from the parent.
-ALLOCATOR='sleep 3; x=$(dd if=/dev/zero bs=1M count=90 2>/dev/null | tr "\000" "A"); echo allocated=${#x}; sleep 120'
+# Same design as the system harness: a single 90M python-bytearray
+# allocation completes under the 128M slice ceiling (control), then two
+# concurrent ones exceed it and the parent OOM engages; with 160M
+# container limits a 137 exit is only reachable from the parent.
+ALLOCATOR="apk add --no-cache python3 >/dev/null 2>&1; python3 -c 'import time; d=bytearray(94371840); print(\"allocated\", len(d), flush=True); time.sleep(120)'"
 docker run -d --name cgm0 --cgroup-parent="$SESS_SLICE" --memory 160m \
   alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "control allocator failed to start"
 CONTROL_OK=0
-for i in $(seq 1 30); do
-  if docker logs cgm0 2>&1 | grep -q "allocated=94371840"; then
+for i in $(seq 1 45); do
+  if docker logs cgm0 2>&1 | grep -q "allocated 94371840"; then
     CONTROL_OK=1
     break
   fi
