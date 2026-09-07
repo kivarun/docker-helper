@@ -258,7 +258,16 @@ EVT=$(cat "$SESS_DIR/pids.events")
 fact "session-slice-pids-current=$CUR"
 fact "session-slice-pids-events=$EVT"
 [ "$CUR" -le 24 ] || die "aggregate PIDs ceiling not enforced (pids.current=$CUR > 24)"
-echo "$EVT" | grep -E "max [1-9]" || die "pids.events shows no max enforcement"
+if ! echo "$EVT" | grep -E "max [1-9]"; then
+  echo "DIAG: cgp1: $(docker inspect --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' cgp1 2>&1)"
+  echo "DIAG: cgp1 log tail: $(docker logs cgp1 2>&1 | tail -4 | tr '\n' '|')"
+  echo "DIAG: scopes under the Session slice:"
+  for s in "$SESS_DIR"/docker-*.scope; do
+    [ -e "$s" ] || continue
+    echo "DIAG:   $(basename "$s") pids.current=$(cat "$s/pids.current" 2>/dev/null) pids.events=$(cat "$s/pids.events" 2>/dev/null | tr '\n' ' ')"
+  done
+  die "pids.events shows no max enforcement"
+fi
 docker rm -f cgp1 >/dev/null 2>&1 || true
 echo "STEP-6-DONE"
 
