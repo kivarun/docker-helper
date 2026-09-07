@@ -76,7 +76,7 @@ closure and TTL expiration are the ownership-lifecycle exception: cleanup
 automatically removes every Session resource whose ownership remains proven.
 All other removal or repair requires an explicit authorized Command.
 
-An authorized Principal, owning Launcher, or administrator may renew an active Session. Renewal resets its expiration to the effective maximum Session TTL from the time of renewal. A Session cannot renew itself, and renewal is never implicit or activity-based.
+An authorized Principal, owning Launcher, or administrator may renew an active Session. Renewal resets its expiration to the currently configured global `session_ttl` counted from the time of renewal. A Session cannot renew itself, and renewal is never implicit or activity-based.
 
 ### Container logs
 

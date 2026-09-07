@@ -392,7 +392,7 @@ Required migration/regression cases include:
 - old build/run supervisor cannot be removed while Launcher admission/runtime
   inspection still calls it;
 - private pull/private `FROM` plus registry-login secret canaries;
-- rootful/rootless cgroup enforcement before R3 run/container readiness.
+- system/rootless cgroup enforcement before R3 run/container readiness.
 
 ## D0 start gate after Phase 0
 
