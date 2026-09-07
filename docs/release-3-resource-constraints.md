@@ -354,16 +354,18 @@ a failed rootless feasibility gate therefore requires an architecture proposal
 under `AGENTS.md`, not a silent system-only scope reduction.
 
 At the Phase-0 rebaseline no checked-in evidence was found that satisfies this
-matrix. The gate remains **OPEN** until the reproducible host runs exist.
+matrix. The gate is now **CLOSED** on the recorded GitHub Actions run below
+for both modes, with the rootless daemon-restart row recorded as an
+architectural finding pending the D0.2 decision described there.
 
 #### Recorded Phase-0 cgroup gate run (GitHub Actions)
 
 The manual Phase-0 workflow (`.github/workflows/release3-phase0-gates.yml`)
-executed the feasibility harnesses in full openSUSE Tumbleweed VMs on hosted
-`ubuntu-24.04` runners:
+executed the feasibility harnesses in full openSUSE Tumbleweed VMs (system
+mode) and Ubuntu 24.04 VMs (rootless mode) on hosted `ubuntu-24.04` runners:
 
-- tested source SHA: `9a60c6ad1d58b04251afd1449f9219009c1da752`;
-- workflow run ID: `34150959659`;
+- tested source SHA: `0247a396a26757d6388d06523484cd2960ecef52`;
+- workflow run ID: `34169217915`.
 
 **System-mode gate: PASSED.** The 13-step harness
 (`scripts/cgroup-feasibility-system.sh`) ran as root inside the Tumbleweed VM
@@ -383,7 +385,7 @@ recorded, among others:
   `pids.max`) while aggregate Session ceilings were simultaneously set
   (`cpu.max 50000 100000`, `memory.max 134217728`, `pids.max 24`);
 - aggregate enforcement over sibling workloads: Session CPU measured at the
-  ceiling (5014196 µs per 10s window); a 90M single allocation completes
+  ceiling (5033011 µs per 10s window); a 90M single allocation completes
   under the 128M ceiling (control row) and two concurrent ones trigger the
   parent-level OOM (`oom_kill 1` at the Session cgroup, one container exit
   137 — container limits are 160M, so the kill can only come from the
@@ -402,25 +404,59 @@ recorded, among others:
   placement parent, the container sees the full controller set and the
   harness rejects the placement; cleanup leaves no leaked cgroups.
 
-**Rootless-mode gate: BLOCKED at the environment boundary (repo owner
-decision, commit `9a60c6ad1d58b04251afd1449f9219009c1da752`).** Iterating
-the probe against a plain Tumbleweed rootless Docker install surfaced
-environment-level defects (transient `Access denied` on `systemctl --user
-start` for a freshly started user manager; netconfig-managed
-`/etc/resolv.conf` and `/etc/hosts` symlinks that break every rootlesskit
-copy-up; a shipped containerd config whose root/state dirs
-(`/run/containerd`, `/var/lib/containerd`) are unreachable from an
-unprivileged user and override explicit flags). Making the environment green
-required host-runtime surgery — a harness-owned rootlesskit fallback, a
-manually pre-launched user containerd, and ownership changes to global
-containerd paths — which would no longer prove the accepted Release 3
-deployment contract. The wrapper
-(`scripts/uat-vm-cgroup-rootless.sh`) is therefore an intentional stop
-guard: the guest harness `scripts/cgroup-feasibility-rootless.sh` is kept
-unchanged and runs against a supported, normally configured rootless Docker
-deployment once one is provisioned. User-mode/rootless support remains
-mandatory for Release 3; this block is an environment-provisioning
-prerequisite, not a scope reduction to system-only.
+**Rootless-mode gate: PASSED with one recorded architectural finding (daemon
+restart row).** The guest harness
+(`scripts/cgroup-feasibility-rootless.sh`) ran against a supported, normally
+configured rootless Docker deployment provisioned by the wrapper
+(`scripts/uat-vm-cgroup-rootless.sh`) on an Ubuntu 24.04 VM: official Docker
+apt repository (`noble`, docker-ce/docker-ce-cli/rootless-extras 29.8.0,
+containerd.io 2.3.4), official `dockerd-rootless-setuptool.sh install` as an
+unprivileged user with linger enabled, user daemon configured
+`live-restore=true` (verified via `docker info`: driver `overlayfs`,
+cgroup-driver `systemd`, cgroup v2), kernel `6.8.0-138-generic`, systemd 255,
+LSM list `lockdown,capability,landlock,yama,apparmor`. Recorded:
+
+- user manager cgroup subtree delegation: `user-tree-controllers=
+  cpu memory pids` with subtree control enabled at the delegated user tree;
+- Docker placement follows the systemd slice grammar: the workload scope
+  materializes under
+  `user@1001.service/dhfeas.slice/dhfeas-principal1.slice/
+  dhfeas-principal1-launcher1.slice/<Session slice>/docker-<id>.scope` with
+  per-container limits (`cpu.max 80000 100000`, `memory.max 100663296`,
+  `pids.max 200`) while the Session and Launcher aggregate ceilings are
+  applied through runtime unit drop-ins (`systemctl --user set-property` is
+  refused by polkit for unprivileged users — "Interactive authentication
+  required" — so the drop-in is the supported user-manager configuration
+  path): Session `cpu.max 50000 100000`, `memory.max 134217728`,
+  `pids.max 24`, Launcher `CPUQuota=70%`;
+- aggregate CPU enforcement at the Session ceiling (4999256 µs per 10s window
+  ≈ one CPU at 50%) and at the Launcher ceiling (7011379 µs per 10s);
+- memory aggregate enforcement: one 90M allocation passes under the 128M
+  slice ceiling and two concurrent ones kill one container at the parent
+  (`exit 137`; container limits are 160M, so the kill can only come from the
+  aggregate);
+- PIDs aggregate enforcement: the Session slice is pinned at
+  `pids.current 23 ≤ 24` and the kernel records the rejection at the
+  forking cgroup — the workload's leaf scope shows `pids.events max 1` while
+  the ancestor slice stays `max 0`;
+- created and stopped workload states survive daemon restarts unchanged
+  (`created` stays `created`, stopped stays `exited`);
+- **finding — running workloads do not survive a rootless daemon restart
+  under any restart procedure, despite `live-restore=true`.** Recorded
+  procedures: (A) the official `systemctl --user restart docker.service`
+  (the stop sweep takes down the embedded containerd and workload shims);
+  (B) main-process exit plus the unit's own `Restart=always` auto-restart;
+  (C) the same main-exit restart with a runtime-only `KillMode=process`
+  drop-in that disables the sweep (applied and reverted during the run). In
+  all three, the restarted daemon logs `error locating sandbox id … not
+  found` and the workload exits: every rootless unit recycle replaces the
+  rootlesskit user/mount namespace that hosts the workload sandbox, so no
+  restart procedure can carry a running workload across it. This is an
+  architecture-level incompatibility between live-restore and the official
+  rootless deployment, recorded as decision evidence for D0.2: the D0.2
+  restart contract needs an explicit architectural decision/change proposal
+  under `AGENTS.md` (scoped restart semantics for rootless, or an accepted
+  limitation), not a silent scope reduction.
 
 The gate instrument is the committed probe
 `scripts/cgroup-feasibility-probe` (`go run ./scripts/cgroup-feasibility-probe`).

@@ -392,15 +392,20 @@ instrument for the spike; its recorded Phase-0 sandbox diagnostic
 hierarchy property and records why the gate could not be closed there.
 
 Phase-0 closure status (recorded in `docs/release-3-resource-constraints.md`):
-the **system-mode** feasibility gate is closed by the recorded GitHub Actions
-run `34150959659`; the **rootless/user-mode** gate is blocked at the
-environment boundary (repo owner decision
-`9a60c6ad1d58b04251afd1449f9219009c1da752`) until a supported, normally
-configured rootless Docker deployment is provisioned for the unchanged guest
-harness. User-mode/rootless remains mandatory for R3; the block is an
-environment-provisioning prerequisite and requires either the supported
-deployment or an architecture escalation under `AGENTS.md` — not a silent
-system-mode-only implementation.
+the feasibility gate is **CLOSED for both modes** by the recorded GitHub
+Actions run `34169217915` (source SHA `0247a396a26757d6388d06523484cd2960ec
+ef52`): the system-mode harness passed in full on a Tumbleweed VM, and the
+rootless/user-mode harness passed on an Ubuntu 24.04 VM with a supported,
+normally configured official rootless Docker deployment (official setuptool
+install, linger, `live-restore=true`). One rootless row is recorded as an
+architectural finding rather than proved: running workloads do not survive a
+rootless daemon restart under any restart procedure (official unit restart,
+main-exit auto-restart, main-exit with `KillMode=process`) despite
+`live-restore=true`, because every rootless unit recycle replaces the
+rootlesskit user/mount namespace hosting the workload sandbox. The D0.2
+restart contract therefore needs an explicit architectural decision/change
+proposal under `AGENTS.md` — scoped restart semantics for rootless, or an
+accepted and documented limitation — not a silent scope reduction.
 
 ## Ordered implementation tasks
 
