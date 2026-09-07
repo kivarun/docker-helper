@@ -251,7 +251,14 @@ echo "STEP-5-DONE"
 step 6 "aggregate PIDs ceiling enforced over sibling workloads"
 docker rm -f cgp1 >/dev/null 2>&1 || true
 docker run -d --name cgp1 --cgroup-parent="$SESS_SLICE" --pids-limit 500 \
-  alpine:3.24 sh -c 'sleep 2; for i in $(seq 1 100); do sleep 300 & done; sleep 120' >/dev/null || die "pids workload failed to start"
+  alpine:3.24 sh -c 'sleep 2; (for i in $(seq 1 100); do sleep 300 & done) 2>/dev/null; sleep 120' >/dev/null || die "pids workload failed to start"
+# Read the limit sources before the workload forks so a rejection can be
+# attributed to the cgroup pids controller or to inherited rlimits.
+sleep 1
+CGP1ID=$(docker inspect --format '{{.Id}}' cgp1)
+fact "cgp1-scope-pids-max=$(cat "$SESS_DIR/docker-$CGP1ID.scope/pids.max" 2>/dev/null || echo ABSENT)"
+fact "cgp1-container-nproc=$(docker exec cgp1 sh -c "grep -i 'Max processes' /proc/1/limits 2>/dev/null" 2>&1 | tail -1 || echo unknown)"
+fact "feasu-host-processes=$(ps -u "$FEAS_USER" --no-headers 2>/dev/null | wc -l)"
 sleep 8
 CUR=$(cat "$SESS_DIR/pids.current")
 EVT=$(cat "$SESS_DIR/pids.events")
