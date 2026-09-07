@@ -999,7 +999,7 @@ Without `--limit`, CLI list follows pages to exhaustion. With `--limit`, it
 returns at most that many total items. Only an administrator may use these
 Commands and Queries; every other valid authority receives `403 forbidden`.
 
-## Session network repair surface
+## Session management surface
 
 Session lookup uses:
 
@@ -1037,6 +1037,12 @@ The Session representation does not duplicate a cleanup Operation's error or
 cancellation payload. An authorized caller follows the public Operation ID for
 that detail. Resource-ceiling and publishing-grant projections extend this
 same object below; they are not separate Session resources.
+
+`GET /sessions` keeps the Release 2.1 authority-scoped list Query and its
+`principal`/`launcher` narrowing filters. Each Release 3 row additionally
+reports the public `state` field so `closing`, `cleanup_failed`, and a
+`closed` tombstone are observable in the list. Row projections stay compact;
+lifecycle detail belongs to `session show`.
 
 The Session, Launcher, and Principal show projections use one resource-policy
 shape:
@@ -1201,6 +1207,96 @@ Foreign and nonexistent Sessions return the same
 `404 session_not_found`. A Session bearer becomes invalid when cleanup claims
 its Session, so a `closing`, `cleanup_failed`, or `closed` Session is observed
 through an owning Launcher, owning Principal, or administrator credential.
+
+### Explicit closure and cleanup retry
+
+Explicit closure reuses the existing authority-scoped Session route:
+
+```text
+DELETE /sessions/{session_id}
+```
+
+Closure is a lifecycle Command, not a physical deletion. It claims the Session
+through the durable Session lifecycle owner and tears every owned resource
+down exclusively through `session.cleanup`. The request has no body and does
+not accept `Idempotency-Key`, because internal `session.cleanup` attempts
+never use client idempotency keys. An administrator token, the owning
+Principal credential, or the owning Launcher credential may invoke it; a
+Session bearer cannot close a Session. A foreign or nonexistent target is the
+same `404 session_not_found`.
+
+| Requested Session state | Result |
+| --- | --- |
+| `active` | `202 Accepted` with the admitted `session.cleanup` Operation and `Location: /operations/{id}`. |
+| `closing` with one cleanup Operation active | `202 Accepted` returning that same active Operation; no parallel attempt is created. |
+| `closing` with no active attempt | `202 Accepted` admitting one immediate new attempt. This is the public cleanup-retry capability; there is no separate retry route. |
+| `cleanup_failed` | `202 Accepted` for an administrator only; any other valid authority receives `403 forbidden`. Automatic retry remains disabled. |
+| `closed` tombstone | `204 No Content` while the fixed observation grace persists. |
+| purged, absent, or foreign | `404 session_not_found` |
+
+The CLI command replaces Release 2.1's `session delete`:
+
+```text
+docker-helper session close --id SESSION_ID [--detach] [--json]
+```
+
+`--id` is required. The CLI waits for the admitted cleanup attempt by default
+and may return after admission with `--detach`. The rename is an explicit
+Release 3 compatibility change: Release 2.1's `session delete` physically
+removed the Session row, while `session close` claims it for durable cleanup
+and the ownership row survives until resource teardown finishes and the
+tombstone grace expires. The HTTP route and verb are unchanged.
+
+### Session renewal
+
+Renewal is a new Release 3 management Command under the Session route
+hierarchy:
+
+```text
+POST /sessions/{session_id}/renew
+```
+
+The request body is empty and the target Session is always explicit; renewal
+uses no Session inference. The owning Principal credential, the owning
+Launcher credential, or an administrator token may renew. A Session bearer
+receives `403 forbidden`: it cannot renew its own Session. A renewal commits
+only while the Session is `active` and computes
+
+```text
+new_expires_at = server_now + current session_ttl
+```
+
+from the configured global `session_ttl` snapshot at the renewal transaction.
+There is no caller-selected duration, delegated TTL, lease ceiling, or
+Principal/Launcher TTL hierarchy. The successful result is HTTP `200` with the
+updated Session management projection, so the new `expires_at` is directly
+observable. The Session bearer value is unchanged. A `closing`,
+`cleanup_failed`, or `closed` Session returns `409 session_not_renewable`; a
+purged or foreign target returns `404 session_not_found`. Renewal is
+serialized with expiration claiming: exactly one transition wins, either the
+new deadline commits while the Session is still `active` or teardown claims
+the Session first and renewal fails.
+
+```text
+docker-helper session renew --id SESSION_ID [--json]
+```
+
+`--id` is required. Audit records the initiator, Session ID, previous
+expiration, and new expiration without bearer material.
+
+### Offline Session maintenance
+
+```text
+docker-helper session cleanup
+```
+
+The existing offline maintenance command is retained with narrowed Release 3
+semantics. It requires neither a running daemon nor a token, holds the daemon
+instance lock, performs no Docker, mount, or MAC teardown, and never deletes
+an `active`, `closing`, or `cleanup_failed` Session row, including an expired
+one. Its only mutation is purging already-`closed` tombstones whose fixed
+observation grace has elapsed. Resource teardown stays owned by the durable
+`session.cleanup` path; offline maintenance is not a second teardown owner.
 
 ### Explicit repair
 
