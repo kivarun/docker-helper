@@ -814,10 +814,11 @@ subcase_g() {
     reg_fail "G: launcher credential create failed"
   fi
 
-  # 5. FIELD after USER: the canonical show-field vocabulary.
+  # 5. FIELD after USER: the canonical show-field vocabulary. (The expected
+  #    list is LC_ALL=C sorted: assert_completion compares sorted-unique.)
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "")"
   assert_completion "G: principal show USER <TAB> offers the FIELD vocabulary" \
-    "username|uid|gid|home|enabled|allowed_roots" "$out" || true
+    "allowed_roots|enabled|gid|home|uid|username" "$out" || true
 
   # 6. FIELD partial: a typed prefix filters the vocabulary.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "a")"
@@ -830,7 +831,7 @@ subcase_g() {
   # 8. operator flags (bool and value-taking) never shift the FIELD position.
   out="$(run_completion "$script" /usr/bin/docker-helper principal show --system --token-file "$cred" "$user" "")"
   assert_completion "G: flags do not shift the FIELD position" \
-    "username|uid|gid|home|enabled|allowed_roots" "$out" || true
+    "allowed_roots|enabled|gid|home|uid|username" "$out" || true
 
   cleanup_principal "$user"
   cleanup_principal "$user2"
