@@ -90,12 +90,12 @@ as_user() {
 # $XDG_RUNTIME_DIR/systemd/user/<unit>.d/50-dh-feas.conf and are applied by
 # systemd when the unit materializes.
 apply_user_unit_props() {
-  local unit="$1" props="" p
-  shift
+  local unit="$1" section="$2" props="" p
+  shift 2
   for p in "$@"; do props+=" $p"; done
   as_user bash -c "set -e
 mkdir -p \"\$XDG_RUNTIME_DIR/systemd/user/$unit.d\"
-printf '%s\n' '[Slice]'$props > \"\$XDG_RUNTIME_DIR/systemd/user/$unit.d/50-dh-feas.conf\"
+printf '%s\n' '[$section]'$props > \"\$XDG_RUNTIME_DIR/systemd/user/$unit.d/50-dh-feas.conf\"
 systemctl --user daemon-reload"
 }
 
@@ -156,9 +156,9 @@ step 3 "workload placement under the delegated Session slice"
 docker pull -q alpine:3.24 >/dev/null 2>&1 || die "could not pull alpine:3.24 (rootless pull gate)"
 # Aggregate ceilings are configured before the first workload under the
 # hierarchy so systemd reads the drop-ins when it materializes the slices.
-apply_user_unit_props "$SESS_SLICE" "CPUQuota=50%" "MemoryMax=128M" "TasksMax=24" \
+apply_user_unit_props "$SESS_SLICE" Slice "CPUQuota=50%" "MemoryMax=128M" "TasksMax=24" \
   || die "could not configure the Session slice runtime drop-in (delegation gate)"
-apply_user_unit_props "$L_SLICE" "CPUQuota=70%" \
+apply_user_unit_props "$L_SLICE" Slice "CPUQuota=70%" \
   || die "could not configure the Launcher slice runtime drop-in (delegation gate)"
 fact "session-slice-set=CPUQuota=50% MemoryMax=128M TasksMax=24 (runtime drop-in)"
 fact "launcher-slice-set=CPUQuota=70% (runtime drop-in)"
@@ -331,10 +331,10 @@ fi
 [ "$(docker inspect --format '{{.State.Status}}' cgr1)" = "exited" ] || die "stopped workload changed state across daemon restart"
 
 # Procedure B: the unit's own Restart=always path — the restart form live
-# restore is designed for (daemon crash/upgrade). The MAIN process exits
-# (rootlesskit forwards SIGTERM to dockerd) and systemd restarts the unit
-# after RestartSec=2 without sweeping the control group, so the embedded
-# containerd and the workload scopes can survive.
+# restore is designed for (daemon crash/upgrade). The MAIN process exits and
+# systemd restarts the unit after RestartSec=2 without an explicit stop
+# cycle, so the embedded containerd and the workload scopes could survive.
+# Empirical outcome is recorded, not assumed.
 docker rm -f cgr5 >/dev/null 2>&1 || true
 docker run -d --name cgr5 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep 900' >/dev/null || die "running workload for restart procedure B failed"
 MAINPID="$(as_user systemctl --user show -p MainPID --value docker.service | tr -d '[:space:]')"
@@ -351,12 +351,57 @@ done
 [ "$RESTARTED" = 1 ] || die "docker.service did not come back after the main process exited (Restart=always path)"
 fact "restart-procedure-b=main-exit+Restart-always"
 docker inspect --format 'FACT: after-procedure-b cgr3={{.State.Status}} cgr4={{.State.Status}} cgr5={{.State.Status}}' cgr3 cgr4 cgr5
-[ "$(docker inspect --format '{{.State.Running}}' cgr5)" = "true" ] \
-  || die "running workload did not survive the main-exit restart path (live-restore contract)"
+if [ "$(docker inspect --format '{{.State.Running}}' cgr5)" != "true" ]; then
+  fact "restart-procedure-b=main-exit+Restart-always cgr5-not-preserved"
+  echo "DETECT: the main-exit auto-restart path also does not preserve running containers"
+  echo "DIAG: docker.service user-unit journal around the main-exit restart:"
+  as_user journalctl --user --since "-1 min" --no-pager 2>/dev/null | grep docker | tail -15 || true
+  C5SCOPE="$SESS_DIR/docker-$(docker inspect --format '{{.Id}}' cgr5).scope"
+  echo "DIAG: cgr5 scope after restart: dir=$([ -d "$C5SCOPE" ] && echo present || echo absent) pids.current=$(cat "$C5SCOPE/pids.current" 2>/dev/null || echo ABSENT)"
+fi
 [ "$(docker inspect --format '{{.State.Status}}' cgr3)" = "created" ] \
   || die "created workload changed state across the main-exit restart path"
-[ -d "$SESS_DIR/docker-$(docker inspect --format '{{.Id}}' cgr5).scope" ] \
-  || die "workload scope cgroup lost across the main-exit restart path"
+
+# Procedure C (non-official decision evidence): the official unit sets
+# KillMode=mixed, so every unit recycle sweeps the embedded containerd and
+# the workload shims. This variant applies a runtime-only KillMode=process
+# drop-in, repeats the main-exit restart, and reverts the drop-in. It
+# isolates the unit sweep as the suspected killer; the outcome is recorded
+# as evidence for the D0.2 restart decision, never asserted as behavior.
+apply_user_unit_props docker.service Service KillMode=process
+sleep 1
+docker rm -f cgr6 >/dev/null 2>&1 || true
+docker run -d --name cgr6 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep 900' >/dev/null || die "running workload for restart procedure C failed"
+MAINPID="$(as_user systemctl --user show -p MainPID --value docker.service | tr -d '[:space:]')"
+[ -n "$MAINPID" ] || die "could not read the docker.service MainPID for procedure C"
+as_user kill -TERM "$MAINPID" || die "could not signal the docker.service main process for procedure C"
+CRESTARTED=0
+for i in $(seq 1 45); do
+  if as_user systemctl --user is-active --quiet docker.service && docker info >/dev/null 2>&1; then
+    CRESTARTED=1
+    break
+  fi
+  sleep 2
+done
+if [ "$CRESTARTED" != 1 ]; then
+  echo "DIAG: docker.service user-unit journal after the procedure C main exit:"
+  as_user journalctl --user --since "-1 min" --no-pager 2>/dev/null | grep docker | tail -15 || true
+  die "docker.service did not come back after the procedure C main exit"
+fi
+if [ "$(docker inspect --format '{{.State.Running}}' cgr6)" = "true" ]; then
+  fact "restart-procedure-c=killmode-process cgr6-preserved"
+  echo "FINDING: with KillMode=process the main-exit restart preserves the running workload"
+else
+  fact "restart-procedure-c=killmode-process cgr6-not-preserved"
+  echo "DETECT: even with the unit sweep disabled the running workload does not survive the main-exit restart"
+  echo "DIAG: docker.service user-unit journal around the procedure C restart:"
+  as_user journalctl --user --since "-1 min" --no-pager 2>/dev/null | grep docker | tail -15 || true
+  C6SCOPE="$SESS_DIR/docker-$(docker inspect --format '{{.Id}}' cgr6).scope"
+  echo "DIAG: cgr6 scope after restart: dir=$([ -d "$C6SCOPE" ] && echo present || echo absent) pids.current=$(cat "$C6SCOPE/pids.current" 2>/dev/null || echo ABSENT)"
+fi
+as_user bash -c "rm -f \"\$XDG_RUNTIME_DIR/systemd/user/docker.service.d/50-dh-feas.conf\" && systemctl --user daemon-reload"
+sleep 1
+docker info >/dev/null 2>&1 || die "rootless daemon unreachable after procedure C revert"
 echo "STEP-8-DONE"
 
 step 9 "container restart re-establishes placement"
@@ -391,7 +436,7 @@ docker rm -f cgfc >/dev/null 2>&1 || true
 echo "STEP-10-DONE"
 
 step 11 "cleanup without leaked cgroups"
-docker rm -f cgr1 cgr2 cgr3 cgr4 cgr5 >/dev/null 2>&1 || true
+docker rm -f cgr1 cgr2 cgr3 cgr4 cgr5 cgr6 >/dev/null 2>&1 || true
 sleep 2
 for d in "$SESS_DIR" "$SESS2_DIR" "$L_DIR" "$P_DIR"; do
   if [ -d "$d" ] && ! ls -A "$d" | grep -q .; then
