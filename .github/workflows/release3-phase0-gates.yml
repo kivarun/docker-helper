@@ -50,7 +50,7 @@ jobs:
         run: |
           docker version
           cd scripts/d01-engine-gate
-          go test -v ./...
+          go test -v -count=1 ./...
 
   engine-floor:
     name: D0.1 matrix (pinned floor Engine)
@@ -129,7 +129,7 @@ jobs:
               -v "${{ github.workspace }}:/src" -w /src/scripts/d01-engine-gate \
               -e D01_GATE_REQUIRED=1 -e DOCKER_HOST=tcp://127.0.0.1:2375 \
               golang:1.26 \
-              go test -v ./...; then
+              go test -v -count=1 ./...; then
             echo "EVIDENCE: full 19.03 matrix passed"
           else
             echo "EVIDENCE: 19.03 matrix rows failed as recorded (see the test log above)"
@@ -183,7 +183,7 @@ jobs:
             -v "${{ github.workspace }}:/src" -w /src/scripts/d01-engine-gate \
             -e D01_GATE_REQUIRED=1 -e DOCKER_HOST=tcp://127.0.0.1:2375 \
             golang:1.26 \
-            go test -v ./...
+            go test -v -count=1 ./...
 
   engine-restart:
     name: D0.1 restart procedures (disposable DinD engines)
@@ -258,7 +258,7 @@ jobs:
           D01_RESTART_SUPERVISOR_HOST=unix:///var/run/docker.sock \
           D01_DISPOSABLE_ENGINE_NAME=dind-restart \
           DOCKER_HOST=tcp://127.0.0.1:2375 \
-          go test -v -run 'TestEngineRestartDuringActiveOperation|TestEngineOneShotLifecycleAcrossRestart' ./...
+          go test -v -count=1 -run 'TestEngineRestartDuringActiveOperation|TestEngineOneShotLifecycleAcrossRestart' ./...
           cd ../..
           docker rm -f dind-restart >/dev/null
           echo "EVIDENCE: floor-engine restart procedures passed"
@@ -307,7 +307,7 @@ jobs:
           D01_RESTART_SUPERVISOR_HOST=unix:///var/run/docker.sock \
           D01_DISPOSABLE_ENGINE_NAME=dind-restart \
           DOCKER_HOST=tcp://127.0.0.1:2375 \
-          go test -v -run 'TestEngineRestartDuringActiveOperation|TestEngineOneShotLifecycleAcrossRestart' ./...
+          go test -v -count=1 -run 'TestEngineRestartDuringActiveOperation|TestEngineOneShotLifecycleAcrossRestart' ./...
           cd ../..
           docker rm -f dind-restart >/dev/null
           echo "EVIDENCE: newer-engine restart procedures passed"
