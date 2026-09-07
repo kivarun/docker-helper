@@ -263,12 +263,15 @@ sandbox (`go1.26.8`, toolchain gate green):
 The Engine-matrix rows below are the live rows that stayed OPEN at the
 mechanism baseline; the instrument covers them and its Engine-dependent rows
 skip with an actionable reason where no real Engine endpoint is provided.
-Two matrix bullets are operator-executed procedures rather than instrument
-tests, because the instrument must not restart a shared daemon:
-daemon-shutdown cancellation (restart the Engine during an active long
-pull/build; the operation must fail with a typed transport/context error
-instead of hanging) and the one-shot lifecycle after shutdown (the same
-restart procedure repeated with a waiting container).
+Two matrix bullets were operator-executed procedures rather than instrument
+tests at the mechanism baseline (the instrument must not restart a shared
+daemon): daemon-shutdown cancellation (restart the Engine during an active
+long pull/build; the operation must fail with a typed transport/context
+error instead of hanging) and the one-shot lifecycle after shutdown (the
+same restart procedure repeated with a waiting container). Both are now
+instrument tests gated behind `D01_GATE_RESTART=1`, which is the operator
+declaration that the `DOCKER_HOST` endpoint is a disposable Engine that may
+be killed and restarted (recorded below).
 The Session credential parsing/storage row stays OPEN with D0.2: the
 mechanism rows prove the exact-registry matching and both auth encodings;
 the protected-Session credential-store bridge and its SQLite/audit/log canary
@@ -285,13 +288,14 @@ The instrument matrix executed in required mode
 (`.github/workflows/release3-phase0-gates.yml`, `workflow_dispatch`-only,
 checkout pinned to `github.sha`):
 
-- tested source SHA: `9a60c6ad1d58b04251afd1449f9219009c1da752`;
-- workflow run ID: `34150959659` (fix trail: runs
-  `34133347326`–`34150959659`; every earlier failure was resolved by a
+- tested source SHA: `9f1e91a5869a16caffa3bacd1464440e8d9410e9`;
+- workflow run ID: `34158819369` (fix trail: runs
+  `34133347326`–`34158819369`; every earlier failure was resolved by a
   recorded probe/workflow fix, never by reclassifying a failed row as
-  optional);
+  optional; the restart-procedure closure trail is recorded below);
 - **current Engine row: PASS, 15/15 required-mode rows** against the
-  hosted `ubuntu-24.04` Engine, negotiated API `1.48`: negotiation and
+  hosted `ubuntu-24.04` Engine, negotiated API `1.48`
+  (`engine-server 28.0.4`): negotiation and
   info, public pull, BuildKit build, supported legacy-build behavior,
   deterministic pull and build cancellation (image/absence asserted after
   cancellation), one-shot create/start/disconnected-wait/remove, logs and
@@ -311,12 +315,46 @@ checkout pinned to `github.sha`):
   `MinAPIVersion`) proves that version cannot serve container rows on a
   cgroup-v2 host (`cgroups: cgroup mountpoint does not exist`), so the
   demonstrated, actually workable lower Engine is 20.10 (API `1.41`);
-- still **OPEN** (operator-executed procedures the instrument
-  deliberately does not perform against a shared daemon): the
-  daemon-shutdown cancellation procedure and the one-shot lifecycle after
-  an Engine restart. They require an owned disposable daemon restart
-  during an active pull/build; a disposable DinD engine can host them
-  without touching a shared daemon.
+- **restart-procedure rows: PASS on both disposable pinned DinD engines**
+  (the two procedures the instrument deliberately does not perform
+  against a shared daemon). The dedicated `engine-restart` workflow job
+  boots its own disposable engine, publishes its API on host loopback,
+  and runs the restart-procedure tests against it; the tests kill/restart
+  that engine through a second, explicitly declared supervisor endpoint
+  (the runner host daemon), with the kill target asserted to be a running
+  DinD container and the Engine/supervisor endpoints asserted distinct
+  before anything is killed (`D01_GATE_RESTART=1`,
+  `D01_RESTART_SUPERVISOR_HOST`, `D01_DISPOSABLE_ENGINE_NAME`):
+  - `docker:20.10.24-dind` (API `1.41`): the daemon-shutdown
+    cancellation row kills the engine 18 s after a deterministic
+    300 s-`RUN` BuildKit build was accepted; the build stream terminates
+    with the bounded typed transport error `unexpected EOF` (no hang, no
+    ambiguous success), the engine answers again after the restart, the
+    interrupted build produced no tagged image, and no test container
+    leaked (37 s). The one-shot lifecycle row kills the engine while a
+    waiting one-shot workload and a durable created-state workload exist;
+    the interrupted wait terminates with the same bounded typed error,
+    the recovered engine reports the one-shot workload `exited`
+    (unclean death, exit 255), the created-state workload survives with
+    its durable state, the lifecycle continues on the recovered engine
+    (deterministic exit 0), and removal yields typed NotFound absence
+    (54 s).
+  - `docker:27.5.1-dind` (API `1.47`): both rows pass with the same
+    observable results (37 s / 54 s).
+
+  Harness note recorded with the evidence: the disposable engine's
+  `/run` is a tmpfs. A DinD container restart after SIGKILL otherwise
+  keeps the daemon's spawned-containerd pid/socket state on the
+  container's writable layer; a restarted dockerd (20.10 and 27.x) can
+  then read the stale `containerd.pid` and, because the pid number is
+  reused inside the container's fresh PID namespace, decide the old
+  containerd is still running, attach to a nonexistent containerd, and
+  fatally fail to boot (`failed to start containerd: timeout waiting for
+  containerd to start`, container exit 1). No supported deployment
+  persists that state — system mode runs an externally managed
+  containerd under systemd, and clean daemon restarts remove the
+  pidfile — so the tmpfs reproduces the supported restart semantics and
+  is a harness environment property, not an engine behavior waiver.
 
 The Session credential parsing/storage row stays OPEN with D0.2: the
 mechanism rows prove the exact-registry matching and both auth encodings;
