@@ -128,6 +128,8 @@ as_user bash -c 'mkdir -p ~/.config/docker && printf "{ \"live-restore\": true }
 # daemon probes, so the managed launch never happens.
 as_user bash -c 'mkdir -p $XDG_RUNTIME_DIR/docker/containerd $HOME/.local/share/docker/containerd/dir; nohup /usr/bin/containerd --root=$HOME/.local/share/docker/containerd/dir --state=$XDG_RUNTIME_DIR/docker/containerd/state --address=$XDG_RUNTIME_DIR/docker/containerd/containerd.sock --log-level=warn >> $HOME/containerd-feas.log 2>&1 < /dev/null & sleep 1' \
   || die "could not launch the user-owned containerd"
+as_user bash -c 'for i in 1 2 3 4 5; do [ -S $XDG_RUNTIME_DIR/docker/containerd/containerd.sock ] && exit 0; sleep 1; done; echo "NO-CONTAINERD-SOCKET"; tail -5 $HOME/containerd-feas.log; exit 1' \
+  || die "the user-owned containerd socket did not appear"
 as_user systemctl --user daemon-reload
 MODE=unit
 STARTED=no
