@@ -177,7 +177,7 @@ done
 fact "session-memory-current=$(cat "$S1/memory.current")"
 fact "session-memory-events=$(cat "$S1/memory.events")"
 [ "$KILLED" -ge 1 ] || die "aggregate memory ceiling did not OOM-kill an allocator under the Session"
-echo "$S1/memory.events" | grep -E "oom_kill [1-9]" || die "session memory.events shows no oom_kill"
+grep -E "oom_kill [1-9]" "$S1/memory.events" || die "session memory.events shows no oom_kill"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
 echo "STEP-6-DONE"
 

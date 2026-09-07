@@ -125,9 +125,10 @@ as_user bash -c 'mkdir -p ~/.config/docker && printf "{ \"live-restore\": true }
 as_user systemctl --user daemon-reload
 MODE=unit
 STARTED=no
-# The first StartUnit can be transiently denied by a freshly started user
-# manager; retry before treating the denial as structural.
-for attempt in 1 2 3; do
+# The first StartUnit calls can be transiently denied by a freshly started
+# user manager (observed: a retried attempt succeeds after several
+# seconds); retry with a wider window before treating it as structural.
+for attempt in 1 2 3 4 5; do
   if as_user systemctl is-active --quiet docker.service; then
     STARTED=yes
     break
@@ -136,7 +137,7 @@ for attempt in 1 2 3; do
     STARTED=yes
     break
   fi
-  sleep 2
+  sleep 4
 done
 if [ "$STARTED" = "yes" ]; then
   fact "rootless-daemon-start=systemd-user-unit (attempts needed: $attempt)"
