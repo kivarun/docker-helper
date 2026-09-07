@@ -4131,7 +4131,7 @@ case "$*" in
     if [ "${STOP_FAIL:-false}" = "true" ]; then exit 1; fi
     exit 0
     ;;
-  *"try-restart"*)
+  *"restart"*)
     if [ "${RESTART_FAIL:-false}" = "true" ]; then exit 1; fi
     exit 0
     ;;
@@ -4431,16 +4431,18 @@ func TestDebPostinstallInactive(t *testing.T) {
 	if !found {
 		t.Error("must call systemctl daemon-reload")
 	}
-	// Must NOT call try-restart, start, or enable
+	// Must not issue a restart operation, start, or enable when the service
+	// was inactive: the was_active guard must keep it inactive.
 	for _, c := range calls {
-		if strings.Contains(c, "try-restart") || strings.Contains(c, " start") || strings.Contains(c, "enable") {
-			t.Errorf("must not start/enable service when inactive: %s", c)
+		if strings.Contains(c, "restart") || strings.Contains(c, " start") || strings.Contains(c, "enable") {
+			t.Errorf("must not restart/start/enable service when inactive: %s", c)
 		}
 	}
 }
 
 // TestDebPostinstallActive verifies postinst on upgrade (active):
-// is-active -> replace -> daemon-reload -> try-restart.
+// is-active -> replace -> daemon-reload -> the inactive-safe restart
+// operation, and never start/enable.
 func TestDebPostinstallActive(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, true, false)
@@ -4453,15 +4455,18 @@ func TestDebPostinstallActive(t *testing.T) {
 	}
 
 	calls := readLifecycleScriptCalls(t, logFile)
-	found := false
+	restarts := 0
 	for _, c := range calls {
-		if strings.Contains(c, "try-restart") {
-			found = true
-			break
+		if strings.Contains(c, "restart") {
+			restarts++
+			continue
+		}
+		if strings.Contains(c, " start") || strings.Contains(c, "enable") {
+			t.Errorf("an active service must be restarted, not started/enabled: %s", c)
 		}
 	}
-	if !found {
-		t.Error("must call systemctl try-restart when service was active")
+	if restarts != 1 {
+		t.Errorf("active service must receive exactly one restart operation, got %d", restarts)
 	}
 }
 
@@ -4478,7 +4483,7 @@ func TestDebPostinstallParserFailure(t *testing.T) {
 	}
 	calls := readLifecycleScriptCalls(t, logFile)
 	for _, c := range calls {
-		if strings.Contains(c, "daemon-reload") || strings.Contains(c, "try-restart") {
+		if strings.Contains(c, "daemon-reload") || strings.Contains(c, "restart") {
 			t.Error("must not proceed after parser failure")
 		}
 	}
@@ -4497,13 +4502,14 @@ func TestDebPostinstallDaemonReloadFailure(t *testing.T) {
 	}
 	calls := readLifecycleScriptCalls(t, logFile)
 	for _, c := range calls {
-		if strings.Contains(c, "try-restart") {
+		if strings.Contains(c, "restart") {
 			t.Error("must not restart after daemon-reload failure")
 		}
 	}
 }
 
-// TestDebPostinstallRestartFailure verifies postinst fails when try-restart fails.
+// TestDebPostinstallRestartFailure verifies postinst fails when the restart
+// operation fails (restart failure stays fatal).
 func TestDebPostinstallRestartFailure(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, true, false)
@@ -4512,7 +4518,7 @@ func TestDebPostinstallRestartFailure(t *testing.T) {
 	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
 		[]string{"configure"}, true, []string{"RESTART_FAIL=true"})
 	if code == 0 {
-		t.Fatal("postinst should fail when try-restart fails")
+		t.Fatal("postinst should fail when the restart operation fails")
 	}
 	calls := readLifecycleScriptCalls(t, logFile)
 	// Verify replace and daemon-reload were called before the failed restart.
@@ -4524,7 +4530,7 @@ func TestDebPostinstallRestartFailure(t *testing.T) {
 		if strings.Contains(c, "daemon-reload") {
 			foundReload = true
 		}
-		if strings.Contains(c, "try-restart") {
+		if strings.Contains(c, "restart") {
 			foundRestart = true
 		}
 	}
@@ -4533,7 +4539,8 @@ func TestDebPostinstallRestartFailure(t *testing.T) {
 	}
 }
 
-// TestRpmPostinstallRestartFailure verifies RPM postinstall fails when try-restart fails.
+// TestRpmPostinstallRestartFailure verifies RPM postinstall fails when the
+// restart operation fails (restart failure stays fatal).
 func TestRpmPostinstallRestartFailure(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, true, false)
@@ -4542,7 +4549,7 @@ func TestRpmPostinstallRestartFailure(t *testing.T) {
 	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
 		[]string{"1"}, true, []string{"RESTART_FAIL=true"})
 	if code == 0 {
-		t.Fatal("rpm postinstall should fail when try-restart fails")
+		t.Fatal("rpm postinstall should fail when the restart operation fails")
 	}
 	calls := readLifecycleScriptCalls(t, logFile)
 	foundReplace, foundReload, foundRestart := false, false, false
@@ -4553,7 +4560,7 @@ func TestRpmPostinstallRestartFailure(t *testing.T) {
 		if strings.Contains(c, "daemon-reload") {
 			foundReload = true
 		}
-		if strings.Contains(c, "try-restart") {
+		if strings.Contains(c, "restart") {
 			foundRestart = true
 		}
 	}
@@ -4881,13 +4888,15 @@ func TestRpmPostinstallInactive(t *testing.T) {
 	}
 	calls := readLifecycleScriptCalls(t, logFile)
 	for _, c := range calls {
-		if strings.Contains(c, "try-restart") || strings.Contains(c, " start") {
-			t.Error("must not start service when inactive")
+		if strings.Contains(c, "restart") || strings.Contains(c, " start") {
+			t.Errorf("must not restart/start service when inactive: %s", c)
 		}
 	}
 }
 
-// TestRpmPostinstallActive verifies RPM postinstall on upgrade (active).
+// TestRpmPostinstallActive verifies RPM postinstall on upgrade (active):
+// the inactive-safe restart operation carries the active service across the
+// package action, and the service is never started/enabled.
 func TestRpmPostinstallActive(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, true, false)
@@ -4899,15 +4908,18 @@ func TestRpmPostinstallActive(t *testing.T) {
 		t.Fatalf("rpm postinstall should exit 0, got %d", code)
 	}
 	calls := readLifecycleScriptCalls(t, logFile)
-	found := false
+	restarts := 0
 	for _, c := range calls {
-		if strings.Contains(c, "try-restart") {
-			found = true
-			break
+		if strings.Contains(c, "restart") {
+			restarts++
+			continue
+		}
+		if strings.Contains(c, " start") || strings.Contains(c, "enable") {
+			t.Errorf("an active service must be restarted, not started/enabled: %s", c)
 		}
 	}
-	if !found {
-		t.Error("must call try-restart when service was active")
+	if restarts != 1 {
+		t.Errorf("active service must receive exactly one restart operation, got %d", restarts)
 	}
 }
 
@@ -5283,15 +5295,15 @@ func TestRpmPostinstallSELinuxUpgrade(t *testing.T) {
 		t.Error("upgrade must call semodule -i to replace SELinux module")
 	}
 
-	// Must call try-restart when service was active
-	foundRestart := false
+	// Must restart the active service across the package action
+	restarts := 0
 	for _, c := range calls {
-		if strings.Contains(c, "try-restart") {
-			foundRestart = true
+		if strings.Contains(c, "restart") {
+			restarts++
 		}
 	}
-	if !foundRestart {
-		t.Error("upgrade must call try-restart when service was active")
+	if restarts != 1 {
+		t.Errorf("upgrade must restart the active service exactly once, got %d", restarts)
 	}
 }
 
@@ -5529,7 +5541,7 @@ func TestRpmPostinstallSemoduleFailure(t *testing.T) {
 
 	calls := readLifecycleScriptCalls(t, logFile)
 	for _, c := range calls {
-		if strings.Contains(c, "daemon-reload") || strings.Contains(c, "try-restart") {
+		if strings.Contains(c, "daemon-reload") || strings.Contains(c, "restart") {
 			t.Error("must not proceed after semodule failure")
 		}
 	}

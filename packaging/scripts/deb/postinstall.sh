@@ -70,7 +70,12 @@ if ! systemctl daemon-reload; then
   exit 1
 fi
 
-# Restart only if the service was already active.
+# Restart only if the service was already active. try-restart is the
+# inactive-safe restart operation: under this guard it enqueues the same
+# restart job `systemctl restart` would, and the shipped unit's
+# RuntimeDirectoryPreserve=restart keeps the /run/docker-helper inode across
+# that restart, so a long-lived container bind-mounting /run/docker-helper
+# continues to see the recreated socket after the package action.
 if [ "$was_active" = "true" ]; then
   if ! systemctl try-restart docker-helper.service; then
     exit 1

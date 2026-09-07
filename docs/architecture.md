@@ -1189,12 +1189,14 @@ final policy boundary at execution time.
   semantics. The user's `COMP_WORDBREAKS` is never modified.
 - **`completion selectors principal|launcher`** — machine-facing selector
   introspection for the values of the `--principal`/`--launcher` flags and
-  of the positional `[LAUNCHER]` argument (the same owner for both).
+  of the positional `[LAUNCHER]` argument and the `principal show` USER
+  positional (the same owner for all of them).
   `selectors principal` is command-context aware through the `--command`
   flag: an admin receives the daemon's Principal names on every command
   carrying the selector, a Principal credential receives exactly its own
-  username on the Launcher command families (where the explicit own
-  selector is legal) and nothing on both Session command paths — session
+  username on the Launcher command families and on the `principal show` USER
+  positional (where the explicit own selector is legal) and nothing on both
+  Session command paths — session
   create rejects every `--principal` under a Principal credential and
   session list rejects every Principal selector, even the credential's own
   Principal — and a Launcher credential receives nothing. `selectors
@@ -1236,6 +1238,16 @@ the final policy boundary and rejects a root outside the effective
 Principal ceiling at execution time. `config allowed-root add` and
 `principal allowed-root add` remain generic filesystem completion, as do
 all other path-valued flags.
+
+Positional completion of `principal show USER [FIELD]`: USER completes
+from the same selector-introspection owner as the `--principal` selector
+(above, with the `principal show` command context), and FIELD completes
+the canonical show-field vocabulary (`username uid gid home enabled
+allowed_roots`) that `extractPrincipalField` owns — one shared vocabulary,
+so completion can never offer a field the command rejects. The FIELD word
+is a local static vocabulary (no daemon exchange), a typed prefix filters
+it, a complete USER+FIELD pair offers nothing further, and the operator
+flags never shift the positional counting.
 
 ### CLI conventions
 

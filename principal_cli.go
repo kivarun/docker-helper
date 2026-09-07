@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 
 	"golang.org/x/term"
 )
@@ -176,24 +177,49 @@ var principalListCommand = &Command{
 	},
 }
 
+// principalField is one readable FIELD of `principal show USER FIELD`. The
+// slice below is the single canonical owner of the FIELD vocabulary:
+// `principal show` extraction and completion generation both derive from it,
+// so the offered completion can never drift from the fields the command
+// actually accepts. Field order is the canonical completion order.
+type principalField struct {
+	name    string
+	extract func(*principalResponse) (string, bool)
+}
+
+var principalFields = []principalField{
+	{name: "username", extract: func(p *principalResponse) (string, bool) { return p.Username, true }},
+	{name: "uid", extract: func(p *principalResponse) (string, bool) { return strconv.Itoa(p.UID), true }},
+	{name: "gid", extract: func(p *principalResponse) (string, bool) { return strconv.Itoa(p.GID), true }},
+	{name: "home", extract: func(p *principalResponse) (string, bool) { return p.Home, true }},
+	{name: "enabled", extract: func(p *principalResponse) (string, bool) { return strconv.FormatBool(p.Enabled), true }},
+	{
+		name: "allowed_roots",
+		extract: func(p *principalResponse) (string, bool) {
+			data, err := json.Marshal(p.AllowedRoots)
+			if err != nil {
+				return "", false
+			}
+			return string(data), true
+		},
+	},
+}
+
+// principalShowFieldNames returns the canonical FIELD vocabulary in
+// canonical order (the completion generation reads the same owner).
+func principalShowFieldNames() []string {
+	names := make([]string, 0, len(principalFields))
+	for _, f := range principalFields {
+		names = append(names, f.name)
+	}
+	return names
+}
+
 func extractPrincipalField(p *principalResponse, field string) (string, bool) {
-	switch field {
-	case "username":
-		return p.Username, true
-	case "uid":
-		return fmt.Sprintf("%d", p.UID), true
-	case "gid":
-		return fmt.Sprintf("%d", p.GID), true
-	case "home":
-		return p.Home, true
-	case "enabled":
-		return fmt.Sprintf("%t", p.Enabled), true
-	case "allowed_roots":
-		data, err := json.Marshal(p.AllowedRoots)
-		if err != nil {
-			return "", false
+	for _, f := range principalFields {
+		if f.name == field {
+			return f.extract(p)
 		}
-		return string(data), true
 	}
 	return "", false
 }

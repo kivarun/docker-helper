@@ -161,6 +161,7 @@ CRED_DIR="/tmp/uat-r2ac"
 rm -rf "$CRED_DIR"; mkdir -p "$CRED_DIR"
 
 cleanup() {
+  docker rm -f uatr2f-rtdir >/dev/null 2>&1 || true
   systemctl stop docker-helper.service >/dev/null 2>&1 || true
   systemctl disable docker-helper.service >/dev/null 2>&1 || true
   apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>/dev/null || true
@@ -1717,6 +1718,99 @@ else
   F_PRINC_ID="$GLOBAL_CRED_ID"
   F_SESSION_ID="$GLOBAL_SESSION_ID"
 
+  # --- RuntimeDirectory identity consumer ----------------------------------
+  # A long-lived container bind-mounting /run/docker-helper holds the
+  # RuntimeDirectory inode through its mount: same dev:inode only while the
+  # directory identity survives the package scriptlets' restart
+  # (RuntimeDirectoryPreserve=restart in the shipped unit). The consumer must
+  # keep seeing the daemon socket recreated in that SAME directory after the
+  # upgrade and the reinstall, with the container never recreated. The
+  # consumer is plain Docker deliberately: the scenario subject is the
+  # systemd RuntimeDirectory/package interaction, not the Session mount
+  # model. (The hosted runner is AppArmor-only, so a plain consumer works;
+  # the socket is proven with test -S/stat, and /health is the host check.)
+  F_RT_CONSUMER="uatr2f-rtdir"
+  F_RT_CONTAINER_ID=""
+  F_RT_INODE_BASE=""
+  rt_dir_inode() { # WHERE: dev:inode of /run/docker-helper from "host" or the
+                   # consumer ("container"); "absent" when unavailable.
+    local where="$1" out
+    if [ "$where" = container ]; then
+      out="$(docker exec "$F_RT_CONSUMER" stat -c '%d:%i' /run/docker-helper 2>/dev/null)" || out="absent"
+    else
+      out="$(stat -c '%d:%i' /run/docker-helper 2>/dev/null)" || out="absent"
+    fi
+    printf '%s' "$out"
+  }
+  rt_dir_consumer_running() {
+    [ "$(docker inspect -f '{{.State.Running}}' "$F_RT_CONSUMER" 2>/dev/null)" = "true" ]
+  }
+  rt_dir_container_id() {
+    docker inspect -f '{{.Id}}' "$F_RT_CONSUMER" 2>/dev/null
+  }
+  rt_dir_verify_phase() { # LABEL: the mandatory invariant set after one
+                          # package action, without touching the consumer.
+    local label="$1" dir dir_c sock sock_c id
+    id="$(rt_dir_container_id)"
+    if rt_dir_consumer_running && [ "$id" = "$F_RT_CONTAINER_ID" ]; then
+      acc_ok "$label: directory-bind consumer still the same container (no recreate/restart)"
+    else
+      acc_fail "$label: directory-bind consumer not running or recreated (was ${F_RT_CONTAINER_ID:-unknown}, now ${id:-unknown})"
+    fi
+    dir="$(rt_dir_inode host)"
+    if [ "$dir" != absent ] && [ "$dir" = "$F_RT_INODE_BASE" ]; then
+      acc_ok "$label: host RuntimeDirectory dev:inode preserved ($dir)"
+    else
+      acc_fail "$label: host RuntimeDirectory dev:inode changed: before $F_RT_INODE_BASE, after ${dir:-absent}"
+    fi
+    dir_c="$(rt_dir_inode container)"
+    if [ "$dir_c" = "$F_RT_INODE_BASE" ] && [ "$dir_c" = "$dir" ]; then
+      acc_ok "$label: consumer still sees the preserved RuntimeDirectory ($dir_c)"
+    else
+      acc_fail "$label: consumer RuntimeDirectory view wrong (container ${dir_c:-absent}, host ${dir:-absent}, baseline $F_RT_INODE_BASE)"
+    fi
+    sock="$(stat -c '%d:%i' "$SOCK" 2>/dev/null)" || sock="absent"
+    if [ "$sock" != absent ]; then
+      acc_ok "$label: host socket exists after the scriptlet-driven restart ($sock)"
+    else
+      acc_fail "$label: host socket missing after restart ($SOCK)"
+    fi
+    if docker exec "$F_RT_CONSUMER" test -S "$SOCK" >/dev/null 2>&1; then
+      sock_c="$(docker exec "$F_RT_CONSUMER" stat -c '%d:%i' "$SOCK" 2>/dev/null)" || sock_c="absent"
+      if [ "$sock_c" = "$sock" ]; then
+        acc_ok "$label: consumer sees the same new socket as the host ($sock_c)"
+      else
+        acc_fail "$label: consumer socket view wrong (container ${sock_c:-absent}, host $sock)"
+      fi
+    else
+      acc_fail "$label: consumer no longer sees the daemon socket through the bind"
+    fi
+  }
+  docker rm -f "$F_RT_CONSUMER" >/dev/null 2>&1 || true
+  if docker run -d --name "$F_RT_CONSUMER" \
+      -v /run/docker-helper:/run/docker-helper alpine:3.24 sleep infinity >/dev/null 2>&1; then
+    for _ in $(seq 1 15); do
+      rt_dir_consumer_running && break
+      sleep 1
+    done
+  fi
+  if ! rt_dir_consumer_running; then
+    acc_blocked "cannot start the directory-bind consumer (image alpine:3.24 pull/run failed)"
+    F_RT_INODE_BASE=""
+  else
+    F_RT_CONTAINER_ID="$(rt_dir_container_id)"
+    F_RT_INODE_BASE="$(rt_dir_inode host)"
+    if [ -n "$F_RT_INODE_BASE" ] && [ "$(rt_dir_inode container)" = "$F_RT_INODE_BASE" ]; then
+      if docker exec "$F_RT_CONSUMER" test -S "$SOCK" >/dev/null 2>&1; then
+        acc_ok "directory-bind consumer running on the v2.0.0 baseline (RuntimeDirectory dev:inode $F_RT_INODE_BASE; socket visible)"
+      else
+        acc_fail "consumer does not see the daemon socket on the baseline ($SOCK)"
+      fi
+    else
+      acc_fail "consumer RuntimeDirectory differs from host (consumer $(rt_dir_inode container), host $F_RT_INODE_BASE)"
+    fi
+  fi
+
   # --- upgrade (v2.0.0 -> candidate) ---------------------------------------
   if dpkg -i "$ARTIFACT_PATH_IN" >/tmp/r2ac-f-upgrade.log 2>&1; then
     acc_ok "upgrade to candidate DEB completed"
@@ -1744,6 +1838,11 @@ else
     acc_ok "daemon healthy after upgrade (was active before)"
   else
     acc_fail "daemon not healthy after upgrade"
+  fi
+  # The package action restarted the active daemon through the scriptlets:
+  # the bind-mounted RuntimeDirectory identity must have survived it.
+  if [ -n "$F_RT_INODE_BASE" ]; then
+    rt_dir_verify_phase "upgrade"
   fi
   DH_PID2="$(systemctl show -p MainPID --value docker-helper.service)"
   if [ "$(cat "/proc/$DH_PID2/attr/current" 2>/dev/null || true)" = "docker-helper-system (enforce)" ]; then
@@ -1806,6 +1905,17 @@ else
   else
     acc_fail "daemon not healthy after reinstall"
   fi
+  # The reinstall ran the same scriptlets: the same consumer must still see
+  # the same RuntimeDirectory and the recreated socket.
+  if [ -n "$F_RT_INODE_BASE" ]; then
+    rt_dir_verify_phase "reinstall"
+  fi
+
+  # The consumer must not hold the bind across the remove/purge phases: a
+  # real service stop destroys the RuntimeDirectory by design
+  # (RuntimeDirectoryPreserve=restart preserves restarts, not stops).
+  docker rm -f "$F_RT_CONSUMER" >/dev/null 2>&1 || true
+  acc_ok "directory-bind consumer removed (candidate left installed)"
 
   # --- remove (dpkg -r) ------------------------------------------------------
   if dpkg -r docker-helper >/tmp/r2ac-f-remove.log 2>&1; then

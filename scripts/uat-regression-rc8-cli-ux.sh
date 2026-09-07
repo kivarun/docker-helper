@@ -42,6 +42,13 @@
 #      of launcher allowed-root add/remove offers both continuations as a
 #      unique union, and the --principal selector completion is
 #      command-context aware.
+#   G. principal show positional completion — the USER positional reuses
+#      the --principal selector-introspection owner (admin sees the
+#      daemon-visible Principal names, a Principal credential sees exactly
+#      its own Principal, a Launcher credential sees nothing), the FIELD
+#      positional after USER offers the canonical show-field vocabulary
+#      with prefix filtering, a complete USER+FIELD pair offers nothing,
+#      and operator flags never shift the positional counting.
 #
 # Each subcase is independent (collect-all). Docker is not required.
 #
@@ -746,12 +753,97 @@ subcase_f() {
   rm -f "$cred" "$TMPDIR_REG14/f-lc.token" "$script"
 }
 
+# ---------------------------------------------------------------------------
+# G. principal show positional completion
+# ---------------------------------------------------------------------------
+subcase_g() {
+  reg_info "subcase G: principal show positional completion"
+  local user="uatreg14g" user2="uatreg14g2" script
+  reg_setup_principal "$user" >/dev/null 2>&1 || { reg_fail "G: fixture setup failed"; return; }
+  reg_setup_principal "$user2" >/dev/null 2>&1 || { reg_fail "G: foreign fixture setup failed"; cleanup_principal "$user"; return; }
+  local cred="$TMPDIR_REG14/g.token"
+  reg_principal_credential "$user" "$cred" || { reg_fail "G: principal credential create failed"; cleanup_principal "$user"; cleanup_principal "$user2"; return; }
+  local lc_token lc_file="$TMPDIR_REG14/g-lc.token"
+  lc_token="$(launcher_credential_token "$user" default)" || lc_token=""
+
+  script="$TMPDIR_REG14/completion-g.bash"
+  if ! dh completion bash > "$script" 2>/dev/null || [ ! -s "$script" ]; then
+    reg_fail "G: completion script generation failed"
+    cleanup_principal "$user"
+    cleanup_principal "$user2"
+    rm -f "$cred"
+    return
+  fi
+
+  local out rc
+  # The machine-facing introspection surface the completion harness drives
+  # must answer on the packaged CLI before the COMPREPLY contract is asserted.
+  out="$(dh completion selectors principal --system --command "principal show" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qx "$user"; then
+    reg_ok "G: introspection selectors principal answers for the principal show context"
+  else
+    reg_fail "G: selectors principal (principal show) query failed (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+  fi
+
+  # 1. USER: an admin sees the daemon-visible Principal names.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "")"
+  if printf '%s\n' "$out" | grep -qx "$user" && printf '%s\n' "$out" | grep -qx "$user2"; then
+    reg_ok "G: admin principal show <TAB> offers the daemon-visible Principal names"
+  else
+    reg_fail "G: admin principal show suggestions = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+
+  # 2. USER: the typed prefix filters the same introspection.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user2")"
+  if printf '%s\n' "$out" | grep -qx "$user2" && ! printf '%s\n' "$out" | grep -qx "$user"; then
+    reg_ok "G: admin principal show <prefix><TAB> filters to the matching Principal"
+  else
+    reg_fail "G: admin principal show prefix suggestions = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+  fi
+
+  # 3. USER: a Principal credential sees exactly its own Principal.
+  out="$(run_completion "$script" /usr/bin/docker-helper principal show --token-file "$cred" "")"
+  assert_completion "G: principal credential sees exactly its own Principal" "$user" "$out" || true
+
+  # 4. USER: a Launcher credential sees no Principal suggestions.
+  if [ -n "$lc_token" ]; then
+    printf '%s\n' "$lc_token" > "$lc_file"
+    out="$(run_completion "$script" /usr/bin/docker-helper principal show --token-file "$lc_file" "")"
+    assert_completion "G: launcher credential sees no Principal suggestions" "" "$out" || true
+  else
+    reg_fail "G: launcher credential create failed"
+  fi
+
+  # 5. FIELD after USER: the canonical show-field vocabulary.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "")"
+  assert_completion "G: principal show USER <TAB> offers the FIELD vocabulary" \
+    "username|uid|gid|home|enabled|allowed_roots" "$out" || true
+
+  # 6. FIELD partial: a typed prefix filters the vocabulary.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "a")"
+  assert_completion "G: principal show USER a<TAB> offers allowed_roots" "allowed_roots" "$out" || true
+
+  # 7. after a complete USER+FIELD pair: no further positional suggestions.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" uid "")"
+  assert_completion "G: principal show USER uid <TAB> offers nothing" "" "$out" || true
+
+  # 8. operator flags (bool and value-taking) never shift the FIELD position.
+  out="$(run_completion "$script" /usr/bin/docker-helper principal show --system --token-file "$cred" "$user" "")"
+  assert_completion "G: flags do not shift the FIELD position" \
+    "username|uid|gid|home|enabled|allowed_roots" "$out" || true
+
+  cleanup_principal "$user"
+  cleanup_principal "$user2"
+  rm -f "$cred" "$lc_file" "$script"
+}
+
 subcase_a
 subcase_b
 subcase_c
 subcase_d
 subcase_e
 subcase_f
+subcase_g
 
 rm -rf "$TMPDIR_REG14"
 reg_result

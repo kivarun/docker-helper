@@ -1392,6 +1392,10 @@ var treeProviderLeafPaths = []string{
 	"launcher allowed-root inherit",
 	"launcher allowed-root add",
 	"launcher allowed-root remove",
+	// The USER positional completes from the daemon-backed Principal
+	// selector introspection (the --principal owner), and the FIELD
+	// positional after USER completes the canonical show-field vocabulary.
+	"principal show",
 	"help",
 }
 
@@ -3201,4 +3205,150 @@ func startCompletionPolicyServer(t *testing.T, respond func(w http.ResponseWrite
 		t.Fatalf("write token: %v", err)
 	}
 	return server.URL, tokenPath, rec
+}
+
+// TestCompletionPrincipalShowFieldVocabulary proves the `principal show`
+// FIELD positional completes from the canonical extractPrincipalField
+// vocabulary owner: the full word offers exactly that vocabulary in its
+// canonical order, a typed prefix filters like any compgen word, a complete
+// USER+FIELD pair offers nothing further, and the operator flags never shift
+// the positional counting (--flag VALUE, --flag=VALUE, and bool --system
+// alike).
+func TestCompletionPrincipalShowFieldVocabulary(t *testing.T) {
+	script := completionScript(t)
+
+	results := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", ""})
+	want := principalShowFieldNames()
+	if !slices.Equal(results, want) {
+		t.Fatalf("principal show michael <TAB> = %v, want the canonical vocabulary %v", results, want)
+	}
+
+	// The offered FIELD words and the extraction owner are one vocabulary:
+	// every word completion offers must be accepted by extractPrincipalField.
+	extractable := &principalResponse{
+		Username: "u", UID: 1, GID: 1, Home: "/home/u", Enabled: true,
+		AllowedRoots: []string{"/home/u"},
+	}
+	for _, name := range results {
+		if _, ok := extractPrincipalField(extractable, name); !ok {
+			t.Fatalf("completion offers FIELD %q, but extractPrincipalField does not accept it", name)
+		}
+	}
+
+	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "a"}); !slices.Equal(got, []string{"allowed_roots"}) {
+		t.Fatalf("principal show michael a<TAB> = %v, want [allowed_roots]", got)
+	}
+
+	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "uid", ""}); len(got) != 0 {
+		t.Fatalf("principal show michael uid <TAB> = %v, want no further positional suggestions", got)
+	}
+
+	// The operator flag forms never shift the positional counting.
+	flagShiftCases := [][]string{
+		{"docker-helper", "principal", "show", "--system", "michael", ""},
+		{"docker-helper", "principal", "show", "--endpoint=unix:///tmp/nowhere", "michael", ""},
+		{"docker-helper", "principal", "show", "--token-file", "/tmp/token", "michael", ""},
+	}
+	for _, words := range flagShiftCases {
+		if got := runCompletion(t, script, words); !slices.Equal(got, want) {
+			t.Fatalf("flag-shifted FIELD completion %v = %v, want %v", words, got, want)
+		}
+	}
+}
+
+// TestCompletionPrincipalShowFieldIsLocal proves FIELD completion performs
+// no daemon exchange: the vocabulary is static once USER is typed, so the
+// completion answers even while the recorded daemon stays silent. The daemon
+// would have been reachable (the query harness is wired), so a missing
+// recorded request proves the locality rather than an unreachable query.
+func TestCompletionPrincipalShowFieldIsLocal(t *testing.T) {
+	endpoint, tokenPath, requests := startAuthoritySelectorServer(t, "admin", "", nil)
+	script := completionScript(t)
+
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "principal", "show", "--endpoint", endpoint, "--token-file", tokenPath,
+		"michael", "",
+	})
+	if stderr != "" {
+		t.Fatalf("FIELD completion must not write to stderr: %q", stderr)
+	}
+	if !slices.Equal(results, principalShowFieldNames()) {
+		t.Fatalf("FIELD suggestions = %v, want %v", results, principalShowFieldNames())
+	}
+	if snap := requests.snapshot(); len(snap) != 0 {
+		t.Fatalf("FIELD completion must not query the daemon, saw %+v", snap)
+	}
+}
+
+// TestCompletionPrincipalShowUserAuthorityMatrix proves the USER positional
+// of `principal show` reuses the --principal selector-introspection owner
+// (`completion selectors principal --command "principal show"`): an admin
+// sees the daemon-visible Principal names, a Principal credential sees
+// exactly its own Principal, a Launcher credential sees nothing, and a query
+// failure degrades silently.
+func TestCompletionPrincipalShowUserAuthorityMatrix(t *testing.T) {
+	script := completionScript(t)
+
+	// Admin: the daemon-visible Principal names, prefix-filtered.
+	adminEndpoint, adminToken, adminRequests := startAuthoritySelectorServer(t, "admin", "", nil)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "principal", "show", "--endpoint", adminEndpoint, "--token-file", adminToken,
+		"",
+	})
+	if stderr != "" {
+		t.Fatalf("USER completion must not write to stderr: %q", stderr)
+	}
+	if !slices.Equal(results, []string{"alice", "bob"}) {
+		t.Fatalf("admin principal show <TAB> = %v, want the daemon-visible Principal names", results)
+	}
+	if got, _ := runCompletionWithPreambleForWords(t, script, adminEndpoint, adminToken, "b"); !slices.Equal(got, []string{"bob"}) {
+		t.Fatalf("admin principal show b<TAB> = %v, want [bob]", got)
+	}
+	if snap := adminRequests.snapshot(); !slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/principals"
+	}) {
+		t.Fatalf("admin USER completion must query the daemon Principal list, saw %+v", snap)
+	}
+
+	// Principal credential: exactly its own Principal.
+	selfEndpoint, selfToken, _ := startAuthoritySelectorServer(t, "principal", "alice", nil)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "principal", "show", "--endpoint", selfEndpoint, "--token-file", selfToken,
+		"",
+	})
+	if !slices.Equal(results, []string{"alice"}) {
+		t.Fatalf("principal-credential principal show <TAB> = %v, want exactly its own Principal", results)
+	}
+
+	// Launcher credential: nothing (the daemon's answer, kept silent).
+	launcherEndpoint, launcherToken, _ := startAuthoritySelectorServer(t, "launcher", "", nil)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "principal", "show", "--endpoint", launcherEndpoint, "--token-file", launcherToken,
+		"",
+	})
+	if len(results) != 0 {
+		t.Fatalf("launcher-credential principal show <TAB> = %v, want nothing", results)
+	}
+
+	// Query failure: silent degradation, no suggestions, no stderr.
+	results, stderr = runCompletionWithPreambleForWords(t, script, "", "", "")
+	if stderr != "" {
+		t.Fatalf("a failed USER query must degrade silently, got stderr %q", stderr)
+	}
+	if len(results) != 0 {
+		t.Fatalf("a failed USER query must offer nothing, got %v", results)
+	}
+}
+
+// runCompletionWithPreambleForWords completes the USER positional of
+// `principal show` against the given operator overrides (empty values mean
+// the flags are omitted, so the default — failing — resolution is exercised).
+func runCompletionWithPreambleForWords(t *testing.T, script, endpoint, tokenPath, userPrefix string) ([]string, string) {
+	t.Helper()
+	words := []string{"docker-helper", "principal", "show"}
+	if endpoint != "" {
+		words = append(words, "--endpoint", endpoint, "--token-file", tokenPath)
+	}
+	words = append(words, userPrefix)
+	return runCompletionWithPreamble(t, script, completionPATHPreamble(t), words)
 }
