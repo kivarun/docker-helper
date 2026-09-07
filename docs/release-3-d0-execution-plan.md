@@ -2,490 +2,390 @@
 
 ## Status and baseline
 
-This document fixes the D0 semantic contract and records an implementation plan against the inspected baseline for the cross-cutting Operation foundation defined by `release-3-operation-model.md`.
-
-The inspected baseline is `main` at
-`694ca5944c87b17303b761c5f38e4afd390a7d89`. Release 2.1 Launcher delegation,
-Launcher-owned Session persistence, the canonical Launcher-name grammar, and
-the Principal-scoped Launcher locator are implemented at this commit.
-
-The baseline implementation invokes the Docker CLI. Release 3 uses the official `github.com/moby/moby/client` Docker Engine API client, pinned to a reviewed version, behind a docker-helper-owned adapter. The client negotiates the daemon API version, while docker-helper documents and tests a minimum supported Engine API. The CLI-specific inventory remains evidence about code that must be retired. Before production migration begins, the operational architect must freeze the narrow adapter methods needed by build, pull, one-shot run, lifecycle, logs, and exec. No executor should introduce a new long-lived `exec.Cmd` abstraction solely to reproduce the baseline mechanics or expose Moby request types outside the adapter.
-
-The current Docker CLI reads a Session-scoped Docker configuration directory. Engine API calls do not inherit that client configuration automatically. The adapter must read the existing Session credential source just in time, pass only the matching registry authorization to image pull, and pass the Session-scoped registry authorization map required by image build. Container create and one-shot run receive no registry credentials after the image is local. Credentials never enter durable Operation data, container management projections, audit, daemon logs, or public errors.
-
-D0 changes two mechanisms that currently share one in-memory object but have different target semantics:
-
-1. `build` and one-shot `run` become synchronous Commands bound to their HTTP Requests;
-2. durable Operation is introduced for managed-container start, stop, restart,
-   remove, administrator policy repair, explicit Session network repair, and
-   Session cleanup only.
-
-The current in-memory Operation is not migrated or generalized. Its public status/log/cancel contract and record are removed. Existing cancellation, shutdown, and cleanup behavior is retained as an observable requirement, not as a requirement to preserve the Docker CLI process mechanism.
-
-## Fixed contract
-
-The following decisions are already binding:
-
-- `build`, one-shot `run`, and non-interactive exec are synchronous Commands;
-- `container.create` is also synchronous, returns `201 Created` with a stopped Managed Container, and creates no Operation;
-- interactive exec uses WebSocket and is not an Operation;
-- durable Operation types are limited to `container.start`, `container.stop`,
-  `container.restart`, `container.remove`, `container.repair`,
-  `session.repair`, and `session.cleanup`; container policy repair is
-  administrator-only, while Session network repair follows the invoking
-  token's scope; a state-matching start or stop returns `200 OK` as a no-op and creates
-  neither an Operation nor an idempotency record;
-- synchronous process execution does not survive request loss or daemon restart; after create's provisional database commit, only bounded registration or compensation continues under server ownership and restart recovery;
-- the normal CLI remains blocking and returns the workload exit result;
-- `pull`, `build`, one-shot `run`, and non-interactive exec return one combined bounded `output` that is not replayable;
-- a started `run` or exec returns HTTP `200` with its actual `exit_code`, including a non-zero exit;
-- a build that reaches the backend but fails returns HTTP `422` with bounded diagnostic output;
-- invalid, denied, absent, and conflicting inputs use HTTP `400`, `403`, `404`, and `409`; backend unavailability and unexpected backend interaction use `503` and `502` respectively;
-- `command_output_max_bytes` replaces `operation_log_max_bytes`, retains the 4 MiB default, newest-output tail, `truncated` flag, and reload behavior, and applies to all four synchronous Commands;
-- Release 3 accepts `operation_log_max_bytes` as a deprecated alias with a startup warning, rejects configurations containing both names, and exposes only the new name through config CLI operations;
-- workload output is never emitted to the daemon logger, journald, or audit stream;
-- durable Operations persist no workload output or progress log;
-- public build/run Operation status, log, and cancel workflows are removed;
-- a daemon shutdown must still cancel live build/run execution within the existing shared shutdown deadline;
-- one-shot `run` cleanup must still remove its backend container after request cancellation, client disconnect, or daemon shutdown;
-- staged build contexts, pinned mounts, and MAC leases retain their current cleanup ordering and failure semantics; cidfiles are a baseline Docker CLI mechanism and need not survive the Engine API migration;
-- daemon shutdown does not convert a durable running Operation into a terminal cancellation; restart recovery decides its result;
-- no independent Operation retention configuration or delete API exists;
-- no hidden queue defers a conflicting lifecycle Command for later execution.
-
-Direct process results keep the existing flat response envelope. A started one-shot `run` or non-interactive exec returns HTTP `200` with `ok`, combined `output`, `truncated`, `duration`, and actual `exit_code`; a non-zero workload exit uses `ok: false` and `code: container_exit_nonzero`, but no redundant `message`, without changing the HTTP status. A backend-reported build failure returns HTTP `422` with `ok: false`, `code: build_failed`, sanitized `message`, combined `output`, `truncated`, and `duration`. Results are not nested under another object and never split stdout from stderr.
-
-## Current implementation inventory
-
-The current `operation` object owns five unrelated responsibilities:
-
-| Responsibility | Current owner | D0 disposition |
-| --- | --- | --- |
-| Public build/run status | `operation` fields and `GET /operations/{id}` | Remove for build/run; replace later with the durable representation. |
-| Client output replay | `operation.LogBuffer`, offset polling, `/logs` | Remove. Retain only a bounded direct-response buffer. |
-| Public cancellation | `/operations/{id}/cancel`, `operationSupervisor.cancel` | Remove. Request/signal loss cancels synchronous work; Session cleanup owns internal durable cancellation. |
-| Live execution termination | `operation.cmd`, `terminateForShutdown`, force cleanup | Re-express as request-context cancellation and bounded backend-resource cleanup outside the durable Operation store. |
-| Durable execution | None | Add SQLite-backed records, one dispatcher, typed handlers, and restart recovery. |
-
-### Production files
-
-| File | Current responsibility | Required change |
-| --- | --- | --- |
-| `operation.go` | In-memory record, registry, log buffer, public cancellation, process start, shutdown termination. | Remove the public record and child-process ownership after callers migrate; retain the bounded output primitive only if the Engine API path still needs it; add durable Operation types in separate files. |
-| `pull.go` and registry configuration helpers | Invoke Docker CLI with the Session configuration directory and return bounded pull output. | Execute pull through the Engine API and explicitly bridge only the matching Session registry authorization. |
-| `build.go` | Validates and stages, registers Operation, starts Docker, returns `201`, completes in a goroutine. | Execute within the request lifetime, return one bounded terminal response, preserve staging/MAC cleanup, and pass Session-scoped registry authorization for private `FROM` resolution. |
-| `run.go` | Validates, pins mounts, registers Operation, manages cidfile, returns `201`, completes in a goroutine. | Execute through the Engine API within the request lifetime, return one bounded terminal response, and preserve daemon-side container, pin, and MAC cleanup without retaining cidfile as target architecture. |
-| `api_contract.go` | Build/run created, status, logs, and cancel response shapes. | Replace build/run response with direct result shapes. Later add the durable Operation representation and list envelope. |
-| `response.go` | `writeOperationCreated` and generic response envelope. | Remove build/run creation response; keep one owner for direct Command responses. |
-| `client.go` | Starts Operations, polls status/logs, cancels. | Replace build/run methods with one-request direct methods; later add durable lookup/list/wait methods. |
-| `agent_cli.go` | Poll loop, log offsets, signal-triggered public cancel. | Render direct build/run results; use request-context cancellation on signals. Durable lifecycle waiting is added separately and performs no public cancel. |
-| `main.go` | Registers legacy Operation routes and terminates `OperationSupervisor` during shutdown. | Remove legacy routes; wire synchronous execution cancellation and backend cleanup separately from the durable dispatcher. Add durable lookup/list routes only with the new model. |
-| `app.go` | Stores `OperationSupervisor`; test seams use `operationID` as a runtime key. | Hold separate synchronous-execution and durable Operation owners. Rename runtime-key parameters so they do not imply public Operation identity. |
-| `config.go`, `config_cli.go`, `reload.go`, `cli.go` | Operation TTL/count and log-buffer configuration. | Remove TTL/count settings. Move the byte limit to direct Command output under the agreed compatibility rule. |
-| `database.go` | Launcher-owned Session/Principal/MAC schema; immediate expired-Session deletion. | Add durable Operation/idempotency schema against the existing non-null Session `launcher_id`; Session cleanup replaces immediate deletion in the later integration step. |
-| `audit.go`, `logging.go` | Request-correlated audit and operational records. | Stop emitting Operation IDs for synchronous build/run. Durable events use the new Operation type/initiator/target vocabulary. |
-
-### Shipped contract files
-
-The synchronous migration changes all sources that currently document the async workflow:
-
-- `README.md`;
-- `docs/architecture.md`;
-- `docs/roadmap.md` historical-versus-current wording;
-- relevant files in `docs/man/`;
-- `.claude/skills/docker-helper/SKILL.md`;
-- CLI help and completion fixtures.
-
-Historical roadmap sections may describe the old Release 1/2 implementation, but the current architecture and examples must not present it as the active Release 3 contract.
-
-## Target ownership split
-
-### 1. Synchronous Command service
-
-The build and run services remain the owners of their domain validation, typed failure classification, audit metadata, and resource cleanup.
-
-The public build capability remains deliberately narrow: `context`,
-`dockerfile`, and `image` are required; the request requires a Session bearer
-and the optional `session_id` field only narrows or validates the token's own
-Session; and optional `build_args` preserves the existing validated string
-map. D0 does not add platform, target, no-cache, BuildKit secret,
-SSH-forwarding, network, or generic Engine request fields while migrating the
-transport.
-
-Pull accepts only required `image` plus a Session bearer; the optional
-`session_id` field only narrows or validates the token's own Session.
-Its successful direct result contains `ok`, combined bounded `output`,
-`truncated`, and `duration`, with no redundant success message or repeated
-image field. The Engine API migration adds no platform, pull-policy, registry,
-credential, or generic Engine option to the request.
-
-Pull failure translation uses typed Engine stream results: absent image is
-`404 image_not_found`, registry credential rejection is
-`422 pull_access_denied`, and registry reachability failure is
-`502 registry_unavailable`. These expected execution failures preserve
-already captured bounded progress output. Helper authentication and authority
-remain the sole meanings of `401 unauthorized` and `403 forbidden`; the old
-`docker_pull_failed` code does not survive the adapter migration.
-
-One-shot run reuses the Managed Container create vocabulary for `image`,
-`entrypoint`, `command`, `workdir`, `env`, `mounts`, and `limits`, but creates
-no persistent resource and accepts no name, publication, stdin, or detach
-option. Only `image` is required; the request requires a Session bearer and
-the optional `session_id` field only narrows or validates the token's own
-Session. Omitted entrypoint and command preserve the image values,
-while explicit empty values are rejected.
-
-Registry login accepts required `registry`, `username`, and `password` plus
-a Session bearer; the optional `session_id` field only narrows or validates
-the token's own Session, and it returns only `{\"ok\":true}` on
-success. Username and password remain protected Session runtime secrets and
-never enter SQLite, argv, environment, audit, operational logs, or public
-errors. The Engine adapter persists only the credential material needed for
-later matching pull and build authorization and removes it with the Session.
-
-Registry authentication denial is `422 registry_auth_denied`, registry
-reachability failure is `502 registry_unavailable`, Engine unavailability is
-`503 backend_unavailable`, and an unexpected Engine interaction is
-`502 backend_failure`. None returns captured backend output. `401` remains
-reserved for docker-helper authentication, and the Release 2 generic
-`registry_login_failed` code is retired.
-
-They invoke one docker-helper-owned Docker Engine API adapter that:
-
-- executes under the caller's context and the daemon shutdown boundary;
-- decodes backend streams without exposing Docker framing publicly;
-- reads Session registry credentials only for image operations, sends matching authorization to pull and the required Session-scoped authorization map to build, and never forwards those credentials to container create or run;
-- collects combined output under the shared bounded-output contract;
-- waits for or observes one terminal backend result;
-- returns typed backend failure, workload exit code where applicable, duration, retained output, and truncation;
-- does not allocate, expose, or persist an Operation ID.
-
-The adapter does not own build staging, mount pinning, policy validation, audit events, or HTTP status selection.
-
-### 2. Transient execution coordination
-
-Synchronous execution is live daemon state. Its coordinator owns only:
-
-- an admission gate closed when daemon shutdown begins;
-- active execution contexts;
-- the admission-versus-shutdown race boundary;
-- cancellation and bounded cleanup under the existing absolute shutdown deadline;
-- command-specific backend-resource cleanup where cancellation alone cannot prove the postcondition.
-
-One-shot run tracks the Engine-returned BackendContainerID internally and removes that container on request cancellation, disconnect, or daemon shutdown. Build cancellation closes the Engine request and stream through its context. Domain services continue to clean staging, pins, and MAC leases after execution reaches its terminal local state.
-
-This coordinator has no public lookup, result state, log buffer, retention, Session authorization, or retry semantics. A private per-request runtime key may identify staging or pin paths, but it is not an Operation ID and is not returned or audited as one.
-
-### 3. Durable Operation store and dispatcher
-
-Durable Operation is a separate control-plane owner:
-
-- SQLite owns records and state transitions;
-- one dispatcher owns selection and in-process active tracking;
-- a bounded worker set calls registered type handlers;
-- each registered type supplies distinct `Execute` and `Recover` behavior;
-- resource services own validation and admission preconditions;
-- the common store owns insertion, idempotency association, and generic status transitions;
-- a type-specific transaction hook applies resource changes that must be atomic with terminal status, including clearing `active_mutation_operation_id`.
-
-The daemon instance lock already prevents two docker-helper processes from using the same state directory. D0 must not add distributed leases or a second database-locking framework. Within one daemon, a single dispatcher plus an in-memory active-ID set prevents duplicate handler invocation; conditional SQL updates protect state transitions.
-
-## Persistent shape on the Release 2.1 baseline
-
-The migration uses the existing non-null `sessions.launcher_id` foreign key and
-derives Principal ownership through Launcher. It must not restore a direct
-Session-to-Principal authority path.
-
-### `operations`
-
-Required data:
-
-- public Operation ID using the retained `op_` prefix;
-- non-null owning Session foreign key with `ON DELETE CASCADE`;
-- bounded `type` discriminator;
-- type-specific payload version used to recover work admitted by an earlier daemon version;
-- `pending`, `running`, `succeeded`, `failed`, or `canceled` status;
-- initiator type and the permitted stable initiator identifier;
-- public target type and identifier;
-- optional origin request ID;
-- normalized type-specific input required to execute a pending record;
-- bounded type-specific recovery data required to inspect interrupted work;
-- exactly one status-compatible terminal result, error, or cancellation payload;
-- created, started, cancellation-requested, and completed timestamps where applicable.
-
-Required indexes support:
-
-- lookup and bounded listing by Session and creation order;
-- startup scans by status and creation order;
-- public lookup by Operation ID through Session authorization.
-
-No column stores output chunks, progress logs, raw Docker IDs as public targets, credentials, bearer material, or generic retryability. Payload versions are internal persistence compatibility data and are not part of the public Operation representation.
-
-### `operation_idempotency`
-
-Required data:
-
-- owning Session foreign key;
-- hash of the opaque idempotency key rather than the raw header value;
-- fingerprint of the normalized Command;
-- resulting Operation foreign key;
-- creation timestamp.
-
-The Session and key hash form the logical unique key. The association is inserted in the same transaction as the Operation. Reuse with a different fingerprint returns `idempotency_key_reused`; identical reuse returns the original Operation and performs no second resource mutation. Physical Session deletion removes both tables through cascade.
-
-### State consistency
-
-Application and schema checks must reject impossible combinations:
-
-- `pending` and `running` have no terminal payload;
-- `succeeded` has only a result;
-- `failed` has only an error;
-- `canceled` has only a cancellation;
-- terminal rows have `completed_at` and never change status;
-- `started_at` appears only after the atomic `pending -> running` claim;
-- type-specific input and recovery payload size are bounded before persistence.
-
-## Dispatcher algorithm
-
-### Admission
-
-1. Authenticate, authorize, resolve the public target, and validate before backend access.
-2. Normalize the type-specific Command and compute its versioned non-secret fingerprint.
-3. Resolve an existing optional Session-scoped idempotency key before current-state observation. Identical reuse returns the original Operation; different reuse returns `idempotency_key_reused`.
-4. For a fresh request, obtain the type-specific runtime observation needed for admission.
-5. Begin the admission transaction and re-resolve the idempotency key to close concurrent-reuse races.
-6. Recheck persistent management state and lifecycle conflicts. A competing active mutation returns `409 Conflict` even if the last runtime observation happened to match the requested postcondition.
-7. If the requested start or stop postcondition already holds, commit no new record and return `200 OK` with the current container representation.
-8. Otherwise insert the `pending` Operation and idempotency association and apply the resource-specific active mutation reference in the same transaction.
-9. Commit, return `202 Accepted` with `Location`, and signal the dispatcher.
-
-The architecture fixes this observable ordering but does not require holding a SQLite transaction across Docker Engine access. The operational architect chooses the exact transaction mechanics while preserving idempotency, conflict, and no-op races.
-
-If admission loses a conflict, it returns `409 operation_in_progress` with the
-conflicting Operation ID. No rejected or state-matching no-op Command is
-queued, and neither creates an Operation row.
-
-### New execution
-
-1. The dispatcher gives interrupted `running` rows priority over new `pending` rows.
-2. For a `pending` row, conditionally update it to `running` and set `started_at` before calling external code.
-3. A crash after this commit is safe: startup calls `Recover`, never `Execute`, for that row.
-4. Call the handler's `Execute` once in the current daemon process.
-5. Commit terminal status, terminal payload, timestamp, and type-specific resource finalization atomically.
-
-### Restart recovery
-
-1. After database initialization and handler registration, enumerate `running` Operations in deterministic order.
-2. Call the matching handler's `Recover`; never rewrite the row to `pending`.
-3. Unknown Operation types or unsupported persisted payload versions fail daemon startup rather than being guessed or marked failed.
-4. After interrupted work has been scheduled, dispatch `pending` work normally.
-5. Recovery observes backend postconditions and type-specific evidence; the generic dispatcher never repeats an external action by itself.
-
-### Wake-up and concurrency
-
-Admission sends a coalescing in-memory wake-up after commit. The dispatcher queries SQLite for work; the notification is not the queue and may be dropped when a wake-up is already pending. Startup scanning guarantees recovery after process loss.
-
-Worker concurrency is bounded in code and is not operator configuration in the first implementation. The dispatcher is the sole selector and maintains the active-ID set. Resource-specific active mutation references provide the stronger per-container serialization required by D2.
-
-### Internal cancellation
-
-Only Session teardown may request cancellation through the common D0 boundary:
-
-1. a `pending` user Operation transitions directly to `canceled` with reason `session_closing`;
-2. a `running` Operation receives `cancel_requested_at` in SQLite and its active handler context is canceled with a distinguishable Session-closing cause;
-3. the handler stops only at a type-specific safe point and returns a typed cancellation decision;
-4. terminal success or failure already committed by the handler wins over a competing cancellation request;
-5. after restart, `Recover` observes the durable cancellation request and applies the same type-specific safe-point rule.
-
-The generic dispatcher never converts an arbitrary context error into public cancellation. Daemon shutdown, request loss, worker failure, and Session teardown remain distinguishable causes.
-
-### Shutdown
-
-When shutdown begins:
-
-1. close synchronous-execution and durable-Operation admission gates;
-2. stop claiming new `pending` Operations;
-3. cancel active handler contexts with a daemon-shutdown cause;
-4. cancel synchronous Engine API activity and finish required backend cleanup within the existing shared absolute deadline;
-5. allow a durable handler that reaches a valid terminal commit to keep that result;
-6. leave any other durable row `running` for restart recovery;
-7. never write `canceled` solely because the daemon stopped.
-
-Pending Operations remain pending. The next daemon instance resumes dispatch after recovering interrupted running work.
+This document owns the executor-facing sequence for D0. It is bound to the
+verified Release 2.1 code baseline, not to an earlier planning snapshot.
+
+Phase-0 inspected baseline:
+
+- repository: `kivarun/docker-helper`;
+- branch: `main`;
+- code/document baseline at inspection start:
+  `5dbccdfbc71df9b00639f46bff48ed8201966578`;
+- Release 2.1 production behavior is the parent code at
+  `54cc853c87ad3706dfe28829a0147a0dc62afbc6`; the baseline adds only the
+  consolidated final 2.1 changelog.
+
+If `main` moves before an executor starts D0, the executor must compare the new
+head with this baseline and stop on any change touching the owners listed
+below. Replacing the SHA without rechecking owners is not sufficient.
+
+`docs/architecture.md` is current-state truth. This document and the other
+`release-3-*` documents describe target Release 3 behavior.
+
+## Phase-0 findings that change the old D0 map
+
+The current implementation is materially different from the earlier planning
+baseline:
+
+- Session deletion is owned by `deleteSessionScoped`; the old
+  `deleteSession` / `deleteSessionForPrincipal` split no longer exists.
+- `operationSupervisor` is not only the legacy build/run registry. It also owns
+  the per-Launcher operation-admission quiesce, `hasRunningForLauncher`, and the
+  admission state used by checked Launcher/Principal lifecycle in
+  `launcher_lifecycle.go`.
+- Launcher/Principal disable currently deletes child Session rows inside the
+  parent lifecycle transaction and releases MAC bindings afterwards.
+- startup expiry and the offline `session cleanup` path still physically delete
+  expired Session rows.
+- current Session MAC/runtime reconciliation uses row presence and
+  `expires_at`; that is insufficient once `closing` and `cleanup_failed`
+  Sessions continue to own resources.
+- registry login currently stores Session-scoped Docker credentials under the
+  Session runtime directory and Docker CLI `--config` consumes them. Moby API
+  calls will not inherit that behavior automatically.
+- production has no Moby dependency and no aggregate cgroup hierarchy yet.
+
+D0 must transfer these responsibilities exactly once. No executor may remove
+`operationSupervisor` until every non-legacy responsibility below has its final
+owner and tests.
+
+## Fixed Release 3 execution split
+
+There are three different responsibilities and exactly three final owners:
+
+1. **Synchronous execution coordination** owns live `pull`, `build`, one-shot
+   `run`, and later non-interactive exec request contexts, daemon-shutdown
+   admission, cancellation, bounded response output, and backend-resource
+   cleanup needed to establish a synchronous postcondition. It has no public
+   Operation identity, retention, retry, or lookup.
+2. **Durable Operation store/dispatcher** owns persisted lifecycle work for
+   `container.start`, `container.stop`, `container.restart`,
+   `container.remove`, `container.repair`, `session.repair`, and
+   `session.cleanup`. It owns durable admission, idempotency, claim/recovery,
+   terminal state, and worker shutdown semantics. It stores no workload output
+   or registry secret.
+3. **Session lifecycle service** owns the active -> closing -> cleanup_failed /
+   closed state machine, Session bearer invalidation, expiry claiming, manual
+   and automatic cleanup-attempt admission, parent-lifecycle propagation,
+   tombstone purge, runtime/MAC release ordering, and the coordination needed
+   to prevent new work after closure is claimed.
+
+The old `operationSupervisor` is not any of these final owners. Its
+responsibilities are transferred as follows:
+
+| Current responsibility | Current owner | Final owner | Old path removed when |
+| --- | --- | --- | --- |
+| build/run public status, logs, cancel, retention | `operationSupervisor` + `operation` | none | build/run are synchronous and protocol/tests are migrated |
+| daemon-shutdown admission for live one-shot work | `operationSupervisor.admit` / `beginShutdown` | synchronous execution coordinator | pull/build/run all use the coordinator |
+| process/container cancellation and force cleanup | `operationSupervisor.terminate*` | synchronous execution coordinator plus command-specific cleanup | Engine-backed paths prove the same bounded postconditions |
+| Launcher admission quiesce (`quiesceLauncher`, `setQuiesced`) | `operationSupervisor` used from `launcher_lifecycle.go` | Session/lifecycle admission owner shared by synchronous execution and durable Operation admission | both admission classes consult the durable/current owner state under one lifecycle boundary |
+| active execution check for checked parent lifecycle (`hasRunningForLauncher`) | `operationSupervisor` | synchronous execution coordinator for transient work + durable Operation store for durable work; the parent lifecycle service consumes one combined query | checked delete/disable tests prove neither class is missed |
+| build/run temporary pin/staging/MAC handles | `operation` fields and domain code | build/run domain cleanup; Managed Container mount/MAC lifetime belongs to the Managed Container/Session lifecycle | no temporary handle is retained merely to keep the old supervisor alive |
+
+The replacement admission owner must not create a generic fourth framework.
+It may be a narrow lifecycle admission service in `package main`; its API is
+only the checks needed by synchronous execution, durable Operation admission,
+and parent lifecycle.
+
+## Session lifecycle transition required by D0
+
+D0 persistence is introduced against a Session row that must survive owned
+resource cleanup. Therefore the Session lifecycle schema and cleanup claim are
+a prerequisite to making `session.cleanup` a production Operation.
+
+### Ownership anchor
+
+A Session row remains the ownership anchor from creation until successful
+cleanup has completed and the fixed closed-tombstone grace has expired.
+
+- `active`: bearer may authenticate and new work may be admitted.
+- `closing`: bearer is invalid; ownership remains; cleanup may be active,
+  waiting for retry, or awaiting a manual retry.
+- `cleanup_failed`: bearer is invalid; ownership remains; automatic cleanup is
+  stopped because ownership/policy ambiguity requires administrator action.
+- `closed`: all owned backend/runtime/MAC resources are proven absent; bearer
+  remains invalid; the row is retained for the fixed ten-minute observation
+  grace and then physically purged.
+
+A Session is never reactivated from `closing`, `cleanup_failed`, or `closed`.
+Re-enabling its Principal or Launcher only permits future work/new Sessions; it
+never revives a claimed Session.
+
+### All current invalidation paths
+
+Every current physical-delete path is replaced by one Session-lifecycle owner:
+
+| Current path | Release 3 behavior |
+| --- | --- |
+| `DELETE /sessions/{id}` -> `deleteSessionScoped` | scope-resolve through the existing owner, claim `active -> closing`, invalidate bearer, admit/return `session.cleanup`; never delete the row before cleanup |
+| startup `expires_at <= now` deletion | claim due active Sessions and recover/admit durable cleanup after schema migration and handler registration |
+| offline `docker-helper session cleanup` | never delete an active/closing/cleanup_failed Session; offline mode may only purge already-closed tombstones whose fixed grace elapsed; daemon-owned cleanup is required for resource teardown |
+| Launcher disable | close new Launcher admission, atomically claim its active Sessions for cleanup, retain Launcher and Session ownership; do not delete Session rows |
+| Principal disable | close admission for all child Launchers, atomically claim their active Sessions, retain ownership chain; do not delete Session rows |
+| Launcher/Principal delete | checked physical delete only after there are no child Session rows (including closed tombstones); while Sessions remain, return a stable conflict and do not cascade away ownership |
+
+Parent disable is the teardown trigger; parent delete is a checked ownership
+removal. This avoids creating a parent-delete Operation type and preserves
+`Principal -> Launcher -> Session` until Session cleanup is observable.
+
+### Repeated closure and cleanup
+
+- first explicit close of an active Session returns `202` with the admitted
+  `session.cleanup` Operation;
+- repeated close while one cleanup Operation is active returns that same active
+  Operation and does not create parallel work;
+- after a transient failed cleanup attempt, an owning Principal/Launcher or
+  administrator may request an immediate new attempt when none is active; the
+  automatic retry schedule may independently create the next attempt when due,
+  with one transaction deciding the winner;
+- `cleanup_failed` does not auto-retry. After the administrator resolves the
+  ambiguity, an administrator may request a new cleanup attempt; the previous
+  Operation remains immutable history;
+- close of `closed` is a successful `204` while the tombstone exists;
+- after physical tombstone purge, absent and foreign Sessions are the same
+  `404 session_not_found`.
+
+### Migration and startup order
+
+R3 startup ordering is binding:
+
+1. open SQLite and enable foreign keys;
+2. apply the Session lifecycle/schema migration without deleting expired rows;
+3. materialize/validate new configuration defaults required by R3;
+4. register durable Operation handlers and validate persisted type/payload
+   versions;
+5. recover interrupted `creating` Managed Containers before Session cleanup can
+   make an ownership decision about them;
+6. recover `running` durable Operations;
+7. claim expired active Sessions and admit/recover `session.cleanup` work;
+8. reconcile Session runtime/MAC state using lifecycle ownership, not
+   `expires_at` alone;
+9. dispatch pending Operations and only then open normal admission/listeners.
+
+No startup helper may classify `closing` or `cleanup_failed` state as stale
+merely because `expires_at` is in the past.
+
+### Runtime and MAC lifetime
+
+Release 2.1 Session workspace MAC state is released only after Session cleanup
+proves that every Session-owned resource needing that boundary is absent.
+A transient/ambiguous cleanup failure retains the boundary.
+
+Managed Container system-mode mount pins and any Managed-Container-specific MAC
+state are lifetime resources, not one start-attempt resources:
+
+- create establishes the durable correlation needed to recreate/verify runtime
+  attachment safely;
+- stop does not release ownership state needed for a later start;
+- start/restart may create transient attach handles, but the persistent owner is
+  the Managed Container/Session, not an Operation;
+- daemon restart re-discovers/re-establishes required pins/MAC state from
+  persistent ownership and exact backend evidence before mutation;
+- container remove releases container-specific state only after backend absence
+  is proved;
+- Session cleanup releases remaining container/runtime state before releasing
+  the Session workspace MAC binding.
+
+The current `cleanupStaleSessionRuntimeDirs` and MAC reconciliation paths must
+be changed to query lifecycle ownership. Row absence/closed-after-grace is the
+stale authority; expired time alone is not.
+
+## Docker Engine adapter gate: D0.1
+
+D0.1 remains the single Engine-adapter compatibility gate. Do not create a
+second spike/task for the same questions.
+
+Before D0.2 changes a production backend path, D0.1 must record reproducible
+results for one reviewed `github.com/moby/moby/client` version against the
+repository Go toolchain and supported Engine matrix:
+
+- dependency version and successful `go test`, `go test -race`, and `go vet`;
+- minimum supported Docker Engine API and negotiation against one newer Engine;
+- BuildKit-enabled `ImageBuild` plus the supported legacy-build behavior;
+- public pull and build, private pull, and private `FROM` build;
+- Session credential parsing/storage, exact registry matching, pull auth
+  encoding, build auth map, and secret canaries absent from SQLite/log/audit/
+  public errors;
+- request cancellation and daemon-shutdown cancellation;
+- one-shot container create/start/wait/remove after disconnect and shutdown;
+- stream framing/decoding and typed error classification;
+- logs and exec primitives needed by later packages.
+
+`registry login` is part of this migration map, not an implicit leftover CLI
+path. Its target owner validates credentials through the adapter, writes only
+the protected Session credential store, and later pull/build calls read that
+store just in time. No Session registry credential enters durable Operations.
+
+At the Phase-0 baseline there is no Moby dependency in `go.mod` and no
+repository evidence satisfying this gate. **D0.1 is OPEN.** This is a production
+migration blocker, not an architecture blocker: its contract is fixed here.
+
+## Resource-enforcement prerequisite
+
+The cgroup hierarchy feasibility proof moves from the late D7 risk list to an
+input gate for any production path that claims R3 workload/resource enforcement.
+It is not a second resource architecture package.
+
+Before D0.3 can be accepted as a Release-3-compliant one-shot `run`, and before
+D1/D2 Managed Container creation/start is accepted, a reproducible real-host
+spike must prove:
+
+- aggregate CPU, memory, and PIDs hierarchy `Root -> Principal -> Launcher ->
+  Session`;
+- Docker placement below the verified Session cgroup while concrete Docker
+  workload limits are also applied;
+- sibling workloads cannot exceed the parent aggregate ceiling;
+- system deployment under the shipped systemd hardening and both supported MAC
+  backends where applicable;
+- supported rootless/user deployment, including controller delegation;
+- daemon restart with existing stopped/running Managed Container placement;
+- container/Session cleanup without leaked cgroups;
+- fail-closed behavior when a required controller or placement cannot be
+  proved.
+
+At the Phase-0 baseline no checked-in result proves this matrix. **The cgroup
+feasibility gate is OPEN.** User-mode/rootless remains mandatory for R3; failure
+of the spike therefore requires an architecture escalation under `AGENTS.md`,
+not a silent system-mode-only implementation.
 
 ## Ordered implementation tasks
 
-Each task is intended to be a focused commit or a small reviewable commit series. Later tasks must not leave the old and new owners active together.
+### D0.1 — freeze and prove the Engine API boundary
 
-### D0.1 — Freeze the Docker Engine API boundary
+Run the compatibility gate above. Pin the reviewed Moby client only after the
+matrix passes. No production migration is part of this step.
 
-This is an architectural and compatibility gate, not an intermediate production migration.
+**Gate:** reproducible evidence for all D0.1 bullets; otherwise stop.
 
-- define the narrow adapter methods required by image pull, image build, one-shot run, lifecycle, logs, and exec without exposing Moby types to domain services;
-- define API-version negotiation and the minimum tested Engine API version from the supported daemon matrix;
-- verify `ImageBuild` stream and error handling against the project's BuildKit-enabled and legacy test environments;
-- verify translation from the existing Session registry credential source to pull authorization and build authorization maps, including private-registry success and secret non-disclosure;
-- define cancellation, shutdown, stream decoding, BackendContainerID handling, and one-shot-container cleanup contracts;
-- do not migrate build or run to an Engine-backed copy of the legacy status/log/cancel workflow.
+### D0.2 — migrate registry login + pull, then synchronous build
 
-Completion evidence:
+Dependencies: D0.1 closed.
 
-- the adapter contract and compatibility evidence are recorded for review;
-- private pull and private `FROM` behavior are covered explicitly;
-- no production path, public response, or temporary owner reproduces the asynchronous build/run mechanism over Engine API.
+1. add the narrow adapter and the Session registry-credential bridge;
+2. migrate `registry login` validation/storage through the adapter without
+   changing its Session-secret boundary;
+3. migrate pull with matching Session authorization only;
+4. migrate build synchronously with the Session build-auth map;
+5. transfer build request/shutdown cancellation to the synchronous execution
+   coordinator;
+6. remove build use of `operationSupervisor` and its public Operation
+   status/log/cancel path once tests pass.
 
-### D0.2 — Migrate pull and make build synchronous
+**Ready boundary:** pull/registry/build have exactly one backend owner and build
+has no Operation identity. Legacy run may still use the old supervisor, so the
+supervisor itself remains.
 
-- pin and introduce the reviewed official Moby dependency with the first production adapter methods;
-- execute image pull through the adapter with only matching Session registry authorization;
-- execute Docker build under the request context through the Engine API adapter and transient execution coordinator, with the Session-scoped authorization map required for private `FROM` images;
-- return flat bounded terminal responses;
-- remove `newBuildOperation`, build polling, build public cancellation, and `waitBuildCompletion`;
-- preserve validation, isolated staging, build-arg ordering, ownership of the Session's staged registry credentials, audit fields, cleanup order, and MAC lease retention on cleanup failure;
-- remove build Operation IDs from API responses and audit records.
+### D0.3a — establish Session lifecycle persistence and cleanup admission
 
-Completion evidence:
+Dependencies: D0.1 closed; durable Operation schema primitives may be added in
+this step or D0.5 but there is one final store.
 
-- public and private pull and build paths use the reviewed adapter without exposing credentials;
-- the CLI still blocks, prints build output, reports truncation, handles signals, and exits non-zero on build failure;
-- request disconnect and daemon shutdown cancel the Engine build and clean staging;
-- no build path calls the legacy Operation registry or public Operation routes.
+- add Session lifecycle fields/state and migrate every 2.1 Session as `active`;
+- replace startup/offline immediate expiry deletion with lifecycle-aware claim;
+- replace `deleteSessionScoped`'s physical DELETE with scope resolution plus
+  cleanup claim;
+- change Principal/Launcher disable and delete semantics as specified above;
+- make MAC/runtime reconciliation lifecycle-aware;
+- add the final `session.cleanup` admission/retry/tombstone contract.
 
-### D0.3 — Make one-shot run synchronous
+**Ready boundary:** no production path can erase a Session ownership row before
+resource cleanup. No Managed Container functionality is required yet.
 
-- execute Docker run under the request context through the Engine API adapter and transient execution coordinator;
-- return bounded output, duration, result code, and exit code directly;
-- remove `newRunOperation`, run polling, run public cancellation, and `waitRunCompletion`;
-- preserve UID/GID selection, MAC backend enforcement, mount validation and pinning, CA injection, image-reference behavior, daemon-side container removal, audit metadata, and exit-code mapping;
-- remove run Operation IDs from API responses and audit records.
+### D0.3b — make one-shot run synchronous without claiming R3 resource readiness
 
-Completion evidence:
+Dependencies: D0.1 closed. The cgroup feasibility gate must also be closed
+before this path is declared Release-3-ready.
 
-- the CLI still blocks and returns the container exit code for `container_exit_nonzero`;
-- CLI signal cancellation and request disconnect cannot leave the one-shot container running;
-- pin/container/MAC cleanup ordering preserves the existing observable guarantees;
-- no run path calls the legacy Operation registry or public Operation routes.
+- migrate one-shot run to the adapter/coordinator;
+- preserve UID/GID, workspace/mount policy, pinning, CA injection, cleanup,
+  audit, and exit-code behavior;
+- remove run Operation identity and polling/cancel API use;
+- keep the path behind the D0 readiness gate until resource hierarchy and
+  explicit workload-limit enforcement are implemented together.
 
-### D0.4 — Delete the legacy public Operation mechanism
+There is no interval in which an Engine-backed `run` that lacks mandatory R3
+resource enforcement is advertised as the completed R3 contract.
 
-- remove legacy status/log/cancel handlers, routes, client calls, response types, poll loops, and offset parsing;
-- remove in-memory Operation retention and public log-buffer ownership;
-- remove `operation_retention_ttl` and `operation_max_completed` from runtime config, reload, CLI help, completion, docs, and tests;
-- apply the agreed compatibility treatment to the output byte-limit field;
-- update architecture, README, man pages, agent skill, and examples in the same change;
-- retain only reusable bounded-output and cleanup behavior from the old implementation; do not retain its child-process supervisor as target architecture.
+### D0.4 — remove legacy public/in-memory Operation
 
-Completion evidence:
+Dependencies: D0.2 and D0.3b callers migrated; Launcher quiesce/active-execution
+responsibilities transferred to their final owners.
 
-- searching production code finds no build/run `operation_id`, `/operations/{id}/logs`, public cancel, polling, pruning, or completed-operation registry;
-- tests no longer reimplement the deleted workflow;
-- current documentation describes synchronous build/run while historical roadmap text is clearly historical.
+Remove legacy `/operations/{id}/logs`, public cancel, build/run polling,
+in-memory retention, `operation_retention_ttl`, `operation_max_completed`, and
+all `operationSupervisor` code/tests that no longer protect an observable
+invariant. Rename `operation_log_max_bytes` to `command_output_max_bytes` under
+the accepted compatibility rule.
 
-### D0.5 — Add durable persistence and typed handler boundary
+**Gate:** production search finds no legacy Operation owner and parent lifecycle
+still sees/quiesces both transient and durable work.
 
-The Release 2.1 implementation and vocabulary-map rebaseline prerequisites for
-this task are satisfied.
+### D0.5 — durable Operation persistence and dispatcher
 
-- add the Operation and idempotency tables through the repository's existing explicit SQLite migration style;
-- add bounded domain types for identity, type, status, initiator, target, terminal payload, and timestamps;
-- add transactional admission helpers that participate in a caller-owned transaction;
-- add conditional transition and terminal-finalization methods;
-- add one handler registry requiring both Execute and Recover behavior;
-- make persisted payload-version support explicit at handler registration;
-- reject duplicate type registration and unknown persisted types or payload versions.
+Dependencies: Session lifecycle ownership anchor exists.
 
-Completion evidence:
+Add the one SQLite-backed Operation/idempotency model, bounded typed payloads,
+conditional claims, one handler registry with `Execute`/`Recover`, one bounded
+dispatcher, startup recovery-before-pending ordering, terminal immutability, and
+Session-scoped read/list/wait API. Unknown persisted types/versions fail
+startup.
 
-- foreign keys are enforced on every connection and cascades are tested;
-- invalid state/payload combinations cannot be written through production APIs;
-- idempotency races return one Operation;
-- no handler or test owns an alternative state machine.
+Do not create a fake production Operation type. Generic behavior may use
+package-local test handlers until `session.cleanup` is wired.
 
-### D0.6 — Add dispatcher, restart recovery, and shutdown
+### D0.6 — wire `session.cleanup` as the first real durable handler
 
-- wire the single dispatcher after handler registration;
-- implement startup recovery-before-pending ordering;
-- implement conditional `pending -> running` transition, bounded worker concurrency, active-ID protection, and coalescing wake-up;
-- commit type-specific finalization atomically with terminal status;
-- integrate shutdown without converting interrupted durable work to cancellation;
-- expose focused health/startup failure when persisted types lack handlers.
+The handler consumes the Session lifecycle owner and proves D0 against a real
+resource owner. In the pre-D1 state it cleans existing Session runtime/MAC
+resources; D1-D3 extend the same handler with Managed Containers/network/leases
+rather than replacing it.
 
-Completion evidence:
+This step is where old immediate Session deletion becomes unreachable in
+production.
 
-- a crash point after claim but before Execute enters Recover after restart;
-- a running row is never executed concurrently by two workers;
-- a terminal transition is immutable;
-- shutdown leaves unfinished work recoverable;
-- pending work is not dependent on an in-memory notification for durability.
+### D0.7 — final D0 integration
 
-### D0.7 — Add durable Operation read surface
+- remove obsolete config/help/man/README/skill contracts;
+- prove shutdown leaves unfinished durable work recoverable;
+- prove Session teardown cancels pending/running Operations at type-safe points;
+- prove no registry secret/workload output/raw backend ID enters durable rows;
+- run core gates and the full affected UAT matrix.
 
-- add Session-authorized lookup and bounded listing with status/type/target filters;
-- return `202 Accepted` and `Location` from a test integration Command using the common admission path only when a real Release 3 Operation type is available;
-- add thin CLI wait/detach rendering with no local persistence, automatic retry, or public cancel;
-- keep `initiator_id` and `origin_request_id` internal permanently; the public Operation projection never exposes them.
+## Required checks
 
-Do not ship a fake production Operation type merely to exercise D0. Until D2,
-D3 Session repair, or Session cleanup supplies a real handler, test the generic
-boundary with test-only handlers.
+Every D0 production commit/series ends with:
 
-## Test migration inventory
+```text
+gofmt
+go test ./...
+go test -race ./...
+go vet ./...
+git diff --check
+```
 
-### Preserve and retarget
+Plus applicable real Engine/host/package tests. Tests preserve observable
+invariants, not `operationSupervisor` implementation details.
 
-| Existing suite | Independent invariant to preserve |
-| --- | --- |
-| `cmd_start_race_test.go` | Start and shutdown have one atomic boundary. |
-| `shutdown_test.go`, `shutdown_lifecycle_test.go` | Graceful and force termination share one absolute deadline and run concurrently. |
-| `shutdown_gate_test.go` | Work admitted before gate close is supervised; work after close is rejected. |
-| `container_lifecycle_unit_test.go`, `container_lifecycle_integration_test.go` | One-shot run cancellation cleanup removes the Engine-returned backend container under admission and shutdown races. |
-| `build_staging_test.go` | Staging cleanup precedes MAC lease release; failure retains confinement state. |
-| `mount_pin_linux_test.go`, relevant `mac_lifecycle_test.go` cases | Pin cleanup and MAC lease ownership remain ordered and fail closed. |
-| `bounded_buffer_test.go`, `build_tail_test.go` | Direct output remains bounded, retains the newest bytes, and reports truncation. |
-| `build_audit_test.go`, `audit_test.go`, `logging_audit_correctness_test.go` | Start/finish attribution, sanitized errors, duration, and secret exclusion remain observable without false Operation identity. |
-| `run_exit_code_test.go`, `error_contract_test.go` | Docker failure and workload non-zero exit remain distinct and preserve the exit code. |
-| `agent_cli_test.go` | Blocking behavior, output routing, truncation warning, signal exit codes, and API error rendering remain stable. |
+Required migration/regression cases include:
 
-### Remove or rewrite
+- final 2.1 database -> R3 migration with active and already-expired Sessions;
+- explicit close, TTL expiry, Principal disable, Launcher disable, and daemon
+  restart all converge on the same Session cleanup owner;
+- parent delete cannot erase Sessions in `closing`, `cleanup_failed`, or
+  `closed` grace;
+- parent re-enable never revives a claimed Session;
+- offline cleanup cannot bypass durable ownership cleanup;
+- cleanup retry races produce one active attempt and immutable prior attempts;
+- MAC/runtime state remains owned through transient and ambiguous failure;
+- old build/run supervisor cannot be removed while Launcher admission/runtime
+  inspection still calls it;
+- private pull/private `FROM` plus registry-login secret canaries;
+- rootful/rootless cgroup enforcement before R3 run/container readiness.
 
-- `build_async_test.go` becomes synchronous build request/result and disconnect coverage;
-- public cancellation cases in `cancel_test.go` are deleted, while execution cancellation and backend cleanup races move to transient-coordinator tests;
-- `operation_cleanup_test.go` is deleted with TTL/count pruning;
-- status/log offset tests in `build_test.go`, `run_exit_code_test.go`, `agent_cli_test.go`, and `error_contract_test.go` are replaced by direct result assertions;
-- `operationSupervisor`-specific tests are retained only when they protect observable cancellation or cleanup guarantees and are rewritten against their final owner;
-- configuration, reload, help, completion, README, man-page, packaging, and agent-skill tests are updated with the selected output-limit compatibility rule.
+## D0 start gate after Phase 0
 
-### New durable invariants
-
-D0 persistence and dispatcher tests must prove:
-
-- Session ownership and cross-Session non-disclosure;
-- `ON DELETE CASCADE` for Operation and idempotency rows;
-- atomic idempotency under concurrent admission;
-- same key/different fingerprint rejection;
-- one active worker per Operation;
-- recovery, not Execute, for interrupted `running` rows;
-- pending and running Session-closing cancellation, including the terminal-result race;
-- terminal immutability and status-compatible payloads;
-- terminal status and resource finalization in one transaction;
-- recovery of the previous supported payload version across daemon upgrade;
-- pending work survives a lost wake-up and process restart;
-- shutdown leaves interrupted work recoverable;
-- no secret or raw backend ID enters durable rows, public errors, or audit records; workload output appears only in the bounded direct Command result and never in durable rows or audit.
-
-## Remaining implementation gate
-
-The public D0 contract, target ownership split, and official Moby client dependency are fixed. D0.1 is the operational architect's gate for the narrow adapter contracts, including cancellation, shutdown, build-stream decoding, one-shot-container cleanup, private-registry authorization translation, and the minimum tested Engine API version. The compatibility spike may refine adapter mechanics but is not permission to reopen the synchronous Command, credential boundary, or durable Operation contracts.
-
-## D0 completion gate
-
-D0 is complete only when all of the following are true:
-
-- build and one-shot run have no public or internal durable Operation identity;
-- their CLI remains blocking and their output, exit, cancellation, cleanup, and shutdown behavior is covered through the synchronous production path;
-- the old in-memory record, registry, polling, replay, public cancellation, and retention configuration are gone;
-- transient execution coordination is the only owner of synchronous cancellation and backend-resource cleanup;
-- durable Operation persistence, dispatcher, handler registration, recovery, idempotency, retention-by-Session, and read API have one owner each;
-- no fake build/run compatibility layer reproduces the deleted async workflow;
-- the implementation map references the actual Release 2.1 symbols and schema;
-- documentation and shipped CLI/man/agent contracts match the new behavior.
+Architecture and ownership questions are closed by this document and its
+companion Phase-0 reconciliations. Production D0 must **not** begin at D0.2.
+The exact next executable step is D0.1 Engine compatibility evidence, in
+parallel only with the independent cgroup feasibility spike. D0.2 waits for
+D0.1; D0.3b/D1/D2 readiness also waits for the cgroup gate.
