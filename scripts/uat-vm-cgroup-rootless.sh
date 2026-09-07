@@ -138,8 +138,12 @@ install -o fea-su -g fea-su -m 0644 /tmp/feasu-daemon.json \
   /home/feasu/.config/docker/daemon.json
 rm -f /tmp/feasu-daemon.json
 
-# Official rootless setup tool, as the user, in a real login session
-# (pam_systemd starts the user manager and provides XDG_RUNTIME_DIR).
+# Official rootless setup tool. Invoking it via su/sudo leaves the session
+# without XDG_RUNTIME_DIR, so the tool cannot see the user manager; its own
+# documented remedy is to log in as the user (ssh works). The key pair below
+# gives the bootstrap a real login session (pam_systemd starts the user
+# manager and provides XDG_RUNTIME_DIR), and linger keeps that manager
+# running afterwards for the gate harness.
 cat > /tmp/feasu-rootless-install.sh <<'USR'
 #!/bin/bash
 set -euo pipefail
@@ -153,7 +157,23 @@ ls -l "$XDG_RUNTIME_DIR/docker.sock"
 echo ROOTLESS-INSTALL-DONE
 USR
 chmod 0755 /tmp/feasu-rootless-install.sh
-su -l fea-su -c 'bash /tmp/feasu-rootless-install.sh'
+install -d -o fea-su -g fea-su -m 0700 /home/feasu/.ssh
+ssh-keygen -t ed25519 -N "" -C fea-su-bootstrap -f /home/feasu/.ssh/id_ed25519 >/dev/null
+cat /home/feasu/.ssh/id_ed25519.pub >> /home/feasu/.ssh/authorized_keys
+chown fea-su:fea-su /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/id_ed25519.pub /home/feasu/.ssh/authorized_keys
+chmod 0600 /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/authorized_keys
+SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+READY=0
+for i in 1 2 3 4 5; do
+  if ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 fea-su@localhost true 2>/dev/null; then
+    READY=1
+    break
+  fi
+  sleep 2
+done
+[ "$READY" = 1 ] || { echo "could not open a login session for fea-su via ssh (user manager prerequisite)"; exit 1; }
+log "running the rootless setup tool in a real fea-su login session"
+ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 fea-su@localhost bash /tmp/feasu-rootless-install.sh
 rm -f /tmp/feasu-rootless-install.sh
 
 # Verify the rootless daemon as root through the user socket.
