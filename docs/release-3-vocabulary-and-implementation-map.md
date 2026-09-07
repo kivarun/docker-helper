@@ -12,11 +12,15 @@ Inspected baseline:
 - repository: `kivarun/docker-helper`;
 - branch: `main`;
 - Phase-0 start SHA: `5dbccdfbc71df9b00639f46bff48ed8201966578`;
+- Phase-0 close SHA: `71b6a96d3367d76d4bef2c675ee8686ce9aebe12`;
 - Release 2.1 production parent: `54cc853c87ad3706dfe28829a0147a0dc62afbc6`.
 
-The previous `44281a8` binding is obsolete. If `main` changes before executor
-handoff, compare the new head with the Phase-0 SHA and revalidate every touched
-owner below. A SHA-only edit is not a rebaseline.
+Every commit between the Phase-0 start and close SHAs is documentation only:
+the consolidated final 2.1 changelog and the Release 3 Phase-0 design
+reconciliation. The previous `44281a8` binding is obsolete. If `main` changes
+before executor handoff, compare the new head with the Phase-0 close SHA and
+revalidate every touched owner below; new documentation-only commits do not
+change the ownership facts. A SHA-only edit is not a rebaseline.
 
 `docs/architecture.md` owns implemented truth. Release-3 documents own target
 behavior.
