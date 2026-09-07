@@ -83,7 +83,7 @@ jobs:
             dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
           ready=""
           for i in $(seq 1 60); do
-            if docker exec dind-floor curl -fsS http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
+            if docker exec dind-floor wget -q -O- http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
               ready=yes
               break
             fi
@@ -95,7 +95,7 @@ jobs:
             exit 1
           fi
           echo "EVIDENCE: floor daemon 19.03.15 (API 1.40, the client's declared MinAPIVersion) started"
-          docker exec dind-floor curl -fsS http://127.0.0.1:2375/version | head -c 2000
+          docker exec dind-floor wget -q -O- http://127.0.0.1:2375/version | head -c 2000
           echo
           # The 19.03 matrix run is a RECORDED attempt: rows that fail here are
           # evidence about the declared lower bound, not job failures. The
@@ -123,7 +123,7 @@ jobs:
             dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
           ready=""
           for i in $(seq 1 60); do
-            if docker exec dind-floor curl -fsS http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
+            if docker exec dind-floor wget -q -O- http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
               ready=yes
               break
             fi
@@ -135,7 +135,7 @@ jobs:
             exit 1
           fi
           echo "EVIDENCE: floor daemon 20.10.24 started (first moby release supporting cgroup v2 hosts)"
-          docker exec dind-floor curl -fsS http://127.0.0.1:2375/version | head -c 2000
+          docker exec dind-floor wget -q -O- http://127.0.0.1:2375/version | head -c 2000
           echo
           docker run --rm \
             --network container:dind-floor \

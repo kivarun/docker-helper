@@ -136,15 +136,22 @@ fact "session-memory-max=$(cat "$S1/memory.max")"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
 # /dev/shm is tmpfs: an 80M shmem file is charged to memory.current, so two
 # 80M allocations together exceed the 128M Session ceiling while each stays
-# under its own 96M container limit.
+# under its own 96M container limit. busybox head does not parse the M
+# suffix, so the size comes from dd's bs=1M; the container log records the
+# written size as direct allocation evidence.
+ALLOCATOR='sleep 3; dd if=/dev/zero of=/dev/shm/blob bs=1M count=80 2>/dev/null; echo wrote=$(stat -c %s /dev/shm/blob 2>/dev/null); sleep 120'
 docker run -d --name cgm1 --cgroup-parent="$S1_REL" --memory 96m --shm-size 128m \
-  alpine:3.24 sh -c 'sleep 3; head -c 80M /dev/zero > /dev/shm/blob; sleep 120' >/dev/null || die "allocator 1 failed to start"
+  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
 docker run -d --name cgm2 --cgroup-parent="$S1_REL" --memory 96m --shm-size 128m \
-  alpine:3.24 sh -c 'sleep 3; head -c 80M /dev/zero > /dev/shm/blob; sleep 120' >/dev/null || die "allocator 2 failed to start"
-sleep 12
+  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
+sleep 14
+for c in cgm1 cgm2; do
+  fact "allocator-$c=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$c")"
+  fact "allocator-$c-log=$(docker logs "$c" 2>&1 | tail -1)"
+done
+fact "session-memory-current=$(cat "$S1/memory.current")"
 EX1=$(docker inspect --format '{{.State.ExitCode}}' cgm1)
 EX2=$(docker inspect --format '{{.State.ExitCode}}' cgm2)
-fact "allocator-exit-codes=$EX1,$EX2"
 fact "session-memory-events=$(cat "$S1/memory.events")"
 KILLED=0
 { [ "$EX1" = "137" ] || [ "$EX1" = "255" ]; } && KILLED=1
