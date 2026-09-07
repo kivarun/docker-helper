@@ -72,16 +72,18 @@ jobs:
           docker pull docker:19.03.15-dind
           docker image inspect docker:19.03.15-dind --format 'FACT: floor-image-digest={{index .RepoDigests 0}}' || true
           docker rm -f dind-floor 2>/dev/null || true
-          # TLS disabled and published on the host loopback only; vfs storage
-          # driver so the inner daemon never depends on the runner filesystem.
+          # TLS disabled; vfs storage driver so the inner daemon never depends
+          # on the runner filesystem. No host publication is required: the
+          # probe runs in a container sharing the DinD network namespace, so
+          # the daemon (0.0.0.0:2375) and any inner-published registry port
+          # are reachable at the DinD loopback.
           docker run -d --privileged --name dind-floor \
             -e DOCKER_TLS_CERTDIR= \
-            -p 127.0.0.1:2376:2375 \
             docker:19.03.15-dind \
             dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
           ready=""
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:2376/_ping >/dev/null 2>&1; then
+            if docker exec dind-floor curl -fsS http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
               ready=yes
               break
             fi
@@ -93,13 +95,17 @@ jobs:
             exit 1
           fi
           echo "EVIDENCE: floor daemon 19.03.15 (API 1.40, the client's declared MinAPIVersion) started"
-          curl -fsS http://127.0.0.1:2376/version | head -c 2000
+          docker exec dind-floor curl -fsS http://127.0.0.1:2375/version | head -c 2000
           echo
-          cd scripts/d01-engine-gate
           # The 19.03 matrix run is a RECORDED attempt: rows that fail here are
           # evidence about the declared lower bound, not job failures. The
           # required-mode run below (20.10) is the binding one.
-          if D01_GATE_REQUIRED=1 DOCKER_HOST=tcp://127.0.0.1:2376 go test -v ./...; then
+          if docker run --rm \
+              --network container:dind-floor \
+              -v "${{ github.workspace }}:/src" -w /src/scripts/d01-engine-gate \
+              -e D01_GATE_REQUIRED=1 -e DOCKER_HOST=tcp://127.0.0.1:2375 \
+              golang:1.26 \
+              go test -v ./...; then
             echo "EVIDENCE: full 19.03 matrix passed"
           else
             echo "EVIDENCE: 19.03 matrix rows failed as recorded (see the test log above)"
@@ -113,12 +119,11 @@ jobs:
           docker rm -f dind-floor 2>/dev/null || true
           docker run -d --privileged --name dind-floor \
             -e DOCKER_TLS_CERTDIR= \
-            -p 127.0.0.1:2376:2375 \
             docker:20.10.24-dind \
             dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
           ready=""
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:2376/_ping >/dev/null 2>&1; then
+            if docker exec dind-floor curl -fsS http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
               ready=yes
               break
             fi
@@ -130,10 +135,14 @@ jobs:
             exit 1
           fi
           echo "EVIDENCE: floor daemon 20.10.24 started (first moby release supporting cgroup v2 hosts)"
-          curl -fsS http://127.0.0.1:2376/version | head -c 2000
+          docker exec dind-floor curl -fsS http://127.0.0.1:2375/version | head -c 2000
           echo
-          cd scripts/d01-engine-gate
-          D01_GATE_REQUIRED=1 DOCKER_HOST=tcp://127.0.0.1:2376 go test -v ./...
+          docker run --rm \
+            --network container:dind-floor \
+            -v "${{ github.workspace }}:/src" -w /src/scripts/d01-engine-gate \
+            -e D01_GATE_REQUIRED=1 -e DOCKER_HOST=tcp://127.0.0.1:2375 \
+            golang:1.26 \
+            go test -v ./...
 
   cgroup-system:
     name: Aggregate cgroup feasibility (system mode, Tumbleweed VM)

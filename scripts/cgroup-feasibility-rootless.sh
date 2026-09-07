@@ -59,13 +59,24 @@ done
 echo "STEP-1-DONE"
 
 step 2 "rootless daemon as a systemd user service"
-# Prefer the package-shipped user unit; the openSUSE docker RPM does not
-# ship dockerd-rootless.sh, so when no user unit exists the harness provides
-# the documented rootlesskit invocation as a harness-owned unit.
-if [ ! -f /usr/lib/systemd/user/docker.service ] && [ ! -f /etc/systemd/user/docker.service ] \
-  && ! as_user systemctl cat --quiet docker.service >/dev/null 2>&1; then
-  mkdir -p "$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config/systemd/user"
-  UNIT_DIR="$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config/systemd/user"
+# Prefer the package-shipped user unit only when its ExecStart target
+# actually exists (the openSUSE docker RPM ships a user unit that references
+# the missing dockerd-rootless.sh). Otherwise install the documented
+# rootlesskit invocation as a harness-owned unit, which overrides the
+# package one for this user.
+UNIT_DIR="$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config/systemd/user"
+SHIPPED=0
+PKG_UNIT=/usr/lib/systemd/user/docker.service
+if [ -f "$PKG_UNIT" ]; then
+  EXEC_BIN=$(sed -n 's/^ExecStart=//p' "$PKG_UNIT" | head -1 | awk '{print $1}')
+  if [ -n "$EXEC_BIN" ] && [ -x "$EXEC_BIN" ]; then
+    SHIPPED=1
+  fi
+fi
+if [ "$SHIPPED" = 1 ]; then
+  fact "rootless-unit-source=package-shipped"
+else
+  mkdir -p "$UNIT_DIR"
   cat > "$UNIT_DIR/docker.service" <<'EOF'
 [Unit]
 Description=rootless docker (cgroup feasibility harness)
@@ -81,19 +92,28 @@ StartLimitIntervalSec=60s
 WantedBy=default.target
 EOF
   chown -R "$FEAS_USER:$FEAS_USER" "$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config"
-  fact "rootless-unit-source=harness-owned (documented rootlesskit invocation)"
-else
-  fact "rootless-unit-source=package-shipped"
+  fact "rootless-unit-source=harness-owned (package unit references a missing rootless wrapper)"
 fi
+# live-restore so a daemon restart preserves running workloads (the same
+# contract the system-mode harness proves).
+as_user bash -c 'mkdir -p ~/.config/docker && printf "{ \"live-restore\": true }\n" > ~/.config/docker/daemon.json' \
+  || die "could not write the rootless daemon configuration"
 as_user systemctl --user daemon-reload
 as_user systemctl is-active --quiet docker.service \
   || as_user systemctl start docker.service \
-  || die "rootless docker user service did not start"
+  || {
+    as_user systemctl --user status docker.service --no-pager 2>&1 | head -20 || true
+    as_user journalctl --user -u docker.service -n 30 --no-pager 2>&1 | tail -30 || true
+    die "rootless docker user service did not start"
+  }
 for i in $(seq 1 30); do
   docker info >/dev/null 2>&1 && break
   sleep 2
 done
-docker info >/dev/null 2>&1 || die "rootless daemon unreachable at $DOCKER_HOST"
+docker info >/dev/null 2>&1 || {
+  as_user journalctl --user -u docker.service -n 30 --no-pager 2>&1 | tail -30 || true
+  die "rootless daemon unreachable at $DOCKER_HOST"
+}
 docker info --format 'FACT: rootless-server={{.ServerVersion}} driver={{.Driver}} cgroup-driver={{.CgroupDriver}} cgroup-version={{.CgroupVersion}}' \
   || die "rootless docker info failed"
 DRIVER=$(docker info --format '{{.CgroupDriver}}')

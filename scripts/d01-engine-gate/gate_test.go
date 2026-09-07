@@ -578,9 +578,6 @@ func TestEngineLogsExecPrimitives(t *testing.T) {
 // registry publishes only on the host loopback.
 func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	cli := engineClient(t)
-	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
-		engineEnvIssue(t, "loopback publishing reachability is required; run the probe on the deployment host or in a host-network container")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
@@ -766,7 +763,25 @@ func waitRegistryReady(t *testing.T, addr string) {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	t.Fatalf("disposable registry at %s did not become ready", addr)
+	// Diagnostics: the published endpoint never answered; the registry
+	// container state and its logs tell the executor whether the container
+	// itself failed or the publication is unreachable from this process.
+	t.Logf("disposable registry at %s did not become ready", addr)
+	if cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation()); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if insp, err := cli.ContainerInspect(ctx, "d01-gate-registry", client.ContainerInspectOptions{}); err == nil {
+			t.Logf("FACT: registry-container-state=%s", insp.Container.State.Status)
+		}
+		if logs, err := cli.ContainerLogs(ctx, "d01-gate-registry", client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Tail: "20"}); err == nil {
+			body, _ := io.ReadAll(logs)
+			logs.Close()
+			var plain bytes.Buffer
+			_, _ = stdcopy.StdCopy(&plain, io.Discard, bytes.NewReader(body))
+			t.Logf("FACT: registry-container-log-tail:\n%s", plain.String())
+		}
+	}
+	t.FailNow()
 }
 
 // checkRegistryCredentials proves the credential pair at the registry

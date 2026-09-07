@@ -36,6 +36,11 @@ P=$HIER/principal-1
 L=$P/launcher-1
 S1=$L/session-1
 S2=$L/session-2
+# The cgroupfs driver resolves --cgroup-parent relative to the cgroup root;
+# passing a /sys/fs/cgroup-prefixed path silently creates a doubled path.
+CGRP=/dh-feas
+S1_REL=$CGRP/principal-1/launcher-1/session-1
+S2_REL=$CGRP/principal-1/launcher-1/session-2
 CTRS="+cpu +memory +pids"
 
 step 1 "cgroup v2 facts"
@@ -83,10 +88,10 @@ echo "STEP-3-DONE"
 step 4 "workload placement under Session + concrete Docker limits"
 docker pull -q alpine:3.24 >/dev/null 2>&1 || die "could not pull alpine:3.24"
 docker run -d --name cg1 \
-  --cgroup-parent="$S1" --cpus 0.8 --memory 96m --pids-limit 200 \
+  --cgroup-parent="$S1_REL" --cpus 0.8 --memory 96m --pids-limit 200 \
   alpine:3.24 sh -c 'sleep 900' >/dev/null || die "docker run under $S1 failed (placement gate)"
 docker run -d --name cg2 \
-  --cgroup-parent="$S1" --cpus 0.8 --memory 96m --pids-limit 200 \
+  --cgroup-parent="$S1_REL" --cpus 0.8 --memory 96m --pids-limit 200 \
   alpine:3.24 sh -c 'sleep 900' >/dev/null || die "docker run sibling under $S1 failed (placement gate)"
 fact "container-cgroup-parent=$(docker inspect --format '{{.HostConfig.CgroupParent}}' cg1)"
 CG1PID=$(docker inspect --format '{{.State.Pid}}' cg1)
@@ -107,9 +112,9 @@ echo "STEP-4-DONE"
 
 step 5 "aggregate CPU ceiling enforced over sibling workloads"
 docker rm -f cgc1 cgc2 >/dev/null 2>&1 || true
-docker run -d --name cgc1 --cgroup-parent="$S1" --cpus 0.8 \
+docker run -d --name cgc1 --cgroup-parent="$S1_REL" --cpus 0.8 \
   alpine:3.24 sh -c 'while :; do :; done' >/dev/null || die "burner 1 failed to start"
-docker run -d --name cgc2 --cgroup-parent="$S1" --cpus 0.8 \
+docker run -d --name cgc2 --cgroup-parent="$S1_REL" --cpus 0.8 \
   alpine:3.24 sh -c 'while :; do :; done' >/dev/null || die "burner 2 failed to start"
 echo "50000 100000" > "$S1/cpu.max" || die "cannot set aggregate cpu.max on $S1"
 fact "session-cpu-max=$(cat "$S1/cpu.max")"
@@ -132,9 +137,9 @@ docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
 # /dev/shm is tmpfs: an 80M shmem file is charged to memory.current, so two
 # 80M allocations together exceed the 128M Session ceiling while each stays
 # under its own 96M container limit.
-docker run -d --name cgm1 --cgroup-parent="$S1" --memory 96m --shm-size 128m \
+docker run -d --name cgm1 --cgroup-parent="$S1_REL" --memory 96m --shm-size 128m \
   alpine:3.24 sh -c 'sleep 3; head -c 80M /dev/zero > /dev/shm/blob; sleep 120' >/dev/null || die "allocator 1 failed to start"
-docker run -d --name cgm2 --cgroup-parent="$S1" --memory 96m --shm-size 128m \
+docker run -d --name cgm2 --cgroup-parent="$S1_REL" --memory 96m --shm-size 128m \
   alpine:3.24 sh -c 'sleep 3; head -c 80M /dev/zero > /dev/shm/blob; sleep 120' >/dev/null || die "allocator 2 failed to start"
 sleep 12
 EX1=$(docker inspect --format '{{.State.ExitCode}}' cgm1)
@@ -153,7 +158,7 @@ step 7 "aggregate PIDs ceiling enforced over sibling workloads"
 echo "24" > "$S1/pids.max" || die "cannot set aggregate pids.max on $S1"
 fact "session-pids-max=$(cat "$S1/pids.max")"
 docker rm -f cgp1 >/dev/null 2>&1 || true
-docker run -d --name cgp1 --cgroup-parent="$S1" --pids-limit 500 \
+docker run -d --name cgp1 --cgroup-parent="$S1_REL" --pids-limit 500 \
   alpine:3.24 sh -c 'sleep 2; for i in $(seq 1 100); do sleep 300 & done; sleep 120' >/dev/null || die "pids workload failed to start"
 sleep 8
 CUR=$(cat "$S1/pids.current")
@@ -167,9 +172,9 @@ echo "STEP-7-DONE"
 
 step 8 "Launcher aggregate ceiling over sibling Sessions"
 docker rm -f cgc1 cgs2 >/dev/null 2>&1 || true
-docker run -d --name cgc1 --cgroup-parent="$S1" --cpus 0.8 \
+docker run -d --name cgc1 --cgroup-parent="$S1_REL" --cpus 0.8 \
   alpine:3.24 sh -c 'while :; do :; done' >/dev/null || die "session-1 burner failed to start"
-docker run -d --name cgs2 --cgroup-parent="$S2" --cpus 0.8 \
+docker run -d --name cgs2 --cgroup-parent="$S2_REL" --cpus 0.8 \
   alpine:3.24 sh -c 'while :; do :; done' >/dev/null || die "session-2 burner failed to start"
 echo "70000 100000" > "$L/cpu.max" || die "cannot set launcher cpu.max"
 fact "launcher-cpu-max=$(cat "$L/cpu.max")"
@@ -188,8 +193,8 @@ echo "STEP-8-DONE"
 
 step 9 "running and stopped workloads + daemon restart"
 docker rm -f cg3 cg4 >/dev/null 2>&1 || true
-docker create --name cg3 --cgroup-parent="$S1" alpine:3.24 sh -c 'sleep 60' >/dev/null || die "created-state workload failed"
-docker run -d --name cg4 --cgroup-parent="$S1" alpine:3.24 sh -c 'sleep 900' >/dev/null || die "running workload for restart failed"
+docker create --name cg3 --cgroup-parent="$S1_REL" alpine:3.24 sh -c 'sleep 60' >/dev/null || die "created-state workload failed"
+docker run -d --name cg4 --cgroup-parent="$S1_REL" alpine:3.24 sh -c 'sleep 900' >/dev/null || die "running workload for restart failed"
 docker stop cg1 >/dev/null || die "stop of running workload failed"
 docker inspect --format 'FACT: cg1={{.State.Status}} cg3={{.State.Status}} cg4={{.State.Status}}' cg1 cg3 cg4
 systemctl restart docker || die "docker daemon restart failed"
@@ -247,7 +252,7 @@ step 12 "fail-closed: silent placement without controller enforcement is detecta
 docker rm -f cgfc >/dev/null 2>&1 || true
 mkdir -p "$HIER/nolang"
 echo "-cpu -memory -pids" > "$HIER/nolang/cgroup.subtree_control" || die "could not strip controllers from the no-language parent"
-docker run -d --name cgfc --cgroup-parent="$HIER/nolang" alpine:3.24 sh -c 'sleep 60' >/dev/null 2>&1 \
+docker run -d --name cgfc --cgroup-parent="$CGRP/nolang" alpine:3.24 sh -c 'sleep 60' >/dev/null 2>&1 \
   && FC=started || FC=refused
 fact "no-controller-placement=$FC"
 if [ "$FC" = "started" ]; then
