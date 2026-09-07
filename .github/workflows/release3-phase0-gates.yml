@@ -363,7 +363,7 @@ jobs:
             scripts/uat-vm-cgroup-system.sh
 
   cgroup-rootless:
-    name: Aggregate cgroup feasibility (rootless mode, Tumbleweed VM)
+    name: Aggregate cgroup feasibility (rootless mode, Ubuntu 24.04 VM)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -380,7 +380,7 @@ jobs:
       - name: Print tested source SHA
         run: echo "tested source SHA ${{ github.sha }}"
 
-      - name: Run rootless-mode cgroup feasibility gate in Tumbleweed VM
+      - name: Run rootless-mode cgroup feasibility gate in Ubuntu 24.04 VM
         run: |
           UAT_REPO_DIR="${{ github.workspace }}" \
             scripts/uat-vm-cgroup-rootless.sh

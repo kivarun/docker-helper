@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 #
 # cgroup-feasibility-rootless.sh — Release 3 aggregate-cgroup feasibility
-# harness for ROOTLESS/USER deployment. It runs INSIDE a real openSUSE
-# Tumbleweed VM (the Phase-0 workflow boots it through
-# scripts/uat-vm-cgroup-rootless.sh on the canonical VM harness).
+# harness for ROOTLESS/USER deployment. It runs INSIDE a real Ubuntu 24.04 VM
+# (the Phase-0 workflow boots it through scripts/uat-vm-cgroup-rootless.sh on
+# the canonical Ubuntu VM harness scripts/uat-vm-ubuntu.sh).
 #
 # The proof target is the unprivileged path exactly as deployed: a normal
 # user owns a systemd user session with cgroup v2 controller delegation, a
-# rootless Docker daemon runs as a systemd USER service of that user, and
-# workloads are placed and aggregate-limited through the user's delegated
-# cgroup subtree — never by writing cgroupfs as root outside the delegation.
-# Root reads are used only for evidence.
+# rootless Docker daemon (installed through the official
+# dockerd-rootless-setuptool.sh path and running as a systemd USER service of
+# that user) places workloads in the user's delegated cgroup subtree, and
+# workloads are aggregate-limited through that subtree — never by writing
+# cgroupfs as root outside the delegation. Root reads are used only for
+# evidence.
 #
 # Hierarchy mapping (systemd slice grammar encodes the R3 chain):
 #
@@ -82,122 +84,34 @@ if [ -r /sys/kernel/security/lsm ]; then
 fi
 echo "STEP-1-DONE"
 
-step 2 "rootless daemon as a systemd user service"
-# Prefer the package-shipped user unit only when its ExecStart target
-# actually exists (the openSUSE docker RPM ships a user unit that references
-# the missing dockerd-rootless.sh). Otherwise install the documented
-# rootlesskit invocation as a harness-owned unit, which overrides the
-# package one for this user.
+step 2 "rootless daemon as a systemd user service (official install, verify-only)"
+# The provisioning wrapper installs the rootless daemon through the official
+# dockerd-rootless-setuptool.sh path. This harness only VERIFIES the
+# resulting normally configured supported deployment; it never installs,
+# repairs, or replaces Docker/containerd runtime internals.
 UNIT_DIR="$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config/systemd/user"
-SHIPPED=0
-PKG_UNIT=/usr/lib/systemd/user/docker.service
-if [ -f "$PKG_UNIT" ]; then
-  EXEC_BIN=$(sed -n 's/^ExecStart=//p' "$PKG_UNIT" | head -1 | awk '{print $1}')
-  if [ -n "$EXEC_BIN" ] && [ -x "$EXEC_BIN" ]; then
-    SHIPPED=1
-  fi
-fi
-if [ "$SHIPPED" = 1 ]; then
-  fact "rootless-unit-source=package-shipped"
-else
-  mkdir -p "$UNIT_DIR"
-  cat > "$UNIT_DIR/docker.service" <<'EOF'
-[Unit]
-Description=rootless docker (cgroup feasibility harness)
-StartLimitBurst=3
-StartLimitIntervalSec=60s
-
-[Service]
-ExecStart=/usr/bin/rootlesskit --net=slirp4netns --disable-host-loopback /usr/bin/dockerd
-TimeoutSec=0
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-EOF
-  chown -R "$FEAS_USER:$FEAS_USER" "$(getent passwd "$FEAS_USER" | cut -d: -f6)/.config"
-  fact "rootless-unit-source=harness-owned (package unit references a missing rootless wrapper)"
-fi
-# live-restore so a daemon restart preserves running workloads (the same
-# contract the system-mode harness proves).
-as_user bash -c 'mkdir -p ~/.config/docker && printf "{ \"live-restore\": true }\n" > ~/.config/docker/daemon.json' \
-  || die "could not write the rootless daemon configuration"
-# Rootless dockerd would otherwise launch a managed containerd that
-# inherits the system defaults (/run/containerd) and dies in the userns.
-# Pre-launch a user-owned containerd at the exact address the rootless
-# daemon probes, so the managed launch never happens.
-as_user bash -c 'CTR=""; for cand in /usr/sbin/containerd /usr/bin/containerd; do [ -x $cand ] && CTR=$cand && break; done; echo "FACT: containerd-binary=$CTR"; [ -n "$CTR" ] || { echo "containerd binary not found"; exit 1; }; mkdir -p $XDG_RUNTIME_DIR/docker/containerd $HOME/.local/share/docker/containerd/dir; printf "version = 2\nroot = \"%s\"\nstate = \"%s\"\n" "$HOME/.local/share/docker/containerd/dir" "$XDG_RUNTIME_DIR/docker/containerd/state" > $HOME/containerd-feas.toml; nohup $CTR --config=$HOME/containerd-feas.toml --root=$HOME/.local/share/docker/containerd/dir --state=$XDG_RUNTIME_DIR/docker/containerd/state --address=$XDG_RUNTIME_DIR/docker/containerd/containerd.sock --log-level=warn >> $HOME/containerd-feas.log 2>&1 < /dev/null & sleep 1' \
-  || die "could not launch the user-owned containerd"
-as_user bash -c 'for i in 1 2 3 4 5; do [ -S $XDG_RUNTIME_DIR/docker/containerd/containerd.sock ] && exit 0; sleep 1; done; echo "NO-CONTAINERD-SOCKET"; tail -5 $HOME/containerd-feas.log; exit 1' \
-  || die "the user-owned containerd socket did not appear"
-as_user systemctl --user daemon-reload
-MODE=unit
-STARTED=no
-# The first StartUnit calls can be transiently denied by a freshly started
-# user manager (observed: a retried attempt succeeds after several
-# seconds); retry with a wider window, capture each attempt's error, and
-# trace the first attempt at debug level.
-for attempt in 1 2 3 4 5; do
-  if as_user systemctl is-active --quiet docker.service; then
-    STARTED=yes
-    break
-  fi
-  if [ "$attempt" = "1" ]; then
-    OUT=$(as_user env SYSTEMD_LOG_LEVEL=debug systemctl --user start docker.service 2>&1 || true)
-    echo "DIAG: first start attempt (debug trace, non-message lines):"
-    echo "$OUT" | grep -vE "^Got message|^Bus |^Successfully" | head -15 || true
-    echo "$OUT" | grep -qE "done/Success|finished" && { STARTED=yes; break; }
-  else
-    ERR=$(as_user systemctl start docker.service 2>&1 || true)
-    echo "DIAG: start attempt $attempt: $ERR"
-    echo "$ERR" | grep -qE "Access denied" || { STARTED=yes; break; }
-  fi
-  sleep 4
-done
-if [ "$STARTED" = "yes" ]; then
-  fact "rootless-daemon-start=systemd-user-unit (attempts needed: $attempt)"
-else
-  echo "DIAG: systemctl --user start denied after retries; re-checking and capturing evidence"
-  echo "DIAG: transient-unit method probe:"
-  as_user systemd-run --user --unit=dh-feas-transient-probe /bin/true 2>&1 || true
-  echo "DIAG: USER_AVC / policy denials:"
-  ausearch -m USER_AVC,AVC -ts recent 2>/dev/null | tail -15 || true
-  journalctl -b --no-pager 2>/dev/null | grep -iE "denied|avc" | tail -15 || true
-  if as_user systemctl is-active --quiet docker.service; then
-    STARTED=yes
-    MODE=unit
-    fact "rootless-daemon-start=systemd-user-unit (started during diagnostics)"
-  fi
-fi
-if [ "$STARTED" != "yes" ]; then
-  echo "DIAG: falling back to a direct launch in the user's login session"
-  as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
-    || die "could not launch rootless dockerd directly in the user session"
-  MODE=direct
-  fact "rootless-daemon-start=direct-session-scope (systemd user-unit start denied by the user manager; recorded finding)"
-fi
-for i in $(seq 1 30); do
-  docker info >/dev/null 2>&1 && break
-  sleep 2
-done
-docker info >/dev/null 2>&1 || {
-  echo "DIAG: docker client state:"
-  docker context ls 2>/dev/null | tail -3 || true
+PKG_UNIT="$UNIT_DIR/docker.service"
+[ -f "$PKG_UNIT" ] || die "official rootless user unit missing at $PKG_UNIT (provisioning must run dockerd-rootless-setuptool.sh install)"
+EXEC_BIN="$(sed -n 's/^ExecStart=//p' "$PKG_UNIT" | head -1 | awk '{print $1}')"
+fact "rootless-unit-execstart=$EXEC_BIN"
+[ "$EXEC_BIN" = "/usr/bin/dockerd-rootless.sh" ] \
+  || die "user unit ExecStart is not the official rootless wrapper (got $EXEC_BIN)"
+fact "rootless-unit-source=official-setuptool"
+if ! docker info >/dev/null 2>&1; then
   echo "DIAG: socket state:"
-  ls -l /run/user/$FEAS_UID/docker.sock 2>&1 || true
-  echo "DIAG: daemon journal/log:"
-  if [ "$MODE" = "unit" ]; then
-    as_user journalctl --user -u docker.service -n 40 --no-pager 2>&1 | tail -40 || true
-  else
-    su -l "$FEAS_USER" -c "tail -40 \$HOME/dockerd-feas.log" 2>&1 || true
-  fi
+  ls -l "$RUN_DIR/docker.sock" 2>&1 || true
+  echo "DIAG: daemon journal:"
+  as_user journalctl --user -u docker.service -n 40 --no-pager 2>&1 | tail -40 || true
   die "rootless daemon unreachable at $DOCKER_HOST"
-}
+fi
+docker version --format 'FACT: docker-client={{.Client.Version}}' || true
 docker info --format 'FACT: rootless-server={{.ServerVersion}} driver={{.Driver}} cgroup-driver={{.CgroupDriver}} cgroup-version={{.CgroupVersion}}' \
   || die "rootless docker info failed"
 DRIVER=$(docker info --format '{{.CgroupDriver}}')
 [ "$DRIVER" = "systemd" ] || die "rootless daemon is not using the systemd cgroup driver (got $DRIVER); delegated placement contract unprovable"
-docker version --format 'FACT: docker-client={{.Client.Version}}' || true
+LR=$(docker info --format '{{.LiveRestoreEnabled}}')
+[ "$LR" = "true" ] || die "rootless daemon live-restore is not enabled (daemon-restart contract unprovable)"
+docker info --format 'FACT: security-options={{.SecurityOptions}}' || true
 if [ -r /sys/kernel/security/lsm ]; then
   fact "active-lsm=$(cat /sys/kernel/security/lsm)"
 fi
@@ -331,14 +245,11 @@ docker create --name cgr3 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep
 docker run -d --name cgr4 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep 900' >/dev/null || die "running workload for restart failed"
 docker stop cgr1 >/dev/null || die "stop of running workload failed"
 docker inspect --format 'FACT: cgr1={{.State.Status}} cgr3={{.State.Status}} cgr4={{.State.Status}}' cgr1 cgr3 cgr4
-if [ "$MODE" = "unit" ]; then
-  as_user systemctl restart docker.service || die "rootless daemon restart failed"
-else
-  as_user bash -c 'pkill -f "rootlesskit" || pkill -f "dockerd" || true' || true
-  sleep 2
-  as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
-    || die "rootless daemon relaunch failed"
-fi
+# The supported restart procedure is a restart of the systemd user unit
+# installed by the official setup tool. Bounded so a wedged restart becomes
+# evidence rather than a hung job.
+as_user timeout 180 systemctl --user restart docker.service \
+  || die "rootless daemon restart failed (bounded systemctl --user restart)"
 sleep 2
 docker info >/dev/null 2>&1 || die "rootless daemon unreachable after restart"
 docker inspect --format 'FACT: after-restart cgr1={{.State.Status}} cgr3={{.State.Status}} cgr4={{.State.Status}}' cgr1 cgr3 cgr4
