@@ -71,7 +71,7 @@ on_err() {
   echo "================ HARNESS FAILURE DIAGNOSTICS ==============="
   vm_serial_tail
   if vm_ssh true 2>/dev/null; then
-    vm_ssh 'cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null; ls /sys/fs/cgroup 2>/dev/null | head; systemctl is-active user@$(id -u fea-su) 2>/dev/null; sudo ls -l /run/user/$(id -u fea-su)/docker.sock 2>/dev/null' || true
+    vm_ssh 'cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null; ls /sys/fs/cgroup 2>/dev/null | head; systemctl is-active user@$(id -u feasu) 2>/dev/null; sudo ls -l /run/user/$(id -u feasu)/docker.sock 2>/dev/null' || true
   else
     echo "(guest not SSH-reachable)"
   fi
@@ -124,17 +124,17 @@ systemctl is-active --quiet docker.service \
   && { echo "rootful docker.service still active"; exit 1; } || true
 
 # Dedicated feasibility user with the documented subordinate IDs + linger.
-id fea-su >/dev/null 2>&1 || useradd -m -s /bin/bash fea-su
+id feasu >/dev/null 2>&1 || useradd -m -s /bin/bash feasu
 grep -q '^feasu:' /etc/subuid 2>/dev/null || echo 'feasu:100000:65536' >> /etc/subuid
 grep -q '^feasu:' /etc/subgid 2>/dev/null || echo 'feasu:100000:65536' >> /etc/subgid
-loginctl enable-linger fea-su
-log "feasibility user fea-su created (subuid/subgid 100000:65536, linger enabled)"
+loginctl enable-linger feasu
+log "feasibility user feasu created (subuid/subgid 100000:65536, linger enabled)"
 
 # Daemon configuration through the documented per-user path, before the
 # first rootless start, so live-restore is active from the first boot.
-install -d -o fea-su -g fea-su -m 0700 /home/feasu/.config/docker
+install -d -o feasu -g feasu -m 0700 /home/feasu/.config/docker
 printf '{ "live-restore": true }\n' > /tmp/feasu-daemon.json
-install -o fea-su -g fea-su -m 0644 /tmp/feasu-daemon.json \
+install -o feasu -g feasu -m 0644 /tmp/feasu-daemon.json \
   /home/feasu/.config/docker/daemon.json
 rm -f /tmp/feasu-daemon.json
 
@@ -157,7 +157,7 @@ ls -l "$XDG_RUNTIME_DIR/docker.sock"
 echo ROOTLESS-INSTALL-DONE
 USR
 chmod 0755 /tmp/feasu-rootless-install.sh
-FEASU_UID=$(id -u fea-su)
+FEASU_UID=$(id -u feasu)
 
 # The setup tool refuses su/sudo invocations because they carry no
 # XDG_RUNTIME_DIR and cannot see the user manager. Its own documented
@@ -175,7 +175,7 @@ done
 INSTALLED=""
 if [ "$MANAGER" = "yes" ]; then
   log "user manager active; running the setup tool with the documented XDG_RUNTIME_DIR export"
-  if sudo -u fea-su env XDG_RUNTIME_DIR="/run/user/$FEASU_UID" bash /tmp/feasu-rootless-install.sh; then
+  if sudo -u feasu env XDG_RUNTIME_DIR="/run/user/$FEASU_UID" bash /tmp/feasu-rootless-install.sh; then
     INSTALLED=xdg-linger
   else
     echo "sudo -u setup attempt failed; falling back to a real ssh login session"
@@ -185,21 +185,21 @@ else
 fi
 
 if [ -z "$INSTALLED" ]; then
-  install -d -o fea-su -g fea-su -m 0700 /home/feasu/.ssh
-  ssh-keygen -t ed25519 -N "" -C fea-su-bootstrap -f /home/feasu/.ssh/id_ed25519 >/dev/null
+  install -d -o feasu -g feasu -m 0700 /home/feasu/.ssh
+  ssh-keygen -t ed25519 -N "" -C feasu-bootstrap -f /home/feasu/.ssh/id_ed25519 >/dev/null
   cat /home/feasu/.ssh/id_ed25519.pub >> /home/feasu/.ssh/authorized_keys
-  chown fea-su:fea-su /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/id_ed25519.pub /home/feasu/.ssh/authorized_keys
+  chown feasu:feasu /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/id_ed25519.pub /home/feasu/.ssh/authorized_keys
   chmod 0600 /home/feasu/.ssh/id_ed25519 /home/feasu/.ssh/authorized_keys
   SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o IdentitiesOnly=yes"
   READY=0
   for i in 1 2 3 4 5; do
-    OUT=$(ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 fea-su@localhost true 2>&1) && { READY=1; break; }
+    OUT=$(ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 feasu@localhost true 2>&1) && { READY=1; break; }
     echo "ssh login-session probe attempt $i failed: $OUT"
     sleep 2
   done
   if [ "$READY" = 1 ]; then
-    log "running the rootless setup tool in a real fea-su login session"
-    if ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 fea-su@localhost bash /tmp/feasu-rootless-install.sh; then
+    log "running the rootless setup tool in a real feasu login session"
+    if ssh $SSHOPTS -i /home/feasu/.ssh/id_ed25519 feasu@localhost bash /tmp/feasu-rootless-install.sh; then
       INSTALLED=ssh-login
     else
       echo "ssh login-session setup attempt failed"
@@ -207,7 +207,7 @@ if [ -z "$INSTALLED" ]; then
   else
     echo "ssh diagnostics:"
     journalctl -u ssh -n 30 --no-pager 2>/dev/null | tail -30 || true
-    echo "could not open a login session for fea-su via ssh (user manager prerequisite)"
+    echo "could not open a login session for feasu via ssh (user manager prerequisite)"
   fi
 fi
 rm -f /tmp/feasu-rootless-install.sh
@@ -216,9 +216,12 @@ echo "FACT: rootless-install-path=$INSTALLED"
 
 # Verify the rootless daemon as root through the user socket.
 mkdir -p /opt/cg-feas
-DOCKERSOCK="/run/user/$(id -u fea-su)/docker.sock"
+DOCKERSOCK="/run/user/$(id -u feasu)/docker.sock"
 DOCKER_HOST="unix://$DOCKERSOCK" docker info \
   --format 'FACT: rootless-server={{.ServerVersion}} driver={{.Driver}} cgroup-driver={{.CgroupDriver}} cgroup-version={{.CgroupVersion}} live-restore={{.LiveRestoreEnabled}}'
+echo "FACT: feasu-daemon-config=$(cat /home/feasu/.config/docker/daemon.json)"
+echo "FACT: rootless daemon startup journal (tail):"
+journalctl _SYSTEMD_USER_UNIT=docker.service -b --no-pager -n 15 2>/dev/null | tail -15 || true
 echo "BOOTSTRAP-DONE"
 RMT
 )" || true
