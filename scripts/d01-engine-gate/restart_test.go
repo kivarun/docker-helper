@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -41,13 +43,12 @@ const (
 	restartSupervisorEnv  = "D01_RESTART_SUPERVISOR_HOST"
 	disposableEngineEnv   = "D01_DISPOSABLE_ENGINE_NAME"
 	restartBuildImageTag  = "d01-gate-restart:active-build"
-	restartWaitMarker     = "sleep 120"
+	restartBuildSleepSecs = 300
 	restartOneshotName    = "d01-restart-oneshot"
 	restartCreatedName    = "d01-restart-created"
 	restartPingTimeout    = 180 * time.Second
 	restartErrorBound     = 45 * time.Second
-	restartActiveTimeout  = 90 * time.Second
-	restartStartKillDelay = 3 * time.Second
+	restartKillElapsed    = 18 * time.Second
 )
 
 // restartGate reports whether the disposable-Engine restart rows are enabled.
@@ -167,16 +168,23 @@ func isBoundedTransportContextError(err error) bool {
 	return false
 }
 
-// buildStreamWatcher follows an active build's progress stream, signals the
-// first sighting of the long step (the operation is provably active), and
-// collects the bounded terminal error of the stream reader.
+// buildStreamWatcher follows an active build's progress stream. It counts
+// received progress events (BuildKit progress format varies across Engine
+// versions: plain "stream" text, binary aux traces, or both), keeps bounded
+// textual evidence, records any builder error event, and collects the bounded
+// terminal error of the stream reader.
 type buildStreamWatcher struct {
-	active chan struct{}
-	done   chan error
+	mu          sync.Mutex
+	events      int
+	streamLines []string
+	buildError  string
+	done        chan error
 }
 
+const maxStreamEvidence = 20
+
 func watchBuildStream(r io.Reader) *buildStreamWatcher {
-	w := &buildStreamWatcher{active: make(chan struct{}, 1), done: make(chan error, 1)}
+	w := &buildStreamWatcher{done: make(chan error, 1)}
 	go func() {
 		dec := json.NewDecoder(r)
 		for {
@@ -192,15 +200,28 @@ func watchBuildStream(r io.Reader) *buildStreamWatcher {
 				}
 				return
 			}
-			if strings.Contains(event.Stream, restartWaitMarker) {
-				select {
-				case w.active <- struct{}{}:
-				default:
+			w.mu.Lock()
+			w.events++
+			if event.Stream != "" {
+				w.streamLines = append(w.streamLines, strings.TrimSpace(event.Stream))
+				if len(w.streamLines) > maxStreamEvidence {
+					w.streamLines = w.streamLines[1:]
 				}
 			}
+			if event.Error != "" {
+				w.buildError = event.Error
+			}
+			w.mu.Unlock()
 		}
 	}()
 	return w
+}
+
+// state returns the evidence collected so far.
+func (w *buildStreamWatcher) state() (events int, streamEvidence string, buildError string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.events, strings.Join(w.streamLines, " | "), w.buildError
 }
 
 // TestEngineRestartDuringActiveOperation proves the daemon-shutdown
@@ -219,8 +240,9 @@ func TestEngineRestartDuringActiveOperation(t *testing.T) {
 
 	buildCtx, buildCancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer buildCancel()
+	buildStart := time.Now()
 	res, err := cli.ImageBuild(buildCtx, buildContext(t, map[string]string{
-		"Dockerfile": "FROM alpine:3.24\nRUN " + restartWaitMarker + "\n",
+		"Dockerfile": "FROM alpine:3.24\nRUN sleep " + strconv.Itoa(restartBuildSleepSecs) + "\n",
 	}), client.ImageBuildOptions{
 		Tags:    []string{restartBuildImageTag},
 		Version: buildtypes.BuilderBuildKit,
@@ -228,27 +250,75 @@ func TestEngineRestartDuringActiveOperation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("active build request: %v", err)
 	}
-	defer func() { _, _ = io.Copy(io.Discard, res.Body); _ = res.Body.Close() }()
+	defer func() { _ = res.Body.Close() }()
 
+	// The build runs a single RUN step that sleeps for a known, much longer
+	// time than the kill delay, so from the moment the Engine accepted the
+	// request the solve is guaranteed to still be running at the kill.
+	// BuildKit's textual progress format varies across Engine versions, so
+	// the watcher records received progress events and bounded stream
+	// evidence instead of matching a step header, and the no-produced-image
+	// assertion after recovery proves the build was not complete at the kill.
 	watcher := watchBuildStream(res.Body)
-	select {
-	case <-watcher.active:
-		t.Logf("build is provably active (inside the deterministic long step %q)", restartWaitMarker)
-	case err := <-watcher.done:
-		t.Fatalf("build stream ended before the long step started (not an active-operation kill): err=%v", err)
-	case <-time.After(restartActiveTimeout):
-		t.Fatalf("build never reached the deterministic long step within %s", restartActiveTimeout)
+
+	// Wait for the Engine to stream build progress (activity evidence), and
+	// stop early with the collected evidence if the build ended on its own.
+	for {
+		events, streamEvidence, buildError := watcher.state()
+		if events > 0 {
+			t.Logf("build is streaming progress: %d event(s); last lines: %s", events, streamEvidence)
+			break
+		}
+		select {
+		case err := <-watcher.done:
+			buildCancel()
+			events, streamEvidence, buildError = watcher.state()
+			t.Fatalf("build stream ended before the kill (not an active-operation kill): readerErr=%v builderError=%q events=%d lines=%s",
+				err, buildError, events, streamEvidence)
+		case <-time.After(restartKillElapsed / 2):
+			if time.Since(buildStart) >= restartKillElapsed/2 {
+				t.Logf("no build progress event within %s; the request is still open and the sleep step guarantees an active solve; killing now",
+					restartKillElapsed/2)
+				break
+			}
+		}
+		if time.Since(buildStart) >= restartKillElapsed/2 {
+			break
+		}
 	}
-	time.Sleep(restartStartKillDelay)
+
+	// Guard: the stream must not have ended (build finished/failed) before
+	// the kill.
+	select {
+	case err := <-watcher.done:
+		buildCancel()
+		events, streamEvidence, buildError := watcher.state()
+		t.Fatalf("build stream ended before the kill (not an active-operation kill): readerErr=%v builderError=%q events=%d lines=%s",
+			err, buildError, events, streamEvidence)
+	default:
+	}
+
+	if elapsed := time.Since(buildStart); elapsed < restartKillElapsed {
+		time.Sleep(restartKillElapsed - elapsed)
+	}
+	t.Logf("killing the Engine %s after the build request was accepted (the %ds sleep step cannot have completed)",
+		time.Since(buildStart).Round(time.Millisecond), restartBuildSleepSecs)
 
 	killDisposableEngine(t, sup, engineName)
 	select {
 	case streamErr := <-watcher.done:
+		events, streamEvidence, buildError := watcher.state()
+		if streamErr == nil && buildError == "" {
+			t.Fatalf("active build stream ended with success while the Engine was killed mid-build; ambiguous success (events=%d lines=%s)", events, streamEvidence)
+		}
 		if streamErr == nil {
-			t.Fatal("active build stream ended with success while the Engine was killed mid-build; ambiguous success")
+			// The stream ended cleanly right at the kill carrying a builder
+			// error event; a daemon that died cannot produce one, so treat
+			// only a genuine builder error as evidence and fail otherwise.
+			t.Fatalf("active build stream ended cleanly with builderError=%q at the kill; events=%d lines=%s", buildError, events, streamEvidence)
 		}
 		if !isBoundedTransportContextError(streamErr) {
-			t.Fatalf("active build terminated with an unclassifiable error (want a bounded transport/context error): %v", streamErr)
+			t.Fatalf("active build terminated with an unclassifiable error (want a bounded transport/context error): %v (events=%d lines=%s)", streamErr, events, streamEvidence)
 		}
 		t.Logf("active build terminated with a bounded typed transport/context error: %v", streamErr)
 	case <-time.After(restartErrorBound):
@@ -264,7 +334,8 @@ func TestEngineRestartDuringActiveOperation(t *testing.T) {
 	} else if !errdefs.IsNotFound(err) {
 		t.Fatalf("inspect interrupted build image: %v", err)
 	}
-	t.Logf("interrupted build produced no tagged image on the recovered Engine")
+	t.Logf("interrupted build produced no tagged image on the recovered Engine (kill at +%.1fs, step needs %ds)",
+		restartKillElapsed.Seconds(), restartBuildSleepSecs)
 
 	if _, err := cli.ImageRemove(recoverCtx, restartBuildImageTag, client.ImageRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
 		t.Fatalf("cleanup of %s: %v", restartBuildImageTag, err)
@@ -327,7 +398,7 @@ func TestEngineOneShotLifecycleAcrossRestart(t *testing.T) {
 	waitCtx, waitCancel := context.WithCancel(context.Background())
 	defer waitCancel()
 	wait := cli.ContainerWait(waitCtx, created.ID, client.ContainerWaitOptions{})
-	time.Sleep(restartStartKillDelay) // the wait request is established on the Engine
+	time.Sleep(5 * time.Second) // the wait request is established on the Engine
 
 	killDisposableEngine(t, sup, engineName)
 	select {
@@ -344,7 +415,7 @@ func TestEngineOneShotLifecycleAcrossRestart(t *testing.T) {
 
 	startDisposableEngine(t, sup, engineName, cli)
 
-	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer recoverCancel()
 	oneshot, err := cli.ContainerInspect(recoverCtx, created.ID, client.ContainerInspectOptions{})
 	if err != nil {
@@ -364,17 +435,21 @@ func TestEngineOneShotLifecycleAcrossRestart(t *testing.T) {
 	}
 	t.Log("created-state workload preserved its durable state across the Engine restart")
 
-	if _, err := cli.ContainerRemove(recoverCtx, created.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
+	removeCtx, removeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer removeCancel()
+	if _, err := cli.ContainerRemove(removeCtx, created.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
 		t.Fatalf("cleanup remove of the interrupted one-shot workload: %v", err)
 	}
-	if _, err := cli.ContainerInspect(recoverCtx, created.ID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+	if _, err := cli.ContainerInspect(removeCtx, created.ID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
 		t.Fatalf("removed one-shot workload must be absent with a typed NotFound error, got: %v", err)
 	}
 	t.Log("interrupted one-shot workload cleaned up with a typed absence after Engine recovery")
 
 	// The lifecycle continues after recovery: the created-state workload is
 	// started, waits for its deterministic exit, and is removed.
-	if _, err := cli.ContainerStart(recoverCtx, createdEarly.ID, client.ContainerStartOptions{}); err != nil {
+	startCtx, startCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer startCancel()
+	if _, err := cli.ContainerStart(startCtx, createdEarly.ID, client.ContainerStartOptions{}); err != nil {
 		t.Fatalf("start created-state workload after Engine recovery: %v", err)
 	}
 	waitCtx2, waitCancel2 := context.WithTimeout(context.Background(), 120*time.Second)
@@ -389,14 +464,16 @@ func TestEngineOneShotLifecycleAcrossRestart(t *testing.T) {
 		t.Fatal("started created-state workload did not exit within 120s")
 	}
 	t.Logf("continued one-shot lifecycle after Engine recovery: exit status %+v", exitStatus)
-	if _, err := cli.ContainerRemove(recoverCtx, createdEarly.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
+	if _, err := cli.ContainerRemove(removeCtx, createdEarly.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
 		t.Fatalf("cleanup remove of the continued workload: %v", err)
 	}
-	if _, err := cli.ContainerInspect(recoverCtx, createdEarly.ID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
+	if _, err := cli.ContainerInspect(removeCtx, createdEarly.ID, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
 		t.Fatalf("removed continued workload must be absent with a typed NotFound error, got: %v", err)
 	}
 
-	containers, err := cli.ContainerList(recoverCtx, client.ContainerListOptions{All: true})
+	leakCtx, leakCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer leakCancel()
+	containers, err := cli.ContainerList(leakCtx, client.ContainerListOptions{All: true})
 	if err != nil {
 		t.Fatalf("list containers for leak check: %v", err)
 	}
