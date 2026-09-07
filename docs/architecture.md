@@ -1,6 +1,62 @@
 # Architecture
 
-## Goal
+## Contents
+
+- [Goal and product boundary](#goal-and-product-boundary)
+- [High-level architecture](#high-level-architecture)
+- [Domain model](#domain-model)
+  - [Ownership model](#ownership-model)
+  - [Authority model](#authority-model)
+  - [Credentials and Session capability](#credentials-and-session-capability)
+- [Deployment](#deployment)
+  - [User mode](#user-mode)
+  - [System mode](#system-mode)
+  - [Transports](#transports)
+  - [systemd services](#systemd-services)
+  - [Mandatory access control](#mandatory-access-control)
+- [Trust model](#trust-model)
+- [Control-plane lifecycle](#control-plane-lifecycle)
+  - [Bootstrap](#bootstrap)
+  - [Ownership provisioning](#ownership-provisioning)
+  - [Session creation](#session-creation)
+  - [Principal and Launcher lifecycle](#principal-and-launcher-lifecycle)
+  - [Credential lifecycle](#credential-lifecycle)
+  - [Session lifecycle](#session-lifecycle)
+  - [Ownership migration](#ownership-migration)
+- [Workspace authorization](#workspace-authorization)
+  - [Root-policy hierarchy](#root-policy-hierarchy)
+  - [Launcher scope](#launcher-scope)
+  - [Session workspace](#session-workspace)
+  - [Policy introspection](#policy-introspection)
+  - [MAC lifecycle](#mac-lifecycle)
+- [Control-plane API and CLI mapping](#control-plane-api-and-cli-mapping)
+  - [Principal](#principal)
+  - [Launcher](#launcher)
+  - [Session](#session)
+  - [Completion introspection](#completion-introspection)
+  - [CLI conventions](#cli-conventions)
+  - [Config and reload](#config-and-reload)
+- [Data-plane execution](#data-plane-execution)
+  - [Operation lifecycle](#operation-lifecycle)
+  - [Build](#build)
+  - [Run](#run)
+  - [Pull](#pull)
+  - [Registry login](#registry-login)
+  - [Filesystem policy](#filesystem-policy)
+  - [Environment and trusted CA](#environment-and-trusted-ca)
+  - [Retention and cancellation](#retention-and-cancellation)
+- [Service lifecycle](#service-lifecycle)
+  - [Shutdown](#shutdown)
+  - [systemd units and hardening](#systemd-units-and-hardening)
+- [Errors and observability](#errors-and-observability)
+  - [Health](#health)
+  - [Error contract](#error-contract)
+  - [Audit logging](#audit-logging)
+  - [Operational logging](#operational-logging)
+- [Security considerations](#security-considerations)
+- [Current limitations and non-goals](#current-limitations-and-non-goals)
+
+## Goal and product boundary
 
 docker-helper is a small policy-enforcing daemon that provides a restricted
 interface to Docker.
@@ -12,7 +68,7 @@ processes. docker-helper sits between the agent and Docker and enforces
 policy:
 
 - filesystem access is restricted to an explicit workspace per session;
-- every operation requires a session token;
+- every data-plane operation requires a session token;
 - all Docker commands go through a single process;
 - the developer controls which workspace each session can access.
 
@@ -48,13 +104,11 @@ docker-helper daemon
     Docker Engine
 ```
 
-There are exactly four bearer classes. A credential is a rotatable
-authentication key, never an owner: the admin token authenticates the
-administrator, a Principal credential authenticates one Principal, and a
-Launcher credential authenticates one Launcher. The Launcher is the stable
-Session owner, and the session token is a Session capability — a data-plane
-key for one workspace, not a credential resource. Ownership is derived from
-persistent state, never from the token (see Launcher ownership below).
+There are exactly four bearer classes, described by the [authority
+model](#authority-model): the admin token authenticates the administrator, a
+Principal credential authenticates one Principal, a Launcher credential
+authenticates one Launcher, and the session token is a Session capability —
+a data-plane key for one workspace, not a credential resource.
 
 The daemon HTTP API is the single capability contract. The CLI is a
 shipped reference/convenience client of that API. Curl and native adapters
@@ -62,912 +116,13 @@ are direct clients of the same API.
 
 The presence of the `docker-helper` binary in the agent image is not a
 requirement. Choosing a client interface does not change daemon policy
-or security semantics. The operator tooling or supervisor that starts an
-agent — the launcher role — creates a session and passes the session token
-to the agent; it is not a mandatory daemon or control-plane component.
+or security semantics. The supervisor that starts an agent creates a
+session and passes the session token to the agent; it is not a mandatory
+daemon or control-plane component.
 
-## Deployment modes
+## Domain model
 
-docker-helper supports two deployment modes:
-
-### User mode
-
-- **Effective UID**: non-root
-- **Config**: `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json`
-- **State**: `${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper`
-- **Runtime**: `$XDG_RUNTIME_DIR/docker-helper`
-- **Transport**: Unix socket only (0600)
-- **Execution identity**: daemon UID:GID for daemon-owner (user-mode) Sessions
-
-### System mode
-
-- **Effective UID**: root
-- **Config**: `/etc/docker-helper/config.json`
-- **State**: `/var/lib/docker-helper`
-- **Runtime**: `/run/docker-helper`
-- **Transports**: Unix socket (0666) + loopback HTTP
-- **Default HTTP address**: `127.0.0.1:52375` (configurable via `http_address`)
-- **Execution identity**: the owning Principal's UID:GID
-
-The `http_address` field is configurable in system mode but requires a
-daemon restart to take effect.
-
-### Mandatory access control in system mode
-
-System mode requires exactly one supported enforcing backend:
-
-- AppArmor confines the daemon with the `/etc/apparmor.d/docker-helper-system`
-  profile and uses explicit managed workspace boundaries for path-level
-  workspace defense in depth. The profile includes the dynamic helper-owned
-  boundary state file `/var/lib/docker-helper/apparmor/managed-boundaries`;
-  managed boundaries are stored there, outside config.json. These managed
-  boundaries are MAC state, not authorization roots;
-- SELinux confines the daemon as `docker_helper_t` and system-mode containers
-  as the MCS-constrained `docker_helper_container_t` type.
-
-Neither backend, both backends, and permissive SELinux fail closed. SELinux
-workspace access is type-based and does not reproduce AppArmor's per-path
-managed-boundary rule; canonical application-level allowed-root validation
-remains authoritative in both modes.
-
-## Transports
-
-- **User mode**: Unix socket only
-- **System mode**: Unix socket + loopback HTTP (`127.0.0.1:<port>`)
-
-One handler/API/auth policy on both transports. Transport does not
-determine identity or authorization.
-
-Release 2 transports are local only. Non-loopback listeners, TLS, and remote
-execution are deferred to Release 4 or later and remain use-case driven.
-
-docker-helper listens on transports determined by deployment mode:
-
-- **User mode**: Unix socket at
-  `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock` with `0600` permissions.
-- **System mode**: Unix socket at
-  `/run/docker-helper/docker-helper.sock` with `0666` permissions, plus
-  loopback HTTP at `127.0.0.1:52375` by default.
-
-## Trust model
-
-### Trusted
-
-- the developer who runs `docker-helper init` and `docker-helper serve`;
-- the host filesystem outside the allowed roots;
-- the Docker Engine and its configuration;
-- the `docker-helper` process itself.
-
-### Partially trusted
-
-- the allowed-root directories and their contents;
-- the workspace selected at session creation time.
-
-### Untrusted
-
-- the coding agent;
-- any input from the agent (JSON payloads, paths, image names);
-- Dockerfiles inside the workspace;
-- container processes.
-
-The agent is untrusted because it may execute arbitrary code, generate
-malicious Dockerfiles, or attempt path traversal. docker-helper validates
-every agent input before passing it to Docker.
-
-## Session lifecycle
-
-Every Session is owned by exactly one Launcher: `sessions.launcher_id` is
-`NOT NULL` and references `launchers(id)`, and Principal identity is derived
-through the ownership JOIN (`Session -> Launcher -> Principal`). Admin,
-Principal credential, and Launcher credential are Session creation and
-control authorities — never Session owner types. User mode is the
-transparent daemon-owner Principal plus `default` Launcher case of this
-same ownership model, not a different permanent ownership class. The
-pre-2.1 ownerless states exist only as migration inputs (see Ownership
-migration).
-
-### Bootstrap and Admin-authority Session creation
-
-```
-docker-helper init
-    │
-    ├── creates config directory (0700)
-    ├── creates state directory (0700)
-    ├── writes config.json
-    └── generates admin token (dht_<64 hex chars>)
-    │
-docker-helper serve
-    │
-    ├── loads config.json
-    ├── reads admin token, computes SHA-256 hash
-    ├── opens SQLite database
-    ├── deletes expired session rows (expires_at <= now)
-    ├── runs ownership migration (idempotent; see Launcher ownership)
-    └── starts HTTP server on Unix socket
-    │
-POST /sessions  (admin token)
-    │
-    ├── resolves the target launcher (explicit selector required in
-    │   system mode; local daemon-owner default in user mode)
-    ├── validates workspace inside the launcher's effective allowed roots
-    ├── generates session ID (dhs_<32 hex chars>)
-    ├── generates session token (dht_<64 hex chars>)
-    ├── stores SHA-256 hash of token in database
-    ├── stores full token in response (one-time)
-    └── returns session + token
-    │
-POST /build or POST /run  (session token)
-    │
-    ├── computes SHA-256 of provided token
-    ├── looks up session by token hash
-    ├── checks not expired, not revoked
-    ├── validates request against session workspace
-    ├── registers operation (supervisor admission — atomic with shutdown gate)
-    ├── starts async process (cmd.Start under op.mu)
-    ├── captures stdout/stderr into bounded LogBuffer
-    ├── completion goroutine owns cmd.Wait()
-    ├── transitions operation to succeeded/failed
-    └── writes audit record with the session's ownership provenance
-```
-
-### Principal provisioning and Principal-authority Session creation
-
-```
-POST /principals  (admin token)
-    │
-    ├── resolves OS user (uid, gid, home)
-    ├── creates principal record
-    └── sets default allowed root = home
-    │
-POST /principals/{username}/credentials  (admin token)
-    │
-    ├── generates credential ID (dhcr_<32 hex chars>)
-    ├── generates credential token (dhc_<64 hex chars>)
-    ├── stores SHA-256 hash in database
-    └── returns credential + token (one-time)
-    │
-DELETE /principals/{username}  (admin token)
-    │
-    ├── collects session IDs for runtime cleanup
-    ├── fails with 409 launcher_runtime_active if a launcher
-    │   still has active runtime (durable state unchanged), else
-    │   disables each launcher (deleting its sessions) and deletes
-    │   the principal (credentials/roots/launchers via FK CASCADE)
-    ├── commits the teardown steps
-    └── best-effort cleanup of session runtime directories, also for
-        sessions invalidated before a later teardown failure
-    │
-POST /sessions  (Principal credential)
-    │
-    ├── validates credential
-    ├── resolves principal -> default or explicit launcher
-    ├── validates workspace inside global ∩ principal ∩ launcher allowed roots
-    ├── generates session ID + token
-    ├── stores session with launcher_id
-    └── returns session + token
-    │
-POST /build or POST /run  (session token)
-    │
-    ├── resolves launcher -> principal through the ownership JOIN
-    ├── execution identity = principal.uid:principal.gid
-    └── audit record contains principal_name and launcher provenance
-```
-
-### Principal lifecycle effects
-
-```
-PATCH /principals/{username}  (admin token, body: {"enabled": false})
-    │
-    ├── collects session IDs for runtime cleanup
-    ├── deletes all sessions for the principal (no FK cascade)
-    ├── sets principal.enabled = 0
-    ├── commits transaction
-    └── best-effort cleanup of session runtime directories
-    │
-    Subsequent session token lookup:
-    │
-    ├── findSessionByToken rejects sessions whose launcher's principal is disabled
-    ├── Sessions whose owning Launcher belongs to the disabled Principal are rejected
-    └── disabled launchers' credentials are rejected at authentication time
-```
-
-### Session capability lifecycle
-
-```
-POST /build or POST /run  (session token)
-    │
-    ├── resolves session (launcher-owned)
-    ├── execution identity = principal UID:GID or daemon UID:GID
-    ├── registers operation (supervisor admission — atomic with shutdown gate)
-    ├── starts async process (cmd.Start under op.mu)
-    ├── captures stdout/stderr into bounded LogBuffer
-    ├── completion goroutine owns cmd.Wait()
-    ├── transitions operation to succeeded/failed
-    └── writes audit record
-    │
-GET /operations/{id}  (session token)
-    │
-    └── status, timestamps, exit code, result code
-    │
-GET /operations/{id}/logs?offset=N  (session token)
-    │
-    └── incremental operation output
-    │
-POST /operations/{id}/cancel  (session token)
-    │
-    ├── graceful SIGTERM to running process
-    ├── bounded force-cleanup fallback if process does not exit
-    └── operation becomes terminal (status=failed, result_code=cancelled)
-    │
-DELETE /sessions/{id}  (admin token, Principal credential, or Launcher credential)
-    │
-    └── physically deletes session row
-    │
-subsequent requests with deleted session token
-    │
-    └── 401 Unauthorized
-```
-
-Session token semantics:
-- revoking a Principal or Launcher credential does not invalidate issued
-  sessions; deleting a Launcher credential leaves its launcher's sessions
-  owned and running but removes that authentication key;
-- disabling the principal or its launcher deletes the affected sessions and
-  blocks their tokens; disabled launchers also reject credential
-  authentication;
-- removing an allowed root does not invalidate issued sessions;
-- session expiry or deletion blocks future requests;
-- an already-started Docker operation continues its lifecycle.
-
-A credential is a bearer key, never an owner. The authority model
-distinguishes three delegation tiers:
-
-- Principal credential — broader delegated operator capability; may be
-  given to a sufficiently trusted agent;
-- Launcher credential — narrower delegated operator capability; exact
-  Launcher scope;
-- Session token — narrow data-plane Session capability for a single
-  workspace that expires after the configured TTL.
-
-The tiers bound what the agent can reach: a Session token alone grants
-access to one workspace and cannot create or manage Sessions; a Launcher
-credential can create and manage only its Launcher's Sessions; a Principal
-credential can reach the Sessions owned by that Principal's Launchers.
-Choosing the delegation tier is the operator's trust decision; giving an
-agent a Principal credential delegates broader operator capability and is
-never a default recommendation.
-
-Expired sessions are rejected immediately by the `expires_at` check in
-`findSessionByToken`. Their database rows are physically removed the next
-time `docker-helper serve` starts.
-
-## Session CLI
-
-docker-helper provides a CLI for session management.
-
-### docker-helper session create
-
-Create a new session. Requires admin token, Principal credential, or
-Launcher credential.
-
-```
-docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--principal USER] [--launcher LAUNCHER] [--json]
-```
-
-Flags:
-
-| Flag | Description |
-|------|-------------|
-| `--workspace PATH` | Workspace directory (required) |
-| `--principal USER` | Admin only: target the Principal's default Launcher |
-| `--launcher LAUNCHER` | Target a specific Launcher instead of the default |
-| `--json` | Output in JSON format |
-
-Returns the session ID, token, workspace, creation time, and expiration
-time. The token is shown only once and cannot be retrieved later.
-
-The HTTP API additionally accepts explicit ownership selectors in the
-request body (`launcher_id` or `principal`, mutually exclusive; see
-Session selectors below). The CLI maps its selectors onto those wire
-fields after authenticating (`GET /auth`): an admin token may send
-`--principal USER` (mapped to `principal`) or `--launcher LAUNCHER` —
-an ID-shaped selector is forwarded as `launcher_id` as-is, a Launcher
-name is resolved to its global ID through the scope-first launcher list
-query under the named Principal (`GET /launchers?principal=USER&launcher=NAME`;
-a name without `--principal` is rejected locally because Launcher names
-are never searched globally). A Principal credential may pass
-`--launcher LAUNCHER` only: the name is resolved within the credential's
-own visible scope the same way (a foreign or missing Launcher is the
-daemon's non-disclosing `launcher not found`). A Launcher credential has
-no Launcher control-plane authority, so its selector is never resolved
-through the launcher list: an ID-shaped `--launcher` is forwarded as
-`launcher_id` as-is and the daemon's create admission stays the authority
-(own -> self, foreign -> non-disclosing `launcher not found`), and a
-name-shaped `--launcher` is rejected locally with an actionable hint to
-use the Launcher's `dhl_` ID (reported for the credential by `GET /auth`).
-For both credential authorities `--principal` is rejected locally. With no
-selectors the request body carries only the
-workspace and no auth introspection happens; the authority-specific
-default resolution below applies unchanged. The two selectors are mutually
-exclusive on the wire: the resolved target is sent as either `principal`
-or `launcher_id`, never both. Default resolution without selectors: a
-Principal credential resolves its principal's default launcher, a
-Launcher credential is forced to its own launcher, and a user-mode admin
-token resolves the local daemon-owner default. A system-mode admin token
-requires an explicit selector (`400 missing_launcher_selector`); the CLI
-supports this with `--principal` or `--launcher` and sends the
-corresponding API selector.
-
-### docker-helper session list
-
-List active sessions. Requires admin token, Principal credential, or
-Launcher credential.
-
-```
-docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
-```
-
-Flags:
-
-| Flag | Description |
-|------|-------------|
-| `--principal USER` | Principal username filter (admin authentication; narrowing only; the daemon authorizes visibility) |
-| `--launcher LAUNCHER` | Launcher name or ID filter (admin without `--principal` must use an ID) |
-| `--json` | Output in JSON format |
-
-Returns a table of active sessions with ID, workspace, launcher, creation
-time, and expiration time.
-
-The list is a scope-first Query, matching the launcher and credential
-lists: authentication establishes the maximum visibility and the optional
-selectors can only narrow it, never expand it. The selectors are resolved
-server-side inside the authority-visible ownership and composed into the
-final Session scope, which one existing Session ownership query serves;
-filtering is never performed client-side.
-
-With admin token: lists all sessions, optionally narrowed with
-`--principal USER` (that Principal's sessions) and/or
-`--launcher LAUNCHER` (one Launcher's sessions; `principal + launcher`
-means that Launcher under that Principal). A `dhl_...` Launcher ID is
-valid without `--principal`; a Launcher name is Principal-scoped and is
-never searched globally, so an admin narrowing by name must also name the
-Principal (otherwise `400 launcher_name_requires_principal`). With
-Principal credential: lists only that principal's sessions, optionally
-narrowed with `--launcher` (name or ID inside its own scope);
-`--principal` is invalid even for the credential's own Principal. With
-Launcher credential: lists only that launcher's sessions; the selectors
-are invalid (there is no narrowing contract for this authority).
-
-Selector resolution reuses the existing lookup owners: a missing or
-unknown Principal is the non-disclosing `404 principal_not_found`, a
-missing or foreign Launcher (name or ID) is the non-disclosing
-`404 launcher_not_found`, an authority-illegal selector is
-`400 invalid_selector`, and a database or system failure keeps its own
-error (never collapsed into not-found).
-
-### docker-helper session delete
-
-Delete a session. Requires admin token, Principal credential, or Launcher
-credential.
-
-```
-docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
-```
-
-Flags:
-
-| Flag | Description |
-|------|-------------|
-| `--id SESSION_ID` | Session ID to delete (required) |
-| `--json` | Output in JSON format |
-
-Permanently removes the session. Subsequent requests with the session's
-token will receive 401 Unauthorized.
-
-With admin token: can delete any session.
-With Principal credential: can only delete sessions for its principal.
-With Launcher credential: can only delete sessions owned by its launcher;
-foreign sessions return the same `not_found` outcome (no existence
-disclosure).
-
-### docker-helper session cleanup
-
-Remove expired sessions from the local state database. Does not require
-a running daemon or admin token.
-
-```
-docker-helper session cleanup
-```
-
-Deletes rows whose `expires_at` has passed. Active sessions are
-untouched. Reports the number of removed rows.
-
-### Operator flags
-
-API-backed operator commands (`principal`, `launcher`, `credential`,
-`session`, `reload`, `admin-token rotate`, `completion roots`) support
-explicit endpoint selection. See `docker-helper <command> --help` for
-full syntax:
-
-```
---system              connect to system daemon (Unix socket)
---endpoint ENDPOINT   explicit endpoint (/path, unix:///path, or http://127.0.0.1:port)
---token-file PATH     token file path (auto-resolved for Unix sockets)
-```
-
-## CLI reference
-
-### Agent commands
-
-- `pull` — Pull a Docker image.
-- `build` — Build a Docker image. Hides async operation lifecycle; streams
-  logs; propagates container exit code. SIGINT/SIGTERM cancels the operation
-  (exit 130/143). `--context` must be relative to the session workspace.
-- `run` — Run a Docker container. Same lifecycle semantics as `build`.
-  `--mount` source must be relative to the session workspace; target is an
-  absolute container path.
-- `registry` — Registry operations. Subcommand: `login`.
-
-### Operator commands
-
-- `serve` — Start the HTTP server.
-- `init` — Initialize configuration and admin token.
-- `reload` — Reload configuration from disk.
-- `session` — Manage sessions. Subcommands: `create`, `list`, `delete`,
-  `cleanup`.
-- `config` — Inspect and modify configuration. Subcommands: `show`, `set`,
-  `unset`, `allowed-root` (`list`, `add`, `remove`).
-- `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
-  `set`, `delete`, `allowed-root` (`add`, `list`, `remove`), `credential`
-  (`create`, `list`, `revoke`, `rotate`). `principal show` read authority is
-  scope-first: an admin token reads any Principal, a principal credential
-  reads exactly its own (the daemon authorizes the target; the CLI performs
-  no local self-check), a foreign selector is the non-disclosing not-found,
-  and a Launcher credential has no Principal-read authority.
-- `launcher` — Manage launchers. Subcommands: `create`, `list`, `show`,
-  `set`, `delete`, `allowed-root` (`add`, `list`, `remove`, `inherit`),
-  `credential` (`create`, `show`, `rotate`, `delete`). See Launcher ownership
-  above for the full contract.
-- `credential` — Install a non-admin credential token and host the Release
-  2.0 principal-credential aliases. Subcommands: `install` (canonical local
-  install command), `create`, `list`, `revoke` (compatibility aliases for the
-  canonical `principal credential` commands, sharing the same handlers).
-  `credential create --name` is optional and uses the literal name `default`
-  when omitted. The same `credential install` command stores a Principal or
-  Launcher credential token for the owning user.
-- `admin-token` — Manage the admin token. Subcommand: `rotate` (rotate the
-  admin token; requires the current token, new token shown once, old token
-  invalid immediately, no restart).
-- `apparmor` — Manage/check managed AppArmor workspace boundaries for an
-  AppArmor system deployment (the public `apparmor root` command spelling is
-  retained compatibility; it manages managed workspace boundaries, not
-  authorization roots).
-- `selinux` — Inspect SELinux system-policy state for a SELinux system
-  deployment. Subcommand: `check` (validate that the `docker_helper` policy
-  module is loaded and docker-helper-owned file contexts are consistent with
-  the active policy; read-only operator diagnostics that never mutates SELinux
-  state and never inspects dynamic Session MAC resources).
-
-### General commands
-
-- `version` — Print version.
-- `help` — Show help for the full command tree. `help` is a top-level
-  navigation branch accepting an arbitrary-depth command path:
-  `docker-helper help [command [subcommand ...]]` (for example
-  `docker-helper help principal credential rotate`). It navigates the same
-  canonical command tree as the parser; each branch does not carry its own
-  `help` pseudo-subcommand (`docker-helper principal help` is an unknown
-  subcommand).
-- `completion bash` — Generate Bash completion. The generated script keeps
-  ONE canonical completion-input owner: it reconstructs the real CLI
-  arguments of the completion line from `COMP_LINE` up to `COMP_POINT`
-  (the shell's own argument rules — whitespace, backslash escapes, and
-  quotes) because Readline's default word breaking splits typed arguments
-  at characters like `=` and `:`; every consumer of the word list — the
-  command-path walk, flag/value recognition, typed selector extraction,
-  operator-argument forwarding, positional counting, and the policy-root
-  query forwarding — reads that normalized view, so both the separated
-  `--flag VALUE` and the inline `--flag=VALUE` form, and values physically
-  broken such as `http://HOST:PORT` endpoints, carry identical logical
-  semantics. The user's `COMP_WORDBREAKS` is never modified.
-- `completion selectors <principal|launcher>` — Machine-facing selector
-  introspection consumed by the generated Bash completion for the
-  `--principal`/`--launcher` flag values and the positional `[LAUNCHER]`
-  argument (authority-, command-context-, and scope-applicable candidates
-  only; see the CLI reference details above).
-- `completion roots principal` — Machine-facing completion query: print the
-  target Principal's effective allowed roots (target from `--principal` or
-  inferred from the credential; the daemon authorizes the query). With
-  `--authority-only` it prints only the authenticated operator authority for
-  shell-completion introspection; completion authority introspection reuses
-  this surface so the parser tree, help tree, and completion tree remain
-  identical (no hidden command nodes).
-- `completion roots session` — Machine-facing completion query: print the
-  Session-create effective allowed roots for the current authority. The
-  typed `--principal`/`--launcher` selectors (both `--flag VALUE` and
-  `--flag=VALUE` forms) are forwarded to the daemon; the daemon resolves
-  the same target a real `session create` with those selectors would use
-  through its canonical owners, and a rejected selector fails silently so
-  completion degrades.
-- `completion selectors principal` / `completion selectors launcher` —
-  Machine-facing selector introspection for the values of the
-  `--principal`/`--launcher` flags and of the positional `[LAUNCHER]`
-  argument (the same owner for both). The daemon remains the ownership and
-   authorization authority: `selectors principal` is command-context aware
-   through the `--command` flag — an admin receives the daemon's Principal
-   names on every command carrying the selector, a Principal credential
-   receives exactly its own username on the Launcher command families (where
-   the explicit own selector is legal) and nothing on both Session command
-   paths — session create rejects every `--principal` under a Principal
-   credential and session list rejects every Principal selector, even the
-   credential's own Principal — and a Launcher credential receives nothing.
-   `selectors launcher` honors
-   the typed `--principal` context — an admin with a context receives that
-   Principal's Launcher names, an admin without one receives only globally
-   resolvable `dhl_` Launcher IDs (a name is never searched globally), a
-   Principal credential receives its own Launchers' names — including with
-   its own typed `--principal` context, which the daemon authorizes as an
-   in-scope narrowing — and a Launcher credential receives nothing. A
-   foreign or missing context fails with the daemon's non-disclosing
-   contract and degrades silently.
-
-### Signal cancellation (agent commands)
-
-`build` and `run` handle SIGINT and SIGTERM:
-
-- SIGINT -> best-effort cancel + exit 130;
-- SIGTERM -> best-effort cancel + exit 143;
-- cancel failure prints a diagnostic but does not replace the signal exit
-  status.
-
-### `docker-helper config <subcommand>`
-
-Inspect and modify configuration. Requires a subcommand.
-
-Subcommands: `show`, `set`, `unset`, `allowed-root`.
-
-`docker-helper config show [FIELD]` — without FIELD, prints the complete
-effective configuration as JSON (admin_token redacted). With FIELD, prints
-only that field's scalar value.
-
-`docker-helper config set FIELD VALUE` — sets a writable field.
-Reports `updated` or `unchanged`. If the daemon is running, the change is
-applied automatically for reloadable fields. `http_address` is startup-only
-and requires a daemon restart.
-
-The operation is transactional: the entire read-modify-write-reload cycle
-runs under a process-level lock. If the daemon rejects the reload (e.g.
-invalid config), the original config.json is restored atomically and the
-command exits with a non-zero status. If rollback and reload after rollback
-succeed, config.json and the daemon are synchronized. If the reload after
-rollback fails, they may diverge until the next manual reload or restart.
-
-In system mode with the daemon stopped, a successful mutation that changes an
-active trusted-CA configuration (`trusted_ca_injection=auto` with a source
-path) persists the validated config and prints a warning to stderr: the CA
-file was validated locally, but confined MAC readability cannot be verified
-until daemon startup, and startup fails closed if the source is not readable
-under the active MAC policy. The warning is stderr-only and never claims any
-MAC policy allows the source; it is a diagnostic, not a second MAC
-authority. When the daemon is running, reload under daemon confinement is the
-authoritative proof, and a reload/CA-preparation failure still rolls the
-change back (see Trusted CA injection).
-
-`docker-helper config unset FIELD` — removes an optional field to restore
-its default. `allowed_roots` and `session_ttl` are required and cannot be
-unset. Reports `unset` or `unchanged`. The same transactional rollback
-semantics apply.
-
-`docker-helper config allowed-root <list|add|remove> [PATH]` — manages the
-global allowed_roots array. `add` canonicalizes and validates the path;
-authorization-only, does NOT prepare MAC state.
-`remove` resolves and matches the stored canonical form; rejects removal of
-the final global root. `list` prints one canonical root per line.
-
-`http_address` is configurable in system mode only and requires a daemon
-restart to take effect. It is not included in the reloadable field list.
-
-### `docker-helper reload`
-
-Ask the running daemon to re-read `config.json` and apply changes without
-restarting. Reloadable fields:
-`allowed_roots`, `session_ttl`, `log_level`, `audit_enabled`,
-`shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
-`operation_log_max_bytes`, `trusted_ca_path`, `trusted_ca_injection`.
-
-Startup-only fields (require daemon restart): `http_address`.
-
-Computed paths (socket, database, state) are not changed. If the daemon is
-not running, the command fails with a non-zero exit code. If the new
-configuration is invalid, the daemon keeps its current configuration and
-the command returns an error.
-
-### `docker-helper session <subcommand>`
-
-Manages sessions. Requires a subcommand.
-
-Subcommands: `create`, `list`, `delete`, `cleanup` (see Session CLI section
-above).
-
-### Help flag
-
-The `-h` / `--help` flag is available on every command and session
-subcommand. It prints usage information and exits 0 without executing
-the command action.
-
-### Exit codes
-
-| Code | Meaning | Examples |
-|------|---------|----------|
-| 0 | Success or help displayed | `docker-helper version`, `docker-helper serve --help` |
-| 1 | Runtime error (config load, API call, server failure) | `docker-helper init` with an unwritable configuration directory, `docker-helper session create` with unreachable server |
-| 2 | CLI syntax or argument validation error | unknown command, missing/unknown subcommand, missing required flag, unexpected positional argument, unknown flag |
-
-## systemd user service
-
-docker-helper can run as a systemd user service. The unit file is
-installed at `~/.config/systemd/user/docker-helper.service` by the Release 1
-installer.
-
-### Installation
-
-```
-docker-helper init
-systemctl --user daemon-reload
-systemctl --user enable --now docker-helper
-```
-
-Configuration and state directories are created by `docker-helper init`
-using standard XDG paths. Non-standard `XDG_CONFIG_HOME` and
-`XDG_STATE_HOME` are supported when they are present in the systemd user
-manager environment.
-
-### Stop and restart
-
-docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
-
-- the operation admission gate closes immediately (no new operations accepted);
-- HTTP drain and operation termination share one `shutdown_timeout` budget;
-- in-flight HTTP requests are drained;
-- running build/run processes receive graceful SIGTERM;
-- for run, helper-owned containers are cleaned up via cidfile before
-  force-killing the Docker CLI process;
-- at the reserved force-cleanup window before the deadline, still-running
-  processes are force-killed;
-- the completion goroutine owns `cmd.Wait()` and reaps each process;
-- the lock is held during the entire drain so a second instance cannot
-  start until the first fully stops;
-- helper-owned build/run processes and containers are never left unmanaged
-  after shutdown.
-
-After `TimeoutStopSec=45s`, systemd sends SIGKILL if any processes
-remain. The internal `shutdown_timeout` budget is therefore bounded: its
-maximum is `30s` (the default too), so the internal graceful budget always
-fits inside `TimeoutStopSec=45s`. The last part of the 30s budget is
-reserved by the supervisor for force cleanup, which runs concurrently under
-the shared absolute deadline and must finish by it — force cleanup never
-starts after `shutdown_timeout`. The remaining 15s between the internal
-maximum and `TimeoutStopSec=45s` sits outside the daemon budget and covers
-process final exit, scheduler/kernel/systemd overhead, and systemd's SIGKILL
-fallback if the process still has not exited; it is not intended for the
-regular internal force-cleanup phase. New values above `30s` are rejected by
-`config set`. For Release 1 upgrade compatibility (v1.0.2 accepted any
-positive `shutdown_timeout`), a persisted value above `30s` is loaded but
-bounded to `30s` at startup/reload with an operational warning; `config
-show` reports the bounded effective value. The shipped system and user
-units both carry `TimeoutStopSec=45s`.
-
-The shutdown budget is read from the daemon's *current* configuration at the
-moment shutdown begins: a `shutdown_timeout` changed via reload is honored by
-the next stop without a restart.
-
-### Operation lifecycle invariants
-
-Key internal guarantees that make cancel and shutdown safe:
-
-- explicit cancel and daemon shutdown share the same underlying
-  termination lifecycle;
-- first termination reason wins and cannot be overwritten by a concurrent
-  caller;
-- terminal transition is single-winner: the first `succeed()` or `fail()`
-  to set `CompletedAt` wins; subsequent calls are no-ops;
-- completion goroutine is the sole `cmd.Wait()` owner; termination paths
-  only Signal/Kill processes, coordinate force cleanup through the shared
-  force phase, and never call `cmd.Wait()` themselves; the cancel handler
-  waits for terminal `op.done` before returning;
-- graceful termination phase is bounded (default 5s);
-- force cleanup is single-owner: only the first caller to reach the force
-  phase performs daemon-side container cleanup and CLI process kill;
-- concurrent followers wait on a shared absolute force-cleanup deadline
-  rather than creating independent timers;
-- `/run` force cleanup uses cidfile + daemon-side `docker kill` to prevent
-  orphan containers;
-- `<kind>.finish` audit event is emitted exactly once per operation.
-
-### Logout
-
-- **without linger** (`loginctl enable-linger` not set): the user manager
-  and all services normally stop after the last user session ends;
-- **with linger**: the user manager continues running and the service
-  stays active after logout.
-
-### StartLimit
-
-The unit limits restarts to 3 attempts within 60 seconds. If this limit
-is reached (e.g. when `docker-helper init` has not been run):
-
-```
-systemctl --user reset-failed docker-helper
-systemctl --user start docker-helper
-```
-
-### Hardening
-
-The unit applies process-level hardening (`NoNewPrivileges`,
-`RestrictNamespaces`, `RestrictRealtime`). `RestrictSUIDSGID` is deliberately
-omitted because its seccomp filtering blocks the `openat2` staging primitive on
-supported systems.
-Filesystem namespace directives (`ProtectSystem`, `ProtectHome`, etc.)
-are not used in the initial unit: their compatibility with docker-helper
-depends on the runtime environment and requires per-distribution testing.
-
-The unit does not restrict direct access to the host filesystem. The
-process-level directives only forbid specific operations. Access to the
-Docker socket means the unit does not create a full security boundary.
-
-## Authentication
-
-Three authentication classes provide different levels of access:
-
-### Admin token
-
-- generated once by `docker-helper init`;
-- stored at `admin.token` (user mode: user config directory; system mode:
-  `/etc/docker-helper/admin.token`);
-- SHA-256 hash loaded into memory at server start;
-- grants full administrative access: manage principals, credentials, and
-  all sessions;
-- sent as `Authorization: Bearer <admin-token>`;
-- compared with `crypto/subtle.ConstantTimeCompare` to prevent timing
-  attacks.
-
-### Principal credential
-
-- created per principal by `POST /principals/{username}/credentials`
-  (admin token required);
-- credential token prefixed `dhc_`, credential ID prefixed `dhcr_`;
-- SHA-256 hash stored in SQLite;
-- grants access scoped to the principal: create sessions for that principal,
-  list and delete only that principal's sessions, and manage that principal's
-  launchers and their credentials;
-- cannot manage other principals, their launchers, or global configuration;
-- sent as `Authorization: Bearer <credential-token>`;
-- resolved through database lookup by token hash.
-
-Principal credentials are lifecycle resources of their owning Principal
-(`Principal └── credential (0..N, named)`). The canonical CLI is
-`principal credential create|list|revoke|rotate`:
-
-- `create` and `revoke` remain administrator-controlled in 2.1;
-- `GET /credentials` is the scope-first principal credential list: the
-  authenticated authority establishes the maximum visibility (an admin token
-  sees every Principal's credentials, a Principal credential sees its own
-  Principal's), and the optional `?principal=NAME` filter can only narrow
-  that visibility — never expand it. A Principal credential naming another
-  Principal, and an unknown Principal filter, are the same non-disclosing
-  `404 principal_not_found` as any other principal endpoint; a Launcher
-  credential is `401`. `GET /principals/{username}/credentials` remains the
-  single-Principal form of the same query;
-- `POST /principals/{username}/credentials/{name}/rotate` rotates a named
-  credential in one atomic server-side operation: the token hash is
-  replaced in the same transaction (credential ID, name, ownership, and
-  created_at are unchanged, no second row is created), the old bearer is
-  rejected immediately, and the new bearer is returned exactly once.
-  Rotation always targets the current active credential with that name:
-  revoked historical rows that share the name through documented name reuse
-  are never the target, a name that only has revoked history is
-  `409 credential_revoked`, and a name that never existed is
-  `404 credential_not_found`; the guarded mutation fails closed against
-  stale concurrent state, so a rotation never resurrects a revoked row.
-  The mutation is scoped by the exact owning Principal ID resolved under the
-  request authority (an admin resolves the current same-name Principal; a
-  Principal credential uses its exact authenticated Principal ID), never
-  re-keyed by username, so a Principal deleted and recreated under the same
-  username can never rebind a rotation onto the replacement Principal's
-  credential — a vanished owner fails closed without mutating any row;
-- list CLI resolution needs no auth introspection: the list command sends
-  one server-authorized Query and the daemon applies the scope-first rule
-  (targeting commands such as `show`, `set`, `rotate`, and `delete` keep
-  the `GET /auth` inference rule for the Principal-credential owner).
-
-### Launcher credential
-
-- at most one credential exists per launcher; created with
-  `PUT /principals/{username}/launchers/{launcher}/credential` (admin or
-  owning-principal token required)
-  and replaced by `POST /principals/{username}/launchers/{launcher}/credential/rotate`;
-- same token format as Principal credentials (`dhc_` + 64 hex characters);
-  the token itself carries no owner type — the owner is resolved from
-  persistent state at authentication time;
-- SHA-256 hash stored in SQLite;
-- grants access scoped to one launcher: create sessions owned by that
-  launcher, list and delete only that launcher's sessions, and inspect the
-  launcher itself via `GET /auth`;
-- cannot manage launchers, principals, credentials, or other launchers'
-  sessions;
-- deleting the credential does not delete the launcher or its sessions; it
-  only removes that authentication key.
-
-#### Credential install
-
-The `credential install` command installs a non-admin credential token for
-`docker-helper --system`. The credential may belong to a Principal or a
-Launcher; the daemon resolves its owner and authorization scope when the
-token is used. It is not run as root.
-
-- Token format: `dhc_` + 64 lowercase hex characters (68 total).
-- Token stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`
-  with mode `0600`; directory created with mode `0700`.
-- Input: hidden TTY via `term.ReadPassword` on terminal; `bufio.Scanner` on
-  non-TTY stdin. Token never appears in stdout or stderr.
-- `--force`: skip existence check; atomic `rename` replaces file without prior
-  deletion. Write failure leaves existing file intact.
-- Root invocation rejected with clear message.
-
-Token resolution for `--system` mode:
- 1. `--token-file` — explicit path, always wins.
- 2. Non-root `--system` — credential.token from `credentialPath()`.
- 3. Root `--system` — `/etc/docker-helper/admin.token`.
-
-Endpoint and token resolution for default (no `--system`) mode:
- 1. `--token-file` — explicit path, always wins.
- 2. If the user socket exists, select it and use `admin.token` in the user
-    config directory.
- 3. Otherwise, if the system socket exists, select it and use non-root
-    `credential.token` or root `/etc/docker-helper/admin.token`.
- 4. Once selected, an unavailable/failing endpoint is returned as an error;
-    the client does not retry another daemon.
-
-### Session token
-
-- generated per session by `POST /sessions`;
-- returned once in the creation response;
-- SHA-256 hash stored in SQLite;
-- required for Docker operations: `POST /build`, `POST /run`, `POST /pull`,
-  `POST /registry/login`;
-- sent as `Authorization: Bearer <session-token>`;
-- resolved through database lookup by token hash and checked for expiration;
-- deletion removes the session and invalidates subsequent requests.
-
-Session management is authenticated by authority:
-- admin token -> global session management (create with explicit selector,
-  list all with optional `?principal=`/`?launcher=` narrowing, delete any);
-- Principal credential -> principal-scoped session management (create for
-  the principal's default or an explicit launcher, list and delete only that
-  principal's sessions with optional `?launcher=` narrowing inside that
-  scope, manage that principal's launchers);
-- Launcher credential -> launcher-scoped session management (create for its
-  own launcher, list and delete only its launcher's sessions).
-
-List visibility follows the scope-first rule shared with the launcher and
-credential lists: the authority establishes the maximum visible scope and
-the optional selectors only narrow it, never expand it. Selector
-resolution reuses the existing Principal-control target and Launcher
-lookup owners inside the authority-visible ownership; Launcher names are
-Principal-scoped and are never searched globally.
-
-`GET /auth` reports the authenticated authority to the caller as
-`{"authority": "admin"}`, `{"authority": "principal", "principal": "..."}`
-or `{"authority": "launcher", "principal": "...", "launcher_id": "..."}`.
-It accepts an admin token, Principal credential, or Launcher credential; a
-Session token does not authenticate this endpoint. Invalid, revoked, or
-disabled credentials follow the existing non-disclosing authentication
-semantics and receive no identity information.
-
-## Launcher ownership
-
-Release 2.1 adds one stable ownership and delegation level between Principal
-and Session. The binding domain model is:
+The binding ownership and authority model:
 
 ```
 Principal (OS identity, authorization ceiling)
@@ -981,14 +136,16 @@ Principal (OS identity, authorization ceiling)
 - Principal identity is derived through the Launcher (`Session.LauncherID`
   is stored; `PrincipalName` is a read-time projection via the ownership
   JOIN through `launchers` to `principals`).
-- A credential is a rotatable authentication key, never an owner. Principal
-  credentials initiate and manage work for their principal; Launcher
-  credentials initiate and manage work for their launcher. Ownership is
-  derived from persistent state, never from the token.
+- A credential is a rotatable authentication key, never an owner. Ownership
+  is derived from persistent state, never from the token.
+- User mode is the transparent daemon-owner Principal plus `default`
+  Launcher case of this same ownership model, not a different permanent
+  ownership class. The pre-delegation ownerless states exist only as
+  migration inputs (see [Ownership migration](#ownership-migration)).
 - The CLI is never an authorization authority; the daemon resolves and
   enforces all policy.
 
-### Launcher model
+### Ownership model
 
 `launchers` table: `id` (`dhl_` + 32 hex characters), `principal_id`
 (REFERENCES `principals(id)`), `name`, `enabled`, `scope_mode`
@@ -1001,9 +158,9 @@ characters of lowercase ASCII letters, digits, and hyphens, with
 alphanumeric first and last characters. Names are identifiers: the exact
 supplied value is accepted or rejected, never trimmed or case-folded into
 validity. The grammar is enforced by the centralized Launcher write path
-(create, rename, and the migration/bootstrap insertion of `default`) and
+(create, rename, and the provisioning insertion of `default`) and
 by a CHECK constraint on the `launchers` table; a database created by an
-intermediate unreleased 2.1 build that predates the invariant fails
+intermediate unreleased build that predates the invariant fails
 closed at startup instead of being silently rewritten. Because `_` is
 outside the alphabet, Launcher names and Launcher IDs (`dhl_<32 hex>`)
 occupy disjoint lexical spaces.
@@ -1015,23 +172,18 @@ only the conventional default name — the name used when creation omits
 `--name` and when an individual Launcher command omits the selector —
 not a subtype or a global singleton.
 
-Every Principal has a real Launcher named `default`, auto-provisioned at
-Principal creation. It is a normal stored Launcher object — not a virtual
-or synthesized fallback — and it is addressed implicitly only when a caller
-omits the Launcher selector:
+Every Principal has a real Launcher named `default`, provisioned atomically
+at Principal creation (see [Principal provisioning](#principal-provisioning)).
+It is a normal stored Launcher object — not a virtual or synthesized
+fallback — and it is addressed implicitly only when a caller omits the
+Launcher selector. User mode maps all ownership transparently onto one
+daemon-owner Principal and its `default` Launcher, so quick start requires
+no Principal, Launcher, or credential and preserves the effective
+global-root semantics; system mode requires explicit ownership: an
+authenticated Principal resolves its own default Launcher when no explicit
+selector is supplied.
 
-- provisioning is eager and idempotent: Principal creation provisions its
-  `default` Launcher in the same transaction
-  (`ensureDefaultLauncher`, atomic rollback), and startup backfills any
-  Principal that predates that rule (`migrateDefaultLaunchers`); later
-  startups resolve it read-only (`findDefaultLauncher`);
-- user mode transparently maps all ownership to one daemon-owner principal
-  and its default Launcher, so quick start requires no Principal, Launcher,
-  or credential and preserves the effective global-root semantics;
-- system mode requires explicit ownership: an authenticated Principal
-  resolves its own default Launcher when no explicit selector is supplied.
-
-#### Transparent user-mode owner reservation
+#### User-mode owner reservation
 
 In user mode the daemon-owner Principal (resolved at startup by
 `ensureUserModeOwnership`, identified by the cached
@@ -1070,18 +222,646 @@ failure aborts the mutation fail-closed through the normal internal-error
 path. Audit records of a rejected mutation carry the
 `user_mode_owner_reserved` result.
 
-### Launcher scope and effective roots
+### Authority model
 
-The effective Principal ceiling is owned by one policy function
-(`computeEffectivePrincipalRoots`): in user mode the daemon-owner Principal
-with zero stored roots collapses onto the global allowed roots, every other
-Principal gets the intersection of the global and stored Principal roots.
-Session creation, Launcher restricted-scope create and replacement, and
-Principal effective-roots introspection (and completion through that
-introspection) all consume it; the App-level resolution
-(`resolveEffectivePrincipalRoots`) supplies the symlink-resolved global
-roots and the stored Principal roots, and lifecycle mutations resolve it
-inside their `lifecycleMu` critical section.
+There are exactly four authentication classes. The canonical authority and
+target-resolution contract:
+
+| Authority | Authenticates | Maximum control scope | Session-create target resolution | Legal narrowing selectors (Session list) |
+|---|---|---|---|---|
+| Admin token | the administrator | full control plane: all Principals, Launchers, Principal and Launcher credentials, all Sessions, configuration, reload, admin-token rotation | system mode: exactly one explicit selector required (`400 missing_launcher_selector`); user mode: the local daemon-owner `default` Launcher | `?principal=USER` and/or `?launcher=LAUNCHER`; a `dhl_` Launcher ID is valid without a Principal, a Launcher name requires the Principal scope |
+| Principal credential | one Principal | that Principal's resources: its Launchers and their credentials, its own Principal credential, `principal show` on itself, and the Sessions owned by its Principal's Launchers | its Principal's `default` Launcher, or an explicit own Launcher | `?launcher=` (name or ID) inside its own scope; `--principal` is illegal, even for its own Principal |
+| Launcher credential | one Launcher | that Launcher's Sessions and `GET /auth` self-inspection | its own Launcher (forced) | none — there is no narrowing contract for this authority |
+| Session token | one Session | one workspace data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login`, and that Session's operation endpoints | not a control authority; not accepted by control endpoints or `GET /auth` | none |
+
+Rules shared by every authority:
+
+- **Scope-first visibility.** List surfaces (`session list`, `launcher
+  list`, Principal credential list) are Queries: authentication establishes
+  the maximum visible scope and optional selectors can only narrow it,
+  never expand it. Selector resolution happens server-side inside the
+  authority-visible ownership, and one ownership query serves the final
+  scope — never a client-side filter and never in-memory enumeration.
+- **The daemon is the authority.** The CLI never performs a local
+  authorization decision; it resolves targets (target construction only)
+  and the daemon authorizes. The CLI performs auth introspection (`GET
+  /auth`) only where the wire contract needs the credential's owner, and
+  never where the daemon resolves the scope itself.
+- **Stable Principal-control targeting.** Principal-owned resource
+  families resolve the target Principal under the request authority: a
+  Principal credential targets the exact Principal ID it authenticated as —
+  the nested username is an authorization selector only — so a stale
+  in-flight authority whose Principal was deleted fails closed as
+  `404 principal_not_found` and never rebinds to a Principal recreated
+  under the same username (IDs are AUTOINCREMENT and never reused); an
+  admin authority is name-oriented at the API selector boundary and
+  legitimately targets the current same-name Principal.
+- **Launcher selectors are Principal-scoped.** Launcher names are never
+  searched globally. An exact `dhl_<32 hex>` selector resolves by ID; a
+  name resolves as `(principal_id, name)` inside the resolved Principal
+  scope. A missing or foreign selector is the same non-disclosing
+  `404 launcher_not_found`; an authority-illegal selector is
+  `400 invalid_selector`; a Principal-scoped name supplied without a
+  Principal scope is `400 launcher_name_requires_principal`.
+- **Non-disclosure.** Unknown targets are the same not-found outcome for
+  existing and nonexistent selectors; error and audit behavior never
+  disclose foreign state.
+
+`GET /auth` reports the authenticated authority to the caller as
+`{"authority": "admin"}`, `{"authority": "principal", "principal": "..."}`
+or `{"authority": "launcher", "principal": "...", "launcher_id": "..."}`.
+It accepts an admin token, Principal credential, or Launcher credential; a
+Session token does not authenticate this endpoint. Invalid, revoked, or
+disabled credentials follow the non-disclosing authentication
+semantics and receive no identity information.
+
+Delegation tiers bound what an agent can reach:
+
+- Principal credential — broader delegated operator capability; may be
+  given to a sufficiently trusted agent;
+- Launcher credential — narrower delegated operator capability; exact
+  Launcher scope;
+- Session token — narrow data-plane Session capability for a single
+  workspace that expires after the configured TTL.
+
+A Session token alone grants access to one workspace and cannot create or
+manage Sessions; a Launcher credential can create and manage only its
+Launcher's Sessions; a Principal credential can reach the Sessions owned by
+that Principal's Launchers. Choosing the delegation tier is the operator's
+trust decision; giving an agent a Principal credential delegates broader
+operator capability and is never a default recommendation.
+
+### Credentials and Session capability
+
+Credential token and storage rules:
+
+- Admin token: generated by `docker-helper init`, stored at `admin.token`
+  (user mode: user config directory; system mode:
+  `/etc/docker-helper/admin.token`), SHA-256 hash loaded into memory at
+  server start, sent as `Authorization: Bearer <token>`, compared with
+  `crypto/subtle.ConstantTimeCompare`;
+- Principal credential: credential token prefixed `dhc_` (64 hex
+  characters), credential ID prefixed `dhcr_`, SHA-256 hash stored in
+  SQLite, resolved through database lookup by token hash;
+- Launcher credential: same token format (`dhc_` + 64 hex characters); the
+  token itself carries no owner type — the owner is resolved from
+  persistent state at authentication time; at most one credential exists
+  per Launcher;
+- Session token: generated per session by `POST /sessions`, returned once
+  in the creation response, SHA-256 hash stored in SQLite, required for
+  the data-plane operations, resolved through database lookup by token
+  hash and checked for expiration; deletion removes the session and
+  invalidates subsequent requests.
+
+#### Credential install
+
+The `credential install` command installs a non-admin credential token for
+`docker-helper --system`. The credential may belong to a Principal or a
+Launcher; the daemon resolves its owner and authorization scope when the
+token is used. It is not run as root.
+
+- Token format: `dhc_` + 64 lowercase hex characters (68 total).
+- Token stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`
+  with mode `0600`; directory created with mode `0700`.
+- Input: hidden TTY via `term.ReadPassword` on terminal; `bufio.Scanner` on
+  non-TTY stdin. Token never appears in stdout or stderr.
+- `--force`: skip existence check; atomic `rename` replaces file without prior
+  deletion. Write failure leaves existing file intact.
+- Root invocation rejected with clear message.
+
+Token resolution for `--system` mode:
+ 1. `--token-file` — explicit path, always wins.
+ 2. Non-root `--system` — credential.token from `credentialPath()`.
+ 3. Root `--system` — `/etc/docker-helper/admin.token`.
+
+Endpoint and token resolution for default (no `--system`) mode:
+ 1. `--token-file` — explicit path, always wins.
+ 2. If the user socket exists, select it and use `admin.token` in the user
+    config directory.
+ 3. Otherwise, if the system socket exists, select it and use non-root
+    `credential.token` or root `/etc/docker-helper/admin.token`.
+ 4. Once selected, an unavailable/failing endpoint is returned as an error;
+    the client does not retry another daemon.
+
+## Deployment
+
+### User mode
+
+- **Effective UID**: non-root
+- **Config**: `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json`
+- **State**: `${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper`
+- **Runtime**: `$XDG_RUNTIME_DIR/docker-helper`
+- **Transport**: Unix socket only, at
+  `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock` with `0600`
+  permissions
+- **Execution identity**: daemon UID:GID for daemon-owner (user-mode) Sessions
+
+### System mode
+
+- **Effective UID**: root
+- **Config**: `/etc/docker-helper/config.json`
+- **State**: `/var/lib/docker-helper`
+- **Runtime**: `/run/docker-helper`
+- **Transports**: Unix socket at
+  `/run/docker-helper/docker-helper.sock` with `0666` permissions, plus
+  loopback HTTP at `127.0.0.1:52375` by default (configurable via
+  `http_address`, startup-only)
+- **Execution identity**: the owning Principal's UID:GID
+
+### Transports
+
+- **User mode**: Unix socket only
+- **System mode**: Unix socket + loopback HTTP (`127.0.0.1:<port>`)
+
+One handler, one API, one auth policy on both transports. Transport does
+not determine identity or authorization. Transports are local only:
+non-loopback listeners, TLS, and remote execution are not part of the
+current implementation (see [Current limitations and
+non-goals](#current-limitations-and-non-goals)).
+
+### systemd services
+
+Both deployment modes ship systemd unit files (see [systemd units and
+hardening](#systemd-units-and-hardening)): a user unit installed under the
+user's systemd manager and a system unit under the system manager. The
+units carry the shutdown/restart contract ([Shutdown](#shutdown)) and the
+hardening profile of each mode.
+
+### Mandatory access control
+
+System mode requires exactly one supported enforcing backend:
+
+- AppArmor confines the daemon with the `/etc/apparmor.d/docker-helper-system`
+  profile and uses explicit managed workspace boundaries for path-level
+  workspace defense in depth. The profile includes the dynamic helper-owned
+  boundary state file `/var/lib/docker-helper/apparmor/managed-boundaries`;
+  managed boundaries are stored there, outside config.json. These managed
+  boundaries are MAC state, not authorization roots;
+- SELinux confines the daemon as `docker_helper_t` and system-mode containers
+  as the MCS-constrained `docker_helper_container_t` type.
+
+Neither backend, both backends, and permissive SELinux fail closed. SELinux
+workspace access is type-based and does not reproduce AppArmor's per-path
+managed-boundary rule; canonical application-level allowed-root validation
+remains authoritative in both modes.
+
+## Trust model
+
+### Trusted
+
+- the developer who runs `docker-helper init` and `docker-helper serve`;
+- the host filesystem outside the allowed roots;
+- the Docker Engine and its configuration;
+- the `docker-helper` process itself.
+
+### Partially trusted
+
+- the allowed-root directories and their contents;
+- the workspace selected at session creation time.
+
+### Untrusted
+
+- the coding agent;
+- any input from the agent (JSON payloads, paths, image names);
+- Dockerfiles inside the workspace;
+- container processes.
+
+The agent is untrusted because it may execute arbitrary code, generate
+malicious Dockerfiles, or attempt path traversal. docker-helper validates
+every agent input before passing it to Docker.
+
+## Control-plane lifecycle
+
+### Bootstrap
+
+```
+docker-helper init
+    │
+    ├── creates config directory (0700)
+    ├── creates state directory (0700)
+    ├── writes config.json
+    └── generates admin token (dht_<64 hex chars>)
+    │
+docker-helper serve
+    │
+    ├── loads config.json
+    ├── reads admin token, computes SHA-256 hash
+    ├── opens SQLite database
+    ├── deletes expired session rows (expires_at <= now)
+    ├── runs ownership migration (idempotent; see Ownership migration)
+    ├── resolves user-mode ownership (ensureUserModeOwnership)
+    └── starts HTTP server on the configured transports
+```
+
+### Ownership provisioning
+
+Ownership provisioning is the creation of the durable ownership chain
+`Principal └── Launcher`. Session creation never creates ownership state;
+it only consumes it.
+
+#### Principal provisioning
+
+`POST /principals` (admin token) is one ownership transaction. It resolves
+the OS user (`uid`, `gid`, `home`) and atomically creates:
+
+- the Principal row;
+- its initial (default) Principal allowed root — the canonicalized OS home
+  directory, which must be inside at least one global allowed root;
+- the persisted canonical `default` Launcher: enabled, `inherit` scope,
+  zero Launcher roots;
+- optionally an initial Principal credential (when the request asks for
+  credential issuance; otherwise no credential exists until one is issued
+  separately).
+
+Fresh Principal does not exist without its `default` Launcher ownership
+anchor: `ensureDefaultLauncher` runs inside the same transaction and any
+failure rolls the whole provisioning back. Startup backfills any Principal
+that predates that rule (`migrateDefaultLaunchers`); later startups resolve
+the default read-only (`findDefaultLauncher`). The CLI is `principal
+create`, which prompts for the optional initial Principal credential on a
+TTY and requires an explicit `--issue-credential`/`--no-credential` choice
+non-interactively.
+
+#### Launcher provisioning
+
+`POST /principals/{username}/launchers` (admin token or owning-Principal
+credential) creates a normal persisted Launcher atomically:
+
+```
+POST /principals/{username}/launchers
+    │
+    ├── resolves the owner Principal (Principal-control targeting rules)
+    ├── validates the Launcher name against the canonical grammar
+    ├── creates the launcher row (dhl_<32 hex> ID, inherit scope by
+    │   default, optional initial restricted roots)
+    └── optionally issues the Launcher's single credential in the same
+        atomic result
+```
+
+- The owner Principal is resolved through the stable
+  Principal-control targeting rules (see
+  [Authority model](#authority-model)); targeting is target construction
+  only — the daemon remains the authorization authority.
+- Scope policy: `inherit` (the effective Principal ceiling) by default, or
+  `restricted` with explicit roots supplied at creation; every narrowing
+  must stay inside the effective Principal ceiling.
+- The optional singular Launcher credential is issued in the same creation
+  result when requested (`--issue-credential` / `--no-credential`; the CLI
+  prompts on a TTY); at most one credential exists per Launcher
+  (`409 launcher_credential_exists` on a second issuance).
+- Creation is atomic: a name conflict is `409 launcher_exists` (message
+  naming the Launcher and its Principal).
+- When the CLI omits `--name`, it first checks whether the resolved
+  Principal already has a `default` Launcher: if it does, the CLI fails
+  locally with `launcher "default" already exists for principal "<user>"`
+  plus a hint to use `--name NAME`, before prompting for a credential and
+  without issuing the doomed create request; any other pre-flight failure
+  (for example a transient server error) does not block the create.
+
+### Session creation
+
+One pipeline serves every authority; only target resolution differs.
+
+```
+authority
+    ↓
+resolve exactly one target Launcher
+    ↓
+derive the owning Principal through the Launcher
+    ↓
+resolve effective workspace policy
+    (global roots ∩ effective Principal roots ∩ launcher restricted roots)
+    ↓
+validate workspace inside the effective roots
+    ↓
+create Session with launcher_id
+    (session ID dhs_<32 hex>, session token dht_<64 hex>,
+     SHA-256 hash stored in SQLite)
+    ↓
+return session + one-time token
+```
+
+The HTTP body of `POST /sessions` accepts
+`{"workspace", "launcher_id", "principal"}`:
+
+- `launcher_id` and `principal` are mutually exclusive; both present is
+  `400 conflicting_selectors`; an explicitly present but empty or malformed
+  selector is `400 invalid_selector`;
+- a Launcher credential's target is forced to its own launcher; a
+  conflicting explicit selector is rejected;
+- with no selectors the request body carries only the workspace.
+
+The CLI maps its selectors onto those wire fields after authenticating
+(`GET /auth`). The two selectors are mutually exclusive on the wire: the
+resolved target is sent as either `principal` or `launcher_id`, never
+both.
+
+#### Admin authority
+
+A system-mode admin token must supply exactly one explicit selector
+(`400 missing_launcher_selector`); a user-mode admin token with no
+selector resolves the local daemon-owner `default` Launcher.
+
+An admin may send `--principal USER` (mapped to the `principal` wire
+field) or `--launcher LAUNCHER` — an ID-shaped selector is forwarded as
+`launcher_id` as-is, a Launcher name is resolved to its global ID through
+the scope-first launcher list query under the named Principal
+(`GET /launchers?principal=USER&launcher=NAME`; a name without
+`--principal` is rejected locally because Launcher names are never
+searched globally).
+
+#### Principal authority
+
+A Principal credential may pass `--launcher LAUNCHER` only: the name is
+resolved within the credential's own visible scope the same way (a foreign
+or missing Launcher is the daemon's non-disclosing
+`launcher not found`). With no selector the credential's Principal's
+default Launcher is the target; a `principal` selector must name the
+authenticated Principal. For this authority `--principal` is rejected
+locally.
+
+#### Launcher authority
+
+A Launcher credential has no Launcher control-plane authority, so its
+selector is never resolved through the launcher list: an ID-shaped
+`--launcher` is forwarded as `launcher_id` as-is and the daemon's create
+admission stays the authority (own -> self, foreign -> non-disclosing
+`launcher not found`), and a name-shaped `--launcher` is rejected locally
+with an actionable hint to use the Launcher's `dhl_` ID (reported for the
+credential by `GET /auth`). For this authority `--principal` is rejected
+locally.
+
+### Principal and Launcher lifecycle
+
+Principal disable/delete:
+
+```
+PATCH /principals/{username}  (admin token, body: {"enabled": false})
+    │
+    ├── collects session IDs for runtime cleanup
+    ├── deletes all sessions for the principal (no FK cascade)
+    ├── sets principal.enabled = 0
+    ├── commits transaction
+    └── best-effort cleanup of session runtime directories
+    │
+    Subsequent session token lookup:
+    │
+    ├── findSessionByToken rejects sessions whose launcher's principal is disabled
+    └── disabled launchers' credentials are rejected at authentication time
+```
+
+```
+DELETE /principals/{username}  (admin token)
+    │
+    ├── collects session IDs for runtime cleanup
+    ├── fails with 409 launcher_runtime_active if a launcher
+    │   still has active runtime (durable state unchanged), else
+    │   disables each launcher (deleting its sessions) and deletes
+    │   the principal (credentials/roots/launchers via FK CASCADE)
+    ├── commits the teardown steps
+    └── best-effort cleanup of session runtime directories, also for
+        sessions invalidated before a later teardown failure
+```
+
+Launcher lifecycle and cleanup reuse the existing Session lifecycle and
+MAC/runtime cleanup owners:
+
+- disabling a launcher deletes its sessions and cleans their runtime state
+  through the existing per-session cleanup path; a disabled launcher
+  rejects new session creation and its credential authentication
+  (`launcher disabled`);
+- deleting a launcher performs a checked delete: if its sessions still
+  have active runtime state, the delete fails with
+  `409 launcher_runtime_active` and the launcher's durable state —
+  including its enabled flag and Sessions — is unchanged; a still-enabled
+  launcher can be disabled explicitly first. Once the check passes,
+  sessions are deleted and the launcher row is removed. If owner removal
+  fails after the durable disable committed, the invalidated sessions
+  still receive their runtime-directory cleanup (best-effort) instead of
+  waiting for daemon restart;
+- principal disable/delete propagates: disabling a principal deletes all
+  its sessions; deleting a principal deletes its launchers (FK cascade)
+  and fails with `409 launcher_runtime_active` if any launcher still has
+  active runtime;
+- an individually disabled launcher stays disabled through parent
+  enable/disable transitions; re-enabling the principal or parent does not
+  re-enable it;
+- in user mode the reserved transparent owner chain rejects corrupting
+  mutations (see [User-mode owner reservation](#user-mode-owner-reservation)).
+
+### Credential lifecycle
+
+- **Principal credentials** are lifecycle resources of their owning
+  Principal (`Principal └── credential (0..N, named)`). The canonical CLI
+  is `principal credential create|list|revoke|rotate`; `create` and
+  `revoke` remain administrator-controlled.
+  - `GET /credentials` is the scope-first principal credential list: the
+    authenticated authority establishes the maximum visibility (an admin
+    token sees every Principal's credentials, a Principal credential sees
+    its own Principal's), and the optional `?principal=NAME` filter can
+    only narrow that visibility — never expand it. A Principal credential
+    naming another Principal, and an unknown Principal filter, are the
+    same non-disclosing `404 principal_not_found` as any other principal
+    endpoint; a Launcher credential is `401`. `GET
+    /principals/{username}/credentials` remains the single-Principal form
+    of the same query.
+  - `POST /principals/{username}/credentials/{name}/rotate` rotates a
+    named credential in one atomic server-side operation: the token hash
+    is replaced in the same transaction (credential ID, name, ownership,
+    and created_at are unchanged, no second row is created), the old
+    bearer is rejected immediately, and the new bearer is returned exactly
+    once. Rotation always targets the current active credential with that
+    name: revoked historical rows that share the name through documented
+    name reuse are never the target, a name that only has revoked history
+    is `409 credential_revoked`, and a name that never existed is
+    `404 credential_not_found`; the guarded mutation fails closed against
+    stale concurrent state, so a rotation never resurrects a revoked row.
+    The mutation is scoped by the exact owning Principal ID resolved under
+    the request authority (an admin resolves the current same-name
+    Principal; a Principal credential uses its exact authenticated
+    Principal ID), never re-keyed by username, so a Principal deleted and
+    recreated under the same username can never rebind a rotation onto the
+    replacement Principal's credential — a vanished owner fails closed
+    without mutating any row.
+  - The compatibility CLI `credential create|list|revoke` shares the same
+    handlers as the canonical `principal credential` commands;
+    `credential create --name` is optional and uses the literal name
+    `default` when omitted.
+  - List CLI resolution needs no auth introspection: the list command
+    sends one server-authorized Query and the daemon applies the
+    scope-first rule; targeting commands such as `show`, `set`, `rotate`,
+    and `delete` keep the `GET /auth` inference rule for the
+    Principal-credential owner.
+- **Launcher credentials** are singular per Launcher: issued with `PUT
+  /principals/{username}/launchers/{launcher}/credential` (admin or
+  owning-Principal authority; the canonical CLI verb is
+  `launcher credential create` — the retired `issue` spelling is a
+  compatibility form), replaced by
+  `POST .../credential/rotate`, and deleted by `DELETE .../credential`.
+  Deleting the credential does not delete the launcher or its sessions; it
+  only removes that authentication key. Rotation keeps the launcher
+  identity and its sessions: the old bearer is rejected immediately, the
+  replacement is authorized, and no second credential row is created.
+- **Admin token** rotation (`admin-token rotate`) requires the current
+  token; the new token is shown once, the old token is invalid
+  immediately, and no restart is required.
+
+Revoking a Principal or Launcher credential does not invalidate issued
+sessions; deleting a Launcher credential leaves its launcher's sessions
+owned and running but removes that authentication key.
+
+### Session lifecycle
+
+```
+POST /build or POST /run  (session token)
+    │
+    ├── resolves session (launcher-owned)
+    ├── execution identity = principal UID:GID or daemon UID:GID
+    ├── registers operation (supervisor admission — atomic with shutdown gate)
+    ├── starts async process (cmd.Start under op.mu)
+    ├── captures stdout/stderr into bounded LogBuffer
+    ├── completion goroutine owns cmd.Wait()
+    ├── transitions operation to succeeded/failed
+    └── writes audit record with the session's ownership provenance
+    │
+GET /operations/{id}  (session token)
+    │
+    └── status, timestamps, exit code, result code
+    │
+GET /operations/{id}/logs?offset=N  (session token)
+    │
+    └── incremental operation output
+    │
+POST /operations/{id}/cancel  (session token)
+    │
+    ├── graceful SIGTERM to running process
+    ├── bounded force-cleanup fallback if process does not exit
+    └── operation becomes terminal (status=failed, result_code=cancelled)
+    │
+DELETE /sessions/{id}  (admin token, Principal credential, or Launcher credential)
+    │
+    └── physically deletes session row
+    │
+subsequent requests with deleted session token
+    │
+    └── 401 Unauthorized
+```
+
+Session token semantics:
+
+- session expiry or deletion blocks future requests; expired sessions are
+  rejected immediately by the `expires_at` check in `findSessionByToken`,
+  and their database rows are physically removed the next time
+  `docker-helper serve` starts (`session cleanup` removes them
+  offline);
+- disabling the owning principal or its launcher deletes the affected
+  sessions and blocks their tokens; disabled launchers also reject
+  credential authentication;
+- removing an allowed root does not invalidate issued sessions;
+- an already-started Docker operation continues its lifecycle.
+
+### Ownership migration
+
+The startup migration from the pre-delegation ownership model is idempotent
+and restart-safe, guarded by the daemon instance lock. It is a live
+compatibility contract: a state directory created by an older release
+migrates transparently at startup.
+
+| Legacy state | Result |
+|---|---|
+| pre-delegation Principal credential rows | preserved byte-for-byte as Principal credentials (`launcher_id NULL`, no launcher credential fabricated) |
+| attributable sessions owned directly by the Principal | re-owned by that principal's `default` launcher |
+| user-mode NULL-owner sessions | attributed to the daemon-owner default launcher |
+| system-mode NULL-owner (admin) sessions | invalidated (removed; never left ownerless) |
+| dangling principal reference | migration fails closed, legacy table intact (transaction rollback) |
+
+A dangling reference, a schema-shape mismatch, or a foreign-key violation
+in the rebuilt sessions table aborts the migration before commit. Invalid
+sessions leave no permanent helper-owned MAC or runtime state: they are
+removed before the MAC coordinator is created, and the existing startup
+cleanup paths (`ReconcileLiveSessions`, stale-boundary release, and
+`cleanupStaleSessionRuntimeDirs`) release any directories or boundaries
+whose only consumer was an invalidated session. After migration the final
+schema is authoritative and startup never re-adds the direct-principal
+ownership column.
+
+## Workspace authorization
+
+### Root-policy hierarchy
+
+The workspace authorization hierarchy has three policy ceilings, then one
+concrete selection:
+
+```
+policy ceilings:  global roots
+                    ⊇ effective Principal roots
+                        ⊇ effective Launcher roots
+concrete:               Session workspace (ephemeral)
+```
+
+- **Global allowed_roots** (config.json) — the system-wide authorization
+  ceiling, managed by `config allowed-root list/add/remove`. Changing
+  allowed roots is a policy-only operation; it does NOT prepare MAC state.
+- **Principal allowed roots** (database) — per-principal narrowing, managed
+  by `principal allowed-root add/remove`. Does not prepare MAC.
+- **Launcher allowed roots** (database, `restricted` scope only) —
+  per-launcher narrowing beneath one principal; `inherit` scope applies no
+  launcher-level narrowing. Evaluated at session-creation time against
+  current state. Does not prepare MAC.
+- **Session workspace** (ephemeral, not a persisted policy level) —
+  selected only at session creation time via `session create --workspace
+  PATH`. Must be under a global, the principal, and (when restricted) the
+  launcher allowed root.
+
+`effective Principal roots` is the Principal ceiling owned by
+`computeEffectivePrincipalRoots`: the intersection of the global roots and
+the stored Principal roots, with one documented exception — in user mode the
+daemon-owner Principal with zero stored roots collapses onto the global
+roots. `effective Launcher roots` are the Principal ceiling for `inherit`
+scope, or its intersection with the Launcher's stored roots for `restricted`
+scope (stale out-of-ceiling Launcher roots are rejected, never truncated).
+
+MAC state is derived from the concrete live session/workspace lifecycle,
+not from the authorization ceiling. Only the session workspace participates
+in MAC preparation: AppArmor managed-boundary coverage for the workspace, or
+SELinux Session workspace fcontext labeling with MCS constraints. The
+authorization roots never own MAC state; a broader ceiling never causes
+recursive MAC relabeling. Adding `/opt` as a global allowed root must never
+imply recursive relabeling of `/opt/**`.
+
+Distinct from session workspace MAC preparation, system-mode `docker-helper init`
+under enforcing SELinux applies the installed fcontext rules to docker-helper's
+own deployment state: the helper-owned `/etc/docker-helper/**` (config) and
+`/var/lib/docker-helper/**` (state) trees are relabeled to
+`docker_helper_config_t` / `docker_helper_state_t` immediately after they are
+created and before the admin token is written, so the first daemon start can
+open its database. Init also runs an exact-path restorecon on the Docker CLI
+executable the daemon will exec (resolved over the same PATH the service uses),
+so the confined `docker_helper_t` domain can execute it with the
+`container_runtime_exec_t` type the distro/container-selinux fcontext rules
+already define — never a recursive `/usr/bin` relabel and never a `bin_t`
+execute grant. A relabel failure aborts init (no partial initialization).
+AppArmor system mode and user mode perform no SELinux relabel.
+
+Initialization defaults follow the selected deployment identity:
+
+- interactive non-root initialization defaults `allowed_roots` to the current
+  user's home directory;
+- interactive root initialization defaults `allowed_roots` to `/home`;
+- the shared root validator permits root to select exact `/home` or `/opt`,
+  while non-root validation continues to reject those broad namespaces;
+- non-interactive initialization requires an explicit `--allowed-root`.
+
+When a non-root `docker-helper init` detects an existing system daemon, it uses
+the Principal-credential onboarding path instead of creating a competing user
+daemon configuration. The standalone `credential install` command exposes the
+same user-scoped credential store directly.
+
+Application acceptance of a root does not by itself prove MAC access. AppArmor
+requires the corresponding managed boundary rule. SELinux requires a permitted
+workspace file type.
+
+### Launcher scope
 
 Launcher scope narrows the Principal authorization ceiling for sessions
 created through that launcher; it never widens and never owns MAC state:
@@ -1113,6 +893,37 @@ inherit). Both reject the user-mode reserved default launcher with
 add/list/remove/inherit` and `principal allowed-root add/list/remove`;
 `launcher scope` no longer exists in the CLI.
 
+### Session workspace
+
+Each session is bound to a single workspace directory. An agent with a
+session for `/home/user/project-a` cannot access `/home/user/project-b`,
+even if both are inside an allowed root.
+
+All paths are resolved through `filepath.EvalSymlinks` before comparison.
+This prevents symlink-based escape attacks at validation time. Note:
+`EvalSymlinks` resolves the path at a point in time. By itself it
+does not solve TOCTOU problems where the filesystem changes between
+validation and use. For operations that pass paths to Docker as strings,
+additional measures (such as FD-relative traversal or inode pinning) are
+required to close the gap; the operation-specific mitigations are under
+[Filesystem policy](#filesystem-policy).
+
+The canonical containment API lives in `path_containment.go`:
+
+- `pathWithin(root, path)` — returns true if `path` is within `root`
+  (equality allowed). Both arguments must be canonical (absolute, cleaned).
+- `pathStrictlyWithin(root, path)` — returns true if `path` is a proper
+  descendant of `root`. Equality returns false.
+
+Argument order is always root first, path second. These functions correctly
+handle the prefix trap: `pathWithin("/data", "/data2")` returns false.
+
+When a session is created, the workspace path is resolved through
+`EvalSymlinks` and the canonical workspace is stored in the database.
+When a build or run request specifies a path relative to the workspace,
+the resolved path is compared against the canonical workspace; if the
+resolved path escapes the workspace, the request is rejected.
+
 ### Policy introspection
 
 Two read-only policy introspection surfaces expose the daemon's canonical
@@ -1129,9 +940,9 @@ real mutations use, and neither surface widens authority.
   authenticated Principal ID (a stale authority whose Principal was deleted
   fails closed as the non-disclosing `404 principal_not_found` and never
   observes a recreated same-username Principal), and a Launcher credential
-  is `401`. Consumed by `completion roots principal`.
+  is `401`.
 - `GET /sessions/create-policy` — the complete Session-create projection
-  (target Launcher, ownership names, and the three-level effective root
+  (target Launcher, ownership names, and the three-ceiling effective root
   scope) that a Session created right now with this authority would use,
   resolved by the same owner as real creation (`resolveCreatePolicy`). The
   query optionally carries the typed create selectors (`principal` = a
@@ -1144,38 +955,64 @@ real mutations use, and neither surface widens authority.
   non-disclosing contract for foreign, missing, or authority-illegal
   selectors. Selectorless requests keep the authority-specific default
   resolution (a system-mode admin without a resolvable Launcher receives
-  the same missing-selector contract a real create would). Consumed by
-  `completion roots session`.
+  the same missing-selector contract a real create would).
 
 `GET /auth` is the separate identity introspection surface; it reports the
-authenticated authority class, not policy. The `completion` CLI consumes
-these daemon policy queries and never reproduces policy locally. The
-daemon-backed policy completions are exactly:
+authenticated authority class, not policy (see
+[Authority model](#authority-model)).
 
-| Command flag | Policy query consumed |
+### MAC lifecycle
+
+MAC state follows the concrete Session lifecycle, not the policy ceilings:
+
+- a created session receives its workspace MAC preparation (AppArmor
+  managed-boundary coverage, or SELinux workspace fcontext labeling with
+  MCS constraints) as part of the session lifecycle; a preparation failure
+  after persistence fails the creation closed (`mac_preparation_failed`);
+- a deleted, expired, invalidated, or migrated-away session releases its
+  MAC boundary through the existing release paths (including startup
+  reconciliation of stale boundaries);
+- managed boundaries are helper-owned MAC state (AppArmor's dynamic
+  boundary state file), never authorization roots and never config.json
+  state.
+
+## Control-plane API and CLI mapping
+
+### Principal
+
+HTTP surface (admin token; Principal-credential authority where stated;
+a Launcher credential has no Principal authority):
+
+| Endpoint | Purpose |
 |---|---|
-| `launcher create --allowed-root` | Principal effective-root query |
-| `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
+| `POST /principals` | atomic Principal provisioning (ownership transaction; optional initial credential) |
+| `GET /principals/{username}` | show principal (scope-first read: an admin reads any Principal, a Principal credential reads exactly its own — the daemon authorizes the target, the CLI performs no local self-check; a foreign selector is the non-disclosing not-found; a Launcher credential is unauthorized) |
+| `GET /principals/{username}/effective-allowed-roots` | Principal effective-root introspection (see [Policy introspection](#policy-introspection)) |
+| `PATCH /principals/{username}` | enable / disable (session teardown propagation) |
+| `DELETE /principals/{username}` | checked delete (runtime-active guard, FK cascade teardown) |
+| `POST /principals/{username}/credentials` | create a named Principal credential (one-time token) |
+| `GET /principals/{username}/credentials` | that Principal's credentials |
+| `POST /principals/{username}/credentials/{name}/rotate` | atomic credential rotation |
+| `DELETE /principals/{username}/credentials/{name}` | revoke a credential |
+| `GET /credentials` | scope-first Principal credential list (optional `?principal=` narrowing) |
+| `DELETE /sessions/{id}` | Session deletion (authority-scoped; see [Session](#session)) |
 
-Positional `[LAUNCHER] ... PATH` completion on
-`launcher allowed-root add/remove` is generic filesystem completion
-(directories for add, any filesystem entry for remove); the daemon remains
-the final policy boundary and rejects a root outside the effective
-Principal ceiling at execution time. `config allowed-root add` and
-`principal allowed-root add` remain generic filesystem completion, as do all
-other path-valued flags. When a policy query fails (for example when the
-daemon is unavailable), completion degrades silently to the generic
-filesystem completion for the flag value.
+CLI surface: `principal create|list|show|set|delete`,
+`principal allowed-root add|list|remove`,
+`principal credential create|list|revoke|rotate`. Every command accepts
+the common operator flags (see [CLI conventions](#cli-conventions)).
+`principal allowed-root` mutations are authorization-only and never
+prepare MAC state.
 
-### Launcher control plane
+### Launcher
 
-HTTP surface (admin token or owning-principal credential; a Launcher
+HTTP surface (admin token or owning-Principal credential; a Launcher
 credential cannot manage launchers):
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /principals/{username}/launchers` | create launcher (optional one-time credential issuance) |
-| `GET /principals/{username}/launchers` | list that principal's launchers |
+| `POST /principals/{username}/launchers` | launcher provisioning (optional one-time credential issuance) |
+| `GET /principals/{username}/launchers` | list that Principal's launchers |
 | `GET /launchers` | scope-first launcher list (authority visibility + optional `?principal=` and `?launcher=` narrowing filters) |
 | `GET /principals/{username}/launchers/{launcher}` | show launcher |
 | `PATCH /principals/{username}/launchers/{launcher}` | rename / enable / disable |
@@ -1195,18 +1032,7 @@ already-resolved Principal — an exact `dhl_<32 hex>` selector looks up
 that ID under this Principal, a name looks up `(principal_id, name)`,
 and a malformed, missing, or foreign selector is the same non-disclosing
 `404 launcher_not_found` (never a fallback from an ID-shaped selector to
-a name lookup, never a global name scan). A Principal credential reaches
-only its own Principal (any other username is `404 principal_not_found`);
-an admin token targets the explicitly selected Principal; a Launcher
-credential cannot manage launchers. Principal-control targeting is
-one stable-identity owner shared by every Principal-owned resource family:
-a Principal credential targets the exact Principal ID it authenticated as —
-the nested username is an authorization selector only — so a stale
-in-flight authority whose Principal was deleted fails closed as
-`404 principal_not_found` and never rebinds to a Principal recreated under
-the same username (IDs are AUTOINCREMENT and never reused); an admin
-authority is name-oriented at the API selector boundary and legitimately
-targets the current same-name Principal.
+a name lookup, never a global name scan).
 
 Launcher projection: `{"id", "principal", "name", "enabled", "scope",
 "allowed_roots", "created_at"}`. Create response carries the one-time
@@ -1214,8 +1040,7 @@ credential token only when issuance was requested. Exactly one credential
 may exist per launcher (`launcher_credential_exists` on a second issuance;
 rotation replaces the existing credential and its token).
 
-CLI surface (every Launcher command accepts the common operator flags
-`[--system] [--endpoint ENDPOINT] [--token-file PATH]`):
+CLI surface (every Launcher command accepts the common operator flags):
 
 ```
 docker-helper launcher create [--system] [--endpoint ENDPOINT]
@@ -1257,8 +1082,9 @@ searches for a `default` Launcher globally) — the single exception is an
 admin targeting an individual Launcher by its globally-unique `dhl_` ID,
 where the owning Principal is resolved from the daemon's scope-first
 launcher list query (`GET /launchers?launcher=<ID>`) instead of being
-named. Principal inference is target
-construction only — the daemon remains the authorization authority.
+named. Principal inference is target construction only — the daemon
+remains the authorization authority.
+
 `launcher list` is the exception: it is a scope-first list Query where the
 authenticated authority establishes the visible Launchers (admin without a
 filter: every Principal; a Principal credential without a filter: its own)
@@ -1273,279 +1099,242 @@ globally-unique Launcher ID is accepted and a name is rejected with
 `400 launcher_name_requires_principal` because Launcher names are
 Principal-scoped and are never searched globally. A missing selector match
 is the same non-disclosing `404 launcher_not_found`.
-`launcher credential create` is the canonical issuance verb (the Release 2.0
-`issue` spelling is retired from the public CLI); because a Launcher holds
-at most one credential, a second create is the daemon's normal
-`409 launcher_credential_exists` conflict.
-`create` prompts for the credential choice on a
-TTY; non-interactive use must pass `--issue-credential` or
-`--no-credential` explicitly. When `--name` is omitted, `create` first
-checks whether the resolved Principal already has a `default` Launcher
-(`launcher show default`): if it does, the CLI fails locally with
-`launcher "default" already exists for principal "<user>"` plus a hint to
-use `--name NAME`, before prompting for a credential and without issuing
-the doomed create request; any other pre-flight failure (for example a
-transient server error) does not block the create, which remains atomic on
-the daemon (`409 launcher_exists` on a real conflict, message naming the
-Launcher and its Principal).
 
-### Session selectors and default resolution
+Because a Launcher holds at most one credential, a second `launcher
+credential create` is the daemon's normal `409 launcher_credential_exists`
+conflict.
 
-`POST /sessions` accepts `{"workspace", "launcher_id", "principal"}`:
+### Session
 
-- `launcher_id` and `principal` are mutually exclusive; both present is
-  `400 conflicting_selectors`; an explicitly present but empty or malformed
-  selector is `400 invalid_selector`;
-- Launcher credential: the owning launcher is forced; a conflicting
-  explicit selector is rejected;
-- Principal credential with no selector: resolves that principal's default
-  launcher;
-- Principal credential with `principal` selector: must name the
-  authenticated principal (same non-disclosure rules as before);
-- admin token (system mode): exactly one selector is required; admin token
-  (user mode): omission resolves the local daemon-owner default launcher.
+CLI surface (every command accepts the common operator flags):
 
-`GET /sessions` narrowing selectors are deliberately different from the
-create selectors: `principal + launcher` on the list is not a conflicting
-pair — it means "this Launcher under this Principal" — so create-selector
-conflict semantics are not reused for listing. The list pipeline is one
-path: authenticate the authority, derive the maximum Session management
-scope (`resolveSessionControlScope`), parse the optional narrowing
-selectors, resolve them only inside the authority-visible ownership, and
-serve the resulting scope through the single Session ownership query
-(`listSessionsInScope`) — never a client-side filter and never a
-Launcher-ID enumeration in memory.
+```
+docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--principal USER] [--launcher LAUNCHER] [--json]
+docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
+docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
+docker-helper session cleanup
+```
 
-### Launcher lifecycle and cleanup
+`session create` — target resolution, selector mapping, and default
+resolution are the canonical
+[Session creation](#session-creation) pipeline and authority subsections;
+the CLI maps `--principal`/`--launcher` onto the wire selectors after
+`GET /auth`, and both are mutually exclusive. Returns the session ID,
+token, workspace, creation time, and expiration time; the token is shown
+only once and cannot be retrieved later.
 
-Launcher disable/delete propagation reuses the existing Session lifecycle
-and MAC/runtime cleanup owners:
+`session list` — the scope-first Query (see
+[Authority model](#authority-model)): authentication establishes the
+maximum visibility (`resolveSessionControlScope`), the optional
+`--principal USER` (admin authentication
+only) and `--launcher LAUNCHER` selectors can only narrow it, never expand
+it; the selectors are resolved server-side inside the authority-visible
+ownership and composed into the final Session scope served by one existing
+Session ownership query (`listSessionsInScope`) — filtering is never
+performed client-side.
+`principal + launcher` means "that Launcher under that Principal" (it is
+deliberately not a conflicting pair like the create selectors). A missing
+or unknown Principal is the non-disclosing `404 principal_not_found`, a
+missing or foreign Launcher (name or ID) is the non-disclosing
+`404 launcher_not_found`, an authority-illegal selector is
+`400 invalid_selector`, and a database or system failure keeps its own
+error (never collapsed into not-found). Returns a table of active
+sessions with ID, workspace, launcher, creation time, and expiration
+time.
 
-- disabling a launcher deletes its sessions and cleans their runtime state
-  through the existing per-session cleanup path; a disabled launcher
-  rejects new session creation and its credential authentication
-  (`launcher disabled`);
-- deleting a launcher performs a checked delete: if its sessions still
-  have active runtime state, the delete fails with
-  `409 launcher_runtime_active` and the launcher's durable state —
-  including its enabled flag and Sessions — is unchanged; a still-enabled
-  launcher can be disabled explicitly first. Once the check passes,
-  sessions are deleted and the launcher row is removed. If owner removal
-  fails after the durable disable committed, the invalidated sessions
-  still receive their runtime-directory cleanup (best-effort) instead of
-  waiting for daemon restart;
-- principal disable/delete propagates: disabling a principal deletes all
-  its sessions; deleting a principal deletes its launchers (FK cascade)
-  and fails with `409 launcher_runtime_active` if any launcher still has
-  active runtime;
-- an individually disabled launcher stays disabled through parent
-  enable/disable transitions; re-enabling the principal or parent does not
-  re-enable it;
-- credential rotation keeps the launcher identity and its sessions: the
-  old bearer is rejected immediately, the replacement is authorized, and
-  no second credential row is created.
+`session delete` — permanently removes the session; subsequent requests
+with the session's token receive 401 Unauthorized. With admin token: can
+delete any session. With Principal credential: can only delete sessions
+for its principal. With Launcher credential: can only delete sessions
+owned by its launcher; foreign sessions return the same `not_found`
+outcome (no existence disclosure).
 
-### Ownership migration (v2.0 -> 2.1)
+`session cleanup` — removes expired sessions from the local state
+database; does not require a running daemon or admin token. Deletes rows
+whose `expires_at` has passed; active sessions are untouched; reports the
+number of removed rows.
 
-Startup migration is idempotent and restart-safe, guarded by the daemon
-instance lock:
+### Completion introspection
 
-| Legacy state | Result |
+The machine-facing completion introspection surface serves the generated
+Bash completion. The daemon remains the ownership and authorization
+authority; Bash completion is advisory — a failed query (for example when
+the daemon is unavailable) degrades silently, and the daemon stays the
+final policy boundary at execution time.
+
+- **`completion bash`** — generate the Bash completion script. The
+  generated script keeps ONE canonical completion-input owner: it
+  reconstructs the real CLI arguments of the completion line from
+  `COMP_LINE` up to `COMP_POINT` with the line's own lexical rules —
+  unquoted whitespace separates arguments, a backslash escapes the next
+  character, single-quoted text is literal, and double-quoted text honors
+  backslash escapes — because Readline's default
+  word breaking splits typed arguments at characters like `=` and `:`.
+  The reconstruction performs no expansion and no multi-command operator
+  handling; every consumer of the word list — the command-path walk,
+  flag/value recognition, typed selector extraction, operator-argument
+  forwarding, positional counting, and the policy-root query forwarding —
+  reads that normalized view, so both the separated
+  `--flag VALUE` and the inline `--flag=VALUE` form, and values physically
+  broken such as `http://HOST:PORT` endpoints, carry identical logical
+  semantics. The user's `COMP_WORDBREAKS` is never modified.
+- **`completion selectors principal|launcher`** — machine-facing selector
+  introspection for the values of the `--principal`/`--launcher` flags and
+  of the positional `[LAUNCHER]` argument (the same owner for both).
+  `selectors principal` is command-context aware through the `--command`
+  flag: an admin receives the daemon's Principal names on every command
+  carrying the selector, a Principal credential receives exactly its own
+  username on the Launcher command families (where the explicit own
+  selector is legal) and nothing on both Session command paths — session
+  create rejects every `--principal` under a Principal credential and
+  session list rejects every Principal selector, even the credential's own
+  Principal — and a Launcher credential receives nothing. `selectors
+  launcher` honors the typed `--principal` context: an admin with a
+  context receives that Principal's Launcher names, an admin without one
+  receives only globally resolvable `dhl_` Launcher IDs (a name is never
+  searched globally), a Principal credential receives its own Launchers'
+  names — including with its own typed `--principal` context, which the
+  daemon authorizes as an in-scope narrowing — and a Launcher credential
+  receives nothing. A foreign or missing context fails with the daemon's
+  non-disclosing contract and degrades silently.
+- **`completion roots principal`** — the target Principal's effective
+  allowed roots (target from `--principal` or inferred from the
+  credential; the daemon authorizes the query; consumes
+  `GET /principals/{username}/effective-allowed-roots`). With
+  `--authority-only` it prints only the authenticated operator authority
+  for shell-completion introspection; completion authority introspection
+  reuses this surface so the parser tree, help tree, and completion tree
+  remain identical (no hidden command nodes).
+- **`completion roots session`** — the Session-create effective allowed
+  roots for the current authority (consumes `GET /sessions/create-policy`).
+  The typed `--principal`/`--launcher` selectors (both `--flag VALUE` and
+  `--flag=VALUE` forms) are forwarded to the daemon; the daemon resolves
+  the same target a real `session create` with those selectors would use
+  through its canonical owners, and a rejected selector fails silently so
+  completion degrades.
+
+The daemon-backed policy completions are exactly:
+
+| Command flag | Policy query consumed |
 |---|---|
-| v2.0 principal credential rows | preserved byte-for-byte as Principal credentials (`launcher_id NULL`, no launcher credential fabricated) |
-| attributable v2.0 sessions owned directly by the Principal | re-owned by that principal's `default` launcher |
-| user-mode NULL-owner sessions | attributed to the daemon-owner default launcher |
-| system-mode NULL-owner (admin) sessions | invalidated (removed; never left ownerless) |
-| dangling principal reference | migration fails closed, legacy table intact (transaction rollback) |
+| `launcher create --allowed-root` | Principal effective-root query |
+| `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
 
-A dangling reference, a schema-shape mismatch, or a foreign-key violation
-in the rebuilt sessions table aborts the migration before commit. Invalid
-sessions leave no permanent helper-owned MAC or runtime state: they are
-removed before the MAC coordinator is created, and the existing startup
-cleanup paths (`ReconcileLiveSessions`, stale-boundary release, and
-`cleanupStaleSessionRuntimeDirs`) release any directories or boundaries
-whose only consumer was an invalidated session. After migration the final
-schema is authoritative and startup never re-adds `principal_id`.
+Positional `[LAUNCHER] ... PATH` completion on
+`launcher allowed-root add/remove` is generic filesystem completion
+(directories for add, any filesystem entry for remove); the daemon remains
+the final policy boundary and rejects a root outside the effective
+Principal ceiling at execution time. `config allowed-root add` and
+`principal allowed-root add` remain generic filesystem completion, as do
+all other path-valued flags.
 
-### Runtime correlation labels
+### CLI conventions
 
-Containers started by docker-helper carry helper-owned labels used only for
-correlation and checked cleanup; user input cannot set or override them:
+Operator flags for API-backed commands (`principal`, `launcher`,
+`credential`, `session`, `reload`, `admin-token rotate`,
+`completion roots`):
 
 ```
-com.dockerhelper.session.id      = <session id>
-com.dockerhelper.launcher.id     = <launcher id>
-com.dockerhelper.principal.name  = <principal username>
-com.dockerhelper.schema = 1
+--system              connect to system daemon (Unix socket)
+--endpoint ENDPOINT   explicit endpoint (/path, unix:///path, or http://127.0.0.1:port)
+--token-file PATH     token file path (auto-resolved for Unix sockets)
 ```
 
-Labels are correlation/cleanup evidence, not authorization state. The
-namespace is deliberately neutral: only the Launcher is the Session owner;
-the Session and Principal labels are provenance.
+The `-h` / `--help` flag is available on every command and subcommand. It
+prints usage information and exits 0 without executing the command action.
 
-### Launcher audit provenance
+`help` is a top-level navigation branch accepting an arbitrary-depth
+command path: `docker-helper help [command [subcommand ...]]` (for example
+`docker-helper help principal credential rotate`). It navigates the same
+canonical command tree as the parser; each branch does not carry its own
+`help` pseudo-subcommand (`docker-helper principal help` is an unknown
+subcommand).
 
-Successful launcher-control events name the target owner from the resolved
-or resulting Launcher, independent of the caller:
-`principal_name` is the target owner's Principal (never the caller
-identity), with `launcher_id`, `launcher_name`, `launcher_scope`, and
-`launcher_enabled` projecting the resolved or resulting Launcher.
-`session.create` additionally carries `launcher_id`, `launcher_name`, and
-`principal_name`. Docker operation events (`build`/`run`/`pull`, including
-`registry.login`) record `principal_name`, `launcher_id`, and
-`launcher_name` from the session's ownership. `session.delete` records the
-deleted session's ownership (`launcher_id`, `launcher_name`,
-`principal_name`). Launcher control events keep initiating and target
-credential provenance distinguishable. `initiator_credential_id` names the
-Principal credential that performed the request on every launcher-control
-event (absent for the admin token; Launcher credentials cannot manage
-launchers). `credential_id` carries target-resource semantics: the issued,
-rotated, or revoked Launcher credential on issue/rotate/delete events, and
-the initiating credential on other launcher-control events.
-`credential_name` is recorded where the credential has a name.
+Exit codes:
 
-Principal credential events (`principal.credential_list`,
-`principal.credential_rotate`, and the create/revoke events) follow the
-same provenance rule: `principal_name` is the target Principal, and
-`initiator_credential_id` names the initiating Principal credential
-(absent for the admin token). The rotate/list events additionally project
-the target resource (`credential_id`, `credential_name`).
+| Code | Meaning | Examples |
+|------|---------|----------|
+| 0 | Success or help displayed | `docker-helper version`, `docker-helper serve --help` |
+| 1 | Runtime error (config load, API call, server failure) | `docker-helper init` with an unwritable configuration directory, `docker-helper session create` with unreachable server |
+| 2 | CLI syntax or argument validation error | unknown command, missing/unknown subcommand, missing required flag, unexpected positional argument, unknown flag |
 
-## Workspace isolation
+Agent-facing CLI commands are `pull`, `build`, `run`, and `registry login`
+(described under [Data-plane execution](#data-plane-execution)); operator
+commands are `serve`, `init`, `reload`, `session`, `config`, `principal`,
+`launcher`, `credential`, `admin-token`, `apparmor`, and `selinux`;
+general commands are `version` and `help`.
 
-Each session is bound to a single workspace directory.
+`apparmor` — manage/check managed AppArmor workspace boundaries for an
+AppArmor system deployment (the public `apparmor root` command spelling is
+a retained compatibility form; it manages managed workspace boundaries,
+not authorization roots).
 
-### Initialization and allowed-root defaults
+`selinux` — inspect SELinux system-policy state for a SELinux system
+deployment. Subcommand: `check` (validate that the `docker_helper` policy
+module is loaded and docker-helper-owned file contexts are consistent with
+the active policy; read-only operator diagnostics that never mutates
+SELinux state and never inspects dynamic Session MAC resources).
 
-Initialization follows the selected deployment identity:
+### Config and reload
 
-- interactive non-root initialization defaults `allowed_roots` to the current
-  user's home directory;
-- interactive root initialization defaults `allowed_roots` to `/home`;
-- the shared root validator permits root to select exact `/home` or `/opt`,
-  while non-root validation continues to reject those broad namespaces;
-- non-interactive initialization requires an explicit `--allowed-root`.
+`docker-helper config <subcommand>` — inspect and modify configuration.
+Requires a subcommand: `show`, `set`, `unset`, `allowed-root`.
 
-When a non-root `docker-helper init` detects an existing system daemon, it uses
-the Principal-credential onboarding path instead of creating a competing user
-daemon configuration. The standalone `credential install` command exposes the
-same user-scoped credential store directly.
+`docker-helper config show [FIELD]` — without FIELD, prints the complete
+effective configuration as JSON (admin_token redacted). With FIELD, prints
+only that field's scalar value.
 
-Application acceptance of a root does not by itself prove MAC access. AppArmor
-requires the corresponding managed boundary rule. SELinux requires a permitted
-workspace file type.
+`docker-helper config set FIELD VALUE` — sets a writable field.
+Reports `updated` or `unchanged`. If the daemon is running, the change is
+applied automatically for reloadable fields. `http_address` is startup-only
+and requires a daemon restart.
 
-### Three-level authorization model
+The operation is transactional: the entire read-modify-write-reload cycle
+runs under a process-level lock. If the daemon rejects the reload (e.g.
+invalid config), the original config.json is restored atomically and the
+command exits with a non-zero status. If rollback and reload after rollback
+succeed, config.json and the daemon are synchronized. If the reload after
+rollback fails, they may diverge until the next manual reload or restart.
 
-The canonical root hierarchy is:
+In system mode with the daemon stopped, a successful mutation that changes an
+active trusted-CA configuration (`trusted_ca_injection=auto` with a source
+path) persists the validated config and prints a warning to stderr: the CA
+file was validated locally, but confined MAC readability cannot be verified
+until daemon startup, and startup fails closed if the source is not readable
+under the active MAC policy. The warning is stderr-only and never claims any
+MAC policy allows the source; it is a diagnostic, not a second MAC
+authority. When the daemon is running, reload under daemon confinement is the
+authoritative proof, and a reload/CA-preparation failure still rolls the
+change back (see [Environment and trusted CA](#environment-and-trusted-ca)).
 
-```
-global roots
-  ⊇ effective Principal roots
-      ⊇ effective Launcher roots
-          ⊇ Session workspace
-```
+`docker-helper config unset FIELD` — removes an optional field to restore
+its default. `allowed_roots` and `session_ttl` are required and cannot be
+unset. Reports `unset` or `unchanged`. The same transactional rollback
+semantics apply.
 
-`effective Principal roots` is the Principal ceiling owned by
-`computeEffectivePrincipalRoots`: the intersection of the global roots and
-the stored Principal roots, with one documented exception — in user mode the
-daemon-owner Principal with zero stored roots collapses onto the global
-roots. `effective Launcher roots` are the Principal ceiling for `inherit`
-scope, or its intersection with the Launcher's stored roots for `restricted`
-scope (stale out-of-ceiling Launcher roots are rejected, never truncated).
-Authorization flows through four narrowing steps:
+`docker-helper config allowed-root <list|add|remove> [PATH]` — manages the
+global allowed_roots array. `add` canonicalizes and validates the path;
+authorization-only, does NOT prepare MAC state.
+`remove` resolves and matches the stored canonical form; rejects removal of
+the final global root. `list` prints one canonical root per line.
 
-1. **Global allowed_roots** (config.json) — the system-wide authorization
-   ceiling, managed by `config allowed-root list/add/remove`. Changing
-   allowed roots is a policy-only operation; it does NOT prepare MAC state.
-2. **Principal allowed roots** (database) — per-principal narrowing, managed
-   by `principal allowed-root add/remove`. Does not prepare MAC.
-3. **Launcher allowed roots** (database, `restricted` scope only) —
-   per-launcher narrowing beneath one principal; `inherit` scope applies no
-   launcher-level narrowing. Evaluated at session-creation time against
-   current state. Does not prepare MAC.
-4. **Session workspace** (ephemeral) — selected only at session creation time
-   via `session create --workspace PATH`. Must be under a global, the
-   principal, and (when restricted) the launcher allowed root.
+`http_address` is configurable in system mode only and requires a daemon
+restart to take effect. It is not included in the reloadable field list.
 
-MAC state is derived from the concrete live session/workspace lifecycle,
-not from the authorization ceiling. Only the session workspace participates
-in MAC preparation: AppArmor managed-boundary coverage for the workspace, or
-SELinux Session workspace fcontext labeling with MCS constraints. The
-authorization roots never own MAC state; a broader ceiling never causes
-recursive MAC relabeling.
+`docker-helper reload` — ask the running daemon to re-read `config.json`
+and apply changes without restarting. Reloadable fields:
+`allowed_roots`, `session_ttl`, `log_level`, `audit_enabled`,
+`shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
+`operation_log_max_bytes`, `trusted_ca_path`, `trusted_ca_injection`.
+Startup-only fields (require daemon restart): `http_address`.
+Computed paths (socket, database, state) are not changed. If the daemon is
+not running, the command fails with a non-zero exit code. If the new
+configuration is invalid, the daemon keeps its current configuration and
+the command returns an error.
 
-Distinct from session workspace MAC preparation, system-mode `docker-helper init`
-under enforcing SELinux applies the installed fcontext rules to docker-helper's
-own deployment state: the helper-owned `/etc/docker-helper/**` (config) and
-`/var/lib/docker-helper/**` (state) trees are relabeled to
-`docker_helper_config_t` / `docker_helper_state_t` immediately after they are
-created and before the admin token is written, so the first daemon start can
-open its database. Init also runs an exact-path restorecon on the Docker CLI
-executable the daemon will exec (resolved over the same PATH the service uses),
-so the confined `docker_helper_t` domain can execute it with the
-`container_runtime_exec_t` type the distro/container-selinux fcontext rules
-already define — never a recursive `/usr/bin` relabel and never a `bin_t`
-execute grant. A relabel failure aborts init (no partial initialization).
-AppArmor system mode and user mode perform no SELinux relabel.
+## Data-plane execution
 
-Adding `/opt` as a global allowed root must never imply recursive relabeling
-of `/opt/**`.
-
-### Canonical paths
-
-All paths are resolved through `filepath.EvalSymlinks` before comparison.
-This prevents symlink-based escape attacks at validation time.
-
-Note: `EvalSymlinks` resolves the path at a point in time. By itself it
-does not solve TOCTOU problems where the filesystem changes between
-validation and use. For operations that pass paths to Docker as strings,
-additional measures (such as FD-relative traversal or inode pinning) are
-required to close the gap.
-
-### Path containment
-
-The canonical containment API lives in `path_containment.go`:
-
-- `pathWithin(root, path)` — returns true if `path` is within `root`
-  (equality allowed). Both arguments must be canonical (absolute, cleaned).
-- `pathStrictlyWithin(root, path)` — returns true if `path` is a proper
-  descendant of `root`. Equality returns false.
-
-Argument order is always root first, path second. These functions correctly
-handle the prefix trap: `pathWithin("/data", "/data2")` returns false.
-
-### Symlink escape prevention
-
-When a session is created, the workspace path is resolved through
-`EvalSymlinks`. The canonical workspace is stored in the database.
-
-When a build or run request specifies a path relative to the workspace,
-the resolved path is compared against the canonical workspace. If the
-resolved path escapes the workspace, the request is rejected.
-
-This validation catches static symlink escapes at request time. It does
-not by itself prevent a TOCTOU attack where the workspace contents change
-between validation and Docker execution. The specific mitigation depends
-on the operation:
-
-- **Builds** (both modes): an isolated staging copy eliminates the gap
-  (see Build context below).
-- **System-mode run mounts**: inode-pinned helper-owned mounts via
-  `open_tree` + `move_mount` close the gap (see System-mode mounts
-  below).
-- **User-mode run mounts**: only the workspace root may be mounted;
-  security relies on the workspace-parent write invariant that the agent
-  cannot replace the workspace directory entry (see User-mode mounts
-  below).
-
-### Per-session workspace
-
-Each session has its own workspace. An agent with a session for
-`/home/user/project-a` cannot access `/home/user/project-b`, even if both
-are inside `AllowedRoot`.
-
-## Build pipeline
+### Operation lifecycle
 
 ```
 Authentication
@@ -1568,22 +1357,93 @@ Retention cleanup
 ```
 
 Authentication validates the session token. Request validation checks
-required fields and dockerfile relativity. Canonical path resolution
-resolves the workspace and context through `EvalSymlinks`. Boundary
-validation ensures the context and dockerfile are inside the workspace
-and context respectively.
+required fields and path relativity per operation. Canonical path
+resolution resolves the workspace-relative inputs through `EvalSymlinks`.
+Boundary validation enforces workspace containment per operation.
 
 Operation registration uses the operation supervisor admission path
 (`admit`), which atomically checks the shutdown gate and registers the
 operation under the same mutex. If the daemon is shutting down,
 registration is rejected with 503.
 
-The build process starts asynchronously. `cmd.Start()` is called under
+The process starts asynchronously. `cmd.Start()` is called under
 `op.mu` to synchronize with shutdown termination. stdout and stderr are
-captured directly into a thread-safe bounded buffer (`operation_log_max_bytes`).
+captured directly into a thread-safe bounded buffer
+(`operation_log_max_bytes`). A completion goroutine owns `cmd.Wait()`
+and transitions the operation to `succeeded` or `failed` when the process
+exits.
 
-A completion goroutine owns `cmd.Wait()` and transitions the operation
-to `succeeded` or `failed` when the process exits.
+Key internal guarantees that make cancel and shutdown safe:
+
+- explicit cancel and daemon shutdown share the same underlying
+  termination lifecycle;
+- first termination reason wins and cannot be overwritten by a concurrent
+  caller;
+- terminal transition is single-winner: the first `succeed()` or `fail()`
+  to set `CompletedAt` wins; subsequent calls are no-ops;
+- completion goroutine is the sole `cmd.Wait()` owner; termination paths
+  only Signal/Kill processes, coordinate force cleanup through the shared
+  force phase, and never call `cmd.Wait()` themselves; the cancel handler
+  waits for terminal `op.done` before returning;
+- graceful termination phase is bounded (default 5s);
+- force cleanup is single-owner: only the first caller to reach the force
+  phase performs daemon-side container cleanup and CLI process kill;
+- concurrent followers wait on a shared absolute force-cleanup deadline
+  rather than creating independent timers;
+- `/run` force cleanup uses cidfile + daemon-side `docker kill` to prevent
+  orphan containers;
+- `<kind>.finish` audit event is emitted exactly once per operation.
+
+`POST /build` and `POST /run` return HTTP 201 with an `operation_id`;
+the client tracks progress through the operation endpoints.
+
+**`GET /operations/{id}`** (session token) — status and metadata:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | boolean | always true on success |
+| `operation_id` | string | operation identifier |
+| `status` | string | `running`, `succeeded`, or `failed` |
+| `created_at` | string | RFC 3339 timestamp |
+| `started_at` | string | RFC 3339 timestamp (present when process started) |
+| `completed_at` | string | RFC 3339 timestamp (present when finished) |
+| `duration` | string | wall-clock duration (present when finished) |
+| `exit_code` | number | process exit code (present on failure) |
+| `result_code` | string | `succeeded` or failure code (present when finished) |
+
+**`GET /operations/{id}/logs?offset=N`** (session token) — incremental
+operation output:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | boolean | always true on success |
+| `operation_id` | string | operation identifier |
+| `offset` | number | the requested offset |
+| `next_offset` | number | offset for the next request |
+| `truncated` | boolean | true if older data was evicted |
+| `logs` | string | log data from the requested offset |
+
+Logs are a mixed stdout/stderr byte stream: each operation log is stored
+in a bounded buffer of `operation_log_max_bytes`; when the limit is
+exceeded, the oldest data is evicted, and `truncated` is true when the
+requested offset refers to evicted data.
+
+**`POST /operations/{id}/cancel`** (session token):
+
+- running operation → graceful SIGTERM, then bounded force-cleanup
+  fallback if the process does not exit in time;
+- operation becomes terminal: `status=failed`, `result_code=cancelled`;
+- already-terminal operation → idempotent HTTP 200 with current state;
+- unknown or foreign operation → HTTP 404 `operation_not_found`;
+- operation logs remain accessible after cancel;
+- the response returns after the operation reaches terminal state.
+
+### Build
+
+`docker-helper build` hides the async operation lifecycle; it streams
+logs and propagates the container exit code. SIGINT/SIGTERM cancels the
+operation (exit 130/143). `--context` must be relative to the session
+workspace.
 
 Validation details:
 
@@ -1595,7 +1455,11 @@ Validation details:
 - build-arg keys are sorted for deterministic Docker argv;
 - build-arg values are never logged or audited (only `build_arg_keys`).
 
-## Run pipeline
+### Run
+
+`docker-helper run` uses the same lifecycle semantics as `build`.
+`--mount` source must be relative to the session workspace; target is an
+absolute container path.
 
 ```
 Authentication
@@ -1619,25 +1483,13 @@ Completion goroutine (cmd.Wait → status transition)
 Retention cleanup
 ```
 
-Authentication validates the session token. Request validation checks
-that the image field is non-empty. Workdir validation ensures the value
-is an absolute path if provided. Environment validation ensures variable
-names match `^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each
-source path against the workspace and checks for duplicate targets.
+Request validation checks that the image field is non-empty. Workdir
+validation ensures the value is an absolute path if provided.
+Environment validation ensures variable names match
+`^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
+against the workspace and checks for duplicate targets.
 
-Operation registration uses the operation supervisor admission path
-(`admit`), which atomically checks the shutdown gate and registers the
-operation under the same mutex. If the daemon is shutting down,
-registration is rejected with 503.
-
-The run process starts asynchronously. `cmd.Start()` is called under
-`op.mu` to synchronize with shutdown termination. stdout and stderr are
-captured directly into a thread-safe bounded buffer (`operation_log_max_bytes`).
-
-A completion goroutine owns `cmd.Wait()` and transitions the operation
-to `succeeded` or `failed` when the process exits.
-
-**Container lifecycle:**
+Container lifecycle:
 
 - `--rm` — container is removed on exit;
 - helper-owned `--cidfile` — records container ID for lifecycle management;
@@ -1656,24 +1508,34 @@ Validation details:
 - environment names are sorted for deterministic output;
 - `shm_size` accepts a plain integer with an optional binary unit (`k`, `m`,
   `g`; case-insensitive); values must be > 0 and <= 2 GiB (hard-coded
-  Release 1 limit); the parsed byte value is passed to Docker as
-  `--shm-size`; this is a `/dev/shm` limit only, NOT a general container
-  memory or CPU limit;
-- container runs with fixed security policy (details in implementation).
+  limit); the parsed byte value is passed to Docker as `--shm-size`; this
+  is a `/dev/shm` limit only, NOT a general container memory or CPU limit;
+- container runs with fixed security policy (see
+  [Security considerations](#security-considerations)).
 
-## Pull pipeline
+Containers started by docker-helper carry helper-owned labels used only
+for correlation and checked cleanup; user input cannot set or override
+them:
 
 ```
-Authentication
-    │
-Request validation
-    │
-Docker invocation
+com.dockerhelper.session.id      = <session id>
+com.dockerhelper.launcher.id     = <launcher id>
+com.dockerhelper.principal.name  = <principal username>
+com.dockerhelper.schema = 1
 ```
 
-Authentication validates the session token. Request validation checks
-that the image field is non-empty. Docker invocation runs
-`docker pull` with the image reference.
+Labels are correlation/cleanup evidence, not authorization state. The
+namespace is deliberately neutral: only the Launcher is the Session owner;
+the Session and Principal labels are provenance.
+
+### Pull
+
+`POST /pull` authenticates, validates that the image field is non-empty,
+and runs `docker pull` with the image reference. The endpoint remains
+synchronous and returns the execution result directly in the response;
+pull output is captured into a bounded buffer of
+`operation_log_max_bytes`, and when output exceeds the limit the newest
+tail is retained with `truncated: true`.
 
 Image reference syntax is delegated to Docker. The helper does not
 reimplement the Docker reference grammar; it only checks that the image
@@ -1681,7 +1543,7 @@ field is non-empty. Docker CLI validates the reference when the command
 executes. If Docker rejects the reference, the endpoint returns its
 standard Docker failure response.
 
-## Registry login
+### Registry login
 
 `POST /registry/login` authenticates a session with a Docker registry.
 
@@ -1695,8 +1557,8 @@ Session Docker config directory
 Docker invocation
 ```
 
-Authentication validates the session token. Request validation checks
-that `registry`, `username`, and `password` are all non-empty.
+Request validation checks that `registry`, `username`, and `password` are
+all non-empty.
 
 The session Docker config directory is per-session, located at
 `runtimeDir/sessions/<session_id>/docker`. It is created with `0700`
@@ -1715,115 +1577,9 @@ never returned to the client; only a sanitized category message is sent, and
 only a bounded amount of stderr is captured (never logged or returned) to
 support classification.
 
-### Audit
+### Filesystem policy
 
-| Event | Fields |
-|-------|--------|
-| `registry.login.start` | `session_id`, `registry`, `principal_name`, `launcher_id`, `launcher_name` (the session's ownership provenance) |
-| `registry.login.finish` | `session_id`, `registry`, `result`, `duration`, `principal_name`, `launcher_id`, `launcher_name` (the session's ownership provenance) |
-
-`result` is `success` or `login_failed`. The password and username are
-never included in audit records.
-
-### Session delete cleanup
-
-When a session is deleted, its runtime directory (including the Docker
-config directory) is removed. Stale session directories from crashed
-or expired sessions are cleaned up at daemon startup.
-
-## Health endpoint
-
-`GET /health` returns a 200 OK response with a JSON body indicating the
-server is running. No authentication is required. This endpoint is
-intended for liveness probes and does not perform any audit logging.
-
-## Operation endpoints
-
-`POST /build` and `POST /run` return HTTP 201 with an `operation_id`.
-The client uses the operation endpoints to track progress.
-
-### GET /operations/{id}
-
-Returns the operation status and metadata. Requires the session token
-that created the operation.
-
-Response fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `ok` | boolean | always true on success |
-| `operation_id` | string | operation identifier |
-| `status` | string | `running`, `succeeded`, or `failed` |
-| `created_at` | string | RFC 3339 timestamp |
-| `started_at` | string | RFC 3339 timestamp (present when process started) |
-| `completed_at` | string | RFC 3339 timestamp (present when finished) |
-| `duration` | string | wall-clock duration (present when finished) |
-| `exit_code` | number | process exit code (present on failure) |
-| `result_code` | string | `succeeded` or failure code (present when finished) |
-
-### GET /operations/{id}/logs
-
-Returns incremental operation output. Requires the session token.
-
-Query parameters:
-
-| Parameter | Description |
-|-----------|-------------|
-| `offset` | Byte offset to start reading from (default: 0) |
-
-Response fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `ok` | boolean | always true on success |
-| `operation_id` | string | operation identifier |
-| `offset` | number | the requested offset |
-| `next_offset` | number | offset for the next request |
-| `truncated` | boolean | true if older data was evicted |
-| `logs` | string | log data from the requested offset |
-
-Logs are a mixed stdout/stderr byte stream. Retention: each operation
-log is stored in a bounded buffer of `operation_log_max_bytes`. When the
-limit is exceeded, the oldest data is evicted. `truncated` is true when
-the requested offset refers to evicted data.
-
-### POST /operations/{id}/cancel
-
-Cancels a running operation. Requires the session token that created the
-operation.
-
-Contract:
-
-- running operation → graceful SIGTERM, then bounded force-cleanup
-  fallback if the process does not exit in time;
-- operation becomes terminal: `status=failed`, `result_code=cancelled`;
-- already-terminal operation → idempotent HTTP 200 with current state;
-- unknown or foreign operation → HTTP 404 `operation_not_found`;
-- operation logs remain accessible after cancel;
-- the response returns after the operation reaches terminal state.
-
-Cancel and daemon shutdown share the same underlying termination
-lifecycle. The first termination reason to be set wins and cannot be
-overwritten by a concurrent caller.
-
-## Retention
-
-Completed operations are retained in memory. Cleanup is opportunistic and
-runs on access:
-
-- `operation_retention_ttl` — operations older than this are removed;
-- `operation_max_completed` — when more completed operations exist than
-  this limit, the oldest are removed;
-- `operation_log_max_bytes` — per-operation log buffer size; older output
-  is evicted when exceeded.
-
-Cleanup is invoked during operation creation (`POST /build`, `POST /run`) and operation
-status access (`GET /operations/{id}`). There is no background retention
-worker or periodic ticker.
-
-## Filesystem policy
-
-### Bind mounts
+#### Bind mounts
 
 Each mount in a `POST /run` request specifies a `source` (relative to the
 session workspace) and a `target` (absolute path inside the container).
@@ -1848,7 +1604,10 @@ Forbidden:
 - `target` is not absolute;
 - two mounts use the same `target`.
 
-### System-mode run mounts
+Requiring a relative source ensures the mount is always scoped to the
+session workspace; an absolute source could bypass workspace isolation.
+
+#### System-mode run mounts
 
 In system mode, bind-mount sources are first validated with
 `pathWithin(workspace, sourcePath)`. The helper then opens "/" as a root
@@ -1864,7 +1623,7 @@ Pinning requires Linux kernel support for `openat2`, `open_tree`, and
 fail, the operation fails closed with no pathname fallback. Pinned mounts
 are cleaned up as part of the operation lifecycle.
 
-### User-mode run mounts
+#### User-mode run mounts
 
 In user mode, the resolved mount source must equal the canonical
 `session.Workspace`. Subdirectory and file mounts are rejected as
@@ -1877,7 +1636,7 @@ host-side write access to the parent directory of the workspace. Since the
 agent cannot replace the workspace directory entry, the pathname remains
 stable between validation and the Docker bind mount.
 
-### Build context
+#### Build context
 
 The Linux build implementation creates an isolated helper-owned staging
 copy of the build context. Traversal is FD-relative and restricted with
@@ -1891,37 +1650,27 @@ fails closed without falling back to original workspace paths.
 Staging directories are cleaned up as part of the build operation
 lifecycle.
 
-### Why source must be relative
+### Environment and trusted CA
 
-Requiring a relative source ensures the mount is always scoped to the
-session workspace. An absolute source could bypass workspace isolation.
+Environment variable names must match `^[A-Za-z_][A-Za-z0-9_]*$`. Values
+can be any string, including empty. Values are never logged; only variable
+names appear in `env_keys`. Environment variables are sorted by name
+before being passed to Docker, making the command line deterministic and
+reproducible.
 
-## Environment policy
-
-Environment variable names must match `^[A-Za-z_][A-Za-z0-9_]*$`.
-
-Values can be any string, including empty.
-
-Values are never logged. Only variable names appear in `env_keys`.
-
-Environment variables are sorted by name before being passed to Docker.
-This makes the command line deterministic and reproducible.
-
-### Trusted CA injection
-
-When `trusted_ca_injection` is set to `"auto"` and `trusted_ca_path` points
-to a valid single PEM X.509 CA certificate, docker-helper injects the CA
-into containers started via `POST /run`:
+Trusted CA injection: when `trusted_ca_injection` is set to `"auto"` and
+`trusted_ca_path` points to a valid single PEM X.509 CA certificate,
+docker-helper injects the CA into containers started via `POST /run`:
 
 1. **CA validation** — The CA file must be a regular file containing exactly
    one valid PEM-encoded X.509 certificate.
 
- 2. **OpenSSL hash** — docker-helper computes the 8-character hex hash
-    natively, matching `openssl x509 -hash -noout` (OpenSSL 3.x
-    subject_hash). The algorithm canonicalizes the X.509 subject name
-    (UTF-8 conversion, lowercase, whitespace normalization), DER-encodes
-    it without the outer SEQUENCE wrapper, and takes SHA-1 truncated to
-    4 bytes (little-endian hex). No external `openssl` binary is required.
+2. **OpenSSL hash** — docker-helper computes the 8-character hex hash
+   natively, matching `openssl x509 -hash -noout` (OpenSSL 3.x
+   subject_hash). The algorithm canonicalizes the X.509 subject name
+   (UTF-8 conversion, lowercase, whitespace normalization), DER-encodes
+   it without the outer SEQUENCE wrapper, and takes SHA-1 truncated to
+   4 bytes (little-endian hex). No external `openssl` binary is required.
 
 3. **Runtime artifact** — The CA is materialized in the helper-owned runtime
    directory:
@@ -1976,26 +1725,149 @@ readable by the confined daemon) and the standard system CA-bundle paths the
 shipped AppArmor/SELinux policy permits. Paths outside the shipped policy are
 the operator's responsibility to make readable under that MAC policy. There is
 no silent downgrade: CA preparation and daemon start/reload fail closed when
-the source cannot be read. Existing Release 1 / earlier Release 2
-configurations continue to work without migration or copying the CA.
+the source cannot be read. Older configurations continue to work without
+migration or copying the CA.
 
-## Error handling
+### Retention and cancellation
+
+Completed operations are retained in memory. Cleanup is opportunistic and
+runs on access:
+
+- `operation_retention_ttl` — operations older than this are removed;
+- `operation_max_completed` — when more completed operations exist than
+  this limit, the oldest are removed;
+- `operation_log_max_bytes` — per-operation log buffer size; older output
+  is evicted when exceeded.
+
+Cleanup is invoked during operation creation (`POST /build`, `POST /run`)
+and operation status access (`GET /operations/{id}`). There is no
+background retention worker or periodic ticker.
+
+Cancellation contract: `POST /operations/{id}/cancel` (see
+[Operation lifecycle](#operation-lifecycle)) shares the same termination
+lifecycle as daemon shutdown; the first termination reason wins.
+
+CLI signal handling on `build` and `run`:
+
+- SIGINT -> best-effort cancel + exit 130;
+- SIGTERM -> best-effort cancel + exit 143;
+- cancel failure prints a diagnostic but does not replace the signal exit
+  status.
+
+## Service lifecycle
+
+### Shutdown
+
+docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
+
+- the operation admission gate closes immediately (no new operations accepted);
+- HTTP drain and operation termination share one `shutdown_timeout` budget;
+- in-flight HTTP requests are drained;
+- running build/run processes receive graceful SIGTERM;
+- for run, helper-owned containers are cleaned up via cidfile before
+  force-killing the Docker CLI process;
+- at the reserved force-cleanup window before the deadline, still-running
+  processes are force-killed;
+- the completion goroutine owns `cmd.Wait()` and reaps each process;
+- the lock is held during the entire drain so a second instance cannot
+  start until the first fully stops;
+- helper-owned build/run processes and containers are never left unmanaged
+  after shutdown.
+
+After `TimeoutStopSec=45s`, systemd sends SIGKILL if any processes
+remain. The internal `shutdown_timeout` budget is therefore bounded: its
+maximum is `30s` (the default too), so the internal graceful budget always
+fits inside `TimeoutStopSec=45s`. The last part of the 30s budget is
+reserved by the supervisor for force cleanup, which runs concurrently under
+the shared absolute deadline and must finish by it — force cleanup never
+starts after `shutdown_timeout`. The remaining 15s between the internal
+maximum and `TimeoutStopSec=45s` sits outside the daemon budget and covers
+process final exit, scheduler/kernel/systemd overhead, and systemd's SIGKILL
+fallback if the process still has not exited; it is not intended for the
+regular internal force-cleanup phase. New values above `30s` are rejected by
+`config set`. For upgrade compatibility with releases that accepted any
+positive `shutdown_timeout`, a persisted value above `30s` is loaded but
+bounded to `30s` at startup/reload with an operational warning; `config
+show` reports the bounded effective value. The shipped system and user
+units both carry `TimeoutStopSec=45s`.
+
+The shutdown budget is read from the daemon's *current* configuration at the
+moment shutdown begins: a `shutdown_timeout` changed via reload is honored by
+the next stop without a restart.
+
+### systemd units and hardening
+
+Two units are shipped: `packaging/systemd/user/docker-helper.service` and
+`packaging/systemd/system/docker-helper.service`. Both are `Type=exec`
+with `Restart=on-failure`, `RestartSec=5s`, `TimeoutStopSec=45s`,
+`UMask=0077`, and `StartLimitIntervalSec=60s` / `StartLimitBurst=3`
+(restart limit: if reached, `systemctl reset-failed` before starting
+again).
+
+Shared hardening: `NoNewPrivileges=true`, `RestrictNamespaces=true`,
+`RestrictRealtime=true`. `RestrictSUIDSGID` is deliberately omitted in
+both units because its seccomp filtering blocks the `openat2` staging
+primitive on supported kernels.
+
+User unit: `ExecStart=%h/.local/bin/docker-helper serve` with
+`ExecReload` for non-restarting reloads; configuration and state
+directories are created by `docker-helper init` using standard XDG paths;
+non-standard `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are supported when
+they are present in the systemd user manager environment. Logout
+behavior follows the user manager: without
+`loginctl enable-linger`, the user manager and all services normally stop
+after the last user session ends; with linger, the user manager continues
+running and the service stays active after logout.
+
+System unit:
+
+- `ExecStart=/usr/bin/docker-helper serve`; `ExecReload=... reload
+  --system`.
+- Directory declarations: `ConfigurationDirectory=docker-helper`
+  (mode `0755`), `StateDirectory=docker-helper` (mode `0700`),
+  `RuntimeDirectory=docker-helper` (mode `0755`), and
+  `RuntimeDirectoryPreserve=restart` — the RuntimeDirectory inode is
+  preserved across service restarts so long-lived agent containers with a
+  bind-mount of `/run/docker-helper` continue to see the updated socket
+  after `systemctl restart`; normal cleanup semantics still apply on a
+  real service stop.
+- MAC binding: `AppArmorProfile=docker-helper-system` on AppArmor systems
+  and `SELinuxContext=system_u:system_r:docker_helper_t:s0` on SELinux
+  systems, guarded by `ConditionSecurity=|apparmor` / `ConditionSecurity=|selinux`.
+- Explicit PATH contract: the declared `Environment=PATH` must stay exactly
+  synchronized with the daemon's Docker CLI search path (`dockerCLISearchPath`
+  in `selinux_deploy.go`) — the daemon resolves the Docker CLI over this
+  PATH, and system init relabels that same executable for enforcing
+  SELinux; the two lookup rules must never diverge.
+- Additional hardening: `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+  AF_NETLINK`, `MemoryDenyWriteExecute=true`, `LockPersonality=true`,
+  `ProtectClock=true`, `ProtectHostname=true`, `PrivateTmp=false`.
+
+Filesystem-namespace directives (`ProtectSystem`, `ProtectHome`,
+`ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`,
+`ProtectControlGroups`, `PrivateDevices`, `PrivateMounts`, and path-based
+mount specifications) are deliberately not used in the system unit: any
+directive that creates a separate mount namespace hides mount pins created
+by docker-helper from dockerd (bind mounts would fail with permission
+denied). Access to kernel and cgroup paths is restricted by the AppArmor
+default-deny policy instead; ProtectHome is disabled to allow workspace
+access. The hardening profile does not by itself create a full security
+boundary: access to the Docker socket means the process-level directives
+only forbid specific operations.
+
+## Errors and observability
+
+### Health
+
+`GET /health` returns a 200 OK response with a JSON body indicating the
+server is running. No authentication is required. This endpoint is
+intended for liveness probes and does not perform any audit logging.
+
+### Error contract
 
 The API returns JSON errors with a stable `code` field. Clients can
 distinguish error types programmatically. The `duration` field reports
 wall-clock time.
-
-`POST /build` and `POST /run` return HTTP 201 with an `operation_id` when
-accepted. Execution result (success, failure, exit code, logs) appears
-through the operation endpoints:
-
-- `GET /operations/{id}` — status, timestamps, exit code, result code;
-- `GET /operations/{id}/logs?offset=N` — incremental operation output.
-
-`POST /pull` remains synchronous and returns the execution
-result directly in the response. Pull output is captured into a bounded
-buffer of `operation_log_max_bytes`. When output exceeds the limit, the
-newest tail is retained and `truncated` is set to `true` in the response.
 
 Current error codes (non-exhaustive):
 
@@ -2029,21 +1901,15 @@ Current error codes (non-exhaustive):
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
 | `user_mode_owner_reserved` | Principal/Launcher mutation endpoints (user mode) | the target is the reserved transparent user-mode owner chain (daemon-owner Principal or its `default` Launcher) and the mutation would violate the startup contract |
 
-`GET /sessions` emits `session.list`. `GET /health` intentionally emits no
-audit event because it is an unauthenticated liveness endpoint.
-
-### Rejected Docker-operation requests
-
-After successful session authentication, every POST /pull, POST /build, and
-POST /run request produces exactly one of:
+After successful session authentication, every `POST /pull`,
+`POST /build`, and `POST /run` request produces exactly one of:
 
 - `<kind>.rejected` — the request was rejected before acceptance; or
 - `<kind>.start` — the request was accepted as an operation.
 
-where `<kind>` is `pull`, `build`, or `run`.
-
-Authentication failures remain owned by the existing `auth.failure` path and
-do not additionally emit `<kind>.rejected`.
+where `<kind>` is `pull`, `build`, or `run`. Authentication failures
+remain owned by the existing `auth.failure` path and do not additionally
+emit `<kind>.rejected`.
 
 The rejected event schema contains only:
 
@@ -2055,35 +1921,20 @@ The rejected event schema contains only:
 - `request_id`: from the request context
 
 The `result` field exactly matches the public API response `code`.
+Rejected events intentionally omit request payload metadata (image,
+mounts, env, command, context, dockerfile, etc.) to avoid logging
+partially validated input. No `operation_id` is included because a
+rejected request was never accepted as an operation.
 
-Rejected events intentionally omit request payload metadata (image, mounts,
-env, command, context, dockerfile, etc.). This makes rejected-event metadata
-smaller than accepted `*.start` events and avoids logging partially validated
-input. No `operation_id` is included because a rejected request was never
-accepted as an operation.
-
-## Audit logging
+### Audit logging
 
 docker-helper writes structured audit records to **stdout**. Operational
 logs are written to **stderr**. Both streams use JSON Lines format.
 Timestamps in both streams use UTC in RFC 3339 nanosecond format
-(`time.RFC3339Nano`).
-
-### Stream separation
-
-| Stream | Destination | Content | Level-filtered |
-|--------|-------------|---------|----------------|
-| Audit | stdout | Audit records (JSONL) | No (controlled by `audit_enabled`) |
-| Operational | stderr | Daemon events (JSONL) | Yes, by `log_level` |
-
-No runtime `fmt.Printf`, `log.Printf`, or other free-form text output
-is emitted. Human-oriented CLI output from `init`, `version`, `help`,
-and `session` commands remains unchanged.
-
-Every audit record contains `"stream": "audit"`.
-Every operational record contains `"stream": "operational"`.
-
-### Audit enablement
+(`time.RFC3339Nano`). Every audit record contains `"stream": "audit"`;
+every operational record contains `"stream": "operational"`. No runtime
+free-form text output is emitted; human-oriented CLI output from `init`,
+`version`, `help`, and `session` commands remains unchanged.
 
 Audit output is controlled by the optional `audit_enabled` field in
 `config.json`. The effective value is resolved using these rules:
@@ -2099,97 +1950,15 @@ Audit output is controlled by the optional `audit_enabled` field in
 
 `docker-helper init` omits `audit_enabled` from the generated config.
 In user mode, since the default `log_level` is `info`, audit is disabled
-by default.  In system mode, audit is enabled by default.
+by default. In system mode, audit is enabled by default. The
+`audit_enabled_source` field in `docker-helper config show` indicates how
+the effective value was derived: `"explicit"` (set in config.json),
+`"system_default"` (absent, system mode), or `"log_level"` (absent, user
+mode derived from `log_level`). When audit is disabled, no audit records
+are written, no audit encoding or writer errors are emitted, and
+operational logging and request handling are unaffected.
 
-The `audit_enabled_source` field in `docker-helper config show` indicates
-how the effective value was derived:
-
-| Value | Meaning |
-|-------|---------|
-| `"explicit"` | `audit_enabled` was set in `config.json` |
-| `"system_default"` | `audit_enabled` absent, system mode defaults to enabled |
-| `"log_level"` | `audit_enabled` absent, user mode derived from `log_level` |
-
-When audit is disabled:
-
-- no audit records are written to stdout;
-- no audit encoding or writer errors are emitted;
-- operational logging and request handling are unaffected.
-
-### Operational log levels
-
-The `log_level` field in `config.json` controls operational log verbosity:
-
-| Value | Records emitted |
-|-------|-----------------|
-| `debug` | debug, info, warn, error |
-| `info` | info, warn, error (default) |
-| `warn` | warn, error |
-| `error` | error only |
-
-### Debug request logging
-
-When `log_level` is `debug`, an operational record is emitted after
-every HTTP request:
-
-```json
-{"time":"...","level":"DEBUG","msg":"request completed","request_id":"req_...","method":"POST","route":"/run","status":200,"duration_ms":401,"stream":"operational"}
-```
-
-This record is suppressed at `info`, `warn`, and `error` levels. The
-`route` field uses the registered route pattern (e.g.
-`DELETE /sessions/{id}`), never the actual request URI or session ID.
-Query parameters, request bodies, headers, command arguments, session
-tokens, and Docker output are never included. `duration_ms` is a JSON
-number.
-
-### Request correlation
-
-Every HTTP request receives a server-generated request ID. It is:
-
-- returned in the `X-Request-ID` response header;
-- added as `request_id` to every audit record for that request;
-- added to every operational record for that request;
-- `session_id` is added to operational records when authentication
-  has established a session.
-
-The server does not trust or reuse any client-supplied request ID.
-
-**Async operation completion** (build.finish, run.finish) is not
-request-scoped. These audit records do not include `request_id`.
-Correlation for async events uses `session_id` + `operation_id`.
-
-**Audit writer failures** are logged as operational ERROR records with
-`audit_event` and `operation_id` (when present in the original record)
-for correlation. Existing `request_id` and `session_id` are preserved.
-Audit writer failure is best-effort and does not affect the request
-or operation outcome.
-
-### Sensitive data
-
-The following are **never** logged:
-
-- command arguments (only `command_arg_count` appears in audit);
-- environment variable values (only names in `env_keys`);
-- Docker build output or container stdout/stderr;
-- `Authorization` header values;
-- raw HTTP request bodies.
-
-### Log collection
-
-Log collection, retention, and rotation are delegated to the process
-supervisor (systemd/journald or another log shipper). docker-helper
-does not write log files or implement internal rotation.
-
-### Format
-
-JSON Lines: one JSON object per line, UTF-8 encoded. Each line is an
-independent record.
-
-Operational records use slog's structured `time`, `level`, and `msg`
-fields.
-
-### Common fields
+Common audit fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2203,8 +1972,6 @@ fields.
 Additional fields depend on the event. Fields with empty or zero values
 are omitted from the JSON output.
 
-### Events
-
 Implemented event families are:
 
 | Area | Events |
@@ -2217,8 +1984,36 @@ Implemented event families are:
 | Docker operations | `pull.start`, `pull.finish`, `pull.rejected`, `build.start`, `build.finish`, `build.rejected`, `run.start`, `run.finish`, `run.rejected`, `registry.login.start`, `registry.login.finish` |
 | Configuration | `config.reload` |
 
-The detailed schemas below document the Docker-operation and principal/session
-events with non-obvious fields. All records also carry `stream=audit`.
+Ownership provenance applies across the event families:
+
+- Successful launcher-control events name the target owner from the
+  resolved or resulting Launcher, independent of the caller:
+  `principal_name` is the target owner's Principal (never the caller
+  identity), with `launcher_id`, `launcher_name`, `launcher_scope`, and
+  `launcher_enabled` projecting the resolved or resulting Launcher.
+- `session.create` carries `launcher_id`, `launcher_name`, and
+  `principal_name` (present on `success` only). `session.delete` records
+  the deleted session's ownership (`launcher_id`, `launcher_name`,
+  `principal_name`).
+- Docker operation events (`build`/`run`/`pull`, including
+  `registry.login`) record `principal_name`, `launcher_id`, and
+  `launcher_name` from the session's ownership (present for all Sessions).
+- Launcher control events keep initiating and target credential provenance
+  distinguishable. `initiator_credential_id` names the Principal
+  credential that performed the request on every launcher-control event
+  (absent for the admin token; Launcher credentials cannot manage
+  launchers). `credential_id` carries target-resource semantics: the
+  issued, rotated, or revoked Launcher credential on issue/rotate/delete
+  events, and the initiating credential on other launcher-control events.
+  `credential_name` is recorded where the credential has a name.
+- Principal credential events (`principal.credential_list`,
+  `principal.credential_rotate`, and the create/revoke events) follow the
+  same provenance rule: `principal_name` is the target Principal, and
+  `initiator_credential_id` names the initiating Principal credential
+  (absent for the admin token). The rotate/list events additionally
+  project the target resource (`credential_id`, `credential_name`).
+
+Event schemas with non-obvious fields:
 
 #### build.start
 
@@ -2434,6 +2229,43 @@ Result codes:
 | `container_exit_nonzero` | container exited with a non-zero status |
 | `cancelled` | operation cancelled by client |
 
+#### pull.start
+
+Emitted before a Docker pull begins.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier |
+| `image` | string | image reference |
+| `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
+| `launcher_id` | string | owning Launcher ID (present for all Sessions) |
+| `launcher_name` | string | owning Launcher name (present for all Sessions) |
+
+No `result` or `duration` field.
+
+#### pull.finish
+
+Emitted after a Docker pull completes (success or failure).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier |
+| `image` | string | image reference |
+| `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
+| `launcher_id` | string | owning Launcher ID (present for all Sessions) |
+| `launcher_name` | string | owning Launcher name (present for all Sessions) |
+| `result` | string | `success` or `pull_error` |
+| `exit_code` | number | present when an exit code is available |
+| `duration` | string | pull wall-clock time |
+
+#### registry.login.start / registry.login.finish
+
+Registry login events record the session's ownership provenance:
+`session_id`, `registry`, and `principal_name`, `launcher_id`,
+`launcher_name` (the finish event additionally carries `result` =
+`success` or `login_failed`, and `duration`). The password and username
+are never included in audit records.
+
 #### auth.failure
 
 Emitted for every failed authentication or authorization attempt. No
@@ -2446,11 +2278,11 @@ Emitted for every failed authentication or authorization attempt. No
 | `result` | string | failure reason |
 
 The `result` vocabulary follows the endpoint family that rejected the
-request. The credential-authentication classifier (`classifyCredentialAuthFailure`)
-recognizes exactly five failure modes: unknown credential, revoked
-credential, disabled Principal, disabled Launcher, and database failure;
-every other error fails closed as a database failure so an unknown failure
-can never surface as a 401.
+request. The credential-authentication classifier
+(`classifyCredentialAuthFailure`) recognizes exactly five failure modes:
+unknown credential, revoked credential, disabled Principal, disabled
+Launcher, and database failure; every other error fails closed as a
+database failure so an unknown failure can never surface as a 401.
 
 Header parse and admin-token codes:
 
@@ -2493,35 +2325,6 @@ Session-token data-plane codes:
 | `session.not_found` | No active session matches the token (unknown, expired, or deleted) |
 | `session.database_error` | Database error during session lookup |
 
-#### pull.start
-
-Emitted before a Docker pull begins.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `session_id` | string | session identifier |
-| `image` | string | image reference |
-| `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
-| `launcher_id` | string | owning Launcher ID (present for all Sessions) |
-| `launcher_name` | string | owning Launcher name (present for all Sessions) |
-
-No `result` or `duration` field.
-
-#### pull.finish
-
-Emitted after a Docker pull completes (success or failure).
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `session_id` | string | session identifier |
-| `image` | string | image reference |
-| `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
-| `launcher_id` | string | owning Launcher ID (present for all Sessions) |
-| `launcher_name` | string | owning Launcher name (present for all Sessions) |
-| `result` | string | `success` or `pull_error` |
-| `exit_code` | number | present when an exit code is available |
-| `duration` | string | pull wall-clock time |
-
 #### config.reload
 
 Emitted for every `POST /reload` request after admin authentication.
@@ -2537,14 +2340,28 @@ success event is written before audit is disabled, ensuring the event
 is not lost. When `audit_enabled` changes from `false` to `true`, the
 event is written after the new configuration is applied.
 
-### What is never logged
+Request correlation: every HTTP request receives a server-generated
+request ID, returned in the `X-Request-ID` response header, added as
+`request_id` to every audit record for that request, and added to every
+operational record for that request; `session_id` is added to operational
+records when authentication has established a session. The server does
+not trust or reuse any client-supplied request ID. Async operation
+completion (`build.finish`, `run.finish`) is not request-scoped: these
+audit records do not include `request_id`, and correlation for async
+events uses `session_id` + `operation_id`. **Audit writer failures** are
+logged as operational ERROR records with `audit_event` and `operation_id`
+(when present) for correlation; existing `request_id` and `session_id`
+are preserved. Audit writer failure is best-effort and does not affect
+the request or operation outcome.
 
-The following are **never** logged to either the audit or operational
-streams:
+Sensitive data — the following are **never** logged to either the audit
+or operational streams:
 
 - the raw HTTP request body;
 - HTTP request headers;
-- `Authorization` header values and the token used for authentication;
+- `Authorization` header values and the token used for authentication
+  (admin tokens, Principal credentials, Launcher credentials, and session
+  tokens are never logged);
 - environment variable values (only names appear in `env_keys`);
 - build-arg values (only names appear in `build_arg_keys`);
 - Docker build output or container stdout/stderr;
@@ -2553,30 +2370,29 @@ streams:
 - CA certificate contents.
 
 **Audit records** never contain internal error messages or stack traces.
-
 **Operational ERROR/WARN records** may contain internal error diagnostics
-for debugging unexpected failures. These error strings are operational
+for debugging unexpected failures; these error strings are operational
 internals and are not exposed to the API.
 
-This section refers to the daemon's audit and operational logs. The per-operation
-output buffer accessed via `GET /operations/{id}/logs` is intentionally separate:
-it captures the merged stdout/stderr stream from the Docker CLI process and may
-contain Docker pull/build status output, container stdout/stderr, and build
-process output. That stream is not part of the daemon audit or operational logs.
+The per-operation output buffer accessed via `GET /operations/{id}/logs`
+is intentionally separate: it captures the merged stdout/stderr stream
+from the Docker CLI process and may contain Docker pull/build status
+output, container stdout/stderr, and build process output. That stream is
+not part of the daemon audit or operational logs.
 
-### Examples
+Examples (ownership provenance fields reflect the documented schema):
 
 Successful build:
 
 ```json
-{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile"}
-{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","result":"succeeded","duration":"5s"}
+{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
+{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"5s"}
 ```
 
 Successful session creation:
 
 ```json
-{"time":"2026-01-15T10:29:55Z","stream":"audit","event":"session.create","session_id":"dhs_0a1b2c3d4e5f","workspace":"/home/user/project","result":"success","duration":"1ms"}
+{"time":"2026-01-15T10:29:55Z","stream":"audit","event":"session.create","session_id":"dhs_0a1b2c3d4e5f","workspace":"/home/alice/project","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","principal_name":"alice","credential_id":"dhcr_9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d","result":"success","duration":"1ms"}
 ```
 
 Authorization failure:
@@ -2588,9 +2404,42 @@ Authorization failure:
 Container run:
 
 ```json
-{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"]}
-{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"result":"succeeded","duration":"1s"}
+{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
+{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"1s"}
 ```
+
+### Operational logging
+
+Operational logs are written to **stderr** in JSON Lines with slog's
+structured `time`, `level`, and `msg` fields, filtered by `log_level`:
+
+| Value | Records emitted |
+|-------|-----------------|
+| `debug` | debug, info, warn, error |
+| `info` | info, warn, error (default) |
+| `warn` | warn, error |
+| `error` | error only |
+
+When `log_level` is `debug`, an operational record is emitted after
+every HTTP request:
+
+```json
+{"time":"...","level":"DEBUG","msg":"request completed","request_id":"req_...","method":"POST","route":"/run","status":200,"duration_ms":401,"stream":"operational"}
+```
+
+This record is suppressed at `info`, `warn`, and `error` levels. The
+`route` field uses the registered route pattern (e.g.
+`DELETE /sessions/{id}`), never the actual request URI or session ID.
+Query parameters, request bodies, headers, command arguments, session
+tokens, and Docker output are never included. `duration_ms` is a JSON
+number.
+
+`GET /sessions` emits `session.list`. `GET /health` intentionally emits no
+audit event because it is an unauthenticated liveness endpoint.
+
+Log collection, retention, and rotation are delegated to the process
+supervisor (systemd/journald or another log shipper). docker-helper
+does not write log files or implement internal rotation.
 
 ## Security considerations
 
@@ -2621,12 +2470,15 @@ Each session is bound to one workspace. Build context and mount sources
 are validated against that workspace. An agent cannot access another
 session's workspace.
 
-### Session token leakage
+### Token handling
 
 Session tokens are returned once during creation. The full token is never
 stored in the database — only its SHA-256 hash. Admin token comparison
-uses `ConstantTimeCompare` to prevent timing attacks. Principal credentials
-and session tokens are resolved through database lookup by hash.
+uses `ConstantTimeCompare` to prevent timing attacks. Principal and
+Launcher credentials and session tokens are resolved through database
+lookup by hash. Admin tokens, Principal credentials, Launcher
+credentials, and session tokens are never logged (see
+[Audit logging](#audit-logging)).
 
 ### Direct docker.sock access
 
@@ -2637,13 +2489,6 @@ through the HTTP API.
 - **System mode**: Unix socket has `0666` permissions, but security is
   enforced through bearer authentication and authorization, not socket
   permissions alone.
-
-### Secret leakage through logs
-
-Command arguments, environment variable values, and Docker output are
-never logged. Admin tokens, Principal credentials, and session tokens are
-never logged. The audit record for `POST /run` includes `command_arg_count`
-but never the arguments themselves.
 
 ### Container security
 
@@ -2657,41 +2502,27 @@ docker-helper applies a fixed security policy when running containers:
 - `--user <uid>:<gid>` — run as the session owner principal's UID and GID,
   or daemon UID:GID for daemon-owner (user-mode) sessions.
 
-## Design principles
+## Current limitations and non-goals
 
-- small API surface;
-- deny by default;
-- policy enforcement outside the coding agent;
-- session-scoped authorization;
-- canonical path validation;
-- deterministic Docker command generation;
-- Docker CLI instead of exposing docker.sock.
+Non-goals of the current implementation:
 
-## Non-goals of the current implementation
-
-- container orchestration;
+- container orchestration and scheduling;
 - Kubernetes integration;
 - full Docker API compatibility;
 - multi-host execution;
-- container scheduling;
-- image registry management;
-- network management;
-- volume management beyond bind mounts;
-- detached container execution;
-- container logs endpoint;
-- health checks;
-- resource limits (CPU, memory);
+- container health checks (the daemon's own `GET /health` liveness
+  endpoint exists and is unrelated);
+- managed container lifecycle, interactive exec, container logs, and
+  detached execution;
+- resource limits beyond the `/dev/shm` size (CPU, memory);
 - build caching configuration;
-- build secrets.
+- build secrets;
+- registry and credential management beyond per-session
+  `registry login` (registry authentication itself is supported);
+- network management (creating or configuring Docker networks; containers
+  use Docker's default networking);
+- volume management beyond bind mounts.
 
-## Future work
-
-Items discussed but not yet implemented:
-
-- OpenCode custom tool integration (client-side);
-- Release 3 managed-container lifecycle, interactive exec, per-Session
-  networking, narrow publishing, and resource limits;
-- remote transport and execution contract in Release 4 or later, driven by
-  concrete use cases;
-- stronger privilege separation if operational evidence justifies it;
-- strict SELinux workspace storage based on dedicated/relabelled locations.
+Project purpose, product boundary, and long-lived design principles are
+owned by `docs/manifesto.md`; planned work and release scope are owned by
+`docs/roadmap.md`.
