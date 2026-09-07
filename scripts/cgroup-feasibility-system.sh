@@ -132,9 +132,9 @@ docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
 # /dev/shm is tmpfs: an 80M shmem file is charged to memory.current, so two
 # 80M allocations together exceed the 128M Session ceiling while each stays
 # under its own 96M container limit.
-docker run -d --name cgm1 --cgroup-parent="$S1" --memory 96m \
+docker run -d --name cgm1 --cgroup-parent="$S1" --memory 96m --shm-size 128m \
   alpine:3.24 sh -c 'sleep 3; head -c 80M /dev/zero > /dev/shm/blob; sleep 120' >/dev/null || die "allocator 1 failed to start"
-docker run -d --name cgm2 --cgroup-parent="$S1" --memory 96m \
+docker run -d --name cgm2 --cgroup-parent="$S1" --memory 96m --shm-size 128m \
   alpine:3.24 sh -c 'sleep 3; head -c 80M /dev/zero > /dev/shm/blob; sleep 120' >/dev/null || die "allocator 2 failed to start"
 sleep 12
 EX1=$(docker inspect --format '{{.State.ExitCode}}' cgm1)

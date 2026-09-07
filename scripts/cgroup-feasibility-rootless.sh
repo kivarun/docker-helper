@@ -124,9 +124,9 @@ echo "STEP-4-DONE"
 
 step 5 "aggregate memory ceiling enforced over sibling workloads"
 docker rm -f cgm1 cgm2 >/dev/null 2>&1 || true
-docker run -d --name cgm1 --cgroup-parent="$SESS_SLICE" --memory 96m \
+docker run -d --name cgm1 --cgroup-parent="$SESS_SLICE" --memory 96m --shm-size 128m \
   alpine:3.24 sh -c 'sleep 3; head -c 80M /dev/zero > /dev/shm/blob; sleep 120' >/dev/null || die "allocator 1 failed to start"
-docker run -d --name cgm2 --cgroup-parent="$SESS_SLICE" --memory 96m \
+docker run -d --name cgm2 --cgroup-parent="$SESS_SLICE" --memory 96m --shm-size 128m \
   alpine:3.24 sh -c 'sleep 3; head -c 80M /dev/zero > /dev/shm/blob; sleep 120' >/dev/null || die "allocator 2 failed to start"
 sleep 12
 EX1=$(docker inspect --format '{{.State.ExitCode}}' cgm1)

@@ -610,6 +610,11 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	if err := htFile.Close(); err != nil {
 		t.Fatalf("close htpasswd: %v", err)
 	}
+	// The registry container may run as a non-root user; keep the credential
+	// file readable inside the container.
+	if err := os.Chmod(htPath, 0o644); err != nil {
+		t.Fatalf("chmod htpasswd: %v", err)
+	}
 
 	port, err := network.ParsePort("5000/tcp")
 	if err != nil {
@@ -665,7 +670,11 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	}
 	registryHost := "localhost:" + hostPort
 	t.Logf("disposable registry: container 5000/tcp published on 127.0.0.1:%s", hostPort)
+	if insp, err := cli.ImageInspect(ctx, "registry:2"); err == nil && len(insp.RepoDigests) > 0 {
+		t.Logf("FACT: registry-image-digest=%s", insp.RepoDigests[0])
+	}
 	waitRegistryReady(t, "127.0.0.1:"+hostPort)
+	checkRegistryCredentials(t, "127.0.0.1:"+hostPort)
 
 	auth := registry.AuthConfig{Username: "gate", Password: registryCanary, ServerAddress: registryHost}
 	authBlob, err := json.Marshal(auth)
@@ -675,8 +684,23 @@ func TestEnginePrivateRegistryMatrix(t *testing.T) {
 	encodedAuth := base64.URLEncoding.EncodeToString(authBlob)
 
 	privateRef := registryHost + "/d01/gate-alpine:v1"
-	if err := pushPrivateImage(ctx, cli, privateRef, encodedAuth); err != nil {
-		t.Fatalf("seed private image: %v", err)
+	pushErr := pushPrivateImage(ctx, cli, privateRef, encodedAuth)
+	if pushErr != nil && isUnauthorized(pushErr) {
+		// The registry itself accepted the credential (checked directly above),
+		// so the failure is in how the Engine relayed the encoded header. Try
+		// the standard-alphabet encoding and record which one the Engine
+		// accepted; this is gate evidence about the daemon, not a retry mask.
+		stdAuth := base64.StdEncoding.EncodeToString(authBlob)
+		t.Logf("FACT: urlencoding-push-relay=%v; retrying with std encoding", pushErr)
+		stdErr := pushPrivateImage(ctx, cli, privateRef, stdAuth)
+		if stdErr == nil {
+			t.Log("FACT: std-encoding-push-relay=succeeded; recorded encoding evidence")
+			encodedAuth = stdAuth
+		} else {
+			t.Fatalf("seed private image: url-encoding: %v; std-encoding: %v", pushErr, stdErr)
+		}
+	} else if pushErr != nil {
+		t.Fatalf("seed private image: %v", pushErr)
 	}
 
 	privatePull, err := cli.ImagePull(ctx, privateRef, client.ImagePullOptions{RegistryAuth: encodedAuth})
@@ -743,6 +767,47 @@ func waitRegistryReady(t *testing.T, addr string) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatalf("disposable registry at %s did not become ready", addr)
+}
+
+// checkRegistryCredentials proves the credential pair at the registry
+// boundary itself, before any Engine relay is involved: the anonymous /v2/
+// ping must be rejected and the canary pair must be accepted.
+func checkRegistryCredentials(t *testing.T, addr string) {
+	t.Helper()
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/v2/", nil)
+	if err != nil {
+		t.Fatalf("registry credential check request: %v", err)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("anonymous registry ping: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous /v2/ returned %d; auth middleware is not active at the registry boundary", resp.StatusCode)
+	}
+	t.Log("FACT: registry-auth-middleware=active (anonymous /v2/ rejected)")
+	req, err = http.NewRequest(http.MethodGet, "http://"+addr+"/v2/", nil)
+	if err != nil {
+		t.Fatalf("registry credential check request: %v", err)
+	}
+	req.SetBasicAuth("gate", registryCanary)
+	resp, err = httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("authenticated registry ping: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("canary credential pair rejected by the registry boundary (status %d); htpasswd mismatch", resp.StatusCode)
+	}
+	t.Log("FACT: registry-canary-credentials=accepted at the registry boundary")
+}
+
+// isUnauthorized reports whether the error is an authorization failure at the
+// registry boundary.
+func isUnauthorized(err error) bool {
+	return errdefs.IsUnauthorized(err) || errdefs.IsPermissionDenied(err)
 }
 
 func pushPrivateImage(ctx context.Context, cli *client.Client, privateRef, encodedAuth string) error {

@@ -99,6 +99,7 @@ opensuse_zypper install -y --no-recommends docker curl
 systemctl enable --now docker.service >/dev/null 2>&1 || true
 docker version --format '{{.Client.Version}} / server {{.Server.Version}}' || true
 mkdir -p /opt/cg-feas
+chown opc:opc /opt/cg-feas
 echo "BOOTSTRAP-DONE"
 RMT
 )" || true

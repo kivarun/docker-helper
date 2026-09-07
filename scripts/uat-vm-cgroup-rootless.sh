@@ -92,7 +92,7 @@ if ! opensuse_zypper_refresh; then
   echo "REPO-FAILURE: zypper refresh exhausted attempts; aborting bootstrap" >&2
   exit 1
 fi
-opensuse_zypper install -y --no-recommends docker rootlesskit slirp4netns fuse-overlayfs uidmap curl
+opensuse_zypper install -y --no-recommends docker rootlesskit slirp4netns fuse-overlayfs curl
 log "rootless tool providers:"
 for b in dockerd-rootless.sh rootlesskit slirp4netns fuse-overlayfs newuidmap; do
   p="$(command -v "$b" 2>/dev/null || true)"
