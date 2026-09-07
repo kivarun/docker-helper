@@ -108,7 +108,7 @@ StartLimitBurst=3
 StartLimitIntervalSec=60s
 
 [Service]
-ExecStart=/usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc/hosts --disable-host-loopback /usr/bin/dockerd
+ExecStart=/usr/bin/rootlesskit --net=slirp4netns --disable-host-loopback /usr/bin/dockerd
 TimeoutSec=0
 Restart=on-failure
 
@@ -163,7 +163,7 @@ else
 fi
 if [ "$STARTED" != "yes" ]; then
   echo "DIAG: falling back to a direct launch in the user's login session"
-  as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc/hosts --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
+  as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
     || die "could not launch rootless dockerd directly in the user session"
   MODE=direct
   fact "rootless-daemon-start=direct-session-scope (systemd user-unit start denied by the user manager; recorded finding)"
@@ -328,7 +328,7 @@ if [ "$MODE" = "unit" ]; then
 else
   as_user bash -c 'pkill -f "rootlesskit" || pkill -f "dockerd" || true' || true
   sleep 2
-  as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc/hosts --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
+  as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
     || die "rootless daemon relaunch failed"
 fi
 sleep 2
