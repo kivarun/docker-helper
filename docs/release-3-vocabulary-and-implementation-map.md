@@ -1,379 +1,272 @@
 # Release 3 Vocabulary and Implementation Map
 
-## Purpose
+## Purpose and inspected baseline
 
-This document maps the Release 3 architecture to the existing docker-helper implementation.
+This document maps accepted Release 3 concepts to the implementation that
+actually exists immediately before D0. It prevents executors from inventing
+wrappers, reviving retired symbols, or leaving old and new responsibility
+owners active together.
 
-It is intended for the operational architect who decomposes design work into executor-facing tasks. It identifies which existing symbols are retained, split, replaced, or newly introduced and prevents conceptual names from being translated into unnecessary wrapper types.
-
-This map is based on:
+Inspected baseline:
 
 - repository: `kivarun/docker-helper`;
 - branch: `main`;
-- commit: [`44281a84591cff6bb75cd069a5032ecdf947a282`](https://github.com/kivarun/docker-helper/commit/44281a84591cff6bb75cd069a5032ecdf947a282);
-- Release 2.1 input: the implemented final Release 2.1 contract — Launcher
-  Delegation, the canonical `principal credential` / `launcher credential`
-  command tree with compatibility aliases, atomic `principal credential
-  rotate` targeting the active credential row, and the scope-first list
-  endpoints (`GET /launchers`, `GET /credentials`) — at the same commit.
+- Phase-0 start SHA: `5dbccdfbc71df9b00639f46bff48ed8201966578`;
+- Release 2.1 production parent: `54cc853c87ad3706dfe28829a0147a0dc62afbc6`.
 
-Release 2.1 is implemented at this baseline, including the canonical Launcher
-name grammar and Principal-scoped name-or-ID locator. If further production
-changes land before Release 3 starts, re-verify the affected symbols below
-against the new final commit.
+The previous `44281a8` binding is obsolete. If `main` changes before executor
+handoff, compare the new head with the Phase-0 SHA and revalidate every touched
+owner below. A SHA-only edit is not a rebaseline.
 
-## Reading the map
-
-The document distinguishes three categories:
-
-- **existing fact** — directly present at the baseline commit;
-- **accepted target** — already fixed by the Release 3 scope and domain designs;
-- **implementation gate** — accepted architecture that still requires a bounded backend spike before executor work begins (the Release 2.1 evidence gate is resolved; see Confirmed implementation blockers).
-
-Target names describe one logical responsibility. Exact Go visibility follows the final package boundary. Capitalization of a domain term in documentation does not require an exported Go type in the current single-package implementation.
+`docs/architecture.md` owns implemented truth. Release-3 documents own target
+behavior.
 
 ## Canonical vocabulary
 
-| Term | Canonical meaning | Existing implementation | Release 3 rule |
+| Term | Meaning | Current implementation | Release 3 owner/rule |
 | --- | --- | --- | --- |
-| Request | One transport message received by an HTTP or WebSocket endpoint. | Request structs such as `buildRequest` and `runRequest`; `*http.Request`. | Remains a transport concept. It is not a fourth application layer. |
-| Response | One transport representation returned to a client. | Response structs in `api_contract.go`. | Remains a transport concept. |
-| Command | An application action that may change state or produce an external effect. | Usually implemented directly inside an HTTP handler; no common type. | A conceptual role, not a mandatory `Command` interface or wrapper struct. |
-| Query | A read-only application observation. | Usually implemented directly inside an HTTP handler; no common type. | A conceptual role. A Query never creates an Operation merely for uniformity. |
-| Operation | A durable execution record for selected asynchronous Commands. | `operation` is an in-memory process record for asynchronous `run` and `build`. | Becomes persisted Session-owned control-plane state for container start, stop, restart, remove, administrator policy repair, explicit Session network repair, and Session cleanup. It contains no process handle or output buffer. |
-| Operation type | Discriminator for type-specific execution and recovery. | `operation.Kind string` with internal values `run` and `build`. | Use `type`, not `kind`. Durable values are `container.start`, `container.stop`, `container.restart`, `container.remove`, `container.repair`, `session.repair`, and `session.cleanup`; both current values are removed. |
-| Operation status | Durable execution state. | `operationState`: `running`, `succeeded`, `failed`. | `pending`, `running`, `succeeded`, `failed`, `canceled`. |
-| Operation handler | Type-specific execution and restart recovery. | No common handler boundary; `build.go` and `run.go` own process completion directly. | One handler per Operation type with separate `Execute` and `Recover` behavior. |
-| Managed Container | Session-owned durable docker-helper resource. | No corresponding domain object. A `run` container is ephemeral and uses `--rm`. | New persistent domain object; never an alias for a Docker container ID or Operation. |
-| ManagedContainerID | Stable public identity allocated by docker-helper. | Does not exist. | New immutable public identifier: `dhmc_` followed by 32 lowercase hexadecimal characters. |
-| Managed Container name | Immutable Session-local user-facing name and DNS alias. | Does not exist; one-shot `run` has no retained name. | Public field `name`; unique within one Session and DNS-label-compatible. Use an explicit caller value unchanged after validation, or default to an already-valid unused image repository basename. Invalid or conflicting defaults require an explicit name. |
-| Docker backend name | Diagnostic host-visible Docker object name. | Docker CLI chooses or receives transient names. | Generate `dhmc-<name>-<full-session-id>`. Every named Docker resource owned directly by a Session uses a stable type prefix and the full Session ID; names are not authority or public identity. |
-| BackendContainerID | Docker Engine container identifier. | Transient value read through a `--cidfile` for `run` shutdown cleanup. | Persistent internal correlation, never normal public authority. Only the admin orphan surface may accept it directly; ownership-mismatch force removal targets ManagedContainerID and resolves the exact recorded backend internally. |
-| Session | Authorization, ownership, isolation, and lifetime boundary. | `Session`; SQLite `sessions` row with `launcher_id TEXT NOT NULL REFERENCES launchers(id)` and no `principal_id` column. | Retained and extended with Release 2.1 Launcher ownership and Release 3 teardown state. |
-| Session selection | Request-admission rule that resolves the one Session context of an authorized management Command or Query on Session-owned resources (Managed Container Queries and Commands and `POST /containers`, including Session-local name resolution). | Agent Commands require a Session bearer and therefore take the Session directly from that token. | An optional `session_id` narrows token scope; omission succeeds only when the Session token or documented Launcher/default-Launcher rule identifies exactly one usable Session. Administrator omission and every ambiguity fail. Selection never transfers ownership or expands authority. It is a control-plane rule: the Session data-plane Commands (`pull`, `build`, `run`, `registry login`, exec) require a Session bearer and never infer a Session from a Principal or Launcher credential. |
-| Principal | OS identity and maximum delegated policy. | `principals` table and Principal code. | Retained. It is not the direct owner of Release 3 containers or Operations. |
-| Launcher | Stable delegated Session owner with a Principal-local path-safe name and global `dhl_...` identity. | `Launcher` (package-private `launcher` row type); `launchers` table (`id` with prefix `dhl_`, `principal_id`, `name` constrained to the launcher-name grammar `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$` and unique per principal, `enabled`, `scope_mode`, `created_at`); `launcher_allowed_roots` for `restricted` scope; default Launcher per principal (`ensureDefaultLauncher`/`findDefaultLauncher`); Principal-scoped control routes `/principals/{username}/launchers/{launcher}` (`{launcher}` = name or ID, no global name lookup); CLI `docker-helper launcher`. | Inherited from Release 2.1. Release 3 accepts either stable ID or scoped name as a Launcher selector and must not recreate the domain object. |
-| Credential | Rotatable bearer key owned by one Principal or Launcher. | Single `credentials` table with a concrete owner: Principal credentials (`principal_id NOT NULL`, `launcher_id NULL`, named) and Launcher credentials (`launcher_id NOT NULL`, `principal_id NULL`, unnamed; at most one per launcher). Bearer tokens are `dhc_`-prefixed; credential IDs are `dhcr_`-prefixed. Atomic `rotatePrincipalCredential` always targets the current active row (`revoked_at IS NULL`), so documented name reuse never rotates a revoked historical row. Scope-first list endpoints (`GET /launchers`, `GET /credentials`) authorize visibility by the authenticated authority and narrow it with an optional `?principal=` filter. | Inherited from Release 2.1. Credential scope can authorize control-plane management; the Session token authorizes Session workload execution. A credential is never converted into a substitute Session bearer. |
-| Owner | Domain object that controls resource lifetime and authorization. | Launcher owns Session (`sessions.launcher_id` non-null); principal identity is derived through the ownership JOIN. | Always concrete: Launcher owns Session; Session owns Operation and Managed Container. Do not add a generic Owner hierarchy. |
-| Initiator | Subject that started an Operation. | Not stored in `operation`; `operation` carries an in-memory `LauncherID` for shutdown quiescing, and finish audit retains `auditPrincipalName` (principal projection of the owning Session). | Internal Operation provenance: type plus authorized identifier. It is not ownership and is never part of the public Operation projection. |
-| Actor | Subject recorded by an audit event. | No generic `actor` field; current audit has fields such as `principal_name` and `credential_id`. | Audit vocabulary only. Do not rename Operation `initiator` to `actor`. |
-| Target | Public resource affected by an Operation. | No common target field. Build/run metadata is embedded directly in `operation`. | Type-specific public target identity; never a Docker backend ID. |
-| Management state | Persistent helper-owned lifecycle state. | Session existence is mostly represented by row presence; Managed Container does not exist. | Session and Managed Container state needed for ownership and recovery. It remains internal and is not a second public state machine. |
-| Runtime state | Current backend observation normalized by docker-helper. | Inferred from the running Docker CLI process or queried ad hoc. | Public values are `stopped`, `running`, `paused`, `transitioning`, `dead`, `missing`, and `unknown`; they are observations, never desired state or raw Docker inspect status. |
-| Management projection | Persistent non-secret data required to authorize, inspect, correlate, and clean up a Managed Container. | No Managed Container record exists. | Not a normalized Docker create request or desired state. It excludes environment values, registry credentials, and recreate-capable backend payloads. |
-| Session Network | User-defined bridge owned by one Session. | No per-Session network. | Lazily created, named with the full Session ID, explicitly repaired as a Session-wide invariant when missing with existing Managed Containers, and removed by Session cleanup; it is infrastructure, not a management plane. |
-| Resource ceiling | Aggregate maximum permitted to a Root, Principal, Launcher, or Session subtree. | No resource hierarchy. | CPU, memory, and PIDs narrow down the ownership hierarchy and are enforced by parent cgroups; a ceiling is authority, not a reservation ledger. |
-| Session quota | Maximum count of capacity-bearing Sessions admitted within a daemon, Root, Principal, or Launcher scope. | Session creation has no hierarchical count limit. | Creation must atomically pass every applicable count. Creation reservations plus `active`, `closing`, and `cleanup_failed` Sessions count; `closed` tombstones do not. |
-| Workload limit | Explicit Docker limit applied to one Managed Container or one-shot run. | Docker defaults are largely inherited. | Concrete CPU, memory, PIDs, shared-memory, and disabled-swap policy; it may be narrower than the Session ceiling, while ancestor cgroups cap aggregate actual use. |
-| Publishing grant | Inclusive contiguous host-port range a Root, Principal, Launcher, or Session subtree may use. | No publishing authorization model. | Inherits or narrows through the ownership hierarchy; it authorizes allocation but does not reserve every port in the range. |
-| Port lease | One `127.0.0.1` TCP host port assigned to a Managed Container publication. | No persistent allocation. | Persists for the Managed Container lifetime and prevents collisions only with leases in the same docker-helper state store. |
-| Condition | Stable reason why normal management and runtime observations cannot be combined. | No common type. | Bounded public vocabulary: `backend_missing`, `backend_unavailable`, `ownership_mismatch`, `policy_mismatch`, and `cleanup_failed`. Conditions never trigger autonomous mutation. |
-| Interactive Stream | Transport for one authorized interactive exec. | Does not exist. | Versioned docker-helper TTY WebSocket protocol implemented with `github.com/coder/websocket` behind one package-local adapter; not an Operation or owner. |
+| Request / Response | transport messages | HTTP structs/handlers | transport only; no application base class |
+| Command | application action/effect | usually handler/domain function | conceptual role; no mandatory interface |
+| Query | read-only observation | handler/domain query | never creates Operation for uniformity |
+| Operation | durable record for selected asynchronous Commands | current `operation` is an in-memory build/run process record | SQLite-backed Session-owned state for container start/stop/restart/remove/repair, session repair/cleanup only |
+| Operation type | bounded discriminator | `operation.Kind` = build/run | public/internal discriminator is `type`; old values disappear |
+| Managed Container | durable Session-owned container identity | absent | new `dhmc_...` object; not Docker ID or Operation |
+| Session | authorization/ownership/lifetime boundary | `Session`, `sessions.launcher_id NOT NULL` | gains lifecycle state and remains ownership anchor through cleanup |
+| Launcher | stable Session owner under Principal | implemented Release 2.1 object | retained; no parallel R3 owner model |
+| Principal | OS identity and delegation ceiling | implemented | retained, derived parent of Session through Launcher |
+| Credential | rotatable bearer, never resource owner | Principal or Launcher credential rows | retained; Session bearer remains data-plane authority |
+| Initiator | who admitted durable work | not persisted by current Operation | internal Operation provenance, not ownership |
+| Target | public resource affected by Operation | absent generic field | typed public ID, never BackendContainerID |
+| Condition | stable mismatch/repair reason | ad-hoc current runtime errors | bounded R3 condition vocabulary; observation does not mutate |
+| Session Network | Session-owned backend infrastructure | absent | one lazy bridge per Session; repaired/removed through Session lifecycle |
+| Resource ceiling | aggregate authority | absent | Root -> Principal -> Launcher -> Session cgroup hierarchy |
+| Session quota | capacity-bearing Session count ceiling | absent | daemon/Root/Principal/Launcher atomic create admission |
+| Workload limit | concrete per-container/run limit | only `shm_size` today | CPU/memory/PIDs/shm + swap disabled |
+| Publishing grant / lease | host-port authority / concrete allocation | absent | hierarchical grant + Managed-Container-lifetime lease |
+| Interactive Stream | WebSocket exec transport | absent | not Operation, owner, or durable record |
 
-## Naming rules
+Naming rules remain those in `AGENTS.md`: one concept/one term, `type` rather
+than `kind` for R3 Operation discrimination, no generic `Owner`, `Resource`,
+`Job`, or `Task` hierarchy, and no backend identifier promoted to public
+identity.
 
-The following rules are binding for Release 3 design and code review:
+## Current ownership facts that D0 must respect
 
-1. Use `type` for the Operation discriminator. The current `Kind` field and `kind` JSON name do not survive the migration.
-2. Retain the established `op_` Operation ID prefix. It is already public and does not collide with `dhs_` Session IDs, `dhl_` Launcher IDs, `dhcr_` credential IDs, or bearer-token prefixes (`dht_` session/admin tokens, `dhc_` credentials).
-3. Do not use Operation identity as ManagedContainerID or Session identity.
-4. Use `initiator` in the Operation model and `actor` only if the audit model adopts that umbrella term.
-5. Do not introduce a generic `Owner`, `Resource`, `Job`, or `Task` abstraction where concrete Session ownership and Operation types are sufficient.
-6. Command and Query describe application behavior. They do not require base interfaces, one-field wrapper structs, or duplicate transport models.
-7. Docker Engine requests, container IDs, process IDs, and attach framing are backend details unless a design explicitly promotes them into the public contract.
-8. Existing all-lowercase Go types may remain package-private. A domain term is not renamed solely to match documentation capitalization.
-9. Public `name` is the Managed Container's Session-network DNS alias, not a second display name. ManagedContainerID and OperationID never participate in Docker backend names.
-10. Named Docker resources owned by a Session include the full Session ID in their diagnostic backend names; immutable ownership labels remain authoritative.
+### Session ownership and deletion
 
-## Existing Operation implementation
+Current Session ownership is already canonicalized through:
 
-At the baseline commit, Operation is not durable:
+- `Session.LauncherID`;
+- `sessionOwnershipProjection` joining Session -> Launcher -> Principal;
+- `resolveSessionControlScope` / `resolveSessionListScope` for authority;
+- `deleteSessionScoped` for scoped physical Session deletion.
 
-- `operationSupervisor` owns an in-memory `map[string]*operation`;
-- there is no `operations` SQLite table;
-- daemon restart loses every Operation and its output;
-- Operations begin directly in `running`; there is no `pending` state;
-- cancellation is represented as `failed` plus `result_code=cancelled`;
-- `run` and `build` both create Operations;
-- `operation` contains `*exec.Cmd`, channels, mutexes, shutdown flags, temporary-resource handles, audit metadata, and a rolling `LogBuffer`;
-- `GET /operations/{id}/logs` reads the in-memory buffer;
-- `POST /operations/{id}/cancel` terminates the live process;
-- completed Operations are pruned by TTL and count from memory;
-- admission returns HTTP `201 Created` through `writeOperationCreated`.
+The old map's `deleteSession` / `deleteSessionForPrincipal` replacement task is
+stale. They are not the production owner to migrate.
 
-The Release 3 change is therefore an abstraction split, not a persistence adapter added underneath the current struct.
+Target transition:
 
-## Operation refactoring map
-
-| Existing symbol or field | Existing responsibility | Target responsibility | Action | Owner |
-| --- | --- | --- | --- | --- |
-| `operation` | Domain data, process state, temporary resources, output, cancellation, and audit metadata in one object. | Durable Operation record only. | Split. Remove mutexes, process handles, channels, output buffer, and temporary-resource handles from the persisted model. | D0 |
-| `operationSupervisor` | In-memory registry, shutdown gate, pruning, cancel, and process termination. | No single equivalent. | Split into persistent store and durable worker; preserve only the observable shutdown and cleanup guarantees needed by the Engine API execution path. Retire the old name after callers migrate. | D0 |
-| `operationSupervisor.ops` | In-memory source of truth. | SQLite-backed lookup and listing. | Replace with an `operationStore`-equivalent boundary. | D0 |
-| `operationSupervisor.admit` | Shutdown check plus in-memory registration. | Transactional validation result, Operation insert, idempotency association, and resource conflict reference. | Replace; keep daemon-shutdown admission gating as a separate concern. | D0 |
-| `operationSupervisor.lookup` | In-memory lookup. | Persistent lookup plus authorization through owning Session. | Replace. | D0/D9 |
-| `operationSupervisor.pruneCompleted` | TTL/count retention in memory. | No independent Operation retention. | Remove. Physical Session deletion cascades Operations. | D0 |
-| `operationSupervisor.cancel` | Public cancellation of build/run processes. | Internal type-specific cancellation used by Session cleanup only. | Remove from public API; do not mechanically expose the old function. | D0/D2 |
-| `terminateForShutdown` and `terminateOperations` | Graceful and forced Docker CLI process shutdown. | Bounded cancellation and backend-resource cleanup during daemon shutdown. | Preserve the observable deadline and cleanup guarantees, not the child-process mechanism. | D0 |
-| `operation.Kind` | Untyped `run` or `build` discriminator. | Typed Operation `type`. | Replace with a bounded discriminator. Remove both current values and add Release 3 types. | D0 |
-| `operation.State` | Three-state in-memory process status. | Five-state durable Operation status. | Replace with explicit transition validation. | D0 |
-| `operation.ResultCode` | Success, failure, and cancellation classification in one optional string. | Status-dependent `result`, `error`, or `cancellation`. | Split. Do not retain a generic result-code bucket as the canonical model. | D0/D9 |
-| `operation.ExitCode` | Docker CLI process exit code. | Direct synchronous `run` result. | Move out of Operation; durable lifecycle Operations do not have workload exit codes. | D0 |
-| `operation.Image`, `Context`, `Dockerfile` | Build/run metadata embedded in the generic object. | Synchronous build/run request and execution data. | Move out of the common record; do not persist it as Operation recovery state. | D0/D9 |
-| `operation.LogBuffer` | Client-visible rolling Operation log. | Not part of Operation. | Remove. Synchronous build/run return bounded output directly. | D0/D9 |
-| `boundedBuffer` | Bounded combined stdout/stderr storage. | Reusable bounded I/O primitive where a synchronous response needs it. | Retain independently if useful for `pull`, synchronous `build`, synchronous `run`, or exec; rename only if its final responsibility changes. | D0/D5/D9 |
-| `newBuildOperation` | Creates an already-running in-memory build Operation. | No equivalent. | Remove when `/build` becomes synchronous. | D0/D9 |
-| `newRunOperation` | Creates an asynchronous `run` Operation. | No equivalent. | Remove when `/run` becomes synchronous. | D0/D9 |
-| `startOperationProcess` | Shared Docker CLI process start for build and run and output attachment. | No direct equivalent. | Replace through the Docker Engine API adapter; the common Operation worker does not assume a process or a backend transport. | D0/D9 |
-| `waitBuildCompletion` | Owns asynchronous build completion. | Synchronous `/build` service path. | Move into the request lifetime and direct response contract. | D0/D9 |
-| `waitRunCompletion` | Owns asynchronous run completion. | Synchronous `/run` service path. | Move into the request lifetime and direct response contract. | D0/D9 |
-| `operationForSession` | In-memory lookup plus Session-ID equality. | Persistent lookup plus common Operation authorization. | Replace; higher-level Release 2.1 authority must be handled without exposing foreign existence. | D0/D9 |
-| `writeOperationCreated` | HTTP `201` response for `/build` and `/run`. | HTTP `202 Accepted` response for durable Commands. | Remove from the synchronous build/run path in D0; later add an accepted-response helper that sets `Location`. | D0/D9 |
-
-Working internal boundary names such as `operationStore`, `operationWorker`, `operationHandler`, and `dockerBackend` describe separate responsibilities. They are not permission to create parallel state machines. The architect must choose final names against the code present after Release 2.1 and keep one owner for each responsibility.
-
-## Operation type migration
-
-| Current value | Current behavior | Release 3 mapping |
-| --- | --- | --- |
-| `build` | In-memory asynchronous process with status, logs, and public cancellation. | Removed from Operation types. `/build` becomes synchronous and returns bounded output and result directly. |
-| `run` | In-memory asynchronous process with status, logs, and public cancellation. | Removed from Operation types. `/run` becomes synchronous and returns bounded output and exit status directly. |
-| — | No managed-container lifecycle. | Add durable `container.start`, `container.stop`, `container.restart`, `container.remove`, and administrator-only `container.repair` types. `container.create` is synchronous and creates no Operation. |
-| — | No Session Network. | Add durable `session.repair` only for explicit whole-network restoration when Managed Containers already depend on it; ordinary lazy provisioning remains synchronous infrastructure inside create/run. |
-| — | Session rows are deleted directly. | Add `session.cleanup`. |
-
-There are no persisted Release 2 Operation rows to migrate. Compatibility work concerns public HTTP/CLI behavior, configuration, tests, documentation, and any live-operation assumptions—not database data conversion.
-
-## Operation API migration
-
-| Existing surface | Release 3 surface | Action |
-| --- | --- | --- |
-| `POST /build` → `201`, `operation_id`, `running` | Synchronous bounded result | Breaking protocol change; preserve the normal blocking CLI experience while removing polling, logs, cancel, and Operation identity. |
-| `POST /run` → asynchronous Operation | Synchronous bounded result | Breaking contract change; update handler, client, CLI, tests, docs, and agent skill together. |
-| `GET /operations/{id}` | Persistent Operation lookup | Retain route; replace response schema and storage source. |
-| No Operation list route | Bounded Session-scoped Operation listing | Add route and filters in the API design. |
-| `GET /operations/{id}/logs?offset=N` | No generic Operation log or replay endpoint | Remove after synchronous build/run migration. |
-| `POST /operations/{id}/cancel` | No public Operation cancellation | Remove; internal Session-cleanup cancellation is not an HTTP replacement. |
-| No idempotency | Optional `Idempotency-Key` on durable Commands | Add at protocol admission only; after authorization, resolve an existing matching record before current-state no-op evaluation. Fresh state-matching no-ops create no record. CLI remains stateless. |
-
-The current CLI polls status, fetches Operation logs, and can cancel both `run` and `build`. Release 3 must not leave compatibility shims that reproduce this workflow locally after the server contract changes.
-
-The synchronous `/run` migration retains its Release 2 `command` JSON field:
-run and Managed Container create use it as the Docker command vector combined
-with image or explicit Entrypoint. Both exec modes instead use `argv` for the
-complete executable-and-arguments vector. `/run` replaces `environment` with
-the common `env` field shared by run, Managed Container create, and both exec
-modes. The daemon does not accept both environment spellings. CLI argument
-syntax after `--` and the repeatable `--env` flag remain unchanged.
-
-The Release 2 `/run` request field `shm_size` is replaced by
-`limits.shared_memory_bytes`. The CLI retains `--shm-size` and adds the common
-`--cpus`, `--memory`, and `--pids-limit` workload-limit flags used by both
-one-shot run and Managed Container create.
-
-## Session and ownership migration
-
-### Implemented Release 2.1 baseline
-
-`Session` now contains:
-
-- `ID`;
-- `Workspace`;
-- `CreatedAt`;
-- `ExpiresAt`;
-- non-null `LauncherID` (`dhl_...`);
-- projected `LauncherName` and `PrincipalName` (read-time ownership JOIN
-  through `launchers` to `principals`).
-
-The SQLite `sessions` table contains `id`, `token_hash`, `workspace`,
-timestamps, and `launcher_id TEXT NOT NULL REFERENCES launchers(id)`. The
-retired `principal_id` column no longer exists and startup never re-adds it.
-Authentication treats a row as active when `expires_at > now` and both owning
-Launcher and Principal are enabled. Session deletion immediately deletes the
-row and releases the MAC binding. Startup expiry cleanup directly deletes
-expired rows.
-
-Session ownership and control authorities are implemented in
-`session_control.go` (`resolveCreateLauncher`, `resolveCreatePolicy`,
-`computeLauncherEffectiveRoots` — the single authoritative three-level
-root policy, whose Principal-level ceiling is the canonical
-`computeEffectivePrincipalRoots` owner in `launcher.go`) and
-`session_control.go` scope filtering over the common ownership query in
-`session.go`.
-
-### Release 2.1 Launcher ownership (implemented)
-
-The Launcher ownership model Release 3 must consume:
-
-- every Session has exactly one non-null Launcher owner;
-- Principal identity is derived through the Launcher;
-- creator provenance is separate from owner (credential provenance is
-  audit-only: `credential_id`, `credential_name`);
-- every Principal has an implicit `default` Launcher
-  (`ensureDefaultLauncher`/`findDefaultLauncher`);
-- user mode transparently owns everything through the daemon-owner
-  Principal and its default Launcher;
-- the v2.0.0 → 2.1 migration attributed attributable principal-owned
-  Sessions to the default Launcher and removed non-attributable
-  system-mode admin Sessions.
-
-Release 3 must start from the final implementation of this model. It must not
-add an alternative `owner_type/owner_id` pair or re-add `principal_id` as a
-second authorization path.
-
-### Release 3 deployment compatibility
-
-Release 3 retains the complete user-mode implementation, including transparent
-daemon-owner Principal/default-Launcher ownership, per-user paths and socket,
-rootless support, and user-mode MAC behavior. It also retains the complete
-project-produced tarball lifecycle. These surfaces are deprecated for Release
-4, not removed or redesigned during Release 3.
-
-The deprecation implementation is deliberately narrow: user-mode init and
-daemon startup and tarball installers emit the warnings owned by
-`release-3-api-cli.md`; non-root clients using the system service do not. The
-Release 3 operational architect must not interpret the future deletion as
-permission to split ownership paths, skip user-mode/rootless/package evidence,
-or introduce an early compatibility shim. The first Release 4 work package
-will delete the obsolete production branches and tests as one reviewed
-system-mode-only cutover.
-
-### Release 3 extension
-
-| Existing symbol or behavior | Release 3 action |
+| Current symbol/behavior | Final action |
 | --- | --- |
-| `Session.LauncherID` as owner | Retained; Principal stays derived. |
-| Row presence as lifecycle state | Add explicit teardown state required to distinguish active, closing, cleanup failure, and closed tombstone behavior. Exact schema belongs to the Session implementation design. |
-| `deleteSession` / `deleteSessionForPrincipal` immediate DELETE | Replace control flow with `session.cleanup` admission and deterministic cleanup. Physical deletion occurs after successful cleanup and a fixed internal ten-minute observation grace. |
-| `cleanupExpiredSessions` immediate DELETE at startup | Replace with durable cleanup admission/recovery. Expiry must not bypass container, network, publishing, Operation, or MAC cleanup. Each transiently failed attempt terminates its Operation; the Session remains `closing`, persists attempt count and retry time, and creates a new cleanup Operation when due. Ownership ambiguity remains `cleanup_failed` for Admin action. |
-| `findSessionByToken` checks only expiry and owner enablement | Also reject non-active lifecycle states. The Release 2.1 ownership policy (launcher/principal enablement through the ownership JOIN) is retained. |
-| `cleanupStaleSessionRuntimeDirs` treats non-active row absence as cleanup authority | Run only after durable ownership cleanup can prove the directory is stale. It must not race a retained cleanup-failure Session. |
-| `sessionRuntimeDir` and Docker config directory | Retain as runtime infrastructure; they are not persistent ownership records. |
+| `deleteSessionScoped` selects scope then physically deletes | retain its scope/non-disclosure responsibility; replace the physical DELETE stage with Session close/cleanup claim |
+| row presence + `expires_at` represent usable lifetime | add lifecycle state `active`, `closing`, `cleanup_failed`, `closed`; only `active` authenticates/admit normal work |
+| startup expiry physically deletes rows | claim expired active Sessions for durable cleanup after migration/handler recovery |
+| offline `session cleanup` deletes expired rows | restrict offline mutation to purging already-closed tombstones after grace; backend cleanup is daemon-owned |
+| `findSessionByToken` uses existence/expiry/owner enablement | also require lifecycle `active` |
+| runtime-dir stale cleanup uses absence/expiry assumptions | lifecycle-aware: `closing` and `cleanup_failed` still own runtime state |
+| Session MAC release follows immediate deletion/invalidation | move release to successful Session cleanup after all dependent resources are absent |
 
-## Managed Container introduction
+Physical Session deletion happens only after successful cleanup and the fixed
+closed-tombstone grace.
 
-There is no existing Managed Container abstraction or table.
+### Parent lifecycle
 
-The current `run` path must not be promoted into one:
+`launcher_lifecycle.go` currently owns the serialized Release 2.1 parent
+lifecycle. Important production facts:
 
-- it uses Docker `run --rm`;
-- it treats the Docker container ID as a transient shutdown-cleanup handle;
-- its lifecycle is owned by the Docker CLI process;
-- it has no stable public resource ID or persistent ownership row.
+- `persistLauncherChange` collects and physically deletes Launcher Sessions on
+  disable;
+- `applyLauncherEnabledChange` / lifecycle paths release deleted Session MAC
+  bindings after commit;
+- checked deletion quiesces Launcher operation admission before inspecting
+  runtime;
+- `inspectLauncherRuntime` checks both in-memory running Operations and Docker
+  helper containers;
+- parent deletion is protected by `lifecycleMu` and checked runtime evidence.
 
-Release 3 introduces a new persistent boundary with at least:
+R3 retains `lifecycleMu` as the existing serialization owner unless a concrete
+implementation proves a narrower replacement. It does not add a second parent
+lifecycle framework.
 
-- ManagedContainerID;
-- owning Session ID;
-- nullable BackendContainerID while creation is incomplete;
-- management state;
-- non-secret management projection required for authorization, inspection, policy, and backend correlation;
-- backend ownership metadata version;
-- active lifecycle mutation Operation reference;
-- creation and update timestamps required for recovery.
+Target change:
 
-The exact schema and Go names belong to D1. The common source-of-truth rule is already fixed: SQLite proves ownership and Docker Engine provides current runtime observation.
+- disable closes admission and claims child active Sessions; it does not delete
+  their rows;
+- re-enable never revives a claimed Session;
+- parent physical delete is checked and cannot cascade a Session row that still
+  exists (`active`, `closing`, `cleanup_failed`, or `closed` grace);
+- parent cleanup/runtime inspection consumes one combined view of transient
+  synchronous execution and durable Operations.
 
-Container backend access is isolated behind one docker-helper-owned adapter using the pinned official `github.com/moby/moby/client` Docker Engine API client rather than added as more unrelated `newDockerCommand` calls across handlers. The client negotiates the daemon API version; docker-helper separately documents and tests its minimum supported Engine API. The adapter reads the existing Session registry credential source just in time, passes matching authorization to pull and the required Session-scoped authorization map to build, and never forwards registry credentials to container create or run. Engine request types, response streams, credentials, and backend identifiers do not become the public domain contract.
+### `operationSupervisor` is wider than legacy build/run
 
-## Configuration migration
+At the Phase-0 baseline `operationSupervisor` owns:
 
-| Existing configuration | Existing purpose | Release 3 action |
-| --- | --- | --- |
-| `operation_retention_ttl` | Prunes completed in-memory Operations by age. | Remove. Operation lifetime follows Session physical deletion. |
-| `operation_max_completed` | Caps completed in-memory Operations. | Remove. It is not compatible with Session-owned durable history. |
-| `operation_log_max_bytes` | Bounds pull output and build/run Operation buffers. | Deprecated alias for `command_output_max_bytes`; accepted with a startup warning, rejected when both names are present, and omitted from config CLI operations. |
-| `audit_enabled` | Enables structured audit stream. | Retain. It is not the workload-output logging switch. |
-| — | Workload-output emission to structured operational logging. | Do not add. Release 3 emits command metadata and normalized outcomes, never workload output, to daemon logs and audit. |
+- in-memory build/run registry and public status/log/cancel;
+- bounded log-buffer retention/pruning;
+- daemon shutdown admission and process/container termination;
+- per-Launcher `quiesced` admission state;
+- `quiesceLauncher` / `setQuiesced` used by Launcher disable/delete;
+- `hasRunningForLauncher` used by checked parent deletion.
 
-`command_output_max_bytes` retains the existing 4 MiB default, newest-tail behavior, `truncated` result flag, and runtime reload support. It applies to pull, synchronous build/run, and non-interactive exec.
+Therefore D0 may not simply delete it after synchronous build/run migration.
+Responsibility transfer is:
 
-Removal or replacement of existing keys requires config migration, `config show/set/unset`, reload behavior, man pages, completion, and tests to change together.
-
-## Audit migration
-
-Current `auditRecord` contains separate fields such as `principal_name`,
-`principal_enabled`, `principal_path`, `credential_id`, `credential_name`,
-`credential_changed`, `launcher_id`, `launcher_name`, `launcher_scope`,
-`launcher_enabled`, `session_id`, `workspace`, `request_id`, and
-`operation_id`; it has no generic actor or initiator structure. Launcher
-control-plane events (`launcher.create`, `launcher.list`, `launcher.update`,
-`launcher.scope_replace`, `launcher.delete`, `launcher.credential_issue`,
-`launcher.credential_rotate`, `launcher.credential_delete`) carry the launcher
-projection; Principal credential events (`principal.credential_create`,
-`principal.credential_list`, `principal.credential_rotate`,
-`principal.credential_revoke`) carry target-principal and
-target-credential provenance with the initiating credential distinguishable
-from the target; `session.create` carries launcher and principal provenance;
-Docker-operation events carry `principal_name` (launcher identity lives on
-the owning Session).
-
-Release 3 should extend the audit vocabulary without making it the Operation schema:
-
-- Operation stores `initiator_type` and the permitted identifier needed for internal control-plane attribution, but its public projection exposes neither;
-- audit records the actor representation defined by the implemented Release 2.1 authority model (`principal_name`, `launcher_id`, `launcher_name`, credential provenance);
-- audit includes public Operation type and target;
-- public and audit fields never contain bearer secrets or BackendContainerID;
-- workload output is not audit data.
-
-The exact audit-field migration belongs to D9 and the security/test design. Avoid keeping `auditPrincipalName` inside the durable Operation record merely because the current in-memory struct does so.
-
-## Test migration map
-
-| Existing test area | Release 3 destination |
+| Current responsibility | Final owner |
 | --- | --- |
-| `operationSupervisor` concurrency and terminal guards | Durable state-transition, atomic claim, worker shutdown, and process-supervision tests. |
-| `build_async_test.go` | Synchronous build response, bounded output, timeout, disconnect, and exit-code tests. |
-| `run` polling/log/cancel CLI tests | Synchronous run response, bounded output, timeout, disconnect, and exit-code tests. |
-| `/operations/{id}/logs` tests | Remove or move only the reusable bounded-buffer cases to direct-output tests. |
-| public cancel tests | Remove public-route expectations; retain process termination and internal Session-cleanup cancellation tests at their actual owners. |
-| `cleanupExpiredSessions` tests | Session cleanup Operation and restart-recovery tests. |
-| direct Session deletion tests | Closing, cleanup failure, closed tombstone, cascade, and authorization tests. |
-| current container lifecycle tests for ephemeral `run --rm` | Keep as one-shot run regression tests; do not treat them as Managed Container lifecycle coverage. |
+| build/run public Operation API | removed |
+| live synchronous admission/shutdown | synchronous execution coordinator |
+| one-shot backend cleanup | synchronous command domain + coordinator |
+| Launcher admission closure | Session/lifecycle admission owner consulted by both synchronous and durable admission |
+| running transient work by Launcher | synchronous execution coordinator query |
+| running durable work by Launcher | durable Operation store/dispatcher query |
+| checked parent runtime decision | `launcher_lifecycle.go` consumes the combined result; it does not inspect two private stores itself |
 
-## Confirmed implementation blockers
+The old supervisor type/name is removed only after all rows in this table have
+production replacements and regression coverage.
 
-The code comparison exposes the following implementation gates. They do not
-reopen accepted product or domain decisions.
+## Backend migration map
 
-### 1. Release 2.1 implementation baseline (resolved)
+The Phase-0 baseline invokes Docker CLI and `go.mod` contains no Moby client.
+Release 3 uses one narrow official Moby adapter. Domain services own policy and
+public classification; adapter methods own only Engine protocol mechanics.
 
-Release 2.1 is implemented at the pinned baseline commit. The final
-Session/ownership schema for D1 and D0 persistence migrations is:
+| Capability | Current mechanism | Target migration |
+| --- | --- | --- |
+| pull | Docker CLI + Session `--config` | Engine ImagePull with exact matching Session registry auth |
+| registry login | Docker CLI login writes Session runtime Docker config | adapter validates/login interaction; protected Session credential store remains source for later pull/build |
+| build | Docker CLI + staged context + in-memory Operation | synchronous Engine build; Session auth map for private `FROM`; staging/MAC cleanup stays build-owned |
+| one-shot run | Docker CLI + cidfile + in-memory Operation | synchronous Engine create/start/wait/remove; pins/MAC cleanup stays run-owned |
+| checked parent runtime | Docker CLI inspection | later adapter observation with same fail-closed classification |
+| Managed Container lifecycle/logs/exec/network | absent | later packages consume the same adapter; no second Engine client boundary |
 
-```sql
-CREATE TABLE sessions (
-    id         TEXT PRIMARY KEY,
-    token_hash TEXT NOT NULL UNIQUE,
-    workspace  TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    launcher_id TEXT NOT NULL REFERENCES launchers(id)
-);
-```
+Registry credentials remain Session runtime secrets, never SQLite Operation
+payload. D0.1 must prove parsing, exact registry matching, auth propagation,
+private pull/private `FROM`, and secret exclusion before production migration.
 
-The concrete ownership symbols are `Session.LauncherID` (Go), `launcher_id`
-(SQLite), the `launchers`/`launcher_allowed_roots` tables, and the
-`LauncherScopeMode` values `inherit`/`restricted`. Principal identity is the
-read-time projection `PrincipalName`; there is no stored
-`sessions.principal_id`. D0/D1 must be written against this schema, not
-against nullable Release 2 `principal_id` ownership.
+## Durable Operation target map
 
-### 2. Engine adapter compatibility spike
+The current `operation` type is not adapted in place. It is split.
 
-The backend technology and client are settled. Before broad migration, a focused spike must verify `ImageBuild` stream and error handling against the project's BuildKit-enabled and legacy test environments, private pull and private `FROM` authorization from the existing Session credential source, and one documented minimum Engine API version from the supported daemon matrix. Production migration then moves pull/build directly to their synchronous Engine API path; it must not reproduce the legacy asynchronous workflow on the new backend. This may refine the narrow adapter, not the public capability or credential contracts.
+| Existing symbol/field | Target | Action |
+| --- | --- | --- |
+| `operation` | durable row only | replace; no mutex/process/channel/output/temp handles |
+| `operationSupervisor.ops` | SQLite Operation source of truth | replace |
+| `operationSupervisor.admit` | durable transactional admission or synchronous live admission | split; never one ambiguous method |
+| `lookup` / public build-run operation routes | durable lookup only for R3 Operation types | remove legacy route semantics, then add durable read surface |
+| `pruneCompleted` | none | remove; Operation lifetime is Session lifetime |
+| public `cancel` | none | remove; Session teardown uses internal typed cancellation only |
+| `terminateForShutdown` | synchronous execution shutdown + durable handler shutdown/recovery | split by cause; daemon stop never fabricates durable cancellation |
+| `Kind` | Operation `type` | replace |
+| `LogBuffer` | direct bounded command output | move out of durable model |
+| `ExitCode`, build/run metadata | synchronous result/request data | move out of Operation |
+| temporary pins/staging/MAC lease handles | command/Managed-Container lifecycle owners | move; never persist as generic Operation handles |
 
-## Executor handoff gate
+Durable Operation persistence owns: Session FK, type/payload version, status,
+initiator provenance, target, normalized bounded input/recovery data,
+idempotency association, timestamps, and exactly one terminal result/error/
+cancellation payload. It stores no workload output, registry credential, bearer,
+or public backend ID.
 
-The operational architect may issue code-reading and D1 interface-design tasks from this map. Ordered D0 implementation and verification tasks are defined in `release-3-d0-execution-plan.md`.
+## Session cleanup and resource lifetime map
 
-Production implementation tasks that depend on the following must wait until the corresponding blocker is resolved:
+R3 `session.cleanup` is the convergence owner for all Session teardown causes:
+explicit close, TTL expiry, Principal disable, Launcher disable, startup
+recovery, and manual retry.
 
-- D0 durable persistence and D1 ownership: resolved (final Release 2.1 Session/ownership schema is pinned above);
-- D0 synchronous migration: the official Moby client adapter, minimum Engine API version, and ImageBuild compatibility evidence.
+Ordering is:
 
-The Release 2.1 baseline commit has been consumed: every design-only Launcher
-or Session mapping in this map has been replaced with the actual symbol, table,
-column, and migration names. If production code changes after the pinned
-commit, re-verify the affected mappings against the new final commit before
-Release 3 implementation starts.
+1. Session is claimed (`active -> closing`) and bearer/admission closes;
+2. pending/running durable Operations receive the common Session-closing
+   cancellation protocol;
+3. exec/synchronous activity is terminated through its resource lifecycle;
+4. unresolved `creating` Managed Containers are recovered/classified;
+5. verified Managed Containers are stopped/removed and their lifetime pins/MAC
+   state and port leases are released only after backend absence;
+6. Session Network is removed after containers;
+7. Session runtime credential/config artifacts are removed;
+8. Session workspace MAC binding is released last;
+9. Session becomes `closed` with `last_cleanup_operation_id`;
+10. fixed-grace purge physically deletes the Session and cascades durable rows.
+
+Transient failure leaves `closing` and retains ownership. Ownership ambiguity
+sets `cleanup_failed` and retains everything required to prove/repair ownership.
+
+## Managed Container mount/MAC ownership
+
+Current system-mode one-shot run pins mount sources for one live operation.
+That mechanism cannot be copied blindly to long-lived Managed Containers.
+
+Target ownership:
+
+- persistent Managed Container/Session state owns the requirement for the
+  mount/MAC boundary;
+- start/stop Operations do not own the lifetime pin;
+- stop preserves the durable mount policy needed for later start;
+- daemon restart verifies/re-establishes required helper-owned runtime pins
+  before mutating the container;
+- remove releases container-specific pin/MAC state only after exact backend
+  absence;
+- Session cleanup is the final fallback owner and releases Session MAC last.
+
+Exact kernel-handle mechanics remain an implementation choice, but losing a
+helper process must not silently make a still-owned Managed Container writable
+through a less-safe pathname fallback.
+
+## Configuration and policy ownership
+
+Current `config.go` owns flat configuration, validation, reloadability, and
+CLI field vocabulary. R3 extends that owner; feature packages do not parse
+config independently.
+
+New Root resource defaults and Session quota defaults are materialized or
+normalized by the config owner once. Principal/Launcher/Session explicit policy
+lives with those resources in SQLite. No child stores a copied effective value
+as a second authority.
+
+The exact public R3 config fields and upgrade behavior are canonical in
+`release-3-api-cli.md` and resource semantics in
+`release-3-resource-constraints.md`.
+
+## Preconditions and open gates
+
+### D0.1 Engine adapter
+
+No checked-in evidence at the inspected baseline proves the selected Moby
+version, minimum Engine API, BuildKit/legacy build behavior, private pull,
+private `FROM`, cancellation, or cleanup matrix. `go.mod` has no Moby client.
+The single D0.1 gate in `release-3-d0-execution-plan.md` is therefore **OPEN**.
+
+### Aggregate cgroup enforcement
+
+No checked-in result at the inspected baseline proves the mandatory aggregate
+CPU/memory/PIDs hierarchy and Docker placement in both system and supported
+rootless/user deployment. The feasibility gate defined by
+`release-3-resource-constraints.md` and moved forward by the D0 plan is
+therefore **OPEN**.
+
+Neither gate authorizes an executor to invent weaker semantics. A failed
+mandatory mode is an `AGENTS.md` architecture escalation.
+
+## Executor handoff rule
+
+Before editing a production owner, the executor records:
+
+1. source symbol/file from this map;
+2. final owner from this map/D0 plan;
+3. dependencies/gates;
+4. the commit where the old path becomes unreachable;
+5. the observable test that proves transfer.
+
+A task is incomplete while two production owners enforce the same policy or
+while removal of an old owner would lose one of its listed responsibilities.
