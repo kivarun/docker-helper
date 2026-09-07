@@ -265,7 +265,13 @@ EVT=$(cat "$SESS_DIR/pids.events")
 fact "session-slice-pids-current=$CUR"
 fact "session-slice-pids-events=$EVT"
 [ "$CUR" -le 24 ] || die "aggregate PIDs ceiling not enforced (pids.current=$CUR > 24)"
-if ! echo "$EVT" | grep -E "max [1-9]"; then
+# The kernel records the fork rejection on the forking cgroup (the workload
+# scope) even when the ancestor slice's aggregate limit is what bound it:
+# the scope's own pids.max (500) cannot reject at ~22 processes, so a max
+# event here proves the Session slice ceiling engaged.
+SCOPE_EVT=$(cat "$SESS_DIR/docker-$CGP1ID.scope/pids.events" 2>/dev/null || echo ABSENT)
+fact "workload-scope-pids-events=$SCOPE_EVT"
+if ! echo "$SCOPE_EVT" | grep -E "max [1-9]"; then
   echo "DIAG: cgp1: $(docker inspect --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' cgp1 2>&1)"
   echo "DIAG: cgp1 log tail: $(docker logs cgp1 2>&1 | tail -4 | tr '\n' '|')"
   echo "DIAG: scopes under the Session slice:"
@@ -273,7 +279,7 @@ if ! echo "$EVT" | grep -E "max [1-9]"; then
     [ -e "$s" ] || continue
     echo "DIAG:   $(basename "$s") pids.current=$(cat "$s/pids.current" 2>/dev/null) pids.events=$(cat "$s/pids.events" 2>/dev/null | tr '\n' ' ')"
   done
-  die "pids.events shows no max enforcement"
+  die "pids ceiling rejection not observed (workload scope events=$SCOPE_EVT)"
 fi
 docker rm -f cgp1 >/dev/null 2>&1 || true
 echo "STEP-6-DONE"
