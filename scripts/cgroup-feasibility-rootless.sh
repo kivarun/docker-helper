@@ -311,26 +311,52 @@ docker create --name cgr3 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep
 docker run -d --name cgr4 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep 900' >/dev/null || die "running workload for restart failed"
 docker stop cgr1 >/dev/null || die "stop of running workload failed"
 docker inspect --format 'FACT: cgr1={{.State.Status}} cgr3={{.State.Status}} cgr4={{.State.Status}}' cgr1 cgr3 cgr4
-# The supported restart procedure is a restart of the systemd user unit
-# installed by the official setup tool. Bounded so a wedged restart becomes
-# evidence rather than a hung job.
+# Procedure A: the official unit restart. The embedded containerd lives in
+# the unit's cgroup, so this path's container behavior is recorded as
+# evidence for the D0.2 restart contract.
 as_user timeout 180 systemctl --user restart docker.service \
   || die "rootless daemon restart failed (bounded systemctl --user restart)"
 sleep 2
 docker info >/dev/null 2>&1 || die "rootless daemon unreachable after restart"
 docker inspect --format 'FACT: after-restart cgr1={{.State.Status}} cgr3={{.State.Status}} cgr4={{.State.Status}}' cgr1 cgr3 cgr4
 if [ "$(docker inspect --format '{{.State.Running}}' cgr4)" != "true" ]; then
+  fact "restart-procedure-a=systemctl--user-restart cgr4-not-preserved"
+  echo "DETECT: the official unit restart does not preserve running containers"
   echo "DIAG: docker.service user-unit journal around the restart:"
-  as_user journalctl --user -u docker.service --since "-2 min" --no-pager 2>/dev/null | tail -25 || true
+  as_user journalctl --user --since "-2 min" --no-pager 2>/dev/null | grep docker | tail -15 || true
   C4SCOPE="$SESS_DIR/docker-$(docker inspect --format '{{.Id}}' cgr4).scope"
   echo "DIAG: cgr4 scope after restart: dir=$([ -d "$C4SCOPE" ] && echo present || echo absent) pids.current=$(cat "$C4SCOPE/pids.current" 2>/dev/null || echo ABSENT)"
-  die "running workload did not survive rootless daemon restart (live-restore contract)"
 fi
-[ "$(docker inspect --format '{{.State.Running}}' cgr4)" = "true" ] || die "running workload did not survive rootless daemon restart (live-restore contract)"
 [ "$(docker inspect --format '{{.State.Status}}' cgr3)" = "created" ] || die "created workload changed state across daemon restart"
 [ "$(docker inspect --format '{{.State.Status}}' cgr1)" = "exited" ] || die "stopped workload changed state across daemon restart"
-[ -d "$SESS_DIR/docker-$(docker inspect --format '{{.Id}}' cgr4).scope" ] \
-  || die "workload scope cgroup lost across rootless daemon restart"
+
+# Procedure B: the unit's own Restart=always path — the restart form live
+# restore is designed for (daemon crash/upgrade). The MAIN process exits
+# (rootlesskit forwards SIGTERM to dockerd) and systemd restarts the unit
+# after RestartSec=2 without sweeping the control group, so the embedded
+# containerd and the workload scopes can survive.
+docker rm -f cgr5 >/dev/null 2>&1 || true
+docker run -d --name cgr5 --cgroup-parent="$SESS_SLICE" alpine:3.24 sh -c 'sleep 900' >/dev/null || die "running workload for restart procedure B failed"
+MAINPID="$(as_user systemctl --user show -p MainPID --value docker.service | tr -d '[:space:]')"
+[ -n "$MAINPID" ] || die "could not read the docker.service MainPID"
+as_user kill -TERM "$MAINPID" || die "could not signal the docker.service main process"
+RESTARTED=0
+for i in $(seq 1 45); do
+  if as_user systemctl --user is-active --quiet docker.service && docker info >/dev/null 2>&1; then
+    RESTARTED=1
+    break
+  fi
+  sleep 2
+done
+[ "$RESTARTED" = 1 ] || die "docker.service did not come back after the main process exited (Restart=always path)"
+fact "restart-procedure-b=main-exit+Restart-always"
+docker inspect --format 'FACT: after-procedure-b cgr3={{.State.Status}} cgr4={{.State.Status}} cgr5={{.State.Status}}' cgr3 cgr4 cgr5
+[ "$(docker inspect --format '{{.State.Running}}' cgr5)" = "true" ] \
+  || die "running workload did not survive the main-exit restart path (live-restore contract)"
+[ "$(docker inspect --format '{{.State.Status}}' cgr3)" = "created" ] \
+  || die "created workload changed state across the main-exit restart path"
+[ -d "$SESS_DIR/docker-$(docker inspect --format '{{.Id}}' cgr5).scope" ] \
+  || die "workload scope cgroup lost across the main-exit restart path"
 echo "STEP-8-DONE"
 
 step 9 "container restart re-establishes placement"
@@ -365,7 +391,7 @@ docker rm -f cgfc >/dev/null 2>&1 || true
 echo "STEP-10-DONE"
 
 step 11 "cleanup without leaked cgroups"
-docker rm -f cgr1 cgr2 cgr3 cgr4 >/dev/null 2>&1 || true
+docker rm -f cgr1 cgr2 cgr3 cgr4 cgr5 >/dev/null 2>&1 || true
 sleep 2
 for d in "$SESS_DIR" "$SESS2_DIR" "$L_DIR" "$P_DIR"; do
   if [ -d "$d" ] && ! ls -A "$d" | grep -q .; then
