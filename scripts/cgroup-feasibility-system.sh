@@ -139,10 +139,11 @@ docker rm -f cgm0 cgm1 cgm2 >/dev/null 2>&1 || true
 # Each container limit is 160M so the container-level ceiling can never
 # fire for one allocation; the parent Session ceiling of 128M is the
 # binding constraint. The process prints the allocated size as evidence.
-ALLOCATOR="apk add --no-cache python3 >/dev/null 2>&1; python3 -c 'import time; d=bytearray(94371840); print(\"allocated\", len(d), flush=True); time.sleep(120)'"
+docker pull python:3.12-alpine >/dev/null || die "could not pull the python allocator image"
+ALLOCATOR='python3 -c "import time; d=bytearray(94371840); print(\"allocated\", len(d), flush=True); time.sleep(120)"'
 # Control row: one 90M allocation completes under the 128M ceiling.
 docker run -d --name cgm0 --cgroup-parent="$S1_REL" --memory 160m \
-  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "control allocator failed to start"
+  python:3.12-alpine sh -c "$ALLOCATOR" >/dev/null || die "control allocator failed to start"
 CONTROL_OK=0
 for i in $(seq 1 45); do
   if docker logs cgm0 2>&1 | grep -q "allocated 94371840"; then
@@ -160,9 +161,9 @@ docker rm -f cgm0 >/dev/null 2>&1 || true
 # allocation. Victim selection is kernel policy, so a kill is asserted,
 # not which container survives.
 docker run -d --name cgm1 --cgroup-parent="$S1_REL" --memory 160m \
-  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
+  python:3.12-alpine sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
 docker run -d --name cgm2 --cgroup-parent="$S1_REL" --memory 160m \
-  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
+  python:3.12-alpine sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
 sleep 16
 KILLED=0
 for c in cgm1 cgm2; do

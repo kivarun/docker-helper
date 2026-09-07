@@ -124,11 +124,24 @@ as_user bash -c 'mkdir -p ~/.config/docker && printf "{ \"live-restore\": true }
   || die "could not write the rootless daemon configuration"
 as_user systemctl --user daemon-reload
 MODE=unit
-if as_user systemctl is-active --quiet docker.service \
-  || as_user systemctl start docker.service 2>/dev/null; then
-  fact "rootless-daemon-start=systemd-user-unit"
+STARTED=no
+# The first StartUnit can be transiently denied by a freshly started user
+# manager; retry before treating the denial as structural.
+for attempt in 1 2 3; do
+  if as_user systemctl is-active --quiet docker.service; then
+    STARTED=yes
+    break
+  fi
+  if as_user systemctl start docker.service 2>/dev/null; then
+    STARTED=yes
+    break
+  fi
+  sleep 2
+done
+if [ "$STARTED" = "yes" ]; then
+  fact "rootless-daemon-start=systemd-user-unit (attempts needed: $attempt)"
 else
-  echo "DIAG: systemctl --user start denied; capturing the manager-side reason"
+  echo "DIAG: systemctl --user start denied after retries; capturing the manager-side reason"
   echo "DIAG: debug-traced start attempt:"
   as_user env SYSTEMD_LOG_LEVEL=debug systemctl --user start docker.service 2>&1 | grep -viE "^Successfully|queued job" | tail -25 || true
   echo "DIAG: transient-unit method probe:"
@@ -211,9 +224,10 @@ docker rm -f cgm0 cgm1 cgm2 >/dev/null 2>&1 || true
 # allocation completes under the 128M slice ceiling (control), then two
 # concurrent ones exceed it and the parent OOM engages; with 160M
 # container limits a 137 exit is only reachable from the parent.
-ALLOCATOR="apk add --no-cache python3 >/dev/null 2>&1; python3 -c 'import time; d=bytearray(94371840); print(\"allocated\", len(d), flush=True); time.sleep(120)'"
+docker pull python:3.12-alpine >/dev/null || die "could not pull the python allocator image"
+ALLOCATOR='python3 -c "import time; d=bytearray(94371840); print(\"allocated\", len(d), flush=True); time.sleep(120)"'
 docker run -d --name cgm0 --cgroup-parent="$SESS_SLICE" --memory 160m \
-  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "control allocator failed to start"
+  python:3.12-alpine sh -c "$ALLOCATOR" >/dev/null || die "control allocator failed to start"
 CONTROL_OK=0
 for i in $(seq 1 45); do
   if docker logs cgm0 2>&1 | grep -q "allocated 94371840"; then
@@ -226,9 +240,9 @@ fact "single-allocator-under-ceiling=$(docker inspect --format '{{.State.Status}
 [ "$CONTROL_OK" = "1" ] || die "a single 90M allocation did not complete under the 128M slice ceiling; the calibration is broken"
 docker rm -f cgm0 >/dev/null 2>&1 || true
 docker run -d --name cgm1 --cgroup-parent="$SESS_SLICE" --memory 160m \
-  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
+  python:3.12-alpine sh -c "$ALLOCATOR" >/dev/null || die "allocator 1 failed to start"
 docker run -d --name cgm2 --cgroup-parent="$SESS_SLICE" --memory 160m \
-  alpine:3.24 sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
+  python:3.12-alpine sh -c "$ALLOCATOR" >/dev/null || die "allocator 2 failed to start"
 sleep 16
 KILLED=0
 for c in cgm1 cgm2; do
