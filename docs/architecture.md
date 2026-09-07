@@ -572,13 +572,15 @@ searched globally).
 
 #### Principal authority
 
-A Principal credential may pass `--launcher LAUNCHER` only: the name is
-resolved within the credential's own visible scope the same way (a foreign
-or missing Launcher is the daemon's non-disclosing
-`launcher not found`). With no selector the credential's Principal's
-default Launcher is the target; a `principal` selector must name the
-authenticated Principal. For this authority `--principal` is rejected
-locally.
+Principal authority is established by the credential itself. The
+`principal` create selector is illegal for this authority — not even the
+credential's own Principal is accepted: the CLI rejects `--principal`
+locally, and a `principal` wire selector of any value is the daemon's
+`400 invalid_selector`. A Principal credential may pass
+`--launcher LAUNCHER` only: the name is resolved within the
+credential's own visible scope the same way (a foreign or missing
+Launcher is the daemon's non-disclosing `launcher not found`). With no
+selector the credential's Principal's default Launcher is the target.
 
 #### Launcher authority
 
@@ -687,22 +689,24 @@ MAC/runtime cleanup owners:
     handlers as the canonical `principal credential` commands;
     `credential create --name` is optional and uses the literal name
     `default` when omitted.
-  - List CLI resolution needs no auth introspection: the list command
-    sends one server-authorized Query and the daemon applies the
-    scope-first rule; targeting commands such as `show`, `set`, `rotate`,
-    and `delete` keep the `GET /auth` inference rule for the
-    Principal-credential owner.
+  - CLI resolution is per-command: `list` is the scope-first Query with
+    no auth introspection (one server-authorized query; the daemon
+    applies the scope-first rule); `create` targets an explicit
+    Principal; `revoke` targets the credential ID and performs no
+    Principal resolution; `rotate` resolves its target Principal —
+    inferred through `GET /auth` where needed (an explicit `PRINCIPAL`
+    positional is required for admin authentication).
 - **Launcher credentials** are singular per Launcher: issued with `PUT
   /principals/{username}/launchers/{launcher}/credential` (admin or
   owning-Principal authority; the canonical CLI verb is
-  `launcher credential create` — the retired `issue` spelling is a
-  compatibility form), replaced by
+  `launcher credential create`), replaced by
   `POST .../credential/rotate`, and deleted by `DELETE .../credential`.
   Deleting the credential does not delete the launcher or its sessions; it
   only removes that authentication key. Rotation keeps the launcher
   identity and its sessions: the old bearer is rejected immediately, the
   replacement is authorized, and no second credential row is created.
-- **Admin token** rotation (`admin-token rotate`) requires the current
+- **Admin token** rotation (`admin-token rotate`; HTTP
+  `POST /admin/token/rotate`) requires the current
   token; the new token is shown once, the old token is invalid
   immediately, and no restart is required.
 
@@ -986,14 +990,17 @@ a Launcher credential has no Principal authority):
 | Endpoint | Purpose |
 |---|---|
 | `POST /principals` | atomic Principal provisioning (ownership transaction; optional initial credential) |
+| `GET /principals` | list Principals (admin token) |
 | `GET /principals/{username}` | show principal (scope-first read: an admin reads any Principal, a Principal credential reads exactly its own — the daemon authorizes the target, the CLI performs no local self-check; a foreign selector is the non-disclosing not-found; a Launcher credential is unauthorized) |
-| `GET /principals/{username}/effective-allowed-roots` | Principal effective-root introspection (see [Policy introspection](#policy-introspection)) |
 | `PATCH /principals/{username}` | enable / disable (session teardown propagation) |
 | `DELETE /principals/{username}` | checked delete (runtime-active guard, FK cascade teardown) |
-| `POST /principals/{username}/credentials` | create a named Principal credential (one-time token) |
+| `POST /principals/{username}/allowed-roots` | add one Principal allowed root (authorization-only, never MAC preparation) |
+| `DELETE /principals/{username}/allowed-roots` | remove one Principal allowed root (authorization-only, never MAC preparation) |
+| `GET /principals/{username}/effective-allowed-roots` | Principal effective-root introspection (see [Policy introspection](#policy-introspection)) |
+| `POST /principals/{username}/credentials` | create a named Principal credential (one-time token; administrator-controlled) |
 | `GET /principals/{username}/credentials` | that Principal's credentials |
 | `POST /principals/{username}/credentials/{name}/rotate` | atomic credential rotation |
-| `DELETE /principals/{username}/credentials/{name}` | revoke a credential |
+| `POST /credentials/{id}/revoke` | revoke a credential by its credential ID (administrator-controlled) |
 | `GET /credentials` | scope-first Principal credential list (optional `?principal=` narrowing) |
 | `DELETE /sessions/{id}` | Session deletion (authority-scoped; see [Session](#session)) |
 
@@ -1002,7 +1009,9 @@ CLI surface: `principal create|list|show|set|delete`,
 `principal credential create|list|revoke|rotate`. Every command accepts
 the common operator flags (see [CLI conventions](#cli-conventions)).
 `principal allowed-root` mutations are authorization-only and never
-prepare MAC state.
+prepare MAC state; `principal allowed-root list` is a CLI projection of
+the show endpoint (`GET /principals/{username}`), not a separate HTTP
+list route.
 
 ### Launcher
 
