@@ -9,8 +9,8 @@ admission quotas.
 It fixes the supported resource vocabulary, hierarchical authorization model,
 safe defaults, workload admission, runtime enforcement, policy updates,
 inspection, and failure behavior. Managed Container creation and persistence
-remain canonical in `release-3-managed-container-domain.md`; exact public field
-and CLI flag syntax belongs to `release-3-api-cli.md`.
+remain canonical in `release-3-managed-container-domain.md`; exact public field,
+route, configuration, and CLI spelling belongs to `release-3-api-cli.md`.
 
 Exact Go types, SQL DDL, cgroup paths, Moby request fields, and systemd or
 cgroupfs mechanics are implementation decisions for the operational architect.
@@ -143,9 +143,20 @@ They are not recomputed on every daemon start, so a Docker or host capacity
 change never silently changes authority. An administrator may later widen or
 narrow them within the actual deployment boundary.
 
-If Docker Engine cannot report usable capacity during initialization,
-docker-helper fails the initialization step with a clear diagnostic rather
-than inventing an unlimited or host-derived fallback.
+This one-time materialization applies equally to a fresh Release 3
+initialization and to the first Release 3 startup over a valid Release 2.1
+configuration that has no Root resource policy. Upgrade never interprets an
+absent new field as an indefinitely dynamic default. The migration computes the
+three values from the connected Engine, writes the complete explicit Root
+ceiling atomically with the other new Root defaults defined in
+`release-3-api-cli.md`, and only then exposes Release 3 workload admission. A
+failed calculation or atomic config write leaves the previous configuration
+unchanged and startup fails closed with an actionable diagnostic.
+
+If Docker Engine cannot report usable capacity during first materialization,
+docker-helper fails initialization/upgrade startup rather than inventing an
+unlimited or host-derived fallback. Once materialized, ordinary later daemon
+starts do not require capacity discovery merely to reconstruct policy.
 
 The reserved memory and CPU remain available to Docker, the host, and unrelated
 workloads; docker-helper controls only its own subtree and does not claim to
@@ -176,18 +187,57 @@ The count includes an in-progress creation reservation and Sessions in
 short-lived observation tombstone after owned resources have been removed and
 does not consume quota.
 
-An explicit value of zero forbids new Session creation in that scope. Reducing
-a quota below current use never closes or removes an existing Session; it only
-blocks further creation until the counted population falls below the new
-limit. The daemon hard limit cannot be widened. Administrators may narrow the
-Root quota and may raise or lower Principal and Launcher quotas without
-exceeding the applicable parent or daemon boundary.
+Quota configuration is concrete rather than inherited state:
 
-Principal and Launcher defaults deliberately do not divide an ancestor quota
-according to creation order. They provide predictable ordinary limits while
-leaving deliberate subdivision to an administrator on a shared deployment.
-The exact inspection and mutation spelling is owned by
-`release-3-api-cli.md` and will be frozen separately from these semantics.
+- Root stores one explicit configured maximum;
+- every Principal stores one explicit configured maximum, materialized as 100
+  on migration/creation;
+- every Launcher stores one explicit configured maximum, materialized as 20 on
+  migration/creation;
+- the daemon hard limit of 10,000 is compiled policy and is not a stored or
+  writable setting.
+
+The effective quota is the minimum of the stored value and every ancestor
+quota plus the daemon hard limit. This preserves a child's deliberate stored
+value across a later parent reduction without letting it exceed current parent
+authority. A later parent increase may therefore restore capacity up to the
+child's already stored value; it does not silently rewrite that value.
+
+The public show projection is:
+
+```json
+{
+  "session_quota": {
+    "value": 100,
+    "effective": 80
+  }
+}
+```
+
+Root always has `value == effective` except for the daemon hard cap; Principal
+and Launcher `effective` may be lower than `value` because an ancestor was
+narrowed. There is no `inherit` mode, usage counter, remaining-capacity field,
+or reservation list in this projection.
+
+An explicit value of zero forbids new Session creation in that scope. A newly
+written child quota must be in `0..10000` and no greater than the current
+effective parent quota. Reducing a parent below an existing child's stored
+value is allowed and only narrows that child's effective value. Reducing any
+quota below current use never closes or removes an existing Session; it only
+blocks further creation until counted population falls below the effective
+limit. The daemon hard limit cannot be widened.
+
+Principal and Launcher quota mutation is administrator-only in Release 3. A
+Principal credential cannot raise its own Principal quota or a child Launcher
+quota; this remains host capacity policy rather than delegated workload policy.
+The exact HTTP and CLI spelling is owned by `release-3-api-cli.md`.
+
+On upgrade from Release 2.1, the database migration materializes 100 for every
+existing Principal and 20 for every existing Launcher exactly once. Existing
+Session rows are counted against those values immediately, including rows that
+startup then claims as `closing`; a pre-existing count above a new default is
+not a migration failure and does not delete anything, but new creation stays
+blocked until use falls below the effective quota.
 
 ## Workload defaults and validation
 
@@ -265,24 +315,46 @@ behavior, not a reason for docker-helper to schedule, retry, or restart it.
 The cgroup path uses stable docker-helper identities rather than caller names.
 Direct path syntax and driver-specific identifiers never enter the public API.
 
-## Enforcement availability
+## Enforcement availability and Phase-0 gate
 
-Release 3 must prove the hierarchy on both supported deployment modes before
-resource implementation is frozen:
+Resource implementation is not allowed to discover basic hierarchy
+feasibility late in D7. Before a production one-shot `run` is declared to have
+the Release 3 contract, and before Managed Container creation/start can be
+accepted, Phase 0/D0 must have reproducible real-host evidence for both
+supported deployment modes:
 
-- system deployment;
-- rootless user deployment.
+- system deployment under the shipped systemd unit;
+- supported rootless user deployment.
 
-The implementation spike must verify controller delegation, nested aggregate
-enforcement, Docker placement, daemon restart, cleanup, and the Docker cgroup
-drivers supported by the project. It must demonstrate that sibling workloads
-cannot escape Principal, Launcher, Session, or Root aggregate ceilings.
+The single prerequisite spike must verify:
+
+- CPU, memory, and PIDs controller delegation at every required ancestor;
+- nested aggregate enforcement across sibling containers and Sessions;
+- Docker placement below the exact verified Session cgroup while concrete
+  per-workload Docker limits are simultaneously applied;
+- the supported Docker cgroup drivers;
+- daemon restart with existing running/stopped workloads;
+- container and Session cleanup with no leaked cgroup ownership state;
+- the shipped systemd hardening constraints;
+- AppArmor and SELinux hosts where those MAC backends are supported;
+- fail-closed behavior when a controller, delegation, or placement cannot be
+  proved.
+
+The evidence must record host/cgroup mode, Docker version/API/driver, systemd
+version where applicable, controller layout before/after, workload placement,
+measured aggregate enforcement, restart result, and cleanup result. Unit tests,
+Docker mocks, or a successful per-container limit are not substitutes for this
+gate.
 
 If the required hierarchy or a mandatory workload limit cannot be enforced,
 docker-helper fails closed with `resource_enforcement_unavailable`. It must not
 silently omit a controller, degrade to per-container-only limits, or start an
-unbounded workload. The implementation may reject an unsupported deployment;
-it may not weaken the multi-user contract.
+unbounded workload. User-mode/rootless support remains mandatory for Release 3;
+a failed rootless feasibility gate therefore requires an architecture proposal
+under `AGENTS.md`, not a silent system-only scope reduction.
+
+At the Phase-0 rebaseline no checked-in evidence was found that satisfies this
+matrix. The gate remains **OPEN** until the reproducible host runs exist.
 
 System cgroup paths, Docker backend errors, and controller internals are
 sanitized from ordinary client errors and remain available only in bounded
@@ -349,6 +421,7 @@ Persistent policy contains:
 - explicit or inherited CPU, memory, and PIDs ceilings for Principal, Launcher,
   and Session;
 - materialized Root defaults;
+- concrete Principal/Launcher Session quotas;
 - concrete immutable limits accepted for each Managed Container;
 - only the correlation required to verify cgroup placement and Docker workload
   policy.
@@ -358,11 +431,12 @@ pressure metrics, OOM logs, or a copied Docker inspection response.
 
 `principal show`, `launcher show`, and `session show` expose their effective
 resource ceilings and whether each value is explicit or inherited.
-`container show` exposes both the concrete immutable workload limits applied at
-creation and the current effective maximum after ancestor ceilings, plus the
-disabled-swap policy. This distinction matters after a parent policy change.
-List output does not grow into a resource-monitoring table; detailed limits
-belong to show.
+`principal show` and `launcher show` additionally expose configured/effective
+Session quota. `container show` exposes both the concrete immutable workload
+limits applied at creation and the current effective maximum after ancestor
+ceilings, plus the disabled-swap policy. This distinction matters after a
+parent policy change. List output does not grow into a resource-monitoring or
+quota-usage table; detailed policy belongs to show.
 
 docker-helper does not add CPU or memory usage monitoring in Release 3.
 Operators who need backend usage and cgroup diagnostics use the host and Docker
@@ -378,16 +452,19 @@ The stable resource-policy error categories are:
 | `resource_limit_exceeded` | A requested workload or child ceiling exceeds the caller's effective authorization ceiling. |
 | `resource_limit_update_blocked` | A memory reduction targets a subtree with active workloads. |
 | `resource_enforcement_unavailable` | The required cgroup or Docker enforcement cannot be proved or applied. |
+| `invalid_session_quota` | A configured quota is outside `0..10000` or exceeds the effective parent at mutation time. |
+| `session_quota_exceeded` | Session creation cannot reserve capacity under at least one daemon/Root/Principal/Launcher quota. |
 
-Errors may return the normalized requested and allowed values to a caller
-already authorized for that policy node. Authorization and target resolution
-occur first so foreign policy is never disclosed.
+Session creation returns `409 session_quota_exceeded` without identifying which
+foreign or ancestor scope is full. Quota mutation validation uses
+`400 invalid_session_quota`. Authorization and target resolution occur before
+policy details are returned so foreign state remains non-disclosing.
 
-Policy creation and update, denied limit requests, enforcement failure, and
-detected Docker resource-policy mismatch are audited with public resource
-identities and normalized non-secret values. Audit does not contain runtime
-usage samples, workload output, raw cgroup paths, or a Docker inspection
-payload.
+Resource/quota policy creation and update, denied limit requests, enforcement
+failure, quota-denied Session creation, and detected Docker resource-policy
+mismatch are audited with public resource identities and normalized non-secret
+values. Audit does not contain runtime usage samples, workload output, raw
+cgroup paths, or a Docker inspection payload.
 
 ## Agent and operator guidance
 
@@ -402,6 +479,7 @@ does not guess resource needs from an image, command, or expected lifetime.
 Operator documentation must explain that:
 
 - full inheritance grants authority but does not reserve capacity;
+- Session quotas limit object admission rather than reserving CPU/memory;
 - external Docker and host workloads remain outside the helper's Root ceiling;
 - parent aggregate enforcement can produce workload OOM under contention;
 - larger workloads require explicit administrator policy rather than an
@@ -414,7 +492,11 @@ Implementation is not complete without tests for:
 
 - atomic Session admission against simultaneous daemon, Root, Principal, and
   Launcher quotas, including concurrent creates;
+- one-time migration/default materialization for existing 2.1 Principals and
+  Launchers and a Root configuration with no Release 3 fields;
 - zero, lowered-below-use, cleanup-failed, and closed-tombstone quota cases;
+- child stored quota above a later-narrowed parent producing a lower effective
+  quota without rewriting/deleting existing Sessions;
 - Root default calculations and one-time materialization;
 - inheritance and effective-ceiling calculation at every hierarchy level;
 - cross-Principal and cross-Launcher policy denial without existence leaks;
