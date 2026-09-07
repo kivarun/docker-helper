@@ -127,29 +127,41 @@ MODE=unit
 STARTED=no
 # The first StartUnit calls can be transiently denied by a freshly started
 # user manager (observed: a retried attempt succeeds after several
-# seconds); retry with a wider window before treating it as structural.
+# seconds); retry with a wider window, capture each attempt's error, and
+# trace the first attempt at debug level.
 for attempt in 1 2 3 4 5; do
   if as_user systemctl is-active --quiet docker.service; then
     STARTED=yes
     break
   fi
-  if as_user systemctl start docker.service 2>/dev/null; then
-    STARTED=yes
-    break
+  if [ "$attempt" = "1" ]; then
+    OUT=$(as_user env SYSTEMD_LOG_LEVEL=debug systemctl --user start docker.service 2>&1 || true)
+    echo "DIAG: first start attempt (debug trace, non-message lines):"
+    echo "$OUT" | grep -vE "^Got message|^Bus |^Successfully" | head -15 || true
+    echo "$OUT" | grep -qE "done/Success|finished" && { STARTED=yes; break; }
+  else
+    ERR=$(as_user systemctl start docker.service 2>&1 || true)
+    echo "DIAG: start attempt $attempt: $ERR"
+    echo "$ERR" | grep -qE "Access denied" || { STARTED=yes; break; }
   fi
   sleep 4
 done
 if [ "$STARTED" = "yes" ]; then
   fact "rootless-daemon-start=systemd-user-unit (attempts needed: $attempt)"
 else
-  echo "DIAG: systemctl --user start denied after retries; capturing the manager-side reason"
-  echo "DIAG: debug-traced start attempt:"
-  as_user env SYSTEMD_LOG_LEVEL=debug systemctl --user start docker.service 2>&1 | grep -viE "^Successfully|queued job" | tail -25 || true
+  echo "DIAG: systemctl --user start denied after retries; re-checking and capturing evidence"
   echo "DIAG: transient-unit method probe:"
   as_user systemd-run --user --unit=dh-feas-transient-probe /bin/true 2>&1 || true
   echo "DIAG: USER_AVC / policy denials:"
   ausearch -m USER_AVC,AVC -ts recent 2>/dev/null | tail -15 || true
   journalctl -b --no-pager 2>/dev/null | grep -iE "denied|avc" | tail -15 || true
+  if as_user systemctl is-active --quiet docker.service; then
+    STARTED=yes
+    MODE=unit
+    fact "rootless-daemon-start=systemd-user-unit (started during diagnostics)"
+  fi
+fi
+if [ "$STARTED" != "yes" ]; then
   echo "DIAG: falling back to a direct launch in the user's login session"
   as_user bash -c 'exec /usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc/resolv.conf --copy-up=/etc/hosts --disable-host-loopback /usr/bin/dockerd >> $HOME/dockerd-feas.log 2>&1 < /dev/null & sleep 1' \
     || die "could not launch rootless dockerd directly in the user session"
@@ -161,7 +173,16 @@ for i in $(seq 1 30); do
   sleep 2
 done
 docker info >/dev/null 2>&1 || {
-  su -l "$FEAS_USER" -c "tail -30 $HOME/dockerd-feas.log" 2>/dev/null || true
+  echo "DIAG: docker client state:"
+  docker context ls 2>/dev/null | tail -3 || true
+  echo "DIAG: socket state:"
+  ls -l /run/user/$FEAS_UID/docker.sock 2>&1 || true
+  echo "DIAG: daemon journal/log:"
+  if [ "$MODE" = "unit" ]; then
+    as_user journalctl --user -u docker.service -n 40 --no-pager 2>&1 | tail -40 || true
+  else
+    su -l "$FEAS_USER" -c "tail -40 \$HOME/dockerd-feas.log" 2>&1 || true
+  fi
   die "rootless daemon unreachable at $DOCKER_HOST"
 }
 docker info --format 'FACT: rootless-server={{.ServerVersion}} driver={{.Driver}} cgroup-driver={{.CgroupDriver}} cgroup-version={{.CgroupVersion}}' \
