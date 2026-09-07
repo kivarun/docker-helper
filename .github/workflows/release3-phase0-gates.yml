@@ -1,0 +1,151 @@
+name: Release 3 Phase-0 evidence gates
+
+# Phase-0 evidence gates are workflow_dispatch-only and never part of
+# ordinary CI or the release artifact gate. They execute the two remaining
+# Phase-0 evidence gates against real environments:
+#
+#   engine-current    D0.1 matrix vs the runner's own current Docker Engine
+#   engine-floor      D0.1 matrix vs a pinned older DinD daemon (API lower
+#                     bound actually exercised, not a compile-time constant)
+#   cgroup-system     aggregate-cgroup feasibility in a real Tumbleweed VM
+#                     (system deployment)
+#   cgroup-rootless   aggregate-cgroup feasibility in a real Tumbleweed VM
+#                     (rootless/user deployment)
+#
+# Dispatching on main checks out exactly github.sha and prints it; the tested
+# source SHA recorded in the owner documents is that SHA.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine-current:
+    name: D0.1 matrix (current Engine)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses:  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Print tested source SHA
+        run: echo "tested source SHA ${{ github.sha }}"
+
+      - name: D0.1 matrix against the runner Engine (required mode)
+        env:
+          D01_GATE_REQUIRED: "1"
+        run: |
+          docker version
+          cd scripts/d01-engine-gate
+          go test -v ./...
+
+  engine-floor:
+    name: D0.1 matrix (pinned floor Engine)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses:  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Print tested source SHA
+        run: echo "tested source SHA ${{ github.sha }}"
+
+      - name: Boot pinned floor Docker daemon (DinD, privileged, loopback only)
+        run: |
+          set -euo pipefail
+          docker pull docker:19.03.15-dind
+          docker image inspect docker:19.03.15-dind --format 'FACT: floor-image-digest={{index .RepoDigests 0}}' || true
+          docker rm -f dind-floor 2>/dev/null || true
+          # TLS disabled and published on the host loopback only; vfs storage
+          # driver so the inner daemon never depends on the runner filesystem.
+          docker run -d --privileged --name dind-floor \
+            -e DOCKER_TLS_CERTDIR= \
+            -p 127.0.0.1:2376:2375 \
+            docker:19.03.15-dind \
+            dockerd --host=tcp://0.0.0.0:2375 --storage-driver=vfs
+          ready=""
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:2376/_ping >/dev/null 2>&1; then
+              ready=yes
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "yes" ]; then
+            echo "EVIDENCE: pinned 19.03 floor daemon did not start on this CI host"
+            docker logs dind-floor 2>&1 | tail -40 || true
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:2376/version
+          echo
+          echo "EVIDENCE: floor daemon 19.03.15 started"
+
+      - name: D0.1 matrix against the floor Engine (required mode)
+        env:
+          D01_GATE_REQUIRED: "1"
+          DOCKER_HOST: tcp://127.0.0.1:2376
+        run: |
+          cd scripts/d01-engine-gate
+          go test -v ./...
+
+  cgroup-system:
+    name: Aggregate cgroup feasibility (system mode, Tumbleweed VM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses:  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Print tested source SHA
+        run: echo "tested source SHA ${{ github.sha }}"
+
+      - name: Run system-mode cgroup feasibility gate in Tumbleweed VM
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+            scripts/uat-vm-cgroup-system.sh
+
+  cgroup-rootless:
+    name: Aggregate cgroup feasibility (rootless mode, Tumbleweed VM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses:  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Print tested source SHA
+        run: echo "tested source SHA ${{ github.sha }}"
+
+      - name: Run rootless-mode cgroup feasibility gate in Tumbleweed VM
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+            scripts/uat-vm-cgroup-rootless.sh
