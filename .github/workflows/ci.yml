@@ -163,3 +163,19 @@ jobs:
       - name: Real-Engine pull (public, private, denied, cancellation)
         run: |
           go test -v -run '^TestPullEngineIntegration$' .
+
+  engine-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses:  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Real-Engine build (public, private FROM, denied, cancellation)
+        run: |
+          go test -v -run '^TestBuildEngineIntegration$' .
