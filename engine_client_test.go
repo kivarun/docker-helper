@@ -159,6 +159,19 @@ func TestEngineClientRegistryLoginErrorNormalization(t *testing.T) {
 			wantKind: engineErrRegistryUnavailable,
 		},
 		{
+			name:       "engine reports credential rejection without a typed signal",
+			apiVersion: "1.51",
+			authHandler: func(w http.ResponseWriter, r *http.Request) {
+				// The daemon reports a failed registry login as an untyped
+				// internal error whose message carries the registry status
+				// line (the /auth error is not errdefs-typed end to end).
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"message":` + jsonQuote("login attempt to https://registry.example.com/v2/ failed with status: 401 Unauthorized") + `}`))
+			},
+			wantKind: engineErrRegistryAuthDenied,
+		},
+		{
 			name:       "unexpected engine failure",
 			apiVersion: "1.51",
 			authHandler: func(w http.ResponseWriter, r *http.Request) {

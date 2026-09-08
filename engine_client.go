@@ -102,6 +102,8 @@ func normalizeEngineRegistryError(err error) error {
 		return &engineError{kind: engineErrRegistryAuthDenied, cause: err}
 	}
 	switch classifyDockerError(err.Error()) {
+	case dockerErrorAuthDenied:
+		return &engineError{kind: engineErrRegistryAuthDenied, cause: err}
 	case dockerErrorNetwork:
 		return &engineError{kind: engineErrRegistryUnavailable, cause: err}
 	default:
