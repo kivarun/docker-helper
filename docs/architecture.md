@@ -1546,8 +1546,16 @@ The combined Engine build stream is rendered into the existing bounded
 output primitive: the newest output is retained, `truncated` reports the
 bounded-buffer contract, the complete stream is consumed until the
 terminal outcome even after the cap, and embedded Engine JSON errors are
-detected. Nothing is written to journald and no durable workload log
-exists.
+detected. For a BuildKit build the Engine relays solve progress as
+`moby.buildkit.trace` aux messages — trace type in the message id,
+base64 trace payload as the aux value — so the adapter decodes and
+renders those traces client-side into the plain progress lines the
+docker CLI printed, through the BuildKit progress renderer, inside the
+same bounded output; the renderer is joined before the build result is
+taken, and a malformed trace is skipped as cosmetic because the
+authoritative failure signals remain the in-stream error and the
+transport error. Nothing is written to journald and no durable workload
+log exists.
 
 Validation details (unchanged):
 

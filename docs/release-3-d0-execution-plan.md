@@ -490,6 +490,13 @@ of why the session path is required; it is not current implementation
 truth. The `engineErrBackendFailure` build contract mismatch
 (documented `502 backend_failure`, implemented as the 500
 `docker_build_failed` fall-through) is corrected with a regression test.
+The real-Engine matrix additionally exposed that the migrated build —
+and the pre-correction build alike — rendered no build output for a
+BuildKit build: the Engine relays BuildKit solve progress as
+`moby.buildkit.trace` aux messages (trace type in the message id,
+base64 payload as the aux value) rather than plain stream lines, so the
+adapter now decodes and renders those traces client-side into the plain
+progress lines the docker CLI printed, inside the bounded output.
 D0.2 stays open until this correction passes the real-Engine matrix and
 the full CI gate.
 
