@@ -813,9 +813,11 @@ docker-helper run --image NAME -- command args...
 docker-helper registry login --registry REG --username USER
 ```
 
-`build` and `run` appear synchronous: the CLI polls for completion, streams
-logs, and returns the final exit status. Operation IDs and log offsets are
-handled internally.
+`build` is a synchronous request and returns its final bounded output/result
+directly. `run` keeps a synchronous CLI UX but is backed by an asynchronous
+Operation: the CLI polls for completion, streams incremental logs, and returns
+the final exit status. Operation IDs and log offsets are therefore run-only
+transport details handled internally by the CLI.
 
 Agent-facing commands (`pull`, `build`, `run`, `registry login`) select the
 daemon endpoint the same way operator commands do, but authenticate with the
@@ -839,9 +841,11 @@ The presence of `XDG_RUNTIME_DIR` alone does not select a user socket; agent
 commands fall back to the system socket when no user-mode daemon is present.
 `--system` and `--endpoint` are mutually exclusive.
 
-SIGINT (Ctrl+C) or SIGTERM cancels the current operation:
+SIGINT (Ctrl+C) or SIGTERM interrupts the active command:
 - SIGINT -> exit 130
 - SIGTERM -> exit 143
+- for `build`, the signal cancels the in-flight synchronous HTTP request;
+- for `run`, the signal requests cancellation of the asynchronous daemon Operation.
 
 Use `docker-helper help` and `docker-helper help <command>` for discovery.
 
@@ -868,8 +872,8 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 
 ### Build
 
-`POST /build` starts an asynchronous Docker build and returns immediately
-with an `operation_id`. The build runs in the background.
+`POST /build` is synchronous. The HTTP response is the terminal build result;
+a successful response is HTTP 200 and has no `operation_id`.
 
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
@@ -895,31 +899,15 @@ Build args are not intended for secrets. Values may become visible in Docker
 build output depending on the Dockerfile/build process. Docker Helper audit
 records contain only `build_arg_keys`, never build-arg values.
 
-Response (HTTP 201):
+Response (HTTP 200):
 
 ```json
-{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
+{"ok":true,"output":"...","duration":"..."}
 ```
 
-**Poll status** until `status` is `succeeded` or `failed`:
-
-```bash
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
-  http://localhost/operations/op_abcdef1234567890
-```
-
-**Read incremental logs** using the `offset` parameter:
-
-```bash
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
-  'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
-```
-
-The logs response includes `next_offset` (use it as the `offset` for the
-next request) and `truncated` (true when older log data was evicted by
-the bounded retention limit, `operation_log_max_bytes`).
+A successful response is terminal. There is no build `operation_id` and no
+operation polling/log endpoint for build. When bounded output is capped, the
+response carries `"truncated": true`.
 
 ### Run
 
@@ -944,7 +932,7 @@ Response (HTTP 201):
 {"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
 ```
 
-Track progress using the same operation workflow as build:
+Track progress using the asynchronous Operation workflow:
 
 - **Poll status** until `status` is `succeeded` or `failed`:
 
@@ -971,7 +959,7 @@ Run-specific result codes:
 
 ### Cancel an operation
 
-Cancel a running build or run operation:
+Cancel a running `run` Operation:
 
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
@@ -981,6 +969,8 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 
 The operation becomes terminal with `status=failed` and `result_code=cancelled`.
 Cancelling an already-terminal operation is idempotent (returns current state).
+A synchronous build has no Operation ID; cancel it by cancelling its in-flight
+HTTP request/connection.
 
 ### Private registry authentication
 
@@ -1076,7 +1066,9 @@ Note: `docker-helper config show` (without a field) displays
 - docker-helper is a highly trusted component because it has access to
   the Docker daemon, so a validation or command-construction bug may
   compromise the host.
-- Operation logs for async build/run are bounded by `operation_log_max_bytes`; older output is evicted when the limit is reached.
+- Async `run` operation logs and synchronous build/pull output are bounded by
+  `operation_log_max_bytes`; older async log data is evicted when the limit is
+  reached and synchronous output reports `truncated` when capped.
 - Detached containers, custom networks, named volumes, and resource
   controls are not supported.
 
