@@ -12,6 +12,8 @@ import (
 	"sync"
 )
 
+const dockerHubAuthConfigKey = "https://index.docker.io/v1/"
+
 // The session Docker config directory is the one protected Session registry
 // credential store: a per-Session Docker CLI config directory
 // ($RUNTIME_DIR/sessions/<session-id>/docker, mode 0700) holding config.json
@@ -40,13 +42,12 @@ type sessionDockerAuthConfig struct {
 // the same session without an unbounded per-session lock table.
 var sessionDockerAuthConfigMu sync.Mutex
 
-// normalizeRegistryAddress canonicalizes a registry address to the host[:port]
-// form used as the credential-store key: any scheme prefix and any path
-// suffix are stripped (the docker CLI ConvertToHostname semantics), so the
-// spellings a caller may use for one registry resolve to one key while
-// distinct registries — distinct host or port — stay distinct.
-func normalizeRegistryAddress(registryAddr string) string {
-	stripped := registryAddr
+// convertRegistryToHostname mirrors Docker CLI credentials.ConvertToHostname:
+// it strips an optional scheme and path while preserving host[:port]. The
+// Session store deliberately retains Docker CLI-compatible key semantics
+// because legacy pull/build still consume this same config.json during D0.2.
+func convertRegistryToHostname(maybeURL string) string {
+	stripped := maybeURL
 	if strings.Contains(stripped, "://") {
 		if u, err := url.Parse(stripped); err == nil && u.Hostname() != "" {
 			if u.Port() == "" {
@@ -54,8 +55,67 @@ func normalizeRegistryAddress(registryAddr string) string {
 			}
 			return net.JoinHostPort(u.Hostname(), u.Port())
 		}
+		if host := registryHostFromURLFallback(stripped); host != "" {
+			return host
+		}
 	}
 	host, _, _ := strings.Cut(stripped, "/")
+	return host
+}
+
+// registryHostFromURLFallback handles scheme URLs that net/url rejects,
+// notably unbracketed IPv6 literals. This is the same compatibility behavior
+// Docker CLI uses when normalizing registry credential addresses.
+func registryHostFromURLFallback(maybeURL string) string {
+	_, rest, ok := strings.Cut(maybeURL, "://")
+	if !ok {
+		return ""
+	}
+	host, _, _ := strings.Cut(rest, "/")
+	if host == "" {
+		return ""
+	}
+	if strings.Count(host, ":") > 1 && !strings.HasPrefix(host, "[") {
+		portStart := strings.LastIndex(host, ":")
+		addr, port := host[:portStart], host[portStart+1:]
+		if addr != "" && registryPortDigits(port) {
+			return net.JoinHostPort(addr, port)
+		}
+	}
+	return host
+}
+
+func registryPortDigits(port string) bool {
+	if port == "" {
+		return false
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeRegistryLoginAddress returns the ServerAddress docker CLI would
+// submit to the Engine for an explicit login. The exact "docker.io" spelling
+// selects Docker Hub's historical IndexServer; other spellings are normalized
+// to host[:port] before the Engine call.
+func normalizeRegistryLoginAddress(registryAddr string) string {
+	if registryAddr == "docker.io" {
+		return dockerHubAuthConfigKey
+	}
+	return convertRegistryToHostname(registryAddr)
+}
+
+// normalizeRegistryAddress returns the canonical Docker CLI config key for a
+// registry credential. Docker Hub aliases share the historical IndexServer
+// key; all other registries use normalized host[:port].
+func normalizeRegistryAddress(registryAddr string) string {
+	host := convertRegistryToHostname(registryAddr)
+	if host == "docker.io" || host == "index.docker.io" {
+		return dockerHubAuthConfigKey
+	}
 	return host
 }
 

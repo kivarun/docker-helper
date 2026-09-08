@@ -21,14 +21,35 @@ func TestNormalizeRegistryAddress(t *testing.T) {
 		{"path suffix stripped", "registry.example.com/v2/", "registry.example.com"},
 		{"scheme and path stripped", "https://registry.example.com/v2/", "registry.example.com"},
 		{"distinct registries stay distinct", "registry.example.com:5001", "registry.example.com:5001"},
-		{"hub default", "docker.io", "docker.io"},
-		{"hub index host", "index.docker.io", "index.docker.io"},
-		{"hub v1 url", "https://index.docker.io/v1/", "index.docker.io"},
+		{"hub default", "docker.io", dockerHubAuthConfigKey},
+		{"hub index host", "index.docker.io", dockerHubAuthConfigKey},
+		{"hub v1 url", "https://index.docker.io/v1/", dockerHubAuthConfigKey},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := normalizeRegistryAddress(tc.input); got != tc.want {
 				t.Errorf("normalizeRegistryAddress(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeRegistryLoginAddress(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"docker hub default namespace", "docker.io", dockerHubAuthConfigKey},
+		{"docker hub index host remains explicit host", "index.docker.io", "index.docker.io"},
+		{"docker hub index URL normalizes to host", "https://index.docker.io/v1/", "index.docker.io"},
+		{"custom URL normalizes to host", "https://registry.example.com/v2/", "registry.example.com"},
+		{"custom host with port", "registry.example.com:5000", "registry.example.com:5000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeRegistryLoginAddress(tc.input); got != tc.want {
+				t.Errorf("normalizeRegistryLoginAddress(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -53,9 +74,9 @@ func TestNormalizeRegistryAddressNoAliasing(t *testing.T) {
 			others:    []string{"registry.example.com:5000", "sub.registry.example.com", "other.example.com"},
 		},
 		{
-			name:      "hub and its index host stay distinct keys",
-			spellings: []string{"docker.io"},
-			others:    []string{"index.docker.io"},
+			name:      "docker hub aliases share the historical config key",
+			spellings: []string{"docker.io", "index.docker.io", "https://index.docker.io/v1/"},
+			others:    []string{"registry-1.docker.io", "other.example.com"},
 		},
 	}
 	for _, tc := range cases {
@@ -142,6 +163,51 @@ func TestStoreAndReadSessionRegistryCredential(t *testing.T) {
 	// Nothing is stored for an unknown session.
 	if _, ok, err := readSessionRegistryCredential(runtimeDir, "dhs_other", "registry.example.com"); err != nil || ok {
 		t.Fatalf("foreign session must not see the credential: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestStoreSessionRegistryCredentialDockerHubCLIKey(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	runtimeDir := app.Config.RuntimeDir
+	sessionID := result.Session.ID
+
+	if err := storeSessionRegistryCredential(runtimeDir, sessionID, "docker.io", "hub-user", "hub-pass", ""); err != nil {
+		t.Fatalf("store Docker Hub credential: %v", err)
+	}
+
+	cfg, err := readSessionDockerAuthConfig(sessionDockerDir(runtimeDir, sessionID))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if len(cfg.Auths) != 1 {
+		t.Fatalf("expected one Docker Hub auth entry, got %d: %v", len(cfg.Auths), cfg.Auths)
+	}
+	if _, ok := cfg.Auths[dockerHubAuthConfigKey]; !ok {
+		t.Fatalf("Docker Hub credential must use Docker CLI historical key %q: %v", dockerHubAuthConfigKey, cfg.Auths)
+	}
+	if _, ok := cfg.Auths["docker.io"]; ok {
+		t.Fatalf("Docker Hub credential must not be stored under non-CLI key docker.io")
+	}
+	if _, ok := cfg.Auths["index.docker.io"]; ok {
+		t.Fatalf("Docker Hub credential must not be stored under non-CLI key index.docker.io")
+	}
+
+	for _, spelling := range []string{"docker.io", "index.docker.io", "https://index.docker.io/v1/"} {
+		entry, ok, err := readSessionRegistryCredential(runtimeDir, sessionID, spelling)
+		if err != nil || !ok {
+			t.Fatalf("Docker Hub spelling %q must resolve to stored credential: ok=%v err=%v", spelling, ok, err)
+		}
+		username, password, err := decodeSessionDockerAuth(entry.Auth)
+		if err != nil {
+			t.Fatalf("decode %q: %v", spelling, err)
+		}
+		if username != "hub-user" || password != "hub-pass" {
+			t.Fatalf("Docker Hub spelling %q resolved wrong credential: %q/%q", spelling, username, password)
+		}
 	}
 }
 

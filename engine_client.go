@@ -40,15 +40,28 @@ const (
 	engineErrRegistryUnavailable
 )
 
-// engineError is a normalized Engine failure. The raw backend error is kept
-// only as the unwrappable cause for operator diagnostics; public-facing
-// handlers map the kind to a sanitized code and never copy cause text.
+// engineError is a normalized Engine failure. Error deliberately exposes only
+// the normalized category: raw backend payloads must not leak through ordinary
+// logging or public error handling. The cause remains available through Unwrap
+// for narrow internal classification/diagnostics that explicitly opt into it.
 type engineError struct {
 	kind  engineErrorKind
 	cause error
 }
 
-func (e *engineError) Error() string { return e.cause.Error() }
+func (e *engineError) Error() string {
+	switch e.kind {
+	case engineErrBackendUnavailable:
+		return "docker engine unavailable"
+	case engineErrRegistryAuthDenied:
+		return "registry authentication denied"
+	case engineErrRegistryUnavailable:
+		return "registry unavailable"
+	default:
+		return "docker engine failure"
+	}
+}
+
 func (e *engineError) Unwrap() error { return e.cause }
 
 // engineClient is the single production Docker Engine adapter owner for
