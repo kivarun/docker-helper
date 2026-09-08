@@ -21,8 +21,11 @@ import (
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/errdefs/pkg/errhttp"
+	controlapi "github.com/moby/buildkit/api/services/control"
 	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // newFakeEngine serves the minimal Engine endpoints used by the adapter
@@ -1078,6 +1081,87 @@ func TestEngineImageBuildRequestContract(t *testing.T) {
 	}
 	if got, want := record.query.Get("session"), sessionDials.singleUUID(); got == "" || got != want {
 		t.Errorf("build session = %q, dialed session = %q", got, want)
+	}
+}
+
+// buildkitTraceAuxLine marshals one daemon solve-progress trace into the
+// aux JSON stream line the Engine sends for a BuildKit build.
+func buildkitTraceAuxLine(t *testing.T, resp *controlapi.StatusResponse) string {
+	t.Helper()
+	raw, err := proto.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal trace: %v", err)
+	}
+	payload, err := json.Marshal(struct {
+		Aux map[string][]byte `json:"aux"`
+	}{Aux: map[string][]byte{"moby.buildkit.trace": raw}})
+	if err != nil {
+		t.Fatalf("encode aux line: %v", err)
+	}
+	return string(payload) + "\n"
+}
+
+// TestEngineImageBuildRendersBuildkitTraceAux proves the adapter renders
+// the daemon's moby.buildkit.trace aux messages — the progress form the
+// Engine streams for a BuildKit build — into the plain progress lines the
+// docker CLI printed, inside the bounded build output.
+func TestEngineImageBuildRendersBuildkitTraceAux(t *testing.T) {
+	started := timestamppb.New(time.Now().Add(-100 * time.Millisecond))
+	trace := &controlapi.StatusResponse{
+		Vertexes: []*controlapi.Vertex{{
+			Digest:  "v1",
+			Name:    "[2/2] RUN echo trace-marker",
+			Started: started,
+		}},
+		Logs: []*controlapi.VertexLog{{
+			Vertex:    "v1",
+			Timestamp: started,
+			Msg:       []byte("trace-marker-output\n"),
+		}},
+	}
+	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(nil,
+		buildkitTraceAuxLine(t, trace),
+		`{"aux":{"moby.image.id":"sha256:0123456789abcdef"}}`,
+	))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	result, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:   "example:tag",
+		Context: bytes.NewReader([]byte("tar-context-bytes")),
+	}, 1<<20)
+	if err != nil {
+		t.Fatalf("imageBuild: %v", err)
+	}
+	if result.Output == "" {
+		t.Fatal("build output is empty; the BuildKit trace aux messages must render")
+	}
+	if !strings.Contains(result.Output, "RUN echo trace-marker") {
+		t.Errorf("build output misses the vertex name: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "trace-marker-output") {
+		t.Errorf("build output misses the vertex log: %q", result.Output)
+	}
+}
+
+// TestEngineImageBuildSkipsMalformedTraceAux proves a malformed aux trace
+// is skipped as cosmetic rendering failure and does not fail the build.
+func TestEngineImageBuildSkipsMalformedTraceAux(t *testing.T) {
+	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(nil,
+		`{"aux":{"moby.buildkit.trace":"not-base64!!"}}`,
+		`{"aux":{"moby.buildkit.trace":"AAAA"}}`,
+		`{"stream":"#1 DONE 0.0s\n"}`,
+	))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	result, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:   "example:tag",
+		Context: bytes.NewReader([]byte("tar-context-bytes")),
+	}, 1<<20)
+	if err != nil {
+		t.Fatalf("imageBuild: %v", err)
+	}
+	if result.Output != "#1 DONE 0.0s\n" {
+		t.Errorf("build output = %q, want only the renderable stream line", result.Output)
 	}
 }
 

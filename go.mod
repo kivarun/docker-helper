@@ -8,6 +8,7 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/errdefs/pkg v0.3.0
 	github.com/distribution/reference v0.6.0
+	github.com/docker/cli v29.3.1+incompatible
 	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/moby/buildkit v0.29.0
 	github.com/moby/moby/api v1.56.0
@@ -15,6 +16,7 @@ require (
 	golang.org/x/crypto v0.48.0
 	golang.org/x/sys v0.42.0
 	golang.org/x/term v0.41.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -28,7 +30,6 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.2 // indirect
 	github.com/containerd/ttrpc v1.2.8 // indirect
 	github.com/containerd/typeurl/v2 v2.2.3 // indirect
-	github.com/docker/cli v29.3.1+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.5 // indirect
 	github.com/docker/go-connections v0.7.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
@@ -79,5 +80,4 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260128011058-8636f8732409 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409 // indirect
 	google.golang.org/grpc v1.79.3 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 )

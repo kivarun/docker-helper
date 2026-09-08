@@ -11,13 +11,17 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/errdefs/pkg/errhttp"
 	authtypes "github.com/docker/cli/cli/config/types"
+	controlapi "github.com/moby/buildkit/api/services/control"
+	buildkitclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
+	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/moby/moby/api/pkg/authconfig"
 	buildtypes "github.com/moby/moby/api/types/build"
 	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
+	"google.golang.org/protobuf/proto"
 )
 
 // engineRegistryAuthenticator is the narrow Engine surface consumed by the
@@ -357,6 +361,68 @@ func renderEngineStreamMessage(msg jsonstream.Message) string {
 	}
 }
 
+// buildkitAuxTrace extracts the daemon's BuildKit solve-progress trace from
+// an aux JSON stream message; encoding/json base64-decodes the byte field.
+type buildkitAuxTrace struct {
+	Trace []byte `json:"moby.buildkit.trace"`
+}
+
+// engineBuildTraceRenderer renders BuildKit solve progress for one build
+// request into the plain progress lines the docker CLI printed for BuildKit
+// builds. For a BuildKit build the daemon relays solve progress as
+// moby.buildkit.trace aux messages, so an API client shows the build
+// progress by decoding and rendering those traces client-side. Traces carry
+// build progress only; decode failures are skipped because rendering is
+// cosmetic and the authoritative failure signals remain the in-stream error
+// and the transport error.
+type engineBuildTraceRenderer struct {
+	ch   chan *buildkitclient.SolveStatus
+	done chan struct{}
+}
+
+func newEngineBuildTraceRenderer(ctx context.Context, out io.Writer) (*engineBuildTraceRenderer, error) {
+	display, err := progressui.NewDisplay(out, progressui.PlainMode)
+	if err != nil {
+		return nil, err
+	}
+	r := &engineBuildTraceRenderer{
+		ch:   make(chan *buildkitclient.SolveStatus, 16),
+		done: make(chan struct{}),
+	}
+	go func() {
+		defer close(r.done)
+		_, _ = display.UpdateFrom(ctx, r.ch)
+	}()
+	return r, nil
+}
+
+// pushAux renders one aux message. Malformed aux payloads are skipped.
+func (r *engineBuildTraceRenderer) pushAux(raw json.RawMessage) {
+	if r == nil {
+		return
+	}
+	var aux buildkitAuxTrace
+	if err := json.Unmarshal(raw, &aux); err != nil || len(aux.Trace) == 0 {
+		return
+	}
+	var resp controlapi.StatusResponse
+	if err := proto.Unmarshal(aux.Trace, &resp); err != nil {
+		return
+	}
+	r.ch <- buildkitclient.NewSolveStatus(&resp)
+}
+
+// close joins the renderer: it stops feeding and waits until the display has
+// flushed its remaining progress to the output writer, so the renderer
+// never outlives the build request.
+func (r *engineBuildTraceRenderer) close() {
+	if r == nil {
+		return
+	}
+	close(r.ch)
+	<-r.done
+}
+
 // buildkitSessionSharedKey is the stable session handshake identity shared
 // by every docker-helper build session. It is not a secret and carries no
 // credential material.
@@ -374,11 +440,14 @@ const buildkitSessionSharedKey = "docker-helper"
 // --pull produced.
 //
 // The progress stream is rendered in the line-based form the docker CLI
-// printed for build output and accumulated in a bounded buffer; the stream
-// is always consumed to its terminal outcome so an in-band build failure is
-// detected even after the buffer cap. A build failure the Engine reports
-// inside the stream is a trustworthy negative result; a malformed or
-// transport-broken stream is not.
+// printed for build output and accumulated in a bounded buffer. For a
+// BuildKit build the daemon relays solve progress as moby.buildkit.trace
+// aux messages; the adapter decodes and renders those traces client-side
+// with the BuildKit progress renderer. The stream is always consumed to
+// its terminal outcome so an in-band build failure is detected even after
+// the buffer cap. A build failure the Engine reports inside the stream is
+// a trustworthy negative result; a malformed or transport-broken stream is
+// not.
 func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, outputLimit int64) (engineBuildResult, error) {
 	sess, sessErr := session.NewSession(ctx, buildkitSessionSharedKey)
 	if sessErr != nil {
@@ -431,6 +500,11 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 	defer resp.Body.Close()
 
 	buf := newBoundedBuffer(outputLimit)
+	renderer, err := newEngineBuildTraceRenderer(ctx, buf)
+	if err != nil {
+		// Progress rendering is cosmetic; the build proceeds without it.
+		renderer = nil
+	}
 	var streamErr error
 	var embedded *jsonstream.Error
 	dec := json.NewDecoder(resp.Body)
@@ -456,10 +530,13 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 			if embedded == nil {
 				embedded = &jsonstream.Error{Message: msg.ErrorMessage}
 			}
+		case msg.Aux != nil:
+			renderer.pushAux(*msg.Aux)
 		default:
 			buf.Write([]byte(renderEngineStreamMessage(msg.Message)))
 		}
 	}
+	renderer.close()
 
 	data, _, truncated := buf.Range(0)
 	var buildErr error
