@@ -2,20 +2,25 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
 )
 
 // newFakeEngine serves the minimal Engine endpoints used by the adapter
-// tests: the unversioned /_ping negotiation endpoint and the /auth registry
-// validation endpoint.
-func newFakeEngine(t *testing.T, apiVersion string, authHandler http.HandlerFunc) *httptest.Server {
+// tests: the unversioned /_ping negotiation endpoint, the /auth registry
+// validation endpoint, and the /images/create pull endpoint. A nil handler
+// leaves the corresponding endpoint answering 404.
+func newFakeEngine(t *testing.T, apiVersion string, authHandler, pullHandler http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -26,6 +31,12 @@ func newFakeEngine(t *testing.T, apiVersion string, authHandler http.HandlerFunc
 		case strings.HasSuffix(r.URL.Path, "/auth"):
 			if authHandler != nil {
 				authHandler(w, r)
+				return
+			}
+			http.NotFound(w, r)
+		case strings.HasSuffix(r.URL.Path, "/images/create"):
+			if pullHandler != nil {
+				pullHandler(w, r)
 				return
 			}
 			http.NotFound(w, r)
@@ -68,7 +79,7 @@ func TestEngineClientRegistryLoginNegotiationAndAuth(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"Status":"Login Succeeded"}`))
-	})
+	}, nil)
 	origHandler := srv.Config.Handler
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/_ping" {
@@ -112,7 +123,7 @@ func TestEngineClientRegistryLoginIdentityToken(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"Status":"Login Succeeded","IdentityToken":"tok-123"}`))
-	})
+	}, nil)
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	token, err := eng.registryLogin(context.Background(), "registry.example.com", "user", "pass")
@@ -195,7 +206,7 @@ func TestEngineClientRegistryLoginErrorNormalization(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newFakeEngine(t, tc.apiVersion, tc.authHandler)
+			srv := newFakeEngine(t, tc.apiVersion, tc.authHandler, nil)
 			eng := newEngineClientAgainstFake(t, srv.URL)
 
 			_, err := eng.registryLogin(context.Background(), "registry.example.com", "user", "pass")
@@ -245,7 +256,7 @@ func TestEngineClientNoRawErrorLeakage(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"message":"` + unauthorizedMsg + `"}`))
-	})
+	}, nil)
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	_, err := eng.registryLogin(context.Background(), "registry.example.com", "user", "pass")
@@ -260,5 +271,302 @@ func TestEngineClientNoRawErrorLeakage(t *testing.T) {
 	case engineErrBackendFailure, engineErrBackendUnavailable, engineErrRegistryAuthDenied, engineErrRegistryUnavailable:
 	default:
 		t.Errorf("kind %d is not a docker-helper engine error category", engineErr.kind)
+	}
+}
+
+// fakePullStream returns a pull endpoint handler serving the given NDJSON
+// pull stream, recording the request path, query, and registry-auth header.
+func fakePullStream(record *fakePullRequest, lines ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		record.path = r.URL.Path
+		record.fromImage = r.URL.Query().Get("fromImage")
+		record.tag = r.URL.Query().Get("tag")
+		record.registryAuth = r.Header.Get("X-Registry-Auth")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		for _, line := range lines {
+			_, _ = w.Write([]byte(line + "\n"))
+		}
+	}
+}
+
+// fakePullRequest records one pull endpoint request.
+type fakePullRequest struct {
+	path         string
+	fromImage    string
+	tag          string
+	registryAuth string
+}
+
+// TestEngineClientPullUnauthenticatedRequestAndStream proves the pull adapter
+// delegates reference normalization to the Moby client (the docker-semantic
+// fromImage/tag request the CLI pull path used), sends no registry-auth
+// header for an unauthenticated pull, negotiates the API version, and renders
+// the progress stream into line-based combined output.
+func TestEngineClientPullUnauthenticatedRequestAndStream(t *testing.T) {
+	var record fakePullRequest
+	srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record,
+		`{"status":"Pulling from library/alpine","id":"0123456789ab"}`,
+		`{"status":"Status: Downloaded newer image for alpine:3.24"}`,
+	))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	result, err := eng.imagePull(context.Background(), "alpine:3.24", nil, 1<<20)
+	if err != nil {
+		t.Fatalf("imagePull: %v", err)
+	}
+
+	if record.path != "/v1.51/images/create" {
+		t.Errorf("pull request must use the negotiated API version, got %q", record.path)
+	}
+	if record.fromImage != "docker.io/library/alpine" || record.tag != "3.24" {
+		t.Errorf("fromImage/tag = %q/%q, want docker.io/library/alpine/3.24", record.fromImage, record.tag)
+	}
+	if record.registryAuth != "" {
+		t.Errorf("unauthenticated pull must not send a registry-auth header, got %q", record.registryAuth)
+	}
+	wantOutput := "0123456789ab: Pulling from library/alpine\nStatus: Downloaded newer image for alpine:3.24\n"
+	if result.Output != wantOutput {
+		t.Errorf("output = %q, want %q", result.Output, wantOutput)
+	}
+	if result.Truncated {
+		t.Error("bounded output must not report truncation below the limit")
+	}
+}
+
+// TestEngineClientPullRegistryAuthEncoding proves the pull adapter encodes a
+// resolved Session credential into the X-Registry-Auth header in the Engine
+// format, including the registry address, and never places the credential in
+// the request URL.
+func TestEngineClientPullRegistryAuthEncoding(t *testing.T) {
+	cases := []struct {
+		name       string
+		credential sessionRegistryCredential
+		want       registry.AuthConfig
+	}{
+		{
+			name: "username and password",
+			credential: sessionRegistryCredential{
+				Registry: "registry.example.com",
+				Username: "user",
+				Password: "secret-pass",
+			},
+			want: registry.AuthConfig{
+				Username:      "user",
+				Password:      "secret-pass",
+				ServerAddress: "registry.example.com",
+			},
+		},
+		{
+			name: "identity token",
+			credential: sessionRegistryCredential{
+				Registry:      "https://index.docker.io/v1/",
+				IdentityToken: "tok-123",
+			},
+			want: registry.AuthConfig{
+				IdentityToken: "tok-123",
+				ServerAddress: "https://index.docker.io/v1/",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var record fakePullRequest
+			srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record,
+				`{"status":"Status: Downloaded newer image for alpine:3.24"}`,
+			))
+
+			eng := newEngineClientAgainstFake(t, srv.URL)
+			cred := tc.credential
+			_, err := eng.imagePull(context.Background(), "alpine:3.24", &cred, 1<<20)
+			if err != nil {
+				t.Fatalf("imagePull: %v", err)
+			}
+			if record.registryAuth == "" {
+				t.Fatal("authenticated pull must send the registry-auth header")
+			}
+
+			decoded, err := base64.URLEncoding.DecodeString(record.registryAuth)
+			if err != nil {
+				t.Fatalf("registry-auth header is not base64url encoded: %v (%q)", err, record.registryAuth)
+			}
+			var sent registry.AuthConfig
+			if err := json.Unmarshal(decoded, &sent); err != nil {
+				t.Fatalf("registry-auth header is not the Engine auth payload: %v", err)
+			}
+			if sent != tc.want {
+				t.Errorf("auth payload = %+v, want %+v", sent, tc.want)
+			}
+		})
+	}
+}
+
+// TestEngineClientPullEmbeddedErrorNormalization proves in-band Engine pull
+// failures normalize into the docker-helper error categories with typed
+// signals preserved, and that the adapter keeps draining the stream after an
+// embedded error so the rendered failure output stays complete.
+func TestEngineClientPullEmbeddedErrorNormalization(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantKind   engineErrorKind
+		wantTyped  func(error) bool
+		wantOutput string
+	}{
+		{
+			name: "typed registry auth denial",
+			body: `{"errorDetail":{"code":401,"message":"unauthorized: authentication required"},"error":"unauthorized: authentication required"}` + "\n" +
+				`{"status":"Download complete","id":"zz"}`,
+			wantKind:   engineErrRegistryAuthDenied,
+			wantTyped:  cerrdefs.IsUnauthorized,
+			wantOutput: "unauthorized: authentication required\nzz: Download complete\n",
+		},
+		{
+			name:       "typed image not found",
+			body:       `{"errorDetail":{"code":404,"message":"manifest for alpine:9.9 not found"},"error":"manifest for alpine:9.9 not found"}`,
+			wantKind:   engineErrImageNotFound,
+			wantTyped:  cerrdefs.IsNotFound,
+			wantOutput: "manifest for alpine:9.9 not found\n",
+		},
+		{
+			name:       "registry auth denial without a typed signal",
+			body:       `{"errorDetail":{"message":"pull access denied for foo, repository does not exist or may require 'docker login'"}}`,
+			wantKind:   engineErrRegistryAuthDenied,
+			wantOutput: "pull access denied for foo, repository does not exist or may require 'docker login'\n",
+		},
+		{
+			name:       "registry unreachable without a typed signal",
+			body:       `{"errorDetail":{"message":"Error response from daemon: Get \"https://registry.example.com/v2/\": dial tcp: lookup registry.example.com: no such host"}}`,
+			wantKind:   engineErrRegistryUnavailable,
+			wantOutput: "Error response from daemon: Get \"https://registry.example.com/v2/\": dial tcp: lookup registry.example.com: no such host\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var record fakePullRequest
+			srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record, tc.body))
+
+			eng := newEngineClientAgainstFake(t, srv.URL)
+			result, err := eng.imagePull(context.Background(), "alpine:3.24", nil, 1<<20)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+
+			var engineErr *engineError
+			if !errors.As(err, &engineErr) {
+				t.Fatalf("error must normalize into engineError, got %T: %v", err, err)
+			}
+			if engineErr.kind != tc.wantKind {
+				t.Errorf("kind = %d, want %d", engineErr.kind, tc.wantKind)
+			}
+			if tc.wantTyped != nil && !tc.wantTyped(err) {
+				t.Errorf("typed signal lost through normalization: %v", err)
+			}
+			if result.Output != tc.wantOutput {
+				t.Errorf("failure output = %q, want %q", result.Output, tc.wantOutput)
+			}
+		})
+	}
+}
+
+// TestEngineClientPullTransportAndRequestFailures proves the pull adapter
+// normalizes Engine transport failures and invalid image references.
+func TestEngineClientPullTransportAndRequestFailures(t *testing.T) {
+	closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := closedSrv.URL
+	closedSrv.Close()
+	eng := newEngineClientAgainstFake(t, closedURL)
+	_, err := eng.imagePull(context.Background(), "alpine:3.24", nil, 1<<20)
+	if err == nil {
+		t.Fatal("expected an error for an unreachable engine")
+	}
+	var engineErr *engineError
+	if !errors.As(err, &engineErr) {
+		t.Fatalf("error must normalize into engineError, got %T: %v", err, err)
+	}
+	if engineErr.kind != engineErrBackendUnavailable {
+		t.Errorf("kind = %d, want %d", engineErr.kind, engineErrBackendUnavailable)
+	}
+
+	var record fakePullRequest
+	srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record))
+	eng = newEngineClientAgainstFake(t, srv.URL)
+	_, err = eng.imagePull(context.Background(), "INVALID:REFERENCE!!", nil, 1<<20)
+	if err == nil {
+		t.Fatal("expected an error for an invalid image reference")
+	}
+	if !errors.As(err, &engineErr) {
+		t.Fatalf("error must normalize into engineError, got %T: %v", err, err)
+	}
+	if engineErr.kind != engineErrBackendFailure {
+		t.Errorf("kind = %d, want %d", engineErr.kind, engineErrBackendFailure)
+	}
+	if record.path != "" {
+		t.Error("an invalid image reference must not reach the Engine pull endpoint")
+	}
+}
+
+// TestEngineClientPullContextCancellation proves a cancelled pull request
+// surfaces as the client-cancelled category and the Engine sees the request
+// end through the cancelled context.
+func TestEngineClientPullContextCancellation(t *testing.T) {
+	requestStarted := make(chan struct{})
+	handlerDone := make(chan struct{})
+	srv := newFakeEngine(t, "1.51", nil, func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+		close(handlerDone)
+	})
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-requestStarted
+		cancel()
+	}()
+
+	_, err := eng.imagePull(ctx, "alpine:3.24", nil, 1<<20)
+	if err == nil {
+		t.Fatal("expected an error for a cancelled pull")
+	}
+	var engineErr *engineError
+	if !errors.As(err, &engineErr) {
+		t.Fatalf("error must normalize into engineError, got %T: %v", err, err)
+	}
+	if engineErr.kind != engineErrClientCancelled {
+		t.Errorf("kind = %d, want %d", engineErr.kind, engineErrClientCancelled)
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Error("the cancelled pull did not end the Engine request")
+	}
+}
+
+// TestEngineClientPullOutputTruncation proves the pull adapter bounds its
+// rendered output with the newest bytes preserved and truncation reported.
+func TestEngineClientPullOutputTruncation(t *testing.T) {
+	var record fakePullRequest
+	lines := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		lines = append(lines, `{"stream":"0123456789\n"}`)
+	}
+	srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record, lines...))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	result, err := eng.imagePull(context.Background(), "alpine:3.24", nil, 100)
+	if err != nil {
+		t.Fatalf("imagePull: %v", err)
+	}
+	full := strings.Repeat("0123456789\n", 20)
+	want := full[len(full)-100:]
+	if result.Output != want {
+		t.Errorf("truncated output = %q, want %q", result.Output, want)
+	}
+	if !result.Truncated {
+		t.Error("output beyond the limit must report truncation")
 	}
 }

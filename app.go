@@ -39,6 +39,10 @@ type App struct {
 	// registry-login path. Production default (nil) constructs the single
 	// engineClient adapter with API negotiation.
 	NewEngineClientFn func() (engineRegistryAuthenticator, error)
+	// NewEnginePullFn is a test seam for the Engine adapter used by the pull
+	// path. Production default (nil) constructs the single engineClient
+	// adapter with API negotiation.
+	NewEnginePullFn func() (engineImagePuller, error)
 	// PinWorkspaceMountSourceFn is a test seam for the inode-pinning primitive.
 	// Production default calls the real pinWorkspaceMountSource; tests can return
 	// a fake pinnedMount with controlled Cleanup behavior.
@@ -54,6 +58,11 @@ type App struct {
 	// MACCoordinator is the session MAC coordinator owner.
 	// nil in user mode or when no MAC driver is active.
 	MACCoordinator *sessionMACCoordinator
+	// SyncExecutionCoordinator owns admission, cancellation, and bounded
+	// shutdown termination for synchronous Engine-backed requests. It is
+	// wired for every App, production and tests alike, so pull handling has
+	// a single shutdown behavior.
+	SyncExecutionCoordinator *syncExecutionCoordinator
 	// InspectHelperContainers, when set, overrides the Docker-based helper
 	// container inspection used by checked Launcher/Principal deletion. It is a
 	// narrow test seam; production default shells out to the Docker CLI.

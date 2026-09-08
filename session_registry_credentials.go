@@ -31,6 +31,18 @@ type sessionDockerAuthEntry struct {
 	IdentityToken string `json:"identitytoken,omitempty"`
 }
 
+// sessionRegistryCredential is one Session registry credential resolved from
+// the session Docker credential store in the form the Engine adapter
+// consumes. Registry is the canonical store key the credential was persisted
+// under; exactly one of the username/password pair or the identity token is
+// populated, matching the persisted entry.
+type sessionRegistryCredential struct {
+	Registry      string
+	Username      string
+	Password      string
+	IdentityToken string
+}
+
 // sessionDockerAuthConfig is the persisted config.json document shape.
 type sessionDockerAuthConfig struct {
 	Auths map[string]sessionDockerAuthEntry `json:"auths,omitempty"`

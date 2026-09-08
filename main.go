@@ -353,12 +353,13 @@ func runDaemon(stdout, stderr io.Writer) error {
 		}
 
 		app := &App{
-			Config:              cfg,
-			DB:                  db,
-			AdminTokenHash:      adminHash,
-			OperationSupervisor: newOperationSupervisor(),
-			MACCoordinator:      macCoordinator,
-			userModeDefault:     userModeDefault,
+			Config:                   cfg,
+			DB:                       db,
+			AdminTokenHash:           adminHash,
+			OperationSupervisor:      newOperationSupervisor(),
+			SyncExecutionCoordinator: newSyncExecutionCoordinator(),
+			MACCoordinator:           macCoordinator,
+			userModeDefault:          userModeDefault,
 		}
 
 		mux := http.NewServeMux()
@@ -396,9 +397,13 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return app.getConfig().ShutdownTimeout
 		}, func() {
 			// Shutdown triggered (signal or Serve error) — close the operation
-			// gate so no new operations are accepted.
+			// gate so no new operations are accepted, and close synchronous
+			// Engine request admission.
 			if app.OperationSupervisor != nil {
 				app.OperationSupervisor.beginShutdown()
+			}
+			if app.SyncExecutionCoordinator != nil {
+				app.SyncExecutionCoordinator.beginShutdown()
 			}
 		})
 
@@ -407,6 +412,12 @@ func runDaemon(stdout, stderr io.Writer) error {
 		// concurrently under the one wall-clock shutdown budget.
 		if app.OperationSupervisor != nil {
 			app.OperationSupervisor.terminateForShutdown(shutdownCtx, app.killContainerBestEffort)
+		}
+
+		// Cancel live synchronous Engine requests and wait for their
+		// handlers to release them under the same shutdown deadline.
+		if app.SyncExecutionCoordinator != nil {
+			app.SyncExecutionCoordinator.terminateForShutdown(shutdownCtx)
 		}
 
 		// Wait for HTTP drain to complete before cancelling the shutdown

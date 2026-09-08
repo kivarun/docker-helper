@@ -250,8 +250,9 @@ func newTestApp(t *testing.T) *App {
 	}
 
 	app := &App{
-		Config: cfg,
-		DB:     db,
+		Config:                   cfg,
+		DB:                       db,
+		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 		// Default to no observable helper runtime so ordinary lifecycle tests
 		// that do not exercise Docker can delete Launchers/Principals cleanly.
 		// Docker runtime-inspection tests override this seam explicitly.
