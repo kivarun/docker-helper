@@ -1085,20 +1085,26 @@ func TestEngineImageBuildRequestContract(t *testing.T) {
 }
 
 // buildkitTraceAuxLine marshals one daemon solve-progress trace into the
-// aux JSON stream line the Engine sends for a BuildKit build.
+// aux JSON stream line the Engine sends for a BuildKit build: the trace
+// type travels in the message id, the base64 trace payload in the aux field.
 func buildkitTraceAuxLine(t *testing.T, resp *controlapi.StatusResponse) string {
 	t.Helper()
 	raw, err := proto.Marshal(resp)
 	if err != nil {
 		t.Fatalf("marshal trace: %v", err)
 	}
-	payload, err := json.Marshal(struct {
-		Aux map[string][]byte `json:"aux"`
-	}{Aux: map[string][]byte{"moby.buildkit.trace": raw}})
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("encode trace payload: %v", err)
+	}
+	line, err := json.Marshal(struct {
+		ID  string          `json:"id,omitempty"`
+		Aux json.RawMessage `json:"aux,omitempty"`
+	}{ID: "moby.buildkit.trace", Aux: payload})
 	if err != nil {
 		t.Fatalf("encode aux line: %v", err)
 	}
-	return string(payload) + "\n"
+	return string(line) + "\n"
 }
 
 // TestEngineImageBuildRendersBuildkitTraceAux proves the adapter renders
@@ -1147,8 +1153,8 @@ func TestEngineImageBuildRendersBuildkitTraceAux(t *testing.T) {
 // is skipped as cosmetic rendering failure and does not fail the build.
 func TestEngineImageBuildSkipsMalformedTraceAux(t *testing.T) {
 	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(nil,
-		`{"aux":{"moby.buildkit.trace":"not-base64!!"}}`,
-		`{"aux":{"moby.buildkit.trace":"AAAA"}}`,
+		`{"id":"moby.buildkit.trace","aux":"not-base64!!"}`,
+		`{"id":"moby.buildkit.trace","aux":"AAAA"}`,
 		`{"stream":"#1 DONE 0.0s\n"}`,
 	))
 

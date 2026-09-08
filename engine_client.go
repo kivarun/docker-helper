@@ -361,11 +361,10 @@ func renderEngineStreamMessage(msg jsonstream.Message) string {
 	}
 }
 
-// buildkitAuxTrace extracts the daemon's BuildKit solve-progress trace from
-// an aux JSON stream message; encoding/json base64-decodes the byte field.
-type buildkitAuxTrace struct {
-	Trace []byte `json:"moby.buildkit.trace"`
-}
+// buildkitTraceAuxID is the aux message id the Engine uses to relay
+// BuildKit solve progress on the build stream: the trace type travels in
+// the message id and the base64-encoded trace payload in the aux field.
+const buildkitTraceAuxID = "moby.buildkit.trace"
 
 // engineBuildTraceRenderer renders BuildKit solve progress for one build
 // request into the plain progress lines the docker CLI printed for BuildKit
@@ -396,17 +395,18 @@ func newEngineBuildTraceRenderer(ctx context.Context, out io.Writer) (*engineBui
 	return r, nil
 }
 
-// pushAux renders one aux message. Malformed aux payloads are skipped.
-func (r *engineBuildTraceRenderer) pushAux(raw json.RawMessage) {
-	if r == nil {
+// pushAux renders one aux message. Non-trace aux types and malformed trace
+// payloads are skipped.
+func (r *engineBuildTraceRenderer) pushAux(id string, raw json.RawMessage) {
+	if r == nil || id != buildkitTraceAuxID {
 		return
 	}
-	var aux buildkitAuxTrace
-	if err := json.Unmarshal(raw, &aux); err != nil || len(aux.Trace) == 0 {
+	var trace []byte
+	if err := json.Unmarshal(raw, &trace); err != nil || len(trace) == 0 {
 		return
 	}
 	var resp controlapi.StatusResponse
-	if err := proto.Unmarshal(aux.Trace, &resp); err != nil {
+	if err := proto.Unmarshal(trace, &resp); err != nil {
 		return
 	}
 	r.ch <- buildkitclient.NewSolveStatus(&resp)
@@ -531,7 +531,7 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 				embedded = &jsonstream.Error{Message: msg.ErrorMessage}
 			}
 		case msg.Aux != nil:
-			renderer.pushAux(*msg.Aux)
+			renderer.pushAux(msg.ID, *msg.Aux)
 		default:
 			buf.Write([]byte(renderEngineStreamMessage(msg.Message)))
 		}
