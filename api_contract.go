@@ -59,7 +59,7 @@ type buildResponse struct {
 	Duration  string `json:"duration,omitempty"`
 }
 
-// operationCreatedResponse is the response from POST /build and POST /run.
+// operationCreatedResponse is the response from the asynchronous POST /run.
 type operationCreatedResponse struct {
 	OK          bool           `json:"ok"`
 	OperationID string         `json:"operation_id"`
