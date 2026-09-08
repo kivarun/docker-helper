@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/errdefs/pkg/errhttp"
 	"github.com/moby/moby/api/pkg/authconfig"
+	buildtypes "github.com/moby/moby/api/types/build"
 	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
@@ -33,6 +36,38 @@ type engineImagePuller interface {
 	// failure the result still carries the output rendered before the
 	// failure and err is a normalized engineError.
 	imagePull(ctx context.Context, imageRef string, credential *sessionRegistryCredential, outputLimit int64) (enginePullResult, error)
+}
+
+// engineImageBuilder is the narrow Engine surface consumed by the build
+// path. The production implementation is the single Engine adapter owner
+// below; tests may substitute a narrower builder.
+type engineImageBuilder interface {
+	// imageBuild builds through the Engine ImageBuild endpoint, consuming
+	// the prepared trusted context stream and rendering the build progress
+	// stream into bounded combined output. On failure the result still
+	// carries the output rendered before the failure and err is a
+	// normalized engineError.
+	imageBuild(ctx context.Context, spec engineBuildSpec, outputLimit int64) (engineBuildResult, error)
+}
+
+// engineBuildSpec is one prepared build request for the Engine adapter.
+// Context is the tar stream of the staged, helper-owned build context; the
+// adapter consumes the prepared trusted context and is not the
+// workspace-policy owner. Auths carries exactly the Session credentials the
+// staged Dockerfile's FROM lines name; the adapter encodes them into the
+// Engine request and never logs or echoes them.
+type engineBuildSpec struct {
+	Image      string
+	Context    io.Reader
+	Dockerfile string
+	BuildArgs  map[string]string
+	Auths      []sessionRegistryCredential
+}
+
+// engineBuildResult is the bounded combined output of one Engine build.
+type engineBuildResult struct {
+	Output    string
+	Truncated bool
 }
 
 // enginePullResult is the bounded combined output of one Engine pull.
@@ -63,8 +98,14 @@ const (
 	// engineErrImageNotFound means the Engine reports that the requested
 	// image or manifest does not exist on the registry.
 	engineErrImageNotFound
-	// engineErrClientCancelled means the pull request context was cancelled
-	// before the pull completed (client disconnect, shutdown, or deadline).
+	// engineErrBuildFailed means the Engine reported a terminal build
+	// failure inside the build stream: the build mechanism rejected or
+	// failed the build, and the bounded output is a trustworthy negative
+	// result.
+	engineErrBuildFailed
+	// engineErrClientCancelled means the request context was cancelled
+	// before the Engine operation completed (client disconnect, shutdown,
+	// or deadline).
 	engineErrClientCancelled
 )
 
@@ -87,8 +128,10 @@ func (e *engineError) Error() string {
 		return "registry unavailable"
 	case engineErrImageNotFound:
 		return "image not found"
+	case engineErrBuildFailed:
+		return "image build failed"
 	case engineErrClientCancelled:
-		return "pull request cancelled"
+		return "request cancelled"
 	default:
 		return "docker engine failure"
 	}
@@ -192,6 +235,23 @@ func (a *App) newEngineImagePuller() (engineImagePuller, error) {
 	return a.sharedEngineAdapter()
 }
 
+// newEngineImageBuilder returns the Engine adapter for the build path: the
+// test seam when set, otherwise the App's shared adapter.
+func (a *App) newEngineImageBuilder() (engineImageBuilder, error) {
+	if a.NewEngineBuildFn != nil {
+		return a.NewEngineBuildFn()
+	}
+	return a.sharedEngineAdapter()
+}
+
+// engineBuildStreamMessage extends the Engine JSON stream message with the
+// bare "error" field the docker JSON stream convention carries alongside
+// errorDetail, which the docker CLI also honors as the error message.
+type engineBuildStreamMessage struct {
+	jsonstream.Message
+	ErrorMessage string `json:"error,omitempty"`
+}
+
 // engineStreamError is an Engine-reported pull failure carried inside the
 // pull progress stream: the daemon relays registry failures as in-band
 // jsonstream errors rather than HTTP statuses. Unwrap exposes the errdefs
@@ -256,7 +316,7 @@ func (e *engineClient) imagePull(ctx context.Context, imageRef string, credentia
 			}
 			continue
 		}
-		buf.Write([]byte(renderEnginePullMessage(msg)))
+		buf.Write([]byte(renderEngineStreamMessage(msg)))
 	}
 
 	if embedded != nil {
@@ -274,11 +334,11 @@ func (e *engineClient) imagePull(ctx context.Context, imageRef string, credentia
 	return enginePullResult{Output: string(data), Truncated: truncated}, nil
 }
 
-// renderEnginePullMessage renders one Engine pull progress message in the
-// line-based form the docker CLI printed for pull output: raw stream text
-// verbatim, otherwise the status line, prefixed with the layer ID when the
-// message carries one.
-func renderEnginePullMessage(msg jsonstream.Message) string {
+// renderEngineStreamMessage renders one Engine progress message in the
+// line-based form the docker CLI printed for pull and build output: raw
+// stream text verbatim, otherwise the status line, prefixed with the layer
+// ID when the message carries one.
+func renderEngineStreamMessage(msg jsonstream.Message) string {
 	switch {
 	case msg.Stream != "":
 		return msg.Stream
@@ -289,6 +349,147 @@ func renderEnginePullMessage(msg jsonstream.Message) string {
 		return msg.Status + "\n"
 	default:
 		return ""
+	}
+}
+
+// imageBuild builds through the Engine ImageBuild endpoint — the same
+// daemon operation the docker CLI build path delegated to, with the
+// builder version, base-image pull, tag, Dockerfile selection, build args,
+// and registry auth the accepted build semantics require. The prepared
+// trusted context stream is the request body; the encoded Session
+// credentials, if any, are handed to the Engine for this build only and
+// never enter logs, audit, or errors.
+//
+// The progress stream is rendered in the line-based form the docker CLI
+// printed for build output and accumulated in a bounded buffer; the stream
+// is always consumed to its terminal outcome so an in-band build failure is
+// detected even after the buffer cap. A build failure the Engine reports
+// inside the stream is a trustworthy negative result; a malformed or
+// transport-broken stream is not.
+func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, outputLimit int64) (engineBuildResult, error) {
+	opts := client.ImageBuildOptions{
+		Tags:       []string{spec.Image},
+		Dockerfile: spec.Dockerfile,
+		PullParent: true, // the CLI build path always pulled base images
+		Remove:     true, // keep the daemon default of removing intermediate containers
+		Version:    buildtypes.BuilderBuildKit,
+	}
+	if len(spec.BuildArgs) > 0 {
+		// The Engine build request carries build-arg values as pointers so
+		// an empty value stays an empty value.
+		buildArgs := make(map[string]*string, len(spec.BuildArgs))
+		for key, value := range spec.BuildArgs {
+			value := value
+			buildArgs[key] = &value
+		}
+		opts.BuildArgs = buildArgs
+	}
+	if len(spec.Auths) > 0 {
+		auths := make(map[string]registry.AuthConfig, len(spec.Auths))
+		for _, credential := range spec.Auths {
+			auths[credential.Registry] = registry.AuthConfig{
+				Username:      credential.Username,
+				Password:      credential.Password,
+				IdentityToken: credential.IdentityToken,
+				ServerAddress: credential.Registry,
+			}
+		}
+		opts.AuthConfigs = auths
+	}
+
+	resp, err := e.cli.ImageBuild(ctx, spec.Context, opts)
+	if err != nil {
+		return engineBuildResult{}, normalizeEngineBuildError(err)
+	}
+	defer resp.Body.Close()
+
+	buf := newBoundedBuffer(outputLimit)
+	var streamErr error
+	var embedded *jsonstream.Error
+	dec := json.NewDecoder(resp.Body)
+	for {
+		// engineBuildStreamMessage extends the Engine JSON stream message
+		// with the bare "error" field the docker JSON stream convention
+		// carries alongside errorDetail; the docker CLI honors it too.
+		var msg engineBuildStreamMessage
+		if err := dec.Decode(&msg); err != nil {
+			if !errors.Is(err, io.EOF) {
+				streamErr = err
+			}
+			break
+		}
+		switch {
+		case msg.Error != nil:
+			buf.Write([]byte(msg.Error.Message + "\n"))
+			if embedded == nil {
+				embedded = msg.Error
+			}
+		case msg.ErrorMessage != "":
+			buf.Write([]byte(msg.ErrorMessage + "\n"))
+			if embedded == nil {
+				embedded = &jsonstream.Error{Message: msg.ErrorMessage}
+			}
+		default:
+			buf.Write([]byte(renderEngineStreamMessage(msg.Message)))
+		}
+	}
+
+	data, _, truncated := buf.Range(0)
+	if embedded != nil {
+		return engineBuildResult{Output: string(data), Truncated: truncated}, normalizeEmbeddedBuildError(&engineStreamError{
+			message: embedded.Message,
+			code:    embedded.Code,
+		})
+	}
+	if streamErr != nil {
+		return engineBuildResult{Output: string(data), Truncated: truncated}, normalizeEngineBuildError(streamErr)
+	}
+	return engineBuildResult{Output: string(data), Truncated: truncated}, nil
+}
+
+// normalizeEngineBuildError maps a build interaction failure to the
+// normalized error categories. Typed backend signals are preferred. An
+// interaction failure that prevents a trustworthy build outcome — a
+// malformed or transport-broken request or stream — is a backend failure,
+// not a build failure the Engine reported.
+func normalizeEngineBuildError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &engineError{kind: engineErrClientCancelled, cause: err}
+	}
+	if client.IsErrConnectionFailed(err) {
+		return &engineError{kind: engineErrBackendUnavailable, cause: err}
+	}
+	if cerrdefs.IsUnauthorized(err) || cerrdefs.IsPermissionDenied(err) {
+		return &engineError{kind: engineErrRegistryAuthDenied, cause: err}
+	}
+	return &engineError{kind: engineErrBackendFailure, cause: err}
+}
+
+// normalizeEmbeddedBuildError classifies a build failure the Engine reported
+// inside the build stream. Registry signals keep their categories so the
+// credential contract stays observable for private FROM builds; every
+// remaining in-stream failure is a build failure the Engine reported, and
+// the bounded output is a trustworthy negative result.
+func normalizeEmbeddedBuildError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &engineError{kind: engineErrClientCancelled, cause: err}
+	}
+	if cerrdefs.IsUnauthorized(err) || cerrdefs.IsPermissionDenied(err) {
+		return &engineError{kind: engineErrRegistryAuthDenied, cause: err}
+	}
+	switch classifyDockerError(err.Error()) {
+	case dockerErrorAuthDenied:
+		return &engineError{kind: engineErrRegistryAuthDenied, cause: err}
+	case dockerErrorNetwork:
+		return &engineError{kind: engineErrRegistryUnavailable, cause: err}
+	default:
+		return &engineError{kind: engineErrBuildFailed, cause: err}
 	}
 }
 

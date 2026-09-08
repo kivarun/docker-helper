@@ -6,9 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,15 +20,16 @@ import (
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/errdefs/pkg/errhttp"
 	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
 )
 
 // newFakeEngine serves the minimal Engine endpoints used by the adapter
 // tests: the unversioned /_ping negotiation endpoint, the /auth registry
-// validation endpoint, and the /images/create pull endpoint. A nil handler
-// leaves the corresponding endpoint answering 404.
-func newFakeEngine(t *testing.T, apiVersion string, authHandler, pullHandler http.HandlerFunc) *httptest.Server {
+// validation endpoint, the /images/create pull endpoint, and the /build
+// endpoint. A nil handler leaves the corresponding endpoint answering 404.
+func newFakeEngine(t *testing.T, apiVersion string, authHandler, pullHandler, buildHandler http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -42,6 +46,12 @@ func newFakeEngine(t *testing.T, apiVersion string, authHandler, pullHandler htt
 		case strings.HasSuffix(r.URL.Path, "/images/create"):
 			if pullHandler != nil {
 				pullHandler(w, r)
+				return
+			}
+			http.NotFound(w, r)
+		case strings.HasSuffix(r.URL.Path, "/build"):
+			if buildHandler != nil {
+				buildHandler(w, r)
 				return
 			}
 			http.NotFound(w, r)
@@ -84,7 +94,7 @@ func TestEngineClientRegistryLoginNegotiationAndAuth(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"Status":"Login Succeeded"}`))
-	}, nil)
+	}, nil, nil)
 	origHandler := srv.Config.Handler
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/_ping" {
@@ -128,7 +138,7 @@ func TestEngineClientRegistryLoginIdentityToken(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"Status":"Login Succeeded","IdentityToken":"tok-123"}`))
-	}, nil)
+	}, nil, nil)
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	token, err := eng.registryLogin(context.Background(), "registry.example.com", "user", "pass")
@@ -211,7 +221,7 @@ func TestEngineClientRegistryLoginErrorNormalization(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := newFakeEngine(t, tc.apiVersion, tc.authHandler, nil)
+			srv := newFakeEngine(t, tc.apiVersion, tc.authHandler, nil, nil)
 			eng := newEngineClientAgainstFake(t, srv.URL)
 
 			_, err := eng.registryLogin(context.Background(), "registry.example.com", "user", "pass")
@@ -261,7 +271,7 @@ func TestEngineClientNoRawErrorLeakage(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"message":"` + unauthorizedMsg + `"}`))
-	}, nil)
+	}, nil, nil)
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	_, err := eng.registryLogin(context.Background(), "registry.example.com", "user", "pass")
@@ -313,7 +323,7 @@ func TestEngineClientPullUnauthenticatedRequestAndStream(t *testing.T) {
 	srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record,
 		`{"status":"Pulling from library/alpine","id":"0123456789ab"}`,
 		`{"status":"Status: Downloaded newer image for alpine:3.24"}`,
-	))
+	), nil)
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	result, err := eng.imagePull(context.Background(), "alpine:3.24", nil, 1<<20)
@@ -380,7 +390,7 @@ func TestEngineClientPullRegistryAuthEncoding(t *testing.T) {
 			var record fakePullRequest
 			srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record,
 				`{"status":"Status: Downloaded newer image for alpine:3.24"}`,
-			))
+			), nil)
 
 			eng := newEngineClientAgainstFake(t, srv.URL)
 			cred := tc.credential
@@ -451,7 +461,7 @@ func TestEngineClientPullEmbeddedErrorNormalization(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var record fakePullRequest
-			srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record, tc.body))
+			srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record, tc.body), nil)
 
 			eng := newEngineClientAgainstFake(t, srv.URL)
 			result, err := eng.imagePull(context.Background(), "alpine:3.24", nil, 1<<20)
@@ -496,7 +506,7 @@ func TestEngineClientPullTransportAndRequestFailures(t *testing.T) {
 	}
 
 	var record fakePullRequest
-	srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record))
+	srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record), nil)
 	eng = newEngineClientAgainstFake(t, srv.URL)
 	_, err = eng.imagePull(context.Background(), "INVALID:REFERENCE!!", nil, 1<<20)
 	if err == nil {
@@ -523,7 +533,7 @@ func TestEngineClientPullContextCancellation(t *testing.T) {
 		close(requestStarted)
 		<-r.Context().Done()
 		close(handlerDone)
-	})
+	}, nil)
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -559,7 +569,7 @@ func TestEngineClientPullOutputTruncation(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		lines = append(lines, `{"stream":"0123456789\n"}`)
 	}
-	srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record, lines...))
+	srv := newFakeEngine(t, "1.51", nil, fakePullStream(&record, lines...), nil)
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	result, err := eng.imagePull(context.Background(), "alpine:3.24", nil, 100)
@@ -896,5 +906,439 @@ func TestShutdownClosesSharedEngineAdapterOnlyAfterHTTPDrain(t *testing.T) {
 	}
 	if closedConns.Load() <= closedAtLoginDone {
 		t.Error("the Engine endpoint never observed the shared adapter's connection closing after the drain")
+	}
+}
+
+// fakeBuildRequest records what a fake Engine /build endpoint received.
+type fakeBuildRequest struct {
+	query          url.Values
+	registryConfig string
+	contentType    string
+	context        []byte
+	contextErr     error
+}
+
+// fakeBuildStream answers the /build endpoint with the given JSON stream
+// lines after recording the request.
+func fakeBuildStream(record *fakeBuildRequest, lines ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if record != nil {
+			record.query = r.URL.Query()
+			record.registryConfig = r.Header.Get("X-Registry-Config")
+			record.contentType = r.Header.Get("Content-Type")
+			blob, err := io.ReadAll(r.Body)
+			record.contextErr = err
+			record.context = blob
+		}
+		w.Header().Set("Content-Type", "application/json")
+		for _, line := range lines {
+			_, _ = w.Write([]byte(line))
+		}
+	}
+}
+
+// TestEngineImageBuildRequestContract proves the adapter's Engine build
+// request shape: the accepted build semantics — the requested tag, the
+// Dockerfile selection, build args, the base-image pull, the daemon default
+// of removing intermediate containers, and the supported BuildKit builder —
+// reach the Engine query, and the prepared context stream is the body.
+func TestEngineImageBuildRequestContract(t *testing.T) {
+	var record fakeBuildRequest
+	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(&record,
+		`{"stream":"#1 [internal] load build definition from Dockerfile\n"}`,
+		`{"stream":"#1 DONE 0.0s\n"}`,
+	))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	ctxBody := bytes.NewReader([]byte("tar-context-bytes"))
+	result, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:      "example:tag",
+		Context:    ctxBody,
+		Dockerfile: "sub/Dockerfile",
+		BuildArgs:  map[string]string{"GREETING": "hello", "EMPTY": ""},
+	}, 1<<20)
+	if err != nil {
+		t.Fatalf("imageBuild: %v", err)
+	}
+
+	if result.Truncated {
+		t.Error("short stream must not be truncated")
+	}
+	if result.Output != "#1 [internal] load build definition from Dockerfile\n#1 DONE 0.0s\n" {
+		t.Errorf("build output = %q", result.Output)
+	}
+	if got := record.query.Get("t"); got != "example:tag" {
+		t.Errorf("tag query = %q", got)
+	}
+	if got := record.query.Get("dockerfile"); got != "sub/Dockerfile" {
+		t.Errorf("dockerfile query = %q", got)
+	}
+	if got := record.query.Get("version"); got != "2" {
+		t.Errorf("builder version query = %q", got)
+	}
+	if got := record.query.Get("pull"); got != "1" {
+		t.Errorf("pull query = %q", got)
+	}
+	if _, keep := record.query["rm"]; keep {
+		t.Errorf("rm query must stay at the daemon default, got %q", record.query.Get("rm"))
+	}
+	var buildArgs map[string]*string
+	if err := json.Unmarshal([]byte(record.query.Get("buildargs")), &buildArgs); err != nil {
+		t.Fatalf("decode buildargs: %v", err)
+	}
+	if len(buildArgs) != 2 || buildArgs["GREETING"] == nil || *buildArgs["GREETING"] != "hello" {
+		t.Errorf("build args = %v", buildArgs)
+	}
+	if buildArgs["EMPTY"] == nil || *buildArgs["EMPTY"] != "" {
+		t.Errorf("empty build arg must stay an empty value, got %v", buildArgs["EMPTY"])
+	}
+	if record.contentType != "application/x-tar" {
+		t.Errorf("context content type = %q", record.contentType)
+	}
+	if string(record.context) != "tar-context-bytes" {
+		t.Errorf("context body = %q", record.context)
+	}
+}
+
+// TestEngineImageBuildAuthMap proves the adapter encodes exactly the
+// credentials it was given into the Engine registry config header, keyed by
+// registry address, and nothing else.
+func TestEngineImageBuildAuthMap(t *testing.T) {
+	var record fakeBuildRequest
+	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(&record,
+		`{"stream":"#1 DONE 0.0s\n"}`,
+	))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	_, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:   "example:tag",
+		Context: bytes.NewReader(nil),
+		Auths: []sessionRegistryCredential{
+			{Registry: "registry.example.com", Username: "user", Password: "pass"},
+			{Registry: dockerHubAuthConfigKey, IdentityToken: "id-tok"},
+		},
+	}, 1<<20)
+	if err != nil {
+		t.Fatalf("imageBuild: %v", err)
+	}
+
+	blob, err := base64.URLEncoding.DecodeString(record.registryConfig)
+	if err != nil {
+		t.Fatalf("decode X-Registry-Config: %v", err)
+	}
+	var auths map[string]registry.AuthConfig
+	if err := json.Unmarshal(blob, &auths); err != nil {
+		t.Fatalf("decode registry config: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("registry config entries = %d, want 2", len(auths))
+	}
+	if auths["registry.example.com"].Username != "user" || auths["registry.example.com"].Password != "pass" {
+		t.Errorf("registry.example.com credential = %+v", auths["registry.example.com"])
+	}
+	if auths[dockerHubAuthConfigKey].IdentityToken != "id-tok" {
+		t.Errorf("docker hub credential = %+v", auths[dockerHubAuthConfigKey])
+	}
+}
+
+// TestEngineImageBuildStreamTruncation proves the bounded-output contract on
+// the build stream: newest bytes are retained and truncation is reported.
+func TestEngineImageBuildStreamTruncation(t *testing.T) {
+	const lines = 20
+	var stream []string
+	for i := 0; i < lines; i++ {
+		stream = append(stream, fmt.Sprintf(`{"stream":"step %02d\n"}`, i))
+	}
+	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(nil, stream...))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	result, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:   "example:tag",
+		Context: bytes.NewReader(nil),
+	}, 20)
+	if err != nil {
+		t.Fatalf("imageBuild: %v", err)
+	}
+
+	if !result.Truncated {
+		t.Error("truncation must be reported")
+	}
+	if !strings.Contains(result.Output, "step 19") {
+		t.Errorf("newest step lost: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "step 18") {
+		t.Errorf("the newest window must keep more than the last line: %q", result.Output)
+	}
+	if strings.Contains(result.Output, "step 00") {
+		t.Errorf("oldest steps must be dropped: %q", result.Output)
+	}
+}
+
+// TestEngineImageBuildEmbeddedFailure proves an in-band build failure is
+// normalized as a trustworthy build failure with the output preserved.
+func TestEngineImageBuildEmbeddedFailure(t *testing.T) {
+	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(nil,
+		`{"stream":"#5 [2/2] RUN exit 2\n"}`,
+		`{"errorDetail":{"message":"process \"/bin/sh\" did not complete successfully: exit code: 2"},"error":"process \"/bin/sh\" did not complete successfully: exit code: 2"}`,
+	))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	result, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:   "example:tag",
+		Context: bytes.NewReader(nil),
+	}, 1<<20)
+
+	var engErr *engineError
+	if !errors.As(err, &engErr) {
+		t.Fatalf("imageBuild error = %v, want *engineError", err)
+	}
+	if engErr.kind != engineErrBuildFailed {
+		t.Errorf("error kind = %d, want build failed", engErr.kind)
+	}
+	if !strings.Contains(result.Output, "exit code: 2") {
+		t.Errorf("embedded build failure output lost: %q", result.Output)
+	}
+}
+
+// TestEngineImageBuildEmbeddedAuthDenied proves an in-band registry denial
+// for a private FROM keeps the registry-auth-denied category, both through
+// the errdefs-typed signal and the message classifier.
+func TestEngineImageBuildEmbeddedAuthDenied(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+	}{
+		{
+			name: "typed",
+			line: `{"errorDetail":{"message":"unauthorized: authentication required","code":401},"error":"unauthorized: authentication required"}`,
+		},
+		{
+			name: "classified",
+			line: `{"error":"pull access denied for dh/private, repository does not exist or may require authorization"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(nil, tc.line))
+
+			eng := newEngineClientAgainstFake(t, srv.URL)
+			_, err := eng.imageBuild(context.Background(), engineBuildSpec{
+				Image:   "example:tag",
+				Context: bytes.NewReader(nil),
+			}, 1<<20)
+
+			var engErr *engineError
+			if !errors.As(err, &engErr) {
+				t.Fatalf("imageBuild error = %v, want *engineError", err)
+			}
+			if engErr.kind != engineErrRegistryAuthDenied {
+				t.Errorf("error kind = %d, want registry auth denied", engErr.kind)
+			}
+		})
+	}
+}
+
+// TestEngineImageBuildMalformedStream proves a malformed build stream is a
+// backend failure, not a build failure: the outcome is not trustworthy.
+func TestEngineImageBuildMalformedStream(t *testing.T) {
+	srv := newFakeEngine(t, "1.51", nil, nil, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"stream":"#1 ...`))
+	})
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	_, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:   "example:tag",
+		Context: bytes.NewReader(nil),
+	}, 1<<20)
+
+	var engErr *engineError
+	if !errors.As(err, &engErr) {
+		t.Fatalf("imageBuild error = %v, want *engineError", err)
+	}
+	if engErr.kind != engineErrBackendFailure {
+		t.Errorf("error kind = %d, want backend failure", engErr.kind)
+	}
+}
+
+// TestEngineImageBuildTransportFailure proves an unreachable Engine is the
+// backend-unavailable category.
+func TestEngineImageBuildTransportFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close() // nothing listens anymore
+
+	eng := newEngineClientAgainstFake(t, url)
+	_, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:   "example:tag",
+		Context: bytes.NewReader(nil),
+	}, 1<<20)
+
+	var engErr *engineError
+	if !errors.As(err, &engErr) {
+		t.Fatalf("imageBuild error = %v, want *engineError", err)
+	}
+	if engErr.kind != engineErrBackendUnavailable {
+		t.Errorf("error kind = %d, want backend unavailable", engErr.kind)
+	}
+}
+
+// TestEngineImageBuildCancellationClosesBody proves a cancelled build
+// request is the client-cancelled category, the fake Engine handler observes
+// the client disconnect, and the adapter closes the build response body.
+func TestEngineImageBuildCancellationClosesBody(t *testing.T) {
+	requestStarted := make(chan struct{})
+	handlerDone := make(chan struct{})
+	srv := newFakeEngine(t, "1.51", nil, nil, func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+		close(handlerDone)
+	})
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	buildCtx, buildCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		_, err := eng.imageBuild(buildCtx, engineBuildSpec{
+			Image:   "example:tag",
+			Context: bytes.NewReader(nil),
+		}, 1<<20)
+		done <- err
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the Engine never received the build request")
+	}
+
+	buildCancel()
+
+	select {
+	case err := <-done:
+		var engErr *engineError
+		if !errors.As(err, &engErr) {
+			t.Fatalf("cancelled imageBuild error = %v, want *engineError", err)
+		}
+		if engErr.kind != engineErrClientCancelled {
+			t.Errorf("error kind = %d, want client cancelled", engErr.kind)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("imageBuild did not return after cancellation")
+	}
+
+	select {
+	case <-handlerDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the fake Engine handler never observed the client disconnect")
+	}
+}
+
+// TestNormalizeEngineBuildErrorKinds proves the build error classifiers map
+// the accepted categories. An interaction failure — malformed or
+// transport-broken request or stream — is a backend failure, never a build
+// failure; an in-band stream failure that fits no registry or cancellation
+// category is a build failure the Engine reported, including a base image
+// the registry cannot resolve, which for a build is not the pull contract's
+// image-not-found.
+func TestNormalizeEngineBuildErrorKinds(t *testing.T) {
+	cases := []struct {
+		name         string
+		err          error
+		wantOK       bool
+		wantInter    engineErrorKind
+		wantEmbedded engineErrorKind
+	}{
+		{
+			name: "nil",
+			err:  nil,
+		},
+		{
+			name:         "cancelled",
+			err:          fmt.Errorf("wrapped: %w", context.Canceled),
+			wantOK:       true,
+			wantInter:    engineErrClientCancelled,
+			wantEmbedded: engineErrClientCancelled,
+		},
+		{
+			name:         "deadline",
+			err:          fmt.Errorf("wrapped: %w", context.DeadlineExceeded),
+			wantOK:       true,
+			wantInter:    engineErrClientCancelled,
+			wantEmbedded: engineErrClientCancelled,
+		},
+		{
+			name:         "typed unauthorized",
+			err:          errhttp.ToNative(401),
+			wantOK:       true,
+			wantInter:    engineErrRegistryAuthDenied,
+			wantEmbedded: engineErrRegistryAuthDenied,
+		},
+		{
+			name:         "typed permission denied",
+			err:          errhttp.ToNative(403),
+			wantOK:       true,
+			wantInter:    engineErrRegistryAuthDenied,
+			wantEmbedded: engineErrRegistryAuthDenied,
+		},
+		{
+			name:         "request level daemon error",
+			err:          errors.New("Error response from daemon: unexpected failure"),
+			wantOK:       true,
+			wantInter:    engineErrBackendFailure,
+			wantEmbedded: engineErrBuildFailed,
+		},
+		{
+			name:         "in-band build failure",
+			err:          errors.New(`process "/bin/sh" did not complete successfully: exit code: 2`),
+			wantOK:       true,
+			wantInter:    engineErrBackendFailure,
+			wantEmbedded: engineErrBuildFailed,
+		},
+		{
+			name:         "in-band base image missing",
+			err:          errors.New("manifest for alpine:3.999 not found: manifest unknown"),
+			wantOK:       true,
+			wantInter:    engineErrBackendFailure,
+			wantEmbedded: engineErrBuildFailed,
+		},
+		{
+			name:         "in-band registry denial",
+			err:          errors.New("pull access denied for dh/private, repository does not exist or may require authorization"),
+			wantOK:       true,
+			wantInter:    engineErrBackendFailure,
+			wantEmbedded: engineErrRegistryAuthDenied,
+		},
+		{
+			name:         "in-band registry network failure",
+			err:          errors.New("Get \"https://registry.example.com/v2/\": dial tcp 127.0.0.1:1: connect: connection refused"),
+			wantOK:       true,
+			wantInter:    engineErrBackendFailure,
+			wantEmbedded: engineErrRegistryUnavailable,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inter := normalizeEngineBuildError(tc.err)
+			embedded := normalizeEmbeddedBuildError(tc.err)
+			var interErr, embeddedErr *engineError
+			gotInterOK := errors.As(inter, &interErr)
+			gotEmbeddedOK := errors.As(embedded, &embeddedErr)
+			if tc.wantOK != (gotInterOK && gotEmbeddedOK) {
+				t.Fatalf("normalizers returned %v / %v", inter, embedded)
+			}
+			if !tc.wantOK {
+				return
+			}
+			if interErr.kind != tc.wantInter {
+				t.Errorf("interaction kind = %d, want %d", interErr.kind, tc.wantInter)
+			}
+			if embeddedErr.kind != tc.wantEmbedded {
+				t.Errorf("embedded kind = %d, want %d", embeddedErr.kind, tc.wantEmbedded)
+			}
+		})
 	}
 }

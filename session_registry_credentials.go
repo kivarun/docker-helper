@@ -286,3 +286,94 @@ func resolveSessionRegistryCredential(runtimeDir, sessionID, imageRef string) (c
 	credential.Password = password
 	return credential, true, nil
 }
+
+// dockerfileAuthRegistries extracts the registry addresses a build may
+// authenticate against: the image references of the Dockerfile's FROM lines,
+// normalized to the canonical credential-store keys. scratch, directive
+// comments, and unparseable references contribute no registry; the Engine
+// reports the resulting build failure normally. Line continuations are
+// joined before parsing.
+func dockerfileAuthRegistries(dockerfilePath string) ([]string, error) {
+	blob, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read Dockerfile: %w", err)
+	}
+	var lines []string
+	continuation := ""
+	for _, line := range strings.Split(string(blob), "\n") {
+		if strings.HasSuffix(line, "\\") {
+			continuation += strings.TrimSuffix(line, "\\")
+			continue
+		}
+		lines = append(lines, continuation+line)
+		continuation = ""
+	}
+	if continuation != "" {
+		lines = append(lines, continuation)
+	}
+	var registryAddrs []string
+	seen := make(map[string]bool)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "FROM") {
+			continue
+		}
+		image := ""
+		for _, field := range fields[1:] {
+			if strings.HasPrefix(field, "--") {
+				continue
+			}
+			image = field
+			break
+		}
+		if image == "" || strings.EqualFold(image, "scratch") {
+			continue
+		}
+		registryAddr := imageReferenceRegistryAddress(image)
+		if registryAddr == "" || seen[registryAddr] {
+			continue
+		}
+		seen[registryAddr] = true
+		registryAddrs = append(registryAddrs, registryAddr)
+	}
+	return registryAddrs, nil
+}
+
+// resolveBuildAuthCredentials loads the Session credentials for exactly the
+// registries the Dockerfile's FROM lines name. Credentials stored for other
+// registries are never projected into the build request; a FROM with no
+// stored credential builds unauthenticated for it, exactly as the docker CLI
+// --config path did. A store read failure is operational.
+func resolveBuildAuthCredentials(runtimeDir, sessionID, dockerfilePath string) ([]sessionRegistryCredential, error) {
+	registryAddrs, err := dockerfileAuthRegistries(dockerfilePath)
+	if err != nil {
+		return nil, err
+	}
+	var credentials []sessionRegistryCredential
+	for _, registryAddr := range registryAddrs {
+		entry, ok, err := readSessionRegistryCredential(runtimeDir, sessionID, registryAddr)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		credential := sessionRegistryCredential{Registry: registryAddr}
+		if entry.IdentityToken != "" {
+			credential.IdentityToken = entry.IdentityToken
+		} else {
+			username, password, err := decodeSessionDockerAuth(entry.Auth)
+			if err != nil {
+				return nil, err
+			}
+			credential.Username = username
+			credential.Password = password
+		}
+		credentials = append(credentials, credential)
+	}
+	return credentials, nil
+}

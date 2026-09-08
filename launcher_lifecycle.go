@@ -396,6 +396,20 @@ func (s *operationSupervisor) quiesceLauncher(launcherID string) {
 	s.quiesced[launcherID] = true
 }
 
+// launcherQuiesced reports whether operation admission is currently closed
+// for the Launcher. The synchronous execution coordinator consults it at
+// Launcher-scoped admission, so a quiesced Launcher cannot admit new
+// synchronous Engine requests while the quiesce ownership stays with the
+// supervisor.
+func (s *operationSupervisor) launcherQuiesced(launcherID string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.quiesced[launcherID]
+}
+
 // setQuiesced sets the supervisor admission state for launcherID to the given
 // value in one atomic step. closed=true refuses new Operations for it;
 // closed=false reopens admission. It is the primitive used by
@@ -577,7 +591,11 @@ type launcherRuntimeInspection struct {
 // classification error — both fail closed so a Launcher is never deleted when
 // its runtime cannot be classified, and neither mutates anything.
 func (a *App) inspectLauncherRuntime(ctx context.Context, launcherID string) (launcherRuntimeInspection, error) {
-	if a.OperationSupervisor.hasRunningForLauncher(launcherID) {
+	// Live work for the Launcher spans the two current execution classes:
+	// durable operations in the supervisor and live synchronous Engine
+	// requests in the coordinator. The combined query follows the accepted
+	// execution split until the admission owners are consolidated.
+	if a.OperationSupervisor.hasRunningForLauncher(launcherID) || a.SyncExecutionCoordinator.hasLiveForLauncher(launcherID) {
 		return launcherRuntimeInspection{active: true}, nil
 	}
 	containers, err := a.inspectHelperContainersForLauncher(ctx, launcherID)

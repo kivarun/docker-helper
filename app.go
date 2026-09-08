@@ -43,6 +43,10 @@ type App struct {
 	// path. Production default (nil) resolves the App's shared Engine
 	// adapter.
 	NewEnginePullFn func() (engineImagePuller, error)
+	// NewEngineBuildFn is a test seam for the Engine adapter used by the
+	// build path. Production default (nil) resolves the App's shared Engine
+	// adapter.
+	NewEngineBuildFn func() (engineImageBuilder, error)
 	// engineAdapter is the single shared Docker Engine adapter for the App
 	// lifetime, guarded by engineAdapterMu. It is created on first Engine
 	// use and released at daemon shutdown; a failed creation leaves it nil

@@ -106,3 +106,49 @@ func TestSyncExecutionCoordinatorTerminateAbandonsPastDeadline(t *testing.T) {
 	// The handler releases only after termination already gave up.
 	req.end()
 }
+
+// TestSyncExecutionCoordinatorLauncherScopedAdmission proves the
+// Launcher-scoped admission contract: a quiesced Launcher is refused with the
+// quiesced decision, an open Launcher is admitted with its Launcher tagged,
+// and the tagged request is visible to checked parent-lifecycle inspection
+// until it ends.
+func TestSyncExecutionCoordinatorLauncherScopedAdmission(t *testing.T) {
+	c := newSyncExecutionCoordinator()
+
+	quiesced := map[string]bool{"la": true}
+	quiesceClosed := func(launcherID string) bool { return quiesced[launcherID] }
+
+	if _, _, decision := c.admitLauncherScoped(context.Background(), "la", quiesceClosed); decision != admissionRefusedQuiesced {
+		t.Fatalf("quiesced admission decision = %v, want refused-quiesced", decision)
+	}
+
+	_, req, decision := c.admitLauncherScoped(context.Background(), "lb", quiesceClosed)
+	if decision != admissionAccepted {
+		t.Fatalf("open admission decision = %v, want accepted", decision)
+	}
+	if !c.hasLiveForLauncher("lb") {
+		t.Error("the admitted request must be visible to Launcher inspection while live")
+	}
+	if c.hasLiveForLauncher("la") {
+		t.Error("a refused request must not be visible")
+	}
+	if c.hasLiveForLauncher("other") {
+		t.Error("a foreign Launcher must not see live work")
+	}
+
+	req.end()
+	if c.hasLiveForLauncher("lb") {
+		t.Error("the ended request must no longer be live")
+	}
+}
+
+// TestSyncExecutionCoordinatorShutdownRefusesLauncherScopedAdmission proves
+// the shutdown gate wins for Launcher-scoped admission as well.
+func TestSyncExecutionCoordinatorShutdownRefusesLauncherScopedAdmission(t *testing.T) {
+	c := newSyncExecutionCoordinator()
+	c.beginShutdown()
+
+	if _, _, decision := c.admitLauncherScoped(context.Background(), "lb", func(string) bool { return false }); decision != admissionRefusedShutdown {
+		t.Fatalf("shutdown admission decision = %v, want refused-shutdown", decision)
+	}
+}

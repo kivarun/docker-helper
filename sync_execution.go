@@ -6,17 +6,20 @@ import (
 )
 
 // syncExecutionCoordinator owns admission, cancellation, and bounded shutdown
-// termination for synchronous Engine-backed requests (currently the pull
-// path). It is the synchronous companion of the operationSupervisor: unlike
-// build/run operations, a synchronous request has no stored operation record
-// to terminate, so the coordinator tracks the derived request contexts that
-// are live right now.
+// termination for synchronous Engine-backed requests (currently the pull and
+// build paths). It is the synchronous companion of the operationSupervisor:
+// unlike the legacy run operation, a synchronous request has no stored
+// operation record to terminate, so the coordinator tracks the derived
+// request contexts that are live right now.
 //
 // Admission and the shutdown gate are one atomic step: admit either derives
 // and registers a request context while shutdown is closed, or refuses when
-// shutdown has begun. Daemon shutdown first closes admission, then cancels
-// every live request and waits for their handlers to release them under the
-// shared shutdown deadline.
+// shutdown has begun. Launcher-scoped admission additionally consults the
+// Launcher quiesce gate and tags the request with its Launcher, so a checked
+// Launcher deletion still sees live synchronous work, exactly as registered
+// build operations used to be seen. Daemon shutdown first closes admission,
+// then cancels every live request and waits for their handlers to release
+// them under the shared shutdown deadline.
 type syncExecutionCoordinator struct {
 	mu       sync.Mutex
 	shutting bool
@@ -33,9 +36,10 @@ func newSyncExecutionCoordinator() *syncExecutionCoordinator {
 // called exactly once by the owning handler, through defer, to release the
 // request whether it succeeded or failed.
 type syncExecutionRequest struct {
-	coord  *syncExecutionCoordinator
-	cancel context.CancelFunc
-	done   chan struct{}
+	coord      *syncExecutionCoordinator
+	launcherID string // "" for requests without Launcher-scoped admission
+	cancel     context.CancelFunc
+	done       chan struct{}
 }
 
 // admit derives a request context from parent and registers it atomically
@@ -55,6 +59,52 @@ func (c *syncExecutionCoordinator) admit(parent context.Context) (ctx context.Co
 	}
 	c.live[req] = struct{}{}
 	return ctx, req, true
+}
+
+// admitLauncherScoped admits a synchronous request tied to one Launcher's
+// admission state. It atomically checks the shutdown gate and — while
+// holding the coordinator lock — the Launcher quiesce gate consulted through
+// quiesceClosed, the current operation-admission owner, so a quiesced
+// Launcher can neither admit the request nor race a checked Launcher
+// deletion that is about to inspect live work. The request is registered
+// with its Launcher for that inspection. The caller maps the decision to the
+// endpoint's refusal contract.
+func (c *syncExecutionCoordinator) admitLauncherScoped(parent context.Context, launcherID string, quiesceClosed func(string) bool) (context.Context, *syncExecutionRequest, admissionDecision) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutting {
+		return nil, nil, admissionRefusedShutdown
+	}
+	if quiesceClosed != nil && quiesceClosed(launcherID) {
+		return nil, nil, admissionRefusedQuiesced
+	}
+	ctx, cancel := context.WithCancel(parent)
+	req := &syncExecutionRequest{
+		coord:      c,
+		launcherID: launcherID,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+	}
+	c.live[req] = struct{}{}
+	return ctx, req, admissionAccepted
+}
+
+// hasLiveForLauncher reports whether any Launcher-scoped synchronous request
+// is currently live. It is the transient-work side of checked parent-lifecycle
+// inspection; the durable-operation side remains with the operationSupervisor
+// until the admission owners are consolidated.
+func (c *syncExecutionCoordinator) hasLiveForLauncher(launcherID string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for req := range c.live {
+		if req.launcherID == launcherID {
+			return true
+		}
+	}
+	return false
 }
 
 // end deregisters the request and cancels its context. After end, shutdown
