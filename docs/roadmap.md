@@ -33,7 +33,8 @@ Verified against current implementation:
 - session expiration enforcement (`expires_at` check on every request);
 - startup expired-session cleanup + `docker-helper session cleanup` CLI;
 - strict single-document JSON request decoding (`decodeJSONRequest`);
-- async build/run with operation lifecycle (status, logs, cancel);
+- synchronous Engine-backed build and pull requests plus async run operation
+  lifecycle (status, logs, cancel);
 - global bounded shutdown lifecycle (one absolute deadline, concurrent drain
   + operation termination, force cleanup);
 - developer rules in root `AGENTS.md`;
@@ -193,9 +194,10 @@ to reproduce hand-written curl instructions.
 
 **Completed:** reference CLI (`pull`, `build`, `run`,
 `registry login`) with signal cancellation, synchronous UX, and log streaming.
-Direct HTTP API with full async operation lifecycle.
-Portable agent skill at `.claude/skills/docker-helper/SKILL.md` covering both
-interfaces. OpenCode dogfood completed for both CLI and HTTP-only environments.
+Direct HTTP API with synchronous pull/build results and the async run Operation
+lifecycle. Portable agent skill at `.claude/skills/docker-helper/SKILL.md`
+covering both interfaces. OpenCode dogfood completed for both CLI and HTTP-only
+environments.
 
 Native adapter is a subsequent experiment, implementing the same HTTP
 capability contract.
