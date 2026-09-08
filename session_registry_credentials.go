@@ -294,9 +294,25 @@ func resolveSessionRegistryCredential(runtimeDir, sessionID, imageRef string) (c
 // reports the resulting build failure normally. Line continuations are
 // joined before parsing.
 func dockerfileAuthRegistries(dockerfilePath string) ([]string, error) {
+	_, registryAddrs, err := dockerfileFromEntries(dockerfilePath)
+	return registryAddrs, err
+}
+
+// dockerfileFromImages extracts the base images a staged Dockerfile's FROM
+// lines name, in order and deduplicated by image reference. The build
+// adapter refreshes every one of them through the Engine pull path before
+// the build.
+func dockerfileFromImages(dockerfilePath string) ([]string, error) {
+	fromImages, _, err := dockerfileFromEntries(dockerfilePath)
+	return fromImages, err
+}
+
+// dockerfileFromEntries walks a Dockerfile's FROM lines and returns the
+// deduplicated base-image references and their registry addresses.
+func dockerfileFromEntries(dockerfilePath string) (fromImages, registryAddrs []string, err error) {
 	blob, err := os.ReadFile(dockerfilePath)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read Dockerfile: %w", err)
+		return nil, nil, fmt.Errorf("cannot read Dockerfile: %w", err)
 	}
 	var lines []string
 	continuation := ""
@@ -311,8 +327,8 @@ func dockerfileAuthRegistries(dockerfilePath string) ([]string, error) {
 	if continuation != "" {
 		lines = append(lines, continuation)
 	}
-	var registryAddrs []string
-	seen := make(map[string]bool)
+	seenImages := make(map[string]bool)
+	seenRegistries := make(map[string]bool)
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -334,13 +350,19 @@ func dockerfileAuthRegistries(dockerfilePath string) ([]string, error) {
 			continue
 		}
 		registryAddr := imageReferenceRegistryAddress(image)
-		if registryAddr == "" || seen[registryAddr] {
+		if registryAddr == "" {
 			continue
 		}
-		seen[registryAddr] = true
-		registryAddrs = append(registryAddrs, registryAddr)
+		if !seenImages[image] {
+			seenImages[image] = true
+			fromImages = append(fromImages, image)
+		}
+		if !seenRegistries[registryAddr] {
+			seenRegistries[registryAddr] = true
+			registryAddrs = append(registryAddrs, registryAddr)
+		}
 	}
-	return registryAddrs, nil
+	return fromImages, registryAddrs, nil
 }
 
 // resolveBuildAuthCredentials loads the Session credentials for exactly the

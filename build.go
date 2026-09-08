@@ -164,8 +164,27 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve the Session credentials the staged Dockerfile's FROM lines
 	// name just in time, from the one protected credential store. Only
-	// matching entries are projected into the Engine request.
+	// matching entries are projected into the Engine request, and the base
+	// images are pulled through the Engine pull path with those
+	// credentials before the build resolves them locally.
 	authCredentials, err := resolveBuildAuthCredentials(cfg.RuntimeDir, session.ID, staged.DockerfilePath)
+	if err != nil {
+		opLog(ctx).Error("cannot read session registry credentials",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
+		duration := time.Since(started).Round(time.Millisecond).String()
+		finishAudit("docker_build_failed")
+		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, buildResponse{
+			OK:       false,
+			Code:     "docker_build_failed",
+			Message:  "docker build failed",
+			Duration: duration,
+		})
+		return
+	}
+
+	fromImages, err := dockerfileFromImages(staged.DockerfilePath)
 	if err != nil {
 		opLog(ctx).Error("cannot read session registry credentials",
 			slog.String("operation", "build"),
@@ -222,6 +241,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		Image:      req.Image,
 		Context:    contextTar,
 		Dockerfile: dockerfileRel,
+		FromImages: fromImages,
 		BuildArgs:  req.BuildArgs,
 		Auths:      authCredentials,
 	}, cfg.OperationLogMaxBytes)

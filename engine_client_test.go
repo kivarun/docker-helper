@@ -976,8 +976,8 @@ func TestEngineImageBuildRequestContract(t *testing.T) {
 	if got := record.query.Get("version"); got != "2" {
 		t.Errorf("builder version query = %q", got)
 	}
-	if got := record.query.Get("pull"); got != "1" {
-		t.Errorf("pull query = %q", got)
+	if got := record.query.Get("pull"); got != "" {
+		t.Errorf("the build must resolve its base locally (pre-pulled by the adapter), pull query = %q", got)
 	}
 	if _, keep := record.query["rm"]; keep {
 		t.Errorf("rm query must stay at the daemon default, got %q", record.query.Get("rm"))
@@ -997,6 +997,91 @@ func TestEngineImageBuildRequestContract(t *testing.T) {
 	}
 	if string(record.context) != "tar-context-bytes" {
 		t.Errorf("context body = %q", record.context)
+	}
+}
+
+// TestEngineImageBuildPullsFromImages proves the adapter refreshes every
+// FROM base image through the Engine pull path with the Session credential
+// stored for that registry — the plain ImageBuild request cannot resolve
+// sources remotely without a client session (moby/moby#48112) — and that a
+// missing base image is a build failure.
+func TestEngineImageBuildPullsFromImages(t *testing.T) {
+	type pullRecord struct {
+		query        url.Values
+		registryAuth string
+	}
+	var pulls []pullRecord
+	srv := newFakeEngine(t, "1.51", nil, func(w http.ResponseWriter, r *http.Request) {
+		rec := pullRecord{query: r.URL.Query(), registryAuth: r.Header.Get("X-Registry-Auth")}
+		pulls = append(pulls, rec)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"Downloaded newer image\n"}`))
+	}, fakeBuildStream(&fakeBuildRequest{}, `{"stream":"#1 DONE 0.0s\n"}`))
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	result, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:      "example:tag",
+		Context:    bytes.NewReader(nil),
+		Dockerfile: "Dockerfile",
+		FromImages: []string{"registry.example.com/team/base:1", "alpine:3.24"},
+		Auths: []sessionRegistryCredential{
+			{Registry: "registry.example.com", Username: "user", Password: "pass"},
+		},
+	}, 1<<20)
+	if err != nil {
+		t.Fatalf("imageBuild: %v", err)
+	}
+	if len(pulls) != 2 {
+		t.Fatalf("pulls = %d, want 2", len(pulls))
+	}
+	if got := pulls[0].query.Get("fromImage"); got != "registry.example.com/team/base" || pulls[0].query.Get("tag") != "1" {
+		t.Errorf("first pull = %q tag %q", pulls[0].query.Get("fromImage"), pulls[0].query.Get("tag"))
+	}
+	auth, err := base64.URLEncoding.DecodeString(pulls[0].registryAuth)
+	if err != nil {
+		t.Fatalf("decode first pull auth: %v", err)
+	}
+	var authConfig registry.AuthConfig
+	if err := json.Unmarshal(auth, &authConfig); err != nil {
+		t.Fatal(err)
+	}
+	if authConfig.Username != "user" || authConfig.Password != "pass" {
+		t.Errorf("first pull credential = %+v", authConfig)
+	}
+	if got := pulls[1].query.Get("fromImage"); got != "docker.io/library/alpine" || pulls[1].query.Get("tag") != "3.24" {
+		t.Errorf("second pull = %q tag %q", pulls[1].query.Get("fromImage"), pulls[1].query.Get("tag"))
+	}
+	if pulls[1].registryAuth != "" {
+		t.Errorf("the second pull must stay unauthenticated, got %q", pulls[1].registryAuth)
+	}
+	_ = result
+}
+
+// TestEngineImageBuildPullMissingBaseIsBuildFailure proves a missing base
+// image surfaces as a build failure, not a client-image 404.
+func TestEngineImageBuildPullMissingBaseIsBuildFailure(t *testing.T) {
+	srv := newFakeEngine(t, "1.51", nil, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"no such image"}`))
+	}, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the build must not run when the base image cannot be pulled")
+	})
+
+	eng := newEngineClientAgainstFake(t, srv.URL)
+	_, err := eng.imageBuild(context.Background(), engineBuildSpec{
+		Image:      "example:tag",
+		Context:    bytes.NewReader(nil),
+		Dockerfile: "Dockerfile",
+		FromImages: []string{"missing.example.com/base:1"},
+	}, 1<<20)
+
+	var engErr *engineError
+	if !errors.As(err, &engErr) {
+		t.Fatalf("imageBuild error = %v, want *engineError", err)
+	}
+	if engErr.kind != engineErrBuildFailed {
+		t.Errorf("error kind = %d, want build failed", engErr.kind)
 	}
 }
 

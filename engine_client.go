@@ -53,13 +53,14 @@ type engineImageBuilder interface {
 // engineBuildSpec is one prepared build request for the Engine adapter.
 // Context is the tar stream of the staged, helper-owned build context; the
 // adapter consumes the prepared trusted context and is not the
-// workspace-policy owner. Auths carries exactly the Session credentials the
-// staged Dockerfile's FROM lines name; the adapter encodes them into the
-// Engine request and never logs or echoes them.
+// workspace-policy owner. FromImages carries the base images the staged
+// Dockerfile's FROM lines name, and Auths the exactly matching Session
+// credentials; the adapter never logs or echoes them.
 type engineBuildSpec struct {
 	Image      string
 	Context    io.Reader
 	Dockerfile string
+	FromImages []string
 	BuildArgs  map[string]string
 	Auths      []sessionRegistryCredential
 }
@@ -352,6 +353,32 @@ func renderEngineStreamMessage(msg jsonstream.Message) string {
 	}
 }
 
+// pullBuildBase refreshes one FROM base image through the Engine pull path
+// with the Session credential stored for that registry, if any. A missing
+// base image is a build failure, not a client-image 404: the build would
+// fail on it anyway.
+func (e *engineClient) pullBuildBase(ctx context.Context, spec engineBuildSpec, fromImage string) error {
+	var credential *sessionRegistryCredential
+	registry := imageReferenceRegistryAddress(fromImage)
+	for i := range spec.Auths {
+		if spec.Auths[i].Registry == registry {
+			credential = &spec.Auths[i]
+			break
+		}
+	}
+	if _, err := e.imagePull(ctx, fromImage, credential, 0); err != nil {
+		var engErr *engineError
+		if !errors.As(err, &engErr) {
+			return err
+		}
+		if engErr.kind == engineErrImageNotFound {
+			return &engineError{kind: engineErrBuildFailed, cause: engErr}
+		}
+		return err
+	}
+	return nil
+}
+
 // imageBuild builds through the Engine ImageBuild endpoint — the same
 // daemon operation the docker CLI build path delegated to, with the
 // builder version, base-image pull, tag, Dockerfile selection, build args,
@@ -367,10 +394,23 @@ func renderEngineStreamMessage(msg jsonstream.Message) string {
 // inside the stream is a trustworthy negative result; a malformed or
 // transport-broken stream is not.
 func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, outputLimit int64) (engineBuildResult, error) {
+	// The Engine ImageBuild backend resolves source images through the
+	// build session the docker CLI attaches; the plain Engine API request
+	// has no session, so remote source resolution is refused with "no
+	// active sessions" (moby/moby#48112) and the X-Registry-Config auth is
+	// ignored by the builder. The adapter therefore pulls every FROM base
+	// image through the Engine pull path first — which carries per-request
+	// Session credentials — and builds from the locally resolved base, the
+	// same effective base-image freshness the CLI --pull produced.
+	for _, fromImage := range spec.FromImages {
+		if err := e.pullBuildBase(ctx, spec, fromImage); err != nil {
+			return engineBuildResult{}, err
+		}
+	}
+
 	opts := client.ImageBuildOptions{
 		Tags:       []string{spec.Image},
 		Dockerfile: spec.Dockerfile,
-		PullParent: true, // the CLI build path always pulled base images
 		Remove:     true, // keep the daemon default of removing intermediate containers
 		Version:    buildtypes.BuilderBuildKit,
 	}

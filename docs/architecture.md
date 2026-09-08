@@ -1505,19 +1505,26 @@ failure alike.
 
 The build context is uploaded to the Engine as a tar stream generated from
 the trusted staged copy ([Build context](#build-context)); symlinks are
-preserved as symlink entries. The adapter sends the Moby `ImageBuild`
-request with the target image tag, the staged Dockerfile path relative to
-the context, `--pull` (`PullParent`, matching the CLI behavior of always
-pulling base images), intermediate-container removal (the daemon default),
-and the BuildKit builder version required by the supported contract.
-Provenance/attestation records are a buildx client-side feature the old CLI
-invocation disabled explicitly; the direct Engine `ImageBuild` path never
-emits them.
+preserved as symlink entries. The adapter first refreshes every base image
+the staged Dockerfile's `FROM` lines name through the Engine pull path —
+the same pull operation the `pull` endpoint uses, with the Session
+credentials — and then sends the Moby `ImageBuild` request with the target
+image tag, the staged Dockerfile path relative to the context, local base
+resolution, intermediate-container removal (the daemon default), and the
+BuildKit builder version required by the supported contract. The
+pre-pull is required because the plain Engine `ImageBuild` request has no
+BuildKit client session: remote source resolution through it is refused
+with `no active sessions` (moby/moby#48112) and the builder ignores the
+request auth map, so session-private `FROM` images would be unreachable.
+This keeps the same effective base-image freshness the CLI `--pull`
+produced. Provenance/attestation records are a buildx client-side feature
+the old CLI invocation disabled explicitly; the direct Engine `ImageBuild`
+path never emits them.
 
 Registry credentials for private `FROM` images are resolved just in time
 from the one protected Session Docker credential store: only the
 registries named by the staged Dockerfile's `FROM` lines are projected
-into the Engine request auth map (Docker Hub keeps its established
+into the pre-pull credentials (Docker Hub keeps its established
 canonical key). Credentials are never persisted anywhere new, never enter
 durable Operations, argv, environment, audit, or operational logs.
 

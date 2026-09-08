@@ -1778,7 +1778,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 
 // TestAdmitRejectionBuildStagingBeforeLease drives handleBuild with
 // admit rejection and verifies staging is cleaned up before the lease is released.
-func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
+func TestBuildShutdownRefusalReleasesLeaseWithoutStaging(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)
@@ -1821,8 +1821,8 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 
-	// Force admit rejection.
-	app.OperationSupervisor.beginShutdown()
+	// Close the synchronous admission gates.
+	app.beginShutdown()
 
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
@@ -1850,29 +1850,10 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
-	var cleanupCalled bool
-	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
-		stagingDir := t.TempDir()
-		opDir := filepath.Join(stagingDir, opID)
-		if err := os.MkdirAll(opDir, 0o700); err != nil {
-			return nil, err
-		}
-		ctxDir := filepath.Join(opDir, "context")
-		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), []byte("FROM scratch\n"), 0o644); err != nil {
-			return nil, err
-		}
-		return &stagedBuildContext{
-			ContextPath:    ctxDir,
-			DockerfilePath: filepath.Join(ctxDir, dfrel),
-			cleanupPath:    opDir,
-			removeAll: func(path string) error {
-				cleanupCalled = true
-				return os.RemoveAll(path)
-			},
-		}, nil
+	var stagingAttempted bool
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, stagingID string) (*stagedBuildContext, error) {
+		stagingAttempted = true
+		return nil, os.ErrInvalid
 	}
 
 	reqBody := map[string]any{
@@ -1890,17 +1871,17 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify: staging cleanup was called.
-	if !cleanupCalled {
-		t.Error("staging cleanup must be called on admit rejection")
+	// Admission happens before staging: a refused build never stages.
+	if stagingAttempted {
+		t.Error("a refused build must not stage anything")
 	}
 
-	// Verify: lease was released after staging cleanup.
+	// Verify: the lease was released on refusal.
 	mac.mu.Lock()
 	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 	if leaseCount != 0 {
-		t.Errorf("expected 0 leases after admit rejection, got %d", leaseCount)
+		t.Errorf("expected 0 leases after refusal, got %d", leaseCount)
 	}
 }
 
