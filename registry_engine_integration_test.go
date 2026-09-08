@@ -307,7 +307,10 @@ func provisionDisposableRegistry(t *testing.T, ctx context.Context, provisioning
 	if hostPort == "" {
 		t.Fatal("engine did not publish the requested loopback port for the registry")
 	}
-	registryHost := "localhost:" + hostPort
+	// Address the published binding by its exact IPv4 loopback address:
+	// "localhost" can resolve to ::1, where the loopback-only publication
+	// has no listener (observed as dockerd dial refusals in CI).
+	registryHost := "127.0.0.1:" + hostPort
 	t.Logf("disposable registry: container 5000/tcp published on 127.0.0.1:%s", hostPort)
 
 	waitRegistryEndpointReady(t, registryHost)
