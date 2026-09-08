@@ -1573,30 +1573,43 @@ Authentication
     │
 Request validation
     │
-Session Docker config directory
+Engine adapter registry validation
     │
-Docker invocation
+Session credential store write
 ```
 
 Request validation checks that `registry`, `username`, and `password` are
 all non-empty.
 
-The session Docker config directory is per-session, located at
-`runtimeDir/sessions/<session_id>/docker`. It is created with `0700`
-permissions on first login. This directory is used as the Docker config
-home via `--config`, so registry credentials are isolated per session.
+Registry credential validation runs through the single production Engine
+adapter (`engineClient`), which constructs the negotiated Moby client and
+calls the Engine `/auth` endpoint — the same daemon operation the docker
+CLI login path delegated to. The adapter normalizes Engine failures into
+docker-helper error categories; Moby request/response types stay inside the
+adapter.
 
-Docker invocation runs `docker --config <dir> login --username <user>
---password-stdin <registry>`. The password is passed via stdin, never
-in argv, environment, logs, or audit records.
+On successful validation the handler persists the credential in the
+session-scoped Docker config directory at
+`runtimeDir/sessions/<session_id>/docker`, created with `0700`
+permissions on first login. The persisted representation is the Docker CLI
+`config.json` auths map, keyed by the canonical registry address
+(host[:port]; scheme and path stripped), written atomically with `0600`
+permissions by docker-helper itself. The credential entry is replaced only
+for that registry; previously stored valid credentials are left unchanged
+when validation fails. Later pull/build operations read the stored
+credential just in time; the legacy docker CLI backend keeps consuming the
+same file via `--config`. The password never enters argv, environment,
+logs, audit, SQLite, or error payloads. The credential is removed with the
+Session runtime directory.
 
-On success, the endpoint returns HTTP 200. On failure, it returns a
-classified status/code: HTTP 401 `registry_auth_denied` for authentication
-denial, HTTP 502 `registry_unavailable` for registry/backend failure, or HTTP
-400 `registry_login_failed` for unrecognized failures. The Docker output is
-never returned to the client; only a sanitized category message is sent, and
-only a bounded amount of stderr is captured (never logged or returned) to
-support classification.
+On success, the endpoint returns HTTP 200 with `{"ok": true}`. On failure,
+it returns the classified status/code contract owned by
+`release-3-api-cli.md`: HTTP 422 `registry_auth_denied` for registry
+credential denial, HTTP 502 `registry_unavailable` for a registry the
+Engine cannot reach, HTTP 503 `backend_unavailable` for an unreachable
+Engine, or HTTP 502 `backend_failure` for an unexpected Engine
+interaction. The Engine failure payload is never returned to the client;
+only a sanitized category message is sent.
 
 ### Filesystem policy
 

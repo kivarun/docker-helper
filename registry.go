@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
-	"io"
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -16,19 +14,23 @@ type registryLoginRequest struct {
 	Password string `json:"password"`
 }
 
-// classifyRegistryLoginFailure maps a docker login failure's stderr output to
-// an HTTP status, error code, and message. Authentication/authorization
-// denials are distinguished from registry/backend failures; the docker CLI
-// exposes no structured error, so the classification relies on its stable
-// stderr lines. Unrecognized failures keep the existing generic contract.
-func classifyRegistryLoginFailure(output string) (status int, code, message string) {
-	switch classifyDockerError(output) {
-	case dockerErrorAuthDenied:
-		return http.StatusUnauthorized, "registry_auth_denied", "authentication failed for registry"
-	case dockerErrorNetwork:
-		return http.StatusBadGateway, "registry_unavailable", "registry unreachable or backend failure"
+// writeRegistryLoginFailure maps a normalized Engine error to the accepted
+// registry-login failure contract. The response never carries registry
+// command output, the username, the password, or any raw Engine payload.
+func writeRegistryLoginFailure(ctx context.Context, w http.ResponseWriter, engErr *engineError) {
+	switch engErr.kind {
+	case engineErrRegistryAuthDenied:
+		writeError(ctx, w, http.StatusUnprocessableEntity, "registry_auth_denied",
+			"the registry rejected the supplied username and password")
+	case engineErrRegistryUnavailable:
+		writeError(ctx, w, http.StatusBadGateway, "registry_unavailable",
+			"registry unreachable or backend failure")
+	case engineErrBackendUnavailable:
+		writeError(ctx, w, http.StatusServiceUnavailable, "backend_unavailable",
+			"docker engine cannot be reached or observed")
 	default:
-		return http.StatusBadRequest, "registry_login_failed", "registry login failed"
+		writeError(ctx, w, http.StatusBadGateway, "backend_failure",
+			"unexpected docker engine failure")
 	}
 }
 
@@ -57,10 +59,7 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure the session Docker config directory exists.
-	cfg := a.getConfig()
-	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
-	if err != nil {
+	if _, err := ensureSessionDockerDir(a.getConfig().RuntimeDir, session.ID); err != nil {
 		opLog(ctx).Error("cannot create session Docker directory",
 			slog.String("operation", "registry_login"),
 			slog.String("error", err.Error()),
@@ -80,44 +79,39 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		LauncherName:  session.LauncherName,
 	})
 
-	// Execute docker login with password via stdin.
-	// Password must never appear in argv, environment, logs, or audit.
-	cmd := a.newDockerCommand(r.Context(), "docker",
-		"--config", dockerDir,
-		"login",
-		"--username", req.Username,
-		"--password-stdin",
-		req.Registry,
-	)
-
-	var stdinBuf bytes.Buffer
-	stdinBuf.WriteString(req.Password)
-	cmd.Stdin = &stdinBuf
-
-	// Registry login output is intentionally not retained or exposed.
-	// Capture only enough stderr to classify the failure, never returning or
-	// logging it: the password is supplied via stdin (never argv/env/logs) and
-	// must not leak, and Docker output must not be exposed verbatim.
-	var errBuf *boundedBuffer = newBoundedBuffer(4096)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = errBuf
-
-	err = cmd.Run()
-	duration := time.Since(started).Round(time.Millisecond).String()
-
+	// Validate the credentials through the Engine adapter. The password is
+	// held only in the request value and the adapter call; it must never
+	// appear in argv, environment, logs, audit, or errors.
+	authenticator, err := a.newEngineRegistryAuthenticator()
 	if err != nil {
-		// Classify the login failure (authentication vs. registry/backend)
-		// using the docker CLI's stable stderr lines. Only a sanitized
-		// category message is returned; the captured output is discarded.
-		outData, _, _ := errBuf.Range(0)
-		status, code, message := classifyRegistryLoginFailure(string(outData))
+		opLog(ctx).Error("cannot construct docker engine adapter",
+			slog.String("operation", "registry_login"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	identityToken, err := authenticator.registryLogin(r.Context(), req.Registry, req.Username, req.Password)
+	if err != nil {
+		// Classification uses only the normalized error kind; the raw
+		// backend payload stays out of the response and the captured
+		// diagnostic text never carries credential material.
+		engErr, ok := err.(*engineError)
+		if !ok {
+			opLog(ctx).Error("registry login failed with an unclassified engine error",
+				slog.String("operation", "registry_login"),
+				slog.String("error", err.Error()),
+			)
+			engErr = &engineError{kind: engineErrBackendFailure, cause: err}
+		}
 
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "registry.login.finish",
 			SessionID:     session.ID,
 			Registry:      req.Registry,
 			Result:        "login_failed",
-			Duration:      duration,
+			Duration:      time.Since(started).Round(time.Millisecond).String(),
 			PrincipalName: session.PrincipalName,
 			LauncherID:    session.LauncherID,
 			LauncherName:  session.LauncherName,
@@ -128,12 +122,19 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 		)
 
-		writeJSON(ctx, w, status, response{
-			OK:       false,
-			Code:     code,
-			Message:  message,
-			Duration: duration,
-		})
+		writeRegistryLoginFailure(ctx, w, engErr)
+		return
+	}
+
+	// Validation succeeded: atomically replace the Session's protected
+	// credential entry for exactly this registry. Success is reported only
+	// after the credential is committed.
+	if err := storeSessionRegistryCredential(a.getConfig().RuntimeDir, session.ID, req.Registry, req.Username, req.Password, identityToken); err != nil {
+		opLog(ctx).Error("cannot store session registry credential",
+			slog.String("operation", "registry_login"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -142,14 +143,13 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		SessionID:     session.ID,
 		Registry:      req.Registry,
 		Result:        "success",
-		Duration:      duration,
+		Duration:      time.Since(started).Round(time.Millisecond).String(),
 		PrincipalName: session.PrincipalName,
 		LauncherID:    session.LauncherID,
 		LauncherName:  session.LauncherName,
 	})
 
 	writeJSON(ctx, w, http.StatusOK, response{
-		OK:      true,
-		Message: fmt.Sprintf("login succeeded for %s", req.Registry),
+		OK: true,
 	})
 }

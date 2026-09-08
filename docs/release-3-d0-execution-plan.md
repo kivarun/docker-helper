@@ -402,10 +402,16 @@ architectural finding rather than proved: running workloads do not survive a
 rootless daemon restart under any restart procedure (official unit restart,
 main-exit auto-restart, main-exit with `KillMode=process`) despite
 `live-restore=true`, because every rootless unit recycle replaces the
-rootlesskit user/mount namespace hosting the workload sandbox. The D0.2
-restart contract therefore needs an explicit architectural decision/change
-proposal under `AGENTS.md` — scoped restart semantics for rootless, or an
-accepted and documented limitation — not a silent scope reduction.
+rootlesskit user/mount namespace hosting the workload sandbox. The owner
+decision resolving this finding: Release 3 does not guarantee that running
+workloads survive a Docker Engine daemon restart. A daemon restart is an
+infrastructure event; docker-helper's responsibility after Engine
+availability returns is to observe backend reality, reconcile it with
+durable ownership/state, and continue normal lifecycle/recovery semantics.
+`live-restore`, where present, is useful backend behavior but is not a
+docker-helper product requirement, and no implementation or acceptance
+requirement exists to preserve running workloads across an Engine restart.
+The experiment remains recorded evidence, not a blocker.
 
 ## Ordered implementation tasks
 

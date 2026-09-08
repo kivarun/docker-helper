@@ -451,12 +451,16 @@ LSM list `lockdown,capability,landlock,yama,apparmor`. Recorded:
   all three, the restarted daemon logs `error locating sandbox id … not
   found` and the workload exits: every rootless unit recycle replaces the
   rootlesskit user/mount namespace that hosts the workload sandbox, so no
-  restart procedure can carry a running workload across it. This is an
-  architecture-level incompatibility between live-restore and the official
-  rootless deployment, recorded as decision evidence for D0.2: the D0.2
-  restart contract needs an explicit architectural decision/change proposal
-  under `AGENTS.md` (scoped restart semantics for rootless, or an accepted
-  limitation), not a silent scope reduction.
+   restart procedure can carry a running workload across it. This is an
+   architecture-level incompatibility between live-restore and the official
+   rootless deployment. The owner decision resolving it: Release 3 does not
+   guarantee that running workloads survive a Docker Engine daemon restart;
+   a daemon restart is an infrastructure event, and docker-helper's
+   responsibility afterwards is to observe backend reality, reconcile it
+   with durable ownership/state, and continue normal lifecycle/recovery
+   semantics. `live-restore`, where present, is useful backend behavior but
+   is not a docker-helper product requirement. The experiment above remains
+   recorded deployment evidence, not a product blocker.
 
 The gate instrument is the committed probe
 `scripts/cgroup-feasibility-probe` (`go run ./scripts/cgroup-feasibility-probe`).

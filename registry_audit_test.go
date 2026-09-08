@@ -2,11 +2,10 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -14,29 +13,18 @@ import (
 func TestRegistryLoginAuditStartFinish(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEngineAuth(t)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	reqBody := map[string]string{
+	w := postRegistryLogin(t, app, result.Token, map[string]string{
 		"registry": "registry.example.com",
 		"username": "user",
 		"password": "secret",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/registry/login", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRegistryLogin(w, req)
+	})
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
@@ -83,17 +71,17 @@ func TestRegistryLoginAuditStartFinish(t *testing.T) {
 func TestRegistryLoginRegistryHyphenRejected(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEngineAuth(t)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	execCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		execCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
+	adapterCalled := false
+	app.NewEngineClientFn = func() (engineRegistryAuthenticator, error) {
+		adapterCalled = true
+		return &fakeEngineAuth{}, nil
 	}
 
 	reqBody := map[string]string{
@@ -121,8 +109,8 @@ func TestRegistryLoginRegistryHyphenRejected(t *testing.T) {
 		t.Errorf("expected code 'invalid_registry_login', got %v", resp["code"])
 	}
 
-	if execCalled {
-		t.Error("ExecCommandContext must not be called when registry starts with '-'")
+	if adapterCalled {
+		t.Error("the engine adapter must not be constructed when registry starts with '-'")
 	}
 
 	records := parseAuditRecords(auditBuf)
@@ -136,7 +124,7 @@ func TestRegistryLoginRegistryHyphenRejected(t *testing.T) {
 func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 	auditBuf, opBuf := setupTestLogging(t)
 
-	app := newTestAppWithAdminToken(t)
+	app, fake := newTestAppWithEngineAuth(t)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -146,9 +134,7 @@ func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 	const secretPassword = "super-secret-password-12345"
 
 	// Use failure path so the operational logger actually writes.
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
-	}
+	fake.err = &engineError{kind: engineErrBackendFailure, cause: errors.New("engine failure")}
 
 	reqBody := map[string]string{
 		"registry": "registry.example.com",
@@ -163,8 +149,8 @@ func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 
 	app.handleRegistryLogin(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d", http.StatusBadGateway, w.Code)
 	}
 
 	auditOutput := auditBuf.String()
@@ -181,7 +167,7 @@ func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 func TestRegistryLoginAuditUsernameNotLogged(t *testing.T) {
 	auditBuf, opBuf := setupTestLogging(t)
 
-	app := newTestAppWithAdminToken(t)
+	app, fake := newTestAppWithEngineAuth(t)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -191,9 +177,7 @@ func TestRegistryLoginAuditUsernameNotLogged(t *testing.T) {
 	const secretUsername = "secret-username-12345"
 
 	// Use failure path so the operational logger actually writes.
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
-	}
+	fake.err = &engineError{kind: engineErrBackendFailure, cause: errors.New("engine failure")}
 
 	reqBody := map[string]string{
 		"registry": "registry.example.com",
@@ -208,8 +192,8 @@ func TestRegistryLoginAuditUsernameNotLogged(t *testing.T) {
 
 	app.handleRegistryLogin(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d", http.StatusBadGateway, w.Code)
 	}
 
 	auditOutput := auditBuf.String()

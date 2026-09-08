@@ -163,3 +163,148 @@ func TestRegistryLoginUsageListsAgentEndpointFlags(t *testing.T) {
 		}
 	}
 }
+
+// TestRegistryLoginCLISuccessJSONEnvelope proves JSON mode prints the exact
+// one-field server response and the human success line names the registry.
+func TestRegistryLoginCLISuccessJSONEnvelope(t *testing.T) {
+	stdout, stderr := runRegistryLoginCLIAgainstFake(t, []string{"--json"}, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Registry string `json:"registry"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	if stderr != "" {
+		t.Errorf("unexpected stderr: %s", stderr)
+	}
+	if strings.Contains(stdout, "Login succeeded") {
+		t.Errorf("JSON mode must print the server response verbatim, got: %s", stdout)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("JSON mode must print JSON, got: %s", stdout)
+	}
+	if len(resp) != 1 || resp["ok"] != true {
+		t.Errorf("expected exactly {\"ok\":true}, got: %s", stdout)
+	}
+}
+
+// TestRegistryLoginCLIHumanSuccessLine proves human mode prints its own
+// success line naming the registry without echoing credential material.
+func TestRegistryLoginCLIHumanSuccessLine(t *testing.T) {
+	stdout, stderr := runRegistryLoginCLIAgainstFake(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	if stderr != "" {
+		t.Errorf("unexpected stderr: %s", stderr)
+	}
+	if !strings.Contains(stdout, "Login succeeded for registry.example.com") {
+		t.Errorf("expected human success line, got: %s", stdout)
+	}
+}
+
+// TestRegistryLoginCLISecretCanary proves the CLI never echoes the supplied
+// password or encoded credential material on success or failure.
+func TestRegistryLoginCLISecretCanary(t *testing.T) {
+	const passwordCanary = "cli-registry-canary-Zq9Lm4Xw7b"
+	const usernameCanary = "cli-registry-user-canary-Rn3Kp8Qf6c"
+
+	run := func(fail bool) {
+		stdout, stderr := runRegistryLoginCLIAgainstFake(t, nil, func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Registry string `json:"registry"`
+				Username string `json:"username"`
+				Password string `json:"password"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if req.Password != passwordCanary || req.Username != usernameCanary {
+				t.Errorf("CLI must send the supplied credentials unchanged: %q/%q", req.Username, req.Password)
+			}
+			if fail {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				json.NewEncoder(w).Encode(map[string]any{
+					"ok":      false,
+					"code":    "registry_auth_denied",
+					"message": "the registry rejected the supplied username and password",
+				})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		})
+		for _, output := range []string{stdout, stderr} {
+			if strings.Contains(output, passwordCanary) {
+				t.Error("CLI output must not contain the password")
+			}
+			if strings.Contains(output, usernameCanary) {
+				t.Error("CLI output must not contain the username")
+			}
+		}
+	}
+	run(false)
+	run(true)
+}
+
+// runRegistryLoginCLIAgainstFake runs the registry login CLI against a fake
+// daemon HTTP server and returns stdout and stderr. extraArgs are appended
+// after the base flags (e.g. --json). The password is fed via stdin;
+// --password-stdin is the only input mode (no terminal in tests).
+func runRegistryLoginCLIAgainstFake(t *testing.T, extraArgs []string, handler http.HandlerFunc) (string, string) {
+	t.Helper()
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, listenErr := net.Listen("unix", socketPath)
+	if listenErr != nil {
+		t.Fatal(listenErr)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /registry/login", handler)
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	waitForDialReady(t, "unix", socketPath)
+
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
+
+	pr, pw, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	pw.WriteString("cli-registry-canary-Zq9Lm4Xw7b\n")
+	pw.Close()
+
+	oldStdin := os.Stdin
+	os.Stdin = pr
+	t.Cleanup(func() {
+		os.Stdin = oldStdin
+		pr.Close()
+	})
+
+	var out, stderr bytes.Buffer
+	args := append([]string{
+		"registry", "login",
+		"--registry", "registry.example.com",
+		"--username", "cli-registry-user-canary-Rn3Kp8Qf6c",
+		"--password-stdin",
+	}, extraArgs...)
+	exitCode := runCommandWithWriters(args, &out, &stderr)
+
+	if exitCode != 0 && exitCode != 1 {
+		t.Errorf("unexpected exit code %d, stderr: %s", exitCode, stderr.String())
+	}
+	return out.String(), stderr.String()
+}
