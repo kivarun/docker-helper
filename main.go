@@ -192,6 +192,43 @@ func serveHTTPUntilShutdown(
 	}
 }
 
+// terminateDaemonServing is the single owner of the post-trigger shutdown
+// order. With the one absolute deadline the drain carries, it terminates
+// legacy operations, cancels live synchronous Engine requests and waits for
+// their handlers to release them, and then waits for the HTTP drain —
+// which also waits for handlers the synchronous coordinator does not track,
+// such as registry login.
+//
+// The shared Engine adapter is released only after the drain completed:
+// every HTTP handler that could use it has finished by then, so no handler
+// can reuse a closed Moby client or lazy-create one after the close.
+// shutdownCancel runs last so the drain and termination contexts are never
+// cancelled prematurely.
+func terminateDaemonServing(app *App, shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan error) error {
+	// Terminate running operations with the same absolute deadline used
+	// by HTTP drain. HTTP drain and operation termination proceed
+	// concurrently under the one wall-clock shutdown budget.
+	if app.OperationSupervisor != nil {
+		app.OperationSupervisor.terminateForShutdown(shutdownCtx, app.killContainerBestEffort)
+	}
+
+	// Cancel live synchronous Engine requests and wait for their
+	// handlers to release them under the same shutdown deadline.
+	if app.SyncExecutionCoordinator != nil {
+		app.SyncExecutionCoordinator.terminateForShutdown(shutdownCtx)
+	}
+
+	// Wait for HTTP drain to complete before releasing the adapter and
+	// cancelling the shutdown context. The drain goroutine runs
+	// server.Shutdown(shutdownCtx) and must not be interrupted by
+	// premature context cancellation.
+	drainErr := <-drainDone
+
+	app.closeEngineAdapter()
+	shutdownCancel()
+	return drainErr
+}
+
 // registerRoutes registers all production API endpoints on the given mux.
 func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /build", app.handleBuild)
@@ -395,40 +432,9 @@ func runDaemon(stdout, stderr io.Writer) error {
 
 		shutdownCtx, shutdownCancel, drainDone, err := serveHTTPUntilShutdown(ctx, server, unixListener, tcpListener, func() time.Duration {
 			return app.getConfig().ShutdownTimeout
-		}, func() {
-			// Shutdown triggered (signal or Serve error) — close the operation
-			// gate so no new operations are accepted, and close synchronous
-			// Engine request admission.
-			if app.OperationSupervisor != nil {
-				app.OperationSupervisor.beginShutdown()
-			}
-			if app.SyncExecutionCoordinator != nil {
-				app.SyncExecutionCoordinator.beginShutdown()
-			}
-		})
+		}, app.beginShutdown)
 
-		// Terminate running operations with the same absolute deadline used
-		// by HTTP drain. HTTP drain and operation termination proceed
-		// concurrently under the one wall-clock shutdown budget.
-		if app.OperationSupervisor != nil {
-			app.OperationSupervisor.terminateForShutdown(shutdownCtx, app.killContainerBestEffort)
-		}
-
-		// Cancel live synchronous Engine requests and wait for their
-		// handlers to release them under the same shutdown deadline.
-		if app.SyncExecutionCoordinator != nil {
-			app.SyncExecutionCoordinator.terminateForShutdown(shutdownCtx)
-		}
-
-		// Release the shared Engine adapter's pooled connections now that
-		// no synchronous Engine request is live.
-		app.closeEngineAdapter()
-
-		// Wait for HTTP drain to complete before cancelling the shutdown
-		// context. The drain goroutine runs server.Shutdown(shutdownCtx)
-		// and must not be interrupted by premature context cancellation.
-		drainErr := <-drainDone
-		shutdownCancel()
+		drainErr := terminateDaemonServing(app, shutdownCtx, shutdownCancel, drainDone)
 
 		// Use drain error if no serve error was returned.
 		if err == nil {

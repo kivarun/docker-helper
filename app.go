@@ -129,6 +129,19 @@ func (a *App) closeEngineAdapter() {
 	}
 }
 
+// beginShutdown closes both runtime admission gates: new legacy operations
+// and new synchronous Engine requests are refused from now on. It is the
+// trigger-side wiring the serving shutdown path installs; the post-trigger
+// termination order is owned by terminateDaemonServing.
+func (a *App) beginShutdown() {
+	if a.OperationSupervisor != nil {
+		a.OperationSupervisor.beginShutdown()
+	}
+	if a.SyncExecutionCoordinator != nil {
+		a.SyncExecutionCoordinator.beginShutdown()
+	}
+}
+
 // getConfig returns a snapshot copy of the current configuration under a read lock.
 // The caller receives an independent copy that cannot be mutated by setConfig.
 func (a *App) getConfig() Config {

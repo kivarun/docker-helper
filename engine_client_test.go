@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -711,5 +713,188 @@ func TestAppShutdownClosesSharedEngineAdapter(t *testing.T) {
 	}
 	if closedConns.Load() == 0 {
 		t.Error("the Engine endpoint never observed the shared client's pooled connection closing")
+	}
+}
+
+// TestShutdownClosesSharedEngineAdapterOnlyAfterHTTPDrain is the shutdown
+// ordering regression for the shared Engine adapter. A real registry login
+// handler is accepted and blocked inside the shared adapter's Engine call;
+// shutdown is then initiated through the production serving stack. The
+// adapter must not be closed while the handler is in flight, and the fake
+// Engine must observe its pooled connection closing only after the HTTP
+// drain completed. A close issued before the drain cannot close the
+// handler's active connection, so with the wrong order the endpoint would
+// never observe a StateClosed transition here. After the drain no handler is
+// alive, so a lazy-create after the close is structurally impossible.
+// TestShutdownClosesSharedEngineAdapterOnlyAfterHTTPDrain is the shutdown
+// ordering regression for the shared Engine adapter. A real registry login
+// handler is accepted and blocked while the shared adapter is mid-use — the
+// fake Engine holds the adapter's first Engine call, the API negotiation
+// ping; the login handler cannot proceed without it. Shutdown is then
+// initiated through the production serving stack.
+//
+// A close issued before the HTTP drain is observable twice: closing while
+// the adapter's connection is still active marks the transport's pooled
+// connection for closure, so the connection is torn down as soon as it
+// becomes idle — while the login is still completing — and the connection
+// the login actually used is created after that and is never closed at all.
+// With the accepted order the same connection survives the whole login,
+// stays pooled through the drain, and the fake Engine observes exactly one
+// StateClosed transition after the drain completed.
+func TestShutdownClosesSharedEngineAdapterOnlyAfterHTTPDrain(t *testing.T) {
+	pingHeld := make(chan struct{})
+	pingRelease := make(chan struct{})
+	authDone := make(chan struct{})
+	var closedConns atomic.Int32
+
+	engine := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/_ping":
+			// Hold the negotiation so the login handler is provably
+			// mid-adapter-use while the shutdown trigger fires.
+			var once sync.Once
+			once.Do(func() { close(pingHeld) })
+			select {
+			case <-pingRelease:
+			case <-r.Context().Done():
+			}
+			w.Header().Set("Api-Version", "1.51")
+			w.Header().Set("Ostype", "linux")
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/auth"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"Status":"Login Succeeded"}`))
+			close(authDone)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	engine.Config.ConnState = func(c net.Conn, cs http.ConnState) {
+		if cs == http.StateClosed {
+			closedConns.Add(1)
+		}
+	}
+	engine.Start()
+	t.Cleanup(engine.Close)
+	t.Setenv("DOCKER_HOST", engine.URL)
+
+	app := newTestAppWithAdminToken(t)
+	app.Config.ShutdownTimeout = 30 * time.Second
+	session, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	registerRoutes(mux, app)
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "shutdown-order.sock"))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	signalCtx, signalCancel := context.WithCancel(context.Background())
+	t.Cleanup(signalCancel)
+	serverDone := make(chan error, 1)
+	go func() {
+		shutdownCtx, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(
+			signalCtx, server, listener, nil,
+			func() time.Duration { return app.getConfig().ShutdownTimeout },
+			app.beginShutdown,
+		)
+		serverDone <- terminateDaemonServing(app, shutdownCtx, shutdownCancel, drainDone)
+		if serveErr != nil {
+			t.Errorf("serveHTTPUntilShutdown: %v", serveErr)
+		}
+	}()
+
+	// A real registry login through the production route, blocked inside
+	// the shared adapter's first Engine call.
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", listener.Addr().String())
+		},
+	}
+	loginBody := []byte(`{"registry":"registry.example.com","username":"user","password":"pass"}`)
+	req, err := http.NewRequest(http.MethodPost, "http://localhost/registry/login", bytes.NewReader(loginBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+session.Token)
+	loginDone := make(chan int, 1)
+	go func() {
+		resp, err := (&http.Client{Transport: transport}).Do(req)
+		if err != nil {
+			t.Errorf("registry login request: %v", err)
+			loginDone <- 0
+			return
+		}
+		resp.Body.Close()
+		loginDone <- resp.StatusCode
+	}()
+
+	select {
+	case <-pingHeld:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the login handler never reached the shared Engine adapter")
+	}
+
+	// Initiate shutdown while the login handler is mid-adapter-use. None of
+	// the termination steps tracks the login handler, so the drain is what
+	// still waits for it, and the adapter close must come only after that
+	// drain.
+	signalCancel()
+
+	// No connection may close while the handler is still mid-flight.
+	if closed := closedConns.Load(); closed != 0 {
+		t.Fatalf("a shared adapter connection closed before the login completed: %d", closed)
+	}
+
+	// Release the handler and let the login, the drain, and the ordered
+	// shutdown sequence complete.
+	close(pingRelease)
+
+	select {
+	case code := <-loginDone:
+		if code != http.StatusOK {
+			t.Fatalf("registry login status = %d, want 200", code)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the login handler never completed")
+	}
+	select {
+	case <-authDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the fake Engine never completed the login call")
+	}
+
+	// The connection that carried the login must not have been closed by
+	// the time the login completed: a pre-drain close marks the transport's
+	// pooled connection for closure, which tears it down as soon as it
+	// becomes idle — during the login, never after the drain.
+	closedAtLoginDone := closedConns.Load()
+
+	select {
+	case drainErr := <-serverDone:
+		if drainErr != nil {
+			t.Fatalf("drain error: %v", drainErr)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the serving shutdown never completed")
+	}
+
+	// After the drain the adapter's pooled connection must be released.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if closedConns.Load() > closedAtLoginDone {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if closedConns.Load() <= closedAtLoginDone {
+		t.Error("the Engine endpoint never observed the shared adapter's connection closing after the drain")
 	}
 }
