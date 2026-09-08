@@ -436,6 +436,12 @@ Dependencies: D0.1 closed.
 6. remove build use of `operationSupervisor` and its public Operation
    status/log/cancel path once tests pass.
 
+Progress note: steps 1–2 are landed (registry login validated through the
+Engine adapter with the Session store unchanged); step 3 is landed (pull
+migrated to the Engine pull stream with just-in-time Session credential
+resolution, admitted through the synchronous execution coordinator with
+`shutting_down` refusal). Steps 4–6 (synchronous build migration) remain.
+
 **Ready boundary:** pull/registry/build have exactly one backend owner and build
 has no Operation identity. Legacy run may still use the old supervisor, so the
 supervisor itself remains.

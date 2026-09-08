@@ -1552,16 +1552,36 @@ the Session and Principal labels are provenance.
 ### Pull
 
 `POST /pull` authenticates, validates that the image field is non-empty,
-and runs `docker pull` with the image reference. The endpoint remains
+and pulls the image reference through the Engine API. The endpoint remains
 synchronous and returns the execution result directly in the response;
-pull output is captured into a bounded buffer of
+pull progress output is captured into a bounded buffer of
 `operation_log_max_bytes`, and when output exceeds the limit the newest
 tail is retained with `truncated: true`.
 
+The pull runs through the single production Engine adapter
+(`engineClient`), which calls the Engine `/images/create` pull stream —
+the same daemon operation the docker CLI pull path delegated to. The
+adapter renders the progress stream into the line-based combined output
+form and normalizes Engine failures into docker-helper error categories;
+Moby request/response types stay inside the adapter.
+
+Just before the pull, the handler resolves the stored Session credential
+for the exact registry the image reference names (Docker reference
+grammar, delegated to the Moby reference parser) and hands it to the
+Engine in the `X-Registry-Auth` header. A reference with no registry or
+nothing stored for it pulls unauthenticated. The credential never enters
+argv, environment, logs, audit, SQLite, or error payloads.
+
+The pull is admitted through the synchronous-execution coordinator: while
+the daemon is shutting down, new pulls are refused with
+`shutting_down` before any pull starts; a live pull is cancelled at
+shutdown and answered with the generic pull failure. A pull whose request
+context ends (client disconnect) is answered the same way.
+
 Image reference syntax is delegated to Docker. The helper does not
 reimplement the Docker reference grammar; it only checks that the image
-field is non-empty. Docker CLI validates the reference when the command
-executes. If Docker rejects the reference, the endpoint returns its
+field is non-empty. The Engine validates the reference when the pull
+executes. If the Engine rejects the reference, the endpoint returns its
 standard Docker failure response.
 
 ### Registry login
@@ -1597,8 +1617,9 @@ permissions on first login. The persisted representation is the Docker CLI
 permissions by docker-helper itself. The credential entry is replaced only
 for that registry; previously stored valid credentials are left unchanged
 when validation fails. Later pull/build operations read the stored
-credential just in time; the legacy docker CLI backend keeps consuming the
-same file via `--config`. The password never enters argv, environment,
+credential just in time: pull encodes it into the Engine `X-Registry-Auth`
+header, and the legacy docker CLI build backend keeps consuming the same
+file via `--config`. The password never enters argv, environment,
 logs, audit, SQLite, or error payloads. The credential is removed with the
 Session runtime directory.
 
@@ -1925,10 +1946,10 @@ Current error codes (non-exhaustive):
 | `launcher_not_found` | `GET /sessions?launcher=` | the selected Launcher does not exist inside the narrowed scope (list narrowing; non-disclosing) |
 | `launcher_name_requires_principal` | `GET /sessions?launcher=` | a Launcher-name narrowing selector was supplied without a Principal scope (names are never searched globally) |
 | `invalid_selector` | `GET /sessions` | a narrowing selector is illegal for the authenticated authority (a Principal selector under a Principal credential, any selector under a Launcher credential) |
-| `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
-| `docker_pull_failed` | `POST /pull` | docker pull returned non-zero and the failure is not classified |
-| `image_not_found` | `POST /pull` | docker pull: image/repository not found |
-| `pull_access_denied` | `POST /pull` | docker pull: authentication/authorization denied |
+| `shutting_down` | `POST /build`, `POST /run`, `POST /pull` | daemon is shutting down |
+| `docker_pull_failed` | `POST /pull` | pull: unexpected Engine failure, unreachable Engine, or cancelled pull |
+| `image_not_found` | `POST /pull` | pull: image/repository not found |
+| `pull_access_denied` | `POST /pull` | pull: authentication/authorization denied |
 | `registry_unavailable` | `POST /pull`, `POST /registry/login` | registry/network/backend failure |
 | `registry_auth_denied` | `POST /registry/login` | docker login: authentication/authorization denied |
 | `registry_login_failed` | `POST /registry/login` | docker login failed and the failure is not classified |
@@ -2265,7 +2286,7 @@ Result codes:
 
 #### pull.start
 
-Emitted before a Docker pull begins.
+Emitted before a pull begins.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2279,7 +2300,7 @@ No `result` or `duration` field.
 
 #### pull.finish
 
-Emitted after a Docker pull completes (success or failure).
+Emitted after a pull completes (success or failure).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2289,7 +2310,7 @@ Emitted after a Docker pull completes (success or failure).
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |
 | `result` | string | `success` or `pull_error` |
-| `exit_code` | number | present when an exit code is available |
+| `exit_code` | number | not emitted: the Engine pull path has no CLI exit code |
 | `duration` | string | pull wall-clock time |
 
 #### registry.login.start / registry.login.finish
@@ -2410,7 +2431,7 @@ internals and are not exposed to the API.
 
 The per-operation output buffer accessed via `GET /operations/{id}/logs`
 is intentionally separate: it captures the merged stdout/stderr stream
-from the Docker CLI process and may contain Docker pull/build status
+from the Docker CLI process and may contain Docker build/run status
 output, container stdout/stderr, and build process output. That stream is
 not part of the daemon audit or operational logs.
 

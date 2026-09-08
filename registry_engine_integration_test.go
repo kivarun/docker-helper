@@ -30,8 +30,9 @@ import (
 //     environment) validates correct and wrong credentials;
 //   - a successful login persists the credential in the protected Session
 //     Docker config store in the docker CLI config format;
-//   - the stored credential is consumable by the legacy Docker CLI backend
-//     that pull/build still use (the cross-version regression constraint);
+//   - the stored credential stays consumable by the legacy Docker CLI
+//     backend that build still uses (the cross-version regression
+//     constraint, probed with a CLI pull against the same config format);
 //   - the credential canaries never appear in the HTTP response, audit
 //     capture, daemon log capture, or SQLite content.
 //
@@ -52,128 +53,7 @@ func TestRegistryLoginEngineIntegration(t *testing.T) {
 	const userCanary = "dh-prod-login-user-canary-Bm5Jt7Yw2r"
 	const passCanary = "dh-prod-login-pass-canary-Vk8Qn4Zs6h"
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(passCanary), bcrypt.MinCost)
-	if err != nil {
-		t.Fatalf("bcrypt: %v", err)
-	}
-
-	seedPull, err := provisioning.ImagePull(ctx, "registry:2", client.ImagePullOptions{})
-	if err != nil {
-		t.Fatalf("pull registry:2: %v", err)
-	}
-	if err := seedPull.Wait(ctx); err != nil {
-		t.Fatalf("pull registry:2: %v", err)
-	}
-
-	seedImagePull, err := provisioning.ImagePull(ctx, "alpine:3.24", client.ImagePullOptions{})
-	if err != nil {
-		t.Fatalf("pull alpine:3.24: %v", err)
-	}
-	if err := seedImagePull.Wait(ctx); err != nil {
-		t.Fatalf("pull alpine:3.24: %v", err)
-	}
-
-	const authVolume = "dh-login-auth-volume"
-	if _, err := provisioning.VolumeCreate(ctx, client.VolumeCreateOptions{Name: authVolume}); err != nil {
-		t.Fatalf("create auth volume: %v", err)
-	}
-	defer func() {
-		_, _ = provisioning.VolumeRemove(context.WithoutCancel(ctx), authVolume, client.VolumeRemoveOptions{Force: true})
-	}()
-
-	seed, err := provisioning.ContainerCreate(ctx, client.ContainerCreateOptions{
-		Config: &container.Config{
-			Image: "alpine:3.24",
-			Cmd:   []string{"sh", "-c", `printf '%s:%s\n' "$DH_USER" "$DH_HASH" > /auth/htpasswd`},
-			Env:   []string{"DH_USER=" + userCanary, "DH_HASH=" + string(hash)},
-		},
-		HostConfig: &container.HostConfig{Binds: []string{authVolume + ":/auth"}},
-	})
-	if err != nil {
-		t.Fatalf("create htpasswd helper: %v", err)
-	}
-	if _, err := provisioning.ContainerStart(ctx, seed.ID, client.ContainerStartOptions{}); err != nil {
-		t.Fatalf("start htpasswd helper: %v", err)
-	}
-	waitResult := provisioning.ContainerWait(ctx, seed.ID, client.ContainerWaitOptions{})
-	select {
-	case <-waitResult.Result:
-	case waitErr := <-waitResult.Error:
-		t.Fatalf("wait htpasswd helper: %v", waitErr)
-	}
-
-	port, err := network.ParsePort("5000/tcp")
-	if err != nil {
-		t.Fatalf("parse container port: %v", err)
-	}
-	reg, err := provisioning.ContainerCreate(ctx, client.ContainerCreateOptions{
-		Config: &container.Config{
-			Image:        "registry:2",
-			ExposedPorts: network.PortSet{port: {}},
-			Env: []string{
-				"REGISTRY_AUTH=htpasswd",
-				"REGISTRY_AUTH_HTPASSWD_REALM=dh-login",
-				"REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd",
-			},
-		},
-		HostConfig: &container.HostConfig{
-			PortBindings: network.PortMap{port: []network.PortBinding{{
-				HostIP:   netip.MustParseAddr("127.0.0.1"),
-				HostPort: "",
-			}}},
-			Binds: []string{authVolume + ":/auth:ro"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("create registry container: %v", err)
-	}
-	defer func() {
-		_, _ = provisioning.ContainerRemove(context.WithoutCancel(ctx), reg.ID, client.ContainerRemoveOptions{Force: true})
-	}()
-	if _, err := provisioning.ContainerStart(ctx, reg.ID, client.ContainerStartOptions{}); err != nil {
-		t.Fatalf("start registry container: %v", err)
-	}
-
-	inspected, err := provisioning.ContainerInspect(ctx, reg.ID, client.ContainerInspectOptions{})
-	if err != nil {
-		t.Fatalf("inspect registry container: %v", err)
-	}
-	var hostPort string
-	for _, bindings := range inspected.Container.NetworkSettings.Ports {
-		for _, binding := range bindings {
-			if binding.HostPort != "" && binding.HostIP == netip.MustParseAddr("127.0.0.1") {
-				hostPort = binding.HostPort
-				break
-			}
-		}
-		if hostPort != "" {
-			break
-		}
-	}
-	if hostPort == "" {
-		t.Fatal("engine did not publish the requested loopback port for the registry")
-	}
-	registryHost := "localhost:" + hostPort
-	t.Logf("disposable registry: container 5000/tcp published on 127.0.0.1:%s", hostPort)
-
-	waitRegistryEndpointReady(t, registryHost)
-	// The registry boundary is authenticated before the production path runs.
-	anonymous, anonymousErr := registryV2Ping(registryHost, "", "")
-	if anonymousErr != nil {
-		t.Fatalf("anonymous registry ping: %v", anonymousErr)
-	}
-	anonymous.Body.Close()
-	if anonymous.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("anonymous /v2/ returned %d; auth middleware is not active", anonymous.StatusCode)
-	}
-	authorized, authorizedErr := registryV2Ping(registryHost, userCanary, passCanary)
-	if authorizedErr != nil {
-		t.Fatalf("authenticated registry ping: %v", authorizedErr)
-	}
-	authorized.Body.Close()
-	if authorized.StatusCode != http.StatusOK {
-		t.Fatalf("canary credential pair rejected by the registry boundary (status %d)", authorized.StatusCode)
-	}
+	registryHost := provisionDisposableRegistry(t, ctx, provisioning, "dh-login-auth-volume", userCanary, passCanary)
 
 	// Production path: real adapter (nil seam, Engine endpoint from the
 	// environment), test app, and one Session bearer.
@@ -314,7 +194,142 @@ func TestRegistryLoginEngineIntegration(t *testing.T) {
 	if pullErr != nil {
 		t.Fatalf("legacy docker CLI pull with the stored credential failed: %v\n%s", pullErr, pullOut)
 	}
-	t.Log("legacy docker CLI pull consumed the stored session credential successfully")
+	t.Log("legacy docker CLI probe consumed the stored session credential successfully")
+}
+
+// provisionDisposableRegistry provisions an authenticated disposable
+// registry through the given Engine client with the Phase-0 mechanics
+// (loopback-only publication, disposable credential volume) and returns its
+// loopback address. The container and the credential volume are removed on
+// test cleanup. Before returning, the registry is verified ready with its
+// auth middleware active: an anonymous /v2/ request is rejected and the
+// canary credential pair is accepted.
+func provisionDisposableRegistry(t *testing.T, ctx context.Context, provisioning *client.Client, volumeName, userCanary, passCanary string) string {
+	t.Helper()
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(passCanary), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+
+	seedPull, err := provisioning.ImagePull(ctx, "registry:2", client.ImagePullOptions{})
+	if err != nil {
+		t.Fatalf("pull registry:2: %v", err)
+	}
+	if err := seedPull.Wait(ctx); err != nil {
+		t.Fatalf("pull registry:2: %v", err)
+	}
+
+	seedImagePull, err := provisioning.ImagePull(ctx, "alpine:3.24", client.ImagePullOptions{})
+	if err != nil {
+		t.Fatalf("pull alpine:3.24: %v", err)
+	}
+	if err := seedImagePull.Wait(ctx); err != nil {
+		t.Fatalf("pull alpine:3.24: %v", err)
+	}
+
+	if _, err := provisioning.VolumeCreate(ctx, client.VolumeCreateOptions{Name: volumeName}); err != nil {
+		t.Fatalf("create auth volume: %v", err)
+	}
+	defer func() {
+		_, _ = provisioning.VolumeRemove(context.WithoutCancel(ctx), volumeName, client.VolumeRemoveOptions{Force: true})
+	}()
+
+	seed, err := provisioning.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
+			Image: "alpine:3.24",
+			Cmd:   []string{"sh", "-c", `printf '%s:%s\n' "$DH_USER" "$DH_HASH" > /auth/htpasswd`},
+			Env:   []string{"DH_USER=" + userCanary, "DH_HASH=" + string(hash)},
+		},
+		HostConfig: &container.HostConfig{Binds: []string{volumeName + ":/auth"}},
+	})
+	if err != nil {
+		t.Fatalf("create htpasswd helper: %v", err)
+	}
+	if _, err := provisioning.ContainerStart(ctx, seed.ID, client.ContainerStartOptions{}); err != nil {
+		t.Fatalf("start htpasswd helper: %v", err)
+	}
+	waitResult := provisioning.ContainerWait(ctx, seed.ID, client.ContainerWaitOptions{})
+	select {
+	case <-waitResult.Result:
+	case waitErr := <-waitResult.Error:
+		t.Fatalf("wait htpasswd helper: %v", waitErr)
+	}
+
+	port, err := network.ParsePort("5000/tcp")
+	if err != nil {
+		t.Fatalf("parse container port: %v", err)
+	}
+	reg, err := provisioning.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config: &container.Config{
+			Image:        "registry:2",
+			ExposedPorts: network.PortSet{port: {}},
+			Env: []string{
+				"REGISTRY_AUTH=htpasswd",
+				"REGISTRY_AUTH_HTPASSWD_REALM=dh-registry",
+				"REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd",
+			},
+		},
+		HostConfig: &container.HostConfig{
+			PortBindings: network.PortMap{port: []network.PortBinding{{
+				HostIP:   netip.MustParseAddr("127.0.0.1"),
+				HostPort: "",
+			}}},
+			Binds: []string{volumeName + ":/auth:ro"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create registry container: %v", err)
+	}
+	defer func() {
+		_, _ = provisioning.ContainerRemove(context.WithoutCancel(ctx), reg.ID, client.ContainerRemoveOptions{Force: true})
+	}()
+	if _, err := provisioning.ContainerStart(ctx, reg.ID, client.ContainerStartOptions{}); err != nil {
+		t.Fatalf("start registry container: %v", err)
+	}
+
+	inspected, err := provisioning.ContainerInspect(ctx, reg.ID, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatalf("inspect registry container: %v", err)
+	}
+	var hostPort string
+	for _, bindings := range inspected.Container.NetworkSettings.Ports {
+		for _, binding := range bindings {
+			if binding.HostPort != "" && binding.HostIP == netip.MustParseAddr("127.0.0.1") {
+				hostPort = binding.HostPort
+				break
+			}
+		}
+		if hostPort != "" {
+			break
+		}
+	}
+	if hostPort == "" {
+		t.Fatal("engine did not publish the requested loopback port for the registry")
+	}
+	registryHost := "localhost:" + hostPort
+	t.Logf("disposable registry: container 5000/tcp published on 127.0.0.1:%s", hostPort)
+
+	waitRegistryEndpointReady(t, registryHost)
+	// The registry boundary is authenticated before the production path runs.
+	anonymous, anonymousErr := registryV2Ping(registryHost, "", "")
+	if anonymousErr != nil {
+		t.Fatalf("anonymous registry ping: %v", anonymousErr)
+	}
+	anonymous.Body.Close()
+	if anonymous.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous /v2/ returned %d; auth middleware is not active", anonymous.StatusCode)
+	}
+	authorized, authorizedErr := registryV2Ping(registryHost, userCanary, passCanary)
+	if authorizedErr != nil {
+		t.Fatalf("authenticated registry ping: %v", authorizedErr)
+	}
+	authorized.Body.Close()
+	if authorized.StatusCode != http.StatusOK {
+		t.Fatalf("canary credential pair rejected by the registry boundary (status %d)", authorized.StatusCode)
+	}
+
+	return registryHost
 }
 
 // waitRegistryEndpointReady polls the registry /v2/ endpoint until it
