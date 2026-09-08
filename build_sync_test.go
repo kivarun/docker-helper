@@ -516,10 +516,12 @@ func TestBuildStagingFailureIsSynchronousFailure(t *testing.T) {
 	}
 }
 
-// TestBuildCredentialValuesNeverLeak proves the credential bridge stays
-// secret-safe on the synchronous path: the fake builder receives only the
-// projected credentials, and no credential material reaches audit, the
-// operational log, or the public response.
+// TestBuildCredentialValuesNeverLeak proves the build credential bridge
+// stays secret-safe on the synchronous path: the fake builder receives a
+// host-scoped credential resolver that yields exactly the stored credential
+// of the requested registry (never an unrelated one), and no credential
+// material reaches audit, the operational log, the public response, or the
+// request database.
 func TestBuildCredentialValuesNeverLeak(t *testing.T) {
 	auditBuf, opLogBuf := setupTestLogging(t)
 
@@ -533,7 +535,7 @@ func TestBuildCredentialValuesNeverLeak(t *testing.T) {
 	if err := storeSessionRegistryCredential(app.Config.RuntimeDir, result.Session.ID, "registry.example.com", userCanary, passCanary, ""); err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	// Also store an unrelated credential that must not be projected.
+	// Also store an unrelated credential that must not be resolved.
 	if err := storeSessionRegistryCredential(app.Config.RuntimeDir, result.Session.ID, "other.example.com", "other-user", "other-pass", ""); err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -555,11 +557,30 @@ func TestBuildCredentialValuesNeverLeak(t *testing.T) {
 		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 
-	if len(captured.spec.Auths) != 1 {
-		t.Fatalf("projected credentials = %+v, want exactly the FROM registry", captured.spec.Auths)
+	// The requested host's stored credential resolves just in time, exactly
+	// as the request-owned BuildKit auth session asks for it.
+	credential, err := captured.resolveCredential("registry.example.com")
+	if err != nil {
+		t.Fatalf("resolve requested host: %v", err)
 	}
-	if captured.spec.Auths[0].Username != userCanary || captured.spec.Auths[0].Password != passCanary {
-		t.Errorf("credential contents = %+v", captured.spec.Auths[0])
+	if credential == nil || credential.Username != userCanary || credential.Password != passCanary {
+		t.Errorf("requested host credential = %+v", credential)
+	}
+	// Each requested host resolves exactly its own stored credential.
+	credential, err = captured.resolveCredential("other.example.com")
+	if err != nil {
+		t.Fatalf("resolve unrelated host: %v", err)
+	}
+	if credential == nil || credential.Username != "other-user" || credential.Password != "other-pass" {
+		t.Errorf("other host credential = %+v", credential)
+	}
+	// A host with nothing stored resolves anonymously.
+	credential, err = captured.resolveCredential("unset.example.com")
+	if err != nil {
+		t.Fatalf("resolve unset host: %v", err)
+	}
+	if credential != nil {
+		t.Errorf("unset host resolved credential material: %+v", credential)
 	}
 
 	// The public response must not carry the credential material.

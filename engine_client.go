@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/errdefs/pkg/errhttp"
+	authtypes "github.com/docker/cli/cli/config/types"
+	"github.com/moby/buildkit/session"
+	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/moby/api/pkg/authconfig"
 	buildtypes "github.com/moby/moby/api/types/build"
 	"github.com/moby/moby/api/types/jsonstream"
@@ -53,16 +57,16 @@ type engineImageBuilder interface {
 // engineBuildSpec is one prepared build request for the Engine adapter.
 // Context is the tar stream of the staged, helper-owned build context; the
 // adapter consumes the prepared trusted context and is not the
-// workspace-policy owner. FromImages carries the base images the staged
-// Dockerfile's FROM lines name, and Auths the exactly matching Session
-// credentials; the adapter never logs or echoes them.
+// workspace-policy owner. Credentials resolves stored Session registry
+// credentials just in time, for exactly the registry host BuildKit asks
+// about through the request-owned auth session; the adapter never logs or
+// echoes credential material.
 type engineBuildSpec struct {
-	Image      string
-	Context    io.Reader
-	Dockerfile string
-	FromImages []string
-	BuildArgs  map[string]string
-	Auths      []sessionRegistryCredential
+	Image       string
+	Context     io.Reader
+	Dockerfile  string
+	BuildArgs   map[string]string
+	Credentials buildCredentialResolver
 }
 
 // engineBuildResult is the bounded combined output of one Engine build.
@@ -353,39 +357,21 @@ func renderEngineStreamMessage(msg jsonstream.Message) string {
 	}
 }
 
-// pullBuildBase refreshes one FROM base image through the Engine pull path
-// with the Session credential stored for that registry, if any. A missing
-// base image is a build failure, not a client-image 404: the build would
-// fail on it anyway.
-func (e *engineClient) pullBuildBase(ctx context.Context, spec engineBuildSpec, fromImage string) error {
-	var credential *sessionRegistryCredential
-	registry := imageReferenceRegistryAddress(fromImage)
-	for i := range spec.Auths {
-		if spec.Auths[i].Registry == registry {
-			credential = &spec.Auths[i]
-			break
-		}
-	}
-	if _, err := e.imagePull(ctx, fromImage, credential, 0); err != nil {
-		var engErr *engineError
-		if !errors.As(err, &engErr) {
-			return err
-		}
-		if engErr.kind == engineErrImageNotFound {
-			return &engineError{kind: engineErrBuildFailed, cause: engErr}
-		}
-		return err
-	}
-	return nil
-}
+// buildkitSessionSharedKey is the stable session handshake identity shared
+// by every docker-helper build session. It is not a secret and carries no
+// credential material.
+const buildkitSessionSharedKey = "docker-helper"
 
 // imageBuild builds through the Engine ImageBuild endpoint — the same
-// daemon operation the docker CLI build path delegated to, with the
-// builder version, base-image pull, tag, Dockerfile selection, build args,
-// and registry auth the accepted build semantics require. The prepared
-// trusted context stream is the request body; the encoded Session
-// credentials, if any, are handed to the Engine for this build only and
-// never enter logs, audit, or errors.
+// daemon operation the docker CLI build path delegated to. The adapter owns
+// one request-scoped BuildKit session per build: it registers the
+// host-scoped auth provider on it, dials the Engine's /session hijack
+// endpoint through the shared Engine client, and hands the session ID to
+// the build so the daemon resolves remote sources through that session.
+// Docker/BuildKit owns Dockerfile and source semantics; the adapter never
+// parses the Dockerfile to discover registries or pre-pull base images.
+// PullParent preserves the base-image freshness the previous docker CLI
+// --pull produced.
 //
 // The progress stream is rendered in the line-based form the docker CLI
 // printed for build output and accumulated in a bounded buffer; the stream
@@ -394,25 +380,38 @@ func (e *engineClient) pullBuildBase(ctx context.Context, spec engineBuildSpec, 
 // inside the stream is a trustworthy negative result; a malformed or
 // transport-broken stream is not.
 func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, outputLimit int64) (engineBuildResult, error) {
-	// The Engine ImageBuild backend resolves source images through the
-	// build session the docker CLI attaches; the plain Engine API request
-	// has no session, so remote source resolution is refused with "no
-	// active sessions" (moby/moby#48112) and the X-Registry-Config auth is
-	// ignored by the builder. The adapter therefore pulls every FROM base
-	// image through the Engine pull path first — which carries per-request
-	// Session credentials — and builds from the locally resolved base, the
-	// same effective base-image freshness the CLI --pull produced.
-	for _, fromImage := range spec.FromImages {
-		if err := e.pullBuildBase(ctx, spec, fromImage); err != nil {
-			return engineBuildResult{}, err
-		}
+	sess, sessErr := session.NewSession(ctx, buildkitSessionSharedKey)
+	if sessErr != nil {
+		return engineBuildResult{}, &engineError{kind: engineErrBackendFailure, cause: fmt.Errorf("cannot start build session: %w", sessErr)}
 	}
+	// The auth provider resolves stored Session credentials just in time for
+	// exactly the registry host BuildKit asks about; credential material
+	// reaches only that host's auth RPC, never logs or errors.
+	sess.Allow(authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
+		AuthConfigProvider: engineBuildAuthProvider(spec.Credentials),
+	}))
+
+	// One context drives the build and its session, so request cancellation
+	// and daemon shutdown terminate both.
+	buildCtx, cancelBuild := context.WithCancel(ctx)
+	defer cancelBuild()
+
+	sessionDone := make(chan error, 1)
+	go func() {
+		// Run dials the daemon's /session hijack endpoint through the shared
+		// Engine client and serves the session until the build closes it.
+		sessionDone <- sess.Run(buildCtx, func(runCtx context.Context, proto string, meta map[string][]string) (net.Conn, error) {
+			return e.cli.DialHijack(runCtx, "/session", proto, meta)
+		})
+	}()
 
 	opts := client.ImageBuildOptions{
 		Tags:       []string{spec.Image},
 		Dockerfile: spec.Dockerfile,
 		Remove:     true, // keep the daemon default of removing intermediate containers
 		Version:    buildtypes.BuilderBuildKit,
+		PullParent: true, // the base-image freshness the previous docker CLI --pull produced
+		SessionID:  sess.ID(),
 	}
 	if len(spec.BuildArgs) > 0 {
 		// The Engine build request carries build-arg values as pointers so
@@ -424,22 +423,10 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 		}
 		opts.BuildArgs = buildArgs
 	}
-	if len(spec.Auths) > 0 {
-		auths := make(map[string]registry.AuthConfig, len(spec.Auths))
-		for _, credential := range spec.Auths {
-			auths[credential.Registry] = registry.AuthConfig{
-				Username:      credential.Username,
-				Password:      credential.Password,
-				IdentityToken: credential.IdentityToken,
-				ServerAddress: credential.Registry,
-			}
-		}
-		opts.AuthConfigs = auths
-	}
 
-	resp, err := e.cli.ImageBuild(ctx, spec.Context, opts)
+	resp, err := e.cli.ImageBuild(buildCtx, spec.Context, opts)
 	if err != nil {
-		return engineBuildResult{}, normalizeEngineBuildError(err)
+		return engineBuildResult{}, finalizeEngineBuildSession(ctx, sess, sessionDone, normalizeEngineBuildError(err))
 	}
 	defer resp.Body.Close()
 
@@ -475,16 +462,70 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 	}
 
 	data, _, truncated := buf.Range(0)
-	if embedded != nil {
-		return engineBuildResult{Output: string(data), Truncated: truncated}, normalizeEmbeddedBuildError(&engineStreamError{
+	var buildErr error
+	switch {
+	case embedded != nil:
+		buildErr = normalizeEmbeddedBuildError(&engineStreamError{
 			message: embedded.Message,
 			code:    embedded.Code,
 		})
+	case streamErr != nil:
+		buildErr = normalizeEngineBuildError(streamErr)
 	}
-	if streamErr != nil {
-		return engineBuildResult{Output: string(data), Truncated: truncated}, normalizeEngineBuildError(streamErr)
+	return engineBuildResult{Output: string(data), Truncated: truncated},
+		finalizeEngineBuildSession(ctx, sess, sessionDone, buildErr)
+}
+
+// engineBuildAuthProvider adapts the host-scoped Session credential resolver
+// to the BuildKit auth provider callback. BuildKit asks for exactly the
+// registry host it is resolving; the callback reads only that host's stored
+// Session credential, so an unrelated stored credential is never returned.
+// Nothing stored for the host degrades to anonymous authentication; a store
+// read failure is an operational build failure, not a silent fallback.
+func engineBuildAuthProvider(resolve buildCredentialResolver) authprovider.AuthConfigProvider {
+	return func(_ context.Context, host string, _ []string, _ authprovider.ExpireCachedAuthCheck) (authtypes.AuthConfig, error) {
+		if resolve == nil {
+			return authtypes.AuthConfig{}, nil
+		}
+		credential, err := resolve(host)
+		if err != nil {
+			return authtypes.AuthConfig{}, err
+		}
+		if credential == nil {
+			return authtypes.AuthConfig{}, nil
+		}
+		auth := authtypes.AuthConfig{ServerAddress: host}
+		if credential.IdentityToken != "" {
+			auth.IdentityToken = credential.IdentityToken
+			return auth, nil
+		}
+		auth.Username = credential.Username
+		auth.Password = credential.Password
+		return auth, nil
 	}
-	return engineBuildResult{Output: string(data), Truncated: truncated}, nil
+}
+
+// finalizeEngineBuildSession closes the request-owned BuildKit session on
+// every build exit path and joins its goroutine; the join is bounded by the
+// build context. A session transport failure is reported only when the build
+// produced no error of its own: a broken session transport is an
+// interaction failure, not a build failure the Engine reported. A session
+// error caused by cancellation is not a failure.
+func finalizeEngineBuildSession(ctx context.Context, sess *session.Session, sessionDone <-chan error, buildErr error) error {
+	sess.Close()
+	var runErr error
+	select {
+	case runErr = <-sessionDone:
+	case <-ctx.Done():
+		runErr = nil
+	}
+	if buildErr != nil {
+		return buildErr
+	}
+	if runErr == nil || errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		return nil
+	}
+	return &engineError{kind: engineErrBackendFailure, cause: runErr}
 }
 
 // normalizeEngineBuildError maps a build interaction failure to the

@@ -27,16 +27,25 @@ import (
 
 // newFakeEngine serves the minimal Engine endpoints used by the adapter
 // tests: the unversioned /_ping negotiation endpoint, the /auth registry
-// validation endpoint, the /images/create pull endpoint, and the /build
-// endpoint. A nil handler leaves the corresponding endpoint answering 404.
-func newFakeEngine(t *testing.T, apiVersion string, authHandler, pullHandler, buildHandler http.HandlerFunc) *httptest.Server {
+// validation endpoint, the /images/create pull endpoint, the /build
+// endpoint, and the /session hijack endpoint. A nil handler leaves the
+// corresponding endpoint answering 404. Without an explicit session handler
+// the /session endpoint is hijacked and held open the way the daemon does,
+// so a build's request-owned session attaches normally.
+func newFakeEngine(t *testing.T, apiVersion string, authHandler, pullHandler, buildHandler http.HandlerFunc, sessionHandlers ...http.HandlerFunc) *httptest.Server {
 	t.Helper()
+	sessionHandler := fakeEngineSessionHandler(t, nil)
+	if len(sessionHandlers) > 0 {
+		sessionHandler = sessionHandlers[0]
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/_ping":
 			w.Header().Set("Api-Version", apiVersion)
 			w.Header().Set("Ostype", "linux")
 			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/session"):
+			sessionHandler(w, r)
 		case strings.HasSuffix(r.URL.Path, "/auth"):
 			if authHandler != nil {
 				authHandler(w, r)
@@ -63,12 +72,73 @@ func newFakeEngine(t *testing.T, apiVersion string, authHandler, pullHandler, bu
 	return srv
 }
 
+// fakeEngineSessionRecorder counts /session dials and records the session
+// UUID each dial exposed in the hijack handshake headers.
+type fakeSessionRecorder struct {
+	mu    sync.Mutex
+	dials int
+	uuids []string
+}
+
+func (rec *fakeSessionRecorder) add(uuid string) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.dials++
+	rec.uuids = append(rec.uuids, uuid)
+}
+
+func (rec *fakeSessionRecorder) count() int {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return rec.dials
+}
+
+func (rec *fakeSessionRecorder) singleUUID() string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.uuids) != 1 {
+		return ""
+	}
+	return rec.uuids[0]
+}
+
+// fakeEngineSessionHandler hijacks the Engine /session endpoint the way the
+// daemon does: it upgrades the connection and holds it open until the
+// session closes it, without speaking gRPC. rec is an optional recorder.
+func fakeEngineSessionHandler(t *testing.T, rec *fakeSessionRecorder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if rec != nil {
+			rec.add(r.Header.Get("X-Docker-Expose-Session-Uuid"))
+		}
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack session connection: %v", err)
+			return
+		}
+		defer conn.Close()
+		if _, err := buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+			return
+		}
+		_ = buf.Flush()
+		// Hold the session connection open until the build closes it,
+		// discarding whatever gRPC traffic arrives.
+		blob := make([]byte, 4096)
+		for {
+			if _, err := conn.Read(blob); err != nil {
+				return
+			}
+		}
+	}
+}
+
 // newEngineClientAgainstFake constructs the production adapter against a fake
 // Engine endpoint, exercising the real client construction and negotiation.
+// The fake endpoint URL is converted to the tcp:// daemon host form the
+// client's raw hijack dialer accepts.
 func newEngineClientAgainstFake(t *testing.T, srvURL string) *engineClient {
 	t.Helper()
 	cli, err := client.NewClientWithOpts(
-		client.WithHost(srvURL),
+		client.WithHost(strings.Replace(srvURL, "http://", "tcp://", 1)),
 		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
@@ -939,15 +1009,18 @@ func fakeBuildStream(record *fakeBuildRequest, lines ...string) http.HandlerFunc
 
 // TestEngineImageBuildRequestContract proves the adapter's Engine build
 // request shape: the accepted build semantics — the requested tag, the
-// Dockerfile selection, build args, the base-image pull, the daemon default
-// of removing intermediate containers, and the supported BuildKit builder —
-// reach the Engine query, and the prepared context stream is the body.
+// Dockerfile selection, build args, the base-image pull freshness of the
+// previous docker CLI --pull, the daemon default of removing intermediate
+// containers, and the supported BuildKit builder — reach the Engine query,
+// the prepared context stream is the body, and the build carries exactly
+// the request-owned BuildKit session the adapter dialed.
 func TestEngineImageBuildRequestContract(t *testing.T) {
 	var record fakeBuildRequest
+	sessionDials := &fakeSessionRecorder{}
 	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(&record,
 		`{"stream":"#1 [internal] load build definition from Dockerfile\n"}`,
 		`{"stream":"#1 DONE 0.0s\n"}`,
-	))
+	), fakeEngineSessionHandler(t, sessionDials))
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	ctxBody := bytes.NewReader([]byte("tar-context-bytes"))
@@ -976,8 +1049,8 @@ func TestEngineImageBuildRequestContract(t *testing.T) {
 	if got := record.query.Get("version"); got != "2" {
 		t.Errorf("builder version query = %q", got)
 	}
-	if got := record.query.Get("pull"); got != "" {
-		t.Errorf("the build must resolve its base locally (pre-pulled by the adapter), pull query = %q", got)
+	if got := record.query.Get("pull"); got != "1" {
+		t.Errorf("the build must preserve the docker CLI --pull freshness, pull query = %q", got)
 	}
 	if _, keep := record.query["rm"]; keep {
 		t.Errorf("rm query must stay at the daemon default, got %q", record.query.Get("rm"))
@@ -998,131 +1071,125 @@ func TestEngineImageBuildRequestContract(t *testing.T) {
 	if string(record.context) != "tar-context-bytes" {
 		t.Errorf("context body = %q", record.context)
 	}
+	// The build must carry exactly the request-owned session the adapter
+	// dialed through the Engine hijack endpoint, one session per build.
+	if sessionDials.count() != 1 {
+		t.Fatalf("session dials = %d, want 1", sessionDials.count())
+	}
+	if got, want := record.query.Get("session"), sessionDials.singleUUID(); got == "" || got != want {
+		t.Errorf("build session = %q, dialed session = %q", got, want)
+	}
 }
 
-// TestEngineImageBuildPullsFromImages proves the adapter refreshes every
-// FROM base image through the Engine pull path with the Session credential
-// stored for that registry — the plain ImageBuild request cannot resolve
-// sources remotely without a client session (moby/moby#48112) — and that a
-// missing base image is a build failure.
-func TestEngineImageBuildPullsFromImages(t *testing.T) {
-	type pullRecord struct {
-		query        url.Values
-		registryAuth string
-	}
-	var pulls []pullRecord
-	srv := newFakeEngine(t, "1.51", nil, func(w http.ResponseWriter, r *http.Request) {
-		rec := pullRecord{query: r.URL.Query(), registryAuth: r.Header.Get("X-Registry-Auth")}
-		pulls = append(pulls, rec)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"Downloaded newer image\n"}`))
-	}, fakeBuildStream(&fakeBuildRequest{}, `{"stream":"#1 DONE 0.0s\n"}`))
-
-	eng := newEngineClientAgainstFake(t, srv.URL)
-	result, err := eng.imageBuild(context.Background(), engineBuildSpec{
-		Image:      "example:tag",
-		Context:    bytes.NewReader(nil),
-		Dockerfile: "Dockerfile",
-		FromImages: []string{"registry.example.com/team/base:1", "alpine:3.24"},
-		Auths: []sessionRegistryCredential{
-			{Registry: "registry.example.com", Username: "user", Password: "pass"},
-		},
-	}, 1<<20)
-	if err != nil {
-		t.Fatalf("imageBuild: %v", err)
-	}
-	if len(pulls) != 2 {
-		t.Fatalf("pulls = %d, want 2", len(pulls))
-	}
-	if got := pulls[0].query.Get("fromImage"); got != "registry.example.com/team/base" || pulls[0].query.Get("tag") != "1" {
-		t.Errorf("first pull = %q tag %q", pulls[0].query.Get("fromImage"), pulls[0].query.Get("tag"))
-	}
-	auth, err := base64.URLEncoding.DecodeString(pulls[0].registryAuth)
-	if err != nil {
-		t.Fatalf("decode first pull auth: %v", err)
-	}
-	var authConfig registry.AuthConfig
-	if err := json.Unmarshal(auth, &authConfig); err != nil {
-		t.Fatal(err)
-	}
-	if authConfig.Username != "user" || authConfig.Password != "pass" {
-		t.Errorf("first pull credential = %+v", authConfig)
-	}
-	if got := pulls[1].query.Get("fromImage"); got != "docker.io/library/alpine" || pulls[1].query.Get("tag") != "3.24" {
-		t.Errorf("second pull = %q tag %q", pulls[1].query.Get("fromImage"), pulls[1].query.Get("tag"))
-	}
-	if pulls[1].registryAuth != "" {
-		t.Errorf("the second pull must stay unauthenticated, got %q", pulls[1].registryAuth)
-	}
-	_ = result
-}
-
-// TestEngineImageBuildPullMissingBaseIsBuildFailure proves a missing base
-// image surfaces as a build failure, not a client-image 404.
-func TestEngineImageBuildPullMissingBaseIsBuildFailure(t *testing.T) {
-	srv := newFakeEngine(t, "1.51", nil, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"message":"no such image"}`))
-	}, func(w http.ResponseWriter, r *http.Request) {
-		t.Error("the build must not run when the base image cannot be pulled")
+// TestEngineImageBuildSessionTransportFailureIsBackendFailure proves a
+// session transport failure on an otherwise successful build is an
+// interaction failure, not a build failure the Engine reported.
+func TestEngineImageBuildSessionTransportFailureIsBackendFailure(t *testing.T) {
+	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(nil,
+		`{"stream":"#1 DONE 0.0s\n"}`,
+	), func(w http.ResponseWriter, r *http.Request) {
+		// The daemon refuses the session hijack.
+		w.WriteHeader(http.StatusInternalServerError)
 	})
 
 	eng := newEngineClientAgainstFake(t, srv.URL)
 	_, err := eng.imageBuild(context.Background(), engineBuildSpec{
-		Image:      "example:tag",
-		Context:    bytes.NewReader(nil),
-		Dockerfile: "Dockerfile",
-		FromImages: []string{"missing.example.com/base:1"},
+		Image:   "example:tag",
+		Context: bytes.NewReader(nil),
 	}, 1<<20)
 
 	var engErr *engineError
 	if !errors.As(err, &engErr) {
 		t.Fatalf("imageBuild error = %v, want *engineError", err)
 	}
-	if engErr.kind != engineErrBuildFailed {
-		t.Errorf("error kind = %d, want build failed", engErr.kind)
+	if engErr.kind != engineErrBackendFailure {
+		t.Errorf("error kind = %d, want backend failure", engErr.kind)
 	}
 }
 
-// TestEngineImageBuildAuthMap proves the adapter encodes exactly the
-// credentials it was given into the Engine registry config header, keyed by
-// registry address, and nothing else.
-func TestEngineImageBuildAuthMap(t *testing.T) {
-	var record fakeBuildRequest
-	srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(&record,
-		`{"stream":"#1 DONE 0.0s\n"}`,
-	))
+// TestEngineImageBuildAuthProviderHostScope proves the auth provider
+// callback the adapter registers on the request-owned BuildKit session:
+// it resolves exactly the requested registry host's stored Session
+// credential, never returns an unrelated stored credential, degrades a
+// missing credential to anonymous authentication, prefers a stored
+// identity token over an auth pair, and sanitizes storage failures without
+// credential material.
+func TestEngineImageBuildAuthProviderHostScope(t *testing.T) {
+	const userCanary = "dh-auth-user-canary-8qLw3nTz5c"
+	const passCanary = "dh-auth-pass-canary-Rm2Kx7Vb9d"
+	const hubCanary = "dh-auth-hub-canary-Xw4Pn8Qr2e"
+	resolver := buildCredentialResolver(func(registryHost string) (*sessionRegistryCredential, error) {
+		switch normalizeRegistryAddress(registryHost) {
+		case "registry.example.com":
+			return &sessionRegistryCredential{Registry: "registry.example.com", Username: userCanary, Password: passCanary}, nil
+		case "other.example.com":
+			return &sessionRegistryCredential{Registry: "other.example.com", Username: "other-user", Password: "other-pass"}, nil
+		case "token.example.com":
+			return &sessionRegistryCredential{Registry: "token.example.com", IdentityToken: "id-tok-123"}, nil
+		case dockerHubAuthConfigKey:
+			return &sessionRegistryCredential{Registry: dockerHubAuthConfigKey, Username: "hub-user", Password: hubCanary}, nil
+		case "broken.example.com":
+			return nil, errors.New("cannot read session Docker credential file: permission denied")
+		default:
+			return nil, nil
+		}
+	})
+	provider := engineBuildAuthProvider(resolver)
 
-	eng := newEngineClientAgainstFake(t, srv.URL)
-	_, err := eng.imageBuild(context.Background(), engineBuildSpec{
-		Image:   "example:tag",
-		Context: bytes.NewReader(nil),
-		Auths: []sessionRegistryCredential{
-			{Registry: "registry.example.com", Username: "user", Password: "pass"},
-			{Registry: dockerHubAuthConfigKey, IdentityToken: "id-tok"},
-		},
-	}, 1<<20)
+	// A stored credential reaches the auth callback only for its own host.
+	auth, err := provider(context.Background(), "registry.example.com", []string{"pull"}, nil)
 	if err != nil {
-		t.Fatalf("imageBuild: %v", err)
+		t.Fatalf("provider(registry.example.com): %v", err)
+	}
+	if auth.Username != userCanary || auth.Password != passCanary {
+		t.Errorf("registry.example.com auth = %+v", auth)
 	}
 
-	blob, err := base64.URLEncoding.DecodeString(record.registryConfig)
+	// An unrelated stored credential is never returned for another host.
+	for _, host := range []string{"unknown.example.com", "sub.registry.example.com", "other.example.org"} {
+		auth, err = provider(context.Background(), host, nil, nil)
+		if err != nil {
+			t.Fatalf("provider(%q): %v", host, err)
+		}
+		if auth.Username != "" || auth.Password != "" || auth.IdentityToken != "" {
+			t.Errorf("unrequested host %q received credential material: %+v", host, auth)
+		}
+	}
+
+	// A stored identity token keeps its priority over an auth pair.
+	auth, err = provider(context.Background(), "token.example.com", nil, nil)
 	if err != nil {
-		t.Fatalf("decode X-Registry-Config: %v", err)
+		t.Fatalf("provider(token.example.com): %v", err)
 	}
-	var auths map[string]registry.AuthConfig
-	if err := json.Unmarshal(blob, &auths); err != nil {
-		t.Fatalf("decode registry config: %v", err)
+	if auth.IdentityToken != "id-tok-123" || auth.Username != "" || auth.Password != "" {
+		t.Errorf("token.example.com auth = %+v", auth)
 	}
-	if len(auths) != 2 {
-		t.Fatalf("registry config entries = %d, want 2", len(auths))
+
+	// Every Docker Hub spelling resolves the stored Docker Hub credential.
+	for _, host := range []string{"registry-1.docker.io", "docker.io", "index.docker.io", dockerHubAuthConfigKey} {
+		auth, err = provider(context.Background(), host, nil, nil)
+		if err != nil {
+			t.Fatalf("provider(%q): %v", host, err)
+		}
+		if auth.Password != hubCanary {
+			t.Errorf("hub spelling %q auth = %+v, want the stored hub credential", host, auth)
+		}
 	}
-	if auths["registry.example.com"].Username != "user" || auths["registry.example.com"].Password != "pass" {
-		t.Errorf("registry.example.com credential = %+v", auths["registry.example.com"])
+
+	// A storage failure stays operational and must not carry credential
+	// material through the error the BuildKit auth RPC would deliver.
+	_, err = provider(context.Background(), "broken.example.com", nil, nil)
+	if err == nil {
+		t.Fatal("a storage failure must be an error, not a silent anonymous fallback")
 	}
-	if auths[dockerHubAuthConfigKey].IdentityToken != "id-tok" {
-		t.Errorf("docker hub credential = %+v", auths[dockerHubAuthConfigKey])
+	if strings.Contains(err.Error(), userCanary) || strings.Contains(err.Error(), passCanary) || strings.Contains(err.Error(), hubCanary) {
+		t.Errorf("storage failure leaked credential material: %v", err)
+	}
+
+	// A nil resolver is anonymous.
+	auth, err = engineBuildAuthProvider(nil)(context.Background(), "registry.example.com", nil, nil)
+	if err != nil || auth.Username != "" || auth.Password != "" {
+		t.Errorf("nil resolver auth = %+v err = %v", auth, err)
 	}
 }
 

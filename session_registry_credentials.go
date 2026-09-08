@@ -21,9 +21,11 @@ const dockerHubAuthConfigKey = "https://index.docker.io/v1/"
 // ($RUNTIME_DIR/sessions/<session-id>/docker, mode 0700) holding config.json
 // in the Docker CLI config format. registry login validates the credentials
 // through the Engine adapter and then persists them here exactly as the
-// docker CLI login path used to; later pull/build operations read the stored
-// credential just in time for the exact matching registry. No second store
-// exists, and credentials never enter SQLite, audit, logs, or errors.
+// docker CLI login path used to; later pull operations read the stored
+// credential just in time for the exact matching registry, and build
+// operations resolve credentials through the request-owned BuildKit auth
+// session for exactly the registry host the daemon asks about. No second
+// store exists, and credentials never enter SQLite, audit, logs, or errors.
 
 // sessionDockerAuthEntry mirrors one auths entry of the persisted Docker CLI
 // config.json format. The auth field carries base64(username:password); the
@@ -59,7 +61,7 @@ var sessionDockerAuthConfigMu sync.Mutex
 // convertRegistryToHostname mirrors Docker CLI credentials.ConvertToHostname:
 // it strips an optional scheme and path while preserving host[:port]. The
 // Session store deliberately retains Docker CLI-compatible key semantics
-// because legacy pull/build still consume this same config.json during D0.2.
+// because the legacy pull path still consumes this same config.json.
 func convertRegistryToHostname(maybeURL string) string {
 	stripped := maybeURL
 	if strings.Contains(stripped, "://") {
@@ -113,21 +115,21 @@ func registryPortDigits(port string) bool {
 
 // normalizeRegistryLoginAddress returns the ServerAddress docker CLI would
 // submit to the Engine for an explicit login. The exact "docker.io" spelling
-// selects Docker Hub's historical IndexServer; other spellings are normalized
-// to host[:port] before the Engine call.
+// and its registry endpoint alias select Docker Hub's historical IndexServer;
+// other spellings are normalized to host[:port] before the Engine call.
 func normalizeRegistryLoginAddress(registryAddr string) string {
-	if registryAddr == "docker.io" {
+	if registryAddr == "docker.io" || registryAddr == "registry-1.docker.io" {
 		return dockerHubAuthConfigKey
 	}
 	return convertRegistryToHostname(registryAddr)
 }
 
 // normalizeRegistryAddress returns the canonical Docker CLI config key for a
-// registry credential. Docker Hub aliases share the historical IndexServer
-// key; all other registries use normalized host[:port].
+// registry credential. Every Docker Hub spelling shares the historical
+// IndexServer key; all other registries use normalized host[:port].
 func normalizeRegistryAddress(registryAddr string) string {
 	host := convertRegistryToHostname(registryAddr)
-	if host == "docker.io" || host == "index.docker.io" {
+	if host == "docker.io" || host == "index.docker.io" || host == "registry-1.docker.io" {
 		return dockerHubAuthConfigKey
 	}
 	return host
@@ -270,132 +272,58 @@ func resolveSessionRegistryCredential(runtimeDir, sessionID, imageRef string) (c
 		return nil, false, nil
 	}
 	entry, entryOk, err := readSessionRegistryCredential(runtimeDir, sessionID, registryAddr)
-	if err != nil || !entryOk {
-		return nil, false, err
-	}
-	credential = &sessionRegistryCredential{Registry: registryAddr}
-	if entry.IdentityToken != "" {
-		credential.IdentityToken = entry.IdentityToken
-		return credential, true, nil
-	}
-	username, password, err := decodeSessionDockerAuth(entry.Auth)
 	if err != nil {
 		return nil, false, err
 	}
-	credential.Username = username
-	credential.Password = password
+	credential, err = sessionRegistryCredentialFromEntry(registryAddr, entry, entryOk)
+	if err != nil || credential == nil {
+		return nil, false, err
+	}
 	return credential, true, nil
 }
 
-// dockerfileAuthRegistries extracts the registry addresses a build may
-// authenticate against: the image references of the Dockerfile's FROM lines,
-// normalized to the canonical credential-store keys. scratch, directive
-// comments, and unparseable references contribute no registry; the Engine
-// reports the resulting build failure normally. Line continuations are
-// joined before parsing.
-func dockerfileAuthRegistries(dockerfilePath string) ([]string, error) {
-	_, registryAddrs, err := dockerfileFromEntries(dockerfilePath)
-	return registryAddrs, err
-}
-
-// dockerfileFromImages extracts the base images a staged Dockerfile's FROM
-// lines name, in order and deduplicated by image reference. The build
-// adapter refreshes every one of them through the Engine pull path before
-// the build.
-func dockerfileFromImages(dockerfilePath string) ([]string, error) {
-	fromImages, _, err := dockerfileFromEntries(dockerfilePath)
-	return fromImages, err
-}
-
-// dockerfileFromEntries walks a Dockerfile's FROM lines and returns the
-// deduplicated base-image references and their registry addresses.
-func dockerfileFromEntries(dockerfilePath string) (fromImages, registryAddrs []string, err error) {
-	blob, err := os.ReadFile(dockerfilePath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("cannot read Dockerfile: %w", err)
+// sessionRegistryCredentialFromEntry converts one persisted Docker CLI store
+// entry into the Engine adapter form. ok is false when nothing is stored; a
+// persisted identity token is preferred over an auth pair, matching how the
+// credential was stored.
+func sessionRegistryCredentialFromEntry(registryAddr string, entry sessionDockerAuthEntry, ok bool) (*sessionRegistryCredential, error) {
+	if !ok {
+		return nil, nil
 	}
-	var lines []string
-	continuation := ""
-	for _, line := range strings.Split(string(blob), "\n") {
-		if strings.HasSuffix(line, "\\") {
-			continuation += strings.TrimSuffix(line, "\\")
-			continue
-		}
-		lines = append(lines, continuation+line)
-		continuation = ""
+	credential := &sessionRegistryCredential{Registry: registryAddr}
+	if entry.IdentityToken != "" {
+		credential.IdentityToken = entry.IdentityToken
+		return credential, nil
 	}
-	if continuation != "" {
-		lines = append(lines, continuation)
-	}
-	seenImages := make(map[string]bool)
-	seenRegistries := make(map[string]bool)
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 || !strings.EqualFold(fields[0], "FROM") {
-			continue
-		}
-		image := ""
-		for _, field := range fields[1:] {
-			if strings.HasPrefix(field, "--") {
-				continue
-			}
-			image = field
-			break
-		}
-		if image == "" || strings.EqualFold(image, "scratch") {
-			continue
-		}
-		registryAddr := imageReferenceRegistryAddress(image)
-		if registryAddr == "" {
-			continue
-		}
-		if !seenImages[image] {
-			seenImages[image] = true
-			fromImages = append(fromImages, image)
-		}
-		if !seenRegistries[registryAddr] {
-			seenRegistries[registryAddr] = true
-			registryAddrs = append(registryAddrs, registryAddr)
-		}
-	}
-	return fromImages, registryAddrs, nil
-}
-
-// resolveBuildAuthCredentials loads the Session credentials for exactly the
-// registries the Dockerfile's FROM lines name. Credentials stored for other
-// registries are never projected into the build request; a FROM with no
-// stored credential builds unauthenticated for it, exactly as the docker CLI
-// --config path did. A store read failure is operational.
-func resolveBuildAuthCredentials(runtimeDir, sessionID, dockerfilePath string) ([]sessionRegistryCredential, error) {
-	registryAddrs, err := dockerfileAuthRegistries(dockerfilePath)
+	username, password, err := decodeSessionDockerAuth(entry.Auth)
 	if err != nil {
 		return nil, err
 	}
-	var credentials []sessionRegistryCredential
-	for _, registryAddr := range registryAddrs {
-		entry, ok, err := readSessionRegistryCredential(runtimeDir, sessionID, registryAddr)
+	credential.Username = username
+	credential.Password = password
+	return credential, nil
+}
+
+// buildCredentialResolver resolves one stored Session registry credential
+// for exactly the requested registry host, just in time. The Engine adapter
+// invokes it only through the request-owned BuildKit auth session, for the
+// registry host the daemon is actually resolving; credentials stored for
+// other registries are never requested or returned.
+type buildCredentialResolver func(registryHost string) (*sessionRegistryCredential, error)
+
+// sessionBuildCredentialResolver returns the host-scoped credential resolver
+// for one Session's build. Every lookup reads exactly the credential stored
+// for the requested registry host from the one protected Session store;
+// the store boundary canonicalizes the host, so every Docker Hub spelling
+// resolves the stored Docker Hub credential. Nothing stored for the host
+// degrades to anonymous authentication; a storage failure is operational
+// and is never a silent anonymous fallback.
+func sessionBuildCredentialResolver(runtimeDir, sessionID string) buildCredentialResolver {
+	return func(registryHost string) (*sessionRegistryCredential, error) {
+		entry, ok, err := readSessionRegistryCredential(runtimeDir, sessionID, registryHost)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			continue
-		}
-		credential := sessionRegistryCredential{Registry: registryAddr}
-		if entry.IdentityToken != "" {
-			credential.IdentityToken = entry.IdentityToken
-		} else {
-			username, password, err := decodeSessionDockerAuth(entry.Auth)
-			if err != nil {
-				return nil, err
-			}
-			credential.Username = username
-			credential.Password = password
-		}
-		credentials = append(credentials, credential)
+		return sessionRegistryCredentialFromEntry(normalizeRegistryAddress(registryHost), entry, ok)
 	}
-	return credentials, nil
 }

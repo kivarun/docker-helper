@@ -1,15 +1,18 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,25 +22,39 @@ import (
 
 // TestBuildEngineIntegration validates the migrated production build path end
 // to end against a real Docker Engine and a disposable authenticated
-// registry:
+// registry. The build hands Dockerfile and source semantics to Docker and
+// BuildKit through a request-owned BuildKit session; docker-helper never
+// parses the Dockerfile or pre-pulls base images:
 //
-//   - a public simple build through the supported builder succeeds and
-//     renders build progress;
-//   - a custom Dockerfile selection is honored;
-//   - build args reach the Engine;
-//   - a private FROM consumes the credential resolved just in time from the
-//     session store;
+//   - a public build through the supported builder succeeds and renders
+//     build progress;
+//   - a multi-stage build with a stage alias resolves natively through
+//     BuildKit, with no helper-side FROM parsing or base pre-pull;
+//   - a stage alias named like a real image, and an unresolvable stage
+//     alias, are not treated as external images to pull;
+//   - an ARG-based FROM resolves with its default and with a build-arg
+//     override;
+//   - a custom Dockerfile selection and build args are honored;
+//   - private sources — a FROM, an ARG-substituted FROM, and an external
+//     COPY --from remote source — consume the credential the request-owned
+//     BuildKit auth session resolves just in time for exactly the requested
+//     registry host;
+//   - the daemon refreshes a re-pushed base image at the same tag, preserving
+//     the base-image freshness of the previous docker CLI --pull;
 //   - a wrong stored credential and a fresh session without one are refused
 //     with the sanitized denial and credential material never leaks;
 //   - a cancelled build is bounded: the request ends with the generic build
-//     failure, no tagged target image lands, and staging residue is absent;
-//   - an unreachable Engine is a bounded backend-unavailable failure.
+//     failure, no tagged target image lands, and no BuildKit session
+//     goroutine survives;
+//   - an unreachable Engine is a bounded backend-unavailable failure;
+//   - no staging residue remains, the supervisor stays run-only, and build
+//     audit carries no operation identity.
 //
 // The test skips unless a Docker Engine is reachable.
 func TestBuildEngineIntegration(t *testing.T) {
 	dockerAvailable(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 480*time.Second)
 	defer cancel()
 
 	provisioning, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -45,8 +62,8 @@ func TestBuildEngineIntegration(t *testing.T) {
 		t.Fatalf("construct engine provisioning client: %v", err)
 	}
 
-	// Make the base image local so FROM resolution never depends on
-	// registry availability.
+	// Pull the public base image once through the provisioning client; the
+	// builds under test still refresh their bases remotely themselves.
 	pullReader, err := provisioning.ImagePull(ctx, "alpine:3.24", client.ImagePullOptions{})
 	if err != nil {
 		t.Fatalf("pull base image: %v", err)
@@ -61,26 +78,10 @@ func TestBuildEngineIntegration(t *testing.T) {
 	registryHost := provisionDisposableRegistry(t, ctx, provisioning, "dh-build-auth-volume", userCanary, passCanary)
 
 	// Seed the private base image through the provisioning client, not the
-	// production path under test.
+	// production path under test. The base carries /base1 only; the
+	// freshness rows re-push the same tag with /base2 later.
 	privateBase := registryHost + "/dh-build/base:v1"
-	if _, err := provisioning.ImageTag(ctx, client.ImageTagOptions{Source: "alpine:3.24", Target: privateBase}); err != nil {
-		t.Fatalf("tag private base image: %v", err)
-	}
-	authBlob, err := json.Marshal(map[string]any{
-		"username":      userCanary,
-		"password":      passCanary,
-		"serveraddress": registryHost,
-	})
-	if err != nil {
-		t.Fatalf("marshal push auth: %v", err)
-	}
-	push, err := provisioning.ImagePush(ctx, privateBase, client.ImagePushOptions{RegistryAuth: base64.StdEncoding.EncodeToString(authBlob)})
-	if err != nil {
-		t.Fatalf("push private base image: %v", err)
-	}
-	if err := push.Wait(ctx); err != nil {
-		t.Fatalf("push private base image: %v", err)
-	}
+	buildPrivateBaseWithMarker(t, ctx, provisioning, privateBase, registryHost, userCanary, passCanary, "base1")
 
 	// Production path: real adapter (nil seam, Engine endpoint from the
 	// environment), test app, and one Session bearer.
@@ -93,9 +94,9 @@ func TestBuildEngineIntegration(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	// Row 1+2: a public simple build through the supported builder succeeds
-	// and carries build output. This is the production ImageBuild path with
-	// the BuildKit builder.
+	// Row 1: a public build through the supported builder succeeds and
+	// carries build output. The build refreshes its base remotely through
+	// the request-owned BuildKit session.
 	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "Dockerfile"),
 		[]byte("FROM alpine:3.24\nRUN echo integration-build-ok\n"), 0o644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
@@ -121,7 +122,104 @@ func TestBuildEngineIntegration(t *testing.T) {
 		t.Fatalf("built image %s is not present in the Engine: %v", targetRef, inspectErr)
 	}
 
-	// Row 3: a custom Dockerfile name is honored.
+	// Row 2: a multi-stage build with a stage alias resolves natively:
+	// BuildKit treats "base" as the first stage, not as an external image.
+	// A helper-side FROM parser would pre-pull docker.io/library/base and
+	// fail the build.
+	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "stage.Dockerfile"),
+		[]byte("FROM alpine:3.24 AS base\nRUN echo hello >/hello\n\nFROM base AS final\nCOPY --from=base /hello /hello\n"), 0o644); err != nil {
+		t.Fatalf("write stage Dockerfile: %v", err)
+	}
+	stageRef := "dh-build-integration:stage-alias"
+	w = postBuild(t, app, session.Token, map[string]any{
+		"context":    ".",
+		"dockerfile": "stage.Dockerfile",
+		"image":      stageRef,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("multi-stage alias build: %d %s", w.Code, w.Body.String())
+	}
+	assertBuildFinishResult(t, auditBuf, session.Session.ID, "succeeded")
+	if _, inspectErr := provisioning.ImageInspect(ctx, stageRef); inspectErr != nil {
+		t.Fatalf("built image %s is not present in the Engine: %v", stageRef, inspectErr)
+	}
+
+	// Row 3: a stage alias named like a real image is a stage, not an
+	// external image: the helper must not refresh or pull Docker Hub
+	// ubuntu. (The unresolvable-alias row below makes any reintroduced
+	// helper-side FROM parsing fail the build observably.)
+	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "alias.Dockerfile"),
+		[]byte("FROM alpine:3.24 AS ubuntu\nRUN echo stage-alias >/stage-alias\n\nFROM ubuntu\nRUN test -f /stage-alias\n"), 0o644); err != nil {
+		t.Fatalf("write alias Dockerfile: %v", err)
+	}
+	aliasRef := "dh-build-integration:alias-like-image"
+	w = postBuild(t, app, session.Token, map[string]any{
+		"context":    ".",
+		"dockerfile": "alias.Dockerfile",
+		"image":      aliasRef,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("stage-alias-named-like-image build: %d %s", w.Code, w.Body.String())
+	}
+	assertBuildFinishResult(t, auditBuf, session.Session.ID, "succeeded")
+
+	// Row 4: an unresolvable stage alias is a stage, not an image. A
+	// helper-side FROM parser would pre-pull the nonexistent Docker Hub
+	// image and fail the build.
+	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "unresolvable.Dockerfile"),
+		[]byte("FROM alpine:3.24 AS dh-nosuch-stage-8qLw\nRUN echo alias >/alias\n\nFROM dh-nosuch-stage-8qLw\nRUN test -f /alias\n"), 0o644); err != nil {
+		t.Fatalf("write unresolvable Dockerfile: %v", err)
+	}
+	unresolvableRef := "dh-build-integration:unresolvable-alias"
+	w = postBuild(t, app, session.Token, map[string]any{
+		"context":    ".",
+		"dockerfile": "unresolvable.Dockerfile",
+		"image":      unresolvableRef,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("unresolvable-stage-alias build: %d %s", w.Code, w.Body.String())
+	}
+	assertBuildFinishResult(t, auditBuf, session.Session.ID, "succeeded")
+
+	// Row 5: an ARG-based FROM resolves with its declared default.
+	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "arg.Dockerfile"),
+		[]byte("ARG BASE=alpine:3.24\nFROM ${BASE}\nRUN echo arg-from\n"), 0o644); err != nil {
+		t.Fatalf("write arg Dockerfile: %v", err)
+	}
+	argRef := "dh-build-integration:arg-from"
+	w = postBuild(t, app, session.Token, map[string]any{
+		"context":    ".",
+		"dockerfile": "arg.Dockerfile",
+		"image":      argRef,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("ARG-based FROM build: %d %s", w.Code, w.Body.String())
+	}
+	built = decodeBuildResponse(t, w)
+	if !built.OK || !strings.Contains(built.Output, "alpine:3.24") {
+		t.Errorf("ARG default FROM build = %+v, want the default base in the output", built)
+	}
+	assertBuildFinishResult(t, auditBuf, session.Session.ID, "succeeded")
+
+	// Row 6: a build-arg override of the FROM resolves the overridden base.
+	w = postBuild(t, app, session.Token, map[string]any{
+		"context":    ".",
+		"dockerfile": "arg.Dockerfile",
+		"image":      "dh-build-integration:arg-override",
+		"build_args": map[string]any{
+			"BASE": "alpine:3.19",
+		},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("ARG-override FROM build: %d %s", w.Code, w.Body.String())
+	}
+	built = decodeBuildResponse(t, w)
+	if !built.OK || !strings.Contains(built.Output, "alpine:3.19") {
+		t.Errorf("ARG override FROM build = %+v, want the overridden base in the output", built)
+	}
+	assertBuildFinishResult(t, auditBuf, session.Session.ID, "succeeded")
+
+	// Row 7: a custom Dockerfile name is honored.
 	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "build.Dockerfile"),
 		[]byte("FROM alpine:3.24\nRUN echo custom-dockerfile\n"), 0o644); err != nil {
 		t.Fatalf("write custom Dockerfile: %v", err)
@@ -140,7 +238,7 @@ func TestBuildEngineIntegration(t *testing.T) {
 		t.Fatalf("built image %s is not present in the Engine: %v", customRef, inspectErr)
 	}
 
-	// Row 4: build args reach the Engine and distinguish builds.
+	// Row 8: build args reach the Engine and distinguish builds.
 	argsRef := "dh-build-integration:args"
 	w = postBuild(t, app, session.Token, map[string]any{
 		"context":    ".",
@@ -158,8 +256,9 @@ func TestBuildEngineIntegration(t *testing.T) {
 		t.Fatalf("built image %s is not present in the Engine: %v", argsRef, inspectErr)
 	}
 
-	// Row 5: a private FROM consumes the credential resolved just in time
-	// from the session store after a migrated registry login.
+	// Migrated registry login for the private rows: the Session credential
+	// store stays the one durable credential owner, and the request-owned
+	// BuildKit auth session resolves it just in time.
 	blob, _ := json.Marshal(map[string]string{
 		"registry": registryHost,
 		"username": userCanary,
@@ -173,6 +272,8 @@ func TestBuildEngineIntegration(t *testing.T) {
 		t.Fatalf("registry login: %d %s", loginW.Code, loginW.Body.String())
 	}
 
+	// Row 9: a private FROM consumes the credential resolved just in time
+	// for exactly the requested registry host.
 	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "private.Dockerfile"),
 		[]byte("FROM "+privateBase+"\nRUN echo private-from\n"), 0o644); err != nil {
 		t.Fatalf("write private Dockerfile: %v", err)
@@ -191,7 +292,68 @@ func TestBuildEngineIntegration(t *testing.T) {
 		t.Fatalf("built image %s is not present in the Engine: %v", privateRef, inspectErr)
 	}
 
-	// Row 6: a wrong stored credential is refused with the sanitized denial.
+	// Row 10: a private ARG-substituted FROM consumes the stored credential
+	// through the request-owned BuildKit auth session without any
+	// helper-side Dockerfile parsing.
+	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "private-arg.Dockerfile"),
+		[]byte("ARG BASE\nFROM ${BASE}\nRUN echo private-arg-from\n"), 0o644); err != nil {
+		t.Fatalf("write private arg Dockerfile: %v", err)
+	}
+	privateArgRef := "dh-build-integration:private-arg-from"
+	w = postBuild(t, app, session.Token, map[string]any{
+		"context":    ".",
+		"dockerfile": "private-arg.Dockerfile",
+		"image":      privateArgRef,
+		"build_args": map[string]any{
+			"BASE": privateBase,
+		},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("private ARG-based FROM build: %d %s", w.Code, w.Body.String())
+	}
+	assertBuildFinishResult(t, auditBuf, session.Session.ID, "succeeded")
+
+	// Row 11: an external private remote source the Dockerfile never names
+	// in a FROM — COPY --from=<registry image> — is resolved through the
+	// request-owned BuildKit auth session with the stored credential.
+	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "external.Dockerfile"),
+		[]byte("FROM alpine:3.24\nCOPY --from="+privateBase+" /etc/alpine-release /copied-alpine-release\n"), 0o644); err != nil {
+		t.Fatalf("write external-source Dockerfile: %v", err)
+	}
+	externalRef := "dh-build-integration:external-source"
+	w = postBuild(t, app, session.Token, map[string]any{
+		"context":    ".",
+		"dockerfile": "external.Dockerfile",
+		"image":      externalRef,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("external COPY --from build: %d %s", w.Code, w.Body.String())
+	}
+	assertBuildFinishResult(t, auditBuf, session.Session.ID, "succeeded")
+
+	// Row 12: the base-image freshness of the previous docker CLI --pull is
+	// preserved: a re-pushed base at the same tag is refreshed remotely by
+	// the build. The rebuilt base carries /base2 only, so this build can
+	// only succeed if the daemon resolved the fresh manifest instead of a
+	// stale local base.
+	buildPrivateBaseWithMarker(t, ctx, provisioning, privateBase, registryHost, userCanary, passCanary, "base2")
+	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "fresh.Dockerfile"),
+		[]byte("FROM "+privateBase+"\nRUN test -f /base2\n"), 0o644); err != nil {
+		t.Fatalf("write freshness Dockerfile: %v", err)
+	}
+	freshRef := "dh-build-integration:fresh-base"
+	w = postBuild(t, app, session.Token, map[string]any{
+		"context":    ".",
+		"dockerfile": "fresh.Dockerfile",
+		"image":      freshRef,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("freshness build: %d %s", w.Code, w.Body.String())
+	}
+	assertBuildFinishResult(t, auditBuf, session.Session.ID, "succeeded")
+
+	// Row 13: a wrong stored credential is refused with the sanitized
+	// denial.
 	if err := storeSessionRegistryCredential(app.Config.RuntimeDir, session.Session.ID, registryHost, userCanary, passCanary+"-wrong", ""); err != nil {
 		t.Fatalf("cannot store wrong credential: %v", err)
 	}
@@ -212,7 +374,7 @@ func TestBuildEngineIntegration(t *testing.T) {
 	}
 	assertBuildFinishResult(t, auditBuf, session.Session.ID, "docker_build_failed")
 
-	// Row 7: a fresh session without stored credentials is refused for the
+	// Row 14: a fresh session without stored credentials is refused for the
 	// private FROM.
 	freshSession, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -236,9 +398,9 @@ func TestBuildEngineIntegration(t *testing.T) {
 	}
 	assertBuildFinishResult(t, auditBuf, freshSession.Session.ID, "docker_build_failed")
 
-	// Row 8+9: cancelling an intentionally long build is bounded: the
-	// request ends with the generic build failure, no tagged target image
-	// lands, and the coordinator has no live request left.
+	// Row 15: cancelling an intentionally long build is bounded: the request
+	// ends with the generic build failure, no tagged target image lands,
+	// and the coordinator has no live request left.
 	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "slow.Dockerfile"),
 		[]byte("FROM alpine:3.24\nRUN sleep 120\n"), 0o644); err != nil {
 		t.Fatalf("write slow Dockerfile: %v", err)
@@ -300,7 +462,10 @@ func TestBuildEngineIntegration(t *testing.T) {
 		t.Error("the cancelled build must not leave the tagged image behind")
 	}
 
-	// Row 10: an unreachable Engine is a bounded backend-unavailable failure.
+	// No request-owned BuildKit session goroutine may survive the handler.
+	assertNoBuildkitSessionGoroutines(t)
+
+	// Row 16: an unreachable Engine is a bounded backend-unavailable failure.
 	deadSocket := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	deadURL := deadSocket.URL
 	deadSocket.Close()
@@ -321,7 +486,7 @@ func TestBuildEngineIntegration(t *testing.T) {
 	}
 	assertBuildFinishResult(t, auditBuf, session.Session.ID, "docker_build_failed")
 
-	// Row 11: no temporary staging or runtime residue remains after the
+	// Row 17: no temporary staging or runtime residue remains after the
 	// completion and cancellation paths.
 	buildsDir := filepath.Join(app.Config.RuntimeDir, "builds")
 	entries, readErr := os.ReadDir(buildsDir)
@@ -342,14 +507,23 @@ func TestBuildEngineIntegration(t *testing.T) {
 		}
 	}
 
-	// Credential containment across the log sinks. The credential may appear
-	// only in the protected session Docker config.json.
+	// Credential containment across the log sinks. The credentials may
+	// appear only in the protected session Docker config.json; an unrelated
+	// registry credential stored for another host is never returned for the
+	// requested one, so neither canary may reach any observable output.
+	otherUserCanary := "dh-prod-other-user-canary-Cv5Rm9Yt4x"
+	otherPassCanary := "dh-prod-other-pass-canary-Wn7Kj2Hs6q"
+	if err := storeSessionRegistryCredential(app.Config.RuntimeDir, session.Session.ID, "other.example.com", otherUserCanary, otherPassCanary, ""); err != nil {
+		t.Fatalf("cannot store unrelated credential: %v", err)
+	}
 	for _, sink := range []struct{ name, blob string }{
 		{"audit", auditBuf.String()},
 		{"operational log", opBuf.String()},
 	} {
-		if strings.Contains(sink.blob, passCanary) || strings.Contains(sink.blob, userCanary) {
-			t.Errorf("%s contains credential material", sink.name)
+		for _, canary := range []string{passCanary, userCanary, otherPassCanary, otherUserCanary} {
+			if strings.Contains(sink.blob, canary) {
+				t.Errorf("%s contains credential material %q", sink.name, canary)
+			}
 		}
 	}
 	// Build audit must not carry operation identity.
@@ -361,6 +535,93 @@ func TestBuildEngineIntegration(t *testing.T) {
 	}
 	if strings.Contains(opBuf.String(), "ERROR") {
 		t.Errorf("the exercised build paths must not produce operational ERROR entries, got:\n%s", opBuf.String())
+	}
+
+	// No BuildKit session goroutine survives any exercised path.
+	assertNoBuildkitSessionGoroutines(t)
+}
+
+// buildPrivateBaseWithMarker builds one private base image from the public
+// base, carrying exactly one marker file, and pushes it to the disposable
+// registry through the provisioning client. The same tag is re-pushed with a
+// different marker by the freshness rows.
+func buildPrivateBaseWithMarker(t *testing.T, ctx context.Context, provisioning *client.Client, privateBase, registryHost, userCanary, passCanary, marker string) {
+	t.Helper()
+
+	contextDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"),
+		[]byte("FROM alpine:3.24\nRUN touch /"+marker+"\n"), 0o644); err != nil {
+		t.Fatalf("write base Dockerfile: %v", err)
+	}
+
+	var contextBlob bytes.Buffer
+	tw := tar.NewWriter(&contextBlob)
+	blob, err := os.ReadFile(filepath.Join(contextDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "Dockerfile", Mode: 0o644, Size: int64(len(blob))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(blob); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	buildReader, err := provisioning.ImageBuild(ctx, &contextBlob, client.ImageBuildOptions{
+		Tags:       []string{privateBase},
+		Dockerfile: "Dockerfile",
+		Remove:     true,
+	})
+	if err != nil {
+		t.Fatalf("build private base image: %v", err)
+	}
+	// Drain the build stream to EOF so the daemon completes the build; a
+	// fixture failure surfaces through the push below.
+	if _, err := io.Copy(io.Discard, buildReader.Body); err != nil {
+		t.Fatalf("drain private base build stream: %v", err)
+	}
+	if err := buildReader.Body.Close(); err != nil {
+		t.Fatalf("close private base build stream: %v", err)
+	}
+
+	authBlob, err := json.Marshal(map[string]any{
+		"username":      userCanary,
+		"password":      passCanary,
+		"serveraddress": registryHost,
+	})
+	if err != nil {
+		t.Fatalf("marshal push auth: %v", err)
+	}
+	push, err := provisioning.ImagePush(ctx, privateBase, client.ImagePushOptions{RegistryAuth: base64.StdEncoding.EncodeToString(authBlob)})
+	if err != nil {
+		t.Fatalf("push private base image: %v", err)
+	}
+	if err := push.Wait(ctx); err != nil {
+		t.Fatalf("push private base image: %v", err)
+	}
+}
+
+// assertNoBuildkitSessionGoroutines proves no request-owned BuildKit session
+// goroutine survives the build handler: a leaked session goroutine carries
+// BuildKit frames in its stack. The check settles within a bounded deadline
+// so it does not race an in-flight teardown.
+func assertNoBuildkitSessionGoroutines(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		blob := make([]byte, 1<<21)
+		n := runtime.Stack(blob, true)
+		stacks := string(blob[:n])
+		if !strings.Contains(stacks, "moby/buildkit") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("BuildKit session goroutines leaked:\n%s", stacks)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

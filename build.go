@@ -162,45 +162,6 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Resolve the Session credentials the staged Dockerfile's FROM lines
-	// name just in time, from the one protected credential store. Only
-	// matching entries are projected into the Engine request, and the base
-	// images are pulled through the Engine pull path with those
-	// credentials before the build resolves them locally.
-	authCredentials, err := resolveBuildAuthCredentials(cfg.RuntimeDir, session.ID, staged.DockerfilePath)
-	if err != nil {
-		opLog(ctx).Error("cannot read session registry credentials",
-			slog.String("operation", "build"),
-			slog.String("error", err.Error()),
-		)
-		duration := time.Since(started).Round(time.Millisecond).String()
-		finishAudit("docker_build_failed")
-		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, buildResponse{
-			OK:       false,
-			Code:     "docker_build_failed",
-			Message:  "docker build failed",
-			Duration: duration,
-		})
-		return
-	}
-
-	fromImages, err := dockerfileFromImages(staged.DockerfilePath)
-	if err != nil {
-		opLog(ctx).Error("cannot read session registry credentials",
-			slog.String("operation", "build"),
-			slog.String("error", err.Error()),
-		)
-		duration := time.Since(started).Round(time.Millisecond).String()
-		finishAudit("docker_build_failed")
-		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, buildResponse{
-			OK:       false,
-			Code:     "docker_build_failed",
-			Message:  "docker build failed",
-			Duration: duration,
-		})
-		return
-	}
-
 	// The Engine adapter consumes the prepared trusted context as a tar
 	// stream; the adapter is not the workspace-policy owner.
 	contextTar, err := staged.tarContext(engineCtx)
@@ -237,13 +198,16 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The request-owned BuildKit auth session resolves stored Session
+	// credentials just in time, for exactly the registry host the daemon
+	// asks about through that session. Docker/BuildKit owns the Dockerfile
+	// and its source semantics; the handler never parses the Dockerfile.
 	result, buildErr := builder.imageBuild(engineCtx, engineBuildSpec{
-		Image:      req.Image,
-		Context:    contextTar,
-		Dockerfile: dockerfileRel,
-		FromImages: fromImages,
-		BuildArgs:  req.BuildArgs,
-		Auths:      authCredentials,
+		Image:       req.Image,
+		Context:     contextTar,
+		Dockerfile:  dockerfileRel,
+		BuildArgs:   req.BuildArgs,
+		Credentials: sessionBuildCredentialResolver(cfg.RuntimeDir, session.ID),
 	}, cfg.OperationLogMaxBytes)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
@@ -320,6 +284,15 @@ func writeBuildEngineFailure(ctx context.Context, w http.ResponseWriter, engErr 
 			OK:        false,
 			Code:      "backend_unavailable",
 			Message:   "docker engine unavailable",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrBackendFailure:
+		writeJSONRaw(ctx, w, http.StatusBadGateway, buildResponse{
+			OK:        false,
+			Code:      "backend_failure",
+			Message:   "unexpected docker engine failure",
 			Output:    result.Output,
 			Truncated: result.Truncated,
 			Duration:  duration,

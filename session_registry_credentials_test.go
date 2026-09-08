@@ -23,6 +23,7 @@ func TestNormalizeRegistryAddress(t *testing.T) {
 		{"distinct registries stay distinct", "registry.example.com:5001", "registry.example.com:5001"},
 		{"hub default", "docker.io", dockerHubAuthConfigKey},
 		{"hub index host", "index.docker.io", dockerHubAuthConfigKey},
+		{"hub registry endpoint", "registry-1.docker.io", dockerHubAuthConfigKey},
 		{"hub v1 url", "https://index.docker.io/v1/", dockerHubAuthConfigKey},
 	}
 	for _, tc := range cases {
@@ -41,6 +42,7 @@ func TestNormalizeRegistryLoginAddress(t *testing.T) {
 		want  string
 	}{
 		{"docker hub default namespace", "docker.io", dockerHubAuthConfigKey},
+		{"docker hub registry endpoint", "registry-1.docker.io", dockerHubAuthConfigKey},
 		{"docker hub index host remains explicit host", "index.docker.io", "index.docker.io"},
 		{"docker hub index URL normalizes to host", "https://index.docker.io/v1/", "index.docker.io"},
 		{"custom URL normalizes to host", "https://registry.example.com/v2/", "registry.example.com"},
@@ -75,8 +77,8 @@ func TestNormalizeRegistryAddressNoAliasing(t *testing.T) {
 		},
 		{
 			name:      "docker hub aliases share the historical config key",
-			spellings: []string{"docker.io", "index.docker.io", "https://index.docker.io/v1/"},
-			others:    []string{"registry-1.docker.io", "other.example.com"},
+			spellings: []string{"docker.io", "index.docker.io", "registry-1.docker.io", "https://index.docker.io/v1/"},
+			others:    []string{"other.example.com"},
 		},
 	}
 	for _, tc := range cases {
@@ -355,83 +357,14 @@ func TestStoreSessionRegistryCredentialNoTempResidue(t *testing.T) {
 	}
 }
 
-// TestDockerfileAuthRegistries proves the FROM-line registry extraction the
-// build credential projection relies on: plain and multi-stage FROM lines,
-// flags, scratch, comments, and line continuations, with duplicates removed.
-func TestDockerfileAuthRegistries(t *testing.T) {
-	cases := []struct {
-		name       string
-		dockerfile string
-		want       []string
-	}{
-		{
-			name:       "plain",
-			dockerfile: "FROM registry.example.com/team/base:1\nRUN echo hi\n",
-			want:       []string{"registry.example.com"},
-		},
-		{
-			name:       "docker hub",
-			dockerfile: "FROM alpine:3.24\n",
-			want:       []string{dockerHubAuthConfigKey},
-		},
-		{
-			name:       "multi stage deduped",
-			dockerfile: "FROM registry.example.com/a AS build\nFROM registry.example.com/b\nFROM registry.example.com/a\n",
-			want:       []string{"registry.example.com"},
-		},
-		{
-			name:       "platform flag and scratch",
-			dockerfile: "FROM --platform=linux/amd64 registry.example.com/a\nFROM scratch\n",
-			want:       []string{"registry.example.com"},
-		},
-		{
-			name:       "continuation joins flags",
-			dockerfile: "FROM \\\n  --platform=linux/amd64 \\\n  registry.example.com/a\n",
-			want:       []string{"registry.example.com"},
-		},
-		{
-			name:       "comments and parser directives ignored",
-			dockerfile: "# syntax=docker/dockerfile:1\n# FROM registry.example.com/comment\nFROM registry.example.com/a\n",
-			want:       []string{"registry.example.com"},
-		},
-		{
-			name:       "unparseable contributes nothing",
-			dockerfile: "FROM -bad-ref\n",
-			want:       nil,
-		},
-		{
-			name:       "case insensitive",
-			dockerfile: "from registry.example.com/a\n",
-			want:       []string{"registry.example.com"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "Dockerfile")
-			if err := os.WriteFile(path, []byte(tc.dockerfile), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			got, err := dockerfileAuthRegistries(path)
-			if err != nil {
-				t.Fatalf("dockerfileAuthRegistries: %v", err)
-			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("registries = %v, want %v", got, tc.want)
-			}
-			for i := range tc.want {
-				if got[i] != tc.want[i] {
-					t.Errorf("registry[%d] = %q, want %q", i, got[i], tc.want[i])
-				}
-			}
-		})
-	}
-}
-
-// TestResolveBuildAuthCredentials proves the credential bridge projects only
-// the stored credentials the staged Dockerfile's FROM lines name: unrelated
-// stored credentials are never sent, an unmatched registry builds
-// unauthenticated for it, and the identity token is preferred when stored.
-func TestResolveBuildAuthCredentials(t *testing.T) {
+// TestSessionBuildCredentialResolver proves the host-scoped credential
+// resolver the build path hands to the Engine adapter: every lookup reads
+// exactly the stored credential of the requested registry host from the one
+// protected store, an unrelated stored credential is never returned for
+// another host, nothing stored degrades to anonymous authentication, a
+// stored identity token keeps its priority over an auth pair, and a store
+// read failure is operational instead of a silent fallback.
+func TestSessionBuildCredentialResolver(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -440,7 +373,9 @@ func TestResolveBuildAuthCredentials(t *testing.T) {
 	runtimeDir := app.Config.RuntimeDir
 	sessionID := result.Session.ID
 
-	if err := storeSessionRegistryCredential(runtimeDir, sessionID, "registry.example.com", "user", "pass", ""); err != nil {
+	const userCanary = "dh-resolver-user-canary-8qLw3nTz5c"
+	const passCanary = "dh-resolver-pass-canary-Rm2Kx7Vb9d"
+	if err := storeSessionRegistryCredential(runtimeDir, sessionID, "registry.example.com", userCanary, passCanary, ""); err != nil {
 		t.Fatalf("store: %v", err)
 	}
 	if err := storeSessionRegistryCredential(runtimeDir, sessionID, "other.example.com", "other-user", "other-pass", ""); err != nil {
@@ -449,37 +384,66 @@ func TestResolveBuildAuthCredentials(t *testing.T) {
 	if err := storeSessionRegistryCredential(runtimeDir, sessionID, "token.example.com", "ignored", "ignored", "tok-123"); err != nil {
 		t.Fatalf("store: %v", err)
 	}
-
-	dockerfilePath := filepath.Join(t.TempDir(), "Dockerfile")
-	dockerfile := "FROM registry.example.com/team/base:1\nFROM token.example.com/t:1\nFROM unset.example.com/x:1\nFROM alpine\n"
-	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
-		t.Fatal(err)
+	if err := storeSessionRegistryCredential(runtimeDir, sessionID, "docker.io", "hub-user", "hub-pass", ""); err != nil {
+		t.Fatalf("store: %v", err)
 	}
 
-	credentials, err := resolveBuildAuthCredentials(runtimeDir, sessionID, dockerfilePath)
+	resolve := sessionBuildCredentialResolver(runtimeDir, sessionID)
+
+	credential, err := resolve("registry.example.com")
 	if err != nil {
-		t.Fatalf("resolveBuildAuthCredentials: %v", err)
+		t.Fatalf("resolve requested host: %v", err)
+	}
+	if credential == nil || credential.Registry != "registry.example.com" || credential.Username != userCanary || credential.Password != passCanary {
+		t.Errorf("requested host credential = %+v", credential)
 	}
 
-	if len(credentials) != 2 {
-		t.Fatalf("credentials = %d entries (%+v), want 2", len(credentials), credentials)
+	// An unrelated stored credential is never returned for another host.
+	credential, err = resolve("other.example.com")
+	if err != nil {
+		t.Fatalf("resolve unrelated host: %v", err)
 	}
-	if credentials[0].Registry != "registry.example.com" || credentials[0].Username != "user" || credentials[0].Password != "pass" {
-		t.Errorf("first credential = %+v", credentials[0])
+	if credential == nil || credential.Username != "other-user" || credential.Password != "other-pass" {
+		t.Errorf("unrelated host credential = %+v", credential)
 	}
-	if credentials[1].Registry != "token.example.com" || credentials[1].IdentityToken != "tok-123" {
-		t.Errorf("token credential = %+v", credentials[1])
+
+	// A stored identity token keeps its priority over an auth pair.
+	credential, err = resolve("token.example.com")
+	if err != nil {
+		t.Fatalf("resolve token host: %v", err)
 	}
-	for _, credential := range credentials {
-		if credential.Registry == "other.example.com" {
-			t.Error("an unrelated stored credential must not be projected")
+	if credential == nil || credential.IdentityToken != "tok-123" || credential.Username != "" || credential.Password != "" {
+		t.Errorf("token host credential = %+v", credential)
+	}
+
+	// Every Docker Hub spelling resolves the one stored Docker Hub
+	// credential through the canonical store key.
+	for _, host := range []string{"registry-1.docker.io", "docker.io", "index.docker.io", dockerHubAuthConfigKey} {
+		credential, err = resolve(host)
+		if err != nil {
+			t.Fatalf("resolve hub spelling %q: %v", host, err)
+		}
+		if credential == nil || credential.Username != "hub-user" || credential.Password != "hub-pass" {
+			t.Errorf("hub spelling %q credential = %+v", host, credential)
+		}
+	}
+
+	// Nothing stored for the host is anonymous, not an error.
+	for _, host := range []string{"unset.example.com", "sub.registry.example.com"} {
+		credential, err = resolve(host)
+		if err != nil {
+			t.Fatalf("resolve unset host %q: %v", host, err)
+		}
+		if credential != nil {
+			t.Errorf("unset host %q resolved credential material: %+v", host, credential)
 		}
 	}
 }
 
-// TestResolveBuildAuthCredentialsUnreadableStore proves a store read failure
-// is operational and does not silently drop credentials.
-func TestResolveBuildAuthCredentialsUnreadableStore(t *testing.T) {
+// TestSessionBuildCredentialResolverUnreadableStore proves a store read
+// failure is operational and does not silently degrade to anonymous
+// authentication.
+func TestSessionBuildCredentialResolverUnreadableStore(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -494,12 +458,7 @@ func TestResolveBuildAuthCredentialsUnreadableStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dockerfilePath := filepath.Join(t.TempDir(), "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM registry.example.com/a:1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := resolveBuildAuthCredentials(app.Config.RuntimeDir, sessionID, dockerfilePath); err == nil {
+	if _, err := sessionBuildCredentialResolver(app.Config.RuntimeDir, sessionID)("registry.example.com"); err == nil {
 		t.Fatal("a malformed credential store must be an error, not silent unauthenticated building")
 	}
 }

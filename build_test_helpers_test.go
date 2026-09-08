@@ -181,6 +181,19 @@ func (c *capturedBuild) builderImage() string {
 	return c.spec.Image
 }
 
+// resolveCredential invokes the credential resolver the build handler passed
+// with the build spec, exactly as the request-owned BuildKit auth session
+// would: one host-scoped lookup at a time.
+func (c *capturedBuild) resolveCredential(registryHost string) (*sessionRegistryCredential, error) {
+	c.mu.Lock()
+	resolve := c.spec.Credentials
+	c.mu.Unlock()
+	if resolve == nil {
+		return nil, nil
+	}
+	return resolve(registryHost)
+}
+
 // fakeEngineBuilder is the Engine builder test seam.
 type fakeEngineBuilder struct {
 	captured *capturedBuild
