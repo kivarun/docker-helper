@@ -199,6 +199,29 @@ docker-helper run \
   -- command arg...
 ```
 
+To pass a secret value (an API key, a credential token) without putting it
+on the command line, export it in your own environment and use `--env-from
+DEST=SOURCE`, where SOURCE names your environment variable and DEST is the
+name the workload sees. The value is read locally from your environment;
+it never appears in the command line, diagnostics, audit, or daemon logs.
+An unset SOURCE variable stops the command before any container operation
+is created.
+
+```bash
+ORCHESTRATOR_LLM_KEY=secret \
+docker-helper run \
+  --image IMAGE \
+  --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY \
+  -- command arg...
+```
+
+In system mode, `--helper-socket` makes the Docker Helper socket reachable
+inside the container at `/run/docker-helper/docker-helper.sock` (read-only
+projection, chosen server-side). The socket provides transport only; the
+workload still needs a bearer credential for protected operations, which
+can be passed separately with `--env-from`. In user mode the flag is
+rejected.
+
 Optional workspace mounts:
 
 ```bash

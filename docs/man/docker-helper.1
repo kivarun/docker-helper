@@ -462,8 +462,31 @@ Pull a Docker image.
 .B docker-helper build [\-\-system] [\-\-endpoint ENDPOINT] \-\-context PATH \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...]
 Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
 .TP
-.B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-mount SOURCE:TARGET[:ro] ...] \-\- [command]
-Run a Docker container. \-\-env and \-\-mount may be repeated.
+.B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] \-\- [command]
+Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
+.TP
+.B \-\-env\-from DEST=SOURCE
+Pass an environment variable without putting its value on the command line.
+SOURCE names an environment variable of the
+.B docker-helper
+process itself; its value is read locally and delivered to the container as
+DEST through the same environment contract as
+.BR \-\-env .
+Resolution is fail-closed: an unset SOURCE stops the command before any
+container operation is created. A SOURCE that is set but empty is delivered
+as an empty value. The value never appears in argv, diagnostics, audit, or
+daemon logs. When both \-\-env and \-\-env-from define the same name, the
+\-\-env\-from value wins.
+.TP
+.B \-\-helper\-socket
+Make the helper Unix socket reachable inside the container at
+\fI/run/docker-helper/docker-helper.sock\fR (system mode). This is a
+server-owned capability: the daemon injects a read-only bind of its own
+runtime directory, and the client selects only the boolean flag. The socket
+provides transport only; protected operations still require a bearer
+credential, passed separately (for example with
+.BR \-\-env\-from ).
+Not supported in user mode; the operation is rejected there.
 .TP
 .B docker-helper registry login [\-\-system] [\-\-endpoint ENDPOINT] \-\-registry REGISTRY \-\-username USER [\-\-password-stdin] [\-\-json]
 Log in to a container registry for the current session.

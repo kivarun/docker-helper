@@ -817,6 +817,43 @@ docker-helper registry login --registry REG --username USER
 logs, and returns the final exit status. Operation IDs and log offsets are
 handled internally.
 
+### Passing secrets to a workload without argv
+
+`run --env-from DEST=SOURCE` takes the value of SOURCE from the CLI
+process's own environment and delivers it to the container as DEST. The
+secret value never appears on the command line, in diagnostics, in audit,
+or in daemon logs:
+
+```bash
+ORCHESTRATOR_LLM_KEY=secret \
+docker-helper run \
+  --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY \
+  --image NAME -- command args...
+```
+
+An unset SOURCE fails closed before any container operation is created; a
+SOURCE set to the empty string is delivered as an empty value.
+`--env-from` composes with `--env`.
+
+### Reaching the helper socket from a workload (system mode)
+
+`run --helper-socket` makes the daemon's own Unix socket reachable inside
+the container at `/run/docker-helper/docker-helper.sock` through a
+read-only bind of the helper runtime directory. The client chooses only
+the flag; the mount itself is server-owned. The socket provides transport
+only: protected operations still authenticate with a bearer credential,
+which can be passed with `--env-from`:
+
+```bash
+LAUNCHER_CREDENTIAL=... \
+docker-helper run \
+  --helper-socket \
+  --env-from ORCHESTRATOR_CREDENTIAL=LAUNCHER_CREDENTIAL \
+  --image NAME -- workload...
+```
+
+`--helper-socket` is not supported in user mode and is rejected there.
+
 Agent-facing commands (`pull`, `build`, `run`, `registry login`) select the
 daemon endpoint the same way operator commands do, but authenticate with the
 Session token from `DOCKER_HELPER_SESSION_TOKEN` (never a Principal

@@ -2,6 +2,22 @@
 
 This file summarizes user-visible release changes. Commit-level history remains available through the GitHub compare links for each release.
 
+## [2.1.1]
+
+A compatible patch release over 2.1.0 adding two opt-in workload capabilities. Without the new flags, 2.1.0 behavior is unchanged.
+
+### Highlights
+
+- Added `docker-helper run --env-from DEST=SOURCE`: pass an environment value to the workload without putting the secret value on the command line. The value is read from the CLI process's own environment and delivered through the existing run environment contract; it never appears in argv, diagnostics, audit, or daemon logs. An unset SOURCE fails closed before any run Operation is created; an explicitly empty SOURCE is delivered as an empty value; `--env` and `--env-from` compose.
+- Added `docker-helper run --helper-socket` (HTTP field `helper_socket`): in system mode the daemon injects its own read-only runtime directory bind (`/run/docker-helper` -> `/run/docker-helper`) so the workload can reach the existing helper Unix socket. The client selects only the boolean; source, target, and mount mode are server-owned. The socket provides transport only — protected operations still require a separately passed bearer credential. The directory (not the socket inode) is bound, so an existing projection keeps seeing the recreated socket across the supported service restart lifecycle.
+- `--helper-socket` fails closed in user mode with `invalid_helper_socket`: in user mode the workload runs under the daemon-owner UID, so a runtime directory projection would expose daemon runtime state and is deliberately not offered.
+- Ordinary mount policy is unchanged: sources stay workspace-relative, absolute host sources and workspace escapes stay rejected, and a user mount at the injected mount point is rejected as `invalid_mount` when the projection is active.
+- `run.start` and `run.finish` audit records carry a `helper_socket` boolean when the projection is active. Environment values are never logged (names only), including values delivered through `--env-from`.
+- The shipped SELinux policy grants helper containers the narrow transport permissions to reach the helper socket (runtime directory traversal/getattr, socket connect, connectto to the daemon domain) with no runtime file content access.
+- New targeted UAT regression groups 15-17 (`scripts/uat-regression-env-from.sh`, `scripts/uat-regression-helper-socket.sh`, `scripts/uat-regression-dogfood-env-socket.sh`) cover secret containment, socket isolation and restart semantics, and the combined delegated-orchestrator scenario (Launcher credential through `--env-from`, child Session through the injected socket, cleanup).
+
+Full changes since 2.1.0: https://github.com/kivarun/docker-helper/compare/v2.1.0...v2.1.1
+
 ## [2.1.0] - 2026-09-07
 
 Release 2.1 adds stable delegated Launcher ownership between Principals and Sessions while preserving docker-helper's local-first, policy-enforcing scope.
