@@ -167,7 +167,14 @@ func TestPullEngineIntegration(t *testing.T) {
 		case strings.Contains(r.URL.Path, "/manifests/"):
 			manifestSeen.Do(func() { close(manifestReached) })
 			// Hold the manifest request until the pull client gives up.
-			<-r.Context().Done()
+			// The hold is bounded: dockerd notices an aborted API client
+			// only through a failed progress write, and a stalled pull
+			// produces none, so the daemon may keep this connection open
+			// after the cancellation. The server must always be closable.
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
 		case strings.Contains(r.URL.Path, "/blobs/"):
 			http.Error(w, `{"errors":[{"code":"NAME_UNKNOWN"}]}`, http.StatusNotFound)
 		default:
