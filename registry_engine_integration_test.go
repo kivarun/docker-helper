@@ -231,9 +231,9 @@ func provisionDisposableRegistry(t *testing.T, ctx context.Context, provisioning
 	if _, err := provisioning.VolumeCreate(ctx, client.VolumeCreateOptions{Name: volumeName}); err != nil {
 		t.Fatalf("create auth volume: %v", err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		_, _ = provisioning.VolumeRemove(context.WithoutCancel(ctx), volumeName, client.VolumeRemoveOptions{Force: true})
-	}()
+	})
 
 	seed, err := provisioning.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Config: &container.Config{
@@ -281,9 +281,9 @@ func provisionDisposableRegistry(t *testing.T, ctx context.Context, provisioning
 	if err != nil {
 		t.Fatalf("create registry container: %v", err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		_, _ = provisioning.ContainerRemove(context.WithoutCancel(ctx), reg.ID, client.ContainerRemoveOptions{Force: true})
-	}()
+	})
 	if _, err := provisioning.ContainerStart(ctx, reg.ID, client.ContainerStartOptions{}); err != nil {
 		t.Fatalf("start registry container: %v", err)
 	}
@@ -307,9 +307,10 @@ func provisionDisposableRegistry(t *testing.T, ctx context.Context, provisioning
 	if hostPort == "" {
 		t.Fatal("engine did not publish the requested loopback port for the registry")
 	}
-	// Address the published binding by its exact IPv4 loopback address:
-	// "localhost" can resolve to ::1, where the loopback-only publication
-	// has no listener (observed as dockerd dial refusals in CI).
+	// Address the published binding by its exact IPv4 loopback address.
+	// The binding exists only on 127.0.0.1, while "localhost" may resolve
+	// to ::1 first, and the exact address keeps image references and the
+	// stored credential key deterministic.
 	registryHost := "127.0.0.1:" + hostPort
 	t.Logf("disposable registry: container 5000/tcp published on 127.0.0.1:%s", hostPort)
 

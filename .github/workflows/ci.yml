@@ -162,14 +162,4 @@ jobs:
 
       - name: Real-Engine pull (public, private, denied, cancellation)
         run: |
-          docker version
-          docker info | sed -n '1,45p'
           go test -v -run '^TestPullEngineIntegration$' .
-      - name: Diagnostics on failure
-        if: failure()
-        run: |
-          docker ps -a
-          sudo iptables -t nat -S | head -40 || true
-          ss -ltnp | grep 3276 || true
-          docker run --rm --network host alpine:3.24 sh -c 'wget -q -O- http://127.0.0.1:32768/v2/ || echo host-net-probe-refused' || true
-          docker run --rm alpine:3.24 sh -c 'wget -q -O- http://127.0.0.1:32768/v2/ || echo bridge-probe-refused' || true
