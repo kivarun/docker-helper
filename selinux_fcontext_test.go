@@ -1966,9 +1966,43 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if !strings.Contains(fcContent, "docker_helper_trusted_ca_t") {
 		t.Error("fc file must map trusted-ca to docker_helper_trusted_ca_t")
 	}
-	// Absence of general container -> runtime_t grants.
-	if strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:") {
-		t.Error("policy must NOT grant container general access to runtime_t")
+	// The container may reach the helper socket through the injected
+	// read-only runtime directory bind (helper_socket capability), but only
+	// through the exact narrow transport grants: directory traversal and
+	// socket connection. No runtime file content access and no directory
+	// listing/mutation is permitted.
+	if !strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:dir { getattr search };") {
+		t.Error("policy must grant container only traversal/getattr of runtime_t for the helper socket path")
+	}
+	if !strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:sock_file { getattr open read write };") {
+		t.Error("policy must grant container the helper socket connect permissions")
+	}
+	if !strings.Contains(content, "allow docker_helper_container_t docker_helper_t:unix_stream_socket { connectto };") {
+		t.Error("policy must grant container connectto to the helper daemon domain")
+	}
+	// No runtime file (lock/cid/mount machinery) access for the container.
+	if strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:file") {
+		t.Error("policy must NOT grant container access to runtime_t files")
+	}
+	// No directory listing, mutation, or broader dir access for the container.
+	for _, denied := range []string{
+		"allow docker_helper_container_t docker_helper_runtime_t:dir { read",
+		"allow docker_helper_container_t docker_helper_runtime_t:dir { write",
+		"allow docker_helper_container_t docker_helper_runtime_t:dir { open",
+		"allow docker_helper_container_t docker_helper_runtime_t:dir { add_name",
+		"allow docker_helper_container_t docker_helper_runtime_t:dir { remove_name",
+		"allow docker_helper_container_t docker_helper_runtime_t:dir { create",
+		"allow docker_helper_container_t docker_helper_runtime_t:dir { rmdir",
+	} {
+		if strings.Contains(content, denied) {
+			t.Errorf("policy must NOT grant container %q", denied)
+		}
+	}
+	// No other sock_file permission classes beyond the connect set.
+	if strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:sock_file { create") ||
+		strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:sock_file { unlink") ||
+		strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:sock_file { setattr") {
+		t.Error("policy must NOT grant container sock_file lifecycle permissions on runtime_t")
 	}
 	// setfiles_exec_t for restorecon without transition.
 	if !strings.Contains(content, "type setfiles_exec_t;") {

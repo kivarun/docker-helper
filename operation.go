@@ -100,6 +100,7 @@ type operation struct {
 	auditBuildArgKeys      []string
 	auditShmSize           string
 	auditTrustedCAInjected bool
+	auditHelperSocket      bool
 	auditPrincipalName     string
 	auditLauncherName      string
 }
@@ -699,6 +700,7 @@ func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 		BuildArgKeys:      op.auditBuildArgKeys,
 		ShmSize:           op.auditShmSize,
 		TrustedCAInjected: op.auditTrustedCAInjected,
+		HelperSocket:      op.auditHelperSocket,
 		PrincipalName:     op.auditPrincipalName,
 		LauncherID:        op.LauncherID,
 		LauncherName:      op.auditLauncherName,
