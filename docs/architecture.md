@@ -99,10 +99,18 @@ reference client     curl / native adapter
       │
 docker-helper daemon
       │
-    Docker CLI
+      ├── Moby Engine API ─── registry login, pull
       │
-    Docker Engine
+      └── Docker CLI ─────── build, run
+              │
+          Docker Engine
 ```
+
+Backend ownership is currently split: `registry login` and `POST /pull`
+execute through the daemon's single shared Moby Engine API adapter, while
+`build` and `run` still execute the Docker CLI. The daemon is not yet fully
+Moby-only; the remaining D0 Engine API migrations extend the Engine path and
+retire the CLI path.
 
 There are exactly four bearer classes, described by the [authority
 model](#authority-model): the admin token authenticates the administrator, a
@@ -1357,6 +1365,12 @@ the command returns an error.
 
 ### Operation lifecycle
 
+This section describes the legacy Docker CLI operation lifecycle owned by
+`operationSupervisor` — `build` and `run`. The Engine-backed synchronous
+requests (`pull`, and `registry login` validation) follow the synchronous
+path described under [Pull](#pull) and [Registry login](#registry-login);
+they have no Operation identity and never register with the supervisor.
+
 ```
 Authentication
     │
@@ -1560,10 +1574,14 @@ tail is retained with `truncated: true`.
 
 The pull runs through the single production Engine adapter
 (`engineClient`), which calls the Engine `/images/create` pull stream —
-the same daemon operation the docker CLI pull path delegated to. The
-adapter renders the progress stream into the line-based combined output
-form and normalizes Engine failures into docker-helper error categories;
-Moby request/response types stay inside the adapter.
+the same daemon operation the docker CLI pull path delegated to. The App
+resolves one shared `engineClient` for its lifetime; both Engine consumers
+(`registry login` and `pull`) receive the same adapter instance instead of
+per-request Moby clients, and the adapter's pooled connections are released
+once at daemon shutdown. The adapter renders the progress stream into the
+line-based combined output form and normalizes Engine failures into
+docker-helper error categories; Moby request/response types stay inside the
+adapter.
 
 Just before the pull, the handler resolves the stored Session credential
 for the exact registry the image reference names (Docker reference
@@ -1602,8 +1620,10 @@ Request validation checks that `registry`, `username`, and `password` are
 all non-empty.
 
 Registry credential validation runs through the single production Engine
-adapter (`engineClient`), which constructs the negotiated Moby client and
-calls the Engine `/auth` endpoint — the same daemon operation the docker
+adapter (`engineClient`): the handler resolves the App's shared Engine
+adapter — created once per daemon lifetime with API negotiation and closed
+at daemon shutdown, the same instance the pull path uses — and calls the
+Engine `/auth` endpoint through it, the same daemon operation the docker
 CLI login path delegated to. The adapter normalizes Engine failures into
 docker-helper error categories; Moby request/response types stay inside the
 adapter.
@@ -1815,8 +1835,12 @@ CLI signal handling on `build` and `run`:
 
 docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 
-- the operation admission gate closes immediately (no new operations accepted);
-- HTTP drain and operation termination share one `shutdown_timeout` budget;
+- the legacy operation admission gate closes immediately (no new build/run
+  operations accepted by `operationSupervisor`);
+- the synchronous execution coordinator closes Engine-backed synchronous
+  request admission (no new `pull` requests accepted);
+- HTTP drain, legacy operation termination, and synchronous request
+  termination share one `shutdown_timeout` budget;
 - in-flight HTTP requests are drained;
 - running build/run processes receive graceful SIGTERM;
 - for run, helper-owned containers are cleaned up via cidfile before
@@ -1824,6 +1848,12 @@ docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 - at the reserved force-cleanup window before the deadline, still-running
   processes are force-killed;
 - the completion goroutine owns `cmd.Wait()` and reaps each process;
+- live synchronous Engine requests (`pull`) are cancelled by context
+  cancellation and answered with the generic pull failure; a pull has no
+  durable Operation identity, so there is no persisted cancellation state
+  and nothing to recover;
+- after synchronous request termination, the shared Engine adapter's pooled
+  Moby connections are released;
 - the lock is held during the entire drain so a second instance cannot
   start until the first fully stops;
 - helper-owned build/run processes and containers are never left unmanaged
@@ -1952,7 +1982,8 @@ Current error codes (non-exhaustive):
 | `pull_access_denied` | `POST /pull` | pull: authentication/authorization denied |
 | `registry_unavailable` | `POST /pull`, `POST /registry/login` | registry/network/backend failure |
 | `registry_auth_denied` | `POST /registry/login` | docker login: authentication/authorization denied |
-| `registry_login_failed` | `POST /registry/login` | docker login failed and the failure is not classified |
+| `backend_unavailable` | `POST /registry/login` | the Engine endpoint cannot be reached or observed |
+| `backend_failure` | `POST /registry/login` | unexpected Engine interaction prevents a trustworthy result |
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
 | `user_mode_owner_reserved` | Principal/Launcher mutation endpoints (user mode) | the target is the reserved transparent user-mode owner chain (daemon-owner Principal or its `default` Launcher) and the mutation would violate the startup contract |
 
@@ -1960,7 +1991,10 @@ After successful session authentication, every `POST /pull`,
 `POST /build`, and `POST /run` request produces exactly one of:
 
 - `<kind>.rejected` — the request was rejected before acceptance; or
-- `<kind>.start` — the request was accepted as an operation.
+- `<kind>.start` — the request was accepted. For `build` and `run` the
+  request is accepted as an operation (`operation_id` is carried by the
+  start event and the response); for `pull` the request is accepted as a
+  synchronous Engine request (`pull.start` carries no `operation_id`).
 
 where `<kind>` is `pull`, `build`, or `run`. Authentication failures
 remain owned by the existing `auth.failure` path and do not additionally

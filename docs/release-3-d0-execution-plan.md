@@ -227,9 +227,16 @@ path. Its target owner validates credentials through the adapter, writes only
 the protected Session credential store, and later pull/build calls read that
 store just in time. No Session registry credential enters durable Operations.
 
-At the Phase-0 baseline there is no Moby dependency in `go.mod` and no
-repository evidence satisfying this gate. **D0.1 is OPEN.** This is a production
-migration blocker, not an architecture blocker: its contract is fixed here.
+At the Phase-0 baseline there was no Moby dependency in `go.mod` and no
+repository evidence satisfying this gate, so **D0.1 was OPEN** and was the
+production migration blocker before any backend path migrated: its contract
+is fixed here.
+
+**D0.1 is CLOSED.** The reviewed client `github.com/moby/moby/client v0.6.0`
+(module `github.com/moby/moby/api v1.56.0`) is pinned in the production
+`go.mod`, and the required-mode Engine-matrix run recorded below (workflow
+run `34158819369`, source SHA `9f1e91a5869a16caffa3bacd1464440e8d9410e9`)
+satisfies the gate.
 
 ### D0.1 instrument and recorded Phase-0 mechanism evidence
 
@@ -272,10 +279,14 @@ same restart procedure repeated with a waiting container). Both are now
 instrument tests gated behind `D01_GATE_RESTART=1`, which is the operator
 declaration that the `DOCKER_HOST` endpoint is a disposable Engine that may
 be killed and restarted (recorded below).
-The Session credential parsing/storage row stays OPEN with D0.2: the
-mechanism rows prove the exact-registry matching and both auth encodings;
-the protected-Session credential-store bridge and its SQLite/audit/log canary
-storage proof are D0.2 production work verified against the migration map.
+The Session credential parsing/storage row was OPEN at the Phase-0
+baseline: the mechanism rows proved the exact-registry matching and both
+auth encodings, while the protected-Session credential-store bridge and its
+SQLite/audit/log canary storage proof were deferred to D0.2 production
+work. That production work is landed: registry login validates through the
+adapter and stores only in the protected Session store, pull resolves the
+stored credential just in time, and the canary proofs run against the
+production paths in the real-Engine integration coverage.
 
 `registry login` remains part of this migration map: the mechanism rows prove
 the exact-registry-address matching and both auth encodings its stored
@@ -356,12 +367,6 @@ checkout pinned to `github.sha`):
   pidfile — so the tmpfs reproduces the supported restart semantics and
   is a harness environment property, not an engine behavior waiver.
 
-The Session credential parsing/storage row stays OPEN with D0.2: the
-mechanism rows prove the exact-registry matching and both auth encodings;
-the protected-Session credential-store bridge and its SQLite/audit/log
-canary storage proof are D0.2 production work verified against the
-migration map.
-
 ## Resource-enforcement prerequisite
 
 The cgroup hierarchy feasibility proof moves from the late D7 risk list to an
@@ -440,7 +445,11 @@ Progress note: steps 1–2 are landed (registry login validated through the
 Engine adapter with the Session store unchanged); step 3 is landed (pull
 migrated to the Engine pull stream with just-in-time Session credential
 resolution, admitted through the synchronous execution coordinator with
-`shutting_down` refusal). Steps 4–6 (synchronous build migration) remain.
+`shutting_down` refusal). The D0.2 checkpoint-2 correction pass closed the
+pull scope: the App now owns one shared Engine adapter for its lifetime
+(created on first use, released at daemon shutdown), and the canonical
+documents describe the current split ownership. Steps 4–6 (synchronous
+build migration) remain and have not started.
 
 **Ready boundary:** pull/registry/build have exactly one backend owner and build
 has no Operation identity. Legacy run may still use the old supervisor, so the
@@ -558,8 +567,16 @@ Required migration/regression cases include:
 
 ## D0 start gate after Phase 0
 
-Architecture and ownership questions are closed by this document and its
-companion Phase-0 reconciliations. Production D0 must **not** begin at D0.2.
-The exact next executable step is D0.1 Engine compatibility evidence, in
-parallel only with the independent cgroup feasibility spike. D0.2 waits for
-D0.1; D0.3b/D1/D2 readiness also waits for the cgroup gate.
+At Phase-0 close, architecture and ownership questions were closed by this
+document and its companion Phase-0 reconciliations, and the executable
+sequence was: D0.1 Engine compatibility evidence first (in parallel only
+with the independent cgroup feasibility spike), D0.2 after D0.1, and
+D0.3b/D1/D2 readiness after the cgroup gate.
+
+Current state: **D0.1 is CLOSED** (pinned client plus the recorded
+required-mode matrix run). **D0.2 registry login and pull are migrated and
+accepted**; the checkpoint-2 correction pass closed the pull scope (shared
+Engine adapter lifecycle ownership, canonical-doc consistency). The next
+executable step is D0.2 step 4 — synchronous build migration (steps 4–6);
+it has not started. The cgroup feasibility gate remains a prerequisite
+before any D0.3b/D1/D2 readiness is declared.
