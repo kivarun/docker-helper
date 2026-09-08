@@ -6,20 +6,21 @@ import (
 )
 
 // syncExecutionCoordinator owns admission, cancellation, and bounded shutdown
-// termination for synchronous Engine-backed requests (currently the pull and
-// build paths). It is the synchronous companion of the operationSupervisor:
+// termination for synchronous Engine-backed requests (currently pull and
+// build). It is the synchronous companion of the operationSupervisor:
 // unlike the legacy run operation, a synchronous request has no stored
 // operation record to terminate, so the coordinator tracks the derived
 // request contexts that are live right now.
 //
 // Admission and the shutdown gate are one atomic step: admit either derives
 // and registers a request context while shutdown is closed, or refuses when
-// shutdown has begun. Launcher-scoped admission additionally consults the
-// Launcher quiesce gate and tags the request with its Launcher, so a checked
-// Launcher deletion still sees live synchronous work, exactly as registered
-// build operations used to be seen. Daemon shutdown first closes admission,
-// then cancels every live request and waits for their handlers to release
-// them under the shared shutdown deadline.
+// shutdown has begun. Build uses Launcher-scoped admission because it reads
+// the Session workspace under a workspace-use lease and checked parent
+// lifecycle must observe that live work. Pull intentionally uses the
+// shutdown-only admission path: it neither accesses Session workspace/MAC
+// state nor creates Launcher-owned runtime, so checked Launcher/Principal
+// lifecycle has no runtime resource to wait for. Daemon shutdown still
+// cancels both classes and waits for their handlers under the shared deadline.
 type syncExecutionCoordinator struct {
 	mu       sync.Mutex
 	shutting bool
@@ -37,13 +38,15 @@ func newSyncExecutionCoordinator() *syncExecutionCoordinator {
 // request whether it succeeded or failed.
 type syncExecutionRequest struct {
 	coord      *syncExecutionCoordinator
-	launcherID string // "" for requests without Launcher-scoped admission
+	launcherID string // "" for shutdown-only requests such as pull
 	cancel     context.CancelFunc
 	done       chan struct{}
 }
 
-// admit derives a request context from parent and registers it atomically
-// with the shutdown gate. ok is false when shutdown has begun; the caller
+// admit derives a shutdown-only request context from parent and registers it
+// atomically with the shutdown gate. It is used for synchronous work that has
+// no Launcher-owned runtime/resource lifetime to participate in checked parent
+// lifecycle (currently pull). ok is false when shutdown has begun; the caller
 // must then refuse the request and must not use the returned values.
 func (c *syncExecutionCoordinator) admit(parent context.Context) (ctx context.Context, req *syncExecutionRequest, ok bool) {
 	c.mu.Lock()
@@ -92,7 +95,8 @@ func (c *syncExecutionCoordinator) admitLauncherScoped(parent context.Context, l
 // hasLiveForLauncher reports whether any Launcher-scoped synchronous request
 // is currently live. It is the transient-work side of checked parent-lifecycle
 // inspection; the durable-operation side remains with the operationSupervisor
-// until the admission owners are consolidated.
+// until the admission owners are consolidated. Shutdown-only requests are
+// intentionally absent because they own no Launcher runtime/resource state.
 func (c *syncExecutionCoordinator) hasLiveForLauncher(launcherID string) bool {
 	if c == nil {
 		return false
