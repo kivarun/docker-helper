@@ -82,8 +82,8 @@ Then:
 Use one interface consistently for the current operation when practical.
 
 The CLI is a convenience client for the same daemon capabilities exposed by
-the HTTP API. It hides transport details such as asynchronous operation
-polling and incremental log offsets.
+the HTTP API. For asynchronous `run`, it hides transport details such as
+operation polling and incremental log offsets.
 
 Protected operations use the session token from:
 
@@ -179,8 +179,10 @@ docker-helper build \
   --build-arg OTHER=value
 ```
 
-`build` waits for the daemon operation to finish and streams operation output.
-Build arguments are not a mechanism for passing secrets.
+`build` sends one synchronous build request and prints its bounded output. A
+successful CLI return means the build request itself completed successfully;
+there is no build Operation to poll. Build arguments are not a mechanism for
+passing secrets.
 
 ## Run
 
@@ -237,8 +239,10 @@ container exit code.
 
 While CLI `build` or `run` is active:
 
-- SIGINT cancels the daemon operation and exits with code 130;
-- SIGTERM cancels the daemon operation and exits with code 143.
+- SIGINT exits with code 130;
+- SIGTERM exits with code 143;
+- for `build`, the signal cancels the in-flight synchronous HTTP request;
+- for `run`, the signal cancels the asynchronous daemon Operation.
 
 Do not attempt manual `docker kill` or container cleanup.
 
@@ -298,7 +302,8 @@ curl --silent --show-error \
 
 ## Build over HTTP
 
-`POST /build` starts an asynchronous operation.
+`POST /build` is synchronous. The HTTP response is the terminal build result;
+a successful response is HTTP 200 and has no `operation_id`.
 
 ```bash
 curl --silent --show-error \
@@ -309,8 +314,8 @@ curl --silent --show-error \
   http://localhost/build
 ```
 
-A successful start returns HTTP 201 with an `operation_id`.
-HTTP 201 means the operation was accepted, not that the build completed.
+The response carries the final `ok` result plus bounded `output`; when output
+was capped, `truncated` is true. `duration` is included when available.
 
 Optional build arguments:
 
@@ -324,7 +329,7 @@ Optional build arguments:
 
 ## Run over HTTP
 
-`POST /run` also starts an asynchronous operation.
+`POST /run` starts an asynchronous operation.
 
 ```bash
 curl --silent --show-error \
@@ -337,6 +342,9 @@ curl --silent --show-error \
   }' \
   http://localhost/run
 ```
+
+A successful start returns HTTP 201 with an `operation_id`. HTTP 201 means the
+run was accepted, not that the workload completed.
 
 Useful request fields: `image`, `entrypoint`, `command`, `workdir`,
 `environment`, `mounts`, `shm_size`.
@@ -361,11 +369,11 @@ Example mount (system-mode-only — relative subdirectory):
 }
 ```
 
-## Async operation lifecycle
+## Async run operation lifecycle
 
-For HTTP `build` and `run`, follow this algorithm:
+For HTTP `run`, follow this algorithm:
 
-1. **Start** — POST to `/build` or `/run`; retain the returned `operation_id`.
+1. **Start** — POST to `/run`; retain the returned `operation_id`.
 2. **Poll** — GET `/operations/OPERATION_ID` until status is `succeeded` or `failed`.
 3. **Fetch logs** — GET `/operations/OPERATION_ID/logs?offset=OFFSET` during
    polling and after completion. Use `next_offset` from each response for the
@@ -373,10 +381,12 @@ For HTTP `build` and `run`, follow this algorithm:
 4. **Inspect result** — after a terminal status, check `result_code` and
    `exit_code` in the operation status response.
 
-Do not start work that depends on a successful build until the build operation
-has reached `succeeded`.
+Do not start work that depends on a successful build until the synchronous
+`POST /build` request has returned a successful terminal result.
 
-## Cancel over HTTP
+## Cancel run over HTTP
+
+The Operation cancel endpoint applies to asynchronous `run` Operations:
 
 ```bash
 curl --silent --show-error \
@@ -386,6 +396,8 @@ curl --silent --show-error \
   "http://localhost/operations/OPERATION_ID/cancel"
 ```
 
+A synchronous HTTP build is cancelled by cancelling its request/connection; it
+has no Operation ID and therefore cannot be cancelled through this endpoint.
 Do not use Docker directly to terminate the workload.
 
 ## Registry authentication over HTTP
@@ -412,8 +424,10 @@ session use that session's registry credentials.
 When Docker Helper rejects or fails an operation:
 
 - inspect the returned Docker Helper diagnostic;
-- for asynchronous operations, inspect status, `result_code`, `exit_code`,
-  and operation logs;
+- for asynchronous `run`, inspect status, `result_code`, `exit_code`, and
+  operation logs;
+- for synchronous `pull` and `build`, the direct HTTP response is the final
+  command result;
 - correct the request when appropriate;
 - do not bypass Docker Helper by invoking Docker directly.
 

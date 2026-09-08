@@ -37,15 +37,20 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# lock; the broader /run/docker-helper/** rule intentionally omits k.
 	/run/docker-helper/docker-helper.sock.lock rwk,
 
-	# Buildx serializes access to its per-session Docker CLI state.
-	# Keep file locking restricted to the Buildx lock file; do not add `k`
-	# to the existing broad /run/docker-helper/** rule.
-	/run/docker-helper/sessions/dhs_*/docker/buildx/.lock k,
-
-	# Per-session Docker CLI token-state locking.
-	# Again restricted to the single token-seed lock file; no `k` on the
-	# generic runtime tree or the Docker session directory.
-	/run/docker-helper/sessions/dhs_*/docker/.token_seed.lock k,
+	# D0.2 build execution uses the Moby Engine API plus a request-owned
+	# BuildKit Session. It no longer executes Docker Buildx or creates Docker
+	# CLI build/token state. The former build-only grants below are retained as
+	# negative-regression markers only and MUST stay comments, never active:
+	# /usr/local/lib/docker/cli-plugins/ r,
+	# /usr/local/libexec/docker/cli-plugins/ r,
+	# /usr/lib/docker/cli-plugins/ r,
+	# /usr/libexec/docker/cli-plugins/ r,
+	# /usr/local/lib/docker/cli-plugins/docker-buildx rix,
+	# /usr/local/libexec/docker/cli-plugins/docker-buildx rix,
+	# /usr/lib/docker/cli-plugins/docker-buildx rix,
+	# /usr/libexec/docker/cli-plugins/docker-buildx rix,
+	# /run/docker-helper/sessions/dhs_*/docker/buildx/.lock k,
+	# /run/docker-helper/sessions/dhs_*/docker/.token_seed.lock k,
 
 	# Dynamic AppArmor managed boundaries state (atomic temp + rename).
 	/var/lib/docker-helper/apparmor/ rw,
@@ -59,19 +64,8 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# Allow connecting to the Docker daemon Unix socket.
 	unix (connect,send,receive) type=stream peer=(label=unconfined),
 
-	# Docker CLI binary.
+	# Docker CLI binary. The legacy run path still uses it until D0.3b.
 	/usr/bin/docker rix,
-
-	# Docker Buildx CLI plugin (required by `docker build`).
-	# Directory read is required for Docker CLI plugin discovery.
-	/usr/local/lib/docker/cli-plugins/ r,
-	/usr/local/libexec/docker/cli-plugins/ r,
-	/usr/lib/docker/cli-plugins/ r,
-	/usr/libexec/docker/cli-plugins/ r,
-	/usr/local/lib/docker/cli-plugins/docker-buildx rix,
-	/usr/local/libexec/docker/cli-plugins/docker-buildx rix,
-	/usr/lib/docker/cli-plugins/docker-buildx rix,
-	/usr/libexec/docker/cli-plugins/docker-buildx rix,
 
 	# Docker helper binary itself.
 	/usr/bin/docker-helper r,
@@ -132,7 +126,7 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# Dynamic AppArmor managed boundaries (included if present).
 	#include if exists "/var/lib/docker-helper/apparmor/managed-boundaries"
 
-	# /tmp for Docker build contexts and temporary files.
+	# /tmp for staging and temporary files.
 	/tmp/ r,
 	owner /tmp/** rw,
 
@@ -142,12 +136,9 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/nsswitch.conf r,
 	/etc/host.conf r,
 
-	# Resolver inputs used by Buildx registry access.
-	# On systemd-resolved hosts (e.g. Ubuntu 24.04) /etc/resolv.conf is a
-	# symlink to /run/systemd/resolve/stub-resolv.conf; AppArmor mediates the
-	# resolved targets, so that must be readable too. Without it the confined
-	# docker-buildx cannot read the resolver config and `docker build` DNS
-	# resolution falls back to the local loopback and fails.
+	# Evidence-derived resolver inputs retained while the remaining Docker CLI
+	# run path exists. D0.2 deliberately removes only permissions proven to be
+	# build-owned; D0.3b can re-audit this compatibility surface when run moves.
 	/etc/resolv.conf r,
 	/run/systemd/resolve/stub-resolv.conf r,
 	/etc/hosts r,
@@ -165,20 +156,17 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/sys/module/apparmor/parameters/enabled r,
 	owner @{PROC}/@{pid}/attr/current r,
 
-	# /proc and /sys access required by Go runtime and Docker CLI.
+	# /proc and /sys access required by Go runtime and the remaining Docker CLI path.
 	owner /proc/*/fd/ r,
 	owner /proc/*/mounts r,
 	owner /proc/*/status r,
 	/proc/sys/kernel/random/uuid r,
 	/proc/sys/kernel/osrelease r,
 
-	# Docker / Buildx runtime introspection required by `docker build`.
-	# Own-process cgroup read (docker/docker-buildx) and the single
-	# net/core/somaxconn sysctl read are the only demonstrated build needs.
+	# Evidence-derived Docker CLI runtime introspection. Keep narrow until the
+	# D0.3b run migration removes the final CLI execution path.
 	owner @{PROC}/@{pid}/cgroup r,
 	/proc/sys/net/core/somaxconn r,
-
-	# Buildx/Docker own-process mount introspection.
 	owner @{PROC}/@{pid}/mountinfo r,
 
 	/sys/devices/** r,
@@ -186,9 +174,8 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# OpenSSL/CA certificates.
 	/etc/ssl/certs/** r,
 	/etc/pki/tls/certs/** r,
-	# Buildx TLS CA roots (demonstrated by build registry metadata fetch).
-	# On openSUSE the standard paths are symlinks into /var/lib/ca-certificates;
-	# AppArmor mediates the resolved targets, so those must be readable too.
+	# Evidence-derived system trust reads retained with the remaining Docker CLI
+	# path; do not widen them. D0.3b is the point to re-audit their necessity.
 	/etc/ssl/ca-bundle.pem r,
 	/var/lib/ca-certificates/ca-bundle.pem r,
 	/var/lib/ca-certificates/pem/ r,
@@ -197,7 +184,7 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/pki/trust/anchors/ r,
 	/etc/pki/trust/anchors/** r,
 
-	# Network access (for Docker registry pulls, loopback listener).
+	# Network access (listener plus retained Docker CLI compatibility surface).
 	network inet tcp,
 	network inet udp,
 	network inet6 tcp,

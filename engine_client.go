@@ -17,6 +17,7 @@ import (
 	controlapi "github.com/moby/buildkit/api/services/control"
 	buildkitclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/session"
+	buildkitauth "github.com/moby/buildkit/session/auth"
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/moby/moby/api/pkg/authconfig"
@@ -24,6 +25,9 @@ import (
 	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -399,7 +403,9 @@ func newEngineBuildTraceRenderer(ctx context.Context, out io.Writer) (*engineBui
 }
 
 // pushAux renders one aux message. Non-trace aux types and malformed trace
-// payloads are skipped.
+// payloads are skipped. Once the renderer exits (most importantly because the
+// request context was cancelled), producers stop feeding it: the Engine stream
+// decoder must never block behind a progress consumer that no longer exists.
 func (r *engineBuildTraceRenderer) pushAux(id string, raw json.RawMessage) {
 	if r == nil || id != buildkitTraceAuxID {
 		return
@@ -412,7 +418,16 @@ func (r *engineBuildTraceRenderer) pushAux(id string, raw json.RawMessage) {
 	if err := proto.Unmarshal(trace, &resp); err != nil {
 		return
 	}
-	r.ch <- buildkitclient.NewSolveStatus(&resp)
+	status := buildkitclient.NewSolveStatus(&resp)
+	select {
+	case <-r.done:
+		return
+	default:
+	}
+	select {
+	case r.ch <- status:
+	case <-r.done:
+	}
 }
 
 // close joins the renderer: it stops feeding and waits until the display has
@@ -459,12 +474,14 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 	if sessErr != nil {
 		return engineBuildResult{}, &engineError{kind: engineErrBackendFailure, cause: fmt.Errorf("cannot start build session: %w", sessErr)}
 	}
-	// The auth provider resolves stored Session credentials just in time for
-	// exactly the registry host BuildKit asks about; credential material
-	// reaches only that host's auth RPC, never logs or errors.
-	sess.Allow(authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
-		AuthConfigProvider: engineBuildAuthProvider(spec.Credentials),
-	}))
+	// Register docker-helper's narrow auth attachable rather than BuildKit's
+	// generic Docker auth provider. The generic provider owns a persistent
+	// client-token seed under docker/cli config.Dir(); that hidden global state
+	// is outside the Session lifecycle and conflicts with confined system mode.
+	// Our attachable deliberately declines client token authority so BuildKit
+	// falls back to the ordinary Credentials RPC and performs registry token
+	// exchange server-side, while the credential lookup remains exact-host JIT.
+	sess.Allow(newEngineBuildAuthServer(spec.Credentials))
 
 	// One context drives the build and its session, so request cancellation
 	// and daemon shutdown terminate both. The finalization owner below
@@ -557,6 +574,45 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 	}
 	return engineBuildResult{Output: string(data), Truncated: truncated},
 		finalizeEngineBuildSession(ctx, cancelBuild, sess, sessionDone, buildErr)
+}
+
+// engineBuildAuthServer is docker-helper's narrow BuildKit session auth
+// attachable. It intentionally exposes only host-scoped Credentials. The
+// upstream generic Docker auth provider additionally creates persistent
+// client-token seed state under docker/cli config.Dir(); that state has no
+// Session owner and is incompatible with the helper's confinement contract.
+// Returning Unavailable from GetTokenAuthority is the BuildKit-supported
+// signal that makes the daemon resolver use Credentials directly instead.
+type engineBuildAuthServer struct {
+	buildkitauth.UnimplementedAuthServer
+	provider authprovider.AuthConfigProvider
+}
+
+func newEngineBuildAuthServer(resolve buildCredentialResolver) *engineBuildAuthServer {
+	return &engineBuildAuthServer{provider: engineBuildAuthProvider(resolve)}
+}
+
+func (s *engineBuildAuthServer) Register(server *grpc.Server) {
+	buildkitauth.RegisterAuthServer(server, s)
+}
+
+func (s *engineBuildAuthServer) Credentials(ctx context.Context, req *buildkitauth.CredentialsRequest) (*buildkitauth.CredentialsResponse, error) {
+	cfg, err := s.provider(ctx, req.Host, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp := &buildkitauth.CredentialsResponse{}
+	if cfg.IdentityToken != "" {
+		resp.Secret = cfg.IdentityToken
+		return resp, nil
+	}
+	resp.Username = cfg.Username
+	resp.Secret = cfg.Password
+	return resp, nil
+}
+
+func (s *engineBuildAuthServer) GetTokenAuthority(context.Context, *buildkitauth.GetTokenAuthorityRequest) (*buildkitauth.GetTokenAuthorityResponse, error) {
+	return nil, status.Error(codes.Unavailable, "client token authority is disabled")
 }
 
 // engineBuildAuthProvider adapts the host-scoped Session credential resolver

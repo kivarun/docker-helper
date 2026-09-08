@@ -797,7 +797,6 @@ migrates transparently at startup.
 | user-mode NULL-owner sessions | attributed to the daemon-owner default launcher |
 | system-mode NULL-owner (admin) sessions | invalidated (removed; never left ownerless) |
 | dangling principal reference | migration fails closed, legacy table intact (transaction rollback) |
-
 A dangling reference, a schema-shape mismatch, or a foreign-key violation
 in the rebuilt sessions table aborts the migration before commit. Invalid
 sessions leave no permanent helper-owned MAC or runtime state: they are
@@ -1585,7 +1584,10 @@ with the same contract.
 
 ### Run
 
-`docker-helper run` uses the same lifecycle semantics as `build`.
+`POST /run` is the remaining legacy asynchronous Operation path. Unlike the
+synchronous `POST /build`, it registers an Operation and returns HTTP 201 with
+an `operation_id`; the CLI hides that transport lifecycle by polling status,
+streaming incremental logs, and returning the final workload exit status.
 `--mount` source must be relative to the session workspace; target is an
 absolute container path.
 
@@ -2234,11 +2236,13 @@ No `result`, `duration`, `operation_id`, or `exit_code` field.
 #### build.finish
 
 Emitted after a Docker build completes (success, failure, cancellation,
-or Engine failure). Does not include `request_id` because completion is
-not request-scoped.
+or Engine failure). The synchronous build remains request-scoped through
+completion, so this event carries the same server-generated `request_id`
+correlation as `build.start`.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `request_id` | string | request correlation ID |
 | `session_id` | string | session identifier |
 | `image` | string | target image reference |
 | `context` | string | build context path from the request |
@@ -2434,6 +2438,7 @@ Emitted before a pull begins.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `request_id` | string | request correlation ID |
 | `session_id` | string | session identifier |
 | `image` | string | image reference |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
@@ -2448,6 +2453,7 @@ Emitted after a pull completes (success or failure).
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `request_id` | string | request correlation ID |
 | `session_id` | string | session identifier |
 | `image` | string | image reference |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
@@ -2459,11 +2465,11 @@ Emitted after a pull completes (success or failure).
 
 #### registry.login.start / registry.login.finish
 
-Registry login events record the session's ownership provenance:
-`session_id`, `registry`, and `principal_name`, `launcher_id`,
-`launcher_name` (the finish event additionally carries `result` =
-`success` or `login_failed`, and `duration`). The password and username
-are never included in audit records.
+Registry login events record the session's request-scoped correlation and
+ownership provenance: `request_id`, `session_id`, `registry`, and
+`principal_name`, `launcher_id`, `launcher_name` (the finish event additionally
+carries `result` = `success` or `login_failed`, and `duration`). The password
+and username are never included in audit records.
 
 #### auth.failure
 
@@ -2544,14 +2550,15 @@ request ID, returned in the `X-Request-ID` response header, added as
 `request_id` to every audit record for that request, and added to every
 operational record for that request; `session_id` is added to operational
 records when authentication has established a session. The server does
-not trust or reuse any client-supplied request ID. Async operation
-completion (`build.finish`, `run.finish`) is not request-scoped: these
-audit records do not include `request_id`, and correlation for async
-events uses `session_id` + `operation_id`. **Audit writer failures** are
-logged as operational ERROR records with `audit_event` and `operation_id`
-(when present) for correlation; existing `request_id` and `session_id`
-are preserved. Audit writer failure is best-effort and does not affect
-the request or operation outcome.
+not trust or reuse any client-supplied request ID. Synchronous completion
+records (`build.finish`, `pull.finish`, and `registry.login.finish`) remain
+request-scoped and retain `request_id`. The asynchronous `run.finish` event
+is not request-scoped and therefore omits `request_id`; its correlation uses
+`session_id` + `operation_id`. **Audit writer failures** are logged as
+operational ERROR records with `audit_event` and `operation_id` (when present)
+for correlation; existing `request_id` and `session_id` are preserved. Audit
+writer failure is best-effort and does not affect the request or operation
+outcome.
 
 Sensitive data — the following are **never** logged to either the audit
 or operational streams:
@@ -2587,7 +2594,7 @@ Successful build:
 
 ```json
 {"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
-{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"5s"}
+{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"5s"}
 ```
 
 Successful session creation:
