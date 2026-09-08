@@ -167,7 +167,7 @@ func TestBuildEngineIntegration(t *testing.T) {
 	// helper-side FROM parser would pre-pull the nonexistent Docker Hub
 	// image and fail the build.
 	if err := os.WriteFile(filepath.Join(session.Session.Workspace, "unresolvable.Dockerfile"),
-		[]byte("FROM alpine:3.24 AS dh-nosuch-stage-8qLw\nRUN echo alias >/alias\n\nFROM dh-nosuch-stage-8qLw\nRUN test -f /alias\n"), 0o644); err != nil {
+		[]byte("FROM alpine:3.24 AS dh-nosuch-stage-8qlw\nRUN echo alias >/alias\n\nFROM dh-nosuch-stage-8qlw\nRUN test -f /alias\n"), 0o644); err != nil {
 		t.Fatalf("write unresolvable Dockerfile: %v", err)
 	}
 	unresolvableRef := "dh-build-integration:unresolvable-alias"
