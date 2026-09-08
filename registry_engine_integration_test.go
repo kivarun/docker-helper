@@ -64,6 +64,14 @@ func TestRegistryLoginEngineIntegration(t *testing.T) {
 		t.Fatalf("pull registry:2: %v", err)
 	}
 
+	seedImagePull, err := provisioning.ImagePull(ctx, "alpine:3.24", client.ImagePullOptions{})
+	if err != nil {
+		t.Fatalf("pull alpine:3.24: %v", err)
+	}
+	if err := seedImagePull.Wait(ctx); err != nil {
+		t.Fatalf("pull alpine:3.24: %v", err)
+	}
+
 	const authVolume = "dh-login-auth-volume"
 	if _, err := provisioning.VolumeCreate(ctx, client.VolumeCreateOptions{Name: authVolume}); err != nil {
 		t.Fatalf("create auth volume: %v", err)
