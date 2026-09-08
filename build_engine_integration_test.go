@@ -259,26 +259,26 @@ func TestBuildEngineIntegration(t *testing.T) {
 		close(handlerDone)
 	}()
 
-	// Wait until the Engine is executing the long RUN before cancelling.
+	// Wait until the coordinator carries the admitted request, then give
+	// the long RUN time to be executing before cancelling. The audit
+	// buffer is only read after the handler goroutine has joined.
 	deadline := time.Now().Add(60 * time.Second)
-	started := false
+	live := false
 	for time.Now().Before(deadline) {
-		records := filterBySession(parseAuditRecords(auditBuf), session.Session.ID)
-		for i := len(records) - 1; i >= 0; i-- {
-			if records[i].Event == "build.start" && records[i].Dockerfile == "slow.Dockerfile" {
-				started = true
-			}
-		}
-		if started {
+		if app.SyncExecutionCoordinator.hasLiveForLauncher(session.Session.LauncherID) {
+			live = true
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !started {
-		t.Fatal("the slow build never started")
+	if !live {
+		t.Fatal("the slow build was never admitted")
 	}
-	// Give the Engine a moment to actually enter the RUN step.
+	// Give the Engine time to enter the RUN step.
 	time.Sleep(2 * time.Second)
+	if !app.SyncExecutionCoordinator.hasLiveForLauncher(session.Session.LauncherID) {
+		t.Fatal("the slow build was no longer live before cancellation")
+	}
 
 	buildCancel()
 
