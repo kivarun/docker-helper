@@ -333,11 +333,13 @@ func TestBuildEngineIntegration(t *testing.T) {
 	}
 
 	// Build operations must not be registered: the supervisor is run-only.
-	app.OperationSupervisor.mu.RLock()
-	opCount := len(app.OperationSupervisor.ops)
-	app.OperationSupervisor.mu.RUnlock()
-	if opCount != 0 {
-		t.Errorf("build must not register operations, supervisor has %d", opCount)
+	if app.OperationSupervisor != nil {
+		app.OperationSupervisor.mu.RLock()
+		opCount := len(app.OperationSupervisor.ops)
+		app.OperationSupervisor.mu.RUnlock()
+		if opCount != 0 {
+			t.Errorf("build must not register operations, supervisor has %d", opCount)
+		}
 	}
 
 	// Credential containment across the log sinks. The credential may appear
