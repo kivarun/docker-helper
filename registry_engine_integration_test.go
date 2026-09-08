@@ -112,6 +112,7 @@ func TestRegistryLoginEngineIntegration(t *testing.T) {
 		// first; registry credential material is never printed.
 		eng, engErr := newEngineClient()
 		if engErr == nil {
+			defer eng.close()
 			_, loginErr := eng.registryLogin(context.WithoutCancel(ctx), registryHost, userCanary, passCanary+"-wrong")
 			if loginErr != nil {
 				cause := loginErr.Error()

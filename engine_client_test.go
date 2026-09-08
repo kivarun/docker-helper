@@ -5,9 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -568,5 +571,145 @@ func TestEngineClientPullOutputTruncation(t *testing.T) {
 	}
 	if !result.Truncated {
 		t.Error("output beyond the limit must report truncation")
+	}
+}
+
+// TestSharedEngineAdapterOneAdapterPerApp proves the App's production
+// default owns exactly one Engine adapter per App lifetime: concurrent first
+// use through both Engine consumers resolves the same adapter instance, so
+// no request path constructs or abandons its own Moby client.
+func TestSharedEngineAdapterOneAdapterPerApp(t *testing.T) {
+	app := newTestApp(t)
+
+	const workers = 8
+	authenticators := make([]engineRegistryAuthenticator, workers)
+	pullers := make([]engineImagePuller, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			auth, err := app.newEngineRegistryAuthenticator()
+			if err != nil {
+				t.Errorf("registry-login adapter %d: %v", i, err)
+				return
+			}
+			authenticators[i] = auth
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			puller, err := app.newEngineImagePuller()
+			if err != nil {
+				t.Errorf("pull adapter %d: %v", i, err)
+				return
+			}
+			pullers[i] = puller
+		}(i)
+	}
+	wg.Wait()
+
+	var want *engineClient
+	for i := range authenticators {
+		auth, ok := authenticators[i].(*engineClient)
+		if !ok {
+			t.Fatalf("registry-login adapter %d is not the production engineClient", i)
+		}
+		pull, ok := pullers[i].(*engineClient)
+		if !ok {
+			t.Fatalf("pull adapter %d is not the production engineClient", i)
+		}
+		if want == nil {
+			want = auth
+		}
+		if auth != want || pull != want {
+			t.Errorf("worker %d resolved a different adapter instance", i)
+		}
+	}
+	if want == nil || want != app.engineAdapter {
+		t.Error("the resolved adapter is not the App's shared adapter")
+	}
+}
+
+// TestSharedEngineAdapterConstructionFailureNotCached proves a failed
+// adapter construction leaves the App without a shared adapter, so the next
+// Engine request retries construction instead of inheriting a poisoned
+// cached failure.
+func TestSharedEngineAdapterConstructionFailureNotCached(t *testing.T) {
+	app := newTestApp(t)
+
+	t.Setenv("DOCKER_HOST", "bogus")
+	if _, err := app.newEngineRegistryAuthenticator(); err == nil {
+		t.Fatal("malformed DOCKER_HOST must fail adapter construction")
+	}
+	if app.engineAdapter != nil {
+		t.Error("failed construction must not be cached as the shared adapter")
+	}
+
+	t.Setenv("DOCKER_HOST", "")
+	puller, err := app.newEngineImagePuller()
+	if err != nil {
+		t.Fatalf("construction against the default Engine endpoint: %v", err)
+	}
+	ec, ok := puller.(*engineClient)
+	if !ok || app.engineAdapter != ec {
+		t.Error("the retried construction must install the shared adapter")
+	}
+}
+
+// TestAppShutdownClosesSharedEngineAdapter proves the daemon shutdown path
+// releases the shared Moby client's pooled connections: after a real Engine
+// request through the production default, closeEngineAdapter makes the
+// Engine endpoint observe its pooled connection close.
+func TestAppShutdownClosesSharedEngineAdapter(t *testing.T) {
+	var closedConns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/_ping":
+			w.Header().Set("Api-Version", "1.51")
+			w.Header().Set("Ostype", "linux")
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/auth"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"Status":"Login Succeeded"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	srv.Config.ConnState = func(c net.Conn, cs http.ConnState) {
+		if cs == http.StateClosed {
+			closedConns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	t.Setenv("DOCKER_HOST", srv.URL)
+
+	app := newTestApp(t)
+	auth, err := app.newEngineRegistryAuthenticator()
+	if err != nil {
+		t.Fatalf("registry-login adapter: %v", err)
+	}
+	eng, ok := auth.(*engineClient)
+	if !ok || eng != app.engineAdapter {
+		t.Fatal("the login adapter must be the App's shared adapter")
+	}
+	if _, err := eng.registryLogin(context.Background(), "registry.example.com", "user", "pass"); err != nil {
+		t.Fatalf("registryLogin against the fake Engine: %v", err)
+	}
+
+	app.closeEngineAdapter()
+
+	// The pooled connection must be released. The client close is
+	// synchronous; the Engine endpoint observes it within moments.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if closedConns.Load() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if closedConns.Load() == 0 {
+		t.Error("the Engine endpoint never observed the shared client's pooled connection closing")
 	}
 }

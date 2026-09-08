@@ -36,13 +36,20 @@ type App struct {
 	ExecCommandContext  func(context.Context, string, ...string) *exec.Cmd
 	OperationSupervisor *operationSupervisor
 	// NewEngineClientFn is a test seam for the Engine adapter used by the
-	// registry-login path. Production default (nil) constructs the single
-	// engineClient adapter with API negotiation.
+	// registry-login path. Production default (nil) resolves the App's
+	// shared Engine adapter.
 	NewEngineClientFn func() (engineRegistryAuthenticator, error)
 	// NewEnginePullFn is a test seam for the Engine adapter used by the pull
-	// path. Production default (nil) constructs the single engineClient
-	// adapter with API negotiation.
+	// path. Production default (nil) resolves the App's shared Engine
+	// adapter.
 	NewEnginePullFn func() (engineImagePuller, error)
+	// engineAdapter is the single shared Docker Engine adapter for the App
+	// lifetime, guarded by engineAdapterMu. It is created on first Engine
+	// use and released at daemon shutdown; a failed creation leaves it nil
+	// so the next request retries construction, preserving the accepted
+	// per-request construction-failure contract.
+	engineAdapter   *engineClient
+	engineAdapterMu sync.Mutex
 	// PinWorkspaceMountSourceFn is a test seam for the inode-pinning primitive.
 	// Production default calls the real pinWorkspaceMountSource; tests can return
 	// a fake pinnedMount with controlled Cleanup behavior.
@@ -87,6 +94,39 @@ func (a *App) stageBuildContext(ctx context.Context, workspace, contextPath, doc
 		return a.StageBuildContextFn(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID)
 	}
 	return StageBuildContext(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID)
+}
+
+// sharedEngineAdapter returns the single shared Engine adapter for the App
+// lifetime, creating it on first use against the configured Engine endpoint
+// with API negotiation. Concurrent first users are serialized by the adapter
+// mutex; after the first successful creation every Engine consumer —
+// registry login, pull, and further Engine API migrations — receives the
+// same adapter instance.
+func (a *App) sharedEngineAdapter() (*engineClient, error) {
+	a.engineAdapterMu.Lock()
+	defer a.engineAdapterMu.Unlock()
+	if a.engineAdapter != nil {
+		return a.engineAdapter, nil
+	}
+	adapter, err := newEngineClient()
+	if err != nil {
+		return nil, err
+	}
+	a.engineAdapter = adapter
+	return adapter, nil
+}
+
+// closeEngineAdapter releases the shared Engine adapter's Moby client,
+// closing its pooled idle connections to the Engine endpoint. Daemon
+// shutdown calls it after synchronous Engine request termination, so no
+// request is using the adapter. It is a no-op when the adapter was never
+// created and is safe to call more than once.
+func (a *App) closeEngineAdapter() {
+	a.engineAdapterMu.Lock()
+	defer a.engineAdapterMu.Unlock()
+	if a.engineAdapter != nil {
+		a.engineAdapter.close()
+	}
 }
 
 // getConfig returns a snapshot copy of the current configuration under a read lock.

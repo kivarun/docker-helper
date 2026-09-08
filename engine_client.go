@@ -99,21 +99,38 @@ func (e *engineError) Unwrap() error { return e.cause }
 // engineClient is the single production Docker Engine adapter owner for
 // Release 3. It owns Moby client construction, API negotiation, and the
 // normalization of Engine failures into docker-helper error categories.
-// Moby request/response types stay inside the adapter; production callers
-// pass and receive domain values and normalized errors only.
+// The App holds one engineClient for its lifetime and resolves it for every
+// Engine consumer — registry login, pull, and further Engine API
+// migrations — instead of constructing one per request. The Moby client is
+// built for that shared use: API version negotiation is single-flighted
+// under the client's own lock, and the HTTP transport is the stdlib
+// concurrency contract. Moby request/response types stay inside the
+// adapter; production callers pass and receive domain values and
+// normalized errors only.
 type engineClient struct {
 	cli *client.Client
 }
 
 // newEngineClient constructs the Engine adapter against the configured
 // Engine endpoint with API version negotiation, matching the reviewed D0.1
-// client configuration.
+// client configuration. The App creates it once per lifetime through
+// sharedEngineAdapter; construction does not dial the Engine, so it fails
+// only on malformed Engine endpoint configuration.
 func newEngineClient() (*engineClient, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("cannot construct docker engine client: %w", err)
 	}
 	return &engineClient{cli: cli}, nil
+}
+
+// close releases the shared Moby client's pooled idle connections to the
+// Engine endpoint. Connections with in-flight requests are untouched; the
+// App calls this once at daemon shutdown after Engine request termination.
+func (e *engineClient) close() {
+	if e.cli != nil {
+		_ = e.cli.Close()
+	}
 }
 
 // registryLogin validates registry credentials through the Engine /auth
@@ -157,23 +174,22 @@ func normalizeEngineRegistryError(err error) error {
 }
 
 // newEngineRegistryAuthenticator returns the Engine adapter for the
-// registry-login path. Production default (nil NewEngineClientFn) constructs
-// the single engineClient adapter.
+// registry-login path: the test seam when set, otherwise the App's shared
+// adapter.
 func (a *App) newEngineRegistryAuthenticator() (engineRegistryAuthenticator, error) {
 	if a.NewEngineClientFn != nil {
 		return a.NewEngineClientFn()
 	}
-	return newEngineClient()
+	return a.sharedEngineAdapter()
 }
 
-// newEngineImagePuller returns the Engine adapter for the pull path.
-// Production default (nil NewEnginePullFn) constructs the single engineClient
-// adapter.
+// newEngineImagePuller returns the Engine adapter for the pull path: the
+// test seam when set, otherwise the App's shared adapter.
 func (a *App) newEngineImagePuller() (engineImagePuller, error) {
 	if a.NewEnginePullFn != nil {
 		return a.NewEnginePullFn()
 	}
-	return newEngineClient()
+	return a.sharedEngineAdapter()
 }
 
 // engineStreamError is an Engine-reported pull failure carried inside the

@@ -420,6 +420,10 @@ func runDaemon(stdout, stderr io.Writer) error {
 			app.SyncExecutionCoordinator.terminateForShutdown(shutdownCtx)
 		}
 
+		// Release the shared Engine adapter's pooled connections now that
+		// no synchronous Engine request is live.
+		app.closeEngineAdapter()
+
 		// Wait for HTTP drain to complete before cancelling the shutdown
 		// context. The drain goroutine runs server.Shutdown(shutdownCtx)
 		// and must not be interrupted by premature context cancellation.
