@@ -246,6 +246,52 @@ func TestBuildSynchronousRegistryAuthDenied(t *testing.T) {
 	}
 }
 
+// TestBuildSynchronousBackendFailure proves an unexpected Engine interaction
+// failure keeps its own category in the synchronous contract: 502
+// backend_failure, not the generic docker_build_failed fall-through.
+func TestBuildSynchronousBackendFailure(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app, _, result, _, token := setupSyncBuildTest(t, buildSeamOptions{
+		Output: "step 1 ok\n",
+		Err:    &engineError{kind: engineErrBackendFailure, cause: errors.New("unexpected engine failure")},
+	})
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d: %s", http.StatusBadGateway, w.Code, w.Body.String())
+	}
+
+	var resp buildResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Code != "backend_failure" || resp.Message != "unexpected docker engine failure" {
+		t.Errorf("failure response = %+v", resp)
+	}
+	if resp.Output != "step 1 ok\n" {
+		t.Errorf("output = %q, want the rendered build output", resp.Output)
+	}
+
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	found := 0
+	for _, rec := range records {
+		if rec.Event == "build.finish" && rec.Result == "docker_build_failed" {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Errorf("docker_build_failed finish count = %d, want 1", found)
+	}
+}
+
 // TestBuildSynchronousAdapterConstructionFailure proves an Engine adapter
 // construction failure is a synchronous docker_build_failed failure with
 // exactly one finish.
