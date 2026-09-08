@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -299,7 +300,7 @@ func TestRegistryLoginEngineIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal push auth: %v", err)
 	}
-	push, err := provisioning.ImagePush(ctx, privateRef, client.ImagePushOptions{RegistryAuth: string(authBlob)})
+	push, err := provisioning.ImagePush(ctx, privateRef, client.ImagePushOptions{RegistryAuth: base64.StdEncoding.EncodeToString(authBlob)})
 	if err != nil {
 		t.Fatalf("push private image: %v", err)
 	}
