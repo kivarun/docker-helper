@@ -35,6 +35,10 @@ type App struct {
 	AdminTokenHash      [sha256.Size]byte
 	ExecCommandContext  func(context.Context, string, ...string) *exec.Cmd
 	OperationSupervisor *operationSupervisor
+	// NewEngineClientFn is a test seam for the Engine adapter used by the
+	// registry-login path. Production default (nil) constructs the single
+	// engineClient adapter with API negotiation.
+	NewEngineClientFn func() (engineRegistryAuthenticator, error)
 	// PinWorkspaceMountSourceFn is a test seam for the inode-pinning primitive.
 	// Production default calls the real pinWorkspaceMountSource; tests can return
 	// a fake pinnedMount with controlled Cleanup behavior.
