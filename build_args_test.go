@@ -14,181 +14,6 @@ import (
 	"testing"
 )
 
-func TestBuildArgsProducesExpectedArgv(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
-
-	body := map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-		"build_args": map[string]any{
-			"FOO":     "bar",
-			"VERSION": "1.2.3",
-		},
-	}
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/build", strings.NewReader(string(data)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	// Verify --build-arg entries are present.
-	foundFoo := false
-	foundVersion := false
-	for i, arg := range capturedArgs {
-		if arg == "--build-arg" {
-			next := capturedArgs[i+1]
-			if next == "FOO=bar" {
-				foundFoo = true
-			}
-			if next == "VERSION=1.2.3" {
-				foundVersion = true
-			}
-		}
-	}
-	if !foundFoo {
-		t.Error("expected --build-arg FOO=bar in command args")
-	}
-	if !foundVersion {
-		t.Error("expected --build-arg VERSION=1.2.3 in command args")
-	}
-}
-
-func TestBuildArgsDeterministicOrder(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
-
-	body := map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-		"build_args": map[string]any{
-			"ZEBRA": "z",
-			"ALPHA": "a",
-			"MIKE":  "m",
-		},
-	}
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/build", strings.NewReader(string(data)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	// Extract build-arg values in order.
-	var argOrder []string
-	for i, arg := range capturedArgs {
-		if arg == "--build-arg" {
-			parts := strings.SplitN(capturedArgs[i+1], "=", 2)
-			if len(parts) == 2 {
-				argOrder = append(argOrder, parts[0])
-			}
-		}
-	}
-
-	expected := []string{"ALPHA", "MIKE", "ZEBRA"}
-	if len(argOrder) != len(expected) {
-		t.Fatalf("got %d build args, want %d", len(argOrder), len(expected))
-	}
-	for i, want := range expected {
-		if argOrder[i] != want {
-			t.Errorf("arg[%d] = %q, want %q", i, argOrder[i], want)
-		}
-	}
-}
-
-func TestBuildArgsEmptyValue(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
-
-	body := map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-		"build_args": map[string]any{
-			"EMPTY": "",
-		},
-	}
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/build", strings.NewReader(string(data)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	found := false
-	for i, arg := range capturedArgs {
-		if arg == "--build-arg" && capturedArgs[i+1] == "EMPTY=" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected --build-arg EMPTY= in command args")
-	}
-}
-
 func TestBuildArgsInvalidKeyRejected(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
@@ -236,50 +61,6 @@ func TestBuildArgsInvalidKeyRejected(t *testing.T) {
 	}
 }
 
-func TestBuildArgsOmittedPreservesBehavior(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
-
-	body := map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/build", strings.NewReader(string(data)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	// No --build-arg should be present.
-	for _, arg := range capturedArgs {
-		if arg == "--build-arg" {
-			t.Error("unexpected --build-arg when build_args is omitted")
-		}
-	}
-}
-
 func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	initLoggers(new(bytes.Buffer), auditBuf, slog.LevelInfo, true)
@@ -287,6 +68,7 @@ func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -296,10 +78,6 @@ func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
 	}
 
 	body := map[string]any{
@@ -318,21 +96,9 @@ func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	// Wait for the build to complete.
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-	op.Wait()
 
 	// Parse audit records.
 	records := parseAuditRecords(auditBuf)

@@ -931,7 +931,7 @@ func TestRejectedShuttingDown(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
-	app.OperationSupervisor.beginShutdown()
+	app.beginShutdown()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -943,10 +943,6 @@ func TestRejectedShuttingDown(t *testing.T) {
 	dockerfilePath := filepath.Join(ctxDir, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0644); err != nil {
 		t.Fatal(err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]any{
@@ -1057,7 +1053,7 @@ func TestAcceptedOperationNoRejectedEvent(t *testing.T) {
 	}
 }
 
-func TestBuildRejectedInternalError(t *testing.T) {
+func TestBuildStagingFailureSynchronousAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
@@ -1067,9 +1063,10 @@ func TestBuildRejectedInternalError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Make staging itself fail before operation registration.
+	// Make staging itself fail on an admitted request: the request fails
+	// synchronously with exactly one build.finish.
 	sentinelErr := errors.New("injected staging error")
-	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, stagingID string) (*stagedBuildContext, error) {
 		return nil, sentinelErr
 	}
 
@@ -1095,32 +1092,32 @@ func TestBuildRejectedInternalError(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 
-	var resp response
+	var resp buildResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Code != "internal_error" {
-		t.Fatalf("expected code internal_error, got %q", resp.Code)
+	if resp.OK || resp.Code != "docker_build_failed" {
+		t.Fatalf("expected code docker_build_failed, got %+v", resp)
 	}
 
 	records := parseAuditRecords(auditBuf)
-	count := 0
+	startCount, finishCount := 0, 0
 	for _, rec := range records {
-		if rec.Event == "build.rejected" {
-			count++
-			if rec.Result != "internal_error" {
-				t.Errorf("result = %q, want internal_error", rec.Result)
-			}
-		}
 		if rec.Event == "build.start" {
-			t.Error("build.start must not be emitted for rejected request")
+			startCount++
 		}
 		if rec.Event == "build.finish" {
-			t.Error("build.finish must not be emitted for rejected request")
+			finishCount++
+			if rec.Result != "docker_build_failed" {
+				t.Errorf("finish result = %q, want docker_build_failed", rec.Result)
+			}
+		}
+		if rec.Event == "build.rejected" {
+			t.Error("an admitted request must not be audited as rejected")
 		}
 	}
-	if count != 1 {
-		t.Errorf("expected exactly 1 build.rejected event, got %d", count)
+	if startCount != 1 || finishCount != 1 {
+		t.Errorf("expected exactly 1 build.start and 1 build.finish, got %d/%d", startCount, finishCount)
 	}
 }
 

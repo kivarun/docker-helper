@@ -61,7 +61,7 @@ type App struct {
 	// StageBuildContextFn is a test seam for the build context staging primitive.
 	// Production default calls the real StageBuildContext; tests can return
 	// a fake stagedBuildContext with controlled Cleanup behavior.
-	StageBuildContextFn func(ctx context.Context, workspace, contextPath, dockerfileRel, runtimeDir, operationID string) (*stagedBuildContext, error)
+	StageBuildContextFn func(ctx context.Context, workspace, contextPath, dockerfileRel, runtimeDir, stagingID string) (*stagedBuildContext, error)
 	// RotateRenameFn is a test seam for the final atomic rename in
 	// rotateAdminToken. Production default is os.Rename; tests can fail it
 	// deterministically.
@@ -93,11 +93,11 @@ func (a *App) pinWorkspaceMountSource(workspace, sourcePath, runtimeDir, operati
 }
 
 // stageBuildContext calls StageBuildContextFn if set, otherwise the real StageBuildContext.
-func (a *App) stageBuildContext(ctx context.Context, workspace, contextPath, dockerfileRel, runtimeDir, operationID string) (*stagedBuildContext, error) {
+func (a *App) stageBuildContext(ctx context.Context, workspace, contextPath, dockerfileRel, runtimeDir, stagingID string) (*stagedBuildContext, error) {
 	if a.StageBuildContextFn != nil {
-		return a.StageBuildContextFn(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID)
+		return a.StageBuildContextFn(ctx, workspace, contextPath, dockerfileRel, runtimeDir, stagingID)
 	}
-	return StageBuildContext(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID)
+	return StageBuildContext(ctx, workspace, contextPath, dockerfileRel, runtimeDir, stagingID)
 }
 
 // sharedEngineAdapter returns the single shared Engine adapter for the App

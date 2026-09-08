@@ -36,13 +36,12 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 	}
 
 	// Start an operation before the signal.
-	req1 := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req1 := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w1 := httptest.NewRecorder()
-	app.handleBuild(w1, req1)
+	app.handleRun(w1, req1)
 
 	if w1.Code != http.StatusCreated {
 		t.Fatalf("expected %d, got %d", http.StatusCreated, w1.Code)
@@ -62,13 +61,12 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 	supervisor.beginShutdown()
 
 	// New operation should be rejected.
-	req2 := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test2",
+	req2 := newRunRequest(map[string]any{
+		"image":   "example:test2",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w2 := httptest.NewRecorder()
-	app.handleBuild(w2, req2)
+	app.handleRun(w2, req2)
 
 	if w2.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected %d after signal, got %d", http.StatusServiceUnavailable, w2.Code)
@@ -90,10 +88,10 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 	}
 }
 
-// TestShutdownGateConcurrentBuildAndSignal verifies that a build request
+// TestShutdownGateConcurrentRunAndSignal verifies that a run request
 // in flight when the signal arrives is handled correctly: either accepted
 // (if admit completed before gate close) or rejected (if gate closed first).
-func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
+func TestShutdownGateConcurrentRunAndSignal(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
@@ -118,19 +116,18 @@ func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/sleep", "60")
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w := httptest.NewRecorder()
 
-	// Start build handler in a goroutine.
+	// Start the run handler in a goroutine.
 	var handlerWg sync.WaitGroup
 	handlerWg.Add(1)
 	go func() {
 		defer handlerWg.Done()
-		app.handleBuild(w, req)
+		app.handleRun(w, req)
 	}()
 
 	// Wait for admit to complete (cmd creation blocked).

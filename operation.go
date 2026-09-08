@@ -87,9 +87,6 @@ type operation struct {
 	// pinnedMounts are the inode-pinned mount destinations for system-mode
 	// run operations. They are cleaned up after cmd.Wait completes.
 	pinnedMounts []*pinnedMount
-	// stagedCtx is the staged build context for build operations.
-	// It is cleaned up after the operation completes or fails.
-	stagedCtx *stagedBuildContext
 	// macLeaseRelease releases the workspace-use lease held by this operation.
 	// nil when no lease was acquired (user mode or no MAC backend).
 	macLeaseRelease func()
@@ -97,31 +94,10 @@ type operation struct {
 	auditCommandArgCount   *int
 	auditMounts            []auditMount
 	auditEnvKeys           []string
-	auditBuildArgKeys      []string
 	auditShmSize           string
 	auditTrustedCAInjected bool
 	auditPrincipalName     string
 	auditLauncherName      string
-}
-
-func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64, principalName, launcherID, launcherName string) *operation {
-	opID := generateOperationID()
-	now := time.Now()
-	return &operation{
-		ID:                 opID,
-		SessionID:          sessionID,
-		Kind:               "build",
-		State:              operationRunning,
-		CreatedAt:          now,
-		Image:              image,
-		Context:            ctxPath,
-		Dockerfile:         dockerfile,
-		LogBuffer:          newBoundedBuffer(bufSize),
-		done:               make(chan struct{}),
-		LauncherID:         launcherID,
-		auditPrincipalName: principalName,
-		auditLauncherName:  launcherName,
-	}
 }
 
 func newRunOperation(sessionID, image string, bufSize int64, principalName, launcherID, launcherName string) *operation {
@@ -148,6 +124,17 @@ func generateOperationID() string {
 		panic(fmt.Sprintf("cannot generate operation ID: %v", err))
 	}
 	return "op_" + hex.EncodeToString(b)
+}
+
+// generateBuildStagingID returns a fresh path-safe staging identifier for
+// one synchronous build request. A synchronous build has no operation
+// identity; the staging directory lives only for the request.
+func generateBuildStagingID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("cannot generate build staging ID: %v", err))
+	}
+	return "bld_" + hex.EncodeToString(b)
 }
 
 type operationSupervisor struct {
@@ -691,12 +678,9 @@ func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 		SessionID:         op.SessionID,
 		OperationID:       op.ID,
 		Image:             op.Image,
-		Context:           op.Context,
-		Dockerfile:        op.Dockerfile,
 		CommandArgCount:   op.auditCommandArgCount,
 		Mounts:            op.auditMounts,
 		EnvKeys:           op.auditEnvKeys,
-		BuildArgKeys:      op.auditBuildArgKeys,
 		ShmSize:           op.auditShmSize,
 		TrustedCAInjected: op.auditTrustedCAInjected,
 		PrincipalName:     op.auditPrincipalName,

@@ -1207,10 +1207,11 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:              cfg,
-		DB:                  db,
-		MACCoordinator:      mac,
-		OperationSupervisor: newOperationSupervisor(),
+		Config:                   cfg,
+		DB:                       db,
+		MACCoordinator:           mac,
+		OperationSupervisor:      newOperationSupervisor(),
+		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 
 	// Create workspace and session.
@@ -1340,10 +1341,11 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:              cfg,
-		DB:                  db,
-		MACCoordinator:      mac,
-		OperationSupervisor: newOperationSupervisor(),
+		Config:                   cfg,
+		DB:                       db,
+		MACCoordinator:           mac,
+		OperationSupervisor:      newOperationSupervisor(),
+		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 
 	workspace := filepath.Join(dir, "workspace")
@@ -1457,10 +1459,11 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:              cfg,
-		DB:                  db,
-		MACCoordinator:      mac,
-		OperationSupervisor: newOperationSupervisor(),
+		Config:                   cfg,
+		DB:                       db,
+		MACCoordinator:           mac,
+		OperationSupervisor:      newOperationSupervisor(),
+		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 
 	workspace := filepath.Join(dir, "workspace")
@@ -1514,9 +1517,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 		}, nil
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	reqBody := map[string]any{
 		"context":    ".",
@@ -1529,20 +1530,9 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("handleBuild: expected 201, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleBuild: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-	op.Wait()
 
 	// Verify: the MAC lease was NOT released because staging cleanup failed.
 	mac.mu.Lock()
@@ -1592,10 +1582,11 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:              cfg,
-		DB:                  db,
-		MACCoordinator:      mac,
-		OperationSupervisor: newOperationSupervisor(),
+		Config:                   cfg,
+		DB:                       db,
+		MACCoordinator:           mac,
+		OperationSupervisor:      newOperationSupervisor(),
+		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 
 	workspace := filepath.Join(dir, "workspace")
@@ -1645,9 +1636,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		}, nil
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	reqBody := map[string]any{
 		"context":    ".",
@@ -1660,20 +1649,9 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("handleBuild: expected 201, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleBuild: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-	op.Wait()
 
 	// Verify: the MAC lease WAS released because staging cleanup succeeded.
 	mac.mu.Lock()
@@ -1725,10 +1703,11 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:              cfg,
-		DB:                  db,
-		MACCoordinator:      mac,
-		OperationSupervisor: newOperationSupervisor(),
+		Config:                   cfg,
+		DB:                       db,
+		MACCoordinator:           mac,
+		OperationSupervisor:      newOperationSupervisor(),
+		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 
 	// Force admit rejection.
@@ -1835,10 +1814,11 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:              cfg,
-		DB:                  db,
-		MACCoordinator:      mac,
-		OperationSupervisor: newOperationSupervisor(),
+		Config:                   cfg,
+		DB:                       db,
+		MACCoordinator:           mac,
+		OperationSupervisor:      newOperationSupervisor(),
+		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 
 	// Force admit rejection.

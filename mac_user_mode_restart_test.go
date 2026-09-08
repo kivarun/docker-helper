@@ -41,13 +41,15 @@ func TestUserModeRestartKeepsPersistedSessionsUsable(t *testing.T) {
 	// Compose the restarted daemon's App exactly as user-mode runDaemon does:
 	// same database, MACCoordinator taken from the startup wiring (nil here).
 	app := &App{
-		Config:              first.Config,
-		DB:                  db,
-		AdminTokenHash:      first.AdminTokenHash,
-		OperationSupervisor: newOperationSupervisor(),
-		MACCoordinator:      coordinator,
+		Config:                   first.Config,
+		DB:                       db,
+		AdminTokenHash:           first.AdminTokenHash,
+		OperationSupervisor:      newOperationSupervisor(),
+		MACCoordinator:           coordinator,
+		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 	app.StageBuildContextFn = newStagingSeam(t, stagingSeamOptions{})
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	dockerfilePath := filepath.Join(workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
@@ -81,11 +83,10 @@ func TestUserModeRestartKeepsPersistedSessionsUsable(t *testing.T) {
 	buildReq.Header.Set("Authorization", "Bearer "+result.Token)
 	buildW := httptest.NewRecorder()
 	app.handleBuild(buildW, buildReq)
-	if buildW.Code != http.StatusCreated {
+	if buildW.Code != http.StatusOK {
 		t.Errorf("restarted user-mode daemon: /build returned %d (body %s); persisted session should remain usable", buildW.Code, buildW.Body.String())
 		return
 	}
-	waitBuild(t, app, buildW)
 }
 
 // TestMACCoordinatorForModeSystemDriverActive verifies the system-mode side of

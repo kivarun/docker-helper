@@ -12,10 +12,10 @@ import (
 // SIGTERM to a running build process, and if the process exits after
 // the signal, force kill is not needed.
 func TestShutdownGracefulSignalsBuild(t *testing.T) {
-	app, supervisor, _, token := setupBuildTest(t)
+	app, supervisor, _, token := setupRunSupervisorTest(t)
 	app.ExecCommandContext = makeSleepCmd()
 
-	op := startBuild(t, app, token)
+	op := startRunTestOperation(t, app, token)
 
 	// Mark supervisor as shutting down and terminate with generous timeout.
 	supervisor.beginShutdown()
@@ -41,14 +41,14 @@ func TestShutdownGracefulSignalsBuild(t *testing.T) {
 // TestShutdownForceKillsIgnoringSignal tests that a process ignoring
 // graceful SIGTERM is force-killed within the shutdown deadline.
 func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
-	app, supervisor, _, token := setupBuildTest(t)
+	app, supervisor, _, token := setupRunSupervisorTest(t)
 
 	// Use a readiness marker so we know the trap is installed.
 	readyFile := filepath.Join(app.Config.AllowedRoots[0], ".process_ready")
 	defer os.Remove(readyFile)
 	app.ExecCommandContext = makeIgnoringSignalCmd(t, readyFile)
 
-	op := startBuild(t, app, token)
+	op := startRunTestOperation(t, app, token)
 
 	// Wait for the process to signal readiness (installed SIGTERM ignore).
 	waitProcessReady(t, readyFile)
@@ -79,10 +79,10 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 // completion goroutine properly reaps the process and closes op.done
 // even after force kill.
 func TestShutdownOperationCompletionGoroutineReaps(t *testing.T) {
-	app, supervisor, _, token := setupBuildTest(t)
+	app, supervisor, _, token := setupRunSupervisorTest(t)
 	app.ExecCommandContext = makeSleepCmd()
 
-	op := startBuild(t, app, token)
+	op := startRunTestOperation(t, app, token)
 
 	// Mark supervisor as shutting down and terminate with very short deadline.
 	supervisor.beginShutdown()

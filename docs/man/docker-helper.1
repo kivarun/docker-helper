@@ -460,7 +460,7 @@ root-management API. \fBselinux check\fR remains a read-only diagnostic.
 Pull a Docker image.
 .TP
 .B docker-helper build [\-\-system] [\-\-endpoint ENDPOINT] \-\-context PATH \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...]
-Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
+Build a Docker image synchronously and print the build output. \-\-build-arg may be repeated to pass multiple build arguments. SIGINT/SIGTERM cancels the in\-flight build request.
 .TP
 .B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-mount SOURCE:TARGET[:ro] ...] \-\- [command]
 Run a Docker container. \-\-env and \-\-mount may be repeated.
@@ -522,8 +522,9 @@ Invalid CLI arguments or input (where applicable)
 \fBdocker-helper run\fR returns the container exit code when the container
 exits with a non-zero status.
 .PP
-SIGINT for async build/run operations returns 130.
-SIGTERM for async build/run operations returns 143.
+SIGINT for the synchronous build request returns 130.
+SIGTERM for the synchronous build request returns 143.
+SIGINT/SIGTERM for async run operations return 130/143.
 .SH FILES
 .TP
 .B /etc/docker-helper/config.json

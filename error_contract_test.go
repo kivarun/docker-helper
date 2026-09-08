@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -680,6 +681,10 @@ func TestDockerErrorLogBuild(t *testing.T) {
 
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	setupBuildSeam(t, app, buildSeamOptions{
+		Output: "build-output-secret-xyz\n",
+		Err:    &engineError{kind: engineErrBuildFailed, cause: errors.New("build failed")},
+	})
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -688,11 +693,6 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	dfPath := result.Session.Workspace + "/Dockerfile"
 	if err := os.WriteFile(dfPath, []byte("FROM scratch"), 0644); err != nil {
 		t.Fatalf("cannot write Dockerfile: %v", err)
-	}
-
-	const dockerOutput = "build-output-secret-xyz"
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+dockerOutput+"\\n'; exit 1")
 	}
 
 	reqBody, _ := json.Marshal(map[string]any{
@@ -705,76 +705,30 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected %d, got %d: %s", http.StatusUnprocessableEntity, w.Code, w.Body.String())
 	}
 
-	// Extract operation_id from response.
-	var createResp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&createResp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, ok := createResp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatalf("expected operation_id in response")
+	// The public response carries the rendered build output under the
+	// accepted synchronous contract.
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, "build-output-secret-xyz") {
+		t.Errorf("expected build output in response, got %q", respBody)
 	}
 
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatalf("operation %s not found in supervisor", opID)
-	}
-	op.Wait()
-
-	// Check operation status for failure.
-	opReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID, nil)
-	opReq.Header.Set("Authorization", "Bearer "+result.Token)
-	opW := httptest.NewRecorder()
-	newOperationMux(app).ServeHTTP(opW, opReq)
-
-	if opW.Code != http.StatusOK {
-		t.Fatalf("expected 200 from operation status, got %d, body: %s", opW.Code, opW.Body.String())
-	}
-
-	var opResp map[string]any
-	if err := json.NewDecoder(opW.Body).Decode(&opResp); err != nil {
-		t.Fatalf("decode operation status: %v", err)
-	}
-	if opResp["status"] != "failed" {
-		t.Errorf("expected status 'failed', got %v", opResp["status"])
-	}
-	if opResp["result_code"] != "docker_build_failed" {
-		t.Errorf("expected result_code 'docker_build_failed', got %v", opResp["result_code"])
-	}
-	if exitCode, ok := opResp["exit_code"].(float64); !ok || exitCode != 1 {
-		t.Errorf("expected exit_code 1, got %v", opResp["exit_code"])
-	}
-
-	// Check logs contain build output.
-	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
-	logsW := httptest.NewRecorder()
-	newOperationMux(app).ServeHTTP(logsW, logsReq)
-
-	if logsW.Code != http.StatusOK {
-		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
-	}
-
-	var logsResp map[string]any
-	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
-		t.Fatalf("decode operation logs: %v", err)
-	}
-	logs, _ := logsResp["logs"].(string)
-	if !strings.Contains(logs, dockerOutput) {
-		t.Errorf("expected build output in operation logs, got %q", logs)
-	}
-
-	// Verify docker output is NOT in the operational log.
+	// Verify build output is NOT in the operational log.
 	raw := opBuf.String()
-	if strings.Contains(raw, dockerOutput) {
+	if strings.Contains(raw, "build-output-secret-xyz") {
 		t.Error("Docker output must not appear in operational log")
 	}
 	if strings.Contains(raw, result.Token) {
 		t.Error("session token must not appear in log")
+	}
+	// Audit must not carry the output either.
+	for _, line := range strings.Split(auditBuf.String(), "\n") {
+		if line != "" && strings.Contains(line, "build-output-secret-xyz") {
+			t.Errorf("Docker output must not appear in audit: %s", line)
+		}
 	}
 }
 

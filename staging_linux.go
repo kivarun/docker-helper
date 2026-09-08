@@ -52,9 +52,9 @@ func StageBuildContext(
 	contextPath string,
 	dockerfileRel string,
 	runtimeDir string,
-	operationID string,
+	stagingID string,
 ) (*stagedBuildContext, error) {
-	return stageBuildContextInternal(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID, defaultStagingSyscall(), nil)
+	return stageBuildContextInternal(ctx, workspace, contextPath, dockerfileRel, runtimeDir, stagingID, defaultStagingSyscall(), nil)
 }
 
 func stageBuildContextInternal(
@@ -63,7 +63,7 @@ func stageBuildContextInternal(
 	contextPath string,
 	dockerfileRel string,
 	runtimeDir string,
-	operationID string,
+	stagingID string,
 	sy stagingSyscall,
 	hooks *stagingHooks,
 ) (*stagedBuildContext, error) {
@@ -81,8 +81,8 @@ func stageBuildContextInternal(
 		return nil, fmt.Errorf("runtime dir must be absolute: %s", runtimeDir)
 	}
 
-	if !isOperationIDSafe(operationID) {
-		return nil, fmt.Errorf("invalid operation ID: %q", operationID)
+	if !isPathSafeID(stagingID) {
+		return nil, fmt.Errorf("invalid staging identifier: %q", stagingID)
 	}
 
 	if !isValidDockerfileRel(dockerfileRel) {
@@ -210,30 +210,30 @@ func stageBuildContextInternal(
 	}
 	defer unix.Close(buildsFD)
 
-	// Create operation directory exclusively via mkdirat.
-	if err := unix.Mkdirat(buildsFD, operationID, 0o700); err != nil {
+	// Create the staging instance directory exclusively via mkdirat.
+	if err := unix.Mkdirat(buildsFD, stagingID, 0o700); err != nil {
 		if err == unix.EEXIST {
-			return nil, fmt.Errorf("operation directory already exists: %s", operationID)
+			return nil, fmt.Errorf("staging directory already exists: %s", stagingID)
 		}
-		return nil, fmt.Errorf("cannot create operation directory: %w", err)
+		return nil, fmt.Errorf("cannot create staging directory: %w", err)
 	}
 
-	// We own this operation directory. Open it via openat2 to verify.
-	opFD, err := sy.Openat2(buildsFD, operationID, &unix.OpenHow{
+	// We own this staging directory. Open it via openat2 to verify.
+	opFD, err := sy.Openat2(buildsFD, stagingID, &unix.OpenHow{
 		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
 	})
 	if err != nil {
-		removeAllAtRecursive(buildsFD, operationID)
-		return nil, fmt.Errorf("cannot open operation directory: %w", err)
+		removeAllAtRecursive(buildsFD, stagingID)
+		return nil, fmt.Errorf("cannot open staging directory: %w", err)
 	}
 	defer unix.Close(opFD)
 
-	// We own operation directory; cleanup is safe on any subsequent error.
+	// We own the staging directory; cleanup is safe on any subsequent error.
 
 	// Create staging directory via mkdirat.
 	if err := unix.Mkdirat(opFD, "context", 0o700); err != nil {
-		removeAllAtRecursive(buildsFD, operationID)
+		removeAllAtRecursive(buildsFD, stagingID)
 		return nil, fmt.Errorf("cannot create staging directory: %w", err)
 	}
 
@@ -242,7 +242,7 @@ func stageBuildContextInternal(
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
 	})
 	if err != nil {
-		removeAllAtRecursive(buildsFD, operationID)
+		removeAllAtRecursive(buildsFD, stagingID)
 		return nil, fmt.Errorf("cannot open staging directory: %w", err)
 	}
 
@@ -251,7 +251,7 @@ func stageBuildContextInternal(
 	err = walkAndCopy(ctx, sourceFD, stagingFD, stagingFD, "", hardlinkMap, hooks)
 	unix.Close(stagingFD)
 	if err != nil {
-		removeAllAtRecursive(buildsFD, operationID)
+		removeAllAtRecursive(buildsFD, stagingID)
 		return nil, err
 	}
 
@@ -261,7 +261,7 @@ func stageBuildContextInternal(
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
 	})
 	if err != nil {
-		removeAllAtRecursive(buildsFD, operationID)
+		removeAllAtRecursive(buildsFD, stagingID)
 		return nil, fmt.Errorf("cannot open staging for verification: %w", err)
 	}
 
@@ -271,25 +271,25 @@ func stageBuildContextInternal(
 	})
 	unix.Close(stagingVerifyFD)
 	if err != nil {
-		removeAllAtRecursive(buildsFD, operationID)
+		removeAllAtRecursive(buildsFD, stagingID)
 		return nil, fmt.Errorf("Dockerfile not found in staging: %w", err)
 	}
 
 	var dfSt unix.Stat_t
 	if err := unix.Fstat(dockerfileFD, &dfSt); err != nil {
 		unix.Close(dockerfileFD)
-		removeAllAtRecursive(buildsFD, operationID)
+		removeAllAtRecursive(buildsFD, stagingID)
 		return nil, fmt.Errorf("cannot stat Dockerfile: %w", err)
 	}
 	if dfSt.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(dockerfileFD)
-		removeAllAtRecursive(buildsFD, operationID)
+		removeAllAtRecursive(buildsFD, stagingID)
 		return nil, fmt.Errorf("Dockerfile is not a regular file")
 	}
 	unix.Close(dockerfileFD)
 
 	// Compute cleanup path from rootFD chain.
-	cleanupPath := filepath.Join(runtimeDir, "builds", operationID)
+	cleanupPath := filepath.Join(runtimeDir, "builds", stagingID)
 
 	// Compute staging path.
 	stagingPath := filepath.Join(cleanupPath, "context")

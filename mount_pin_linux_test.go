@@ -928,9 +928,9 @@ func TestIsOperationIDSafe(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := isOperationIDSafe(tc.id)
+		got := isPathSafeID(tc.id)
 		if got != tc.want {
-			t.Errorf("isOperationIDSafe(%q) = %v, want %v", tc.id, got, tc.want)
+			t.Errorf("isPathSafeID(%q) = %v, want %v", tc.id, got, tc.want)
 		}
 	}
 }

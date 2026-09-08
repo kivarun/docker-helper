@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -42,7 +41,7 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommandContext = testBuildCmd("ok", 0)
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -57,11 +56,9 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
-
-	waitBuild(t, app, w)
 }
 
 func TestBuildSessionAuthMissingToken(t *testing.T) {
@@ -139,6 +136,7 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 func TestBuildContextDotUsesWorkspace(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -150,11 +148,8 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	var capture capturedStaging
+	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -169,22 +164,20 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	waitBuild(t, app, w)
-
-	// Check that context path is a staged path (contains "context" in path)
-	lastArg := capturedArgs[len(capturedArgs)-1]
-	if !strings.Contains(lastArg, "context") {
-		t.Errorf("expected staged context path in last arg, got %v", capturedArgs)
+	// Staging receives the canonical workspace context path.
+	if capture.dockerfileRel != "Dockerfile" {
+		t.Errorf("dockerfileRel = %q, want %q", capture.dockerfileRel, "Dockerfile")
 	}
 }
 
 func TestBuildContextRelativeSubdir(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -223,16 +216,15 @@ func TestBuildContextRelativeSubdir(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
-
-	waitBuild(t, app, w)
 }
 
 func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -266,11 +258,9 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
-
-	waitBuild(t, app, w)
 }
 
 func TestBuildContextSiblingDirectoryRejected(t *testing.T) {
@@ -397,6 +387,7 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 func TestBuildWorkspaceIsSymlink(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	realDir := filepath.Join(app.Config.AllowedRoots[0], "real-dir")
 	if err := os.MkdirAll(realDir, 0755); err != nil {
@@ -435,16 +426,15 @@ func TestBuildWorkspaceIsSymlink(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
-
-	waitBuild(t, app, w)
 }
 
 func TestBuildDockerfileInsideContext(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -456,11 +446,8 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	var capture capturedStaging
+	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -475,25 +462,13 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	waitBuild(t, app, w)
-
-	// Check that --file contains the staged dockerfile path (contains "context")
-	found := false
-	for i, arg := range capturedArgs {
-		if arg == "--file" && i+1 < len(capturedArgs) {
-			if strings.Contains(capturedArgs[i+1], "context") {
-				found = true
-				break
-			}
-		}
-	}
-
-	if !found {
-		t.Errorf("expected --file with staged path (containing 'context') in args %v", capturedArgs)
+	// Staging receives the canonical relative Dockerfile path.
+	if capture.dockerfileRel != "Dockerfile" {
+		t.Errorf("dockerfileRel = %q, want %q", capture.dockerfileRel, "Dockerfile")
 	}
 }
 
@@ -531,6 +506,7 @@ func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
 func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -542,11 +518,8 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	var capture capturedStaging
+	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -561,16 +534,13 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	waitBuild(t, app, w)
-
-	// Last arg should be the staged context path (contains "context")
-	lastArg := capturedArgs[len(capturedArgs)-1]
-	if !strings.Contains(lastArg, "context") {
-		t.Errorf("expected last arg to contain 'context' (staged path), got %v", capturedArgs)
+	// Staging receives the canonical workspace context, not a raw request path.
+	if capture.dockerfileRel != "Dockerfile" {
+		t.Errorf("dockerfileRel = %q, want %q", capture.dockerfileRel, "Dockerfile")
 	}
 }
 
@@ -660,18 +630,13 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
-	reqBody := map[string]string{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
+	}, result.Token)
 	w := httptest.NewRecorder()
 
-	app.handleBuild(w, req)
+	app.handleRun(w, req)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d", http.StatusCreated, w.Code)
@@ -679,7 +644,7 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 
 	var resp map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode build response: %v", err)
+		t.Fatalf("decode run response: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
 

@@ -29,7 +29,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Acquire workspace-use lease BEFORE any filesystem access that depends
-	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
+	// on workspace MAC coverage. This reserves MAC state through the
+	// staging work and the Engine build.
 	var leaseRelease func()
 	if a.MACCoordinator != nil {
 		var leaseErr error
@@ -73,74 +74,28 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := a.getConfig()
-	bufSize := cfg.OperationLogMaxBytes
-
-	// Ensure the session Docker config directory exists before registering
-	// the operation so that a failure here does not leave a zombie operation.
-	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
-	if err != nil {
+	// Synchronous Engine builds are admitted through the coordinator with
+	// the build's Launcher admission state: daemon-shutdown refusal,
+	// Launcher-quiesce refusal, request-context cancellation, and bounded
+	// shutdown termination are its contract. A synchronous build has no
+	// operation identity.
+	engineCtx, syncReq, decision := a.SyncExecutionCoordinator.admitLauncherScoped(ctx, session.LauncherID, a.OperationSupervisor.launcherQuiesced)
+	if decision != admissionAccepted {
 		if leaseRelease != nil {
 			leaseRelease()
 		}
-		opLog(ctx).Error("cannot create session Docker directory",
-			slog.String("operation", "build"),
-			slog.String("error", err.Error()),
-		)
-		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
+		if decision == admissionRefusedShutdown {
+			writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
+		} else {
+			writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "build", "launcher_unavailable", "launcher is not available", session.PrincipalName)
+		}
 		return
 	}
-
-	// Create the operation first so we have an ID for staging.
-	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize, session.PrincipalName, session.LauncherID, session.LauncherName)
-	op.auditBuildArgKeys = buildArgKeys
-
-	// Stage the build context into an isolated directory.
-	staged, err := a.stageBuildContext(ctx, session.Workspace, contextPath, dockerfileRel, cfg.RuntimeDir, op.ID)
-	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
-		opLog(ctx).Error("build context staging failed",
-			slog.String("operation", "build"),
-			slog.String("error", err.Error()),
-		)
-		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
-		return
-	}
-
-	if a.OperationSupervisor != nil {
-		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
-			// Cleanup staging before releasing lease.
-			cleanupErr := staged.Cleanup()
-			if cleanupErr != nil {
-				opLog(ctx).Error("staging cleanup failed after admit rejection — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-					slog.String("operation", "build"),
-					slog.String("operation_id", op.ID),
-					slog.String("error", cleanupErr.Error()),
-				)
-			}
-			if cleanupErr == nil && leaseRelease != nil {
-				leaseRelease()
-			}
-			if decision == admissionRefusedShutdown {
-				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
-			} else {
-				writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "build", "launcher_unavailable", "launcher is not available", session.PrincipalName)
-			}
-			return
-		}
-		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
-	}
-
-	// Lease is now associated with the registered operation; it will be
-	// released by waitBuildCompletion after cmd.Wait().
-	op.macLeaseRelease = leaseRelease
+	defer syncReq.end()
 
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "build.start",
 		SessionID:     session.ID,
-		OperationID:   op.ID,
 		Image:         req.Image,
 		Context:       req.Context,
 		Dockerfile:    req.Dockerfile,
@@ -150,130 +105,215 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		LauncherName:  session.LauncherName,
 	})
 
-	// Build the command using staged paths — Docker never sees workspace paths.
-	args := []string{
-		"--config", dockerDir,
-		"build",
-		"--pull",
-		"--provenance=false",
-		"--sbom=false",
-		"--file", staged.DockerfilePath,
-		"--tag", req.Image,
+	started := time.Now()
+	finishAudit := func(result string) {
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:         "build.finish",
+			SessionID:     session.ID,
+			Image:         req.Image,
+			Context:       req.Context,
+			Dockerfile:    req.Dockerfile,
+			BuildArgKeys:  buildArgKeys,
+			Result:        result,
+			Duration:      time.Since(started).Round(time.Millisecond).String(),
+			PrincipalName: session.PrincipalName,
+			LauncherID:    session.LauncherID,
+			LauncherName:  session.LauncherName,
+		})
 	}
 
-	// Append build-arg entries in sorted key order.
-	for _, key := range buildArgKeys {
-		args = append(args, "--build-arg", key+"="+req.BuildArgs[key])
-	}
-	args = append(args, staged.ContextPath)
+	cfg := a.getConfig()
 
-	cmdCtx, cancel := context.WithCancel(context.Background())
-
-	cmd := a.newDockerCommand(cmdCtx, "docker", args...)
-
-	result := startOperationProcess(cmd, op)
-
-	if result.Terminated {
-		cancel()
-		// Release lease AFTER cleaning up staged resources.
-		cleanupErr := staged.Cleanup()
-		if cleanupErr != nil {
-			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "build"),
-				slog.String("operation_id", op.ID),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-		if cleanupErr == nil && op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
-		msg := "build cancelled: daemon is shutting down"
-		if op.reason == terminationCancelled {
-			msg = "build cancelled"
-			op.fail(resultCancelled, msg, nil)
-		} else {
-			op.fail("docker_build_failed", msg, nil)
-		}
-		writeOperationCreated(ctx, w, op.ID, op.State)
-		return
-	}
-	if result.Err != nil {
-		cancel()
-		// Release lease AFTER cleaning up staged resources.
-		cleanupErr := staged.Cleanup()
-		if cleanupErr != nil {
-			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "build"),
-				slog.String("operation_id", op.ID),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-		if cleanupErr == nil && op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
-		opLog(ctx).Error("cannot start build process",
-			slog.String("operation", "build"),
-			slog.String("error", result.Err.Error()),
-		)
-		msg := fmt.Sprintf("cannot start build: %v", result.Err)
-		op.fail("docker_build_failed", msg, nil)
-		writeOperationCreated(ctx, w, op.ID, op.State)
-		return
-	}
-
-	// Store staged context for cleanup in waitBuildCompletion.
-	op.stagedCtx = staged
-
-	// Start goroutine for process completion.
-	go func() {
-		defer cancel()
-		a.waitBuildCompletion(op, *op.StartedAt)
-	}()
-
-	writeOperationCreated(ctx, w, op.ID, operationRunning)
-}
-
-// waitBuildCompletion waits for the build process to finish and transitions
-// the operation to succeeded or failed. It is the single owner of cmd.Wait().
-func (a *App) waitBuildCompletion(op *operation, started time.Time) {
-	err := op.cmd.Wait()
-
-	// Cleanup staging directory regardless of outcome.
-	cleanupErr := error(nil)
-	if op.stagedCtx != nil {
-		cleanupErr = op.stagedCtx.Cleanup()
-		if cleanupErr != nil {
-			ctx := withSessionID(context.Background(), op.SessionID)
-			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "build"),
-				slog.String("operation_id", op.ID),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-	}
-
-	// Release workspace-use lease only if staging cleanup succeeded.
-	if cleanupErr == nil && op.macLeaseRelease != nil {
-		op.macLeaseRelease()
-	}
-
-	duration := time.Since(started).Round(time.Millisecond).String()
-
-	op.mu.Lock()
-	wasCancelled := op.reason == terminationCancelled
-	op.mu.Unlock()
-
+	// Stage the build context into an isolated helper-owned directory. From
+	// here the request owns the staging cleanup — on success, build
+	// failure, cancellation, shutdown, preparation failure, and Engine
+	// failure alike — and releases the workspace-use lease only when the
+	// workspace-dependent cleanup completed.
+	staged, err := a.stageBuildContext(ctx, session.Workspace, contextPath, dockerfileRel, cfg.RuntimeDir, generateBuildStagingID())
 	if err != nil {
-		exitCode := extractExitCode(err)
-		if wasCancelled {
-			op.fail(resultCancelled, "build cancelled", exitCode, &duration)
+		if leaseRelease != nil {
+			leaseRelease()
+		}
+		opLog(ctx).Error("build context staging failed",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
+		duration := time.Since(started).Round(time.Millisecond).String()
+		finishAudit("docker_build_failed")
+		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, buildResponse{
+			OK:       false,
+			Code:     "docker_build_failed",
+			Message:  "docker build failed",
+			Duration: duration,
+		})
+		return
+	}
+	defer func() {
+		cleanupErr := staged.Cleanup()
+		if cleanupErr != nil {
+			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
+				slog.String("operation", "build"),
+				slog.String("error", cleanupErr.Error()),
+			)
 			return
 		}
-		op.fail("docker_build_failed", "docker build failed", exitCode, &duration)
+		if leaseRelease != nil {
+			leaseRelease()
+		}
+	}()
+
+	// Resolve the Session credentials the staged Dockerfile's FROM lines
+	// name just in time, from the one protected credential store. Only
+	// matching entries are projected into the Engine request.
+	authCredentials, err := resolveBuildAuthCredentials(cfg.RuntimeDir, session.ID, staged.DockerfilePath)
+	if err != nil {
+		opLog(ctx).Error("cannot read session registry credentials",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
+		duration := time.Since(started).Round(time.Millisecond).String()
+		finishAudit("docker_build_failed")
+		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, buildResponse{
+			OK:       false,
+			Code:     "docker_build_failed",
+			Message:  "docker build failed",
+			Duration: duration,
+		})
 		return
 	}
 
-	op.succeed(&duration)
+	// The Engine adapter consumes the prepared trusted context as a tar
+	// stream; the adapter is not the workspace-policy owner.
+	contextTar, err := staged.tarContext(engineCtx)
+	if err != nil {
+		opLog(ctx).Error("cannot prepare build context stream",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
+		duration := time.Since(started).Round(time.Millisecond).String()
+		finishAudit("docker_build_failed")
+		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, buildResponse{
+			OK:       false,
+			Code:     "docker_build_failed",
+			Message:  "docker build failed",
+			Duration: duration,
+		})
+		return
+	}
+	defer contextTar.Close()
+
+	builder, err := a.newEngineImageBuilder()
+	if err != nil {
+		opLog(ctx).Error("cannot construct docker engine adapter",
+			slog.String("operation", "build"),
+		)
+		duration := time.Since(started).Round(time.Millisecond).String()
+		finishAudit("docker_build_failed")
+		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, buildResponse{
+			OK:       false,
+			Code:     "docker_build_failed",
+			Message:  "docker build failed",
+			Duration: duration,
+		})
+		return
+	}
+
+	result, buildErr := builder.imageBuild(engineCtx, engineBuildSpec{
+		Image:      req.Image,
+		Context:    contextTar,
+		Dockerfile: dockerfileRel,
+		BuildArgs:  req.BuildArgs,
+		Auths:      authCredentials,
+	}, cfg.OperationLogMaxBytes)
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	if buildErr != nil {
+		var engErr *engineError
+		if !errors.As(buildErr, &engErr) {
+			engErr = &engineError{kind: engineErrBackendFailure, cause: buildErr}
+		}
+
+		if engErr.kind != engineErrClientCancelled {
+			// Operational logs record only the normalized category. Raw
+			// Engine payloads, build-arg values, and credentials stay
+			// behind the adapter boundary and never reach journald.
+			opLog(ctx).Warn("build failed",
+				slog.String("operation", "build"),
+				slog.Int("engine_error_kind", int(engErr.kind)),
+			)
+		}
+
+		auditResult := "docker_build_failed"
+		if engErr.kind == engineErrClientCancelled {
+			auditResult = "cancelled"
+		}
+		finishAudit(auditResult)
+		writeBuildEngineFailure(engineCtx, w, engErr, result, duration)
+		return
+	}
+
+	finishAudit("succeeded")
+	writeJSONRaw(engineCtx, w, http.StatusOK, buildResponse{
+		OK:        true,
+		Output:    result.Output,
+		Truncated: result.Truncated,
+		Duration:  duration,
+	})
+}
+
+// writeBuildEngineFailure maps a normalized Engine build failure to the
+// accepted synchronous build failure contract. The response never carries
+// credentials or raw Engine payloads; the rendered build output is preserved
+// for the client as before. A cancelled build produces no trustworthy
+// result, exactly as the killed docker CLI did.
+func writeBuildEngineFailure(ctx context.Context, w http.ResponseWriter, engErr *engineError, result engineBuildResult, duration string) {
+	switch engErr.kind {
+	case engineErrBuildFailed:
+		writeJSONRaw(ctx, w, http.StatusUnprocessableEntity, buildResponse{
+			OK:        false,
+			Code:      "build_failed",
+			Message:   "image build failed",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrRegistryAuthDenied:
+		writeJSONRaw(ctx, w, http.StatusUnprocessableEntity, buildResponse{
+			OK:        false,
+			Code:      "registry_auth_denied",
+			Message:   "registry authentication denied",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrRegistryUnavailable:
+		writeJSONRaw(ctx, w, http.StatusBadGateway, buildResponse{
+			OK:        false,
+			Code:      "registry_unavailable",
+			Message:   "registry unreachable or backend failure",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrBackendUnavailable:
+		writeJSONRaw(ctx, w, http.StatusServiceUnavailable, buildResponse{
+			OK:        false,
+			Code:      "backend_unavailable",
+			Message:   "docker engine unavailable",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	default:
+		writeJSONRaw(ctx, w, http.StatusInternalServerError, buildResponse{
+			OK:        false,
+			Code:      "docker_build_failed",
+			Message:   "docker build failed",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	}
 }
 
 // operationForSession looks up an operation by ID and verifies it belongs

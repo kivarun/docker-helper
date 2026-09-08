@@ -277,28 +277,33 @@ func (c *apiClient) pull(req pullRequest) (*pullResponse, error) {
 	return &result, nil
 }
 
-// startBuild sends POST /build and returns the operation ID.
-func (c *apiClient) startBuild(req buildRequest) (*operationCreatedResponse, error) {
+// build sends POST /build and returns the synchronous build result.
+func (c *apiClient) build(ctx context.Context, req buildRequest) (*buildResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
 
-	resp, err := c.doAuthenticatedRequest("POST", "/build", bytes.NewReader(body))
+	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "POST", "/build", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	respBody, err := c.readResponseBody(resp)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot read response: %w", err)
 	}
 
-	var result operationCreatedResponse
+	var result buildResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &result, parseAPIError(resp.StatusCode, respBody)
+	}
+
 	return &result, nil
 }
 

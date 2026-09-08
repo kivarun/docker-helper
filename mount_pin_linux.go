@@ -81,7 +81,7 @@ func pinWorkspaceMountSource(workspace, sourcePath, runtimeDir, operationID stri
 
 func pinWorkspaceMountSourceWithSyscalls(seam mountPinSyscalls, workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 	// Validate operationID: must not allow path traversal.
-	if !isOperationIDSafe(operationID) {
+	if !isPathSafeID(operationID) {
 		return nil, fmt.Errorf("invalid operation ID: %q", operationID)
 	}
 
@@ -277,8 +277,8 @@ func cleanupPinnedMount(seam mountPinSyscalls, pinnedPath, mountsDir string) err
 	return nil
 }
 
-// isOperationIDSafe checks that the operation ID cannot be used for path traversal.
-func isOperationIDSafe(id string) bool {
+// isPathSafeID checks that a generated identifier cannot be used for path traversal.
+func isPathSafeID(id string) bool {
 	if id == "" {
 		return false
 	}

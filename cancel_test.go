@@ -18,7 +18,7 @@ import (
 
 // TestCancelRunningBuild proves that cancelling a running build
 // terminates the process and returns result_code=cancelled.
-func TestCancelRunningBuild(t *testing.T) {
+func TestCancelRunningRunOperation(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -37,26 +37,25 @@ func TestCancelRunningBuild(t *testing.T) {
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
+	app.handleRun(w, req)
 
 	if w.Code != http.StatusCreated {
-		t.Fatalf("build: expected %d, got %d", http.StatusCreated, w.Code)
+		t.Fatalf("run: expected %d, got %d", http.StatusCreated, w.Code)
 	}
 
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
 
 	// Verify the operation is in the supervisor.
 	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatalf("operation %s not found in supervisor after build", opID)
+		t.Fatalf("operation %s not found in supervisor after run", opID)
 	}
 	if op.SessionID != result.Session.ID {
 		t.Fatalf("operation session ID %s != result session ID %s", op.SessionID, result.Session.ID)
@@ -176,7 +175,7 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 }
 
 // TestCancelPreservesLogs proves that operation logs remain accessible after cancel.
-func TestCancelPreservesLogs(t *testing.T) {
+func TestCancelPreservesLogsRunOperation(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -194,17 +193,16 @@ func TestCancelPreservesLogs(t *testing.T) {
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
+	app.handleRun(w, req)
 
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
 
 	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
@@ -268,17 +266,16 @@ func TestCancelAuditEvent(t *testing.T) {
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
+	app.handleRun(w, req)
 
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
 
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
@@ -364,17 +361,16 @@ func TestCancelIdempotent(t *testing.T) {
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
+	app.handleRun(w, req)
 
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
 
 	// First cancel.
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
@@ -479,17 +475,16 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
+	app.handleRun(w, req)
 
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
 
 	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
@@ -603,7 +598,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
 	app.OperationSupervisor.mu.Lock()
 	app.OperationSupervisor.ops[op.ID] = op
 	app.OperationSupervisor.mu.Unlock()
@@ -655,7 +650,7 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
 	app.OperationSupervisor.mu.Lock()
 	app.OperationSupervisor.ops[op.ID] = op
 	app.OperationSupervisor.mu.Unlock()
@@ -709,7 +704,7 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
 
 	// Barrier: fail waits until succeed has completed the transition.
 	succeedDone := make(chan struct{})
@@ -731,7 +726,7 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 		defer wg.Done()
 		<-succeedDone
 		exitCode := 1
-		failResult = op.fail("cancelled", "build cancelled", &exitCode, nil)
+		failResult = op.fail("cancelled", "run cancelled", &exitCode, nil)
 	}()
 
 	wg.Wait()
@@ -775,12 +770,12 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	finishCount := 0
 	for _, r := range records {
-		if r.Event == "build.finish" {
+		if r.Event == "run.finish" {
 			finishCount++
 		}
 	}
 	if finishCount != 1 {
-		t.Errorf("build.finish audit count = %d, want 1", finishCount)
+		t.Errorf("run.finish audit count = %d, want 1", finishCount)
 	}
 }
 
@@ -799,7 +794,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
 
 	// Barrier: succeed waits until fail has completed the transition.
 	failDone := make(chan struct{})
@@ -812,7 +807,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		exitCode := 1
-		failResult = op.fail("cancelled", "build cancelled", &exitCode, nil)
+		failResult = op.fail("cancelled", "run cancelled", &exitCode, nil)
 		close(failDone)
 	}()
 
@@ -865,12 +860,12 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	finishCount := 0
 	for _, r := range records {
-		if r.Event == "build.finish" {
+		if r.Event == "run.finish" {
 			finishCount++
 		}
 	}
 	if finishCount != 1 {
-		t.Errorf("build.finish audit count = %d, want 1", finishCount)
+		t.Errorf("run.finish audit count = %d, want 1", finishCount)
 	}
 }
 
@@ -896,17 +891,16 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 		return exec.CommandContext(ctx, "true")
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
+	app.handleRun(w, req)
 
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
 
 	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
@@ -957,8 +951,8 @@ func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 	}
 
 	// Register an already-terminal build operation with a natural failure.
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
-	op.fail("docker_build_failed", "build failed", nil)
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
+	op.fail("docker_run_failed", "run failed", nil)
 	app.OperationSupervisor.mu.Lock()
 	app.OperationSupervisor.ops[op.ID] = op
 	app.OperationSupervisor.mu.Unlock()
@@ -975,7 +969,7 @@ func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 
 	var cancelResp map[string]any
 	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
-	if cancelResp["result_code"] != "docker_build_failed" {
+	if cancelResp["result_code"] != "docker_run_failed" {
 		t.Errorf("expected result_code 'docker_build_failed', got %v", cancelResp["result_code"])
 	}
 
@@ -987,7 +981,7 @@ func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 	}
 	op.mu.Unlock()
 
-	if rc != "docker_build_failed" {
+	if rc != "docker_run_failed" {
 		t.Errorf("stored result_code = %q, want 'docker_build_failed'", rc)
 	}
 }
@@ -1015,17 +1009,16 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
+	req := newRunRequest(map[string]any{
+		"image":   "example:test",
+		"command": []string{"echo", "hello"},
 	}, result.Token)
 	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
+	app.handleRun(w, req)
 
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
 
 	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
@@ -1110,12 +1103,12 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	finishCount := 0
 	for _, r := range records {
-		if r.Event == "build.finish" {
+		if r.Event == "run.finish" {
 			finishCount++
 		}
 	}
 	if finishCount != 1 {
-		t.Errorf("build.finish audit count = %d, want 1", finishCount)
+		t.Errorf("run.finish audit count = %d, want 1", finishCount)
 	}
 
 	// Verify: done is closed.

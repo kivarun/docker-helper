@@ -46,6 +46,19 @@ type pullResponse struct {
 	Duration  string `json:"duration,omitempty"`
 }
 
+// buildResponse is the synchronous response from POST /build. A successful
+// build carries the bounded combined output; a backend-reported build
+// failure additionally carries the stable code and message. There is no
+// operation identity: the result is final within the request.
+type buildResponse struct {
+	OK        bool   `json:"ok"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Duration  string `json:"duration,omitempty"`
+}
+
 // operationCreatedResponse is the response from POST /build and POST /run.
 type operationCreatedResponse struct {
 	OK          bool           `json:"ok"`

@@ -295,7 +295,7 @@ var buildCommand = &Command{
 	Name:    "build",
 	Summary: "Build a Docker image",
 	Usage:   "docker-helper build --context PATH --dockerfile FILE --image NAME [flags]",
-	Help:    `SIGINT/SIGTERM cancels the running build operation.`,
+	Help:    `SIGINT/SIGTERM cancels the running build request.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
 		ctx := fs.String("context", "", "Build context path relative to session workspace")
@@ -340,39 +340,64 @@ var buildCommand = &Command{
 					return 1
 				}
 
-				resp, err := c.startBuild(buildRequest{
-					Context:    *ctx,
-					Dockerfile: *dockerfile,
-					Image:      *image,
-					BuildArgs:  argsMap,
-				})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
+				// SIGINT/SIGTERM cancels the in-flight build request; the
+				// daemon returns the terminal cancelled result.
+				sigCh := make(chan os.Signal, 1)
+				signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+				defer signal.Stop(sigCh)
+
+				reqCtx, cancelReq := context.WithCancel(context.Background())
+				defer cancelReq()
+
+				var cancelOnce sync.Once
+				tryCancel := func() {
+					cancelOnce.Do(func() {
+						cancelReq()
+					})
 				}
 
-				status, err := waitForOperationWithSignal(c, resp.OperationID, stdout, stderr)
-				if err != nil {
-					if sigErr, ok := err.(*signalExitError); ok {
-						return signalExitCode(sigErr.Signal)
-					}
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
+				type buildOutcome struct {
+					resp *buildResponse
+					err  error
 				}
+				resultCh := make(chan buildOutcome, 1)
+				go func() {
+					resp, err := c.build(reqCtx, buildRequest{
+						Context:    *ctx,
+						Dockerfile: *dockerfile,
+						Image:      *image,
+						BuildArgs:  argsMap,
+					})
+					resultCh <- buildOutcome{resp, err}
+				}()
 
-				if status.Status != operationSucceeded {
-					msg := "build failed"
-					if status.ResultCode != nil {
-						msg += " (" + *status.ResultCode + ")"
+				select {
+				case sig := <-sigCh:
+					tryCancel()
+					outcome := <-resultCh
+					if outcome.err != nil && outcome.resp == nil {
+						fmt.Fprintf(stderr, "warning: build did not return a result: %v\n", outcome.err)
 					}
-					if status.ExitCode != nil {
-						msg += fmt.Sprintf(", exit_code=%d", *status.ExitCode)
+					return signalExitCode(sig)
+				case outcome := <-resultCh:
+					resp, err := outcome.resp, outcome.err
+					if err != nil {
+						fmt.Fprintf(stderr, "error: %v\n", err)
+						if resp != nil && resp.Output != "" {
+							fmt.Fprintf(stderr, "build output:\n%s", resp.Output)
+							if resp.Truncated {
+								fmt.Fprintln(stderr, "build output truncated")
+							}
+						}
+						return 1
 					}
-					fmt.Fprintln(stderr, msg)
-					return 1
+
+					if resp.Truncated {
+						fmt.Fprintln(stderr, "build output truncated")
+					}
+					fmt.Fprint(stdout, resp.Output)
+					return 0
 				}
-
-				return 0
 			},
 		}
 	},

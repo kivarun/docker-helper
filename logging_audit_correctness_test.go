@@ -570,9 +570,9 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ctxDir, "Dockerfile"), []byte("FROM alpine"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "nonexistent-docker-binary")
-	}
+	setupBuildSeam(t, app, buildSeamOptions{
+		ConstructErr: errors.New("nonexistent engine endpoint"),
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(fmt.Sprintf(
 		`{"image":"test:latest","context":"%s","dockerfile":"Dockerfile","build_args":{"SECRET":"password"}}`, ctxDir))))
@@ -580,12 +580,12 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
 	}
 
 	opOutput := opBuf.String()
-	if !strings.Contains(opOutput, "cannot start build process") {
+	if !strings.Contains(opOutput, "cannot construct docker engine adapter") {
 		t.Fatalf("build start failure must produce operational ERROR, got:\n%s", opOutput)
 	}
 	if strings.Contains(opOutput, "password") {
@@ -671,99 +671,6 @@ func TestAdminTokenRotateInternalErrorDiagnostic(t *testing.T) {
 //
 // This test uses a staging seam that forces Cleanup() to fail so the
 // cleanup error log is guaranteed to be emitted.
-func TestBuildCleanupCorrelationFields(t *testing.T) {
-	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAdminToken(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Force admit rejection so the cleanup path runs.
-	app.OperationSupervisor.shutting = true
-
-	// Use a staging seam that forces Cleanup() to fail.
-	sentinelErr := errors.New("injected staging cleanup error")
-	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelErr)
-
-	// Create a real build context so staging succeeds.
-	ctxDir := result.Session.Workspace
-	dockerfilePath := filepath.Join(ctxDir, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
-	reqBody := map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "test:latest",
-	}
-	body, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", w.Code)
-	}
-
-	// Parse operational JSON and find the cleanup log.
-	opOutput := opBuf.String()
-	foundCleanup := false
-	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
-		msg, _ := rec["msg"].(string)
-		if !strings.HasPrefix(msg, "staging cleanup failed after admit rejection") {
-			continue
-		}
-		foundCleanup = true
-
-		// Assert operation == "build".
-		opField, ok := rec["operation"].(string)
-		if !ok {
-			t.Fatal("cleanup log missing operation field")
-		}
-		if opField != "build" {
-			t.Errorf("cleanup log operation = %q, want \"build\"", opField)
-		}
-
-		// Assert operation_id is non-empty.
-		opID, ok := rec["operation_id"].(string)
-		if !ok {
-			t.Fatal("cleanup log missing operation_id field")
-		}
-		if opID == "" {
-			t.Error("cleanup log operation_id is empty")
-		}
-
-		// Assert operation != operation_id.
-		if opField == opID {
-			t.Errorf("operation and operation_id must differ, both are %q", opField)
-		}
-
-		// Assert the error contains our sentinel.
-		errField, _ := rec["error"].(string)
-		if !strings.Contains(errField, sentinelErr.Error()) {
-			t.Errorf("cleanup log error = %q, expected to contain %q", errField, sentinelErr.Error())
-		}
-	}
-	if !foundCleanup {
-		t.Fatalf("cleanup log not found in operational output:\n%s", opOutput)
-	}
-}
 
 // --- Session correlation fields ---
 
@@ -1170,7 +1077,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 	app.handleRun(w, req)
 
 	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+		t.Fatalf("expected %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
 	}
 
 	// Wait for the operation to complete.
@@ -1255,7 +1162,11 @@ func TestBuildStagingCleanupCorrelation(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
 	defer logging.reset()
 
-	app, _, result, token := setupBuildTest(t)
+	app, _, result, token := setupRunSupervisorTest(t)
+
+	// A synchronous build has no operation identity, so the cleanup log
+	// correlates through the session id.
+	setupBuildSeam(t, app, buildSeamOptions{Output: "ok\n"})
 
 	// Inject a staging seam with a failing Cleanup.
 	sentinelErr := errors.New("injected staging cleanup error")
@@ -1283,21 +1194,9 @@ func TestBuildStagingCleanupCorrelation(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
-
-	// Wait for the operation to complete.
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-	op.Wait()
 
 	// Parse operational JSON and find the cleanup log.
 	opOutput := opBuf.String()
@@ -1323,18 +1222,6 @@ func TestBuildStagingCleanupCorrelation(t *testing.T) {
 		}
 		if opField != "build" {
 			t.Errorf("cleanup log operation = %q, want \"build\"", opField)
-		}
-
-		// Assert operation_id is non-empty and matches.
-		opIDField, ok := rec["operation_id"].(string)
-		if !ok {
-			t.Fatal("cleanup log missing operation_id field")
-		}
-		if opIDField == "" {
-			t.Error("cleanup log operation_id is empty")
-		}
-		if opIDField != opID {
-			t.Errorf("operation_id = %q, want %q", opIDField, opID)
 		}
 
 		// Assert session_id is non-empty and matches.
