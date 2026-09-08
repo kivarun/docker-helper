@@ -78,10 +78,6 @@ module docker_helper 1.0;
 		type user_home_dir_t;
 		type fs_t;
 		type usr_t;
-		type lib_t;
-		type net_conf_t;
-		type http_port_t;
-		type cert_t;
 		type container_file_t;
 		type cgroup_t;
 		type proc_t;
@@ -108,7 +104,6 @@ module docker_helper 1.0;
 		class filesystem { mount remount unmount getattr };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
-		class udp_socket { create setopt connect getattr read write };
 		class capability { dac_read_search sys_admin };
 		class process { transition siginh noatsecure rlimitinh };
 		class process2 { nnp_transition };
@@ -269,14 +264,14 @@ allow docker_helper_t self:tcp_socket { create setopt bind listen accept getattr
 # Bind TCP listener to local node (from live AVC evidence)
 allow docker_helper_t node_t:tcp_socket { node_bind };
 
-# Docker CLI execution (from live AVC evidence)
-# /usr/bin/docker must remain in docker_helper_t (execute_no_trans, not transition)
+# Docker CLI execution (from live AVC evidence). The legacy run path still
+# uses /usr/bin/docker until D0.3b, so this grant intentionally remains.
 allow docker_helper_t container_runtime_exec_t:file { getattr execute read open execute_no_trans };
 
 # Docker reads /etc/passwd for user resolution
 allow docker_helper_t passwd_file_t:file { read open getattr };
 
-# Docker socket access
+# Docker socket access for both the Moby Engine adapter and remaining CLI run.
 allow docker_helper_t container_var_run_t:sock_file { write };
 allow docker_helper_t container_runtime_t:unix_stream_socket { connectto };
 
@@ -414,16 +409,14 @@ allow docker_helper_t docker_helper_workspace_t:file { relabelfrom relabelto };
 allow docker_helper_t docker_helper_workspace_t:lnk_file { getattr relabelfrom relabelto };
 allow docker_helper_t docker_helper_workspace_t:fifo_file { getattr relabelfrom relabelto };
 
-# --- Buildx execution/runtime/network/certificates (proven in enforcing UAT) ---
-
-# Buildx needs lib_t for execute_no_trans (executing the Docker Buildx CLI plugin)
-allow docker_helper_t lib_t:file { execute_no_trans };
-
-# Unix stream socket connectto for Buildx daemon communication
-allow docker_helper_t self:unix_stream_socket { connectto };
-
-# Network configuration read
-allow docker_helper_t net_conf_t:file { read open getattr };
+# --- D0.2 Engine build confinement boundary ---
+#
+# Build now runs through the Moby Engine API and a request-owned BuildKit
+# Session over the Docker socket. The daemon no longer executes docker-buildx,
+# opens a Buildx daemon connection, performs registry DNS/TCP itself, or reads
+# the host trust store for build registry traffic. Those former grants were
+# build-only and are intentionally absent here. The remaining rules below are
+# retained for the legacy Docker CLI run path until D0.3b.
 
 # /proc/sys/net directory search by Docker (from live AVC evidence):
 #   scontext=docker_helper_t tcontext=sysctl_net_t tclass=dir denied { search } name=net
@@ -431,22 +424,6 @@ allow docker_helper_t sysctl_net_t:dir { search };
 
 # sysctl_net_t file read/open for the Go listener (proven in enforcing UAT).
 allow docker_helper_t sysctl_net_t:file { read open };
-
-# UDP socket for DNS resolution (proven in enforcing UAT)
-allow docker_helper_t self:udp_socket {
-	create setopt connect getattr read write
-};
-
-# TCP socket for Buildx network communication
-allow docker_helper_t self:tcp_socket { connect getopt };
-
-# HTTP port connection for registry access
-allow docker_helper_t http_port_t:tcp_socket { name_connect };
-
-# System certificate access for TLS verification
-allow docker_helper_t cert_t:dir { search read open };
-allow docker_helper_t cert_t:lnk_file { read };
-allow docker_helper_t cert_t:file { read open getattr };
 
 # cgroup traversal for Docker (from live AVC evidence):
 #   scontext=docker_helper_t tcontext=cgroup_t tclass=dir denied { search } comm="docker"
