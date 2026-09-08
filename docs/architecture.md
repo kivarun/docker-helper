@@ -99,18 +99,18 @@ reference client     curl / native adapter
       │
 docker-helper daemon
       │
-      ├── Moby Engine API ─── registry login, pull
+      ├── Moby Engine API ─── registry login, pull, build
       │
-      └── Docker CLI ─────── build, run
+      └── Docker CLI ─────── run
               │
           Docker Engine
 ```
 
-Backend ownership is currently split: `registry login` and `POST /pull`
-execute through the daemon's single shared Moby Engine API adapter, while
-`build` and `run` still execute the Docker CLI. The daemon is not yet fully
-Moby-only; the remaining D0 Engine API migrations extend the Engine path and
-retire the CLI path.
+Backend ownership is currently split: `registry login`, `POST /pull`, and
+the synchronous `POST /build` execute through the daemon's single shared
+Moby Engine API adapter, while `run` still executes the Docker CLI. The
+daemon is not yet fully Moby-only; the remaining D0 Engine API migration
+(run) extends the Engine path and retires the CLI path.
 
 There are exactly four bearer classes, described by the [authority
 model](#authority-model): the admin token authenticates the administrator, a
@@ -725,7 +725,18 @@ owned and running but removes that authentication key.
 ### Session lifecycle
 
 ```
-POST /build or POST /run  (session token)
+POST /build  (session token)
+    │
+    ├── resolves session (launcher-owned)
+    ├── workspace-use lease (MAC, when active)
+    ├── validates and stages the build context (existing workspace policy)
+    ├── synchronous coordinator admission (atomic shutdown/Launcher gate)
+    ├── resolves session registry credentials just in time
+    ├── Engine API ImageBuild (shared adapter, bounded output)
+    ├── staging cleanup owns the request cleanup; lease released on success
+    └── writes build.start/build.finish audit with no operation identity
+    │
+POST /run  (session token)
     │
     ├── resolves session (launcher-owned)
     ├── execution identity = principal UID:GID or daemon UID:GID
@@ -1366,10 +1377,11 @@ the command returns an error.
 ### Operation lifecycle
 
 This section describes the legacy Docker CLI operation lifecycle owned by
-`operationSupervisor` — `build` and `run`. The Engine-backed synchronous
-requests (`pull`, and `registry login` validation) follow the synchronous
-path described under [Pull](#pull) and [Registry login](#registry-login);
-they have no Operation identity and never register with the supervisor.
+`operationSupervisor` — `run`. The Engine-backed synchronous requests
+(`build`, `pull`, and `registry login` validation) follow the synchronous
+path described under [Build](#build), [Pull](#pull), and
+[Registry login](#registry-login); they have no Operation identity and
+never register with the supervisor.
 
 ```
 Authentication
@@ -1429,8 +1441,9 @@ Key internal guarantees that make cancel and shutdown safe:
   orphan containers;
 - `<kind>.finish` audit event is emitted exactly once per operation.
 
-`POST /build` and `POST /run` return HTTP 201 with an `operation_id`;
-the client tracks progress through the operation endpoints.
+`POST /run` returns HTTP 201 with an `operation_id`; the client tracks
+progress through the operation endpoints. `POST /build` is synchronous and
+has no Operation identity (see [Build](#build)).
 
 **`GET /operations/{id}`** (session token) — status and metadata:
 
@@ -1475,20 +1488,64 @@ requested offset refers to evicted data.
 
 ### Build
 
-`docker-helper build` hides the async operation lifecycle; it streams
-logs and propagates the container exit code. SIGINT/SIGTERM cancels the
-operation (exit 130/143). `--context` must be relative to the session
-workspace.
+`POST /build` executes synchronously through the same production Engine
+adapter used by `registry login` and `pull`; there is no Operation
+identity: the endpoint is invisible to `GET /operations/{id}`, operation
+logs, operation cancel, and retention, and the final result comes back in
+the response.
 
-Validation details:
+Flow: Session authentication → workspace-use lease (when MAC is active) →
+request validation → synchronous-coordinator admission (atomic
+shutdown/Launcher gate) → `build.start` audit → staging → credential
+resolution → Engine `ImageBuild` → `build.finish` audit → response. The
+request itself owns staging cleanup and releases the workspace-use lease
+only after workspace-dependent cleanup completed, on success, build
+failure, cancellation, daemon shutdown, preparation failure, and Engine
+failure alike.
+
+The build context is uploaded to the Engine as a tar stream generated from
+the trusted staged copy ([Build context](#build-context)); symlinks are
+preserved as symlink entries. The adapter sends the Moby `ImageBuild`
+request with the target image tag, the staged Dockerfile path relative to
+the context, `--pull` (`PullParent`, matching the CLI behavior of always
+pulling base images), intermediate-container removal (the daemon default),
+and the BuildKit builder version required by the supported contract.
+Provenance/attestation records are a buildx client-side feature the old CLI
+invocation disabled explicitly; the direct Engine `ImageBuild` path never
+emits them.
+
+Registry credentials for private `FROM` images are resolved just in time
+from the one protected Session Docker credential store: only the
+registries named by the staged Dockerfile's `FROM` lines are projected
+into the Engine request auth map (Docker Hub keeps its established
+canonical key). Credentials are never persisted anywhere new, never enter
+durable Operations, argv, environment, audit, or operational logs.
+
+The combined Engine build stream is rendered into the existing bounded
+output primitive: the newest output is retained, `truncated` reports the
+bounded-buffer contract, the complete stream is consumed until the
+terminal outcome even after the cap, and embedded Engine JSON errors are
+detected. Nothing is written to journald and no durable workload log
+exists.
+
+Validation details (unchanged):
 
 - context may be relative (joined with workspace) or absolute (must be
   inside workspace);
 - dockerfile must be relative to context;
 - all paths are resolved through `EvalSymlinks` before `pathWithin` checks;
 - build-arg names must match `^[A-Za-z_][A-Za-z0-9_]*$`;
-- build-arg keys are sorted for deterministic Docker argv;
-- build-arg values are never logged or audited (only `build_arg_keys`).
+- build-arg values are never logged or audited (only `build_arg_keys`,
+  sorted for deterministic request encoding).
+
+Response contract: HTTP 200 `{"ok":true,"output":...,"truncated":...,
+"duration":...}` on success; failures carry
+`{"ok":false,"code":...,"message":...,"output":...,"truncated":...,
+"duration":...}` with the codes below. SIGINT/SIGTERM cancels the
+in-flight request (CLI exit 130/143); a client-cancelled build is
+answered with the generic build failure and audited as `cancelled`. A
+daemon shutdown cancels live builds through the synchronous coordinator
+with the same contract.
 
 ### Run
 
@@ -1636,11 +1693,12 @@ permissions on first login. The persisted representation is the Docker CLI
 (host[:port]; scheme and path stripped), written atomically with `0600`
 permissions by docker-helper itself. The credential entry is replaced only
 for that registry; previously stored valid credentials are left unchanged
-when validation fails. Later pull/build operations read the stored
+when validation fails. Later pull/build requests read the stored
 credential just in time: pull encodes it into the Engine `X-Registry-Auth`
-header, and the legacy docker CLI build backend keeps consuming the same
-file via `--config`. The password never enters argv, environment,
-logs, audit, SQLite, or error payloads. The credential is removed with the
+header, and build projects the `FROM`-referenced registries into the
+Engine `X-Registry-Config` auth map. The password never enters argv,
+environment, logs, audit, SQLite, or error payloads. The credential is
+removed with the
 Session runtime directory.
 
 On success, the endpoint returns HTTP 200 with `{"ok": true}`. On failure,
@@ -1715,15 +1773,17 @@ stable between validation and the Docker bind mount.
 
 The Linux build implementation creates an isolated helper-owned staging
 copy of the build context. Traversal is FD-relative and restricted with
-`openat2` flags (`RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`). Docker
-receives only the staged context and Dockerfile paths, never the
-original workspace paths.
+`openat2` flags (`RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`). The Engine
+receives only the staged context — uploaded as a tar stream generated
+from the staged copy — and the staged Dockerfile path, never the original
+workspace paths.
 
 On platforms or kernels where `openat2` is unavailable, the operation
 fails closed without falling back to original workspace paths.
 
-Staging directories are cleaned up as part of the build operation
-lifecycle.
+Staging directories are cleaned up by the synchronous build request
+itself: the request is the single cleanup owner and releases the
+workspace-use lease only when workspace-dependent cleanup completed.
 
 ### Environment and trusted CA
 
@@ -1814,20 +1874,21 @@ runs on access:
 - `operation_log_max_bytes` — per-operation log buffer size; older output
   is evicted when exceeded.
 
-Cleanup is invoked during operation creation (`POST /build`, `POST /run`)
-and operation status access (`GET /operations/{id}`). There is no
-background retention worker or periodic ticker.
+Cleanup is invoked during operation creation (`POST /run`) and operation
+status access (`GET /operations/{id}`). There is no background retention
+worker or periodic ticker.
 
 Cancellation contract: `POST /operations/{id}/cancel` (see
 [Operation lifecycle](#operation-lifecycle)) shares the same termination
 lifecycle as daemon shutdown; the first termination reason wins.
 
-CLI signal handling on `build` and `run`:
+CLI signal handling:
 
-- SIGINT -> best-effort cancel + exit 130;
-- SIGTERM -> best-effort cancel + exit 143;
-- cancel failure prints a diagnostic but does not replace the signal exit
-  status.
+- `build`: SIGINT/SIGTERM cancels the in-flight synchronous request and
+  the CLI exits 130/143;
+- `run`: SIGINT -> best-effort cancel + exit 130, SIGTERM -> best-effort
+  cancel + exit 143; cancel failure prints a diagnostic but does not
+  replace the signal exit status.
 
 ## Service lifecycle
 
@@ -1835,29 +1896,34 @@ CLI signal handling on `build` and `run`:
 
 docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 
-- the legacy operation admission gate closes immediately (no new build/run
+- the legacy operation admission gate closes immediately (no new run
   operations accepted by `operationSupervisor`);
 - the synchronous execution coordinator closes Engine-backed synchronous
-  request admission (no new `pull` requests accepted);
+  request admission (no new `build` or `pull` requests accepted);
 - HTTP drain, legacy operation termination, and synchronous request
   termination share one `shutdown_timeout` budget;
 - in-flight HTTP requests are drained;
-- running build/run processes receive graceful SIGTERM;
+- running run processes receive graceful SIGTERM;
 - for run, helper-owned containers are cleaned up via cidfile before
   force-killing the Docker CLI process;
 - at the reserved force-cleanup window before the deadline, still-running
   processes are force-killed;
 - the completion goroutine owns `cmd.Wait()` and reaps each process;
-- live synchronous Engine requests (`pull`) are cancelled by context
-  cancellation and answered with the generic pull failure; a pull has no
-  durable Operation identity, so there is no persisted cancellation state
-  and nothing to recover;
+- live synchronous Engine requests (`build`, `pull`) are cancelled by
+  context cancellation and answered with the generic request failure; a
+  synchronous request has no durable Operation identity, so there is no
+  persisted cancellation state and nothing to recover;
+- in-flight synchronous builds clean up their staging state before the
+  handler returns;
 - after synchronous request termination, the shared Engine adapter's pooled
   Moby connections are released;
+- the shared Engine adapter is released only after the HTTP drain
+  completes: every handler that could use it — including a synchronous
+  request or a lazy adapter construction — has finished;
 - the lock is held during the entire drain so a second instance cannot
   start until the first fully stops;
-- helper-owned build/run processes and containers are never left unmanaged
-  after shutdown.
+- helper-owned run processes and containers, and in-flight synchronous
+  builds' staging state, are never left unmanaged after shutdown.
 
 After `TimeoutStopSec=45s`, systemd sends SIGKILL if any processes
 remain. The internal `shutdown_timeout` budget is therefore bounded: its
@@ -1977,13 +2043,16 @@ Current error codes (non-exhaustive):
 | `launcher_name_requires_principal` | `GET /sessions?launcher=` | a Launcher-name narrowing selector was supplied without a Principal scope (names are never searched globally) |
 | `invalid_selector` | `GET /sessions` | a narrowing selector is illegal for the authenticated authority (a Principal selector under a Principal credential, any selector under a Launcher credential) |
 | `shutting_down` | `POST /build`, `POST /run`, `POST /pull` | daemon is shutting down |
+| `launcher_unavailable` | `POST /build`, `POST /run` | the owning Launcher is quiesced or unavailable |
+| `build_failed` | `POST /build` | build: the backend reported an in-band build failure (422) |
 | `docker_pull_failed` | `POST /pull` | pull: unexpected Engine failure, unreachable Engine, or cancelled pull |
 | `image_not_found` | `POST /pull` | pull: image/repository not found |
 | `pull_access_denied` | `POST /pull` | pull: authentication/authorization denied |
-| `registry_unavailable` | `POST /pull`, `POST /registry/login` | registry/network/backend failure |
-| `registry_auth_denied` | `POST /registry/login` | docker login: authentication/authorization denied |
-| `backend_unavailable` | `POST /registry/login` | the Engine endpoint cannot be reached or observed |
-| `backend_failure` | `POST /registry/login` | unexpected Engine interaction prevents a trustworthy result |
+| `docker_build_failed` | `POST /build` | build: unexpected Engine failure, unreachable Engine, or cancelled build |
+| `registry_unavailable` | `POST /build`, `POST /pull`, `POST /registry/login` | registry/network/backend failure |
+| `registry_auth_denied` | `POST /build`, `POST /registry/login` | authentication/authorization denied for the private FROM/login |
+| `backend_unavailable` | `POST /build`, `POST /registry/login` | the Engine endpoint cannot be reached or observed |
+| `backend_failure` | `POST /build`, `POST /registry/login` | unexpected Engine interaction prevents a trustworthy result |
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
 | `user_mode_owner_reserved` | Principal/Launcher mutation endpoints (user mode) | the target is the reserved transparent user-mode owner chain (daemon-owner Principal or its `default` Launcher) and the mutation would violate the startup contract |
 
@@ -1991,10 +2060,11 @@ After successful session authentication, every `POST /pull`,
 `POST /build`, and `POST /run` request produces exactly one of:
 
 - `<kind>.rejected` — the request was rejected before acceptance; or
-- `<kind>.start` — the request was accepted. For `build` and `run` the
-  request is accepted as an operation (`operation_id` is carried by the
-  start event and the response); for `pull` the request is accepted as a
-  synchronous Engine request (`pull.start` carries no `operation_id`).
+- `<kind>.start` — the request was accepted. For `run` the request is
+  accepted as an operation (`operation_id` is carried by the start event
+  and the response); for `build` and `pull` the request is accepted as a
+  synchronous Engine request (`build.start` and `pull.start` carry no
+  `operation_id`).
 
 where `<kind>` is `pull`, `build`, or `run`. Authentication failures
 remain owned by the existing `auth.failure` path and do not additionally
@@ -2013,7 +2083,8 @@ The `result` field exactly matches the public API response `code`.
 Rejected events intentionally omit request payload metadata (image,
 mounts, env, command, context, dockerfile, etc.) to avoid logging
 partially validated input. No `operation_id` is included because a
-rejected request was never accepted as an operation.
+rejected request was never accepted as an operation; for the synchronous
+requests (`build`, `pull`) the request never becomes one.
 
 ### Audit logging
 
@@ -2106,13 +2177,13 @@ Event schemas with non-obvious fields:
 
 #### build.start
 
-Emitted before a Docker build begins.
+Emitted before a Docker build begins. A synchronous build has no
+operation identity.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `request_id` | string | request correlation ID |
 | `session_id` | string | session identifier |
-| `operation_id` | string | operation identifier |
 | `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
@@ -2121,17 +2192,17 @@ Emitted before a Docker build begins.
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |
 
-No `result` or `duration` field.
+No `result`, `duration`, `operation_id`, or `exit_code` field.
 
 #### build.finish
 
-Emitted after a Docker build completes (success or failure).
-Does not include `request_id` because completion is not request-scoped.
+Emitted after a Docker build completes (success, failure, cancellation,
+or Engine failure). Does not include `request_id` because completion is
+not request-scoped.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
-| `operation_id` | string | operation identifier |
 | `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
@@ -2140,8 +2211,10 @@ Does not include `request_id` because completion is not request-scoped.
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |
 | `result` | string | `succeeded`, `docker_build_failed`, or `cancelled` |
-| `exit_code` | number | present when an exit code is available |
 | `duration` | string | build wall-clock time |
+
+No `operation_id` or `exit_code` field: a synchronous build has no
+operation identity and no process exit code.
 
 #### session.create
 
@@ -2465,17 +2538,19 @@ internals and are not exposed to the API.
 
 The per-operation output buffer accessed via `GET /operations/{id}/logs`
 is intentionally separate: it captures the merged stdout/stderr stream
-from the Docker CLI process and may contain Docker build/run status
-output, container stdout/stderr, and build process output. That stream is
-not part of the daemon audit or operational logs.
+from the Docker CLI run process and may contain Docker run status output
+and container stdout/stderr. That stream is not part of the daemon audit
+or operational logs. The synchronous build result is the same: its
+bounded Engine build stream is delivered to the API caller only and is
+not written to audit, operational logs, or journald.
 
 Examples (ownership provenance fields reflect the documented schema):
 
 Successful build:
 
 ```json
-{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
-{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"5s"}
+{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
+{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"5s"}
 ```
 
 Successful session creation:

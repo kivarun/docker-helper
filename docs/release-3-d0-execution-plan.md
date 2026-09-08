@@ -441,15 +441,22 @@ Dependencies: D0.1 closed.
 6. remove build use of `operationSupervisor` and its public Operation
    status/log/cancel path once tests pass.
 
-Progress note: steps 1–2 are landed (registry login validated through the
-Engine adapter with the Session store unchanged); step 3 is landed (pull
-migrated to the Engine pull stream with just-in-time Session credential
-resolution, admitted through the synchronous execution coordinator with
-`shutting_down` refusal). The D0.2 checkpoint-2 correction pass closed the
-pull scope: the App now owns one shared Engine adapter for its lifetime
-(created on first use, released at daemon shutdown), and the canonical
-documents describe the current split ownership. Steps 4–6 (synchronous
-build migration) remain and have not started.
+Progress note: steps 1–3 are landed (registry login validated through the
+Engine adapter with the Session store unchanged; pull migrated to the
+Engine pull stream with just-in-time Session credential resolution,
+admitted through the synchronous execution coordinator with
+`shutting_down` refusal; the checkpoint-2 correction pass additionally
+closed the pull scope — the App owns one shared Engine adapter for its
+lifetime, created on first use, released only after the HTTP drain at
+daemon shutdown, and the canonical documents describe the current split
+ownership). Steps 4–6 are landed: `POST /build` is synchronous through the
+same shared Engine adapter (`ImageBuild`), admitted through the
+synchronous execution coordinator with Launcher-scoped admission, with
+just-in-time FROM-based Session credential projection, bounded combined
+output, and no Operation identity; build no longer registers with
+`operationSupervisor`, whose build Operation status/log/cancel path now
+serves legacy `run` only. The synchronous build request owns staging
+cleanup and the MAC lease release on every path.
 
 **Ready boundary:** pull/registry/build have exactly one backend owner and build
 has no Operation identity. Legacy run may still use the old supervisor, so the
@@ -574,9 +581,8 @@ with the independent cgroup feasibility spike), D0.2 after D0.1, and
 D0.3b/D1/D2 readiness after the cgroup gate.
 
 Current state: **D0.1 is CLOSED** (pinned client plus the recorded
-required-mode matrix run). **D0.2 registry login and pull are migrated and
-accepted**; the checkpoint-2 correction pass closed the pull scope (shared
-Engine adapter lifecycle ownership, canonical-doc consistency). The next
-executable step is D0.2 step 4 — synchronous build migration (steps 4–6);
-it has not started. The cgroup feasibility gate remains a prerequisite
+required-mode matrix run). **D0.2 registry login, pull, and synchronous
+build are migrated** (build with no Operation identity; the supervisor is
+run-only). The next executable step is D0.3b — one-shot run migration —
+and it has not started. The cgroup feasibility gate remains a prerequisite
 before any D0.3b/D1/D2 readiness is declared.
