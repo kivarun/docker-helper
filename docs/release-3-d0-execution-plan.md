@@ -458,7 +458,7 @@ status/log/cancel path now serves legacy `run` only. The synchronous
 build request owns staging cleanup and the MAC lease release on every
 path.
 
-Correction (open, blocking D0.2 closure): the first synchronous-build
+Correction (landed, D0.2-closing): the first synchronous-build
 implementation shipped a temporary workaround — it parsed the staged
 Dockerfile's `FROM` lines itself and pre-pulled every detected base
 image through the Engine pull path, because a plain Engine `ImageBuild`
@@ -478,8 +478,8 @@ host BuildKit asks about (every Docker Hub spelling collapses onto the
 one canonical store key; identity tokens keep their priority; nothing
 stored degrades to anonymous authentication and a store read failure is
 operational), the session is created once, started with the build, and
-closed and joined on every exit path bounded by the request/shutdown
-context, and `pull=1` preserves the base-image freshness the CLI `--pull`
+cancelled, closed, and joined in that order on every exit path, and
+`pull=1` preserves the base-image freshness the CLI `--pull`
 produced without any helper-side pre-pull. Removed with the workaround:
 `dockerfileFromImages`, `dockerfileFromEntries`,
 `dockerfileAuthRegistries`, `resolveBuildAuthCredentials`,
@@ -497,8 +497,37 @@ BuildKit build: the Engine relays BuildKit solve progress as
 base64 payload as the aux value) rather than plain stream lines, so the
 adapter now decodes and renders those traces client-side into the plain
 progress lines the docker CLI printed, inside the bounded output.
-D0.2 stays open until this correction passes the real-Engine matrix and
-the full CI gate.
+
+The finalization review then proved the session lifecycle contract
+bounded end to end. BuildKit's `Session.Run` holds the session mutex
+while its dial is in flight and `Session.Close` waits for that mutex, so
+the previous close-before-cancel ordering left an unbounded wait on any
+build exit path whenever the `/session` transport stalled in the HTTP
+upgrade — even with the parent request context still live. The
+finalization is now one explicit owner in one fixed order — after the
+build stream reached its terminal outcome, cancel the build/session
+context, close the session, join its goroutine, classify the outcome —
+and the session dial owns its connection: it performs the upgrade
+round-trip through the Engine client's public dialer, closes the
+connection the moment the session context is done (which releases a
+stalled upgrade), and maps a failure under an already-cancelled session
+context to a context error, so the intentional finalization
+cancellation never turns a build's own terminal result into a session
+transport failure while a session transport failure that arrived before
+finalization still is one. The stalled `/session` upgrade regression
+proves the bounded lifecycle for both a successful build and a
+trustworthy build failure: the request returns after the build's
+terminal result, the stalled handler observes the disconnect, no
+request-owned session goroutine survives, and the build's own result
+category is preserved; against the previous ordering the same test
+fails on the unbounded finalization wait.
+
+**D0.2 is CLOSED.** The correction passed the real-Engine matrix and the
+full CI gate on source SHA `ad4efc005977ee96e7629207c1017eb8e635227c`
+(GitHub Actions run `34253293392`; required jobs `checks`,
+`engine-registry-login`, `engine-pull`, `engine-build`, `static-build`,
+`packaging-integration`, `selinux-policy`, and
+`x509-openssl-differential` all green).
 
 **Ready boundary:** pull/registry/build have exactly one backend owner and build
 has no Operation identity. Legacy run may still use the old supervisor, so the
@@ -631,11 +660,18 @@ with the independent cgroup feasibility spike), D0.2 after D0.1, and
 D0.3b/D1/D2 readiness after the cgroup gate.
 
 Current state: **D0.1 is CLOSED** (pinned client plus the recorded
-required-mode matrix run). **D0.2 registry login, pull, and synchronous
-build are migrated** (build with no Operation identity; the supervisor is
-run-only), but **D0.2 is NOT closed**: the synchronous build correction
-(request-owned BuildKit session replacing the temporary FROM pre-pull
-workaround) must pass the real-Engine matrix and the full CI gate first.
-The next executable step is D0.3b — one-shot run migration —
-and it has not started. The cgroup feasibility gate remains a prerequisite
-before any D0.3b/D1/D2 readiness is declared.
+required-mode matrix run). **D0.2 is CLOSED**: registry login and pull
+run through the shared Engine API, and the synchronous build runs
+through the same shared Engine API with the native request-owned
+BuildKit session — host-scoped just-in-time auth backed by the Session
+credential store, no Dockerfile semantic pre-parser, native BuildKit
+source semantics (multi-stage stage aliases, ARG-substituted `FROM`,
+external `COPY --from=<registry image>`), `PullParent` base-image
+freshness, BuildKit progress trace rendering, no Operation identity
+(`operationSupervisor` is legacy run-only), and a session lifecycle
+that is cancelled, closed, and joined in that order on every build exit
+path, proven bounded including the stalled `/session` upgrade
+regression (recorded in the D0.2 section above). The next executable
+step is D0.3b — one-shot run migration — and it has not started. The
+cgroup feasibility gate remains a prerequisite before any D0.3b/D1/D2
+readiness is declared.
