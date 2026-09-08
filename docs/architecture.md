@@ -1496,37 +1496,51 @@ the response.
 
 Flow: Session authentication → workspace-use lease (when MAC is active) →
 request validation → synchronous-coordinator admission (atomic
-shutdown/Launcher gate) → `build.start` audit → staging → credential
-resolution → Engine `ImageBuild` → `build.finish` audit → response. The
-request itself owns staging cleanup and releases the workspace-use lease
-only after workspace-dependent cleanup completed, on success, build
-failure, cancellation, daemon shutdown, preparation failure, and Engine
-failure alike.
+shutdown/Launcher gate) → `build.start` audit → staging → Engine
+`ImageBuild` with a request-owned BuildKit session → `build.finish` audit
+→ response. The request itself owns staging cleanup and releases the
+workspace-use lease only after workspace-dependent cleanup completed, on
+success, build failure, cancellation, daemon shutdown, preparation
+failure, and Engine failure alike.
 
 The build context is uploaded to the Engine as a tar stream generated from
 the trusted staged copy ([Build context](#build-context)); symlinks are
-preserved as symlink entries. The adapter first refreshes every base image
-the staged Dockerfile's `FROM` lines name through the Engine pull path —
-the same pull operation the `pull` endpoint uses, with the Session
-credentials — and then sends the Moby `ImageBuild` request with the target
-image tag, the staged Dockerfile path relative to the context, local base
-resolution, intermediate-container removal (the daemon default), and the
-BuildKit builder version required by the supported contract. The
-pre-pull is required because the plain Engine `ImageBuild` request has no
-BuildKit client session: remote source resolution through it is refused
-with `no active sessions` (moby/moby#48112) and the builder ignores the
-request auth map, so session-private `FROM` images would be unreachable.
-This keeps the same effective base-image freshness the CLI `--pull`
-produced. Provenance/attestation records are a buildx client-side feature
-the old CLI invocation disabled explicitly; the direct Engine `ImageBuild`
-path never emits them.
+preserved as symlink entries. Docker and BuildKit own the Dockerfile and
+its source semantics: docker-helper does not parse the Dockerfile and
+discovers no registries from it. The adapter sends the Moby `ImageBuild`
+request with the target image tag, the staged Dockerfile path relative to
+the context, `pull=1` — the base-image freshness the CLI `--pull`
+produced — intermediate-container removal (the daemon default), and the
+BuildKit builder version required by the supported contract.
 
-Registry credentials for private `FROM` images are resolved just in time
-from the one protected Session Docker credential store: only the
-registries named by the staged Dockerfile's `FROM` lines are projected
-into the pre-pull credentials (Docker Hub keeps its established
-canonical key). Credentials are never persisted anywhere new, never enter
-durable Operations, argv, environment, audit, or operational logs.
+Because the plain Engine `ImageBuild` request cannot resolve remote
+sources on its own (`no active sessions`, moby/moby#48112), the adapter
+owns one BuildKit client session per synchronous build request: it
+registers the auth provider on it, dials the Engine `/session` hijack
+endpoint through the shared App-owned Moby client, and sets
+`ImageBuildOptions.SessionID` to that session so the daemon resolves
+every remote source — a `FROM` base, an ARG-substituted `FROM`, a stage
+alias, or an external `COPY --from=<registry image>` — through it. The
+session is created once per build, started with the build, and closed
+and joined on every exit path, bounded by the request/shutdown context;
+a session transport failure is a `backend_failure`, not a build failure.
+Provenance/attestation records are a buildx client-side feature the old
+CLI invocation disabled explicitly; the direct Engine `ImageBuild` path
+never emits them.
+
+Registry credentials for private sources are resolved just in time by the
+request-owned BuildKit auth session: BuildKit asks for exactly the
+registry host it is resolving, the host is canonicalized at the Session
+credential-store boundary (every Docker Hub spelling — `docker.io`,
+`index.docker.io`, `registry-1.docker.io`, and the historical config key
+— resolves the one stored Docker Hub credential), and exactly that
+host's stored credential is returned to that auth RPC, with a stored
+identity token keeping its priority over an auth pair. Nothing stored
+for the host degrades to anonymous authentication; a store read failure
+is an operational build failure, not a silent fallback. Credentials are
+never persisted anywhere new, never enter durable Operations, argv,
+environment, audit, or operational logs, and credential material for an
+unrelated registry is never returned for the requested host.
 
 The combined Engine build stream is rendered into the existing bounded
 output primitive: the newest output is retained, `truncated` reports the
@@ -1701,9 +1715,10 @@ permissions on first login. The persisted representation is the Docker CLI
 permissions by docker-helper itself. The credential entry is replaced only
 for that registry; previously stored valid credentials are left unchanged
 when validation fails. Later pull/build requests read the stored
-credential just in time: pull encodes it into the Engine `X-Registry-Auth`
-header, and build projects the `FROM`-referenced registries into the
-Engine `X-Registry-Config` auth map. The password never enters argv,
+credential just in time for the exact registry the backend asks about:
+pull encodes it into the Engine `X-Registry-Auth` header, and the
+request-owned BuildKit auth session resolves it for the registry host
+BuildKit is resolving. The password never enters argv,
 environment, logs, audit, SQLite, or error payloads. The credential is
 removed with the
 Session runtime directory.
@@ -2055,7 +2070,7 @@ Current error codes (non-exhaustive):
 | `docker_pull_failed` | `POST /pull` | pull: unexpected Engine failure, unreachable Engine, or cancelled pull |
 | `image_not_found` | `POST /pull` | pull: image/repository not found |
 | `pull_access_denied` | `POST /pull` | pull: authentication/authorization denied |
-| `docker_build_failed` | `POST /build` | build: unexpected Engine failure, unreachable Engine, or cancelled build |
+| `docker_build_failed` | `POST /build` | build: request-owned preparation failure (staging, context tar, adapter construction) or cancelled build |
 | `registry_unavailable` | `POST /build`, `POST /pull`, `POST /registry/login` | registry/network/backend failure |
 | `registry_auth_denied` | `POST /build`, `POST /registry/login` | authentication/authorization denied for the private FROM/login |
 | `backend_unavailable` | `POST /build`, `POST /registry/login` | the Engine endpoint cannot be reached or observed |

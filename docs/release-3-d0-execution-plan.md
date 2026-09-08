@@ -452,11 +452,46 @@ daemon shutdown, and the canonical documents describe the current split
 ownership). Steps 4–6 are landed: `POST /build` is synchronous through the
 same shared Engine adapter (`ImageBuild`), admitted through the
 synchronous execution coordinator with Launcher-scoped admission, with
-just-in-time FROM-based Session credential projection, bounded combined
-output, and no Operation identity; build no longer registers with
-`operationSupervisor`, whose build Operation status/log/cancel path now
-serves legacy `run` only. The synchronous build request owns staging
-cleanup and the MAC lease release on every path.
+bounded combined output and no Operation identity; build no longer
+registers with `operationSupervisor`, whose build Operation
+status/log/cancel path now serves legacy `run` only. The synchronous
+build request owns staging cleanup and the MAC lease release on every
+path.
+
+Correction (open, blocking D0.2 closure): the first synchronous-build
+implementation shipped a temporary workaround — it parsed the staged
+Dockerfile's `FROM` lines itself and pre-pulled every detected base
+image through the Engine pull path, because a plain Engine `ImageBuild`
+request cannot resolve remote sources without a client session
+(moby/moby#48112). Review rejected the workaround as a semantic
+regression: a stage alias was treated as an external image,
+ARG-substituted `FROM` references were invisible to the parser, and
+external BuildKit sources such as `COPY --from=<registry image>` had no
+helper-side coverage at all. docker-helper must not grow a second
+Dockerfile parser. The current implementation removes the workaround and
+restores native semantics: the adapter owns one BuildKit client session
+per synchronous build request (auth provider registered on it, dialed
+through the shared App-owned Moby client's `/session` hijack endpoint,
+session ID handed to `ImageBuild`), credentials are resolved just in
+time by the request-owned BuildKit auth session for exactly the registry
+host BuildKit asks about (every Docker Hub spelling collapses onto the
+one canonical store key; identity tokens keep their priority; nothing
+stored degrades to anonymous authentication and a store read failure is
+operational), the session is created once, started with the build, and
+closed and joined on every exit path bounded by the request/shutdown
+context, and `pull=1` preserves the base-image freshness the CLI `--pull`
+produced without any helper-side pre-pull. Removed with the workaround:
+`dockerfileFromImages`, `dockerfileFromEntries`,
+`dockerfileAuthRegistries`, `resolveBuildAuthCredentials`,
+`pullBuildBase`, the `FromImages`/`Auths` spec fields, and the
+`ImageBuild` `AuthConfigs` encoding; nothing replaces the parser. The
+temporary pre-pull approach remains recorded here as historical evidence
+of why the session path is required; it is not current implementation
+truth. The `engineErrBackendFailure` build contract mismatch
+(documented `502 backend_failure`, implemented as the 500
+`docker_build_failed` fall-through) is corrected with a regression test.
+D0.2 stays open until this correction passes the real-Engine matrix and
+the full CI gate.
 
 **Ready boundary:** pull/registry/build have exactly one backend owner and build
 has no Operation identity. Legacy run may still use the old supervisor, so the
@@ -569,7 +604,15 @@ Required migration/regression cases include:
 - MAC/runtime state remains owned through transient and ambiguous failure;
 - old build/run supervisor cannot be removed while Launcher admission/runtime
   inspection still calls it;
-- private pull/private `FROM` plus registry-login secret canaries;
+- private pull/private source plus registry-login secret canaries, including
+  an unrelated stored credential never being returned for another requested
+  registry host;
+- native BuildKit source semantics through the request-owned session:
+  multi-stage stage aliases, ARG-substituted `FROM` with default and
+  build-arg override, and an external `COPY --from=<registry image>` remote
+  source;
+- base-image freshness: a re-pushed base at the same tag is refreshed by the
+  build (`pull=1`), without helper-side pre-pull;
 - system/rootless cgroup enforcement before R3 run/container readiness.
 
 ## D0 start gate after Phase 0
@@ -583,6 +626,9 @@ D0.3b/D1/D2 readiness after the cgroup gate.
 Current state: **D0.1 is CLOSED** (pinned client plus the recorded
 required-mode matrix run). **D0.2 registry login, pull, and synchronous
 build are migrated** (build with no Operation identity; the supervisor is
-run-only). The next executable step is D0.3b — one-shot run migration —
+run-only), but **D0.2 is NOT closed**: the synchronous build correction
+(request-owned BuildKit session replacing the temporary FROM pre-pull
+workaround) must pass the real-Engine matrix and the full CI gate first.
+The next executable step is D0.3b — one-shot run migration —
 and it has not started. The cgroup feasibility gate remains a prerequisite
 before any D0.3b/D1/D2 readiness is declared.
