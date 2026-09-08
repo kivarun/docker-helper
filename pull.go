@@ -1,26 +1,58 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 )
 
-// classifyPullFailure maps a docker pull failure's stderr output to an HTTP
-// status, error code, and message. Expected user/domain failures are
-// distinguished from generic failures; the docker CLI exposes no structured
-// error, so the classification relies on the daemon's stable stderr lines.
-func classifyPullFailure(output string) (status int, code, message string) {
-	switch classifyDockerError(output) {
-	case dockerErrorImageNotFound:
-		return http.StatusNotFound, "image_not_found", "image not found"
-	case dockerErrorAuthDenied:
-		return http.StatusUnauthorized, "pull_access_denied", "pull access denied or authentication required"
-	case dockerErrorNetwork:
-		return http.StatusBadGateway, "registry_unavailable", "registry unreachable or backend failure"
+// writePullEngineFailure maps a normalized Engine error to the accepted pull
+// failure contract. The response never carries credentials or raw Engine
+// payloads; the rendered pull progress output is preserved for the client as
+// before. Backend failures, an unreachable Engine, and a cancelled request
+// share the generic pull failure response: a cancelled pull produces no
+// trustworthy result, exactly as the killed docker CLI did.
+func writePullEngineFailure(ctx context.Context, w http.ResponseWriter, engErr *engineError, result enginePullResult, duration string) {
+	switch engErr.kind {
+	case engineErrImageNotFound:
+		writeJSONRaw(ctx, w, http.StatusNotFound, pullResponse{
+			OK:        false,
+			Code:      "image_not_found",
+			Message:   "image not found",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrRegistryAuthDenied:
+		writeJSONRaw(ctx, w, http.StatusUnauthorized, pullResponse{
+			OK:        false,
+			Code:      "pull_access_denied",
+			Message:   "pull access denied or authentication required",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrRegistryUnavailable:
+		writeJSONRaw(ctx, w, http.StatusBadGateway, pullResponse{
+			OK:        false,
+			Code:      "registry_unavailable",
+			Message:   "registry unreachable or backend failure",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
 	default:
-		return http.StatusInternalServerError, "docker_pull_failed", "docker pull failed"
+		writeJSONRaw(ctx, w, http.StatusInternalServerError, pullResponse{
+			OK:        false,
+			Code:      "docker_pull_failed",
+			Message:   "docker pull failed",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
 	}
 }
 
@@ -49,18 +81,28 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure the session Docker config directory exists before writing
-	// pull.start so that a failure here does not leave an orphan audit event.
-	cfg := a.getConfig()
-	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
+	// Resolve the stored Session credential for the image's registry just in
+	// time, from the one protected credential store. A reference with no
+	// registry or no stored credential pulls unauthenticated, exactly as a
+	// pull without a prior login did; a store read failure is operational.
+	credential, _, err := resolveSessionRegistryCredential(a.getConfig().RuntimeDir, session.ID, req.Image)
 	if err != nil {
-		opLog(ctx).Error("cannot create session Docker directory",
+		opLog(ctx).Error("cannot read session registry credential",
 			slog.String("operation", "pull"),
 			slog.String("error", err.Error()),
 		)
 		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "pull", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
+
+	// Synchronous Engine requests are admitted through the coordinator so
+	// daemon shutdown can refuse them or cancel them deterministically.
+	engineCtx, syncReq, admitted := a.SyncExecutionCoordinator.admit(ctx)
+	if !admitted {
+		writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "pull", "shutting_down", "docker-helper daemon is shutting down", session.PrincipalName)
+		return
+	}
+	defer syncReq.end()
 
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "pull.start",
@@ -73,83 +115,79 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	started := time.Now()
 
-	args := []string{"--config", dockerDir, "pull", req.Image}
-
-	cmd := a.newDockerCommand(ctx, "docker", args...)
-	buf := newBoundedBuffer(cfg.OperationLogMaxBytes)
-	cmd.Stdout = buf
-	cmd.Stderr = buf
-
-	err = cmd.Start()
-	var waitErr error
-	if err == nil {
-		waitErr = cmd.Wait()
+	puller, err := a.newEngineImagePuller()
+	if err != nil {
+		opLog(ctx).Error("cannot construct docker engine adapter",
+			slog.String("operation", "pull"),
+		)
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:         "pull.finish",
+			SessionID:     session.ID,
+			Image:         req.Image,
+			Result:        "pull_error",
+			Duration:      duration,
+			PrincipalName: session.PrincipalName,
+			LauncherID:    session.LauncherID,
+			LauncherName:  session.LauncherName,
+		})
+		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, pullResponse{
+			OK:       false,
+			Code:     "docker_pull_failed",
+			Message:  "docker pull failed",
+			Duration: duration,
+		})
+		return
 	}
-	data, _, truncated := buf.Range(0)
-	outputStr := string(data)
+
+	result, pullErr := puller.imagePull(engineCtx, req.Image, credential, a.getConfig().OperationLogMaxBytes)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
-	var result string
-	var exitCode *int
+	if pullErr != nil {
+		var engErr *engineError
+		if !errors.As(pullErr, &engErr) {
+			engErr = &engineError{kind: engineErrBackendFailure, cause: pullErr}
+		}
 
-	if err != nil {
-		// cmd.Start() failed — operational error.
-		result = "pull_error"
+		if engErr.kind != engineErrClientCancelled {
+			// Operational logs record only the normalized category. Raw
+			// Engine payloads and credentials stay behind the adapter
+			// boundary and never reach journald.
+			opLog(ctx).Warn("pull failed",
+				slog.String("operation", "pull"),
+				slog.Int("engine_error_kind", int(engErr.kind)),
+			)
+		}
 
-		opLog(ctx).Error("cannot start docker pull",
-			slog.String("operation", "pull"),
-			slog.String("error", err.Error()),
-		)
-
-		writeJSONRaw(ctx, w, http.StatusInternalServerError, pullResponse{
-			OK:        false,
-			Code:      "docker_pull_failed",
-			Message:   "docker pull failed",
-			Output:    outputStr,
-			Truncated: truncated,
-			Duration:  duration,
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:         "pull.finish",
+			SessionID:     session.ID,
+			Image:         req.Image,
+			Result:        "pull_error",
+			Duration:      duration,
+			PrincipalName: session.PrincipalName,
+			LauncherID:    session.LauncherID,
+			LauncherName:  session.LauncherName,
 		})
-	} else if waitErr != nil {
-		// cmd.Wait() returned non-zero — workload result, not operational error.
-		exitCode = extractExitCode(waitErr)
-		result = "pull_error"
-
-		// Classify the docker pull failure so expected user/domain failures
-		// (image not found, access denied, registry unreachable) are not
-		// collapsed into a generic HTTP 500. The docker CLI exposes no
-		// structured error, so the classification uses the daemon's stable
-		// stderr lines. The output is preserved for the client as before.
-		status, code, message := classifyPullFailure(outputStr)
-
-		writeJSONRaw(ctx, w, status, pullResponse{
-			OK:        false,
-			Code:      code,
-			Message:   message,
-			Output:    outputStr,
-			Truncated: truncated,
-			Duration:  duration,
-		})
-	} else {
-		result = "success"
-
-		writeJSONRaw(ctx, w, http.StatusOK, pullResponse{
-			OK:        true,
-			Message:   "image pulled successfully",
-			Output:    outputStr,
-			Truncated: truncated,
-			Duration:  duration,
-		})
+		writePullEngineFailure(engineCtx, w, engErr, result, duration)
+		return
 	}
 
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "pull.finish",
 		SessionID:     session.ID,
 		Image:         req.Image,
-		Result:        result,
-		ExitCode:      exitCode,
+		Result:        "success",
 		Duration:      duration,
 		PrincipalName: session.PrincipalName,
 		LauncherID:    session.LauncherID,
 		LauncherName:  session.LauncherName,
+	})
+	writeJSONRaw(engineCtx, w, http.StatusOK, pullResponse{
+		OK:        true,
+		Message:   "image pulled successfully",
+		Output:    result.Output,
+		Truncated: result.Truncated,
+		Duration:  duration,
 	})
 }

@@ -5,38 +5,102 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"sync"
 	"testing"
 	"time"
+
+	cerrdefs "github.com/containerd/errdefs"
 )
 
-func TestPullSessionAuthValidToken(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+// fakePuller is a substituted Engine puller recording the request it was
+// handed and returning a canned result.
+type fakePuller struct {
+	result           enginePullResult
+	err              error
+	gotContext       context.Context
+	gotImage         string
+	gotCredential    *sessionRegistryCredential
+	gotOutputLimit   int64
+	blockUntilCancel bool
+	enteredOnce      sync.Once
+	entered          chan struct{}
+}
 
+func newFakePuller() *fakePuller {
+	return &fakePuller{entered: make(chan struct{})}
+}
+
+func (f *fakePuller) imagePull(ctx context.Context, imageRef string, credential *sessionRegistryCredential, outputLimit int64) (enginePullResult, error) {
+	f.gotContext = ctx
+	f.gotImage = imageRef
+	f.gotCredential = credential
+	f.gotOutputLimit = outputLimit
+	f.enteredOnce.Do(func() { close(f.entered) })
+	if f.blockUntilCancel {
+		<-ctx.Done()
+		return enginePullResult{}, normalizeEnginePullError(ctx.Err())
+	}
+	return f.result, f.err
+}
+
+// newTestAppWithEnginePuller wires a fake puller seam into a test app and
+// returns the app and the fake.
+func newTestAppWithEnginePuller(t *testing.T) (*App, *fakePuller) {
+	t.Helper()
+	app := newTestAppWithAdminToken(t)
+	puller := newFakePuller()
+	app.NewEnginePullFn = func() (engineImagePuller, error) {
+		return puller, nil
+	}
+	return app, puller
+}
+
+// newTestSession creates a session against the app's first allowed root.
+func newTestSession(t *testing.T, app *App) *CreatedSession {
+	t.Helper()
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
+	return result
+}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
+// postPull posts a pull request body as the given session.
+func postPull(t *testing.T, app *App, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	blob, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal pull request: %v", err)
 	}
-
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(blob))
+	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
-
 	app.handlePull(w, req)
+	return w
+}
+
+// decodePullResponse decodes the pull response envelope.
+func decodePullResponse(t *testing.T, w *httptest.ResponseRecorder) pullResponse {
+	t.Helper()
+	var resp pullResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode pull response: %v (%s)", err, w.Body.String())
+	}
+	return resp
+}
+
+func TestPullSessionAuthValidToken(t *testing.T) {
+	app, _ := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
+
+	w := postPull(t, app, result.Token, map[string]string{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
@@ -44,15 +108,9 @@ func TestPullSessionAuthValidToken(t *testing.T) {
 }
 
 func TestPullSessionAuthMissingAuthorization(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
 
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, "", map[string]string{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
@@ -60,15 +118,11 @@ func TestPullSessionAuthMissingAuthorization(t *testing.T) {
 }
 
 func TestPullSessionAuthWrongScheme(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
 
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader([]byte(`{"image":"alpine:3.24"}`)))
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
 	w := httptest.NewRecorder()
-
 	app.handlePull(w, req)
 
 	if w.Code != http.StatusUnauthorized {
@@ -77,15 +131,11 @@ func TestPullSessionAuthWrongScheme(t *testing.T) {
 }
 
 func TestPullSessionAuthEmptyBearer(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
 
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader([]byte(`{"image":"alpine:3.24"}`)))
 	req.Header.Set("Authorization", "Bearer ")
 	w := httptest.NewRecorder()
-
 	app.handlePull(w, req)
 
 	if w.Code != http.StatusUnauthorized {
@@ -94,16 +144,9 @@ func TestPullSessionAuthEmptyBearer(t *testing.T) {
 }
 
 func TestPullSessionAuthInvalidToken(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
 
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer dht_wrong_token")
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, "dht_wrong_token", map[string]string{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
@@ -111,30 +154,14 @@ func TestPullSessionAuthInvalidToken(t *testing.T) {
 }
 
 func TestPullSessionAuthExpiredSession(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	_, err = app.DB.Exec("UPDATE sessions SET expires_at = ? WHERE id = ?", time.Now().Add(-time.Hour).Unix(), result.Session.ID)
-	if err != nil {
+	if _, err := app.DB.Exec("UPDATE sessions SET expires_at = ? WHERE id = ?", time.Now().Add(-time.Hour).Unix(), result.Session.ID); err != nil {
 		t.Fatalf("cannot update expires_at: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, result.Token, map[string]string{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
@@ -142,12 +169,8 @@ func TestPullSessionAuthExpiredSession(t *testing.T) {
 }
 
 func TestPullSessionAuthDeletedSession(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
+	app, _ := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
 	deleted, err := app.deleteSessionScoped(result.Session.ID, sessionControlScope{admin: true})
 	if err != nil {
@@ -157,18 +180,7 @@ func TestPullSessionAuthDeletedSession(t *testing.T) {
 		t.Fatal("expected session to be deleted")
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, result.Token, map[string]string{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
@@ -176,84 +188,50 @@ func TestPullSessionAuthDeletedSession(t *testing.T) {
 }
 
 func TestPullSessionAuthResponseContainsCode(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
 
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
+	w := postPull(t, app, "", map[string]string{"image": "alpine:3.24"})
 
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
-
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
+	resp := decodePullResponse(t, w)
 	if resp.Code != "unauthorized" {
 		t.Errorf("expected code 'unauthorized', got %q", resp.Code)
 	}
 }
 
 func TestPullSessionAuthResponseContainsWWWAuthenticate(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
 
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, "", map[string]string{"image": "alpine:3.24"})
 
 	if w.Header().Get("WWW-Authenticate") != "Bearer" {
 		t.Errorf("expected WWW-Authenticate: Bearer, got %q", w.Header().Get("WWW-Authenticate"))
 	}
 }
 
-func TestPullSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-
-	called := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		called = true
-		return exec.CommandContext(ctx, "true")
+// TestPullSessionAuthInvalidTokenDoesNotConstructPuller proves authorization
+// happens before any Engine adapter construction.
+func TestPullSessionAuthInvalidTokenDoesNotConstructPuller(t *testing.T) {
+	app, _ := newTestAppWithEnginePuller(t)
+	constructed := false
+	app.NewEnginePullFn = func() (engineImagePuller, error) {
+		constructed = true
+		return newFakePuller(), nil
 	}
 
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer dht_wrong_token")
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, "dht_wrong_token", map[string]string{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
 	}
-
-	if called {
-		t.Error("ExecCommandContext should not be called with invalid token")
+	if constructed {
+		t.Error("engine puller must not be constructed with an invalid token")
 	}
 }
 
 func TestPullSessionAuthAdminTokenRejected(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, testAdminToken, map[string]string{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d (admin token should not work for /pull), got %d", http.StatusUnauthorized, w.Code)
@@ -261,52 +239,27 @@ func TestPullSessionAuthAdminTokenRejected(t *testing.T) {
 }
 
 func TestPullImageRequired(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
-	reqBody := map[string]string{}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, result.Token, map[string]string{})
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
 	}
-
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
+	resp := decodePullResponse(t, w)
 	if resp.Message != "image is required" {
 		t.Errorf("expected 'image is required', got %q", resp.Message)
 	}
 }
 
 func TestPullInvalidJSON(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
+	app, _ := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader([]byte("not-json")))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
-
 	app.handlePull(w, req)
 
 	if w.Code != http.StatusBadRequest {
@@ -315,25 +268,10 @@ func TestPullInvalidJSON(t *testing.T) {
 }
 
 func TestPullUnknownFieldsRejected(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
-	reqBody := map[string]any{"image": "alpine:3.24", "extra": "field"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, result.Token, map[string]any{"image": "alpine:3.24", "extra": "field"})
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
@@ -341,35 +279,17 @@ func TestPullUnknownFieldsRejected(t *testing.T) {
 }
 
 func TestPullSuccessResponse(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
+	puller.result = enginePullResult{Output: "pull output\n"}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "echo", "pull output")
-	}
-
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
+	w := postPull(t, app, result.Token, map[string]string{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
+	resp := decodePullResponse(t, w)
 	if !resp.OK {
 		t.Error("expected ok to be true")
 	}
@@ -384,38 +304,44 @@ func TestPullSuccessResponse(t *testing.T) {
 	}
 }
 
-// TestPullFailureClassification verifies that expected docker pull failures
+// TestPullFailureClassification verifies that expected Engine pull failures
 // (image not found, access denied, registry unreachable) are classified into
 // precise HTTP status/code/message pairs instead of a generic 500, while the
-// docker output is preserved for the client.
+// rendered pull output is preserved for the client.
 func TestPullFailureClassification(t *testing.T) {
 	cases := []struct {
 		name       string
-		dockerOut  string
+		pullErr    error
 		wantStatus int
 		wantCode   string
 	}{
 		{
 			name:       "image not found",
-			dockerOut:  "Error response from daemon: manifest for alpine:doesnotexist not found: manifest unknown",
+			pullErr:    fmt.Errorf("manifest unknown: %w", cerrdefs.ErrNotFound),
 			wantStatus: http.StatusNotFound,
 			wantCode:   "image_not_found",
 		},
 		{
 			name:       "pull access denied",
-			dockerOut:  "Error response from daemon: pull access denied for private/repo, repository does not exist or may require docker login",
+			pullErr:    fmt.Errorf("401 Unauthorized: %w", cerrdefs.ErrUnauthenticated),
 			wantStatus: http.StatusUnauthorized,
 			wantCode:   "pull_access_denied",
 		},
 		{
 			name:       "registry network failure",
-			dockerOut:  "Error response from daemon: Get \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io on 127.0.0.53:53: no such host",
+			pullErr:    fmt.Errorf(`Get "https://registry-1.docker.io/v2/": dial tcp: lookup registry-1.docker.io: no such host`),
 			wantStatus: http.StatusBadGateway,
 			wantCode:   "registry_unavailable",
 		},
 		{
 			name:       "unrecognized failure stays generic",
-			dockerOut:  "some other docker error",
+			pullErr:    fmt.Errorf("some other docker error"),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "docker_pull_failed",
+		},
+		{
+			name:       "engine unreachable stays generic",
+			pullErr:    &engineError{kind: engineErrBackendUnavailable, cause: fmt.Errorf("cannot connect")},
 			wantStatus: http.StatusInternalServerError,
 			wantCode:   "docker_pull_failed",
 		},
@@ -423,40 +349,23 @@ func TestPullFailureClassification(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			app := newTestAppWithAdminToken(t)
+			app, puller := newTestAppWithEnginePuller(t)
+			result := newTestSession(t, app)
 
-			result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-			if err != nil {
-				t.Fatalf("createSessionAuthorized() error: %v", err)
-			}
+			puller.result = enginePullResult{Output: "progress before failure\n"}
+			puller.err = normalizeEnginePullError(tc.pullErr)
 
-			out := tc.dockerOut
-			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-				return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+out+"'; exit 1")
-			}
-
-			reqBody := map[string]string{"image": "nonexistent:latest"}
-			body, _ := json.Marshal(reqBody)
-
-			req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-			req.Header.Set("Authorization", "Bearer "+result.Token)
-			w := httptest.NewRecorder()
-
-			app.handlePull(w, req)
+			w := postPull(t, app, result.Token, map[string]string{"image": "nonexistent:latest"})
 
 			if w.Code != tc.wantStatus {
 				t.Errorf("expected status %d, got %d", tc.wantStatus, w.Code)
 			}
-
-			var resp response
-			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-				t.Fatalf("cannot decode response: %v", err)
-			}
+			resp := decodePullResponse(t, w)
 			if resp.Code != tc.wantCode {
 				t.Errorf("expected code %q, got %q", tc.wantCode, resp.Code)
 			}
-			if resp.Output != out {
-				t.Errorf("expected docker output preserved, got %q", resp.Output)
+			if resp.Output != "progress before failure\n" {
+				t.Errorf("expected pull output preserved, got %q", resp.Output)
 			}
 		})
 	}
@@ -490,117 +399,208 @@ func TestClassifyDockerError(t *testing.T) {
 	}
 }
 
-func TestPullErrorResponse(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+// TestPullCredentialResolutionExactRegistry proves the pull path resolves the
+// stored Session credential for exactly the registry the image reference
+// names, including the Docker Hub store key, and pulls unauthenticated when
+// nothing is stored for that registry.
+func TestPullCredentialResolutionExactRegistry(t *testing.T) {
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
+	if err := storeSessionRegistryCredential(app.Config.RuntimeDir, result.Session.ID, "registry.example.com", "user", "stored-pass", ""); err != nil {
+		t.Fatalf("cannot store registry credential: %v", err)
+	}
+	if err := storeSessionRegistryCredential(app.Config.RuntimeDir, result.Session.ID, "docker.io", "hub-user", "hub-pass", ""); err != nil {
+		t.Fatalf("cannot store hub credential: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'error output'; exit 1")
+	cases := []struct {
+		image        string
+		wantRegistry string
+		wantUsername string
+	}{
+		{"registry.example.com/team/image:v1", "registry.example.com", "user"},
+		{"docker.io/library/alpine:3.24", dockerHubAuthConfigKey, "hub-user"},
+		{"alpine:3.24", dockerHubAuthConfigKey, "hub-user"},
+		{"other-registry.example.net/team/image:v1", "", ""},
 	}
 
-	reqBody := map[string]string{"image": "nonexistent:latest"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
-	}
-
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
-	if resp.OK {
-		t.Error("expected ok to be false")
-	}
-	if resp.Output != "error output" {
-		t.Errorf("expected output 'error output', got %q", resp.Output)
+	for _, tc := range cases {
+		t.Run(tc.image, func(t *testing.T) {
+			w := postPull(t, app, result.Token, map[string]string{"image": tc.image})
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+			}
+			if tc.wantRegistry == "" {
+				if puller.gotCredential != nil {
+					t.Errorf("pull from a registry without stored credentials must be unauthenticated, got %+v", puller.gotCredential)
+				}
+				return
+			}
+			if puller.gotCredential == nil {
+				t.Fatal("expected the stored credential to be resolved")
+			}
+			if puller.gotCredential.Registry != tc.wantRegistry {
+				t.Errorf("credential registry = %q, want %q", puller.gotCredential.Registry, tc.wantRegistry)
+			}
+			if puller.gotCredential.Username != tc.wantUsername {
+				t.Errorf("credential username = %q, want %q", puller.gotCredential.Username, tc.wantUsername)
+			}
+		})
 	}
 }
 
-func TestPullDockerArgs(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+// TestPullCredentialResolutionIdentityToken proves a stored identity token is
+// resolved as the credential for its registry.
+func TestPullCredentialResolutionIdentityToken(t *testing.T) {
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
+	if err := storeSessionRegistryCredential(app.Config.RuntimeDir, result.Session.ID, "registry.example.com", "user", "", "tok-123"); err != nil {
+		t.Fatalf("cannot store registry credential: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
-
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
-
+	w := postPull(t, app, result.Token, map[string]string{"image": "registry.example.com/team/image:v1"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
-
-	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-	expectedArgs := []string{"--config", dockerDir, "pull", "alpine:3.24"}
-	if len(capturedArgs) != len(expectedArgs) {
-		t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(capturedArgs), capturedArgs)
-	}
-
-	for i, exp := range expectedArgs {
-		if capturedArgs[i] != exp {
-			t.Errorf("arg[%d]: expected %q, got %q", i, exp, capturedArgs[i])
-		}
+	if puller.gotCredential == nil || puller.gotCredential.IdentityToken != "tok-123" || puller.gotCredential.Password != "" {
+		t.Errorf("expected the identity token as credential, got %+v", puller.gotCredential)
 	}
 }
 
-func TestPullRequestCancellation(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+// TestPullCredentialResolutionMalformedStoreRejected proves an unparseable
+// stored credential is an operational error answered with the sanitized
+// internal-error contract before any pull starts.
+func TestPullCredentialResolutionMalformedStoreRejected(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
 	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
 	if err := os.MkdirAll(dockerDir, 0700); err != nil {
 		t.Fatalf("cannot create docker dir: %v", err)
 	}
-
-	pidFile := filepath.Join(t.TempDir(), "pid")
-	var childPid int
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Return an UNSTARTED command that writes PID on start.
-		cmd := exec.CommandContext(ctx, "sh", "-c",
-			`echo $$ > "$1"; exec sleep 300`,
-			"sh", pidFile,
-		)
-		return cmd
+	configJSON := `{"auths":{"registry.example.com":{"auth":"!!not-base64!!"}}}`
+	if err := os.WriteFile(filepath.Join(dockerDir, "config.json"), []byte(configJSON), 0600); err != nil {
+		t.Fatalf("cannot seed malformed config: %v", err)
 	}
 
+	w := postPull(t, app, result.Token, map[string]string{"image": "registry.example.com/team/image:v1"})
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected %d, got %d", http.StatusInternalServerError, w.Code)
+	}
+	resp := decodePullResponse(t, w)
+	if resp.Code != "internal_error" {
+		t.Errorf("expected code 'internal_error', got %q", resp.Code)
+	}
+	select {
+	case <-puller.entered:
+		t.Error("the pull must not start when the stored credential cannot be read")
+	default:
+	}
+
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	for _, rec := range records {
+		if rec.Event == "pull.start" || rec.Event == "pull.finish" {
+			t.Errorf("pull audit event must not appear: %s", rec.Event)
+		}
+		if rec.Event == "pull.rejected" && rec.Result != "internal_error" {
+			t.Errorf("expected pull.rejected internal_error, got %q", rec.Result)
+		}
+	}
+}
+
+// TestPullCredentialResolutionUnparseableReferenceProves... proves an image
+// reference outside the Docker grammar is not rejected by helper validation;
+// the pull proceeds unauthenticated and the Engine decides the outcome.
+func TestPullCredentialResolutionUnparseableReference(t *testing.T) {
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
+
+	puller.result = enginePullResult{Output: "out\n"}
+
+	w := postPull(t, app, result.Token, map[string]string{"image": "UPPER:CASE!!"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	if puller.gotCredential != nil {
+		t.Errorf("an unparseable reference must pull unauthenticated, got %+v", puller.gotCredential)
+	}
+	if puller.gotImage != "UPPER:CASE!!" {
+		t.Errorf("expected the reference passed through unchanged, got %q", puller.gotImage)
+	}
+}
+
+// TestPullNoCredentialCanaryLeak proves a resolved credential and the raw
+// backend failure text never reach the response, audit, or operational log;
+// the canary markers double as positive controls for every surface checked.
+func TestPullNoCredentialCanaryLeak(t *testing.T) {
+	const credentialCanary = "dht-credential-canary-1f8e2"
+	const backendCanary = "dht-backend-canary-9b41c"
+
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
+	t.Cleanup(logging.reset)
+
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
+
+	if err := storeSessionRegistryCredential(app.Config.RuntimeDir, result.Session.ID, "registry.example.com", "user", credentialCanary, ""); err != nil {
+		t.Fatalf("cannot store registry credential: %v", err)
+	}
+	puller.result = enginePullResult{Output: "progress\n"}
+	puller.err = &engineError{
+		kind:  engineErrBackendFailure,
+		cause: fmt.Errorf("engine failed while using password %s and reported %s", credentialCanary, backendCanary),
+	}
+
+	w := postPull(t, app, result.Token, map[string]string{"image": "registry.example.com/team/image:v1"})
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "docker_pull_failed") {
+		t.Fatalf("expected the generic pull failure response, got %s", body)
+	}
+	if strings.Contains(body, credentialCanary) || strings.Contains(body, backendCanary) {
+		t.Errorf("the pull response leaked a canary: %s", body)
+	}
+
+	rawAudit := auditBuf.String()
+	if !strings.Contains(rawAudit, `"pull.finish"`) {
+		t.Fatalf("expected the pull.finish audit event, got %s", rawAudit)
+	}
+	if strings.Contains(rawAudit, credentialCanary) || strings.Contains(rawAudit, backendCanary) {
+		t.Errorf("the audit log leaked a canary: %s", rawAudit)
+	}
+
+	rawOp := opBuf.String()
+	if !strings.Contains(rawOp, `"pull failed"`) {
+		t.Fatalf("expected the pull failure operational log, got %s", rawOp)
+	}
+	if strings.Contains(rawOp, credentialCanary) || strings.Contains(rawOp, backendCanary) {
+		t.Errorf("the operational log leaked a canary: %s", rawOp)
+	}
+}
+
+// TestPullRequestCancellation proves a disconnected client ends the pull: the
+// Engine request context is cancelled and the handler answers the generic
+// pull failure without an operational log entry.
+func TestPullRequestCancellation(t *testing.T) {
+	auditBuf, opBuf := setupTestLogging(t)
+
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
+
+	puller.blockUntilCancel = true
+
 	ctx, cancel := context.WithCancel(context.Background())
-
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req = req.WithContext(ctx)
-	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req := newPullRequest(map[string]string{"image": "alpine:3.24"}, result.Token).WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	handlerDone := make(chan struct{})
@@ -609,46 +609,12 @@ func TestPullRequestCancellation(t *testing.T) {
 		close(handlerDone)
 	}()
 
-	// Wait for the child process to actually start (PID file appears).
-	pidReady := make(chan struct{})
-	go func() {
-		for i := 0; i < 500; i++ {
-			if _, err := os.Stat(pidFile); err == nil {
-				close(pidReady)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
-
 	select {
-	case <-pidReady:
+	case <-puller.entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("child process did not start (no PID file)")
+		t.Fatal("the pull never started")
 	}
 
-	// Read the PID.
-	pidData, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("cannot read PID file: %v", err)
-	}
-	fmt.Sscanf(string(pidData), "%d", &childPid)
-	if childPid <= 0 {
-		t.Fatalf("invalid PID: %d", childPid)
-	}
-
-	// Verify the process exists.
-	if err := syscall.Kill(childPid, 0); err != nil {
-		t.Fatalf("child process does not exist: %v", err)
-	}
-
-	// Cleanup: kill child if test fails.
-	t.Cleanup(func() {
-		_ = syscall.Kill(childPid, syscall.SIGKILL)
-		_, _ = syscall.Wait4(childPid, nil, syscall.WNOHANG, nil)
-	})
-
-	// Now cancel the request context.
 	cancel()
 
 	select {
@@ -657,341 +623,285 @@ func TestPullRequestCancellation(t *testing.T) {
 		t.Fatal("handlePull did not return after context cancellation")
 	}
 
-	// Verify the child process is gone.
-	if err := syscall.Kill(childPid, 0); err == nil {
-		t.Error("child process still exists after cancellation")
-		// Don't SIGKILL here — that would mask the failure.
+	if puller.gotContext.Err() == nil {
+		t.Error("the Engine request context must be cancelled with the request")
+	}
+	resp := decodePullResponse(t, w)
+	if w.Code != http.StatusInternalServerError || resp.Code != "docker_pull_failed" {
+		t.Errorf("a cancelled pull must answer the generic pull failure, got %d %q", w.Code, resp.Code)
+	}
+
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	var finished bool
+	for _, rec := range records {
+		if rec.Event == "pull.finish" && rec.Result == "pull_error" {
+			finished = true
+		}
+	}
+	if !finished {
+		t.Error("a cancelled pull must finish with result pull_error")
+	}
+	if strings.Contains(opBuf.String(), "ERROR") || strings.Contains(opBuf.String(), "WARN") {
+		t.Errorf("a cancelled pull must not produce an operational log entry, got:\n%s", opBuf.String())
 	}
 }
 
+// TestPullRefusedWhenShuttingDown proves daemon shutdown closes pull
+// admission: the request is answered with the sanitized shutting-down
+// contract before any pull starts.
+func TestPullRefusedWhenShuttingDown(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
+
+	app.SyncExecutionCoordinator.beginShutdown()
+
+	w := postPull(t, app, result.Token, map[string]string{"image": "alpine:3.24"})
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected %d, got %d", http.StatusServiceUnavailable, w.Code)
+	}
+	resp := decodePullResponse(t, w)
+	if resp.Code != "shutting_down" {
+		t.Errorf("expected code 'shutting_down', got %q", resp.Code)
+	}
+	select {
+	case <-puller.entered:
+		t.Error("the pull must not start while the daemon is shutting down")
+	default:
+	}
+
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	var rejected int
+	for _, rec := range records {
+		switch rec.Event {
+		case "pull.start", "pull.finish":
+			t.Errorf("pull audit event must not appear: %s", rec.Event)
+		case "pull.rejected":
+			rejected++
+			if rec.Result != "shutting_down" {
+				t.Errorf("expected pull.rejected shutting_down, got %q", rec.Result)
+			}
+		}
+	}
+	if rejected != 1 {
+		t.Errorf("expected exactly 1 pull.rejected event, got %d", rejected)
+	}
+}
+
+// TestPullTerminatedByDaemonShutdown proves production-like shutdown ends an
+// in-flight pull: the coordinator cancels the Engine request, the handler
+// releases the request and answers the client, and termination returns
+// bounded by the shutdown deadline.
 func TestPullTerminatedByDaemonShutdown(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+	auditBuf, _ := setupTestLogging(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-	if err := os.MkdirAll(dockerDir, 0700); err != nil {
-		t.Fatalf("cannot create docker dir: %v", err)
-	}
-
-	pidFile := filepath.Join(t.TempDir(), "pid")
-	var childPid int
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Return an UNSTARTED command that writes PID on start.
-		cmd := exec.CommandContext(ctx, "sh", "-c",
-			`echo $$ > "$1"; exec sleep 300`,
-			"sh", pidFile,
-		)
-		return cmd
-	}
+	puller.blockUntilCancel = true
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /pull", func(w http.ResponseWriter, r *http.Request) {
-		app.handlePull(w, r)
-	})
+	mux.HandleFunc("POST /pull", app.handlePull)
 
-	// Use a real listener for production-like shutdown.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("cannot create listener: %v", err)
 	}
-
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
-	// Start serving.
 	go func() {
 		_ = server.Serve(listener)
 	}()
 	defer server.Close()
 
-	// Wait for server to be ready.
 	waitForDialReady(t, "tcp", listener.Addr().String())
 
-	// Start the pull request.
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/pull", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/pull", bytes.NewReader([]byte(`{"image":"alpine:3.24"}`)))
 	if err != nil {
 		t.Fatalf("cannot create request: %v", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	req.Header.Set("Content-Type", "application/json")
 
-	reqDone := make(chan error, 1)
+	type requestResult struct {
+		status int
+		code   string
+	}
+	reqDone := make(chan requestResult, 1)
 	go func() {
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			reqDone <- err
+			t.Errorf("pull request failed: %v", err)
 			return
 		}
-		resp.Body.Close()
-		reqDone <- nil
-	}()
-
-	// Wait for the child process to actually start (PID file appears).
-	pidReady := make(chan struct{})
-	go func() {
-		for i := 0; i < 500; i++ {
-			if _, err := os.Stat(pidFile); err == nil {
-				close(pidReady)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
+		defer resp.Body.Close()
+		var body pullResponse
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		reqDone <- requestResult{status: resp.StatusCode, code: body.Code}
 	}()
 
 	select {
-	case <-pidReady:
+	case <-puller.entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("child process did not start (no PID file)")
+		t.Fatal("the pull never started")
 	}
 
-	// Read the PID.
-	pidData, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("cannot read PID file: %v", err)
-	}
-	fmt.Sscanf(string(pidData), "%d", &childPid)
-	if childPid <= 0 {
-		t.Fatalf("invalid PID: %d", childPid)
-	}
-
-	// Verify the process exists.
-	if err := syscall.Kill(childPid, 0); err != nil {
-		t.Fatalf("child process does not exist: %v", err)
-	}
-
-	// Cleanup: kill child if test fails.
-	t.Cleanup(func() {
-		_ = syscall.Kill(childPid, syscall.SIGKILL)
-		_, _ = syscall.Wait4(childPid, nil, syscall.WNOHANG, nil)
-	})
-
-	// Now trigger production-like shutdown using serveHTTPUntilShutdown semantics.
-	// We simulate: signal -> startShutdown -> server.Shutdown(deadline) -> server.Close() -> context cancel
-	shutdownTimeout := 2 * time.Second
-
+	// Production shutdown order: admission gates close, then HTTP drain and
+	// synchronous-request termination run concurrently under one deadline.
+	terminateDone := make(chan struct{})
 	drainDone := make(chan error, 1)
 	go func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer shutdownCancel()
+		defer close(terminateDone)
+		app.SyncExecutionCoordinator.beginShutdown()
 
-		shutdownErr := server.Shutdown(shutdownCtx)
-		var drainErr error
-		if shutdownErr == context.DeadlineExceeded {
-			server.Close()
-			drainErr = fmt.Errorf("graceful shutdown timeout after %v", shutdownTimeout)
-		} else if shutdownErr != nil {
-			drainErr = shutdownErr
-		}
-		drainDone <- drainErr
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+		go func() {
+			shutdownErr := server.Shutdown(shutdownCtx)
+			var drainErr error
+			if shutdownErr == context.DeadlineExceeded {
+				server.Close()
+				drainErr = fmt.Errorf("graceful shutdown timeout after %v", 2*time.Second)
+			} else if shutdownErr != nil {
+				drainErr = shutdownErr
+			}
+			drainDone <- drainErr
+			shutdownCancel()
+		}()
+
+		app.SyncExecutionCoordinator.terminateForShutdown(shutdownCtx)
 	}()
 
 	select {
-	case <-drainDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("shutdown did not complete")
-	}
-
-	// The HTTP request should have completed (success or error).
-	select {
-	case <-reqDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("HTTP request did not complete after shutdown")
-	}
-
-	// Verify the child process is gone, giving the process table a short
-	// bounded window to reap it.
-	childGone := false
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(childPid, 0); err != nil {
-			childGone = true
-			break
+	case result := <-reqDone:
+		if result.status != http.StatusInternalServerError || result.code != "docker_pull_failed" {
+			t.Errorf("a pull cancelled by shutdown must answer the generic pull failure, got %d %q", result.status, result.code)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !childGone {
-		t.Error("child process still exists after daemon shutdown")
-		// Don't SIGKILL here — that would mask the failure.
-	}
-}
-
-func TestPullBoundedOutputTruncatedSuccess(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the HTTP request did not complete after shutdown")
 	}
 
-	// Set a very small operation log limit.
-	app.Config.OperationLogMaxBytes = 64
-
-	// Fake Docker output larger than the limit.
-	largeOutput := strings.Repeat("A", 256)
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "printf", "%s", largeOutput)
+	select {
+	case <-terminateDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminateForShutdown did not return after the pull was released")
 	}
 
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	select {
+	case err := <-drainDone:
+		if err != nil {
+			t.Errorf("graceful drain reported an error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("graceful drain did not complete")
 	}
 
-	var resp pullResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	var finished bool
+	for _, rec := range records {
+		if rec.Event == "pull.finish" && rec.Result == "pull_error" {
+			finished = true
+		}
 	}
-
-	if !resp.OK {
-		t.Error("expected ok=true")
-	}
-
-	// Output must not exceed the bounded buffer limit.
-	if len(resp.Output) > 64 {
-		t.Errorf("output length %d exceeds limit 64", len(resp.Output))
-	}
-
-	// Output should be the newest tail of the large output.
-	expectedTail := largeOutput[len(largeOutput)-len(resp.Output):]
-	if resp.Output != expectedTail {
-		t.Errorf("output is not the newest tail: got %q, want %q", resp.Output, expectedTail)
-	}
-
-	// Truncated must be true.
-	if !resp.Truncated {
-		t.Error("expected truncated=true")
+	if !finished {
+		t.Error("a pull cancelled by shutdown must finish with result pull_error")
 	}
 }
 
-func TestPullBoundedOutputTruncatedFailure(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
+// TestPullOutputSurfacing proves the handler forwards the configured output
+// limit to the Engine puller and surfaces the rendered output and truncation
+// flag verbatim, on success and failure alike, with truncation omitted from
+// the JSON while false.
+func TestPullOutputSurfacing(t *testing.T) {
+	cases := []struct {
+		name        string
+		outputLimit int64
+		result      enginePullResult
+		err         error
+		wantStatus  int
+		wantCode    string
+	}{
+		{
+			name:        "success untruncated",
+			outputLimit: 4 * 1024 * 1024,
+			result:      enginePullResult{Output: "small output\n"},
+			wantStatus:  http.StatusOK,
+			wantCode:    "",
+		},
+		{
+			name:        "success truncated",
+			outputLimit: 64,
+			result:      enginePullResult{Output: strings.Repeat("A", 64), Truncated: true},
+			wantStatus:  http.StatusOK,
+			wantCode:    "",
+		},
+		{
+			name:        "failure truncated",
+			outputLimit: 64,
+			result:      enginePullResult{Output: strings.Repeat("B", 64), Truncated: true},
+			err:         normalizeEnginePullError(fmt.Errorf("some other docker error")),
+			wantStatus:  http.StatusInternalServerError,
+			wantCode:    "docker_pull_failed",
+		},
 	}
 
-	// Set a very small operation log limit.
-	app.Config.OperationLogMaxBytes = 64
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, puller := newTestAppWithEnginePuller(t)
+			result := newTestSession(t, app)
 
-	// Fake Docker output larger than the limit with non-zero exit.
-	largeOutput := strings.Repeat("B", 256)
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", fmt.Sprintf("printf '%%s' '%s'; exit 1", largeOutput))
-	}
+			app.Config.OperationLogMaxBytes = tc.outputLimit
+			puller.result = tc.result
+			puller.err = tc.err
 
-	reqBody := map[string]string{"image": "nonexistent:latest"}
-	body, _ := json.Marshal(reqBody)
+			w := postPull(t, app, result.Token, map[string]string{"image": "alpine:3.24"})
 
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
-	}
-
-	var resp pullResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
-	if resp.OK {
-		t.Error("expected ok=false")
-	}
-
-	if resp.Code != "docker_pull_failed" {
-		t.Errorf("expected code 'docker_pull_failed', got %q", resp.Code)
-	}
-
-	// Output must not exceed the bounded buffer limit.
-	if len(resp.Output) > 64 {
-		t.Errorf("output length %d exceeds limit 64", len(resp.Output))
-	}
-
-	// Output should be the newest tail.
-	expectedTail := largeOutput[len(largeOutput)-len(resp.Output):]
-	if resp.Output != expectedTail {
-		t.Errorf("output is not the newest tail: got %q, want %q", resp.Output, expectedTail)
-	}
-
-	// Truncated must be true.
-	if !resp.Truncated {
-		t.Error("expected truncated=true")
+			if w.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d", tc.wantStatus, w.Code)
+			}
+			resp := decodePullResponse(t, w)
+			if puller.gotOutputLimit != tc.outputLimit {
+				t.Errorf("output limit forwarded = %d, want %d", puller.gotOutputLimit, tc.outputLimit)
+			}
+			if resp.Output != tc.result.Output || resp.Truncated != tc.result.Truncated {
+				t.Errorf("output/truncated = %q/%v, want %q/%v", resp.Output, resp.Truncated, tc.result.Output, tc.result.Truncated)
+			}
+			if resp.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", resp.Code, tc.wantCode)
+			}
+			if tc.wantCode == "" && strings.Contains(w.Body.String(), "truncated") {
+				t.Errorf("truncated field should be omitted when false, got: %s", w.Body.String())
+			}
+		})
 	}
 }
 
-func TestPullBoundedOutputNoTruncation(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+// TestImageReferenceNotRejectedByHelper verifies that valid Docker image
+// reference grammars pass through helper validation unchanged and reach the
+// Engine pull request. The puller is faked to avoid requiring a real daemon.
+func TestImageReferenceNotRejectedByHelper(t *testing.T) {
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
+	for _, image := range []string{
+		"registry.example.com:5000/team/image:tag", // registry with explicit port
+		"alpine@sha256:abc123def456",               // digest reference
+		"alpine",                                   // untagged reference
+		"localhost:5000/image:tag",                 // localhost with port
+	} {
+		t.Run(image, func(t *testing.T) {
+			w := postPull(t, app, result.Token, map[string]string{"image": image})
 
-	// Set a generous operation log limit.
-	app.Config.OperationLogMaxBytes = 4 * 1024 * 1024
-
-	smallOutput := "small output\n"
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "printf", "%s", smallOutput)
-	}
-
-	reqBody := map[string]string{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
-	}
-
-	var resp pullResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
-	if !resp.OK {
-		t.Error("expected ok=true")
-	}
-
-	// Output should be returned unchanged.
-	if resp.Output != smallOutput {
-		t.Errorf("output = %q, want %q", resp.Output, smallOutput)
-	}
-
-	// Truncated must be false (and omitted in JSON via omitempty).
-	if resp.Truncated {
-		t.Error("expected truncated=false")
-	}
-
-	// Verify truncated is omitted from JSON.
-	rawBody := w.Body.String()
-	if strings.Contains(rawBody, "truncated") {
-		t.Errorf("truncated field should be omitted when false, got: %s", rawBody)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+			}
+			if puller.gotImage != image {
+				t.Errorf("image reference passed through = %q, want %q", puller.gotImage, image)
+			}
+		})
 	}
 }

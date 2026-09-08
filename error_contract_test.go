@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -784,16 +785,15 @@ func TestDockerErrorLogPull(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer logging.reset()
 
-	app := newTestAppWithAdminTokenAndStaging(t)
+	app, puller := newTestAppWithEnginePuller(t)
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
 	const dockerOutput = "pull-output-secret-xyz"
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "echo '"+dockerOutput+"'; exit 1")
-	}
+	puller.result = enginePullResult{Output: dockerOutput + "\n"}
+	puller.err = normalizeEnginePullError(fmt.Errorf("some other docker error"))
 
 	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
@@ -936,57 +936,5 @@ func TestDockerErrorLogRun(t *testing.T) {
 	// Environment value not logged
 	if strings.Contains(raw, envValue) {
 		t.Error("environment value must not appear in log")
-	}
-}
-
-// ---------- image reference grammar ----------
-
-// TestImageReferenceNotRejectedByHelper verifies that valid Docker image
-// reference grammars pass through helper validation and reach the docker CLI
-// unchanged. The Docker CLI is mocked to avoid requiring a real daemon.
-func TestImageReferenceNotRejectedByHelper(t *testing.T) {
-	auditBuf := new(bytes.Buffer)
-	opBuf := new(bytes.Buffer)
-
-	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer logging.reset()
-
-	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	for _, image := range []string{
-		"registry.example.com:5000/team/image:tag", // registry with explicit port
-		"alpine@sha256:abc123def456",               // digest reference
-		"alpine",                                   // untagged reference
-		"localhost:5000/image:tag",                 // localhost with port
-	} {
-		t.Run(image, func(t *testing.T) {
-			reqBody, _ := json.Marshal(map[string]string{"image": image})
-			req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
-			req.Header.Set("Authorization", "Bearer "+result.Token)
-
-			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-				if name != "docker" {
-					t.Fatalf("unexpected command: %s", name)
-				}
-				for _, arg := range args {
-					if arg == image {
-						return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'Pulled "+image+"\\n'")
-					}
-				}
-				t.Fatalf("image argument not found in args: %v", args)
-				return exec.CommandContext(ctx, "true")
-			}
-
-			w := httptest.NewRecorder()
-			app.handlePull(w, req)
-
-			if w.Code != http.StatusOK {
-				t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
-			}
-		})
 	}
 }

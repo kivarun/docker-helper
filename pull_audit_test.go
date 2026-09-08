@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -14,16 +13,8 @@ import (
 func TestPullStartContainsFields(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAdminToken(t)
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
 	req := newPullRequest(map[string]any{
 		"image": "alpine:3.24",
@@ -50,21 +41,18 @@ func TestPullStartContainsFields(t *testing.T) {
 	if startRec.Image != "alpine:3.24" {
 		t.Errorf("expected image 'alpine:3.24', got %q", startRec.Image)
 	}
+	select {
+	case <-puller.entered:
+	default:
+		t.Error("expected the pull to run")
+	}
 }
 
 func TestPullFinishSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAdminToken(t)
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
+	app, _ := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
 	req := newPullRequest(map[string]any{
 		"image": "alpine:3.24",
@@ -93,19 +81,15 @@ func TestPullFinishSuccess(t *testing.T) {
 	}
 }
 
-func TestPullFinishErrorWithExitCode(t *testing.T) {
+// TestPullFinishError proves a failed pull finishes with result pull_error
+// and no exit_code: the Engine path has no CLI process exit code to report.
+func TestPullFinishError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAdminToken(t)
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'pull failed'; exit 1")
-	}
+	puller.err = normalizeEnginePullError(context.DeadlineExceeded)
 
 	req := newPullRequest(map[string]any{
 		"image": "nonexistent:latest",
@@ -129,8 +113,8 @@ func TestPullFinishErrorWithExitCode(t *testing.T) {
 	if finishRec.Result != "pull_error" {
 		t.Errorf("expected result 'pull_error', got %q", finishRec.Result)
 	}
-	if finishRec.ExitCode == nil || *finishRec.ExitCode != 1 {
-		t.Errorf("expected exit_code 1, got %v", finishRec.ExitCode)
+	if finishRec.ExitCode != nil {
+		t.Errorf("expected no exit_code on the Engine pull path, got %v", *finishRec.ExitCode)
 	}
 }
 
@@ -139,22 +123,20 @@ func TestPullAuditNoPullOutput(t *testing.T) {
 
 	const pullOutput = "Digest: sha256:abc123\nStatus: Downloaded newer image for alpine:3.24\n"
 
-	app := newTestAppWithAdminToken(t)
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+pullOutput+"'")
-	}
+	puller.result = enginePullResult{Output: pullOutput}
 
 	req := newPullRequest(map[string]any{
 		"image": "alpine:3.24",
 	}, result.Token)
 	w := httptest.NewRecorder()
 	app.handlePull(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
 
 	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) < 2 {
@@ -181,22 +163,21 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 
 	const pullErrorOutput = "ERROR: failed to pull: access denied\n"
 
-	app := newTestAppWithAdminToken(t)
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+pullErrorOutput+"'; exit 1")
-	}
+	puller.result = enginePullResult{Output: pullErrorOutput}
+	puller.err = normalizeEnginePullError(context.DeadlineExceeded)
 
 	req := newPullRequest(map[string]any{
 		"image": "private:latest",
 	}, result.Token)
 	w := httptest.NewRecorder()
 	app.handlePull(w, req)
+
+	if w.Code != 500 {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
 
 	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) < 2 {
@@ -221,18 +202,8 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 func TestPullImageHyphenRejected(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAdminToken(t)
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	execCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		execCalled = true
-		return exec.CommandContext(ctx, "true")
-	}
+	app, puller := newTestAppWithEnginePuller(t)
+	result := newTestSession(t, app)
 
 	req := newPullRequest(map[string]any{
 		"image": "-v",
@@ -252,8 +223,10 @@ func TestPullImageHyphenRejected(t *testing.T) {
 		t.Errorf("expected code 'invalid_image', got %v", resp["code"])
 	}
 
-	if execCalled {
-		t.Error("ExecCommandContext must not be called when image starts with '-'")
+	select {
+	case <-puller.entered:
+		t.Error("the pull must not run when image starts with '-'")
+	default:
 	}
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
@@ -264,7 +237,7 @@ func TestPullImageHyphenRejected(t *testing.T) {
 	}
 }
 
-func newPullRequest(body map[string]any, token string) *http.Request {
+func newPullRequest(body any, token string) *http.Request {
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(data))
 	req.Header.Set("Authorization", "Bearer "+token)

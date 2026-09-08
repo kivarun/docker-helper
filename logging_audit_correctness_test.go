@@ -455,17 +455,18 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 // TestPullNonZeroNoOperationalError verifies the logging invariant:
 // a successfully started docker process with non-zero exit is a workload
 // result, not a daemon operational error.
+// TestPullNonZeroNoOperationalError verifies the logging invariant:
+// a pull workload failure (the Engine reports the pull did not complete) is
+// a workload result, not a daemon operational error.
 func TestPullNonZeroNoOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAdminToken(t)
+	app, puller := newTestAppWithEnginePuller(t)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
-	}
+	puller.err = normalizeEnginePullError(fmt.Errorf("some other docker error"))
 
 	req := newPullRequest(map[string]any{"image": "nonexistent:latest"}, result.Token)
 	w := httptest.NewRecorder()
@@ -479,9 +480,10 @@ func TestPullNonZeroNoOperationalError(t *testing.T) {
 	}
 }
 
-// TestPullStartFailureOperationalError verifies the logging invariant:
-// a docker Start failure (process never started) is an operational error.
-func TestPullStartFailureOperationalError(t *testing.T) {
+// TestPullAdapterConstructionFailureOperationalError verifies the logging
+// invariant: an Engine adapter that cannot be constructed is an operational
+// error, and the pull is answered with the generic pull failure.
+func TestPullAdapterConstructionFailureOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
@@ -489,8 +491,8 @@ func TestPullStartFailureOperationalError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "nonexistent-docker-binary")
+	app.NewEnginePullFn = func() (engineImagePuller, error) {
+		return nil, fmt.Errorf("cannot construct docker engine client: broken")
 	}
 
 	req := newPullRequest(map[string]any{"image": "alpine:3.24"}, result.Token)
@@ -500,8 +502,8 @@ func TestPullStartFailureOperationalError(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 
-	if !strings.Contains(opBuf.String(), "cannot start docker pull") {
-		t.Fatalf("pull start failure must produce operational ERROR, got:\n%s", opBuf.String())
+	if !strings.Contains(opBuf.String(), "cannot construct docker engine adapter") {
+		t.Fatalf("pull adapter construction failure must produce operational ERROR, got:\n%s", opBuf.String())
 	}
 }
 

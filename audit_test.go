@@ -1035,24 +1035,15 @@ func TestRejectedNoSensitiveData(t *testing.T) {
 
 func TestAcceptedOperationNoRejectedEvent(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAdminToken(t)
+	app, _ := newTestAppWithEnginePuller(t)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
 	// Send a valid pull request.
-	reqBody := map[string]any{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handlePull(w, req)
+	w := postPull(t, app, result.Token, map[string]any{"image": "alpine:3.24"})
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)

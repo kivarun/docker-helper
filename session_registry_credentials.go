@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/distribution/reference"
 )
 
 const dockerHubAuthConfigKey = "https://index.docker.io/v1/"
@@ -241,4 +243,46 @@ func readSessionRegistryCredential(runtimeDir, sessionID, registryAddr string) (
 	}
 	entry, ok = cfg.Auths[normalizeRegistryAddress(registryAddr)]
 	return entry, ok, nil
+}
+
+// imageReferenceRegistryAddress extracts the registry address of an image
+// reference with Docker reference semantics: the domain of the normalized
+// reference, normalized to the canonical credential-store key. An
+// unparseable reference resolves to "" and the pull proceeds
+// unauthenticated, as the docker CLI pull path did for such references.
+func imageReferenceRegistryAddress(imageRef string) string {
+	named, err := reference.ParseNormalizedNamed(imageRef)
+	if err != nil {
+		return ""
+	}
+	return normalizeRegistryAddress(reference.Domain(named))
+}
+
+// resolveSessionRegistryCredential loads the Session's stored credential for
+// the registry an image reference names and converts the persisted Docker CLI
+// entry into the Engine adapter form. ok is false when the reference names no
+// registry or nothing is stored for it; the caller then pulls
+// unauthenticated. A persisted identity token is preferred over an auth pair,
+// matching how the credential was stored.
+func resolveSessionRegistryCredential(runtimeDir, sessionID, imageRef string) (credential *sessionRegistryCredential, ok bool, err error) {
+	registryAddr := imageReferenceRegistryAddress(imageRef)
+	if registryAddr == "" {
+		return nil, false, nil
+	}
+	entry, entryOk, err := readSessionRegistryCredential(runtimeDir, sessionID, registryAddr)
+	if err != nil || !entryOk {
+		return nil, false, err
+	}
+	credential = &sessionRegistryCredential{Registry: registryAddr}
+	if entry.IdentityToken != "" {
+		credential.IdentityToken = entry.IdentityToken
+		return credential, true, nil
+	}
+	username, password, err := decodeSessionDockerAuth(entry.Auth)
+	if err != nil {
+		return nil, false, err
+	}
+	credential.Username = username
+	credential.Password = password
+	return credential, true, nil
 }
