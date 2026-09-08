@@ -1521,9 +1521,16 @@ endpoint through the shared App-owned Moby client, and sets
 `ImageBuildOptions.SessionID` to that session so the daemon resolves
 every remote source — a `FROM` base, an ARG-substituted `FROM`, a stage
 alias, or an external `COPY --from=<registry image>` — through it. The
-session is created once per build, started with the build, and closed
-and joined on every exit path, bounded by the request/shutdown context;
-a session transport failure is a `backend_failure`, not a build failure.
+session is created once per build, started with the build, and on every
+exit path — after the build stream reached its terminal outcome —
+cancelled, closed, and joined in that order, so the session transport
+never outlives the owning build request. The build/session context is
+cancelled before the session close: BuildKit's session goroutine holds
+the session mutex while its dial is in flight, and the session dial
+closes its connection on cancellation, so a stalled `/session` HTTP
+upgrade cannot keep the request alive after the build's terminal
+outcome. A session transport failure is a `backend_failure`, not a
+build failure; a session error caused by cancellation is not a failure.
 Provenance/attestation records are a buildx client-side feature the old
 CLI invocation disabled explicitly; the direct Engine `ImageBuild` path
 never emits them.

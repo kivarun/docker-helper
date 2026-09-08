@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/errdefs/pkg/errhttp"
@@ -437,7 +440,10 @@ const buildkitSessionSharedKey = "docker-helper"
 // Docker/BuildKit owns Dockerfile and source semantics; the adapter never
 // parses the Dockerfile to discover registries or pre-pull base images.
 // PullParent preserves the base-image freshness the previous docker CLI
-// --pull produced.
+// --pull produced. The session is created once per build, started with the
+// build, and on every exit path cancelled, closed, and joined in that order
+// by one finalization owner, so the session transport never outlives the
+// owning build request.
 //
 // The progress stream is rendered in the line-based form the docker CLI
 // printed for build output and accumulated in a bounded buffer. For a
@@ -461,17 +467,17 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 	}))
 
 	// One context drives the build and its session, so request cancellation
-	// and daemon shutdown terminate both.
+	// and daemon shutdown terminate both. The finalization owner below
+	// cancels it once the build stream reached its terminal outcome —
+	// never while the stream is still in use — and always before the
+	// potentially blocking session close.
 	buildCtx, cancelBuild := context.WithCancel(ctx)
-	defer cancelBuild()
 
 	sessionDone := make(chan error, 1)
 	go func() {
 		// Run dials the daemon's /session hijack endpoint through the shared
 		// Engine client and serves the session until the build closes it.
-		sessionDone <- sess.Run(buildCtx, func(runCtx context.Context, proto string, meta map[string][]string) (net.Conn, error) {
-			return e.cli.DialHijack(runCtx, "/session", proto, meta)
-		})
+		sessionDone <- sess.Run(buildCtx, e.dialBuildkitSession)
 	}()
 
 	opts := client.ImageBuildOptions{
@@ -495,7 +501,7 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 
 	resp, err := e.cli.ImageBuild(buildCtx, spec.Context, opts)
 	if err != nil {
-		return engineBuildResult{}, finalizeEngineBuildSession(ctx, sess, sessionDone, normalizeEngineBuildError(err))
+		return engineBuildResult{}, finalizeEngineBuildSession(ctx, cancelBuild, sess, sessionDone, normalizeEngineBuildError(err))
 	}
 	defer resp.Body.Close()
 
@@ -550,7 +556,7 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 		buildErr = normalizeEngineBuildError(streamErr)
 	}
 	return engineBuildResult{Output: string(data), Truncated: truncated},
-		finalizeEngineBuildSession(ctx, sess, sessionDone, buildErr)
+		finalizeEngineBuildSession(ctx, cancelBuild, sess, sessionDone, buildErr)
 }
 
 // engineBuildAuthProvider adapts the host-scoped Session credential resolver
@@ -582,18 +588,35 @@ func engineBuildAuthProvider(resolve buildCredentialResolver) authprovider.AuthC
 	}
 }
 
-// finalizeEngineBuildSession closes the request-owned BuildKit session on
-// every build exit path and joins its goroutine; the join is bounded by the
-// build context. A session transport failure is reported only when the build
-// produced no error of its own: a broken session transport is an
-// interaction failure, not a build failure the Engine reported. A session
-// error caused by cancellation is not a failure.
-func finalizeEngineBuildSession(ctx context.Context, sess *session.Session, sessionDone <-chan error, buildErr error) error {
+// finalizeEngineBuildSession is the single finalization owner of the
+// request-owned BuildKit session. It runs only after the build stream
+// reached its terminal outcome, in one fixed order: cancel the build/session
+// context, close the session, join its goroutine, then classify the outcome.
+//
+// The order is load-bearing. BuildKit's Session.Run holds the session mutex
+// while its dial is in flight, and Session.Close waits for that mutex, so
+// the session context must be cancelled before the potentially blocking
+// close: the dial closes its connection on cancellation, which releases a
+// stalled /session upgrade and lets the close proceed bounded.
+//
+// Classification keeps the accepted precedence: a build error wins; a
+// session transport failure is reported only when the build produced no
+// error of its own; a session error caused by cancellation — including the
+// intentional finalization cancellation of a session that outlived a
+// terminal build result — is not a failure.
+func finalizeEngineBuildSession(ctx context.Context, cancelBuild context.CancelFunc, sess *session.Session, sessionDone <-chan error, buildErr error) error {
+	cancelBuild()
+
 	sess.Close()
+
 	var runErr error
 	select {
 	case runErr = <-sessionDone:
 	case <-ctx.Done():
+		// The parent request context is gone (client disconnect or daemon
+		// shutdown). The join is abandoned on that path; the session
+		// goroutine still ends on its own through the cancelled session
+		// context, so nothing is left behind.
 		runErr = nil
 	}
 	if buildErr != nil {
@@ -603,6 +626,108 @@ func finalizeEngineBuildSession(ctx context.Context, sess *session.Session, sess
 		return nil
 	}
 	return &engineError{kind: engineErrBackendFailure, cause: runErr}
+}
+
+// dialBuildkitSession dials the Engine /session hijack endpoint for one
+// request-owned BuildKit session — the same public Engine dialer and the
+// same upgrade round-trip the Moby client's DialHijack performs. It cannot
+// delegate to DialHijack itself: the hijack round-trip reads the raw
+// connection without watching the request context, so an Engine that
+// accepts the connection but stalls before the HTTP upgrade response would
+// block the dial forever and deadlock session finalization on the BuildKit
+// session mutex held during the dial. This dial owns its connection and
+// closes it the moment the session context is done; that close releases a
+// stalled upgrade, the session's serve loop reacts to the same
+// cancellation, and the session goroutine therefore ends bounded on every
+// build exit path.
+func (e *engineClient) dialBuildkitSession(ctx context.Context, proto string, meta map[string][]string) (net.Conn, error) {
+	// A dial failure while the session context is already cancelled is the
+	// cancellation itself — finalization closes the connection this dial
+	// owns — not an Engine-reported transport failure, so it surfaces as a
+	// context error and finalization classifies it as cosmetic.
+	cancelled := func(err error) (net.Conn, error) {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("buildkit session dial: %w", ctx.Err())
+		}
+		return nil, err
+	}
+
+	conn, err := e.cli.Dialer()(ctx)
+	if err != nil {
+		return cancelled(err)
+	}
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+
+	// The upgrade round-trip below reads the connection without watching
+	// the context, so a watcher owns the disconnect during the dial: it
+	// closes the connection the moment the session context is done. The
+	// session's own serve loop takes over the same reaction after the dial
+	// returned.
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-watchDone:
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "/session", http.NoBody)
+	if err != nil {
+		return cancelled(fmt.Errorf("cannot build the buildkit session request: %w", err))
+	}
+	for name, values := range meta {
+		req.Header[http.CanonicalHeaderKey(name)] = values
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", proto)
+
+	if err := req.Write(conn); err != nil {
+		return cancelled(fmt.Errorf("cannot send the buildkit session request: %w", err))
+	}
+	buf := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(buf, req)
+	if err != nil {
+		return cancelled(fmt.Errorf("cannot upgrade the buildkit session: %w", err))
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		_ = resp.Body.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("unable to upgrade to %s, received %d", proto, resp.StatusCode)
+	}
+	// Bytes the Engine delivered alongside the upgrade response must stay
+	// readable in order for the session protocol taking over now.
+	if buf.Buffered() > 0 {
+		return &buildkitSessionConnCloseWriter{&buildkitSessionConn{Conn: conn, r: buf}}, nil
+	}
+	return conn, nil
+}
+
+// buildkitSessionConn is a hijacked Engine connection that still carries
+// unread bytes from the upgrade response: reads continue through the
+// buffered reader, writes reach the connection itself. It mirrors the
+// connection form the Moby client returns for a hijacked dial with buffered
+// response bytes.
+type buildkitSessionConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *buildkitSessionConn) Read(b []byte) (int, error) { return c.r.Read(b) }
+
+type buildkitSessionConnCloseWriter struct {
+	*buildkitSessionConn
+}
+
+func (c *buildkitSessionConnCloseWriter) CloseWrite() error {
+	if conn, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return nil
 }
 
 // normalizeEngineBuildError maps a build interaction failure to the

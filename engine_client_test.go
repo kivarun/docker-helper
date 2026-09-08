@@ -982,6 +982,110 @@ func TestShutdownClosesSharedEngineAdapterOnlyAfterHTTPDrain(t *testing.T) {
 	}
 }
 
+// fakeEngineStalledSessionHandler accepts the Engine /session request but
+// never answers the HTTP upgrade, holding the connection open the way a
+// stalled Engine daemon does. It exits only when it observes the client
+// disconnect through the request context — recorded in observed — or when
+// the test releases it during cleanup (never before the test's own
+// assertions, so a pass cannot be satisfied by the release).
+func fakeEngineStalledSessionHandler(observed chan<- string, release <-chan struct{}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			observed <- "cancelled"
+		case <-release:
+			observed <- "released"
+		}
+	}
+}
+
+// TestEngineImageBuildStalledSessionUpgradeIsBounded is the session
+// lifecycle regression: once the build itself reached a terminal outcome, a
+// stalled /session HTTP upgrade must not be able to keep the request alive
+// indefinitely. The fake Engine serves the /build endpoint independently and
+// accepts the /session connection without ever answering the upgrade, so
+// BuildKit's Session.Run stays blocked in its dial holding the session
+// mutex. The build must still return bounded, the stalled handler must
+// observe the client disconnect, the session goroutine must end, and the
+// build's own result category must not be replaced by the intentional
+// session teardown.
+func TestEngineImageBuildStalledSessionUpgradeIsBounded(t *testing.T) {
+	cases := []struct {
+		name       string
+		buildLines []string
+		wantOK     bool
+		wantKind   engineErrorKind
+	}{
+		{
+			name:       "successful build",
+			buildLines: []string{`{"stream":"#1 DONE 0.0s\n"}`},
+			wantOK:     true,
+		},
+		{
+			name: "build failure",
+			buildLines: []string{
+				`{"stream":"#5 [2/2] RUN exit 2\n"}`,
+				`{"errorDetail":{"message":"process \"/bin/sh\" did not complete successfully: exit code: 2"},"error":"process \"/bin/sh\" did not complete successfully: exit code: 2"}`,
+			},
+			wantKind: engineErrBuildFailed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			observed := make(chan string, 1)
+			release := make(chan struct{})
+			srv := newFakeEngine(t, "1.51", nil, nil, fakeBuildStream(nil, tc.buildLines...),
+				fakeEngineStalledSessionHandler(observed, release))
+			// Registered after the server so cleanup runs it first (LIFO)
+			// and a failed-assertion path cannot hang the server close.
+			t.Cleanup(func() { close(release) })
+
+			eng := newEngineClientAgainstFake(t, srv.URL)
+			done := make(chan error, 1)
+			go func() {
+				_, err := eng.imageBuild(context.Background(), engineBuildSpec{
+					Image:   "example:tag",
+					Context: bytes.NewReader(nil),
+				}, 1<<20)
+				done <- err
+			}()
+
+			select {
+			case err := <-done:
+				if tc.wantOK {
+					if err != nil {
+						t.Fatalf("imageBuild: %v", err)
+					}
+				} else {
+					var engineErr *engineError
+					if !errors.As(err, &engineErr) {
+						t.Fatalf("imageBuild error = %v, want *engineError", err)
+					}
+					if engineErr.kind != tc.wantKind {
+						t.Errorf("error kind = %d, want %d", engineErr.kind, tc.wantKind)
+					}
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("imageBuild did not return after the build reached its terminal outcome: the stalled /session upgrade kept the request alive")
+			}
+
+			// The stalled handler must observe the cancellation-caused
+			// disconnect, not the test release.
+			select {
+			case observedBy := <-observed:
+				if observedBy != "cancelled" {
+					t.Errorf("the stalled /session handler exited through %q, want the observed disconnect", observedBy)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("the stalled /session handler never observed the disconnect")
+			}
+
+			// No request-owned session goroutine may survive the build.
+			assertNoBuildkitSessionGoroutines(t)
+		})
+	}
+}
+
 // fakeBuildRequest records what a fake Engine /build endpoint received.
 type fakeBuildRequest struct {
 	query          url.Values

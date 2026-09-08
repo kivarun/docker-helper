@@ -115,7 +115,7 @@ After a session token is issued:
 - Docker CLI and access to a running Docker daemon
 
 To build from source, you additionally need:
-- Go 1.23.0 with the go1.26.7 toolchain pinned in `go.mod` (the `go` command
+- Go 1.25.5 with the go1.26.7 toolchain pinned in `go.mod` (the `go` command
   honors the `toolchain` directive automatically), CGO enabled, and a C
   compiler
 

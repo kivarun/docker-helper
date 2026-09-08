@@ -356,7 +356,8 @@ under `AGENTS.md`, not a silent system-only scope reduction.
 At the Phase-0 rebaseline no checked-in evidence was found that satisfies this
 matrix. The gate is now **CLOSED** on the recorded GitHub Actions run below
 for both modes, with the rootless daemon-restart row recorded as an
-architectural finding pending the D0.2 decision described there.
+architectural finding whose owner decision is recorded in the D0 execution
+plan (`docs/release-3-d0-execution-plan.md`).
 
 #### Recorded Phase-0 cgroup gate run (GitHub Actions)
 
