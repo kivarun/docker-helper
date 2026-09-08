@@ -226,6 +226,21 @@ func TestRegistryLoginEngineIntegration(t *testing.T) {
 	w = httptest.NewRecorder()
 	app.handleRegistryLogin(w, req)
 	if w.Code != http.StatusUnprocessableEntity {
+		// Record the engine's normalized view of the rejection as a fact
+		// before failing. The cause text is checked against both canaries
+		// first; registry credential material is never printed.
+		eng, engErr := newEngineClient()
+		if engErr == nil {
+			_, loginErr := eng.registryLogin(context.WithoutCancel(ctx), registryHost, userCanary, passCanary+"-wrong")
+			if loginErr != nil {
+				cause := loginErr.Error()
+				if !strings.Contains(cause, passCanary) && !strings.Contains(cause, userCanary) {
+					t.Logf("FACT: wrong-credential engine error: kind-normalized=%v raw-cause=%q", errorKindOf(loginErr), cause)
+				} else {
+					t.Logf("FACT: wrong-credential engine error cause withheld (contained credential material)")
+				}
+			}
+		}
 		t.Fatalf("wrong credentials must return 422, got %d %s", w.Code, w.Body.String())
 	}
 	var failure response

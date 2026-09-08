@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -116,4 +117,14 @@ func (a *App) newEngineRegistryAuthenticator() (engineRegistryAuthenticator, err
 		return a.NewEngineClientFn()
 	}
 	return newEngineClient()
+}
+
+// errorKindOf reports the normalized category of an adapter error, or the
+// backend-failure category for an unclassified error.
+func errorKindOf(err error) engineErrorKind {
+	var engErr *engineError
+	if errors.As(err, &engErr) {
+		return engErr.kind
+	}
+	return engineErrBackendFailure
 }
