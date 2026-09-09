@@ -164,7 +164,7 @@ EOF
 
 assert_escape_contract() {
   local sample escaped token
-  sample='/m0/space * ? [ ] { } # " \\'
+  sample=$'/m0/space * ? [ ] { } # " \\'
   escaped="$(aa_path_literal "$sample")"
   for token in '\x20' '\x2a' '\x3f' '\x5b' '\x5d' '\x7b' '\x7d' '\x23' '\x22' '\x5c'; do
     case "$escaped" in
@@ -236,17 +236,17 @@ cp "$ESCAPE_PROFILE_FILE" "$EVIDENCE_DIR/path-literal-test.profile"
 apparmor_parser --preprocess "$PROFILE_FILE" >"$EVIDENCE_DIR/generated-workload.preprocessed"
 
 # Establish a fresh audit window before any intentional generated-profile deny.
-AA_AUDIT_START_EPOCH="$(date +%s)"
-# shellcheck source=scripts/uat-mac-apparmor.sh
+export AA_AUDIT_START_EPOCH="$(date +%s)"
+# shellcheck source=/dev/null
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/uat-mac-apparmor.sh"
 
 say 'prove literal-path escaping does not widen to a glob neighbor'
 apparmor_parser --replace --skip-read-cache "$ESCAPE_PROFILE_FILE"
 profile_loaded "$ESCAPE_PROFILE_NAME" || fail 'literal-encoding test profile was not loaded'
-if aa-exec -p "$ESCAPE_PROFILE_NAME" -- sh -c 'printf denied >>"$1"' sh "$ESCAPE_SENTINEL"; then
+if aa-exec -p "$ESCAPE_PROFILE_NAME" -- sh -c "printf denied >>\"\$1\"" sh "$ESCAPE_SENTINEL"; then
   fail 'literal sentinel write unexpectedly succeeded'
 fi
-aa-exec -p "$ESCAPE_PROFILE_NAME" -- sh -c 'printf allowed >>"$1"' sh "$ESCAPE_NEIGHBOR" \
+aa-exec -p "$ESCAPE_PROFILE_NAME" -- sh -c "printf allowed >>\"\$1\"" sh "$ESCAPE_NEIGHBOR" \
   || fail 'escaped literal denial widened to a neighboring pathname'
 remove_profile "$ESCAPE_PROFILE_NAME" "$ESCAPE_PROFILE_FILE"
 
@@ -260,8 +260,9 @@ docker run --rm --security-opt apparmor=unconfined \
     printf control > /m0/ro/control.txt
     rm /m0/rw/control.txt /m0/ro/control.txt
   '
-[ ! -e "$RW_SOURCE/control.txt" ] && [ ! -e "$RO_SOURCE/control.txt" ] \
-  || fail 'control-container cleanup did not restore the source trees'
+if [ -e "$RW_SOURCE/control.txt" ] || [ -e "$RO_SOURCE/control.txt" ]; then
+  fail 'control-container cleanup did not restore the source trees'
+fi
 
 RO_HASH_BEFORE="$(sha256sum "$RO_SOURCE/seed.txt" | awk '{print $1}')"
 
@@ -287,8 +288,9 @@ docker rm "$CONTAINER_NAME" >/dev/null
 [ -f "$RW_SOURCE/created.txt" ] || fail 'RW target did not persist its write'
 RO_HASH_AFTER="$(sha256sum "$RO_SOURCE/seed.txt" | awk '{print $1}')"
 [ "$RO_HASH_AFTER" = "$RO_HASH_BEFORE" ] || fail 'RO source content changed'
-[ ! -e "$RO_SOURCE/created.txt" ] && [ ! -e "$RO_SOURCE/renamed.txt" ] \
-  || fail 'RO source gained mutation residue'
+if [ -e "$RO_SOURCE/created.txt" ] || [ -e "$RO_SOURCE/renamed.txt" ]; then
+  fail 'RO source gained mutation residue'
+fi
 
 PROFILE_AUDIT="$EVIDENCE_DIR/generated-profile-audit.log"
 audit_records 'apparmor="DENIED"' \
