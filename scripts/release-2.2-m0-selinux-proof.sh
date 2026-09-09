@@ -483,12 +483,19 @@ grep -E 'avc:[[:space:]]+denied|type=AVC' "$EVIDENCE_DIR/audit-all.log" \
   >"$EVIDENCE_DIR/projection-avc.log" || true
 [ -s "$EVIDENCE_DIR/projection-avc.log" ] \
   || fail 'no attributable SELinux AVC for the read-only projection'
-grep -Eq 'denied[[:space:]]+\{[^}]*(write|append)' "$EVIDENCE_DIR/projection-avc.log" \
+grep -E 'tclass=file' "$EVIDENCE_DIR/projection-avc.log" \
+  | grep -Eq 'denied[[:space:]]+\{[^}]*(write|append)' \
   || fail 'no projection file-write AVC was captured'
-grep -Eq 'denied[[:space:]]+\{[^}]*(add_name|create)' "$EVIDENCE_DIR/projection-avc.log" \
-  || fail 'no projection create/add_name AVC was captured'
-grep -Eq 'denied[[:space:]]+\{[^}]*(remove_name|unlink|rename)' "$EVIDENCE_DIR/projection-avc.log" \
-  || fail 'no projection delete/rename AVC was captured'
+grep -E 'tclass=dir' "$EVIDENCE_DIR/projection-avc.log" \
+  | grep -Eq 'denied[[:space:]]+\{[^}]*(write|add_name|create)' \
+  || fail 'no projection directory-mutation AVC was captured'
+grep -F 'comm="rm"' "$EVIDENCE_DIR/projection-avc.log" >/dev/null \
+  || fail 'no attributable AVC for the delete attempt was captured'
+grep -F 'comm="mv"' "$EVIDENCE_DIR/projection-avc.log" >/dev/null \
+  || fail 'no attributable AVC for the rename attempt was captured'
+grep -F 'name="item"' "$EVIDENCE_DIR/projection-avc.log" \
+  | grep -Eq 'denied[[:space:]]+\{[^}]*(write|append)' \
+  || fail 'no attributable AVC for the regular-file append was captured'
 
 docker rm -f "$RO_CONTAINER" "$RW_CONTAINER" >/dev/null
 remove_projection "$FILE_STATE"
