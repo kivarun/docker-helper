@@ -466,7 +466,9 @@ Build a Docker image. \-\-build-arg may be repeated to pass multiple build argum
 Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
 .TP
 .B \-\-env\-from DEST=SOURCE
-Pass an environment variable without putting its value on the command line.
+Pass an environment variable without placing its value in the
+.B docker-helper
+command line.
 SOURCE names an environment variable of the
 .B docker-helper
 process itself; its value is read locally and delivered to the container as
@@ -474,8 +476,14 @@ DEST through the same environment contract as
 .BR \-\-env .
 Resolution is fail-closed: an unset SOURCE stops the command before any
 container operation is created. A SOURCE that is set but empty is delivered
-as an empty value. The value never appears in argv, diagnostics, audit, or
-daemon logs. When both \-\-env and \-\-env-from define the same name, the
+as an empty value. The value is not placed in the
+.B docker-helper
+argv, is not printed in diagnostics, is not inherited from the surrounding
+environment, and the daemon does not log environment values. Known
+limitation: the run implementation starts the workload through the legacy
+Docker CLI, which receives the value as \-\-env DEST=value, so the value can
+appear in the argv of that daemon-side child process. When both \-\-env and
+\-\-env-from define the same name, the
 \-\-env\-from value wins.
 .TP
 .B \-\-helper\-socket

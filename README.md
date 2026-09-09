@@ -817,12 +817,13 @@ docker-helper registry login --registry REG --username USER
 logs, and returns the final exit status. Operation IDs and log offsets are
 handled internally.
 
-### Passing secrets to a workload without argv
+### Passing secrets to a workload
 
 `run --env-from DEST=SOURCE` takes the value of SOURCE from the CLI
 process's own environment and delivers it to the container as DEST. The
-secret value never appears on the command line, in diagnostics, in audit,
-or in daemon logs:
+secret value is not placed in the `docker-helper` command line, is not
+printed in diagnostics, is not inherited from the surrounding shell, and
+the daemon does not log environment values:
 
 ```bash
 ORCHESTRATOR_LLM_KEY=secret \
@@ -834,6 +835,12 @@ docker-helper run \
 An unset SOURCE fails closed before any container operation is created; a
 SOURCE set to the empty string is delivered as an empty value.
 `--env-from` composes with `--env`.
+
+Limitation: the 2.1.x `run` implementation starts the workload through
+the legacy Docker CLI, which receives environment values as
+`--env DEST=value` argv entries, so a resolved value is visible in the
+argv of that daemon-side child process. `--env-from` guarantees nothing
+beyond the `docker-helper` process boundary.
 
 ### Reaching the helper socket from a workload (system mode)
 

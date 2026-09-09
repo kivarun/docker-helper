@@ -437,8 +437,13 @@ var runContainerCommand = &Command{
 				// CLI process environment. Resolution is local and fail-closed:
 				// an unset SOURCE stops the command before any run Operation
 				// is created. A resolved value exists only in the request body
-				// (the existing run environment contract); it never appears in
-				// argv, diagnostics, audit, or daemon logs.
+				// (the existing run environment contract); it is not placed in
+				// this CLI process's argv, is not printed in CLI diagnostics,
+				// and the daemon does not log environment values. Known 2.1.x
+				// limitation: the legacy run implementation passes the value
+				// to the daemon-side docker CLI as --env argv, so the value
+				// can appear in that child process's argv
+				// (see docs/architecture.md).
 				for _, spec := range envFromSlice.vals {
 					parts := strings.SplitN(spec, "=", 2)
 					if len(parts) != 2 {

@@ -1697,11 +1697,22 @@ command with exit code 2 before any request is sent, so no run Operation
 is created and no runtime residue remains. A SOURCE that is set but empty
 is delivered as an empty value. An invalid DEST name is rejected by the
 existing daemon environment validation exactly like an invalid `--env`
-name. Resolved values exist only in the request body; they never appear in
-the CLI argv, stdout/stderr diagnostics, audit records, or daemon logs.
+name. Resolved values exist only in the request body; they are not placed
+in the `docker-helper` process's argv, are not printed in CLI diagnostics,
+are not inherited from the surrounding process environment, and the
+daemon does not log environment values (only names appear in `env_keys`).
 Only explicitly requested variables are forwarded; the rest of the CLI
 process environment is never inherited. When both `--env` and
 `--env-from` define the same name, the `--env-from` value wins.
+
+Known 2.1.x limitation: `run` starts the workload through the legacy
+Docker CLI, and the daemon passes environment values to that child
+process as `--env DEST=value` argv entries, so a resolved value is
+visible in the argv of the daemon-side `docker` child process.
+`--env-from` therefore scopes its guarantee to the `docker-helper` CLI
+process boundary only; it does not promise the value is absent from every
+process argv on the system. Migrating `run` away from the legacy Docker
+CLI is not a 2.1.1 goal.
 `--env-from` introduces no new daemon-side concept: the existing
 `run.environment` contract fully owns delivery.
 
@@ -1794,9 +1805,13 @@ The client selects only the boolean. It never chooses the source, the
 target, or the mount mode, and the ordinary mount policy does not change:
 mount sources stay workspace-relative, absolute host sources and workspace
 escapes stay rejected, and allowed-root semantics are untouched. When the
-projection is active, a user mount whose target is exactly the injected
-mount point is rejected as `invalid_mount` (it would be a duplicate mount
-point at run time).
+projection is active, a user mount whose target overlaps the injected
+mount point — exact match, ancestor (`/run`, `/`), or descendant
+(`/run/docker-helper/docker-helper.sock`) — is rejected as `invalid_mount`:
+a caller-owned mount must not be able to shadow, replace, or partially
+cover the server-owned projection (same exact + ancestor + descendant
+principle as trusted-CA injection). Without `helper_socket` the 2.1.0
+mount contract is unchanged.
 
 The projection binds the runtime DIRECTORY, not the socket inode. The
 systemd unit preserves the runtime directory across service restarts
