@@ -315,11 +315,13 @@ func TestRunEngineIntegration(t *testing.T) {
 
 	// Run must not register operations: the supervisor no longer accepts
 	// run work at all.
-	app.OperationSupervisor.mu.RLock()
-	opCount := len(app.OperationSupervisor.ops)
-	app.OperationSupervisor.mu.RUnlock()
-	if opCount != 0 {
-		t.Errorf("run must not register operations, supervisor has %d", opCount)
+	if app.OperationSupervisor != nil {
+		app.OperationSupervisor.mu.RLock()
+		opCount := len(app.OperationSupervisor.ops)
+		app.OperationSupervisor.mu.RUnlock()
+		if opCount != 0 {
+			t.Errorf("run must not register operations, supervisor has %d", opCount)
+		}
 	}
 
 	// Rows 10+: helper_socket projection and trusted-CA coexistence
