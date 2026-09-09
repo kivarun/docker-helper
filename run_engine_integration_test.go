@@ -304,7 +304,9 @@ func TestRunEngineIntegration(t *testing.T) {
 		{"audit", auditBuf.String()},
 		{"operational log", opBuf.String()},
 	} {
-		for _, canary := range []string{"RUN-OUT-OK", "RUN-ERR-OK", "RUN_INTEG_KEY", "RUN_INTEG_VALUE", "RUN-INTEGRATION-CONTENT"} {
+		// Env names are a legitimate audit field (env_keys); the workload
+		// output and the env VALUES must not reach any log sink.
+		for _, canary := range []string{"RUN-OUT-OK", "RUN-ERR-OK", "RUN_INTEG_VALUE", "RUN-INTEGRATION-CONTENT"} {
 			if strings.Contains(sink.blob, canary) {
 				t.Errorf("%s contains workload material %q", sink.name, canary)
 			}
