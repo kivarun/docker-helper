@@ -90,3 +90,18 @@ func allowedRootPaths(entries []AllowedRootEntry) []string {
 	}
 	return out
 }
+
+// allowedRootEntriesForPaths lifts a path-only policy scope into canonical
+// entries: every path-only root is read_write. It is the inverse projection
+// of allowedRootPaths for 2.1-shaped callers and never invents an
+// authoritative policy value of its own.
+func allowedRootEntriesForPaths(paths []string) []AllowedRootEntry {
+	if paths == nil {
+		return nil
+	}
+	out := make([]AllowedRootEntry, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, allowedRootEntry(p))
+	}
+	return out
+}

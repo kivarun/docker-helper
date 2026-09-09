@@ -116,8 +116,9 @@ and return to architecture. Do not weaken the release requirement silently.
 
 ## Phase 2.2.1 — canonical policy value and persistence migration
 
-**Status: implemented, awaiting architectural acceptance.** Implemented on
-`feature/2.2.1-policy-persistence` (base `release/2.2@9e9c88d`). Evidence:
+**Status: CLOSED.** Implemented on `feature/2.2.1-policy-persistence` (base
+`release/2.2@9e9c88d`), merged to `release/2.2` as `33ba7a1` after
+architectural acceptance. Evidence:
 canonical `AllowedRootEntry{Path, Access}` value in `allowed_root.go`;
 config decode accepts legacy string entries (normalized `read_write`), the
 canonical `{"path","access"}` object form, and mixed arrays, with unknown
@@ -130,9 +131,11 @@ path-only shape in one atomic, idempotent, fail-closed transaction
 (`classifyAllowedRootsTable`, `migrateAllowedRootsTableToAccessSchema`);
 migration, config, constraint, and persistence tests in
 `allowed_root_migration_test.go` and `config_allowed_root_test.go`. Not yet
-done by design: the resolver (2.2.2), rich HTTP/CLI projection (2.2.3), and the
-Session snapshot (2.2.4); public `allowed_roots` remains the 2.1 path-only
-projection.
+done by design at 2.2.1: the rich HTTP/CLI projection (2.2.3), the Session
+snapshot (2.2.4), and runtime enforcement; public `allowed_roots` remains the
+2.1 path-only projection. The later phases were accepted and closed through
+their own implementation cycles (2.2.2 resolver, 2.2.3 control plane,
+2.2.4 snapshot persistence, 2.2.5 data-plane enforcement).
 
 Dependencies: M0-A and M0-S CLOSED.
 
@@ -199,6 +202,28 @@ Do not silently discard duplicate/conflicting policy state.
 `read_write` authority at the public behavior level.
 
 ## Phase 2.2.2 — one effective policy resolver
+
+**Status: implemented, awaiting architectural acceptance.** Implemented on
+`feature/2.2.2-effective-policy-resolver` (base `release/2.2@65f0406`, final
+SHA recorded in the phase report). Evidence: the pure domain owner
+`allowed_root_policy.go` implements most-specific lookup within one scope
+(`lookupAllowedRootAccess`), access-mode meet with `read_only` dominance
+(`meetAllowedRootAccess`), scope composition with derived path-only
+projections preserved as wrappers (`composeAllowedRootScopes`, and
+`intersectAllowedRootScopes` / `computeEffectivePrincipalRoots` /
+`computeLauncherEffectiveRoots` delegating to it), the Principal ceiling with
+the user-mode daemon-owner collapse (`effectivePrincipalAllowedRoots`),
+Launcher inherit/restricted semantics with the fail-closed stale-root
+revalidation (`effectiveLauncherAllowedRoots`), canonical ancestor-first
+ordering, normalization of redundant transitions
+(`normalizeAllowedRootEntries`), the pure Session filesystem snapshot
+derivation with source lookup and the single writable-parent query
+(`sessionFilesystemSnapshot.LookupAccess`, `CanExposeWritable`). The
+required pure/equivalence test matrix lives in
+`allowed_root_policy_test.go`. Not implemented by design here: the rich
+HTTP/CLI projection (2.2.3), snapshot persistence (2.2.4), and runtime
+enforcement (2.2.5); public `allowed_roots` responses and Session creation
+behavior are unchanged.
 
 Implement the pure/domain policy layer before wiring mutations or Docker.
 

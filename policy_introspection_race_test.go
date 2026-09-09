@@ -262,10 +262,16 @@ func TestRacePrincipalRootNarrowingSerializesCreatePolicyIntrospection(t *testin
 	root := app1.Config.AllowedRoots[0].Path
 
 	// Principal raceowner with stored roots [home, extra] and a credential.
+	// The extra root is a disjoint sibling under the global root, so the
+	// canonical normalized effective projection keeps both entries and the
+	// pre-/post-narrowing states remain distinguishable (a nested
+	// same-mode child would be normalized away).
 	home := filepath.Join(root, "home", "raceowner")
-	extra := filepath.Join(home, "extra")
-	if err := os.MkdirAll(extra, 0755); err != nil {
-		t.Fatal(err)
+	extra := filepath.Join(root, "raceowner-inputs")
+	for _, d := range []string{home, extra} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	installOSUserMock(t, map[string]string{"raceowner": home})
 	if _, err := createPrincipal(app1.DB, "raceowner", app1.Config.AllowedRoots); err != nil {
@@ -587,10 +593,16 @@ func TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing(t *testing.T
 	setupTestLoggingDiscard(t)
 	root := app1.Config.AllowedRoots[0].Path
 
+	// The extra root is a disjoint sibling under the global root, so the
+	// canonical normalized effective projection keeps both entries and the
+	// pre-/post-narrowing states remain distinguishable (a nested
+	// same-mode child would be normalized away).
 	home := filepath.Join(root, "home", "raceowner")
-	extra := filepath.Join(home, "extra")
-	if err := os.MkdirAll(extra, 0755); err != nil {
-		t.Fatal(err)
+	extra := filepath.Join(root, "raceowner-inputs")
+	for _, d := range []string{home, extra} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	installOSUserMock(t, map[string]string{"raceowner": home})
 	if _, err := createPrincipal(app1.DB, "raceowner", app1.Config.AllowedRoots); err != nil {

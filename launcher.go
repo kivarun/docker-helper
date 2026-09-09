@@ -350,10 +350,11 @@ func readPrincipalAllowedRoots(db *sql.DB, principalID int64) ([]AllowedRootEntr
 // It is a pure policy function: callers resolve the global roots, the stored
 // Principal roots, and the daemon-owner identity, and pass them in.
 func computeEffectivePrincipalRoots(globalRoots []string, storedPrincipalRoots []string, principalID int64, daemonOwnerPrincipalID int64, userMode bool) []string {
-	if userMode && principalID == daemonOwnerPrincipalID && len(storedPrincipalRoots) == 0 {
-		return append([]string(nil), globalRoots...)
-	}
-	return intersectAllowedRootScopes(globalRoots, storedPrincipalRoots)
+	return allowedRootPaths(effectivePrincipalAllowedRoots(
+		allowedRootEntriesForPaths(globalRoots),
+		allowedRootEntriesForPaths(storedPrincipalRoots),
+		principalID, daemonOwnerPrincipalID, userMode,
+	))
 }
 
 // resolveEffectivePrincipalRoots resolves the canonical effective Principal
@@ -368,7 +369,7 @@ func computeEffectivePrincipalRoots(globalRoots []string, storedPrincipalRoots [
 // resolvePrincipalEffectiveRootsSnapshot.
 func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error) {
 	cfg := a.getConfig()
-	globalRoots, err := resolveAllowedRootPaths(allowedRootPaths(cfg.AllowedRoots))
+	globalRoots, err := resolveAllowedRootEntries(cfg.AllowedRoots)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +382,7 @@ func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error
 	if userMode && a.userModeDefault != nil {
 		daemonOwnerPrincipalID = a.userModeDefault.principalID
 	}
-	return computeEffectivePrincipalRoots(globalRoots, allowedRootPaths(stored), principalID, daemonOwnerPrincipalID, userMode), nil
+	return allowedRootPaths(effectivePrincipalAllowedRoots(globalRoots, stored, principalID, daemonOwnerPrincipalID, userMode)), nil
 }
 
 // principalEffectiveRootsSnapshot is the immutable read-only projection of one
