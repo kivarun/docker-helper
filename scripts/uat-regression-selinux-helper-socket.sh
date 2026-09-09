@@ -41,9 +41,18 @@ fi
 IMAGE="alpine:3.24"
 AVC_TS="$(date '+%m/%d/%Y %H:%M:%S')"
 
+# Workspace inside an authorized global root (/opt; /home/* is not authorized
+# on the enforcing guest — its home root is the operator's own /home/opc).
+WS="/opt/uat-reg6-$RANDOM/ws"
+mkdir -p "$WS"
+dh config allowed-root add /opt >/dev/null 2>&1 || true
+dh config reload --system >/dev/null 2>&1 || true
+
 # --- session owner (principal + default Launcher + credential) ----------------
 SEL_P="selsock"; SEL_CRED="/tmp/selsock.tok"
 reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
+dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 \
+  || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
 # Launcher credential for the explicit in-workload bearer (value kept out of argv).
@@ -52,13 +61,13 @@ LC_JSON="$(dh launcher credential create --system --principal "$SEL_P" 2>/dev/nu
 LC_TOKEN="$(printf '%s\n' "$LC_JSON" | json_field token)"
 [ -n "$LC_TOKEN" ] || { reg_fail "launcher credential token missing"; reg_result; }
 
-reg_session "$SEL_CRED" "/home/$SEL_P/ws" || { reg_fail "session create failed"; reg_result; }
+reg_session "$SEL_CRED" "$WS" || { reg_fail "session create failed"; reg_result; }
 SID="$REG_SESSION_ID"; STOK="$REG_SESSION_TOKEN"
 
 # docker-helper binary travels through the workspace bind for the in-workload op.
-cp /usr/bin/docker-helper "/home/$SEL_P/ws/docker-helper"
-chmod 755 "/home/$SEL_P/ws/docker-helper"
-rm -f "/home/$SEL_P/ws/reg6-child-id" 2>/dev/null || true
+cp /usr/bin/docker-helper "$WS/docker-helper"
+chmod 755 "$WS/docker-helper"
+rm -f "$WS/reg6-child-id" 2>/dev/null || true
 
 # --- 1. ordinary run: no projection, confined container domain ----------------
 if DOCKER_HELPER_SESSION_TOKEN="$STOK" \
@@ -127,6 +136,7 @@ fi
 
 # --- cleanup --------------------------------------------------------------------
 dh session delete --system --id "$SID" >/dev/null 2>&1 || reg_fail "session delete failed"
-rm -f "$SEL_CRED" "/home/$SEL_P/ws/docker-helper" "/home/$SEL_P/ws/reg6-child-id"
+rm -f "$SEL_CRED"
+rm -rf "$(dirname "$WS")"
 
 reg_result
