@@ -1527,10 +1527,11 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 }
 
-// TestAdmitRejectionRunPinsBeforeLease drives handleRun with admit
-// rejection and verifies pins are cleaned up before the lease is released.
+// TestAdmitRejectionRunPinsBeforeLease drives handleRun with synchronous
+// admission refusal and verifies the run refuses before any pin exists and
+// releases the workspace-use lease.
 func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
-	mockDetectLSM(t, LSMAppArmor, nil)
+	setupTestLoggingDiscard(t)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)
@@ -1574,8 +1575,9 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
 	}
 
-	// Force admit rejection.
-	app.OperationSupervisor.beginShutdown()
+	// Force synchronous admission refusal.
+	app.SyncExecutionCoordinator.beginShutdown()
+	mockDetectLSM(t, LSMAppArmor, nil)
 
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
@@ -1600,14 +1602,12 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
-	var cleanupOrder []string
+	pinCalled := false
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinCalled = true
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
-			cleanup: func() error {
-				cleanupOrder = append(cleanupOrder, "pin_cleanup")
-				return nil
-			},
+			cleanup:    func() error { return nil },
 		}, nil
 	}
 
@@ -1626,12 +1626,13 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify: pin cleanup was called (production code cleaned up pins).
-	if len(cleanupOrder) != 1 || cleanupOrder[0] != "pin_cleanup" {
-		t.Errorf("expected [pin_cleanup], got %v", cleanupOrder)
+	// Admission happens before pinning: no pin may be created for a
+	// refused request.
+	if pinCalled {
+		t.Error("no pin may be created when the run is refused at admission")
 	}
 
-	// Verify: lease was released after pin cleanup.
+	// Verify: the lease was released on refusal.
 	mac.mu.Lock()
 	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()

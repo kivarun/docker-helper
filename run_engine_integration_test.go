@@ -270,14 +270,20 @@ func TestRunEngineIntegration(t *testing.T) {
 	assertNoHelperOwnedContainers(ctx, t, provisioning, session.Session.ID)
 
 	// Row 9: an unreachable Engine is a bounded backend-unavailable
-	// failure; no exit code is guessed.
+	// failure; no exit code is guessed. A fresh app is used because row 8
+	// left its coordinator in the shutdown state.
+	deadApp := newTestAppWithAdminToken(t)
+	deadSession, deadSessionErr := createDefaultAdminSessionForTest(deadApp, testWorkspaceDir(t, deadApp.Config.AllowedRoots[0]))
+	if deadSessionErr != nil {
+		t.Fatalf("createSession for unreachable-engine row: %v", deadSessionErr)
+	}
 	deadSocket := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	deadURL := deadSocket.URL
 	deadSocket.Close()
-	app.NewEngineRunFn = func() (engineContainerRunner, error) {
+	deadApp.NewEngineRunFn = func() (engineContainerRunner, error) {
 		return newEngineClientAgainstFake(t, deadURL), nil
 	}
-	w = postRun(t, app, session.Token, map[string]any{
+	w = postRun(t, deadApp, deadSession.Token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hi"},
 	})
@@ -291,8 +297,7 @@ func TestRunEngineIntegration(t *testing.T) {
 	if transportFailed.ExitCode != nil {
 		t.Errorf("transport failure must not guess an exit code: %+v", transportFailed)
 	}
-	assertRunFinishResult(t, auditBuf, session.Session.ID, "docker_run_failed")
-	app.NewEngineRunFn = nil
+	assertRunFinishResult(t, auditBuf, deadSession.Session.ID, "docker_run_failed")
 
 	// Workload material never reaches the log sinks.
 	for _, sink := range []struct{ name, blob string }{
