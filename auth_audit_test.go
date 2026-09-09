@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -11,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -545,32 +543,16 @@ func TestAuthAuditNoFailureOnValidSessionCapabilityAuth_Run(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	assertNoAuthFailure(t, auditBuf)
 }

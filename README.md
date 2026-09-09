@@ -813,11 +813,9 @@ docker-helper run --image NAME -- command args...
 docker-helper registry login --registry REG --username USER
 ```
 
-`build` is a synchronous request and returns its final bounded output/result
-directly. `run` keeps a synchronous CLI UX but is backed by an asynchronous
-Operation: the CLI polls for completion, streams incremental logs, and returns
-the final exit status. Operation IDs and log offsets are therefore run-only
-transport details handled internally by the CLI.
+`build`, `pull`, and `run` are synchronous requests that return their final
+bounded output/result directly; none has an Operation ID, and none is
+polled.
 
 ### Passing secrets to a workload
 
@@ -888,8 +886,8 @@ commands fall back to the system socket when no user-mode daemon is present.
 SIGINT (Ctrl+C) or SIGTERM interrupts the active command:
 - SIGINT -> exit 130
 - SIGTERM -> exit 143
-- for `build`, the signal cancels the in-flight synchronous HTTP request;
-- for `run`, the signal requests cancellation of the asynchronous daemon Operation.
+- for `build` and `run`, the signal cancels the in-flight synchronous HTTP
+  request; the daemon cancels the workload and cleans up its own backend state.
 
 Use `docker-helper help` and `docker-helper help <command>` for discovery.
 
@@ -917,7 +915,8 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 ### Build
 
 `POST /build` is synchronous. The HTTP response is the terminal build result;
-a successful response is HTTP 200 and has no `operation_id`.
+a successful response is HTTP 200 and has no `operation_id`. `POST /run`
+behaves the same (see below).
 
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
@@ -955,8 +954,8 @@ response carries `"truncated": true`.
 
 ### Run
 
-`POST /run` starts an asynchronous container run and returns immediately
-with an `operation_id`. The container runs in the background.
+`POST /run` is synchronous: it runs the workload container and returns the
+final bounded result with the actual exit code.
 
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
@@ -970,51 +969,31 @@ Optional `shm_size` sets the `/dev/shm` size for the container. Accepts
 a plain integer with an optional binary unit (`k`, `m`, `g`; case-insensitive).
 Example: `"64m"`, `"1g"`. Maximum is 2 GiB. If omitted, Docker uses its default.
 
-Response (HTTP 201):
+Response (HTTP 200):
 
 ```json
-{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
+{"ok":true,"output":"hello\n","truncated":false,"duration":"1s","exit_code":0}
 ```
 
-Track progress using the asynchronous Operation workflow:
+A non-zero workload exit is a workload result, not a backend failure: the
+response is still HTTP 200 with `ok: false`, `code: "container_exit_nonzero"`,
+the actual `exit_code`, and the bounded combined output. stdout and stderr
+are not split.
 
-- **Poll status** until `status` is `succeeded` or `failed`:
+Run failure codes:
 
-  ```bash
-  curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-    -H "Authorization: Bearer $SESSION_TOKEN" \
-    http://localhost/operations/op_abcdef1234567890
-  ```
-
-- **Read incremental logs** using the `offset` parameter:
-
-  ```bash
-  curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-    -H "Authorization: Bearer $SESSION_TOKEN" \
-    'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
-  ```
-
-Run-specific result codes:
-
-- `succeeded` — container exited with status 0;
-- `docker_run_failed` — Docker run operation failed;
 - `container_exit_nonzero` — container exited with a non-zero status;
-- `cancelled` — operation cancelled by client.
+- `docker_run_failed` — the Engine failed before a trustworthy workload
+  start/result;
+- `backend_unavailable` — the Docker Engine is unreachable;
+- `backend_failure` — unexpected Engine interaction;
+- `image_not_found` / `registry_auth_denied` / `registry_unavailable` —
+  image or registry failure before a trustworthy workload result;
+- `cancelled` — run cancelled by request cancellation or daemon shutdown.
 
-### Cancel an operation
-
-Cancel a running `run` Operation:
-
-```bash
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
-  -X POST 'http://localhost/operations/op_abcdef1234567890/cancel'
-```
-
-The operation becomes terminal with `status=failed` and `result_code=cancelled`.
-Cancelling an already-terminal operation is idempotent (returns current state).
-A synchronous build has no Operation ID; cancel it by cancelling its in-flight
-HTTP request/connection.
+Cancelling a synchronous run is done by cancelling the in-flight HTTP
+request/connection (the CLI does this on SIGINT/SIGTERM); the daemon removes
+the transient container before returning.
 
 ### Private registry authentication
 

@@ -939,16 +939,17 @@ func TestRunAuditLauncherProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
 	req := newRunRequest(map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hello"},
 	}, sresp.Token)
 	rw := httptest.NewRecorder()
 	mux.ServeHTTP(rw, req)
-	if rw.Code != http.StatusCreated {
-		t.Fatalf("run: expected 201, got %d (body=%s)", rw.Code, rw.Body.String())
+	if rw.Code != http.StatusOK {
+		t.Fatalf("run: expected 200, got %d (body=%s)", rw.Code, rw.Body.String())
 	}
-	waitRun(t, app, rw)
 
 	startRaw := findAuditLine(auditBuf, "run.start")
 	finishRaw := findAuditLine(auditBuf, "run.finish")

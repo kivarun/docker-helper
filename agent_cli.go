@@ -111,56 +111,6 @@ func resolveAgentEndpoint(endpoint string, tokenSource func() (string, error)) (
 	return newHTTPAPIClient(addr, tokenSource, nil), nil
 }
 
-// waitForOperationContext polls an operation until it reaches a terminal state.
-// If ctx is cancelled, it returns immediately with ctx.Err().
-func waitForOperationContext(ctx context.Context, c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
-	var offset int64
-	truncated := false
-
-	for {
-		// Fetch and print any new logs.
-		logs, err := c.operationLogs(ctx, opID, offset)
-		if err != nil {
-			return nil, err
-		}
-		if logs.Logs != "" {
-			fmt.Fprint(stdout, logs.Logs)
-		}
-		if logs.Truncated && !truncated {
-			truncated = true
-			fmt.Fprintln(stderr, "warning: operation log was truncated")
-		}
-		offset = logs.NextOffset
-
-		// Check operation status.
-		status, err := c.operationStatus(ctx, opID)
-		if err != nil {
-			return nil, err
-		}
-
-		if status.Status == operationSucceeded || status.Status == operationFailed {
-			// Read remaining logs one final time (always, even if offset == 0).
-			finalLogs, err := c.operationLogs(ctx, opID, offset)
-			if err != nil {
-				return nil, err
-			}
-			if finalLogs.Logs != "" {
-				fmt.Fprint(stdout, finalLogs.Logs)
-			}
-			if finalLogs.Truncated && !truncated {
-				fmt.Fprintln(stderr, "warning: operation log was truncated")
-			}
-			return status, nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(operationPollInterval):
-		}
-	}
-}
-
 // signalExitError indicates the CLI was interrupted by a signal.
 // The Signal field holds the received os.Signal.
 type signalExitError struct {
@@ -183,55 +133,42 @@ func signalExitCode(sig os.Signal) int {
 	}
 }
 
-// waitForOperationWithSignal polls an operation while watching for SIGINT/SIGTERM.
-// On signal, it stops polling, performs an at-most-once bounded synchronous
-// best-effort cancel, waits for the polling goroutine to exit, and returns a
-// signalExitError so the caller can exit with the correct code.
-// On normal completion, it returns the operation status as usual.
-func waitForOperationWithSignal(c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-	return waitForOperationWithSignalCh(c, opID, stdout, stderr, sigCh)
-}
-
-// waitForOperationWithSignalCh is the testable core of waitForOperationWithSignal.
-// It accepts a pre-configured signal channel so tests can inject signals.
-func waitForOperationWithSignalCh(c *apiClient, opID string, stdout, stderr io.Writer, sigCh <-chan os.Signal) (*operationStatusResponse, error) {
+// runWithSignalCh sends the synchronous run request while watching sigCh
+// for SIGINT/SIGTERM. On signal, it cancels the request context — the daemon
+// cancels the workload and performs run-owned backend cleanup — waits for
+// the request to return, and reports a signalExitError so the caller can
+// exit with the conventional signal code.
+func runWithSignalCh(c *apiClient, req runRequest, sigCh <-chan os.Signal, stdout, stderr io.Writer) (*runResponse, error) {
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
 
 	var cancelOnce sync.Once
-
 	tryCancel := func() {
 		cancelOnce.Do(func() {
-			if err := c.cancelOperation(opID); err != nil {
-				fmt.Fprintf(stderr, "warning: cancel failed: %v\n", err)
-			}
+			cancelCtx()
 		})
 	}
 
-	resultCh := make(chan struct {
-		status *operationStatusResponse
-		err    error
-	}, 1)
-
+	type runOutcome struct {
+		resp *runResponse
+		err  error
+	}
+	resultCh := make(chan runOutcome, 1)
 	go func() {
-		status, err := waitForOperationContext(ctx, c, opID, stdout, stderr)
-		resultCh <- struct {
-			status *operationStatusResponse
-			err    error
-		}{status, err}
+		resp, err := c.run(ctx, req)
+		resultCh <- runOutcome{resp, err}
 	}()
 
 	select {
 	case sig := <-sigCh:
-		cancelCtx() // stop poll goroutine immediately
-		tryCancel() // bounded synchronous best-effort daemon cancel
-		<-resultCh  // wait for goroutine to exit (no orphan)
+		tryCancel()
+		outcome := <-resultCh
+		if outcome.err != nil && outcome.resp == nil {
+			fmt.Fprintf(stderr, "warning: run did not return a result: %v\n", outcome.err)
+		}
 		return nil, &signalExitError{Signal: sig}
-	case res := <-resultCh:
-		return res.status, res.err
+	case outcome := <-resultCh:
+		return outcome.resp, outcome.err
 	}
 }
 
@@ -422,7 +359,7 @@ var runContainerCommand = &Command{
 	Summary:    "Run a Docker container",
 	Usage:      "docker-helper run --image NAME [flags] -- [command]",
 	MaxPosArgs: -1, // Unlimited positional args after --
-	Help:       `SIGINT/SIGTERM cancels the running container operation.`,
+	Help:       `SIGINT/SIGTERM cancels the in-flight run; the daemon terminates the workload and removes the transient container.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
 		image := fs.String("image", "", "Image name and tag")
@@ -536,38 +473,51 @@ var runContainerCommand = &Command{
 					HelperSocket: *helperSocket,
 				}
 
-				resp, err := c.startRun(req)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
+				// SIGINT/SIGTERM cancels the in-flight run request; the
+				// daemon cancels the workload and removes the transient
+				// container, then returns the terminal result.
+				sigCh := make(chan os.Signal, 1)
+				signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+				defer signal.Stop(sigCh)
 
-				status, err := waitForOperationWithSignal(c, resp.OperationID, stdout, stderr)
+				resp, err := runWithSignalCh(c, req, sigCh, stdout, stderr)
 				if err != nil {
 					if sigErr, ok := err.(*signalExitError); ok {
 						return signalExitCode(sigErr.Signal)
 					}
 					fmt.Fprintf(stderr, "error: %v\n", err)
+					if resp != nil && resp.Output != "" {
+						fmt.Fprintf(stderr, "run output:\n%s", resp.Output)
+						if resp.Truncated {
+							fmt.Fprintln(stderr, "run output truncated")
+						}
+					}
 					return 1
 				}
 
-				if status.Status == "succeeded" {
+				if resp.Truncated {
+					fmt.Fprintln(stderr, "run output truncated")
+				}
+				fmt.Fprint(stdout, resp.Output)
+
+				if resp.OK {
 					return 0
 				}
 
-				// container_exit_nonzero: return the container's exit code
-				if status.ResultCode != nil && *status.ResultCode == "container_exit_nonzero" && status.ExitCode != nil {
-					fmt.Fprintf(stderr, "run failed (container_exit_nonzero), exit_code=%d\n", *status.ExitCode)
-					return *status.ExitCode
+				// container_exit_nonzero is a workload result: the exit
+				// code is the container's actual exit code.
+				if resp.Code == "container_exit_nonzero" && resp.ExitCode != nil {
+					fmt.Fprintf(stderr, "run failed (container_exit_nonzero), exit_code=%d\n", *resp.ExitCode)
+					return *resp.ExitCode
 				}
 
-				// Other failures: print diagnostics
+				// Other failures: print diagnostics.
 				msg := "run failed"
-				if status.ResultCode != nil {
-					msg += " (" + *status.ResultCode + ")"
+				if resp.Code != "" {
+					msg += " (" + resp.Code + ")"
 				}
-				if status.ExitCode != nil {
-					msg += fmt.Sprintf(", exit_code=%d", *status.ExitCode)
+				if resp.ExitCode != nil {
+					msg += fmt.Sprintf(", exit_code=%d", *resp.ExitCode)
 				}
 				fmt.Fprintln(stderr, msg)
 				return 1

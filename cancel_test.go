@@ -16,8 +16,11 @@ import (
 	"time"
 )
 
-// TestCancelRunningBuild proves that cancelling a running build
-// terminates the process and returns result_code=cancelled.
+// TestCancelRunningRunOperation proves at the route level that cancelling a
+// running legacy operation terminates it and reports result_code=cancelled.
+// Run no longer registers operations; the operation is constructed through
+// the production supervisor primitives, and the legacy cancel route stays
+// contract-tested until the operation framework removal (D0.4).
 func TestCancelRunningRunOperation(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
@@ -27,73 +30,28 @@ func TestCancelRunningRunOperation(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	op := newRunOperation(result.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Use sleep 300 which will respond to SIGTERM.
-		return exec.CommandContext(ctx, "sleep", "300")
+	cmd := exec.Command("sleep", "300")
+	if res := startOperationProcess(cmd, op); res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
 	}
+	go func() {
+		cmd.Wait()
+		op.fail("cancelled", "run cancelled", nil, nil)
+	}()
 
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("run: expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
-	// Verify the operation is in the supervisor.
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatalf("operation %s not found in supervisor after run", opID)
-	}
-	if op.SessionID != result.Session.ID {
-		t.Fatalf("operation session ID %s != result session ID %s", op.SessionID, result.Session.ID)
-	}
-
-	// Wait for the process to start.
-	for i := 0; i < 50; i++ {
-		op.mu.Lock()
-		proc := op.cmd
-		op.mu.Unlock()
-		if proc != nil && proc.Process != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if op.cmd == nil || op.cmd.Process == nil {
-		t.Fatal("process not started yet")
-	}
-
-	// Cancel the operation.
-	t.Logf("cancelling operation %s (session %s)", opID, result.Session.ID)
-
-	// Verify the operation is still in the supervisor.
-	opBeforeCancel := app.OperationSupervisor.lookup(opID)
-	if opBeforeCancel == nil {
-		t.Fatalf("operation %s not found in supervisor before cancel", opID)
-	}
-	t.Logf("operation session ID: %s", opBeforeCancel.SessionID)
-
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	// Cancel the operation through the route.
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
 	mux := newOperationMux(app)
 	mux.ServeHTTP(cancelW, cancelReq)
 
 	if cancelW.Code != http.StatusOK {
-		t.Logf("cancel response: %d %s", cancelW.Code, cancelW.Body.String())
 		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
 	}
 
@@ -142,22 +100,13 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 		t.Fatalf("createSession2: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+	op := newRunOperation(session1.Session.ID, "alpine:3.24", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
 
-	runReq := newRunRequest(map[string]any{
-		"image": "alpine:3.24",
-	}, session1.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, runReq)
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
 	// Try to cancel with session2's token.
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+session2.Token)
 	cancelW := httptest.NewRecorder()
 	mux := newOperationMux(app)
@@ -166,15 +115,11 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 	if cancelW.Code != http.StatusNotFound {
 		t.Errorf("expected %d, got %d", http.StatusNotFound, cancelW.Code)
 	}
-
-	// Clean up: cancel with the correct session to avoid leaving orphan processes.
-	cancelReq2 := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
-	cancelReq2.Header.Set("Authorization", "Bearer "+session1.Token)
-	cancelW2 := httptest.NewRecorder()
-	newOperationMux(app).ServeHTTP(cancelW2, cancelReq2)
 }
 
-// TestCancelPreservesLogs proves that operation logs remain accessible after cancel.
+// TestCancelPreservesLogs proves that operation logs remain accessible after
+// cancel. The legacy cancel route stays contract-tested until the operation
+// framework removal (D0.4).
 func TestCancelPreservesLogsRunOperation(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
@@ -184,48 +129,22 @@ func TestCancelPreservesLogsRunOperation(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	op := newRunOperation(result.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+	cmd := exec.Command("sleep", "300")
+	if res := startOperationProcess(cmd, op); res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
 	}
-
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-
-	// Wait for the process to start.
-	for i := 0; i < 50; i++ {
-		op.mu.Lock()
-		proc := op.cmd
-		op.mu.Unlock()
-		if proc != nil && proc.Process != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if op.cmd == nil || op.cmd.Process == nil {
-		t.Fatal("process not started yet")
-	}
+	go func() {
+		cmd.Wait()
+		op.fail("cancelled", "run cancelled", nil, nil)
+	}()
 
 	// Cancel.
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
 	mux := newOperationMux(app)
@@ -235,8 +154,8 @@ func TestCancelPreservesLogsRunOperation(t *testing.T) {
 		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
 	}
 
-	// Read logs.
-	logsReq := httptest.NewRequest("GET", "/operations/"+opID+"/logs?offset=0", nil)
+	// Read logs after the cancel completed.
+	logsReq := httptest.NewRequest("GET", "/operations/"+op.ID+"/logs?offset=0", nil)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
 	newOperationMux(app).ServeHTTP(logsW, logsReq)
@@ -246,8 +165,9 @@ func TestCancelPreservesLogsRunOperation(t *testing.T) {
 	}
 }
 
-// TestCancelAuditEvent proves that cancelled operations emit the correct
-// audit event with result=cancelled.
+// TestCancelAuditEvent proves that cancelling a running legacy operation
+// reports result_code=cancelled, classified by the cancellation reason
+// exactly as the legacy run lifecycle classified it.
 func TestCancelAuditEvent(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
@@ -257,36 +177,47 @@ func TestCancelAuditEvent(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	op := newRunOperation(result.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+	cmd := exec.Command("sleep", "300")
+	if res := startOperationProcess(cmd, op); res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
+	}
+	go func() {
+		cmd.Wait()
+		// Classify like the legacy run lifecycle: by termination reason.
+		op.mu.Lock()
+		reason := op.reason
+		op.mu.Unlock()
+		if reason == terminationCancelled {
+			op.fail(resultCancelled, "run cancelled", nil, nil)
+		} else {
+			op.fail("docker_run_failed", "docker run failed", nil, nil)
+		}
+	}()
+
+	if err := app.OperationSupervisor.cancel(op.ID, app.killContainerBestEffort); err != nil {
+		t.Fatalf("cancel: %v", err)
 	}
 
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	select {
+	case <-op.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("operation did not complete after cancel")
+	}
 
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
+	op.mu.Lock()
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	op.mu.Unlock()
 
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
-	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
-	cancelW := httptest.NewRecorder()
-	mux := newOperationMux(app)
-	mux.ServeHTTP(cancelW, cancelReq)
-
-	// Verify the operation has result_code=cancelled.
-	op := app.OperationSupervisor.lookup(opID)
-	if op.ResultCode == nil || *op.ResultCode != resultCancelled {
-		t.Errorf("expected result_code 'cancelled', got %v", op.ResultCode)
+	if rc != resultCancelled {
+		t.Errorf("expected result_code 'cancelled', got %q", rc)
 	}
 }
 
@@ -341,8 +272,8 @@ func TestCancelClassificationUsesSentinels(t *testing.T) {
 	}
 }
 
-// TestCancelIdempotent proves that cancelling an already-cancelled operation
-// returns the terminal state without error.
+// TestCancelIdempotent proves that cancelling an already-cancelled legacy
+// operation returns the terminal state without error.
 func TestCancelIdempotent(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
@@ -352,41 +283,52 @@ func TestCancelIdempotent(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	op := newRunOperation(result.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+	cmd := exec.Command("sleep", "300")
+	if res := startOperationProcess(cmd, op); res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
 	}
+	go func() {
+		cmd.Wait()
+		op.mu.Lock()
+		reason := op.reason
+		op.mu.Unlock()
+		if reason == terminationCancelled {
+			op.fail(resultCancelled, "run cancelled", nil, nil)
+		} else {
+			op.fail("docker_run_failed", "docker run failed", nil, nil)
+		}
+	}()
 
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
+	mux := newOperationMux(app)
 
 	// First cancel.
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	mux := newOperationMux(app)
 	mux.ServeHTTP(cancelW, cancelReq)
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("first cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
+	}
+
+	select {
+	case <-op.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("operation did not complete after cancel")
+	}
 
 	// Second cancel (idempotent).
-	cancelReq2 := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq2 := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq2.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW2 := httptest.NewRecorder()
 	mux.ServeHTTP(cancelW2, cancelReq2)
 
 	if cancelW2.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, cancelW2.Code)
+		t.Fatalf("second cancel: expected %d, got %d", http.StatusOK, cancelW2.Code)
 	}
 
 	var cancelResp2 map[string]any
@@ -399,64 +341,9 @@ func TestCancelIdempotent(t *testing.T) {
 	}
 }
 
-// TestCancelRunCidfileCleanup proves that cancelling a run operation
-// cleans up the cidfile.
-func TestCancelRunCidfileCleanup(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
-	}
-
-	runReq := newRunRequest(map[string]any{
-		"image": "alpine:3.24",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, runReq)
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
-	op := app.OperationSupervisor.lookup(opID)
-	cidfile := op.cidfile
-
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
-	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
-	cancelW := httptest.NewRecorder()
-	mux := newOperationMux(app)
-	mux.ServeHTTP(cancelW, cancelReq)
-
-	// Verify cidfile is cleaned up.
-	if cidfile != "" {
-		if _, err := os.Stat(cidfile); err == nil {
-			t.Error("cidfile should be removed after cancel")
-		}
-	}
-
-	// Verify cancel HTTP response.
-	if cancelW.Code != http.StatusOK {
-		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
-	}
-
-	var cancelResp map[string]any
-	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
-	if cancelResp["status"] != "failed" {
-		t.Errorf("expected status 'failed', got %v", cancelResp["status"])
-	}
-	if cancelResp["result_code"] != "cancelled" {
-		t.Errorf("expected result_code 'cancelled', got %v", cancelResp["result_code"])
-	}
-}
-
 // TestShutdownDoesNotProduceCancelledResult proves that daemon shutdown
-// does not produce result_code=cancelled for build operations.
+// does not produce result_code=cancelled for a running legacy operation:
+// the shutdown reason classifies to the natural backend failure result.
 func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
@@ -466,41 +353,26 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	op := newRunOperation(result.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+	cmd := exec.Command("sleep", "300")
+	if res := startOperationProcess(cmd, op); res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
 	}
-
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-
-	// Wait for the process to start.
-	for i := 0; i < 50; i++ {
+	go func() {
+		cmd.Wait()
 		op.mu.Lock()
-		proc := op.cmd
+		reason := op.reason
 		op.mu.Unlock()
-		if proc != nil && proc.Process != nil {
-			break
+		if reason == terminationCancelled {
+			op.fail(resultCancelled, "run cancelled", nil, nil)
+		} else {
+			op.fail("docker_run_failed", "docker run failed", nil, nil)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	}()
 
 	// Simulate daemon shutdown by calling terminateForShutdown directly.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -508,69 +380,11 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
 
 	// Wait for the operation to complete.
-	op.Wait()
-
-	// Verify the result is NOT cancelled.
-	op.mu.Lock()
-	rc := ""
-	if op.ResultCode != nil {
-		rc = *op.ResultCode
+	select {
+	case <-op.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("operation did not complete after shutdown")
 	}
-	op.mu.Unlock()
-
-	if rc == "cancelled" {
-		t.Errorf("shutdown should not produce result_code 'cancelled', got %q", rc)
-	}
-}
-
-// TestShutdownRunDoesNotProduceCancelledResult proves that daemon shutdown
-// does not produce result_code=cancelled for run operations.
-func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
-	}
-
-	runReq := newRunRequest(map[string]any{
-		"image": "alpine:3.24",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, runReq)
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-
-	// Wait for the process to start.
-	for i := 0; i < 50; i++ {
-		op.mu.Lock()
-		proc := op.cmd
-		op.mu.Unlock()
-		if proc != nil && proc.Process != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Simulate daemon shutdown by calling terminateForShutdown directly.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
-
-	// Wait for the operation to complete.
-	op.Wait()
 
 	// Verify the result is NOT cancelled.
 	op.mu.Lock()
@@ -870,8 +684,8 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 }
 
 // TestCancelAfterNaturalCompletionPreservesResult proves that when the
-// operation completes naturally before cancel processes it, the natural
-// result is preserved (sequential idempotency).
+// legacy operation completes naturally before cancel processes it, the
+// natural result is preserved (sequential idempotency).
 func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
@@ -881,41 +695,36 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	op := newRunOperation(result.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Complete immediately with exit 0 (success).
-		return exec.CommandContext(ctx, "true")
+	// Complete immediately with exit 0 (success).
+	cmd := exec.Command("true")
+	if res := startOperationProcess(cmd, op); res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
 	}
-
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
+	go func() {
+		cmd.Wait()
+		op.succeed(nil)
+	}()
 
 	// Wait for natural completion to finish.
-	op.Wait()
+	select {
+	case <-op.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("operation did not complete")
+	}
 
 	// Now attempt cancel — it should see the operation is already terminal.
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	mux := newOperationMux(app)
-	mux.ServeHTTP(cancelW, cancelReq)
+	newOperationMux(app).ServeHTTP(cancelW, cancelReq)
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
+	}
 
 	// Verify: result must be succeeded, not cancelled.
 	op.mu.Lock()
@@ -987,8 +796,8 @@ func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 }
 
 // TestConcurrentDoubleCancel proves that two simultaneous cancel requests
-// for the same running operation produce exactly one terminal transition
-// and one finish audit. Both HTTP requests complete without error.
+// for the same running legacy operation produce exactly one terminal
+// transition and one finish audit. Both requests complete without error.
 func TestConcurrentDoubleCancel(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
@@ -1000,60 +809,42 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	op := newRunOperation(result.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+	cmd := exec.Command("sleep", "300")
+	if res := startOperationProcess(cmd, op); res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
 	}
-
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-
-	// Wait for the process to start.
-	for i := 0; i < 50; i++ {
+	go func() {
+		cmd.Wait()
 		op.mu.Lock()
-		proc := op.cmd
+		reason := op.reason
 		op.mu.Unlock()
-		if proc != nil && proc.Process != nil {
-			break
+		if reason == terminationCancelled {
+			op.fail(resultCancelled, "run cancelled", nil, nil)
+		} else {
+			op.fail("docker_run_failed", "docker run failed", nil, nil)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	}()
 
 	// Launch two cancel requests concurrently.
-	// Both enter the handler at roughly the same time.
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	var cancelW1, cancelW2 *httptest.ResponseRecorder
 	var cancelReq1, cancelReq2 *http.Request
 
-	// Prepare both requests.
-	cancelReq1 = httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq1 = httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq1.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW1 = httptest.NewRecorder()
 
-	cancelReq2 = httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq2 = httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq2.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW2 = httptest.NewRecorder()
 
-	// Barrier: both goroutines start at the same time.
 	start := make(chan struct{})
 
 	go func() {
@@ -1071,7 +862,6 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// Both requests must complete successfully.
 	if cancelW1.Code != http.StatusOK {
 		t.Errorf("cancel 1: expected %d, got %d", http.StatusOK, cancelW1.Code)
 	}
@@ -1109,13 +899,6 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	}
 	if finishCount != 1 {
 		t.Errorf("run.finish audit count = %d, want 1", finishCount)
-	}
-
-	// Verify: done is closed.
-	select {
-	case <-op.done:
-	default:
-		t.Fatal("op.done must be closed")
 	}
 }
 
@@ -1347,35 +1130,16 @@ func TestCancelResponseNoTimestampFields(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	// Create a run operation that completes immediately.
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
+	op := newRunOperation(result.Session.ID, "alpine:3.24", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
-
-	req := newRunRequest(map[string]any{
-		"image":   "alpine:3.24",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("run: expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var runResp map[string]any
-	json.NewDecoder(w.Body).Decode(&runResp)
-	opID := runResp["operation_id"].(string)
-
-	// Wait for the operation to complete.
-	if op := app.OperationSupervisor.lookup(opID); op != nil {
-		op.Wait()
-	}
+	op.succeed(nil)
 
 	// Cancel the already-completed operation.
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
-	w = httptest.NewRecorder()
+	w := httptest.NewRecorder()
 	newOperationMux(app).ServeHTTP(w, cancelReq)
 
 	if w.Code != http.StatusOK {
@@ -1398,8 +1162,8 @@ func TestCancelResponseNoTimestampFields(t *testing.T) {
 	if cancelResp["ok"] != true {
 		t.Error("expected ok=true")
 	}
-	if cancelResp["operation_id"] != opID {
-		t.Errorf("expected operation_id=%s, got %v", opID, cancelResp["operation_id"])
+	if cancelResp["operation_id"] != op.ID {
+		t.Errorf("expected operation_id=%s, got %v", op.ID, cancelResp["operation_id"])
 	}
 	if cancelResp["status"] != "succeeded" {
 		t.Errorf("expected status=succeeded, got %v", cancelResp["status"])

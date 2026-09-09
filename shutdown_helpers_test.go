@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -31,55 +29,57 @@ func setupRunSupervisorTest(t *testing.T) (*App, *operationSupervisor, *CreatedS
 	return app, supervisor, result, result.Token
 }
 
-// startRunTestOperation starts a run request through the production handler and
-// returns the registered operation. The caller must have installed an
-// ExecCommandContext seam; the handler is called synchronously.
-func startRunTestOperation(t *testing.T, app *App, token string) *operation {
+// startRunTestOperation constructs and starts a legacy run operation through
+// the production supervisor primitives. The synchronous run no longer
+// registers operations; the legacy operation lifecycle stays contract-tested
+// through its production primitives until the operation framework removal
+// (D0.4). The caller may have installed an ExecCommandContext seam; the
+// command below is created through that seam.
+func startRunTestOperation(t *testing.T, app *App, session *CreatedSession) *operation {
 	t.Helper()
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	op := newRunOperation(session.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if app.OperationSupervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	cmd := app.newDockerCommand(context.Background(), "sleep", "60")
+	res := startOperationProcess(cmd, op)
+	if res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
 	}
-	opID, _ := resp["operation_id"].(string)
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
+	go func() {
+		cmd.Wait()
+		exitCode := 137
+		op.fail("docker_run_failed", "docker run failed", &exitCode, nil)
+	}()
 	return op
 }
 
-// startRunOperationConcurrent starts a run request in a goroutine and
-// returns the response recorder and the operation channel for
-// synchronization.
-func startRunOperationConcurrent(t *testing.T, app *App, token string) (*httptest.ResponseRecorder, chan *operation, func() *operation) {
+// startRunOperationConcurrent starts a legacy run operation in a goroutine
+// through the production supervisor primitives and returns the operation
+// channel for synchronization.
+func startRunOperationConcurrent(t *testing.T, app *App, session *CreatedSession) (*httptest.ResponseRecorder, chan *operation, func() *operation) {
 	t.Helper()
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, token)
 	w := httptest.NewRecorder()
 
 	opCh := make(chan *operation, 1)
 	go func() {
-		app.handleRun(w, req)
-		var resp map[string]any
-		if err := json.NewDecoder(w.Body).Decode(&resp); err == nil {
-			if opID, ok := resp["operation_id"].(string); ok {
-				opCh <- app.OperationSupervisor.lookup(opID)
-			}
+		op := newRunOperation(session.Session.ID, "example:test", 4*1024*1024, "", "", "")
+		if app.OperationSupervisor.admit(op) != admissionAccepted {
+			opCh <- nil
+			return
 		}
+		cmd := app.newDockerCommand(context.Background(), "sleep", "60")
+		res := startOperationProcess(cmd, op)
+		if res.Terminated || res.Err != nil {
+			opCh <- op
+			return
+		}
+		go func() {
+			cmd.Wait()
+			exitCode := 137
+			op.fail("docker_run_failed", "docker run failed", &exitCode, nil)
+		}()
+		opCh <- op
 	}()
 
 	return w, opCh, func() *operation {
@@ -87,7 +87,7 @@ func startRunOperationConcurrent(t *testing.T, app *App, token string) (*httptes
 		case op := <-opCh:
 			return op
 		case <-time.After(5 * time.Second):
-			t.Fatal("run handler did not complete")
+			t.Fatal("run operation did not start")
 			return nil
 		}
 	}

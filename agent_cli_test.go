@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,7 +12,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 )
 
 type agentCLITestServer struct {
@@ -128,45 +126,32 @@ func TestBuildMissingFlags(t *testing.T) {
 }
 
 func TestRunContainerExitNonzero(t *testing.T) {
-	opID := "op_test123"
 	exitCode := 42
-	_, _, actualExit := runAgentCLITestWithServer(t, []string{
+	stdout, stderr, actualExit := runAgentCLITestWithServer(t, []string{
 		"run", "--image", "alpine:3.24", "--", "sh", "-c", "exit 42",
 	}, "", func(s *agentCLITestServer) {
 		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "running",
-			})
-		})
-		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "failed",
-				"result_code":  "container_exit_nonzero",
-				"exit_code":    exitCode,
-			})
-		})
-		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"offset":       int64(0),
-				"next_offset":  int64(0),
-				"truncated":    false,
-				"logs":         "",
+				"ok":        false,
+				"code":      "container_exit_nonzero",
+				"message":   "workload exited with a non-zero status",
+				"output":    "workload output\n",
+				"truncated": false,
+				"duration":  "1s",
+				"exit_code": exitCode,
 			})
 		})
 	})
 
 	if actualExit != 42 {
-		t.Errorf("expected exit 42, got %d", actualExit)
+		t.Errorf("expected exit 42, got %d (stderr %s)", actualExit, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "workload output") {
+		t.Errorf("expected workload output on stdout, got: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "container_exit_nonzero") {
+		t.Errorf("expected container_exit_nonzero diagnostic, got: %s", stderr.String())
 	}
 }
 
@@ -250,94 +235,6 @@ func TestPullNoConfigFile(t *testing.T) {
 // - first logs request returns empty (next_offset=0)
 // - status is already terminal
 // - final logs request returns output
-func TestWaitForOperationFinalLogsRace(t *testing.T) {
-	opID := "op_test"
-	callCount := 0
-
-	tempDir := t.TempDir()
-	socketPath := tempDir + "/docker-helper.sock"
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"status":       "succeeded",
-		})
-	})
-	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.Header().Set("Content-Type", "application/json")
-		if callCount == 1 {
-			// First request: empty logs, next_offset=0
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"offset":       int64(0),
-				"next_offset":  int64(0),
-				"truncated":    false,
-				"logs":         "",
-			})
-		} else {
-			// Final request: has output
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"offset":       int64(0),
-				"next_offset":  int64(10),
-				"truncated":    false,
-				"logs":         "Final output\n",
-			})
-		}
-	})
-
-	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	waitForDialReady(t, "unix", socketPath)
-
-	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
-	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
-	defer func() {
-		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
-		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
-	}()
-
-	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
-	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
-
-	var out bytes.Buffer
-	c := &apiClient{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var dialer net.Dialer
-					return dialer.DialContext(ctx, "unix", socketPath)
-				},
-			},
-		},
-		baseURL:     "http://localhost",
-		tokenSource: func() (string, error) { return "test-token", nil },
-	}
-
-	status, err := waitForOperationContext(context.Background(), c, opID, &out, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("waitForOperation failed: %v", err)
-	}
-	if status.Status != operationSucceeded {
-		t.Errorf("expected succeeded, got %s", status.Status)
-	}
-	if !strings.Contains(out.String(), "Final output") {
-		t.Errorf("expected final output, got: %s", out.String())
-	}
-}
-
 // TestRunInvalidMountOption verifies that unknown mount options are rejected.
 func TestRunInvalidMountOption(t *testing.T) {
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
@@ -367,37 +264,16 @@ func TestRunMountAbsoluteSourceRejected(t *testing.T) {
 
 // TestRunFailedDiagnostics verifies that failed run prints diagnostics.
 func TestRunFailedDiagnostics(t *testing.T) {
-	opID := "op_test"
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
 		"run", "--image", "alpine:3.24", "--", "echo", "hi",
 	}, "", func(s *agentCLITestServer) {
 		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
+			w.WriteHeader(http.StatusBadGateway)
 			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "running",
-			})
-		})
-		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "failed",
-				"result_code":  "docker_run_failed",
-			})
-		})
-		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"offset":       int64(0),
-				"next_offset":  int64(0),
-				"truncated":    false,
-				"logs":         "",
+				"ok":      false,
+				"code":    "backend_failure",
+				"message": "unexpected Engine interaction",
 			})
 		})
 	})
@@ -405,8 +281,8 @@ func TestRunFailedDiagnostics(t *testing.T) {
 	if exitCode != 1 {
 		t.Errorf("expected exit 1, got %d", exitCode)
 	}
-	if !strings.Contains(stderr.String(), "docker_run_failed") {
-		t.Errorf("expected result_code in error, got: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "backend_failure") {
+		t.Errorf("expected result code in error, got: %s", stderr.String())
 	}
 }
 
@@ -587,10 +463,11 @@ func TestBuildContract(t *testing.T) {
 }
 
 // TestRunContract verifies that run sends the expected JSON contract.
+// TestRunContract verifies that the CLI sends the accepted run request shape
+// and returns success through the synchronous flat result.
 func TestRunContract(t *testing.T) {
-	opID := "op_run"
 	received := false
-	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+	stdout, stderr, exitCode := runAgentCLITestWithServer(t, []string{
 		"run", "--image", "alpine:3.24",
 		"--env", "KEY=value",
 		"--mount", ".:/workspace:ro",
@@ -628,30 +505,12 @@ func TestRunContract(t *testing.T) {
 			}
 			received = true
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "running",
-			})
-		})
-		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "succeeded",
-			})
-		})
-		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"offset":       int64(0),
-				"next_offset":  int64(0),
-				"truncated":    false,
-				"logs":         "",
+				"ok":        true,
+				"output":    "hello",
+				"truncated": false,
+				"duration":  "1s",
+				"exit_code": 0,
 			})
 		})
 	})
@@ -661,14 +520,57 @@ func TestRunContract(t *testing.T) {
 	if exitCode != 0 {
 		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
 	}
+	if !strings.Contains(stdout.String(), "hello") {
+		t.Errorf("expected run output on stdout, got: %s", stdout.String())
+	}
 }
 
-// TestTruncatedOnlyInFinalLogs verifies that truncation in final logs
-// still produces the warning.
-func TestTruncatedOnlyInFinalLogs(t *testing.T) {
-	opID := "op_test"
-	callCount := 0
+// TestRunTruncatedOutputWarns verifies that a truncated synchronous run
+// result produces the warning on stderr and the bounded output on stdout.
+func TestRunTruncatedOutputWarns(t *testing.T) {
+	stdout, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+		"run", "--image", "alpine:3.24",
+	}, "", func(s *agentCLITestServer) {
+		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":        true,
+				"output":    "newest output",
+				"truncated": true,
+				"duration":  "1s",
+				"exit_code": 0,
+			})
+		})
+	})
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "newest output") {
+		t.Errorf("expected bounded output on stdout, got: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "truncated") {
+		t.Errorf("expected truncation warning, got: %s", stderr.String())
+	}
+}
 
+// TestSignalExitCodes proves the conventional CLI exit codes for signals.
+func TestSignalExitCodes(t *testing.T) {
+	if got := signalExitCode(syscall.SIGINT); got != 130 {
+		t.Errorf("signalExitCode(SIGINT) = %d, want 130", got)
+	}
+	if got := signalExitCode(syscall.SIGTERM); got != 143 {
+		t.Errorf("signalExitCode(SIGTERM) = %d, want 143", got)
+	}
+	if got := signalExitCode(syscall.SIGHUP); got != 1 {
+		t.Errorf("signalExitCode(other) = %d, want 1", got)
+	}
+}
+
+// TestRunSignalExitsWithSignalCode verifies that SIGINT during a blocking
+// synchronous run cancels the request and reports the conventional signal
+// error: runWithSignalCh cancels the request context, waits for the request
+// to return, and produces a signalExitError carrying the signal.
+func TestRunSignalExitsWithSignalCode(t *testing.T) {
 	tempDir := t.TempDir()
 	socketPath := tempDir + "/docker-helper.sock"
 
@@ -678,116 +580,19 @@ func TestTruncatedOnlyInFinalLogs(t *testing.T) {
 	}
 	defer listener.Close()
 
+	requested := make(chan struct{})
+	release := make(chan struct{})
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /run", func(w http.ResponseWriter, r *http.Request) {
+		close(requested)
+		// Hold the request open until the test releases it; the CLI must
+		// already have cancelled the in-flight request by then.
+		<-release
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"status":       string(operationSucceeded),
-		})
-	})
-	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.Header().Set("Content-Type", "application/json")
-		resp := map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"offset":       int64(0),
-			"next_offset":  int64(0),
-			"truncated":    false,
-			"logs":         "",
-		}
-		// Only the final request (second call) has truncation
-		if callCount == 2 {
-			resp["truncated"] = true
-			resp["logs"] = "final output\n"
-		}
-		json.NewEncoder(w).Encode(resp)
-	})
-
-	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	waitForDialReady(t, "unix", socketPath)
-
-	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
-	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
-	defer func() {
-		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
-		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
-	}()
-
-	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
-	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
-
-	var out, stderr bytes.Buffer
-	c := &apiClient{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var dialer net.Dialer
-					return dialer.DialContext(ctx, "unix", socketPath)
-				},
-			},
-		},
-		baseURL:     "http://localhost",
-		tokenSource: func() (string, error) { return "test-token", nil },
-	}
-
-	_, err = waitForOperationContext(context.Background(), c, opID, &out, &stderr)
-	if err != nil {
-		t.Fatalf("waitForOperation failed: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "warning: operation log was truncated") {
-		t.Errorf("expected truncation warning from final logs, got: %s", stderr.String())
-	}
-	if !strings.Contains(out.String(), "final output") {
-		t.Errorf("expected final output, got: %s", out.String())
-	}
-}
-
-// TestTruncatedMultiplePollsSingleWarning verifies that when truncation
-// appears across multiple polls, the warning is printed exactly once.
-func TestTruncatedMultiplePollsSingleWarning(t *testing.T) {
-	opID := "op_test"
-	statusCallCount := 0
-	logsCallCount := 0
-
-	tempDir := t.TempDir()
-	socketPath := tempDir + "/docker-helper.sock"
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
-		statusCallCount++
-		w.Header().Set("Content-Type", "application/json")
-		// First two status checks return running, third returns succeeded
-		status := string(operationRunning)
-		if statusCallCount >= 3 {
-			status = string(operationSucceeded)
-		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"status":       status,
-		})
-	})
-	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
-		logsCallCount++
-		w.Header().Set("Content-Type", "application/json")
-		// All logs requests return truncated=true
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"offset":       int64(0),
-			"next_offset":  int64(100),
-			"truncated":    true,
-			"logs":         "output\n",
+			"ok":       false,
+			"code":     "docker_run_failed",
+			"duration": "1s",
 		})
 	})
 
@@ -795,352 +600,36 @@ func TestTruncatedMultiplePollsSingleWarning(t *testing.T) {
 	go server.Serve(listener)
 	waitForDialReady(t, "unix", socketPath)
 
-	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
-	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
-	defer func() {
-		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
-		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
-	}()
+	c := newUnixAPIClient(socketPath, func() (string, error) { return "test-token", nil }, nil)
 
-	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
-	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
-
-	var out, stderr bytes.Buffer
-	c := &apiClient{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var dialer net.Dialer
-					return dialer.DialContext(ctx, "unix", socketPath)
-				},
-			},
-		},
-		baseURL:     "http://localhost",
-		tokenSource: func() (string, error) { return "test-token", nil },
-	}
-
-	_, err = waitForOperationContext(context.Background(), c, opID, &out, &stderr)
-	if err != nil {
-		t.Fatalf("waitForOperation failed: %v", err)
-	}
-
-	warningCount := strings.Count(stderr.String(), "warning: operation log was truncated")
-	if warningCount != 1 {
-		t.Errorf("expected exactly one truncation warning, got %d: %s", warningCount, stderr.String())
-	}
-}
-
-// TestSignalCancel verifies that waitForOperationWithSignalCh handles
-// SIGINT and SIGTERM correctly: cancels once, exits with proper code, stops polling.
-func TestSignalCancel(t *testing.T) {
-	cases := []struct {
-		name     string
-		signal   syscall.Signal
-		exitCode int
-	}{
-		{"SIGINT", syscall.SIGINT, 130},
-		{"SIGTERM", syscall.SIGTERM, 143},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			opID := "op_signal_" + tc.name
-			cancelCalled := int32(0)
-			pollCount := int32(0)
-
-			tempDir := t.TempDir()
-			socketPath := tempDir + "/docker-helper.sock"
-
-			listener, err := net.Listen("unix", socketPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer listener.Close()
-
-			mux := http.NewServeMux()
-			mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
-				atomic.AddInt32(&pollCount, 1)
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{
-					"ok":           true,
-					"operation_id": opID,
-					"status":       "running",
-				})
-			})
-			mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{
-					"ok":           true,
-					"operation_id": opID,
-					"offset":       int64(0),
-					"next_offset":  int64(0),
-					"truncated":    false,
-					"logs":         "",
-				})
-			})
-			mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
-				atomic.AddInt32(&cancelCalled, 1)
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{
-					"ok":           true,
-					"operation_id": opID,
-					"status":       "failed",
-					"result_code":  "cancelled",
-				})
-			})
-
-			server := &http.Server{Handler: mux}
-			go server.Serve(listener)
-			waitForDialReady(t, "unix", socketPath)
-
-			c := &apiClient{
-				httpClient: &http.Client{
-					Transport: &http.Transport{
-						DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-							var dialer net.Dialer
-							return dialer.DialContext(ctx, "unix", socketPath)
-						},
-					},
-				},
-				baseURL:     "http://localhost",
-				tokenSource: func() (string, error) { return "test-token", nil },
-			}
-
-			sigCh := make(chan os.Signal, 1)
-			sigCh <- tc.signal
-
-			var out, stderr bytes.Buffer
-			_, err = waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
-			if err == nil {
-				t.Fatal("expected error from signal")
-			}
-			sigErr, ok := err.(*signalExitError)
-			if !ok {
-				t.Fatalf("expected *signalExitError, got %T: %v", err, err)
-			}
-			if sigErr.Signal != tc.signal {
-				t.Errorf("expected %v, got %v", tc.signal, sigErr.Signal)
-			}
-			if code := signalExitCode(sigErr.Signal); code != tc.exitCode {
-				t.Errorf("expected exit code %d, got %d", tc.exitCode, code)
-			}
-			if atomic.LoadInt32(&cancelCalled) != 1 {
-				t.Errorf("expected cancel called exactly once, got %d", atomic.LoadInt32(&cancelCalled))
-			}
-			polls := atomic.LoadInt32(&pollCount)
-			if polls > 2 {
-				t.Errorf("expected polling to stop after signal, got %d polls", polls)
-			}
-		})
-	}
-}
-
-// TestSignalCancelErrorDiagnostic verifies that a cancel endpoint error
-// prints a diagnostic but does not change the signal exit code.
-func TestSignalCancelErrorDiagnostic(t *testing.T) {
-	opID := "op_cancel_err"
-
-	tempDir := t.TempDir()
-	socketPath := tempDir + "/docker-helper.sock"
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"status":       "running",
-		})
-	})
-	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"offset":       int64(0),
-			"next_offset":  int64(0),
-			"truncated":    false,
-			"logs":         "",
-		})
-	})
-	mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]any{
-			"code":    "internal_error",
-			"message": "daemon internal error",
-		})
-	})
-
-	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	waitForDialReady(t, "unix", socketPath)
-
-	c := &apiClient{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var dialer net.Dialer
-					return dialer.DialContext(ctx, "unix", socketPath)
-				},
-			},
-		},
-		baseURL:     "http://localhost",
-		tokenSource: func() (string, error) { return "test-token", nil },
-	}
-
-	// Pre-load signal.
 	sigCh := make(chan os.Signal, 1)
-	sigCh <- syscall.SIGINT
+	var out, errBuf bytes.Buffer
+	// Deliver the injected signal once the daemon handler is inside the
+	// blocking run request.
+	go func() {
+		<-requested
+		sigCh <- syscall.SIGINT
+	}()
 
-	var out, stderr bytes.Buffer
-	_, err = waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
-	if err == nil {
-		t.Fatal("expected error from signal")
+	resp, err := runWithSignalCh(c, runRequest{Image: "alpine:3.24", Command: []string{"sleep", "300"}}, sigCh, &out, &errBuf)
+	if resp != nil {
+		t.Fatalf("interrupted run must not produce a usable result, got %+v", resp)
 	}
 	sigErr, ok := err.(*signalExitError)
 	if !ok {
-		t.Fatalf("expected *signalExitError, got %T: %v", err, err)
+		t.Fatalf("expected signalExitError, got %v", err)
 	}
-	// Signal exit code is preserved despite cancel error.
-	if code := signalExitCode(sigErr.Signal); code != 130 {
-		t.Errorf("expected exit code 130, got %d", code)
+	if sigErr.Signal != syscall.SIGINT {
+		t.Errorf("signal = %v, want SIGINT", sigErr.Signal)
 	}
-
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "warning: cancel failed") {
-		t.Errorf("expected cancel error diagnostic in stderr, got: %s", stderrStr)
+	if !strings.Contains(errBuf.String(), "run did not return a result") {
+		t.Errorf("expected no-result warning, got: %s", errBuf.String())
 	}
+	// runWithSignalCh returning guarantees the request goroutine exited
+	// (no orphan) after the cancellation.
+	close(release)
 }
 
-// TestSignalExitCodes verifies that signalExitCode returns correct values.
-func TestSignalExitCodes(t *testing.T) {
-	if got := signalExitCode(syscall.SIGINT); got != 130 {
-		t.Errorf("SIGINT: expected 130, got %d", got)
-	}
-	if got := signalExitCode(syscall.SIGTERM); got != 143 {
-		t.Errorf("SIGTERM: expected 143, got %d", got)
-	}
-	if got := signalExitCode(syscall.SIGHUP); got != 1 {
-		t.Errorf("SIGHUP: expected 1, got %d", got)
-	}
-}
-
-// TestSignalNoOrphanGoroutine verifies that after signal, the poll goroutine
-// exits cleanly and no further HTTP requests are made.
-func TestSignalNoOrphanGoroutine(t *testing.T) {
-	opID := "op_no_orphan"
-	requestAfterCancel := int32(0)
-	cancelDone := int32(0)
-	statusCalls := int32(0)
-
-	tempDir := t.TempDir()
-	socketPath := tempDir + "/docker-helper.sock"
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&statusCalls, 1)
-		// After cancel completes, any further request means orphan goroutine.
-		if atomic.LoadInt32(&cancelDone) == 1 {
-			atomic.AddInt32(&requestAfterCancel, 1)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"status":       "running",
-		})
-	})
-	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
-		if atomic.LoadInt32(&cancelDone) == 1 {
-			atomic.AddInt32(&requestAfterCancel, 1)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"offset":       int64(0),
-			"next_offset":  int64(0),
-			"truncated":    false,
-			"logs":         "",
-		})
-	})
-	mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"status":       "failed",
-			"result_code":  "cancelled",
-		})
-		atomic.StoreInt32(&cancelDone, 1)
-	})
-
-	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	waitForDialReady(t, "unix", socketPath)
-
-	c := &apiClient{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var dialer net.Dialer
-					return dialer.DialContext(ctx, "unix", socketPath)
-				},
-			},
-		},
-		baseURL:     "http://localhost",
-		tokenSource: func() (string, error) { return "test-token", nil },
-	}
-
-	sigCh := make(chan os.Signal, 1)
-
-	var out, stderr bytes.Buffer
-	done := make(chan struct{})
-	go func() {
-		_, _ = waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
-		close(done)
-	}()
-
-	// Wait for the first poll request to be observed, then interrupt.
-	deadline := time.Now().Add(5 * time.Second)
-	for atomic.LoadInt32(&statusCalls) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("poll goroutine did not send a status request")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	sigCh <- syscall.SIGINT
-
-	<-done
-
-	// Wait for any orphan request with a bounded observation window.
-	observeDeadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(observeDeadline) {
-		if atomic.LoadInt32(&requestAfterCancel) > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	if atomic.LoadInt32(&requestAfterCancel) > 0 {
-		t.Errorf("expected no HTTP requests after signal, got %d", atomic.LoadInt32(&requestAfterCancel))
-	}
-}
-
-// TestBuildContextAbsoluteRejected verifies that build rejects absolute --context.
 func TestBuildContextAbsoluteRejected(t *testing.T) {
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
 		"build", "--context", "/absolute/path", "--dockerfile", "Dockerfile", "--image", "app:test",

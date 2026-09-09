@@ -594,6 +594,55 @@ before this path is declared Release-3-ready.
 There is no interval in which an Engine-backed `run` that lacks mandatory R3
 resource enforcement is advertised as the completed R3 contract.
 
+**Implementation evidence** (executor branch `feature/r3-d0.3b-run-sync`):
+
+- the run Engine primitive lives in the single `engine_client.go` adapter
+  (`engineContainerRunner` / `engineRunSpec` / `engineRunResult` /
+  `containerRun`), sharing the one `engineClient` with pull/build/login;
+  Moby types stay inside the adapter and the handler hands the adapter a
+  resolved trusted spec;
+- the handler sequence is: session capability → validation →
+  `helper_socket` fail-closed (user mode) → workspace-use lease → mount
+  resolution → credential resolution (fail-closed) → system-mode MAC
+  detection (fail-closed) → `admitLauncherScoped` → system-mode pinning →
+  `run.start` audit → `containerRun` → direct bounded result →
+  `run.finish` audit → pin cleanup in reverse order → lease release
+  (retained when workspace-dependent cleanup did not complete);
+- cancellation contract: HTTP request cancellation and daemon shutdown
+  cancel the request context; the handler removes the transient container
+  through the Engine with a bounded removal context detached from the
+  request context and unmounts the pins before returning; the removal is
+  part of the run postcondition — when the bounded removal cannot
+  complete or prove the container absent, the run reports the normalized
+  cleanup failure instead of a successful result or a terminal workload
+  result, keeping the bounded output captured so far and the surviving
+  container's helper-owned correlation labels;
+- the response contract: HTTP 200 flat result with
+  `ok/output/truncated/duration/exit_code`; non-zero workload exit is a
+  workload result (`container_exit_nonzero`, actual exit code, HTTP 200);
+  Engine failures classify through the normalized Engine error kinds
+  (`backend_unavailable` 503, `backend_failure` 502, `image_not_found`
+  404, `registry_auth_denied` 422, `registry_unavailable` 502,
+  unclassified `docker_run_failed` 500) with no guessed exit code and no
+  raw Engine payload in public/log/audit surfaces; the failed forced
+  removal is classified through the same normalized kinds (the removal
+  budget expiring is `backend_failure`, never a client cancellation) and
+  never yields `ok: true`, `container_exit_nonzero`, or a guessed exit
+  code;
+- the CLI sends one blocking synchronous request; SIGINT/SIGTERM cancels
+  the in-flight request context and exits 130/143; the legacy
+  create/poll/cancel CLI machinery is removed;
+- run-specific cidfile/Docker-CLI lifecycle helpers are gone from the
+  production run path; `operationSupervisor` keeps only its
+  quiesce/terminate/inspection machinery for the D0.4 transfer;
+- local gates, Engine mapping unit tests, the fake-Engine forced-removal
+  suite (`TestRunEngineRemove*`: successful/non-zero/cancelled workloads
+  plus a removal-budget timeout, and the removal-success control row),
+  and the real-Engine integration test (`TestRunEngineIntegration`,
+  `engine-run` CI job) cover the sequence; the release-2 acceptance
+  oracle discovers running workloads through the reserved helper label
+  set instead of cidfiles.
+
 ### D0.4 — remove legacy public/in-memory Operation
 
 Dependencies: D0.2 and D0.3b callers migrated; Launcher quiesce/active-execution
@@ -703,7 +752,22 @@ freshness, BuildKit progress trace rendering, no Operation identity
 (`operationSupervisor` is legacy run-only), and a session lifecycle
 that is cancelled, closed, and joined in that order on every build exit
 path, proven bounded including the stalled `/session` upgrade
-regression (recorded in the D0.2 section above). The next executable
-step is D0.3b — one-shot run migration — and it has not started. The
-cgroup feasibility gate remains a prerequisite before any D0.3b/D1/D2
-readiness is declared.
+regression (recorded in the D0.2 section above). **D0.3b is
+implemented** on the executor branch `feature/r3-d0.3b-run-sync`
+(pending architectural review): one-shot `run` executes synchronously
+through the shared Engine adapter with Launcher-scoped synchronous
+admission, direct bounded result and actual exit code, Engine-owned
+transient-container removal on every exit path with the removal as an
+enforced run postcondition (a removal that cannot complete or prove the
+container absent fails the run with the normalized cleanup failure), and
+no run Operation identity/polling/cancel — with the 2.1.1
+`helper_socket` and `--env-from` contracts preserved and the D0
+readiness boundary intact (no R3 resource readiness is claimed; the
+cgroup feasibility gate still owns the declaration of D0.3b/D1/D2
+readiness). Evidence: branch SHA
+`e1f58646f4fa82864dd8a219e3ebae457e60522f`, CI run 34375329603 all nine
+jobs green including the real-Engine `TestRunEngineIntegration` run
+matrix, and the black-box UAT artifact gate run 34375794687 all eight
+jobs green across Ubuntu tarball, openSUSE AppArmor, openSUSE SELinux
+tarball and the regression suite. The next executable step is D0.4 —
+legacy Operation retirement.

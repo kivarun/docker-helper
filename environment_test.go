@@ -1,13 +1,9 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"os/exec"
+	"slices"
 	"testing"
 )
 
@@ -20,54 +16,21 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"KEY": "value",
 		},
-	}
-	body, _ := json.Marshal(reqBody)
+	})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	found := false
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "KEY=value" {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Errorf("expected --env KEY=value in args %v", capturedArgs)
+	if spec := captured.lastSpec(); spec.Env["KEY"] != "value" {
+		t.Errorf("environment = %+v, want KEY=value", spec.Env)
 	}
 }
 
@@ -80,54 +43,23 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"A": "1",
 			"B": "2",
 		},
-	}
-	body, _ := json.Marshal(reqBody)
+	})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	envCount := 0
-	for _, arg := range capturedArgs {
-		if arg == "--env" {
-			envCount++
-		}
-	}
-
-	if envCount != 2 {
-		t.Errorf("expected 2 --env flags, got %d", envCount)
+	env := captured.lastSpec().Env
+	if len(env) != 2 || env["A"] != "1" || env["B"] != "2" {
+		t.Errorf("environment = %+v, want A=1 and B=2", env)
 	}
 }
 
@@ -140,54 +72,22 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"FLAG": "",
 		},
-	}
-	body, _ := json.Marshal(reqBody)
+	})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	found := false
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "FLAG=" {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Errorf("expected --env FLAG= in args %v", capturedArgs)
+	env := captured.lastSpec().Env
+	if value, ok := env["FLAG"]; !ok || value != "" {
+		t.Errorf("environment = %+v, want FLAG present with empty value", env)
 	}
 }
 
@@ -199,19 +99,12 @@ func TestRunEnvironmentInvalidName(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"INVALID-NAME": "value",
 		},
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
+	})
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
@@ -226,19 +119,12 @@ func TestRunEnvironmentNameStartsWithDigit(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"1NAME": "value",
 		},
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
+	})
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
@@ -253,19 +139,12 @@ func TestRunEnvironmentNameWithSpace(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"NAME WITH SPACE": "value",
 		},
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
+	})
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
@@ -280,26 +159,23 @@ func TestRunEnvironmentNameWithDash(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"NAME-DASH": "value",
 		},
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
+	})
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
 	}
 }
 
-func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
+// TestRunEngineCreateConfiguration proves the prepared run spec maps onto
+// the exact Engine create configuration the docker CLI run path produced:
+// user identity, security option, reserved labels, sorted environment, and
+// the command image/argv layout.
+func TestRunEngineCreateConfiguration(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -308,92 +184,50 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":       "alpine:latest",
 		"entrypoint":  "/bin/sh",
 		"command":     []string{"-c", "echo hello"},
 		"environment": map[string]string{"KEY": "value"},
-	}
-	body, _ := json.Marshal(reqBody)
+	})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
+	spec := captured.lastSpec()
 
-	// The expected Docker --user identity is the owning Principal's UID:GID,
-	// resolved through the Session's Launcher, not an assumed daemon identity.
+	// The prepared trusted spec carries the resolved identity, the
+	// user-mode security option, the reserved labels, and the caller
+	// environment.
 	expectedUID, expectedGID, err := resolveSessionExecutionIdentity(app.DB, &result.Session)
 	if err != nil {
 		t.Fatalf("resolveSessionExecutionIdentity() error: %v", err)
 	}
-
-	// --config is first, then --cidfile is inserted after the reserved helper
-	// runtime labels, before other options.
-	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--user", fmt.Sprintf("%d:%d", expectedUID, expectedGID), "--security-opt", "label=disable"}
-	for i, expected := range baseArgs {
-		if capturedArgs[i] != expected {
-			t.Fatalf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])
-		}
+	if spec.User != fmt.Sprintf("%d:%d", expectedUID, expectedGID) {
+		t.Errorf("user = %q, want %d:%d", spec.User, expectedUID, expectedGID)
 	}
-	// The reserved helper-owned runtime labels derive from the resolved Session
-	// ownership chain (schema, session id, launcher id, principal name), never
-	// from caller input. They are emitted in that exact order.
-	labelStart := len(baseArgs)
+	if len(spec.SecurityOpt) != 1 || spec.SecurityOpt[0] != "label=disable" {
+		t.Errorf("securityOpt = %+v, want [label=disable]", spec.SecurityOpt)
+	}
 	expectedLabels := []string{
-		"--label", runtimeLabelSchema + "=" + runtimeLabelSchemaValue,
-		"--label", runtimeLabelSessionID + "=" + result.Session.ID,
-		"--label", runtimeLabelLauncherID + "=" + result.Session.LauncherID,
-		"--label", runtimeLabelPrincipalName + "=" + result.Session.PrincipalName,
+		runtimeLabelSchema + "=" + runtimeLabelSchemaValue,
+		runtimeLabelSessionID + "=" + result.Session.ID,
+		runtimeLabelLauncherID + "=" + result.Session.LauncherID,
+		runtimeLabelPrincipalName + "=" + result.Session.PrincipalName,
 	}
-	for i, expected := range expectedLabels {
-		if capturedArgs[labelStart+i] != expected {
-			t.Fatalf("label arg[%d]: expected %q, got %q", labelStart+i, expected, capturedArgs[labelStart+i])
-		}
+	if !slices.Equal(spec.Labels, expectedLabels) {
+		t.Errorf("labels = %+v, want %+v", spec.Labels, expectedLabels)
 	}
-	cidfileIndex := labelStart + len(expectedLabels)
-	if len(capturedArgs) < cidfileIndex+1 || capturedArgs[cidfileIndex] != "--cidfile" {
-		t.Fatalf("expected --cidfile at arg[%d], got %v", cidfileIndex, capturedArgs)
+	if spec.Env["KEY"] != "value" {
+		t.Errorf("env = %+v, want KEY=value", spec.Env)
 	}
-	if len(capturedArgs) < cidfileIndex+2 || capturedArgs[cidfileIndex+1] == "" {
-		t.Fatalf("expected cidfile path at arg[%d], got %v", cidfileIndex+1, capturedArgs)
+	if spec.Image != "alpine:latest" || spec.Entrypoint != "/bin/sh" {
+		t.Errorf("image/entrypoint = %q/%q", spec.Image, spec.Entrypoint)
 	}
-	// Skip the cidfile args for the rest of the comparison.
-	remainingArgs := capturedArgs[cidfileIndex+2:]
-	expectedRemaining := []string{"--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
-	if len(remainingArgs) != len(expectedRemaining) {
-		t.Fatalf("expected %d remaining args, got %d: %v", len(expectedRemaining), len(remainingArgs), remainingArgs)
-	}
-
-	for i, expected := range expectedRemaining {
-		if remainingArgs[i] != expected {
-			t.Errorf("remaining arg[%d]: expected %q, got %q", i, expected, remainingArgs[i])
-		}
+	if !slices.Equal(spec.Command, []string{"-c", "echo hello"}) {
+		t.Errorf("command = %+v", spec.Command)
 	}
 }

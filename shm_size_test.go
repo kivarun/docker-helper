@@ -1,12 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"os/exec"
 	"testing"
 )
 
@@ -184,30 +179,15 @@ func TestRunShmSizeOmitted(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine:latest"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
 
-	reqBody := map[string]string{"image": "alpine:latest"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	for i, arg := range capturedArgs {
-		if arg == "--shm-size" {
-			t.Errorf("expected no --shm-size in args, found at index %d: %v", i, capturedArgs)
-			return
-		}
+	if spec := captured.lastSpec(); spec.ShmSize != 0 {
+		t.Errorf("shm size = %d, want unset (0)", spec.ShmSize)
 	}
 }
 
@@ -220,33 +200,18 @@ func TestRunShmSizeEmpty(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":    "alpine:latest",
 		"shm_size": "",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
 
-	for i, arg := range capturedArgs {
-		if arg == "--shm-size" {
-			t.Errorf("expected no --shm-size in args, found at index %d: %v", i, capturedArgs)
-			return
-		}
+	if spec := captured.lastSpec(); spec.ShmSize != 0 {
+		t.Errorf("shm size = %d, want unset (0)", spec.ShmSize)
 	}
 }
 
@@ -259,42 +224,22 @@ func TestRunShmSizeValid(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":    "alpine:latest",
 		"shm_size": "512m",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
 
-	// Verify --shm-size is present with the correct byte value.
-	wantBytes := "536870912" // 512 * 1024 * 1024
-	for i, arg := range capturedArgs {
-		if arg == "--shm-size" && i+1 < len(capturedArgs) {
-			if capturedArgs[i+1] != wantBytes {
-				t.Errorf("expected --shm-size %s, got %s", wantBytes, capturedArgs[i+1])
-			}
-			return
-		}
+	if spec := captured.lastSpec(); spec.ShmSize != 512*1024*1024 {
+		t.Errorf("shm size = %d, want %d", spec.ShmSize, 512*1024*1024)
 	}
-	t.Errorf("expected --shm-size in args, got %v", capturedArgs)
 }
 
-func TestRunShmSizePlacementBeforeImage(t *testing.T) {
+func TestRunShmSizeLimitPassedUnchanged(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -303,48 +248,18 @@ func TestRunShmSizePlacementBeforeImage(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":    "myimage:test",
-		"shm_size": "1g",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+		"shm_size": "2g",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
 
-	// Find --shm-size and image positions.
-	shmIdx := -1
-	imageIdx := -1
-	for i, arg := range capturedArgs {
-		if arg == "--shm-size" {
-			shmIdx = i
-		}
-		if arg == "myimage:test" {
-			imageIdx = i
-		}
-	}
-
-	if shmIdx == -1 {
-		t.Fatalf("expected --shm-size in args, got %v", capturedArgs)
-	}
-	if imageIdx == -1 {
-		t.Fatalf("expected image in args, got %v", capturedArgs)
-	}
-	if shmIdx >= imageIdx {
-		t.Errorf("--shm-size (idx %d) must come before image (idx %d)", shmIdx, imageIdx)
+	if spec := captured.lastSpec(); spec.ShmSize != 2*1024*1024*1024 {
+		t.Errorf("shm size = %d, want %d", spec.ShmSize, 2*1024*1024*1024)
 	}
 }
 
@@ -356,38 +271,28 @@ func TestRunShmSizeInvalidRejected(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		t.Fatal("ExecCommandContext should not be called for invalid shm_size")
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	for _, shmSize := range []string{"0", "-1g", "1.5g", "3g", "1x", "g", " 1g", "1 g"} {
 		t.Run(shmSize, func(t *testing.T) {
-			reqBody := map[string]any{
+			w := postRun(t, app, result.Token, map[string]any{
 				"image":    "alpine:latest",
 				"shm_size": shmSize,
-			}
-			body, _ := json.Marshal(reqBody)
-
-			req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-			req.Header.Set("Authorization", "Bearer "+result.Token)
-			w := httptest.NewRecorder()
-
-			app.handleRun(w, req)
+			})
 
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
 			}
 
-			var resp response
-			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-				t.Fatalf("cannot decode response: %v", err)
-			}
-
+			resp := decodeRunResponse(t, w)
 			if resp.Code != "invalid_shm_size" {
 				t.Errorf("expected code 'invalid_shm_size', got %q", resp.Code)
 			}
 		})
+	}
+
+	if captured.reached() {
+		t.Error("Engine runner must not be called for rejected shm sizes")
 	}
 }
 
@@ -402,39 +307,15 @@ func TestRunShmSizeAuditIncluded(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":    "alpine:latest",
 		"shm_size": "256m",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	var startRec, finishRec *auditRecord
@@ -473,36 +354,12 @@ func TestRunShmSizeAuditOmitted(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]string{"image": "alpine:latest"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine:latest"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	for _, rec := range records {

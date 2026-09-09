@@ -2,12 +2,10 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"testing"
 	"time"
 )
@@ -21,9 +19,7 @@ func TestRunSessionCapabilityAuthValidToken(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
@@ -34,8 +30,8 @@ func TestRunSessionCapabilityAuthValidToken(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 }
 
@@ -197,11 +193,7 @@ func TestRunSessionCapabilityAuthResponseContract(t *testing.T) {
 func TestRunSessionCapabilityAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	called := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		called = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
@@ -216,8 +208,8 @@ func TestRunSessionCapabilityAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
 	}
 
-	if called {
-		t.Error("ExecCommandContext should not be called with invalid token")
+	if captured.reached() {
+		t.Error("Engine runner must not be called with an invalid token")
 	}
 }
 

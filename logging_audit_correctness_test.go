@@ -611,12 +611,9 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(mountDir, "file.txt"), []byte("content"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "nonexistent-docker-binary")
-	}
 
 	// In system mode the mount source is pinned before the run starts. Provide
-	// a succeeding pin so the operation proceeds to the docker start failure.
+	// a succeeding pin so the request proceeds to the Engine failure.
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
@@ -624,19 +621,23 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 		}, nil
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(fmt.Sprintf(
-		`{"image":"alpine:3.24","command":["echo","hello"],"environment":{"SECRET":"password"},"mounts":[{"source":"%s","target":"/mnt"}]}`, mountRel))))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
+	setupRunSeam(t, app, runSeamOptions{
+		Err: &engineError{kind: engineErrBackendFailure, cause: errors.New("engine probe")},
+	})
+
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":       "alpine:3.24",
+		"command":     []string{"echo", "hello"},
+		"environment": map[string]string{"SECRET": "password"},
+		"mounts":      []map[string]any{{"source": mountRel, "target": "/mnt"}},
+	})
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d", http.StatusBadGateway, w.Code)
 	}
 
 	opOutput := opBuf.String()
-	if !strings.Contains(opOutput, "cannot start run process") {
-		t.Fatalf("run start failure must produce operational ERROR, got:\n%s", opOutput)
+	if !strings.Contains(opOutput, "run failed") {
+		t.Fatalf("run failure must produce an operational warning, got:\n%s", opOutput)
 	}
 	if strings.Contains(opOutput, "password") || strings.Contains(opOutput, "hello") {
 		t.Fatal("operational ERROR must not contain env/command values")
@@ -1036,9 +1037,11 @@ func countAuditEvents(buf *bytes.Buffer, event, result string) int {
 	return count
 }
 
-// TestRunPinnedMountCleanupCorrelation verifies that when pinned mount cleanup
-// fails during run completion, the operational log contains the correct
-// correlation fields: operation=run, operation_id, session_id, error.
+// TestRunPinnedMountCleanupCorrelation verifies that when pinned mount
+// cleanup fails during synchronous run completion, the operational log
+// contains the correct correlation fields: operation=run, session_id, error.
+// A synchronous run has no operation identity, so the cleanup log correlates
+// through the session id.
 func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	auditBuf := new(bytes.Buffer)
@@ -1054,7 +1057,6 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
-	token := result.Token
 
 	// Inject a pinned mount with a failing Cleanup.
 	sentinelErr := errors.New("injected pinned mount cleanup error")
@@ -1067,30 +1069,16 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 		}, nil
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":".","target":"/workspace"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": ".", "target": "/workspace"}},
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
-
-	// Wait for the operation to complete.
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-	op.Wait()
 
 	// Parse operational JSON and find the cleanup log.
 	opOutput := opBuf.String()
@@ -1116,18 +1104,6 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 		}
 		if opField != "run" {
 			t.Errorf("cleanup log operation = %q, want \"run\"", opField)
-		}
-
-		// Assert operation_id is non-empty and matches.
-		opIDField, ok := rec["operation_id"].(string)
-		if !ok {
-			t.Fatal("cleanup log missing operation_id field")
-		}
-		if opIDField == "" {
-			t.Error("cleanup log operation_id is empty")
-		}
-		if opIDField != opID {
-			t.Errorf("operation_id = %q, want %q", opIDField, opID)
 		}
 
 		// Assert session_id is non-empty and matches.

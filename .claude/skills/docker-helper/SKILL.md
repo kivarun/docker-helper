@@ -82,8 +82,8 @@ Then:
 Use one interface consistently for the current operation when practical.
 
 The CLI is a convenience client for the same daemon capabilities exposed by
-the HTTP API. For asynchronous `run`, it hides transport details such as
-operation polling and incremental log offsets.
+the HTTP API. `build`, `pull`, and `run` are synchronous: the CLI blocks
+until the final result and prints the bounded output.
 
 Protected operations use the session token from:
 
@@ -205,14 +205,11 @@ To pass a secret value (an API key, a credential token) without placing it
 in the `docker-helper` command line, export it in your own environment and
 use `--env-from DEST=SOURCE`, where SOURCE names your environment variable
 and DEST is the name the workload sees. The value is read locally from
-your environment; it is not placed in the `docker-helper` argv, is not
-printed in diagnostics, is not inherited from the surrounding shell, and
-the daemon does not log environment values. Known limitation: `run` starts
-the workload through the legacy Docker CLI, which receives the value as
-`--env DEST=value`, so the value can appear in that daemon-side child
-process's argv; `--env-from` guarantees nothing beyond the `docker-helper`
-process boundary. An unset SOURCE variable stops the command before any
-container operation is created.
+your environment; it is not placed in any process argv (the workload
+receives it through the container environment only), is not printed in
+diagnostics, is not inherited from the surrounding shell, and the daemon
+does not log environment values. An unset SOURCE variable stops the
+command before any request is sent.
 
 ```bash
 ORCHESTRATOR_LLM_KEY=secret \
@@ -272,8 +269,8 @@ While CLI `build` or `run` is active:
 
 - SIGINT exits with code 130;
 - SIGTERM exits with code 143;
-- for `build`, the signal cancels the in-flight synchronous HTTP request;
-- for `run`, the signal cancels the asynchronous daemon Operation.
+- for `build` and `run`, the signal cancels the in-flight synchronous HTTP
+  request; the daemon cancels the workload and removes the transient container.
 
 Do not attempt manual `docker kill` or container cleanup.
 
@@ -360,7 +357,7 @@ Optional build arguments:
 
 ## Run over HTTP
 
-`POST /run` starts an asynchronous operation.
+`POST /run` is synchronous.
 
 ```bash
 curl --silent --show-error \
@@ -374,8 +371,21 @@ curl --silent --show-error \
   http://localhost/run
 ```
 
-A successful start returns HTTP 201 with an `operation_id`. HTTP 201 means the
-run was accepted, not that the workload completed.
+A successful workload returns HTTP 200 with the flat result:
+
+```json
+{
+  "ok": true,
+  "output": "hello\n",
+  "truncated": false,
+  "duration": "1s",
+  "exit_code": 0
+}
+```
+
+A non-zero workload exit is a workload result, not a backend failure: HTTP 200
+with `ok: false`, `code: "container_exit_nonzero"`, the actual `exit_code`, and
+the bounded combined output. stdout and stderr are not split.
 
 Useful request fields: `image`, `entrypoint`, `command`, `workdir`,
 `environment`, `mounts`, `shm_size`, `helper_socket`.
@@ -407,36 +417,12 @@ Example mount (system-mode-only — relative subdirectory):
 }
 ```
 
-## Async run operation lifecycle
-
-For HTTP `run`, follow this algorithm:
-
-1. **Start** — POST to `/run`; retain the returned `operation_id`.
-2. **Poll** — GET `/operations/OPERATION_ID` until status is `succeeded` or `failed`.
-3. **Fetch logs** — GET `/operations/OPERATION_ID/logs?offset=OFFSET` during
-   polling and after completion. Use `next_offset` from each response for the
-   next request. When `truncated` is true, older output has been discarded.
-4. **Inspect result** — after a terminal status, check `result_code` and
-   `exit_code` in the operation status response.
+Cancelling a synchronous run is done by cancelling the in-flight HTTP
+request/connection; the daemon removes the transient container before
+returning. Do not use Docker directly to terminate the workload.
 
 Do not start work that depends on a successful build until the synchronous
 `POST /build` request has returned a successful terminal result.
-
-## Cancel run over HTTP
-
-The Operation cancel endpoint applies to asynchronous `run` Operations:
-
-```bash
-curl --silent --show-error \
-  --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
-  -X POST \
-  "http://localhost/operations/OPERATION_ID/cancel"
-```
-
-A synchronous HTTP build is cancelled by cancelling its request/connection; it
-has no Operation ID and therefore cannot be cancelled through this endpoint.
-Do not use Docker directly to terminate the workload.
 
 ## Registry authentication over HTTP
 
@@ -462,10 +448,8 @@ session use that session's registry credentials.
 When Docker Helper rejects or fails an operation:
 
 - inspect the returned Docker Helper diagnostic;
-- for asynchronous `run`, inspect status, `result_code`, `exit_code`, and
-  operation logs;
-- for synchronous `pull` and `build`, the direct HTTP response is the final
-  command result;
+- for synchronous `run`, `pull`, and `build`, the direct HTTP response is
+  the final command result: `code`, `exit_code`, and the bounded output;
 - correct the request when appropriate;
 - do not bypass Docker Helper by invoking Docker directly.
 

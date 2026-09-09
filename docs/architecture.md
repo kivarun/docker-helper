@@ -100,18 +100,16 @@ reference client     curl / native adapter
       │
 docker-helper daemon
       │
-      ├── Moby Engine API ─── registry login, pull, build
-      │
-      └── Docker CLI ─────── run
+      └── Moby Engine API ─── registry login, pull, build, run
               │
           Docker Engine
 ```
 
-Backend ownership is currently split: `registry login`, `POST /pull`, and
-the synchronous `POST /build` execute through the daemon's single shared
-Moby Engine API adapter, while `run` still executes the Docker CLI. The
-daemon is not yet fully Moby-only; the remaining D0 Engine API migration
-(run) extends the Engine path and retires the CLI path.
+Backend ownership is single: `registry login`, `POST /pull`, `POST /build`,
+and `POST /run` execute through the daemon's one shared Moby Engine API
+adapter. The one-shot run no longer executes the Docker CLI and leaves no
+cidfile mechanism behind; the Docker CLI remains only for the
+launcher-runtime container listing until that path migrates.
 
 There are exactly four bearer classes, described by the [authority
 model](#authority-model): the admin token authenticates the administrator, a
@@ -241,7 +239,7 @@ target-resolution contract:
 | Admin token | the administrator | full control plane: all Principals, Launchers, Principal and Launcher credentials, all Sessions, configuration, reload, admin-token rotation | system mode: exactly one explicit selector required (`400 missing_launcher_selector`); user mode: the local daemon-owner `default` Launcher | `?principal=USER` and/or `?launcher=LAUNCHER`; a `dhl_` Launcher ID is valid without a Principal, a Launcher name requires the Principal scope |
 | Principal credential | one Principal | that Principal's resources: its Launchers and their credentials, its own Principal credential, `principal show` on itself, and the Sessions owned by its Principal's Launchers | its Principal's `default` Launcher, or an explicit own Launcher | `?launcher=` (name or ID) inside its own scope; `--principal` is illegal, even for its own Principal |
 | Launcher credential | one Launcher | that Launcher's Sessions and `GET /auth` self-inspection | its own Launcher (forced) | none — there is no narrowing contract for this authority |
-| Session token | one Session | one workspace data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login`, and that Session's operation endpoints | not a control authority; not accepted by control endpoints or `GET /auth` | none |
+| Session token | one Session | one workspace data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login` (legacy operation endpoints remain for the transferred framework) | not a control authority; not accepted by control endpoints or `GET /auth` | none |
 
 Rules shared by every authority:
 
@@ -645,7 +643,14 @@ MAC/runtime cleanup owners:
   have active runtime state, the delete fails with
   `409 launcher_runtime_active` and the launcher's durable state —
   including its enabled flag and Sessions — is unchanged; a still-enabled
-  launcher can be disabled explicitly first. Once the check passes,
+  launcher can be disabled explicitly first. Active runtime spans the two
+  current execution classes: durable operations in the supervisor and
+  live Launcher-scoped synchronous Engine requests (including `run`) in
+  the coordinator. Once the check passes,
+  sessions are deleted and the launcher row is removed. If owner removal
+  fails after the durable disable committed, the invalidated sessions
+  still receive their runtime-directory cleanup (best-effort) instead of
+  waiting for daemon restart; Once the check passes,
   sessions are deleted and the launcher row is removed. If owner removal
   fails after the durable disable committed, the invalidated sessions
   still receive their runtime-directory cleanup (best-effort) instead of
@@ -741,12 +746,12 @@ POST /run  (session token)
     │
     ├── resolves session (launcher-owned)
     ├── execution identity = principal UID:GID or daemon UID:GID
-    ├── registers operation (supervisor admission — atomic with shutdown gate)
-    ├── starts async process (cmd.Start under op.mu)
-    ├── captures stdout/stderr into bounded LogBuffer
-    ├── completion goroutine owns cmd.Wait()
-    ├── transitions operation to succeeded/failed
-    └── writes audit record with the session's ownership provenance
+    ├── synchronous coordinator admission (Launcher-scoped, atomic
+    │   shutdown/Launcher gate)
+    ├── system-mode mount pinning (request-scoped pin set)
+    ├── Engine containerRun: create → attach → start → wait → bounded
+    │   detached removal (shared adapter, bounded combined output)
+    └── writes run.start/run.finish audit with no operation identity
     │
 GET /operations/{id}  (session token)
     │
@@ -782,7 +787,9 @@ Session token semantics:
   sessions and blocks their tokens; disabled launchers also reject
   credential authentication;
 - removing an allowed root does not invalidate issued sessions;
-- an already-started Docker operation continues its lifecycle.
+- synchronous Engine requests already admitted are cancelled at shutdown
+  with their handler-owned cleanup (transient container removal for
+  `run`, staging cleanup for `build`).
 
 ### Ownership migration
 
@@ -1384,11 +1391,14 @@ the command returns an error.
 ### Operation lifecycle
 
 This section describes the legacy Docker CLI operation lifecycle owned by
-`operationSupervisor` — `run`. The Engine-backed synchronous requests
-(`build`, `pull`, and `registry login` validation) follow the synchronous
-path described under [Build](#build), [Pull](#pull), and
-[Registry login](#registry-login); they have no Operation identity and
-never register with the supervisor.
+`operationSupervisor`. No production path currently registers operations:
+`run` is Engine-backed and synchronous (see [Run](#run)), and `build`,
+`pull`, and `registry login` validation follow the synchronous path
+described under [Build](#build), [Pull](#pull), and
+[Registry login](#registry-login) — none have an Operation identity or
+register with the supervisor. The supervisor remains for the checked
+parent-lifecycle quiesce/terminate responsibilities being transferred in
+the D0.4 execution step.
 
 ```
 Authentication
@@ -1444,13 +1454,13 @@ Key internal guarantees that make cancel and shutdown safe:
   phase performs daemon-side container cleanup and CLI process kill;
 - concurrent followers wait on a shared absolute force-cleanup deadline
   rather than creating independent timers;
-- `/run` force cleanup uses cidfile + daemon-side `docker kill` to prevent
-  orphan containers;
 - `<kind>.finish` audit event is emitted exactly once per operation.
 
-`POST /run` returns HTTP 201 with an `operation_id`; the client tracks
-progress through the operation endpoints. `POST /build` is synchronous and
-has no Operation identity (see [Build](#build)).
+No production path creates operations: `POST /build`, `POST /pull`, and
+`POST /run` are synchronous and have no Operation identity (see
+[Build](#build), [Pull](#pull), and [Run](#run)). The supervisor and the
+operation endpoints remain only for the legacy framework being
+transferred in the D0.4 execution step.
 
 **`GET /operations/{id}`** (session token) — status and metadata:
 
@@ -1592,12 +1602,12 @@ with the same contract.
 
 ### Run
 
-`POST /run` is the remaining legacy asynchronous Operation path. Unlike the
-synchronous `POST /build`, it registers an Operation and returns HTTP 201 with
-an `operation_id`; the CLI hides that transport lifecycle by polling status,
-streaming incremental logs, and returning the final workload exit status.
-`--mount` source must be relative to the session workspace; target is an
-absolute container path.
+`POST /run` is synchronous. It executes one bounded workload container
+through the single shared Engine adapter and returns the flat result
+directly in the response; it has no Operation identity, no `operation_id`,
+and never registers with the supervisor. The CLI sends one blocking
+request and stays a thin stateless adapter (no `--detach`, no local
+polling state, no local retry).
 
 ```
 Authentication
@@ -1608,17 +1618,28 @@ Workdir validation
     │
 Environment validation
     │
-Mount resolution
+helper_socket fail-closed check (user mode → invalid_helper_socket)
     │
-Operation registration (supervisor admission — atomic with shutdown gate)
+Workspace-use lease acquisition
     │
-Async docker run process start (cmd.Start under op.mu)
+Mount resolution (user mounts, trusted-CA overlap, helper-socket overlap)
     │
-Incremental bounded log capture (cmd.Stdout/stderr → boundedBuffer)
+Session credential resolution (fail-closed on store read failure)
     │
-Completion goroutine (cmd.Wait → status transition)
+System-mode MAC detection (fail-closed) → container security policy
     │
-Retention cleanup
+Launcher-scoped synchronous admission (atomic with the shutdown gate)
+    │
+System-mode mount pinning (with the request-scoped pin set)
+    │
+run.start audit
+    │
+Engine containerRun: create → (pull on absent image) → attach → start
+    │ → wait → bounded detached removal
+    │
+Direct bounded result (exit code, combined output, duration)
+    │
+run.finish audit + pin cleanup in reverse order + lease release
 ```
 
 Request validation checks that the image field is non-empty. Workdir
@@ -1629,18 +1650,66 @@ against the workspace and checks for duplicate targets.
 
 `helper_socket` validation is mode-aware: when the boolean is requested in
 user mode the request is rejected (`invalid_helper_socket`) before any
-lease, pin, or operation state exists. In system mode the capability is
+lease, pin, or Engine container exists. In system mode the capability is
 accepted and a user mount may not use the injected mount point itself
 (`invalid_mount`).
 
-Container lifecycle:
+The Engine sequence is owned by the adapter (`engineClient.containerRun`):
 
-- `--rm` — container is removed on exit;
-- helper-owned `--cidfile` — records container ID for lifecycle management;
-- graceful shutdown — Docker CLI receives SIGTERM;
-- force fallback — daemon-side `docker kill` by CID, then CLI process
-  force-kill/reap if needed;
-- helper-owned containers are never left orphan after shutdown.
+- create the transient container from the trusted spec the handler
+  resolved; when the image is absent, one implicit pull with the stored
+  Session credential joins the bounded run output, then one create retry —
+  the same auto-pull behavior the docker CLI run path had;
+- attach before start, so bounded capture loses nothing;
+- start;
+- wait for the next exit; the container's terminal exit code is a result,
+  never a failure;
+- bounded forced removal of the transient container on every exit path —
+  normal completion, non-zero exit, request cancellation, daemon shutdown,
+  and create/start partial failure — through a removal context detached
+  from the request context with its own timeout, so a cancelled request
+  still cleans up provably owned state. The removal is part of the
+  synchronous run postcondition: when it cannot complete within its
+  bounded budget (or prove the container absent through a NotFound
+  answer), the run reports the normalized Engine cleanup failure instead
+  of a successful result or a terminal workload result, the bounded output
+  captured so far is preserved, and no backend identifier is exposed.
+
+The backend container ID stays internal: it never reaches the API
+response, audit, or operational logs. The combined workload output is
+captured into a bounded buffer of `operation_log_max_bytes` with
+newest-data behavior; it exists only in the synchronous HTTP response and
+never in slog, journald, audit, or SQLite.
+
+Request validation checks that the image field is non-empty. Workdir
+validation ensures the value is an absolute path if provided.
+Environment validation ensures variable names match
+`^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
+against the workspace and checks for duplicate targets.
+
+The response contract:
+
+- a started workload whose container exits 0 returns HTTP 200 with
+  `ok: true`, the bounded combined output, `truncated`, `duration`, and
+  `exit_code: 0`;
+- a non-zero workload exit is a workload result, not a backend protocol
+  failure: HTTP 200 with `ok: false`, `code: container_exit_nonzero`, the
+  actual `exit_code`, the bounded combined output, `truncated`, and
+  `duration`. stdout and stderr are not split and no nested result object
+  is introduced;
+- before a trustworthy workload start/result, Engine failures classify
+  through the normalized Engine error kinds: `backend_unavailable` (503),
+  `backend_failure` (502), `image_not_found` (404), `registry_auth_denied`
+  (422), `registry_unavailable` (502); an unclassified Engine failure is
+  `docker_run_failed` (500). No exit code is guessed from an error string
+  and raw Engine error payloads never become public/log/audit contract;
+  the same classification covers a failed forced removal: the run never
+  reports `ok: true` or a terminal workload result when the bounded removal
+  could not complete or prove the container absent;
+- a cancelled run (request cancellation or shutdown) is answered with the
+  generic run failure and audited as `cancelled` with no exit code; when
+  its own cleanup also failed within the bounded budget, the run is
+  answered with the normalized cleanup failure instead.
 
 Validation details:
 
@@ -1649,30 +1718,27 @@ Validation details:
 - mount target must be absolute;
 - source is resolved through `EvalSymlinks` and checked via `pathWithin`;
 - environment values are never logged (only names in `env_keys`);
-- environment names are sorted for deterministic output;
+- environment names are sorted for the Engine create config;
 - `helper_socket` injects the server-owned read-only runtime projection
   described in [Helper socket projection](#helper-socket-projection);
 - `shm_size` accepts a plain integer with an optional binary unit (`k`, `m`,
   `g`; case-insensitive); values must be > 0 and <= 2 GiB (hard-coded
-  limit); the parsed byte value is passed to Docker as `--shm-size`; this
-  is a `/dev/shm` limit only, NOT a general container memory or CPU limit;
-- container runs with fixed security policy (see
-  [Security considerations](#security-considerations)).
+  limit); the parsed byte value is passed to the Engine as the container
+  SHM size; this is a `/dev/shm` limit only, NOT a general container memory
+  or CPU limit;
+- the resolved trusted spec also carries the system-mode execution identity
+  (UID:GID), the fixed container security policy, and the helper-owned
+  labels (see [Security considerations](#security-considerations)); the
+  adapter receives the resolved spec and owns only Engine protocol
+  mechanics — no policy decision is made inside the adapter.
 
-Containers started by docker-helper carry helper-owned labels used only
-for correlation and checked cleanup; user input cannot set or override
-them:
-
-```
-com.dockerhelper.session.id      = <session id>
-com.dockerhelper.launcher.id     = <launcher id>
-com.dockerhelper.principal.name  = <principal username>
-com.dockerhelper.schema = 1
-```
-
-Labels are correlation/cleanup evidence, not authorization state. The
-namespace is deliberately neutral: only the Launcher is the Session owner;
-the Session and Principal labels are provenance.
+Run is admitted through `syncExecutionCoordinator.admitLauncherScoped`:
+it touches workspace/MAC/runtime state that checked Launcher lifecycle
+must wait for, so a quiesced Launcher refuses admission
+(`launcher_unavailable`) and a live run is visible to Launcher runtime
+inspection through the same coordinator query the durable operations
+used. During daemon shutdown the launcher-scoped admission closes with
+`shutting_down`.
 
 ### Pull
 
@@ -1803,13 +1869,15 @@ file descriptor. The source path is converted to a root-relative path
 and opened with `openat2` using `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`,
 and `RESOLVE_NO_MAGICLINKS` relative to the root FD. The resulting inode
 is pinned with `open_tree` + `move_mount` into a helper-owned directory
-under the runtime path. Docker receives the pinned path, not the original
-workspace path.
+under the runtime path. The Engine create configuration receives the
+pinned path, not the original workspace path.
 
 Pinning requires Linux kernel support for `openat2`, `open_tree`, and
 `move_mount`, and `CAP_SYS_ADMIN`. When any of these are unavailable or
-fail, the operation fails closed with no pathname fallback. Pinned mounts
-are cleaned up as part of the operation lifecycle.
+fail, the request fails closed with no pathname fallback. Pinned mounts
+are cleaned up by the request itself, in reverse order, before the
+workspace-use lease is released (the lease is retained when the
+workspace-dependent cleanup did not complete).
 
 #### User-mode run mounts
 
@@ -1865,15 +1933,10 @@ Only explicitly requested variables are forwarded; the rest of the CLI
 process environment is never inherited. When both `--env` and
 `--env-from` define the same name, the `--env-from` value wins.
 
-Known 2.1.x limitation: `run` starts the workload through the legacy
-Docker CLI, and the daemon passes environment values to that child
-process as `--env DEST=value` argv entries, so a resolved value is
-visible in the argv of the daemon-side `docker` child process.
-`--env-from` therefore scopes its guarantee to the `docker-helper` CLI
-process boundary only; it does not promise the value is absent from every
-process argv on the system. Migrating `run` away from the legacy Docker
-CLI is not a 2.1.1 goal.
-`--env-from` introduces no new daemon-side concept: the existing
+The migrated synchronous run no longer spawns a daemon-side Docker CLI
+child process: environment values are delivered through the Engine create
+config environment only, so a resolved value appears in no process argv
+at all. `--env-from` introduces no new daemon-side concept: the existing
 `run.environment` contract fully owns delivery.
 
 Trusted CA injection: when `trusted_ca_injection` is set to `"auto"` and
@@ -1954,7 +2017,8 @@ existing helper Unix socket through its own existing runtime directory.
 The canonical public name is `helper_socket`; no parallel transport or
 socket exists.
 
-In system mode the daemon injects one additional read-only bind mount:
+In system mode the Engine create configuration for the run receives one
+additional daemon-owned read-only bind mount:
 
 ```
 /run/docker-helper (host runtime directory)
@@ -1981,10 +2045,10 @@ survive daemon replacement — for example an orphaned container in a crash
 scenario — observes the recreated socket through its existing directory
 bind where a socket inode bind would go stale. This says nothing about
 the workload lifecycle: a normal graceful `systemctl restart
-docker-helper` still terminates helper-owned run workloads under the
-2.1.x shutdown lifecycle, and `helper_socket` does not change that
-lifecycle. No workload survival across a service restart or a package
-upgrade is promised.
+docker-helper` terminates admitted run workloads through the synchronous
+shutdown ordering (request cancellation plus Engine-side container
+removal), and `helper_socket` does not change that lifecycle. No workload
+survival across a service restart or a package upgrade is promised.
 
 Authority is transport reachability only. The socket grants no
 Session/Launcher/Principal/Admin credential, restores no credential from
@@ -1993,8 +2057,8 @@ bearer token; protected operations authenticate exactly as any other API
 client, with the credential passed separately (for example through
 `--env-from`). The injected mount is read-only, so the workload cannot
 create, remove, or replace top-level runtime entries, and helper-private
-runtime state (`builds/`, `mounts/`, `sessions/`, the socket lock, and cid
-files) remains unreadable for the Principal-UID workload through the
+runtime state (`builds/`, `mounts/`, `sessions/`, and the socket lock)
+remains unreadable for the Principal-UID workload through the
 helper-owned directory permissions; the known entry names are not
 authority. Under enforcing SELinux the shipped policy grants the workload
 exactly the traversal and socket-connect permissions needed to reach the
@@ -2026,9 +2090,8 @@ runs on access:
 - `operation_log_max_bytes` — per-operation log buffer size; older output
   is evicted when exceeded.
 
-Cleanup is invoked during operation creation (`POST /run`) and operation
-status access (`GET /operations/{id}`). There is no background retention
-worker or periodic ticker.
+Cleanup is invoked on operation status access (`GET /operations/{id}`).
+There is no background retention worker or periodic ticker.
 
 Cancellation contract: `POST /operations/{id}/cancel` (see
 [Operation lifecycle](#operation-lifecycle)) shares the same termination
@@ -2038,9 +2101,9 @@ CLI signal handling:
 
 - `build`: SIGINT/SIGTERM cancels the in-flight synchronous request and
   the CLI exits 130/143;
-- `run`: SIGINT -> best-effort cancel + exit 130, SIGTERM -> best-effort
-  cancel + exit 143; cancel failure prints a diagnostic but does not
-  replace the signal exit status.
+- `run`: SIGINT/SIGTERM cancels the in-flight synchronous request (the
+  daemon cancels the workload and removes the transient container) and
+  the CLI exits 130/143; no CLI-side operation cancel request exists.
 
 ## Service lifecycle
 
@@ -2048,23 +2111,21 @@ CLI signal handling:
 
 docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 
-- the legacy operation admission gate closes immediately (no new run
-  operations accepted by `operationSupervisor`);
-- the synchronous execution coordinator closes Engine-backed synchronous
-  request admission (no new `build` or `pull` requests accepted);
+- the synchronous execution coordinator closes synchronous request
+  admission (no new `build`, `pull`, or `run` requests accepted);
+  run admission is Launcher-scoped (see [Run](#run));
 - HTTP drain, legacy operation termination, and synchronous request
   termination share one `shutdown_timeout` budget;
 - in-flight HTTP requests are drained;
-- running run processes receive graceful SIGTERM;
-- for run, helper-owned containers are cleaned up via cidfile before
-  force-killing the Docker CLI process;
-- at the reserved force-cleanup window before the deadline, still-running
-  processes are force-killed;
-- the completion goroutine owns `cmd.Wait()` and reaps each process;
-- live synchronous Engine requests (`build`, `pull`) are cancelled by
-  context cancellation and answered with the generic request failure; a
+- live synchronous Engine requests (`build`, `pull`, `run`) are cancelled
+  by context cancellation and answered with the generic request failure; a
   synchronous request has no durable Operation identity, so there is no
   persisted cancellation state and nothing to recover;
+- run performs its own cleanup before its handler returns: the transient
+  backend container is removed through the Engine (bounded, detached
+  removal) and the system-mode mount pins are unmounted in reverse order;
+  the workspace-use lease is released only when the workspace-dependent
+  cleanup completed;
 - in-flight synchronous builds clean up their staging state before the
   handler returns;
 - after synchronous request termination, the shared Engine adapter's pooled
@@ -2215,10 +2276,8 @@ After successful session authentication, every `POST /pull`,
 `POST /build`, and `POST /run` request produces exactly one of:
 
 - `<kind>.rejected` — the request was rejected before acceptance; or
-- `<kind>.start` — the request was accepted. For `run` the request is
-  accepted as an operation (`operation_id` is carried by the start event
-  and the response); for `build` and `pull` the request is accepted as a
-  synchronous Engine request (`build.start` and `pull.start` carry no
+- `<kind>.start` — the request was accepted as a synchronous Engine
+  request (none of `run.start`, `build.start`, or `pull.start` carries an
   `operation_id`).
 
 where `<kind>` is `pull`, `build`, or `run`. Authentication failures
@@ -2238,8 +2297,8 @@ The `result` field exactly matches the public API response `code`.
 Rejected events intentionally omit request payload metadata (image,
 mounts, env, command, context, dockerfile, etc.) to avoid logging
 partially validated input. No `operation_id` is included because a
-rejected request was never accepted as an operation; for the synchronous
-requests (`build`, `pull`) the request never becomes one.
+rejected request was never accepted as an operation; no synchronous
+request ever becomes one.
 
 ### Audit logging
 
@@ -2490,13 +2549,13 @@ rotate when the credential was replaced).
 
 #### run.start
 
-Emitted before a container starts.
+Emitted before an Engine container starts. The event is request-scoped
+(`request_id`) and carries no operation identity.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `request_id` | string | request correlation ID |
 | `session_id` | string | session identifier |
-| `operation_id` | string | operation identifier |
 | `image` | string | container image reference |
 | `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
@@ -2520,13 +2579,13 @@ Each entry in `mounts` has:
 
 #### run.finish
 
-Emitted after a container run attempt completes.
-Does not include `request_id` because completion is not request-scoped.
+Emitted after an Engine container run attempt completes. The event is
+request-scoped (`request_id`) and carries no operation identity.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `request_id` | string | request correlation ID |
 | `session_id` | string | session identifier |
-| `operation_id` | string | operation identifier |
 | `image` | string | container image reference |
 | `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
@@ -2548,7 +2607,7 @@ Result codes:
 | `succeeded` | container exited with status 0 |
 | `docker_run_failed` | Docker failed to start the container |
 | `container_exit_nonzero` | container exited with a non-zero status |
-| `cancelled` | operation cancelled by client |
+| `cancelled` | run cancelled by request cancellation or daemon shutdown |
 
 #### pull.start
 
@@ -2669,13 +2728,12 @@ request ID, returned in the `X-Request-ID` response header, added as
 operational record for that request; `session_id` is added to operational
 records when authentication has established a session. The server does
 not trust or reuse any client-supplied request ID. Synchronous completion
-records (`build.finish`, `pull.finish`, and `registry.login.finish`) remain
-request-scoped and retain `request_id`. The asynchronous `run.finish` event
-is not request-scoped and therefore omits `request_id`; its correlation uses
-`session_id` + `operation_id`. **Audit writer failures** are logged as
-operational ERROR records with `audit_event` and `operation_id` (when present)
-for correlation; existing `request_id` and `session_id` are preserved. Audit
-writer failure is best-effort and does not affect the request or operation
+records (`build.finish`, `pull.finish`, `run.finish`, and
+`registry.login.finish`) remain request-scoped and retain `request_id`.
+**Audit writer failures** are logged as operational ERROR records with
+`audit_event` (and `operation_id` when a legacy operation record exists)
+for correlation; existing `request_id` and `session_id` are preserved.
+Audit writer failure is best-effort and does not affect the request
 outcome.
 
 Sensitive data — the following are **never** logged to either the audit
@@ -2699,11 +2757,10 @@ for debugging unexpected failures; these error strings are operational
 internals and are not exposed to the API.
 
 The per-operation output buffer accessed via `GET /operations/{id}/logs`
-is intentionally separate: it captures the merged stdout/stderr stream
-from the Docker CLI run process and may contain Docker run status output
-and container stdout/stderr. That stream is not part of the daemon audit
-or operational logs. The synchronous build result is the same: its
-bounded Engine build stream is delivered to the API caller only and is
+is intentionally separate: it captures the merged stdout/stderr stream of
+legacy operations. That stream is not part of the daemon audit or
+operational logs. The synchronous `run` result behaves the same: its
+bounded Engine attach capture is delivered to the API caller only and is
 not written to audit, operational logs, or journald.
 
 Examples (ownership provenance fields reflect the documented schema):
@@ -2730,8 +2787,8 @@ Authorization failure:
 Container run:
 
 ```json
-{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
-{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"1s"}
+{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
+{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","exit_code":0,"duration":"1s"}
 ```
 
 ### Operational logging

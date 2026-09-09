@@ -22,6 +22,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/errdefs/pkg/errhttp"
 	controlapi "github.com/moby/buildkit/api/services/control"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
 	"google.golang.org/protobuf/proto"
@@ -1686,5 +1687,121 @@ func TestNormalizeEngineBuildErrorKinds(t *testing.T) {
 				t.Errorf("embedded kind = %d, want %d", embeddedErr.kind, tc.wantEmbedded)
 			}
 		})
+	}
+}
+
+// TestEngineRunContainerConfigMapping proves the adapter's trusted-spec →
+// Engine create mapping: environment is a sorted name=value projection of
+// the domain map, entrypoint/workdir/user are mapped when present, labels
+// are the reserved helper label set, mounts become read-only-capable bind
+// mounts, and no domain field leaks outside the Engine create config.
+func TestEngineRunContainerConfigMapping(t *testing.T) {
+	spec := engineRunSpec{
+		Image:       "alpine:3.24",
+		Entrypoint:  "/bin/sh",
+		Command:     []string{"-c", "echo hi"},
+		Workdir:     "/workspace",
+		Env:         map[string]string{"B_KEY": "b", "A_KEY": "a", "EMPTY": ""},
+		User:        "1000:1000",
+		SecurityOpt: []string{"label=disable"},
+		Labels:      []string{"com.dockerhelper.schema=1", "com.dockerhelper.session.id=dhs_1"},
+		Mounts: []engineRunMount{
+			{Source: "/host/src", Target: "/data", ReadOnly: true},
+			{Source: "/host/src2", Target: "/data2"},
+		},
+		ShmSize: 128 * 1024 * 1024,
+	}
+
+	config, hostConfig := engineRunContainerConfig(spec)
+
+	if config.Image != "alpine:3.24" {
+		t.Errorf("image = %q", config.Image)
+	}
+	if !config.AttachStdout || !config.AttachStderr {
+		t.Error("create config must attach stdout and stderr for bounded capture")
+	}
+	if len(config.Entrypoint) != 1 || config.Entrypoint[0] != "/bin/sh" {
+		t.Errorf("entrypoint = %v", config.Entrypoint)
+	}
+	if len(config.Cmd) != 2 || config.Cmd[0] != "-c" || config.Cmd[1] != "echo hi" {
+		t.Errorf("cmd = %v", config.Cmd)
+	}
+	if config.WorkingDir != "/workspace" {
+		t.Errorf("workdir = %q", config.WorkingDir)
+	}
+	if config.User != "1000:1000" {
+		t.Errorf("user = %q", config.User)
+	}
+
+	// Environment must be projected as sorted name=value pairs from the
+	// domain map — never as daemon-side CLI argv.
+	if len(config.Env) != 3 {
+		t.Fatalf("env = %v, want 3 entries", config.Env)
+	}
+	wantEnv := []string{"A_KEY=a", "B_KEY=b", "EMPTY="}
+	for i, want := range wantEnv {
+		if config.Env[i] != want {
+			t.Errorf("env[%d] = %q, want %q", i, config.Env[i], want)
+		}
+	}
+
+	if len(config.Labels) != 2 {
+		t.Fatalf("labels = %v, want 2", config.Labels)
+	}
+	if config.Labels["com.dockerhelper.schema"] != "1" || config.Labels["com.dockerhelper.session.id"] != "dhs_1" {
+		t.Errorf("labels = %v", config.Labels)
+	}
+
+	if hostConfig.SecurityOpt[0] != "label=disable" {
+		t.Errorf("securityOpt = %v", hostConfig.SecurityOpt)
+	}
+	if hostConfig.ShmSize != 128*1024*1024 {
+		t.Errorf("shmSize = %d", hostConfig.ShmSize)
+	}
+
+	if len(hostConfig.Mounts) != 2 {
+		t.Fatalf("mounts = %+v, want 2", hostConfig.Mounts)
+	}
+	if hostConfig.Mounts[0].Type != mount.TypeBind || hostConfig.Mounts[0].Source != "/host/src" || hostConfig.Mounts[0].Target != "/data" || !hostConfig.Mounts[0].ReadOnly {
+		t.Errorf("mount[0] = %+v", hostConfig.Mounts[0])
+	}
+	if hostConfig.Mounts[1].Type != mount.TypeBind || hostConfig.Mounts[1].Source != "/host/src2" || hostConfig.Mounts[1].Target != "/data2" || hostConfig.Mounts[1].ReadOnly {
+		t.Errorf("mount[1] = %+v", hostConfig.Mounts[1])
+	}
+
+	// The helper-socket and trusted-CA projections are owned by the domain
+	// spec; the adapter must not reconstruct or inject them itself.
+	for _, m := range hostConfig.Mounts {
+		if m.Target == helperSocketContainerDir {
+			t.Errorf("adapter must not inject the helper-socket projection itself: %+v", m)
+		}
+	}
+	if strings.Contains(fmt.Sprintf("%v", config), "password") {
+		t.Error("create config must not contain raw credential material")
+	}
+}
+
+// TestEngineRunContainerConfigOmissions proves the adapter omits unset
+// optional fields so the Engine keeps its own defaults for them.
+func TestEngineRunContainerConfigOmissions(t *testing.T) {
+	config, hostConfig := engineRunContainerConfig(engineRunSpec{
+		Image:   "alpine:3.24",
+		Command: []string{"echo", "hi"},
+	})
+
+	if len(config.Entrypoint) != 0 {
+		t.Errorf("entrypoint = %v, want omitted", config.Entrypoint)
+	}
+	if config.WorkingDir != "" {
+		t.Errorf("workdir = %q, want Engine default", config.WorkingDir)
+	}
+	if config.User != "" {
+		t.Errorf("user = %q, want Engine default", config.User)
+	}
+	if len(hostConfig.Mounts) != 0 {
+		t.Errorf("mounts = %+v, want none", hostConfig.Mounts)
+	}
+	if hostConfig.ShmSize != 0 {
+		t.Errorf("shmSize = %d, want Engine default", hostConfig.ShmSize)
 	}
 }

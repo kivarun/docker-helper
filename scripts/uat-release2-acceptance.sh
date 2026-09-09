@@ -133,9 +133,11 @@ json_field() { # field
 #   auth    — a registry auth/authorization-denial marker is present and no
 #             network marker matched.
 #   unknown — neither; NOT proof of a registry auth/authorization denial.
-# Markers mirror production classifyDockerError (docker_error_classify.go) and
-# are matched case-insensitively. Fail-closed: only "auth" may satisfy an
-# auth-denial acceptance assertion.
+# Markers mirror production classifyDockerError (docker_error_classify.go)
+# plus the synchronous R3 canonical registry denial contract
+# (code registry_auth_denied, message "registry authentication denied").
+# Markers are matched case-insensitively. Fail-closed: only "auth" may
+# satisfy an auth-denial acceptance assertion.
 classify_registry_failure() {
   local stream="$1"
 
@@ -146,7 +148,7 @@ classify_registry_failure() {
   fi
 
   if grep -qiE \
-      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials' <<<"$stream"; then
+      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials|registry_auth_denied|registry authentication denied' <<<"$stream"; then
     printf 'auth\n'
     return 0
   fi
@@ -685,24 +687,23 @@ D_CRED="$CRED_DIR/restart.tok"
 set_up_principal "$D_USER" "$D_CRED" || acc_fail "restart principal setup failed"
 D_TOKEN="$GLOBAL_SESSION_TOKEN"
 
-start_long_op() { # sets D_CID from the daemon cidfile
-  local before now
-  before="$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)"
+start_long_op() { # sets D_CID from the helper-owned container labels
   DOCKER_HELPER_SESSION_TOKEN="$D_TOKEN" \
     dh run --image alpine:3.24 -- sh -ec 'while true; do sleep 1; done' \
     >/tmp/r2ac-longop.out 2>&1 &
   D_OP_CLI_PID=$!
-  # Wait until the daemon actually created the container (cidfile) and the
-  # container is in a running state (not a blind sleep; polls the real state).
+  # Wait until the daemon actually created the helper-owned container and
+  # it is in a running state (not a blind sleep; polls the real state).
+  # Container discovery uses the reserved helper label set: the schema
+  # marker plus the owning principal of this scenario's session.
   for _ in $(seq 1 100); do
-    now="$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)"
-    if [ "$now" -gt "$before" ]; then
-      D_CIDFILE="$(ls -t /run/docker-helper/*.cid 2>/dev/null | head -1)"
-      D_CID="$(cat "$D_CIDFILE" 2>/dev/null || true)"
-      if [ -n "$D_CID" ] && docker inspect -f '{{.State.Running}}' "$D_CID" 2>/dev/null | grep -q true; then
-        acc_ok "long-running operation is actually running (container $D_CID)"
-        return 0
-      fi
+    D_CID="$(docker ps -q \
+      --filter 'label=com.dockerhelper.schema=1' \
+      --filter "label=com.dockerhelper.principal.name=$D_USER" \
+      2>/dev/null | tail -1 || true)"
+    if [ -n "$D_CID" ] && docker inspect -f '{{.State.Running}}' "$D_CID" 2>/dev/null | grep -q true; then
+      acc_ok "long-running operation is actually running (container $D_CID)"
+      return 0
     fi
     sleep 0.2
   done
@@ -1565,7 +1566,6 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   dh launcher set --system --principal "$H_USER" --enabled true "$H_BETA_ID" >/dev/null 2>&1 || true
 
   # H7: checked delete with active runtime.
-  H_BEFORE_CID="$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)"
   H_RT_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
   H_RT_SESS="$(printf '%s' "$H_RT_SESS_JSON" | json_field id || true)"
   H_RT_TOKEN="$(printf '%s' "$H_RT_SESS_JSON" | json_field token || true)"
@@ -1575,11 +1575,14 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       dh run --image alpine:3.24 -- sh -ec 'while true; do sleep 1; done' \
       >/tmp/r2ac-h-op.out 2>&1 &
     H_OP_PID=$!
+    # Discover the runtime container through the reserved helper label set
+    # (schema marker plus the owning session), then wait for running state.
     for _ in $(seq 1 100); do
-      H_RT_CIDFILE="$(ls -t /run/docker-helper/*.cid 2>/dev/null | head -1)"
-      H_RT_CID="$(cat "$H_RT_CIDFILE" 2>/dev/null || true)"
-      if [ -n "$H_RT_CID" ] && [ "$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)" -gt "$H_BEFORE_CID" ] \
-          && docker inspect -f '{{.State.Running}}' "$H_RT_CID" 2>/dev/null | grep -q true; then
+      H_RT_CID="$(docker ps -q \
+        --filter 'label=com.dockerhelper.schema=1' \
+        --filter "label=com.dockerhelper.session.id=$H_RT_SESS" \
+        2>/dev/null | tail -1 || true)"
+      if [ -n "$H_RT_CID" ] && docker inspect -f '{{.State.Running}}' "$H_RT_CID" 2>/dev/null | grep -q true; then
         break
       fi
       H_RT_CID=""

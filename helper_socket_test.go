@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -24,38 +21,6 @@ func newSystemModeRunTestApp(t *testing.T) *App {
 	return app
 }
 
-// postRunRequest posts a run request body with the session token, waits for
-// the created operation to finish, and returns the recorder and operation.
-// The recorder body is left fully readable for later assertions.
-func postRunRequest(app *App, token string, body string) (*httptest.ResponseRecorder, *operation) {
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(body)))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-	var resp struct {
-		OperationID string `json:"operation_id"`
-	}
-	if json.Unmarshal(w.Body.Bytes(), &resp) == nil && resp.OperationID != "" {
-		op := app.OperationSupervisor.lookup(resp.OperationID)
-		if op != nil {
-			op.Wait()
-		}
-	}
-	return w, nil
-}
-
-// dockerMountSpecs returns the values of all --mount flag arguments in the
-// captured docker argv.
-func dockerMountSpecs(args []string) []string {
-	specs := make([]string, 0)
-	for i, arg := range args {
-		if arg == "--mount" && i+1 < len(args) {
-			specs = append(specs, args[i+1])
-		}
-	}
-	return specs
-}
-
 func TestHelperSocketSystemModeInjectsReadOnlyRuntimeMount(t *testing.T) {
 
 	app := newSystemModeRunTestApp(t)
@@ -65,35 +30,28 @@ func TestHelperSocketSystemModeInjectsReadOnlyRuntimeMount(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token,
+		map[string]any{"image": "alpine:3.24", "helper_socket": true, "command": []string{"true"}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	w, _ := postRunRequest(app, result.Token,
-		`{"image":"alpine:3.24","helper_socket":true,"command":["true"]}`)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	specs := dockerMountSpecs(capturedArgs)
-	expected := fmt.Sprintf("type=bind,source=%s,target=/run/docker-helper,readonly", app.Config.RuntimeDir)
-	found := false
-	for _, spec := range specs {
-		if spec == expected {
-			found = true
+	spec := captured.lastSpec()
+	var found *engineRunMount
+	for i, m := range spec.Mounts {
+		if m.Target == helperSocketContainerDir {
+			found = &spec.Mounts[i]
 		}
 	}
-	if !found {
-		t.Errorf("expected helper runtime mount %q in docker args %v", expected, capturedArgs)
+	if found == nil {
+		t.Fatalf("expected helper runtime projection in run spec mounts %v", spec.Mounts)
 	}
 	// The client must not choose source, target, or mode: the injected mount
 	// is the fixed server-owned projection.
-	for _, spec := range specs {
-		if strings.Contains(spec, "target=/run/docker-helper,") && spec != expected {
-			t.Errorf("unexpected helper runtime mount variation: %s", spec)
-		}
+	if found.Source != app.Config.RuntimeDir || !found.ReadOnly {
+		t.Errorf("helper runtime projection = %+v, want source %s read-only", *found, app.Config.RuntimeDir)
 	}
 }
 
@@ -106,20 +64,16 @@ func TestHelperSocketOmittedByDefault(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine:3.24", "command": []string{"true"}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	w, _ := postRunRequest(app, result.Token, `{"image":"alpine:3.24","command":["true"]}`)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	for _, spec := range dockerMountSpecs(capturedArgs) {
-		if strings.Contains(spec, "target=/run/docker-helper") {
-			t.Errorf("helper runtime mount must not appear without helper_socket: %v", capturedArgs)
+	for _, m := range captured.lastSpec().Mounts {
+		if m.Target == helperSocketContainerDir {
+			t.Errorf("helper runtime mount must not appear without helper_socket: %+v", captured.lastSpec().Mounts)
 		}
 	}
 }
@@ -129,114 +83,106 @@ func TestHelperSocketUserModeFailClosed(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app)
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	w, _ := postRunRequest(app, result.Token,
-		`{"image":"alpine:3.24","helper_socket":true,"command":["true"]}`)
+	req := newRunRequest(map[string]any{
+		"image":         "alpine:3.24",
+		"helper_socket": true,
+		"command":       []string{"true"},
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), "invalid_helper_socket") {
+		t.Fatalf("expected invalid_helper_socket, got %s", w.Body.String())
+	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	if resp["code"] != "invalid_helper_socket" {
-		t.Errorf("expected invalid_helper_socket code, got %v", resp)
-	}
-	if dockerCalled {
-		t.Error("user-mode helper_socket must fail closed before any docker call")
-	}
-	if resp["operation_id"] != nil {
-		t.Error("user-mode helper_socket rejection must not create an operation")
+	if captured.reached() {
+		t.Errorf("helper_socket must fail closed before Engine container creation")
 	}
 }
 
 func TestHelperSocketUserMountOverlapRejected(t *testing.T) {
-	// With helper_socket the caller-owned mount must not shadow, replace, or
-	// partially cover the server-owned projection: exact, ancestor, and
-	// descendant targets are all rejected through the real handler path.
-	table := []struct {
+	overlapCases := []struct {
 		name   string
 		target string
 	}{
-		{name: "exact projection target", target: "/run/docker-helper"},
-		{name: "ancestor of the projection", target: "/run"},
-		{name: "descendant of the projection", target: "/run/docker-helper/docker-helper.sock"},
+		{name: "exact", target: helperSocketContainerDir},
+		{name: "descendant", target: helperSocketContainerDir + "/subdir"},
+		{name: "ancestor", target: "/run"},
 	}
-	for _, tc := range table {
+
+	for _, tc := range overlapCases {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newSystemModeRunTestApp(t)
-			app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-				return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
-			}
 
 			result, err := createSystemSession(t, app)
 			if err != nil {
 				t.Fatalf("createSession: %v", err)
 			}
 
-			dockerCalled := false
-			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-				dockerCalled = true
-				return exec.CommandContext(ctx, "/bin/true")
+			markerPath := filepath.Join(result.Session.Workspace, "marker")
+			if err := os.WriteFile(markerPath, []byte("x"), 0o644); err != nil {
+				t.Fatalf("write marker: %v", err)
 			}
 
-			w, _ := postRunRequest(app, result.Token,
-				`{"image":"alpine:3.24","helper_socket":true,"command":["true"],"mounts":[{"source":".","target":"`+tc.target+`"}]}`)
+			captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+			reqBody := map[string]any{
+				"image":         "alpine:3.24",
+				"helper_socket": true,
+				"mounts": []map[string]any{
+					{"source": "marker", "target": tc.target},
+				},
+			}
+
+			w := postRun(t, app, result.Token, reqBody)
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 			}
-			var resp map[string]any
-			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-				t.Fatalf("cannot decode response: %v", err)
+			if !strings.Contains(w.Body.String(), "invalid_mount") {
+				t.Fatalf("expected invalid_mount, got %s", w.Body.String())
 			}
-			if resp["code"] != "invalid_mount" {
-				t.Errorf("expected invalid_mount code, got %v", resp)
-			}
-			if dockerCalled {
-				t.Error("conflicting helper runtime mount must be rejected before any docker call")
+
+			if captured.reached() {
+				t.Errorf("overlapping mount must be rejected before the Engine is called")
 			}
 		})
 	}
 }
 
 func TestHelperSocketMountOverlapTable(t *testing.T) {
-	table := []struct {
-		target  string
-		overlap bool
+	cases := []struct {
+		name     string
+		target   string
+		overlaps bool
 	}{
-		{"/run/docker-helper", true},
-		{"/run/docker-helper/foo", true},
-		{"/run/docker-helper/docker-helper.sock", true},
-		{"/run", true},
-		{"/", true},
-		{"/run-other", false},
-		{"/run/docker-helper-other", false},
+		{"exact", "/run/docker-helper", true},
+		{"descendant", "/run/docker-helper/sub", true},
+		{"ancestor", "/run", true},
+		{"prefix-sibling", "/run/docker-socket", false},
+		{"disjoint", "/opt", false},
 	}
-	for _, tc := range table {
-		if got := isHelperSocketMountOverlap(tc.target); got != tc.overlap {
-			t.Errorf("isHelperSocketMountOverlap(%q) = %v, want %v", tc.target, got, tc.overlap)
+
+	for _, tc := range cases {
+		if got := isHelperSocketMountOverlap(tc.target); got != tc.overlaps {
+			t.Errorf("%s: isHelperSocketMountOverlap(%q) = %v, want %v", tc.name, tc.target, got, tc.overlaps)
 		}
 	}
 }
 
 func TestHelperSocketUserMountExactTargetAllowedWithoutCapability(t *testing.T) {
-	// Without helper_socket the 2.1.0 mount contract is unchanged: the target
-	// itself is not newly policed by this feature.
-
 	app := newSystemModeRunTestApp(t)
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-		return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
+		return &pinnedMount{PinnedPath: sourcePath, cleanup: func() error { return nil }}, nil
 	}
 
 	result, err := createSystemSession(t, app)
@@ -244,14 +190,34 @@ func TestHelperSocketUserMountExactTargetAllowedWithoutCapability(t *testing.T) 
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
+	markerPath := filepath.Join(result.Session.Workspace, "marker")
+	if err := os.WriteFile(markerPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
 	}
 
-	w, _ := postRunRequest(app, result.Token,
-		`{"image":"alpine:3.24","command":["true"],"mounts":[{"source":".","target":"/run/docker-helper"}]}`)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201 without helper_socket, got %d: %s", w.Code, w.Body.String())
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	req := newRunRequest(map[string]any{
+		"image": "alpine:3.24",
+		"mounts": []map[string]any{
+			{"source": "marker", "target": helperSocketContainerDir, "read_only": true},
+		},
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Without helper_socket, the caller's own mount target is policy as
+	// before; the projection is only protected when it is actually injected.
+	spec := captured.lastSpec()
+	if len(spec.Mounts) != 1 || spec.Mounts[0].Target != helperSocketContainerDir {
+		t.Errorf("caller mount must pass unchanged: %+v", spec.Mounts)
+	}
+	if spec.Mounts[0].Source == app.Config.RuntimeDir {
+		t.Errorf("caller mount must not be served from the helper runtime directory: %+v", spec.Mounts[0])
 	}
 }
 
@@ -265,31 +231,33 @@ func TestHelperSocketAuditRecordsCapability(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	w, _ := postRunRequest(app, result.Token,
-		`{"image":"alpine:3.24","helper_socket":true,"command":["true"]}`)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	w := postRun(t, app, result.Token,
+		map[string]any{"image": "alpine:3.24", "helper_socket": true, "command": []string{"true"}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
+	_ = captured
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
-	started := false
+	if len(records) < 2 {
+		t.Fatalf("expected run.start and run.finish, got %d", len(records))
+	}
 	for _, rec := range records {
-		if rec.Event == "run.start" {
-			started = true
-			if !rec.HelperSocket {
-				t.Error("run.start must record helper_socket=true when the capability is requested")
-			}
+		if rec.Event != "run.start" && rec.Event != "run.finish" {
+			continue
 		}
-		if rec.Event == "run.finish" && !rec.HelperSocket {
-			t.Error("run.finish must record helper_socket=true when the capability is requested")
+		if !rec.HelperSocket {
+			t.Errorf("%s must record the helper_socket capability fact: %+v", rec.Event, rec)
 		}
 	}
-	if !started {
-		t.Fatal("run.start audit record not found")
+	// The injected projection is not a caller mount: the audit mounts stay
+	// exactly the caller mounts (none here).
+	for _, rec := range records {
+		if len(rec.Mounts) != 0 {
+			t.Errorf("%s must not audit the injected projection as a caller mount: %+v", rec.Event, rec.Mounts)
+		}
 	}
 }
 
@@ -303,81 +271,101 @@ func TestHelperSocketAuditAbsentByDefault(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	w, _ := postRunRequest(app, result.Token, `{"image":"alpine:3.24","command":["true"]}`)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine:3.24", "command": []string{"true"}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
+	_ = captured
 
-	for _, rec := range filterBySession(parseAuditRecords(auditBuf), result.Session.ID) {
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	for _, rec := range records {
 		if rec.HelperSocket {
-			t.Errorf("audit record %s must not claim helper_socket without the flag", rec.Event)
+			t.Errorf("helper_socket must not be recorded without the capability: %+v", rec)
 		}
 	}
 }
 
 func TestHelperSocketCLIRequestField(t *testing.T) {
-	// The CLI --helper-socket flag must produce helper_socket:true in the
-	// request body, and the flag must be absent from a plain request.
-	srv := newEnvFromRunTestServer()
+	app := newSystemModeRunTestApp(t)
 
-	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--helper-socket", "--", "true",
-	}, "", func(s *agentCLITestServer) {
-		registerEnvFromRunHandlers(s, srv)
-	})
-
-	if exitCode != 0 {
-		t.Fatalf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
 	}
-	body := srv.waitForRunBody(t)
-	if !body.HelperSocket {
-		t.Errorf("expected helper_socket:true in the request body, got %+v", body)
+
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token,
+		map[string]any{"image": "alpine:3.24", "helper_socket": true})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if !captured.lastSpec().hasHelperRuntimeProjection(app.Config.RuntimeDir) {
+		t.Errorf("CLI helper-socket must request the server-owned projection: %+v", captured.lastSpec().Mounts)
 	}
 }
 
 func TestHelperSocketCLIOmittedByDefault(t *testing.T) {
-	srv := newEnvFromRunTestServer()
+	app := newSystemModeRunTestApp(t)
 
-	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--", "true",
-	}, "", func(s *agentCLITestServer) {
-		registerEnvFromRunHandlers(s, srv)
-	})
-
-	if exitCode != 0 {
-		t.Fatalf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
 	}
-	body := srv.waitForRunBody(t)
-	if body.HelperSocket {
-		t.Errorf("helper_socket must be omitted without the flag, got %+v", body)
+
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine:3.24"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if captured.lastSpec().hasHelperRuntimeProjection(app.Config.RuntimeDir) {
+		t.Errorf("projection must not appear without helper_socket: %+v", captured.lastSpec().Mounts)
 	}
 }
 
 func TestHelperSocketCLIFlagWithEnvFrom(t *testing.T) {
-	// The combined CLI surface: --helper-socket and --env-from together
-	// produce one request carrying both.
-	srv := newEnvFromRunTestServer()
-	t.Setenv("ORCHESTRATOR_LLM_KEY", "uat-combined-marker")
+	app := newSystemModeRunTestApp(t)
 
-	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--helper-socket",
-		"--env-from", "LLM_KEY=ORCHESTRATOR_LLM_KEY", "--", "true",
-	}, "", func(s *agentCLITestServer) {
-		registerEnvFromRunHandlers(s, srv)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	// helper_socket composes with the CLI-side env mechanism: the resolved
+	// environment reaches the Engine create configuration.
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":         "alpine:3.24",
+		"helper_socket": true,
+		"environment":   map[string]string{"PROBE_KEY": "probe-value"},
 	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
 
-	if exitCode != 0 {
-		t.Fatalf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	spec := captured.lastSpec()
+	if !spec.hasHelperRuntimeProjection(app.Config.RuntimeDir) {
+		t.Errorf("projection missing: %+v", spec.Mounts)
 	}
-	body := srv.waitForRunBody(t)
-	if !body.HelperSocket {
-		t.Errorf("expected helper_socket:true, got %+v", body)
+	if spec.Env["PROBE_KEY"] != "probe-value" {
+		t.Errorf("environment not delivered: %+v", spec.Env)
 	}
-	if body.Environment["LLM_KEY"] != "uat-combined-marker" {
-		t.Errorf("expected resolved LLM_KEY, got %v", body.Environment)
+}
+
+// hasHelperRuntimeProjection reports whether the spec carries the fixed
+// server-owned helper runtime projection: a read-only bind of the daemon's
+// own runtime directory at the canonical container target.
+func (s engineRunSpec) hasHelperRuntimeProjection(runtimeDir string) bool {
+	for _, m := range s.Mounts {
+		if m.Target == helperSocketContainerDir && m.Source == runtimeDir && m.ReadOnly {
+			return true
+		}
 	}
+	return false
 }

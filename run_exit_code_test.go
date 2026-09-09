@@ -1,26 +1,24 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
-	"os/exec"
+	"strings"
 	"testing"
 )
 
-type mockExitError struct {
-	code int
-	msg  string
+// runEngineError builds a normalized Engine failure for run tests.
+func runEngineError(kind engineErrorKind) error {
+	return &engineError{kind: kind, cause: errors.New("engine probe")}
 }
 
-func (e *mockExitError) Error() string { return e.msg }
-func (e *mockExitError) ExitCode() int { return e.code }
-func (e *mockExitError) Unwrap() error { return nil }
+// TestRunSynchronousSuccess proves the synchronous run contract on the
+// production handler: the flat result comes back in the response with the
+// terminal exit code and bounded combined output, no operation identity is
+// issued, and no run Operation is registered.
+func TestRunSynchronousSuccess(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
 
-func TestRunNonZeroExit(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -29,78 +27,114 @@ func TestRunNonZeroExit(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf 'container output\n'; exit 7")
+	setupRunSeam(t, app, runSeamOptions{Output: "container output\n", ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":   "alpine:latest",
+		"command": []string{"echo", "hello"},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	reqBody := map[string]any{
+	respBody := w.Body.Bytes()
+	resp := decodeRunResponse(t, w)
+	if !resp.OK || resp.Code != "" || resp.Message != "" {
+		t.Errorf("success response = %+v", resp)
+	}
+	if resp.Output != "container output\n" {
+		t.Errorf("output = %q", resp.Output)
+	}
+	if resp.Truncated {
+		t.Error("short output must not be truncated")
+	}
+	if resp.Duration == "" {
+		t.Error("duration must be set")
+	}
+	if resp.ExitCode == nil || *resp.ExitCode != 0 {
+		t.Errorf("exit_code = %v, want 0", resp.ExitCode)
+	}
+
+	assertNoRunOperation(t, app, respBody)
+
+	// No operation identity in the audit either.
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	for _, rec := range records {
+		if rec.OperationID != "" {
+			t.Errorf("run audit must not carry operation_id: %+v", rec)
+		}
+	}
+}
+
+// TestRunNonZeroExitIsWorkloadResult proves a non-zero container exit stays
+// a workload result: HTTP 200, ok false, code container_exit_nonzero, the
+// actual exit code, and the bounded combined output.
+func TestRunNonZeroExitIsWorkloadResult(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAdminToken(t)
+	app.OperationSupervisor = newOperationSupervisor()
+
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSessionAuthorized() error: %v", err)
+	}
+
+	setupRunSeam(t, app, runSeamOptions{Output: "error output", ExitCode: 7})
+
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"command": []string{"sh", "-c", "exit 7"},
-	}
-	body, _ := json.Marshal(reqBody)
+	})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
+	respBody := w.Body.Bytes()
+	resp := decodeRunResponse(t, w)
+	if resp.OK {
+		t.Errorf("non-zero exit must not be ok: %+v", resp)
 	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
+	if resp.Code != "container_exit_nonzero" {
+		t.Errorf("code = %q, want container_exit_nonzero", resp.Code)
 	}
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
+	if resp.ExitCode == nil || *resp.ExitCode != 7 {
+		t.Errorf("exit_code = %v, want 7", resp.ExitCode)
 	}
-	op.Wait()
-
-	if op.State != operationFailed {
-		t.Errorf("expected status 'failed', got %q", op.State)
+	if resp.Output != "error output" {
+		t.Errorf("output = %q", resp.Output)
 	}
-	if op.ResultCode == nil || *op.ResultCode != "container_exit_nonzero" {
-		t.Errorf("expected result_code 'container_exit_nonzero', got %v", op.ResultCode)
-	}
-	if op.ExitCode == nil {
-		t.Fatal("expected exit_code to be set")
-	}
-	if *op.ExitCode != 7 {
-		t.Errorf("expected exit_code 7, got %d", *op.ExitCode)
-	}
-	if op.Duration == nil || *op.Duration == "" {
-		t.Error("expected duration to be set")
+	if resp.Duration == "" {
+		t.Error("duration must be set")
 	}
 
-	// Check operation logs for output.
-	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
-	logsW := httptest.NewRecorder()
-	newOperationMux(app).ServeHTTP(logsW, logsReq)
+	assertNoRunOperation(t, app, respBody)
 
-	if logsW.Code != http.StatusOK {
-		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	foundFinish := false
+	for _, rec := range records {
+		if rec.Event == "run.finish" {
+			foundFinish = true
+			if rec.Result != "container_exit_nonzero" {
+				t.Errorf("finish result = %q, want container_exit_nonzero", rec.Result)
+			}
+			if rec.ExitCode == nil || *rec.ExitCode != 7 {
+				t.Errorf("audit exit_code = %v, want 7", rec.ExitCode)
+			}
+		}
 	}
-
-	var logsResp map[string]any
-	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
-		t.Fatalf("decode operation logs: %v", err)
-	}
-	logs, _ := logsResp["logs"].(string)
-	if logs != "container output\n" {
-		t.Errorf("expected output 'container output\\n', got %q", logs)
+	if !foundFinish {
+		t.Error("run.finish audit record missing")
 	}
 }
 
-func TestRunNonZeroExitCodeZero(t *testing.T) {
+// TestRunExitCode125IsStillAWorkloadResult proves the terminal container
+// exit code from the Engine wait is a workload result, not a docker CLI
+// classification: exit 125 reaches the client as container_exit_nonzero
+// with the actual code.
+func TestRunExitCode125IsStillAWorkloadResult(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -109,46 +143,135 @@ func TestRunNonZeroExitCodeZero(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{Output: "image not found\n", ExitCode: 125})
 
-	reqBody := map[string]string{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
-	}
-	body, _ := json.Marshal(reqBody)
+	})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	if op.State != operationSucceeded {
-		t.Errorf("expected status 'succeeded', got %q", op.State)
+	resp := decodeRunResponse(t, w)
+	if resp.OK || resp.Code != "container_exit_nonzero" || resp.ExitCode == nil || *resp.ExitCode != 125 {
+		t.Errorf("exit 125 response = %+v", resp)
 	}
 }
 
-func TestRunDockerErrorStill500(t *testing.T) {
+// TestRunEngineFailureClassification proves the canonical Engine failure
+// contract for run: no exit code is guessed from the failure, the response
+// carries the normalized code and bounded output, and the failure response
+// never carries an operation identity.
+func TestRunEngineFailureClassification(t *testing.T) {
+	cases := []struct {
+		name         string
+		err          error
+		wantStatus   int
+		wantCode     string
+		wantExitCode bool
+	}{
+		{
+			name:       "backend unavailable",
+			err:        runEngineError(engineErrBackendUnavailable),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "backend_unavailable",
+		},
+		{
+			name:       "backend failure",
+			err:        runEngineError(engineErrBackendFailure),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   "backend_failure",
+		},
+		{
+			name:       "image not found",
+			err:        runEngineError(engineErrImageNotFound),
+			wantStatus: http.StatusNotFound,
+			wantCode:   "image_not_found",
+		},
+		{
+			name:       "registry auth denied",
+			err:        runEngineError(engineErrRegistryAuthDenied),
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "registry_auth_denied",
+		},
+		{
+			name:       "registry unavailable",
+			err:        runEngineError(engineErrRegistryUnavailable),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   "registry_unavailable",
+		},
+		{
+			name:       "unclassified failure",
+			err:        errors.New("raw engine payload probe"),
+			wantStatus: http.StatusBadGateway,
+			wantCode:   "backend_failure",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auditBuf, _ := setupTestLogging(t)
+
+			app := newTestAppWithAdminToken(t)
+			app.OperationSupervisor = newOperationSupervisor()
+
+			result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+			if err != nil {
+				t.Fatalf("createSessionAuthorized() error: %v", err)
+			}
+
+			setupRunSeam(t, app, runSeamOptions{
+				Output: "partial output",
+				Err:    tc.err,
+			})
+
+			w := postRun(t, app, result.Token, map[string]any{
+				"image":   "alpine:latest",
+				"command": []string{"true"},
+			})
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tc.wantStatus, w.Code, w.Body.String())
+			}
+
+			respBody := w.Body.Bytes()
+			resp := decodeRunResponse(t, w)
+			if resp.OK || resp.Code != tc.wantCode {
+				t.Errorf("response = %+v, want code %s", resp, tc.wantCode)
+			}
+			if resp.ExitCode != nil {
+				t.Errorf("Engine failure must not guess an exit code: %+v", resp)
+			}
+			if resp.Output != "partial output" {
+				t.Errorf("output before failure = %q", resp.Output)
+			}
+
+			assertNoRunOperation(t, app, respBody)
+
+			records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+			foundFinish := false
+			for _, rec := range records {
+				if rec.Event == "run.finish" {
+					foundFinish = true
+					if rec.Result != "docker_run_failed" {
+						t.Errorf("finish result = %q, want docker_run_failed", rec.Result)
+					}
+					if rec.ExitCode != nil {
+						t.Errorf("audit must not carry a guessed exit code: %+v", rec)
+					}
+				}
+			}
+			if !foundFinish {
+				t.Error("run.finish audit record missing")
+			}
+		})
+	}
+}
+
+// TestRunAdapterConstructionFailure proves a failed Engine adapter
+// construction is a bounded run failure, not a panic or a leak.
+func TestRunAdapterConstructionFailure(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -157,53 +280,30 @@ func TestRunDockerErrorStill500(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'docker: not found\\n'; exit 125")
+	setupRunSeam(t, app, runSeamOptions{ConstructErr: errors.New("no engine endpoint")})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine:latest"})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
 	}
 
-	reqBody := map[string]any{
-		"image": "alpine:latest",
+	resp := decodeRunResponse(t, w)
+	if resp.OK || resp.Code != "docker_run_failed" {
+		t.Errorf("response = %+v", resp)
 	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if resp.ExitCode != nil {
+		t.Errorf("no exit code on construction failure: %+v", resp)
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	if op.State != operationFailed {
-		t.Errorf("expected status 'failed', got %q", op.State)
-	}
-	if op.ResultCode == nil || *op.ResultCode != "docker_run_failed" {
-		t.Errorf("expected result_code 'docker_run_failed', got %v", op.ResultCode)
-	}
-	// Exit code 125 is set for docker errors.
-	if op.ExitCode == nil || *op.ExitCode != 125 {
-		t.Errorf("expected exit_code 125 for docker error, got %v", op.ExitCode)
-	}
+	assertNoRunOperation(t, app, w.Body.Bytes())
 }
 
-func TestRunSuccessNoExitCode(t *testing.T) {
+// TestRunEnginePayloadStaysOutOfLogs proves the operational log records only
+// the normalized category, never the raw Engine payload or the workload
+// output.
+func TestRunEnginePayloadStaysOutOfLogs(t *testing.T) {
+	_, opBuf := setupTestLogging(t)
+
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -212,114 +312,18 @@ func TestRunSuccessNoExitCode(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
+	setupRunSeam(t, app, runSeamOptions{
+		Output: "workload output marker outputmarker-9z4k",
+		Err:    runEngineError(engineErrBackendFailure),
+	})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine:latest"})
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d", http.StatusBadGateway, w.Code)
 	}
 
-	reqBody := map[string]any{
-		"image": "alpine:latest",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	if op.State != operationSucceeded {
-		t.Errorf("expected status 'succeeded', got %q", op.State)
-	}
-	if op.ExitCode != nil {
-		t.Errorf("expected no exit_code for success, got %d", *op.ExitCode)
-	}
-}
-
-func TestExtractExitCode(t *testing.T) {
-	err := &mockExitError{code: 42, msg: "test"}
-	code := extractExitCode(err)
-	if code == nil {
-		t.Fatal("expected exit code to be extracted")
-	}
-	if *code != 42 {
-		t.Errorf("expected 42, got %d", *code)
-	}
-}
-
-func TestExtractExitCodeNil(t *testing.T) {
-	err := errors.New("plain error")
-	code := extractExitCode(err)
-	if code != nil {
-		t.Errorf("expected nil, got %d", *code)
-	}
-}
-
-func TestRunNonZeroExitCode125(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'image not found\\n'; exit 125")
-	}
-
-	reqBody := map[string]any{
-		"image": "nonexistent:latest",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	if op.State != operationFailed {
-		t.Errorf("expected status 'failed', got %q", op.State)
-	}
-	if op.ResultCode == nil || *op.ResultCode != "docker_run_failed" {
-		t.Errorf("expected result_code 'docker_run_failed', got %v", op.ResultCode)
+	logs := opBuf.String()
+	if strings.Contains(logs, "raw engine payload") || strings.Contains(logs, "outputmarker-9z4k") {
+		t.Errorf("raw payload or workload output leaked into operational logs: %s", logs)
 	}
 }

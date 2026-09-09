@@ -1,16 +1,11 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"os/exec"
 	"testing"
 )
 
-func TestRunWorkdirPassedToDocker(t *testing.T) {
+func TestRunWorkdirPassedToEngine(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -19,52 +14,19 @@ func TestRunWorkdirPassedToDocker(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"workdir": "/workspace",
-	}
-	body, _ := json.Marshal(reqBody)
+	})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	found := false
-	for i, arg := range capturedArgs {
-		if arg == "--workdir" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "/workspace" {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Errorf("expected --workdir /workspace in docker args, got %v", capturedArgs)
+	if spec := captured.lastSpec(); spec.Workdir != "/workspace" {
+		t.Errorf("workdir = %q, want /workspace", spec.Workdir)
 	}
 }
 
@@ -77,46 +39,16 @@ func TestRunNoWorkdir(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine:latest"})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	reqBody := map[string]string{
-		"image": "alpine:latest",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
-
-	for _, arg := range capturedArgs {
-		if arg == "--workdir" {
-			t.Errorf("expected no --workdir in docker args, got %v", capturedArgs)
-			break
-		}
+	if spec := captured.lastSpec(); spec.Workdir != "" {
+		t.Errorf("workdir = %q, want unset", spec.Workdir)
 	}
 }
 
@@ -128,33 +60,23 @@ func TestRunRelativeWorkdirRejected(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		t.Fatal("ExecCommandContext should not be called for relative workdir")
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	reqBody := map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"workdir": "relative/path",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
+	})
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, w.Code)
 	}
 
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
+	resp := decodeRunResponse(t, w)
 	if resp.Code != "invalid_workdir" {
 		t.Errorf("expected code 'invalid_workdir', got %q", resp.Code)
+	}
+
+	if captured.reached() {
+		t.Error("Engine runner must not be called for a rejected workdir")
 	}
 }

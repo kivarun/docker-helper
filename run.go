@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -108,76 +110,6 @@ func isHelperSocketMountOverlap(target string) bool {
 	return pathOverlap(filepath.Clean(target), helperSocketContainerDir) != pathDisjoint
 }
 
-func extractExitCode(err error) *int {
-	var exitCoder interface{ ExitCode() int }
-	if errors.As(err, &exitCoder) {
-		code := exitCoder.ExitCode()
-		return &code
-	}
-	return nil
-}
-
-// readContainerIDFromCidfile reads the container ID from a Docker --cidfile.
-// Returns empty string if the file doesn't exist, is empty, or is malformed.
-func readContainerIDFromCidfile(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	id := strings.TrimSpace(string(data))
-	if id == "" {
-		return ""
-	}
-	return id
-}
-
-// waitForContainerID polls the cidfile until the container ID appears or the
-// context expires. This handles the race where Docker daemon publishes the
-// container ID asynchronously after cmd.Start().
-// Returns empty string if the context expires before the ID is available.
-func waitForContainerID(ctx context.Context, op *operation) string {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			// Context expired; try one final read before giving up.
-			return readContainerIDFromCidfile(op.cidfile)
-		case <-op.done:
-			// Operation completed while we were waiting — no cleanup needed.
-			return ""
-		case <-ticker.C:
-			if id := readContainerIDFromCidfile(op.cidfile); id != "" {
-				return id
-			}
-		}
-	}
-}
-
-// killContainerBestEffort attempts to kill a Docker container by ID.
-// This is a bounded, best-effort operation used during force shutdown.
-// If the container is already gone or the command fails, the error is
-// logged but not propagated — "container already gone" is a success.
-func (a *App) killContainerBestEffort(ctx context.Context, containerID string) {
-	cmd := a.newDockerCommand(ctx, "docker", "kill", containerID)
-	if err := cmd.Run(); err != nil {
-		// Container already gone or docker not available — acceptable.
-		// Do not log the container ID to avoid unnecessary traceability.
-		opLog(ctx).Warn("daemon-side container cleanup failed",
-			slog.String("error", err.Error()),
-		)
-	}
-}
-
-// cleanupCidfile removes the cidfile for a run operation.
-// This is called when the operation fails before the process starts
-// or when the process completes normally.
-func cleanupCidfile(op *operation) {
-	if op.cidfile != "" {
-		os.Remove(op.cidfile)
-	}
-}
-
 type resolvedMount struct {
 	SourcePath string
 	Target     string
@@ -248,6 +180,39 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 	}, nil
 }
 
+// generateRunRequestID returns a fresh path-safe identifier for one
+// synchronous run request. A synchronous run has no operation identity; the
+// identifier scopes only the helper-owned request state the run creates —
+// the inode-pinned mount staging directories — and is never public.
+func generateRunRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("cannot generate run request ID: %v", err))
+	}
+	return "run_" + hex.EncodeToString(b)
+}
+
+// runAuditBase returns the attribution and metadata fields shared by the
+// run.start and run.finish audit records. Env keys are names only; mounts
+// are the caller mounts as the caller mounted them; the injected
+// helper-socket projection appears only as the helper_socket capability
+// fact, never as a caller mount.
+func runAuditBase(session *Session, req runRequest, envNames []string, mountAudit []auditMount, auditShmSize string, trustedCAInjected, helperSocket bool, cmdArgCount *int) auditRecord {
+	return auditRecord{
+		SessionID:         session.ID,
+		Image:             req.Image,
+		CommandArgCount:   cmdArgCount,
+		Mounts:            mountAudit,
+		EnvKeys:           envNames,
+		ShmSize:           auditShmSize,
+		TrustedCAInjected: trustedCAInjected,
+		HelperSocket:      helperSocket,
+		PrincipalName:     session.PrincipalName,
+		LauncherID:        session.LauncherID,
+		LauncherName:      session.LauncherName,
+	}
+}
+
 func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSessionCapability(w, r)
 	if !ok {
@@ -303,14 +268,14 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	cfg := a.getConfig()
 
 	// helper_socket is a system-mode server-owned capability. User mode
-	// fails closed before any lease, pin, or operation state exists.
+	// fails closed before any lease, pin, or Engine container creation.
 	if req.HelperSocket && cfg.Mode != ModeSystem {
 		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_helper_socket", "helper_socket is not supported in user mode", session.PrincipalName)
 		return
 	}
 
 	// Acquire workspace-use lease BEFORE any filesystem access that depends
-	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
+	// on workspace MAC coverage. This reserves MAC state through pre-run work.
 	var leaseRelease func()
 	if a.MACCoordinator != nil {
 		var leaseErr error
@@ -418,17 +383,29 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Sort all environment names for deterministic argv.
-	sortedEnvNames := make([]string, 0, len(allEnv))
-	for name := range allEnv {
-		sortedEnvNames = append(sortedEnvNames, name)
-	}
-	sort.Strings(sortedEnvNames)
-
 	// Audit env keys are only the user-provided ones (already sorted above).
 
-	// Resolve execution identity before registering the operation.
-	// Failure here means no operation is created and docker is not called.
+	// Resolve the stored Session credential for the image's registry just
+	// in time, from the one protected credential store. It is used only if
+	// the requested image is absent and an implicit pull is required,
+	// exactly as the docker CLI run path resolved it. A reference with no
+	// registry or no stored credential pulls unauthenticated; a store read
+	// failure is operational.
+	credential, _, err := resolveSessionRegistryCredential(cfg.RuntimeDir, session.ID, req.Image)
+	if err != nil {
+		if leaseRelease != nil {
+			leaseRelease()
+		}
+		opLog(ctx).Error("cannot read session registry credential",
+			slog.String("operation", "run"),
+			slog.String("error", err.Error()),
+		)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+		return
+	}
+
+	// Resolve execution identity before admitting the request.
+	// Failure here means nothing is admitted and the Engine is not called.
 	execUID, execGID, err := resolveSessionExecutionIdentity(a.DB, session)
 	if err != nil {
 		if leaseRelease != nil {
@@ -442,24 +419,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure the session Docker config directory exists before registering
-	// the operation so that a failure here does not leave a zombie operation.
-	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
-	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
-		opLog(ctx).Error("cannot create session Docker directory",
-			slog.String("operation", "run"),
-			slog.String("error", err.Error()),
-		)
-		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
-		return
-	}
-
-	// In system mode, determine the MAC backend before pin creation,
-	// operation registration, and run.start audit.
-	// A detection failure or unsupported configuration must fail closed.
+	// In system mode, determine the MAC backend before admission and pin
+	// creation. A detection failure or unsupported configuration must fail
+	// closed.
 	securityOpt := ""
 	if cfg.Mode == ModeSystem {
 		backend, err := detectLSM()
@@ -496,244 +458,283 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		securityOpt = "label=disable"
 	}
 
-	bufSize := cfg.OperationLogMaxBytes
-
-	// Create run operation and register it.
-	op := newRunOperation(session.ID, req.Image, bufSize, session.PrincipalName, session.LauncherID, session.LauncherName)
-	op.auditCommandArgCount = cmdArgCount
-	op.auditMounts = mountAudit
-	op.auditEnvKeys = envNames
-	op.auditTrustedCAInjected = trustedCAInjected
-	op.auditHelperSocket = req.HelperSocket && cfg.Mode == ModeSystem
-	if shmSizeBytes > 0 {
-		op.auditShmSize = req.ShmSize
+	// Synchronous Engine runs are admitted through the coordinator with the
+	// run's Launcher admission state: daemon-shutdown refusal,
+	// Launcher-quiesce refusal, request-context cancellation, and bounded
+	// shutdown termination are its contract. A synchronous run has no
+	// operation identity.
+	engineCtx, syncReq, decision := a.SyncExecutionCoordinator.admitLauncherScoped(ctx, session.LauncherID, a.OperationSupervisor.launcherQuiesced)
+	if decision != admissionAccepted {
+		if leaseRelease != nil {
+			leaseRelease()
+		}
+		if decision == admissionRefusedShutdown {
+			writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
+		} else {
+			writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "run", "launcher_unavailable", "launcher is not available", session.PrincipalName)
+		}
+		return
 	}
-
-	// Create a unique cidfile for daemon-side container lifecycle management.
-	// The path is in the helper-owned runtime directory, never user-controlled.
-	if cfg.RuntimeDir != "" {
-		op.cidfile = filepath.Join(cfg.RuntimeDir, op.ID+".cid")
-	}
+	defer syncReq.end()
 
 	// In system mode, pin each mount source to a helper-owned destination.
-	// In user mode, use the resolved host paths directly.
+	// In user mode, use the resolved host paths directly. From here the
+	// request owns the pin cleanup — on success, failure, cancellation, and
+	// shutdown alike — and releases the workspace-use lease only when the
+	// workspace-dependent cleanup completed.
+	runID := generateRunRequestID()
 	pinnedMounts := make([]*pinnedMount, 0, len(resolvedMounts))
 	if cfg.Mode == ModeSystem {
 		for i, m := range resolvedMounts {
-			pm, err := a.pinWorkspaceMountSource(session.Workspace, m.SourcePath, cfg.RuntimeDir, op.ID, i)
+			pm, err := a.pinWorkspaceMountSource(session.Workspace, m.SourcePath, cfg.RuntimeDir, runID, i)
 			if err != nil {
-				// Cleanup pins before releasing lease.
-				pinCleanupErr := false
-				for j := len(pinnedMounts) - 1; j >= 0; j-- {
-					if ce := pinnedMounts[j].Cleanup(); ce != nil {
-						opLog(ctx).Error("pin cleanup failed",
-							slog.String("operation", "run"),
-							slog.String("error", ce.Error()),
-						)
-						pinCleanupErr = true
-					}
-				}
-				if !pinCleanupErr && leaseRelease != nil {
+				cleanupPinnedMountList(pinnedMounts)
+				if leaseRelease != nil {
 					leaseRelease()
-				} else if pinCleanupErr {
-					opLog(ctx).Error("MAC lease intentionally retained because workspace-dependent pin cleanup did not complete",
-						slog.String("operation", "run"),
-					)
 				}
 				opLog(ctx).Error("cannot pin mount source",
 					slog.String("operation", "run"),
+					slog.String("session_id", session.ID),
 					slog.String("error", err.Error()),
 				)
-				writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+				writeDockerActionRejected(engineCtx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 				return
 			}
 			pinnedMounts = append(pinnedMounts, pm)
 		}
 	}
-
-	// Store pins in operation before registering so the operation owns them.
-	op.pinnedMounts = pinnedMounts
-
-	// Register the operation. Single admit after all pins are created.
-	if a.OperationSupervisor != nil {
-		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
-			// Cleanup pins before releasing lease.
-			pinCleanupErr := false
-			for j := len(pinnedMounts) - 1; j >= 0; j-- {
-				if ce := pinnedMounts[j].Cleanup(); ce != nil {
-					opLog(ctx).Error("pin cleanup failed",
-						slog.String("operation", "run"),
-						slog.String("error", ce.Error()),
-					)
-					pinCleanupErr = true
-				}
-			}
-			if !pinCleanupErr && leaseRelease != nil {
-				leaseRelease()
-			} else if pinCleanupErr {
-				opLog(ctx).Error("MAC lease intentionally retained because workspace-dependent pin cleanup did not complete",
-					slog.String("operation", "run"),
-				)
-			}
-			if decision == admissionRefusedShutdown {
-				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
-			} else {
-				writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "run", "launcher_unavailable", "launcher is not available", session.PrincipalName)
-			}
+	defer func() {
+		cleanupErr := cleanupPinnedMountList(pinnedMounts)
+		if cleanupErr != nil {
+			opLog(ctx).Error("pinned mount cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
+				slog.String("operation", "run"),
+				slog.String("session_id", session.ID),
+				slog.String("error", cleanupErr.Error()),
+			)
 			return
 		}
-		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
+		if leaseRelease != nil {
+			leaseRelease()
+		}
+	}()
+
+	auditShmSize := ""
+	if shmSizeBytes > 0 {
+		auditShmSize = req.ShmSize
 	}
+	helperSocket := req.HelperSocket && cfg.Mode == ModeSystem
 
-	// Lease is now associated with the registered operation; it will be
-	// released by waitRunCompletion after cmd.Wait().
-	op.macLeaseRelease = leaseRelease
+	writeRequestContextAudit(ctx, func() auditRecord {
+		rec := runAuditBase(session, req, envNames, mountAudit, auditShmSize, trustedCAInjected, helperSocket, cmdArgCount)
+		rec.Event = "run.start"
+		return rec
+	}())
 
-	writeRequestContextAudit(ctx, auditRecord{
-		Event:             "run.start",
-		SessionID:         session.ID,
-		OperationID:       op.ID,
-		Image:             req.Image,
-		CommandArgCount:   cmdArgCount,
-		Mounts:            mountAudit,
-		EnvKeys:           envNames,
-		ShmSize:           op.auditShmSize,
-		TrustedCAInjected: trustedCAInjected,
-		HelperSocket:      op.auditHelperSocket,
-		PrincipalName:     session.PrincipalName,
-		LauncherID:        session.LauncherID,
-		LauncherName:      session.LauncherName,
-	})
+	// Build the trusted Engine run spec from the already-resolved values.
+	// The adapter owns only Engine protocol mechanics; no policy decision
+	// is made here or inside it.
+	engineMounts := make([]engineRunMount, 0, len(resolvedMounts)+2)
 
-	// Container security label determined above (before pins/registration/audit).
-	args := []string{
-		"--config", dockerDir,
-		"run",
-		"--rm",
-		"--user", fmt.Sprintf("%d:%d", execUID, execGID),
-		"--security-opt", securityOpt,
-	}
-
-	// Add the reserved helper-owned runtime labels. Values derive from the
-	// resolved Session ownership chain, never from caller input.
-	for _, l := range runtimeLabelsFor(session) {
-		args = append(args, "--label", l)
-	}
-
-	if op.cidfile != "" {
-		args = append(args, "--cidfile", op.cidfile)
-	}
-
-	if req.Entrypoint != "" {
-		args = append(args, "--entrypoint", req.Entrypoint)
-	}
-
-	if req.Workdir != "" {
-		args = append(args, "--workdir", req.Workdir)
-	}
-
-	// Add all environment variables (user + injected CA) in sorted order.
-	for _, name := range sortedEnvNames {
-		args = append(args, "--env", name+"="+allEnv[name])
-	}
-
-	// Add trusted CA injection mount (not included in user mounts audit).
+	// Trusted CA injection mount (not included in user mounts audit).
 	if trustedCAInjected {
-		caMountSpec := fmt.Sprintf("type=bind,source=%s,target=%s,readonly",
-			cfg.TrustedCAPreparedDir, trustedCAContainerDir)
-		args = append(args, "--mount", caMountSpec)
+		engineMounts = append(engineMounts, engineRunMount{
+			Source:   cfg.TrustedCAPreparedDir,
+			Target:   trustedCAContainerDir,
+			ReadOnly: true,
+		})
 	}
 
-	// Add the server-owned helper runtime projection (not included in user
+	// The server-owned helper runtime projection (not included in user
 	// mounts audit): a read-only bind of the daemon's own runtime directory
 	// at the fixed container target, giving the workload transport
 	// reachability to the existing helper Unix socket.
-	if req.HelperSocket && cfg.Mode == ModeSystem {
-		args = append(args, "--mount", fmt.Sprintf("type=bind,source=%s,target=%s,readonly",
-			cfg.RuntimeDir, helperSocketContainerDir))
+	if helperSocket {
+		engineMounts = append(engineMounts, engineRunMount{
+			Source:   cfg.RuntimeDir,
+			Target:   helperSocketContainerDir,
+			ReadOnly: true,
+		})
 	}
 
-	// Add user mounts: pinned paths in system mode, resolved paths in user mode.
+	// User mounts: pinned paths in system mode, resolved paths in user mode.
 	for i, m := range resolvedMounts {
-		dockerBindSource := m.SourcePath
+		source := m.SourcePath
 		if cfg.Mode == ModeSystem {
-			dockerBindSource = pinnedMounts[i].PinnedPath
+			source = pinnedMounts[i].PinnedPath
 		}
-		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", dockerBindSource, m.Target)
-		if m.ReadOnly {
-			mountSpec += ",readonly"
-		}
-		args = append(args, "--mount", mountSpec)
+		engineMounts = append(engineMounts, engineRunMount{
+			Source:   source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		})
 	}
 
-	if shmSizeBytes > 0 {
-		args = append(args, "--shm-size", strconv.FormatInt(shmSizeBytes, 10))
+	spec := engineRunSpec{
+		Image:       req.Image,
+		Entrypoint:  req.Entrypoint,
+		Command:     req.Command,
+		Workdir:     req.Workdir,
+		Env:         allEnv,
+		User:        fmt.Sprintf("%d:%d", execUID, execGID),
+		SecurityOpt: []string{securityOpt},
+		Labels:      runtimeLabelsFor(session),
+		Mounts:      engineMounts,
+		ShmSize:     shmSizeBytes,
+		Credential:  credential,
 	}
 
-	args = append(args, req.Image)
-	args = append(args, req.Command...)
-
-	cmdCtx, cancel := context.WithCancel(context.Background())
-
-	cmd := a.newDockerCommand(cmdCtx, "docker", args...)
-
-	result := startOperationProcess(cmd, op)
-
-	if result.Terminated {
-		cancel()
-		// Cleanup cidfile and pins before releasing lease.
-		cleanupCidfile(op)
-		cleanupErr := cleanupPinnedMounts(op)
-		if cleanupErr != nil {
-			opLog(ctx).Error("pin cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "run"),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-		if cleanupErr == nil && op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
-		msg := "run cancelled: daemon is shutting down"
-		if op.reason == terminationCancelled {
-			msg = "run cancelled"
-			op.fail(resultCancelled, msg, nil)
-		} else {
-			op.fail("docker_run_failed", msg, nil)
-		}
-		writeOperationCreated(ctx, w, op.ID, op.State)
-		return
-	}
-	if result.Err != nil {
-		cancel()
-		// Cleanup cidfile and pins before releasing lease.
-		cleanupCidfile(op)
-		cleanupErr := cleanupPinnedMounts(op)
-		if cleanupErr != nil {
-			opLog(ctx).Error("pin cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "run"),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-		if cleanupErr == nil && op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
-		opLog(ctx).Error("cannot start run process",
+	started := time.Now()
+	runner, err := a.newEngineContainerRunner()
+	if err != nil {
+		opLog(ctx).Error("cannot construct docker engine adapter",
 			slog.String("operation", "run"),
-			slog.String("error", result.Err.Error()),
 		)
-		msg := fmt.Sprintf("cannot start run: %v", result.Err)
-		op.fail("docker_run_failed", msg, nil)
-		writeOperationCreated(ctx, w, op.ID, op.State)
+		duration := time.Since(started).Round(time.Millisecond).String()
+		finishAudit := runAuditBase(session, req, envNames, mountAudit, auditShmSize, trustedCAInjected, helperSocket, cmdArgCount)
+		finishAudit.Event = "run.finish"
+		finishAudit.Result = "docker_run_failed"
+		writeRequestContextAudit(ctx, finishAudit)
+		writeJSONRaw(engineCtx, w, http.StatusInternalServerError, runResponse{
+			OK:       false,
+			Code:     "docker_run_failed",
+			Message:  "docker run failed",
+			Duration: duration,
+		})
 		return
 	}
 
-	// Start goroutine for process completion.
-	go func() {
-		defer cancel()
-		a.waitRunCompletion(op, *op.StartedAt)
-	}()
+	result, runErr := runner.containerRun(engineCtx, spec, cfg.OperationLogMaxBytes)
+	duration := time.Since(started).Round(time.Millisecond).String()
 
-	writeOperationCreated(ctx, w, op.ID, operationRunning)
+	var exitCode *int
+	if runErr == nil {
+		code := result.ExitCode
+		exitCode = &code
+	}
+
+	finishAudit := runAuditBase(session, req, envNames, mountAudit, auditShmSize, trustedCAInjected, helperSocket, cmdArgCount)
+	finishAudit.Event = "run.finish"
+	finishAudit.Duration = duration
+
+	if runErr == nil && result.ExitCode == 0 {
+		finishAudit.Result = "succeeded"
+		writeRequestContextAudit(ctx, finishAudit)
+		writeJSONRaw(engineCtx, w, http.StatusOK, runResponse{
+			OK:        true,
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+			ExitCode:  exitCode,
+		})
+		return
+	}
+
+	if runErr == nil {
+		// A non-zero container exit is a workload result, not a backend
+		// protocol failure.
+		finishAudit.Result = "container_exit_nonzero"
+		finishAudit.ExitCode = exitCode
+		writeRequestContextAudit(ctx, finishAudit)
+		writeJSONRaw(engineCtx, w, http.StatusOK, runResponse{
+			OK:        false,
+			Code:      "container_exit_nonzero",
+			Message:   "container exited with a non-zero code",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+			ExitCode:  exitCode,
+		})
+		return
+	}
+
+	var engErr *engineError
+	if !errors.As(runErr, &engErr) {
+		engErr = &engineError{kind: engineErrBackendFailure, cause: runErr}
+	}
+
+	auditResult := "docker_run_failed"
+	if engErr.kind == engineErrClientCancelled {
+		auditResult = "cancelled"
+		// A cancelled run produces no trustworthy exit code.
+		exitCode = nil
+	}
+	finishAudit.Result = auditResult
+	finishAudit.ExitCode = exitCode
+	if engErr.kind != engineErrClientCancelled {
+		// Operational logs record only the normalized category. Raw
+		// Engine payloads and workload output stay behind the adapter
+		// boundary and never reach journald.
+		opLog(ctx).Error("run failed",
+			slog.String("operation", "run"),
+			slog.Int("engine_error_kind", int(engErr.kind)),
+		)
+	}
+	writeRequestContextAudit(ctx, finishAudit)
+	writeRunEngineFailure(engineCtx, w, engErr, result, duration)
+}
+
+// writeRunEngineFailure maps a normalized Engine run failure to the accepted
+// synchronous run failure contract. The response never carries credentials,
+// raw Engine payloads, or workload output beyond the bounded capture; a
+// cancelled run produces no trustworthy result, exactly as the killed docker
+// CLI did.
+func writeRunEngineFailure(ctx context.Context, w http.ResponseWriter, engErr *engineError, result engineRunResult, duration string) {
+	switch engErr.kind {
+	case engineErrImageNotFound:
+		writeJSONRaw(ctx, w, http.StatusNotFound, runResponse{
+			OK:        false,
+			Code:      "image_not_found",
+			Message:   "image not found",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrRegistryAuthDenied:
+		writeJSONRaw(ctx, w, http.StatusUnprocessableEntity, runResponse{
+			OK:        false,
+			Code:      "registry_auth_denied",
+			Message:   "registry authentication denied",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrRegistryUnavailable:
+		writeJSONRaw(ctx, w, http.StatusBadGateway, runResponse{
+			OK:        false,
+			Code:      "registry_unavailable",
+			Message:   "registry unreachable or backend failure",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrBackendUnavailable:
+		writeJSONRaw(ctx, w, http.StatusServiceUnavailable, runResponse{
+			OK:        false,
+			Code:      "backend_unavailable",
+			Message:   "docker engine unavailable",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	case engineErrBackendFailure:
+		writeJSONRaw(ctx, w, http.StatusBadGateway, runResponse{
+			OK:        false,
+			Code:      "backend_failure",
+			Message:   "unexpected docker engine failure",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	default:
+		writeJSONRaw(ctx, w, http.StatusInternalServerError, runResponse{
+			OK:        false,
+			Code:      "docker_run_failed",
+			Message:   "docker run failed",
+			Output:    result.Output,
+			Truncated: result.Truncated,
+			Duration:  duration,
+		})
+	}
 }
 
 // newDockerCommand creates a new exec.Cmd for a Docker command.
@@ -746,64 +747,12 @@ func (a *App) newDockerCommand(ctx context.Context, name string, args ...string)
 	return cmd
 }
 
-// waitRunCompletion waits for the run process to finish and transitions
-// the operation to succeeded or failed. It is the single owner of cmd.Wait().
-func (a *App) waitRunCompletion(op *operation, started time.Time) {
-	err := op.cmd.Wait()
-
-	// Clean up the cidfile regardless of outcome.
-	// The container is already handled by --rm (normal exit) or
-	// daemon-side kill (force shutdown), so the cidfile is no longer needed.
-	cleanupCidfile(op)
-
-	// Clean up pinned mounts after cmd.Wait completes.
-	cleanupErr := cleanupPinnedMounts(op)
-	if cleanupErr != nil {
-		ctx := withSessionID(context.Background(), op.SessionID)
-		opLog(ctx).Error("pinned mount cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-			slog.String("operation", "run"),
-			slog.String("operation_id", op.ID),
-			slog.String("error", cleanupErr.Error()),
-		)
-	}
-
-	// Release workspace-use lease only if pinned mount cleanup succeeded.
-	// If cleanup failed, the MAC lease/boundary is intentionally retained
-	// to preserve confinement while a pinned workspace mount remains.
-	if cleanupErr == nil && op.macLeaseRelease != nil {
-		op.macLeaseRelease()
-	}
-
-	duration := time.Since(started).Round(time.Millisecond).String()
-
-	op.mu.Lock()
-	wasCancelled := op.reason == terminationCancelled
-	op.mu.Unlock()
-
-	exitCode := extractExitCode(err)
-
-	if err != nil {
-		if wasCancelled {
-			op.fail(resultCancelled, "run cancelled", exitCode, &duration)
-			return
-		}
-		resultCode := "docker_run_failed"
-		if exitCode != nil && *exitCode != 125 {
-			resultCode = "container_exit_nonzero"
-		}
-		op.fail(resultCode, "docker run failed", exitCode, &duration)
-		return
-	}
-
-	op.succeed(&duration)
-}
-
-// cleanupPinnedMounts cleans up all pinned mounts for an operation in
-// reverse order. It is concurrency-safe via pinnedMount.Cleanup().
-func cleanupPinnedMounts(op *operation) error {
+// cleanupPinnedMountList cleans up pinned mounts in reverse order. It is
+// concurrency-safe via pinnedMount.Cleanup().
+func cleanupPinnedMountList(pinnedMounts []*pinnedMount) error {
 	var errs []error
-	for i := len(op.pinnedMounts) - 1; i >= 0; i-- {
-		if err := op.pinnedMounts[i].Cleanup(); err != nil {
+	for i := len(pinnedMounts) - 1; i >= 0; i-- {
+		if err := pinnedMounts[i].Cleanup(); err != nil {
 			errs = append(errs, err)
 		}
 	}

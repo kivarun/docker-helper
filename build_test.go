@@ -626,33 +626,13 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode run response: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatalf("operation %s not found in supervisor", opID)
-	}
-	op.Wait()
+	// Register a completed operation directly: the legacy operation routes
+	// stay contract-tested until the full operation framework removal, and
+	// the synchronous run no longer produces operations.
+	op := newRunOperation(result.Session.ID, "example:test", 1024, "", "", "")
+	op.State = operationSucceeded
+	app.OperationSupervisor.admit(op)
+	opID := op.ID
 
 	cases := []string{"-1", "abc", "12foo"}
 	for _, offset := range cases {

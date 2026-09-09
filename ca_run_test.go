@@ -1,34 +1,11 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
-
-// waitRun waits for a run operation to complete.
-func waitRun(t *testing.T, app *App, w *httptest.ResponseRecorder) {
-	t.Helper()
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode run response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatalf("operation %s not found in supervisor", opID)
-	}
-	op.Wait()
-}
 
 func setupRunTestApp(t *testing.T) (*App, string) {
 	t.Helper()
@@ -43,10 +20,8 @@ func setupRunTestApp(t *testing.T) (*App, string) {
 	return app, result.Token
 }
 
-func TestRunCAAutoAddsMountAndEnv(t *testing.T) {
-	app, token := setupRunTestApp(t)
-
-	// Set up CA injection config directly.
+func setupCADir(t *testing.T, app *App) string {
+	t.Helper()
 	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-snapshot")
 	if err := os.MkdirAll(preparedDir, 0755); err != nil {
 		t.Fatalf("cannot create prepared dir: %v", err)
@@ -56,114 +31,82 @@ func TestRunCAAutoAddsMountAndEnv(t *testing.T) {
 	}
 	app.Config.TrustedCAInjection = "auto"
 	app.Config.TrustedCAPreparedDir = preparedDir
+	return preparedDir
+}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+func TestRunCAAutoAddsMountAndEnv(t *testing.T) {
+	app, token := setupRunTestApp(t)
 
-	req := newRunRequest(map[string]any{
+	preparedDir := setupCADir(t, app)
+
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hello"},
-	}, token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 
-	waitRun(t, app, w)
+	spec := captured.lastSpec()
 
-	// Verify exactly one CA mount with the correct value.
-	var mountValues []string
-	for i, arg := range capturedArgs {
-		if arg == "--mount" && i+1 < len(capturedArgs) {
-			mountValues = append(mountValues, capturedArgs[i+1])
+	// Verify exactly one CA mount with the correct projection.
+	var mounts []engineRunMount
+	for _, m := range spec.Mounts {
+		if m.Target == trustedCAContainerDir {
+			mounts = append(mounts, m)
 		}
 	}
-	expectedMount := "type=bind,source=" + preparedDir + ",target=/run/docker-helper/trusted-ca,readonly"
-	if len(mountValues) != 1 || mountValues[0] != expectedMount {
-		t.Errorf("expected exactly 1 mount %q, got %v", expectedMount, mountValues)
+	if len(mounts) != 1 || mounts[0].Source != preparedDir || !mounts[0].ReadOnly {
+		t.Errorf("expected exactly 1 CA mount %s read-only, got %+v", preparedDir, spec.Mounts)
 	}
 
 	// Verify exactly two CA env vars with the correct values and no extras.
-	var envValues []string
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) {
-			envValues = append(envValues, capturedArgs[i+1])
-		}
+	if len(spec.Env) != 2 {
+		t.Fatalf("expected exactly 2 env vars, got %d: %v", len(spec.Env), spec.Env)
 	}
-	if len(envValues) != 2 {
-		t.Fatalf("expected exactly 2 env vars, got %d: %v", len(envValues), envValues)
+	if got := spec.Env["NODE_EXTRA_CA_CERTS"]; got != trustedCAEnvNodeExtraValue {
+		t.Errorf("NODE_EXTRA_CA_CERTS = %q, want %q", got, trustedCAEnvNodeExtraValue)
 	}
-	if envValues[0] != "NODE_EXTRA_CA_CERTS=/run/docker-helper/trusted-ca/ca.pem" {
-		t.Errorf("env[0] = %q, want NODE_EXTRA_CA_CERTS=/run/docker-helper/trusted-ca/ca.pem", envValues[0])
-	}
-	if envValues[1] != "SSL_CERT_DIR=/run/docker-helper/trusted-ca:/etc/ssl/certs:/etc/pki/tls/certs" {
-		t.Errorf("env[1] = %q, want SSL_CERT_DIR=/run/docker-helper/trusted-ca:/etc/ssl/certs:/etc/pki/tls/certs", envValues[1])
+	if got := spec.Env["SSL_CERT_DIR"]; got != trustedCAEnvSSLDirValue {
+		t.Errorf("SSL_CERT_DIR = %q, want %q", got, trustedCAEnvSSLDirValue)
 	}
 }
 
 func TestRunCAExplicitEnvWins(t *testing.T) {
 	app, token := setupRunTestApp(t)
 
-	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-snapshot")
-	if err := os.MkdirAll(preparedDir, 0755); err != nil {
-		t.Fatalf("cannot create prepared dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(preparedDir, "ca.pem"), []byte("test-ca"), 0644); err != nil {
-		t.Fatalf("cannot write ca.pem: %v", err)
-	}
-	app.Config.TrustedCAInjection = "auto"
-	app.Config.TrustedCAPreparedDir = preparedDir
+	setupCADir(t, app)
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hello"},
 		"environment": map[string]string{
 			"SSL_CERT_DIR":        "/custom/certs",
 			"NODE_EXTRA_CA_CERTS": "/custom/ca.pem",
 		},
-	}, token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
 
-	waitRun(t, app, w)
+	env := captured.lastSpec().Env
 
-	// Verify user values are the only ones present.
-	checkEnvArg := func(name, want string) {
-		var found []string
-		for i, arg := range capturedArgs {
-			if arg == "--env" && i+1 < len(capturedArgs) {
-				next := capturedArgs[i+1]
-				if strings.HasPrefix(next, name+"=") {
-					found = append(found, strings.TrimPrefix(next, name+"="))
-				}
-			}
-		}
-		if len(found) != 1 {
-			t.Errorf("expected exactly 1 %s, got %d: %v", name, len(found), found)
-			return
-		}
-		if found[0] != want {
-			t.Errorf("%s = %q, want %q", name, found[0], want)
-		}
+	// User values are the only ones present.
+	if got := env["SSL_CERT_DIR"]; got != "/custom/certs" {
+		t.Errorf("SSL_CERT_DIR = %q, want /custom/certs", got)
 	}
-
-	checkEnvArg("SSL_CERT_DIR", "/custom/certs")
-	checkEnvArg("NODE_EXTRA_CA_CERTS", "/custom/ca.pem")
+	if got := env["NODE_EXTRA_CA_CERTS"]; got != "/custom/ca.pem" {
+		t.Errorf("NODE_EXTRA_CA_CERTS = %q, want /custom/ca.pem", got)
+	}
+	if len(env) != 2 {
+		t.Errorf("unexpected extra env vars: %v", env)
+	}
 }
 
 func TestRunCADisabledNoMountOrEnv(t *testing.T) {
@@ -173,68 +116,41 @@ func TestRunCADisabledNoMountOrEnv(t *testing.T) {
 	app.Config.TrustedCAInjection = "disabled"
 	app.Config.TrustedCAPreparedDir = ""
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hello"},
-	}, token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
 
-	waitRun(t, app, w)
+	spec := captured.lastSpec()
 
-	// Verify no CA mount.
-	for i, arg := range capturedArgs {
-		if arg == "--mount" && i+1 < len(capturedArgs) {
-			if strings.Contains(capturedArgs[i+1], "trusted-ca") {
-				t.Errorf("CA mount should not be present when disabled, got: %s", capturedArgs[i+1])
-			}
+	for _, m := range spec.Mounts {
+		if m.Target == trustedCAContainerDir {
+			t.Errorf("CA mount should not be present when disabled, got: %+v", m)
 		}
 	}
 
-	// Verify no CA env vars.
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) {
-			next := capturedArgs[i+1]
-			if strings.HasPrefix(next, "SSL_CERT_DIR=") {
-				t.Errorf("SSL_CERT_DIR should not be injected when disabled, got: %s", next)
-			}
-			if strings.HasPrefix(next, "NODE_EXTRA_CA_CERTS=") {
-				t.Errorf("NODE_EXTRA_CA_CERTS should not be injected when disabled, got: %s", next)
-			}
-		}
+	if _, ok := spec.Env["SSL_CERT_DIR"]; ok {
+		t.Errorf("SSL_CERT_DIR should not be injected when disabled: %v", spec.Env)
+	}
+	if _, ok := spec.Env["NODE_EXTRA_CA_CERTS"]; ok {
+		t.Errorf("NODE_EXTRA_CA_CERTS should not be injected when disabled: %v", spec.Env)
 	}
 }
 
 func TestRunCAOverlappingMountRejected(t *testing.T) {
 	app, token := setupRunTestApp(t)
 
-	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-snapshot")
-	if err := os.MkdirAll(preparedDir, 0755); err != nil {
-		t.Fatalf("cannot create prepared dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(preparedDir, "ca.pem"), []byte("test-ca"), 0644); err != nil {
-		t.Fatalf("cannot write ca.pem: %v", err)
-	}
-	app.Config.TrustedCAInjection = "auto"
-	app.Config.TrustedCAPreparedDir = preparedDir
+	setupCADir(t, app)
 
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hello"},
 		"mounts": []map[string]any{
@@ -243,24 +159,19 @@ func TestRunCAOverlappingMountRejected(t *testing.T) {
 				"target": "/run/docker-helper/trusted-ca",
 			},
 		},
-	}, token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
 	}
 
-	if dockerCalled {
-		t.Error("docker should not be called when overlapping mount is rejected")
+	if captured.reached() {
+		t.Error("Engine runner must not be called when an overlapping mount is rejected")
 	}
 
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if code, ok := resp["code"].(string); !ok || code != "invalid_mount" {
-		t.Errorf("expected code=invalid_mount, got %v", resp["code"])
+	resp := decodeRunResponse(t, w)
+	if resp.Code != "invalid_mount" {
+		t.Errorf("expected code=invalid_mount, got %q", resp.Code)
 	}
 }
 

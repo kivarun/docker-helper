@@ -2,12 +2,10 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -56,9 +54,7 @@ func TestUserModeRestartKeepsPersistedSessionsUsable(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	// /run on the persisted pre-restart session must not fail with
 	// "no MAC binding for session".
@@ -67,11 +63,10 @@ func TestUserModeRestartKeepsPersistedSessionsUsable(t *testing.T) {
 	runReq.Header.Set("Authorization", "Bearer "+result.Token)
 	runW := httptest.NewRecorder()
 	app.handleRun(runW, runReq)
-	if runW.Code != http.StatusCreated {
+	if runW.Code != http.StatusOK {
 		t.Errorf("restarted user-mode daemon: /run returned %d (body %s); persisted session should remain usable", runW.Code, runW.Body.String())
 		return
 	}
-	waitRun(t, app, runW)
 
 	// /build on the persisted pre-restart session must also remain usable.
 	buildBody, _ := json.Marshal(map[string]string{
