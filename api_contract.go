@@ -41,6 +41,22 @@ type mountRequest struct {
 	ReadOnly bool   `json:"read_only,omitempty"`
 }
 
+// runResponse is the synchronous response from POST /run. A started workload
+// returns its flat final result directly in the request: the bounded combined
+// output, the terminal exit code, and the duration. A non-zero workload exit
+// is a workload result, not a backend protocol failure (HTTP 200, ok false,
+// code container_exit_nonzero). There is no operation identity: the result
+// is final within the request.
+type runResponse struct {
+	OK        bool   `json:"ok"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Duration  string `json:"duration,omitempty"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
+}
+
 // pullResponse is the response from POST /pull.
 type pullResponse struct {
 	OK        bool   `json:"ok"`

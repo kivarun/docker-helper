@@ -1,12 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"os/exec"
 	"testing"
 )
 
@@ -40,38 +35,24 @@ func TestRunImageOptionInjectionRejected(t *testing.T) {
 				t.Fatalf("createSession: %v", err)
 			}
 
-			dockerCalled := false
-			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-				dockerCalled = true
-				return exec.CommandContext(ctx, "true")
-			}
+			captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-			body, _ := json.Marshal(tc.body)
-			req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-			req.Header.Set("Authorization", "Bearer "+result.Token)
-			w := httptest.NewRecorder()
-
-			app.handleRun(w, req)
+			w := postRun(t, app, result.Token, tc.body)
 
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("expected status %d, got %d", http.StatusBadRequest, w.Code)
 			}
 
-			var resp map[string]any
-			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-				t.Fatalf("cannot decode response: %v", err)
-			}
-			if code, ok := resp["code"].(string); !ok || code != "invalid_image" {
-				t.Errorf("expected code 'invalid_image', got %q", code)
+			resp := decodeRunResponse(t, w)
+			if resp.Code != "invalid_image" {
+				t.Errorf("expected code 'invalid_image', got %q", resp.Code)
 			}
 
-			if dockerCalled {
-				t.Error("Docker must not be invoked for rejected image")
+			if captured.reached() {
+				t.Error("Engine runner must not be invoked for a rejected image")
 			}
 
-			if len(app.OperationSupervisor.ops) != 0 {
-				t.Error("no operation should be registered for rejected image")
-			}
+			assertNoRunOperation(t, app, w.Body.Bytes())
 
 			records := parseAuditRecords(auditBuf)
 			for _, rec := range records {

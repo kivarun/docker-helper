@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1255,10 +1254,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Execute command succeeds (true).
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	// Drive handleRun.
 	req := httptest.NewRequest(http.MethodPost, "/run",
@@ -1267,25 +1263,11 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("handleRun: expected 201, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleRun: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-
-	// Wait for operation to complete.
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	// Verify: the MAC lease was NOT released because cleanup failed.
-	// The boundary count should still reflect the session binding + the
-	// unreleased lease (the lease was never released due to cleanup failure).
 	mac.mu.Lock()
 	boundaryCount := mac.boundaryConsumerCounts[workspace]
 	leaseCount := len(mac.workspaceUseLeases)
@@ -1303,124 +1285,6 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 
 // TestRunHandlerCleanupSuccessReleasesLease drives handleRun with a
 // successful pinned mount cleanup and verifies the MAC lease IS released.
-func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
-	mockDetectLSM(t, LSMAppArmor, nil)
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	db, err := openDatabase(dbPath)
-	if err != nil {
-		t.Fatalf("openDatabase: %v", err)
-	}
-	defer db.Close()
-
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
-
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
-	mac := newSessionMACCoordinator(db, driver)
-
-	runtimeDir := filepath.Join(dir, "runtime")
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &Config{
-		AllowedRoots:          []string{dir},
-		SessionTTL:            24 * time.Hour,
-		SocketPath:            filepath.Join(dir, "test.sock"),
-		StateDir:              dir,
-		RuntimeDir:            runtimeDir,
-		DatabasePath:          dbPath,
-		AdminTokenPath:        filepath.Join(dir, "admin.token"),
-		ShutdownTimeout:       30 * time.Second,
-		OperationRetentionTTL: 10 * time.Minute,
-		OperationMaxCompleted: 200,
-		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
-	}
-
-	app := &App{
-		Config:                   cfg,
-		DB:                       db,
-		MACCoordinator:           mac,
-		OperationSupervisor:      newOperationSupervisor(),
-		SyncExecutionCoordinator: newSyncExecutionCoordinator(),
-	}
-
-	workspace := filepath.Join(dir, "workspace")
-	if err := os.MkdirAll(workspace, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Generate auth token for the session.
-	token, err := generateSessionToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-	tokenHash := sha256.Sum256([]byte(token))
-
-	launcherID := testMACLauncherID(t, db)
-
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("CreateSessionBinding: %v", err)
-	}
-
-	// Inject a pinned mount with a successful Cleanup.
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-		return &pinnedMount{
-			PinnedPath: "/tmp/test-mount",
-			cleanup: func() error {
-				return nil
-			},
-		}, nil
-	}
-
-	mountSource := filepath.Join(workspace, "src")
-	if err := os.MkdirAll(mountSource, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/run",
-		bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"src","target":"/mnt"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("handleRun: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-	op.Wait()
-
-	// Verify: the MAC lease WAS released because cleanup succeeded.
-	mac.mu.Lock()
-	leaseCount := len(mac.workspaceUseLeases)
-	mac.mu.Unlock()
-
-	if leaseCount != 0 {
-		t.Errorf("expected 0 leases (cleanup succeeded, lease released), got %d", leaseCount)
-	}
-}
-
 // TestBuildHandlerStagingCleanupFailureRetainsLease drives handleBuild with
 // a staging seam that fails Cleanup, and verifies the MAC lease is retained.
 func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {

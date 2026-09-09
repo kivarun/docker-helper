@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,9 +12,10 @@ import (
 	"time"
 )
 
-// TestShutdownGateClosesOnSignal verifies that after the shutdown signal
-// is received (simulated by beginShutdown), new operations are rejected
-// while existing operations remain under shutdown lifecycle.
+// TestShutdownGateClosesOnSignal verifies that after the shutdown signal is
+// received, the synchronous admission gate closes (new runs are refused)
+// while a legacy operation admitted before the signal remains under the
+// legacy shutdown lifecycle.
 func TestShutdownGateClosesOnSignal(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	supervisor := newOperationSupervisor()
@@ -26,54 +26,38 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
+	// Start a legacy operation before the signal.
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
+	existingOp := newRunOperation(result.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if supervisor.admit(existingOp) != admissionAccepted {
+		t.Fatal("admit failed")
 	}
-
-	// Start an operation before the signal.
-	req1 := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w1 := httptest.NewRecorder()
-	app.handleRun(w1, req1)
-
-	if w1.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w1.Code)
+	cmd := exec.Command("sleep", "60")
+	if res := startOperationProcess(cmd, existingOp); res.Terminated || res.Err != nil {
+		t.Fatalf("start operation: terminated=%v err=%v", res.Terminated, res.Err)
 	}
+	go func() {
+		cmd.Wait()
+		existingOp.fail("docker_run_failed", "docker run failed", nil, nil)
+	}()
 
-	var resp map[string]any
-	if err := json.NewDecoder(w1.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	existingOp := supervisor.lookup(opID)
-	if existingOp == nil {
-		t.Fatal("existing operation should be in supervisor")
-	}
-
-	// Simulate signal received — close the gate.
+	// Simulate signal received — close both gates.
 	supervisor.beginShutdown()
+	app.SyncExecutionCoordinator.beginShutdown()
 
-	// New operation should be rejected.
-	req2 := newRunRequest(map[string]any{
+	// A new synchronous run must be rejected.
+	w2 := postRun(t, app, result.Token, map[string]any{
 		"image":   "example:test2",
 		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w2 := httptest.NewRecorder()
-	app.handleRun(w2, req2)
+	})
 
 	if w2.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected %d after signal, got %d", http.StatusServiceUnavailable, w2.Code)
 	}
 
-	// Existing operation should still be in supervisor and managed by shutdown.
-	if supervisor.lookup(opID) == nil {
+	// The legacy operation stays in the supervisor and is managed by shutdown.
+	if supervisor.lookup(existingOp.ID) == nil {
 		t.Fatal("existing operation should remain in supervisor")
 	}
 
@@ -88,9 +72,11 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 	}
 }
 
-// TestShutdownGateConcurrentRunAndSignal verifies that a run request
-// in flight when the signal arrives is handled correctly: either accepted
-// (if admit completed before gate close) or rejected (if gate closed first).
+// TestShutdownGateConcurrentRunAndSignal verifies that a run request racing
+// the shutdown gate is handled correctly: either accepted (if admission
+// completed before the gate closed) or rejected with shutting_down (if the
+// gate closed first). Either way the response is well-formed and there is
+// no operation identity.
 func TestShutdownGateConcurrentRunAndSignal(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	supervisor := newOperationSupervisor()
@@ -106,20 +92,14 @@ func TestShutdownGateConcurrentRunAndSignal(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	// Block ExecCommandContext so we can close the gate concurrently.
-	cmdBlocked := make(chan struct{})
-	var cmdWg sync.WaitGroup
-	cmdWg.Add(1)
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		cmdWg.Done()
-		<-cmdBlocked
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
-	}
+	// Block the Engine runner so we can close the gate concurrently.
+	runnerStarted := make(chan struct{})
+	runnerProceed := make(chan struct{})
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0, Block: runnerProceed})
+	go func() {
+		<-runnerStarted
+	}()
 
-	req := newRunRequest(map[string]any{
-		"image":   "example:test",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
 	w := httptest.NewRecorder()
 
 	// Start the run handler in a goroutine.
@@ -127,38 +107,27 @@ func TestShutdownGateConcurrentRunAndSignal(t *testing.T) {
 	handlerWg.Add(1)
 	go func() {
 		defer handlerWg.Done()
-		app.handleRun(w, req)
+		// Close the gate as soon as the request reaches the Engine runner.
+		go func() {
+			<-runnerStarted
+			app.SyncExecutionCoordinator.beginShutdown()
+		}()
+		app.handleRun(w, newRunRequest(map[string]any{
+			"image":   "example:test",
+			"command": []string{"echo", "hello"},
+		}, result.Token))
 	}()
 
-	// Wait for admit to complete (cmd creation blocked).
-	cmdWg.Wait()
-
-	// Close the gate concurrently.
-	supervisor.beginShutdown()
-
-	// Unblock cmd creation.
-	close(cmdBlocked)
+	// Unblock the runner.
+	close(runnerProceed)
 
 	// Wait for handler to complete.
 	handlerWg.Wait()
 
-	// The operation may have been accepted or rejected depending on timing.
+	// The run may have been accepted or rejected depending on timing.
 	// In either case, the response should be valid.
-	if w.Code == http.StatusCreated {
-		var resp map[string]any
-		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		opID, _ := resp["operation_id"].(string)
-		op := supervisor.lookup(opID)
-		if op == nil {
-			t.Fatal("accepted operation should be in supervisor")
-		}
-		// Clean up.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		supervisor.terminateForShutdown(shutdownCtx, nil)
-		cancel()
-		<-op.done
+	if w.Code == http.StatusOK {
+		assertNoRunOperation(t, app, w.Body.Bytes())
 	} else if w.Code == http.StatusServiceUnavailable {
 		// Rejected — this is also valid.
 	} else {

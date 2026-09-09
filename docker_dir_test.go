@@ -14,10 +14,11 @@ import (
 	"time"
 )
 
-// TestRunEnsureSessionDockerDirFails verifies that when
-// ensureSessionDockerDir fails during handleRun, the handler
-// returns 500 without registering an operation or writing an audit event.
-func TestRunEnsureSessionDockerDirFails(t *testing.T) {
+// TestRunBlockedCredentialStoreFailsClosed proves an unreadable session
+// Docker credential store is an operational failure, never a silent
+// anonymous fallback: the run fails closed before the Engine is called and
+// registers no operation.
+func TestRunBlockedCredentialStoreFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 
 	dbPath := filepath.Join(dir, "test.db")
@@ -30,8 +31,8 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	allowedRoot := testAllowedRootDir(t)
-	// Create a RuntimeDir where MkdirAll will fail: put a regular file
-	// at the path where the sessions subdirectory would be created.
+	// Block the sessions runtime path with a regular file: any legacy
+	// MkdirAll of the session Docker directory would fail loudly.
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 		t.Fatal(err)
@@ -79,17 +80,9 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	// Capture audit output.
 	auditBuf, _ := setupTestLogging(t)
 
-	// Track whether Docker command was invoked.
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if name == "docker" {
-			dockerCalled = true
-		}
-		return exec.CommandContext(ctx, name, args...)
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	// Send run request.
 	reqBody := map[string]string{
@@ -102,34 +95,21 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	// Verify 500 response.
 	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d", w.Code)
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Code != "internal_error" {
-		t.Errorf("expected code 'internal_error', got %q", resp.Code)
+	if captured.reached() {
+		t.Error("Engine runner must not be reached when the credential store is unreadable")
 	}
 
-	// Verify no operation was registered.
-	if len(app.OperationSupervisor.ops) != 0 {
-		t.Error("supervisor should be empty after ensureSessionDockerDir failure")
-	}
+	assertNoRunOperation(t, app, w.Body.Bytes())
 
-	// Verify Docker command was not invoked.
-	if dockerCalled {
-		t.Error("docker command should not be invoked after ensureSessionDockerDir failure")
-	}
-
-	// Verify no run.start audit event was written.
-	records := parseAuditRecords(auditBuf)
+	// No run audit event is written for a rejected run.
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	for _, rec := range records {
-		if rec.Event == "run.start" && rec.SessionID == result.Session.ID {
-			t.Error("run.start audit event should not appear after ensureSessionDockerDir failure")
+		if rec.Event == "run.start" || rec.Event == "run.finish" {
+			t.Errorf("%s audit event must not appear after a store read failure", rec.Event)
 		}
 	}
 }

@@ -2,20 +2,25 @@ package main
 
 import (
 	"context"
-	"net/http"
 	"os/exec"
 	"testing"
 	"time"
 )
 
-// TestCmdStartRaceShutdownBeforeStart verifies that when shutdown acquires
-// the coordination boundary before cmd.Start(), the process does not start.
-// This is deterministic: the handler blocks on op.mu while terminateAll
-// sets terminated=true, then the handler sees terminated and aborts.
+// TestCmdStartRaceShutdownBeforeStart verifies at the primitive level that
+// when shutdown acquires the coordination boundary before cmd.Start(), the
+// process does not start: terminateForShutdown marks the operation terminated
+// while the starter waits, and startOperationProcess then refuses to start.
 func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
-	app, supervisor, _, token := setupRunSupervisorTest(t)
+	app, supervisor, session, _ := setupRunSupervisorTest(t)
 
-	// Block the handler at the point where it holds op.mu about to call Start().
+	op := newRunOperation(session.Session.ID, "example:test", 4*1024*1024, "", "", "")
+	if supervisor.admit(op) != admissionAccepted {
+		t.Fatal("admit failed")
+	}
+
+	// Block the starter at the point where it holds op.mu about to call
+	// Start(), via the command-creation seam.
 	cmdBlocked := make(chan struct{})
 	cmdProceed := make(chan struct{})
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -24,44 +29,57 @@ func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/sleep", "60")
 	}
 
-	w, _, getOp := startRunOperationConcurrent(t, app, token)
+	started := make(chan operationStartResult, 1)
+	go func() {
+		cmd := app.newDockerCommand(context.Background(), "sleep", "60")
+		started <- startOperationProcess(cmd, op)
+	}()
 
-	// Wait for cmd to be ready (handler blocked waiting for cmdProceed).
 	select {
 	case <-cmdBlocked:
 	case <-time.After(5 * time.Second):
-		t.Fatal("handler did not reach cmd creation")
+		t.Fatal("starter did not reach command creation")
 	}
 
-	// Trigger shutdown while handler is blocked.
+	// Trigger shutdown while the starter is blocked.
 	supervisor.beginShutdown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	supervisor.terminateForShutdown(shutdownCtx, nil)
 	cancel()
 
-	// Unblock the handler — it should see terminated and not start.
+	// Unblock the starter — it must see terminated and not start the process.
 	close(cmdProceed)
-	op := getOp()
+	var res operationStartResult
+	select {
+	case res = <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startOperationProcess did not complete")
+	}
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected %d, got %d", http.StatusCreated, w.Code)
+	if !res.Terminated {
+		t.Errorf("startOperationProcess = %+v, want pre-start termination", res)
 	}
-	if op == nil {
-		t.Fatal("operation should be in supervisor")
-	}
-	if op.State != operationFailed {
-		t.Errorf("expected 'failed', got %q", op.State)
+
+	// The operation must remain marked terminated so the owning handler
+	// path fails it; the supervisor itself must never start the process.
+	op.mu.Lock()
+	terminated := op.terminated
+	startedFlag := op.started
+	op.mu.Unlock()
+
+	if !terminated || startedFlag {
+		t.Errorf("terminated=%v started=%v, want terminated and never started", terminated, startedFlag)
 	}
 }
 
-// TestCmdStartRaceStartBeforeShutdown verifies that when cmd.Start()
-// completes before shutdown acquires the boundary, the process is
-// properly terminated via graceful SIGTERM.
+// TestCmdStartRaceStartBeforeShutdown verifies that when the process starts
+// before shutdown acquires the boundary, the process is properly terminated
+// via graceful SIGTERM.
 func TestCmdStartRaceStartBeforeShutdown(t *testing.T) {
-	app, supervisor, _, token := setupRunSupervisorTest(t)
+	app, supervisor, session, _ := setupRunSupervisorTest(t)
 	app.ExecCommandContext = makeSleepCmd()
 
-	op := startRunTestOperation(t, app, token)
+	op := startRunTestOperation(t, app, session)
 
 	supervisor.beginShutdown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

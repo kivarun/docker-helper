@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,34 +74,16 @@ func TestRunStartAndFinish(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
@@ -145,37 +126,19 @@ func TestAuditEnvKeysNoValues(t *testing.T) {
 
 	const secretValue = "super-secret-token-12345"
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"SECRET_KEY": secretValue,
 			"APP_MODE":   "test",
 		},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	output := auditBuf.String()
 
@@ -229,36 +192,18 @@ func TestAuditDebugNoRawValue(t *testing.T) {
 
 	const secretValue = "my-password-do-not-log"
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"environment": map[string]string{
 			"DB_PASSWORD": secretValue,
 		},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	output := auditBuf.String()
 
@@ -288,34 +233,16 @@ func TestAuditNonZeroExit(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'error output'; exit 7")
-	}
+	setupRunSeam(t, app, runSeamOptions{Output: "error output", ExitCode: 7})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"command": []string{"sh", "-c", "exit 7"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
@@ -334,7 +261,7 @@ func TestAuditNonZeroExit(t *testing.T) {
 	}
 }
 
-func TestAuditDockerError(t *testing.T) {
+func TestAuditRunEngineFailure(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAdminToken(t)
@@ -345,42 +272,29 @@ func TestAuditDockerError(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'docker not found'; exit 125")
-	}
+	setupRunSeam(t, app, runSeamOptions{
+		Err: &engineError{kind: engineErrBackendFailure, cause: errors.New("engine probe")},
+	})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d", http.StatusBadGateway, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
 
-	finishRec := records[1]
+	finishRec := records[len(records)-1]
 	if finishRec.Result != "docker_run_failed" {
 		t.Errorf("expected result 'docker_run_failed', got %q", finishRec.Result)
+	}
+	if finishRec.ExitCode != nil {
+		t.Errorf("audit must not carry a guessed exit code: %+v", finishRec)
 	}
 }
 func TestAuditMountsRelativeSource(t *testing.T) {
@@ -394,36 +308,18 @@ func TestAuditMountsRelativeSource(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
 		"mounts": []map[string]any{
 			{"source": ".", "target": "/workspace", "read_only": true},
 		},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
@@ -458,33 +354,15 @@ func TestAuditNoContainerOutput(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	for _, rec := range records {
@@ -506,33 +384,15 @@ func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image": "alpine:latest",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) == 0 {
@@ -557,34 +417,16 @@ func TestAuditCommandArgCount(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"command": []string{"sh", "-c", "echo hello world"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
@@ -616,34 +458,16 @@ func TestAuditNoCommandInRecord(t *testing.T) {
 
 	const secretCmd = "SECRET_CMD_ARG_UNIQUE_12345"
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"command": []string{"sh", "-c", secretCmd},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	for _, rec := range records {
@@ -665,28 +489,22 @@ func TestRunShutdownGateNoStartAudit(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	// Close the admission gate before the request.
-	app.OperationSupervisor.beginShutdown()
+	// Close the synchronous admission gate before the request.
+	app.SyncExecutionCoordinator.beginShutdown()
 
-	called := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		called = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected %d, got %d", http.StatusServiceUnavailable, w.Code)
 	}
 
-	if called {
-		t.Error("executor must not be called when admission gate is closed")
+	if captured.reached() {
+		t.Error("Engine runner must not be called when the admission gate is closed")
 	}
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)

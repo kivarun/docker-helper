@@ -1,12 +1,9 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,22 +30,16 @@ func TestRunAuditCAInjectedAuto(t *testing.T) {
 	app.Config.TrustedCAPath = "/test-docker-helper-ca-path/ca.pem"
 	app.Config.TrustedCAPreparedDir = preparedDir
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	waitRun(t, app, w)
 
 	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) != 2 {
@@ -127,22 +118,16 @@ func TestRunAuditCAInjectedDisabled(t *testing.T) {
 	app.Config.TrustedCAInjection = "disabled"
 	app.Config.TrustedCAPreparedDir = ""
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := newRunRequest(map[string]any{
+	w := postRun(t, app, result.Token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	waitRun(t, app, w)
 
 	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) != 2 {

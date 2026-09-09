@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -212,9 +212,7 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	req := newRunRequest(map[string]any{
 		"image": "alpine:latest",
@@ -224,23 +222,9 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	rid := w.Header().Get("X-Request-ID")
 	if rid == "" {
@@ -254,7 +238,7 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 }
 
 // TestRequestScopedOperationalErrorContainsIDs verifies that request-scoped
-// operational errors contain request_id and session_id as JSON fields.
+// audit records carry request_id and session_id as JSON fields.
 func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
@@ -270,9 +254,10 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
-	}
+	setupRunSeam(t, app, runSeamOptions{
+		Output: "engine probe",
+		Err:    &engineError{kind: engineErrBackendFailure, cause: errors.New("engine probe")},
+	})
 
 	req := newRunRequest(map[string]any{
 		"image": "alpine:latest",
@@ -282,36 +267,21 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d", http.StatusBadGateway, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	rid := w.Header().Get("X-Request-ID")
 	if rid == "" {
 		t.Fatal("X-Request-ID header should be set")
 	}
 
-	// With async model, request_id and session_id are in audit records.
+	// Request-scoped audit records carry request_id and session_id.
 	auditOutput := auditBuf.String()
 	if auditOutput == "" {
 		t.Fatal("audit output is empty")
 	}
 
-	// Parse audit records and verify request_id and session_id.
 	for _, line := range strings.Split(strings.TrimSpace(auditOutput), "\n") {
 		if line == "" {
 			continue
@@ -348,9 +318,7 @@ func TestNoCommandInAuditStream(t *testing.T) {
 
 	const secretArg = "UNIQUE_SECRET_CMD_ARG_98765"
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{Output: "container said " + secretArg, ExitCode: 3})
 
 	req := newRunRequest(map[string]any{
 		"image":   "alpine:latest",
@@ -361,23 +329,9 @@ func TestNoCommandInAuditStream(t *testing.T) {
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	auditOutput := auditBuf.String()
 	opOutput := opBuf.String()
@@ -409,9 +363,7 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 
 	const secretEnv = "UNIQUE_SECRET_ENV_VALUE_54321"
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{Output: "loaded env " + secretEnv, ExitCode: 2})
 
 	req := newRunRequest(map[string]any{
 		"image": "alpine:latest",
@@ -424,23 +376,9 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
 	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationSupervisor.lookup(opID)
-	if op == nil {
-		t.Fatal("operation not found in supervisor")
-	}
-	op.Wait()
 
 	auditOutput := auditBuf.String()
 	opOutput := opBuf.String()
@@ -908,9 +846,7 @@ func TestResponseEncodingErrorThroughHandler(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	req := newRunRequest(map[string]any{
 		"image": "alpine:latest",

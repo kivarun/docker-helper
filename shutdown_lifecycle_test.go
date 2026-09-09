@@ -15,13 +15,13 @@ import (
 // the operation's forceDeadline is non-zero and equal to the root shutdown deadline.
 // Old code failed this because it used time.Now().Add(defaultForceCleanupTimeout).
 func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
-	app, supervisor, _, token := setupRunSupervisorTest(t)
+	app, supervisor, session, _ := setupRunSupervisorTest(t)
 
 	readyFile := filepath.Join(app.Config.AllowedRoots[0], ".lifecycle_ready")
 	defer os.Remove(readyFile)
 	app.ExecCommandContext = makeIgnoringSignalCmd(t, readyFile)
 
-	op := startRunTestOperation(t, app, token)
+	op := startRunTestOperation(t, app, session)
 	waitProcessReady(t, readyFile)
 
 	supervisor.beginShutdown()

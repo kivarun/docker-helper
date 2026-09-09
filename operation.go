@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -740,4 +743,56 @@ func startOperationProcess(cmd *exec.Cmd, op *operation) operationStartResult {
 	}
 
 	return operationStartResult{}
+}
+
+// readContainerIDFromCidfile reads the container ID from a Docker --cidfile.
+// Returns empty string if the file doesn't exist, is empty, or is malformed.
+func readContainerIDFromCidfile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return ""
+	}
+	return id
+}
+
+// waitForContainerID polls the cidfile until the container ID appears or the
+// context expires. This handles the race where Docker daemon publishes the
+// container ID asynchronously after cmd.Start().
+// Returns empty string if the context expires before the ID is available.
+func waitForContainerID(ctx context.Context, op *operation) string {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// Context expired; try one final read before giving up.
+			return readContainerIDFromCidfile(op.cidfile)
+		case <-op.done:
+			// Operation completed while we were waiting — no cleanup needed.
+			return ""
+		case <-ticker.C:
+			if id := readContainerIDFromCidfile(op.cidfile); id != "" {
+				return id
+			}
+		}
+	}
+}
+
+// killContainerBestEffort attempts to kill a Docker container by ID.
+// This is a bounded, best-effort operation used during force shutdown.
+// If the container is already gone or the command fails, the error is
+// logged but not propagated — "container already gone" is a success.
+func (a *App) killContainerBestEffort(ctx context.Context, containerID string) {
+	cmd := a.newDockerCommand(ctx, "docker", "kill", containerID)
+	if err := cmd.Run(); err != nil {
+		// Container already gone or docker not available — acceptable.
+		// Do not log the container ID to avoid unnecessary traceability.
+		opLog(ctx).Warn("daemon-side container cleanup failed",
+			slog.String("error", err.Error()),
+		)
+	}
 }

@@ -1,15 +1,10 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -26,18 +21,15 @@ func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine", "mounts": []map[string]any{{"source": ".", "target": "/data"}}})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":".","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
+	_ = captured
 }
 
 func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
@@ -56,18 +48,15 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine", "mounts": []map[string]any{{"source": "self-link", "target": "/data"}}})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"self-link","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
+	_ = captured
 }
 
 func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
@@ -84,31 +73,21 @@ func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine", "mounts": []map[string]any{{"source": "subdir", "target": "/data"}}})
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	resp := decodeRunResponse(t, w)
 	if resp.Code != "invalid_mount" {
 		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
 	}
 
-	if dockerCalled {
-		t.Error("docker should not be called after user-mode mount rejection")
+	if captured.reached() {
+		t.Error("Engine runner must not be called after user-mode mount rejection")
 	}
 }
 
@@ -126,19 +105,13 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"testfile.txt","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine", "mounts": []map[string]any{{"source": "testfile.txt", "target": "/data"}}})
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	resp := decodeRunResponse(t, w)
 	if resp.Code != "invalid_mount" {
 		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
 	}
@@ -160,9 +133,7 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
 	// Mock PinWorkspaceMountSourceFn to return a fake pinned mount.
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
@@ -172,14 +143,13 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 		}, nil
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine", "mounts": []map[string]any{{"source": "subdir", "target": "/data"}}})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
+
+	_ = captured
 }
 
 func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
@@ -197,10 +167,9 @@ func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{"image": "alpine", "mounts": []map[string]any{{"source": "subdir", "target": "/data"}}})
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
@@ -209,19 +178,13 @@ func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 	if len(app.OperationSupervisor.ops) != 0 {
 		t.Error("operation should not be created after user-mode mount rejection")
 	}
-}
 
-// getLastOp returns the first operation from the supervisor (there should be exactly one).
-func getLastOp(sup *operationSupervisor) *operation {
-	sup.mu.RLock()
-	defer sup.mu.RUnlock()
-	for _, op := range sup.ops {
-		return op
+	if captured.reached() {
+		t.Error("Engine runner must not be called after user-mode mount rejection")
 	}
-	return nil
 }
 
-// TestRunSecondPinError cleans first pin, supervisor contains no operation, Docker not called.
+// TestRunSecondPinError cleans first pin, supervisor contains no operation, Engine runner not called.
 func TestRunSecondPinError(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
@@ -258,22 +221,15 @@ func TestRunSecondPinError(t *testing.T) {
 		}, nil
 	}
 
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[
-			{"source":"subdir1","target":"/data1"},
-			{"source":"subdir2","target":"/data2"}
-		]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{
+		"image": "alpine",
+		"mounts": []map[string]any{
+			{"source": "subdir1", "target": "/data1"},
+			{"source": "subdir2", "target": "/data2"},
+		},
+	})
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)
@@ -289,19 +245,22 @@ func TestRunSecondPinError(t *testing.T) {
 		t.Error("supervisor should be empty after pin error")
 	}
 
-	// Docker should not be called.
-	if dockerCalled {
-		t.Error("docker should not be called after pin error")
+	// Engine runner should not be called.
+	if captured.reached() {
+		t.Error("Engine runner must not be called after pin error")
 	}
+	_ = callCount
 }
 
-// TestRunRegistryShuttingDown cleans pins, supervisor does not receive operation.
+// TestRunSupervisorShuttingDown: run is refused by the synchronous
+// admission gate during daemon shutdown and the workspace-use lease is
+// released; no pins are created.
 func TestRunSupervisorShuttingDown(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	app.SyncExecutionCoordinator.beginShutdown()
 	supervisor := newOperationSupervisor()
-	supervisor.beginShutdown()
 	app.OperationSupervisor = supervisor
 
 	result, err := createSystemSession(t, app)
@@ -314,48 +273,92 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleanupCalled := false
+	pinCalled := false
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-		return &pinnedMount{
-			PinnedPath: "/pinned/0",
-			cleanup: func() error {
-				cleanupCalled = true
-				return nil
-			},
-		}, nil
+		pinCalled = true
+		return &pinnedMount{PinnedPath: "/pinned/0", cleanup: func() error { return nil }}, nil
 	}
 
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[{"source":"subdir","target":"/data"}]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": "subdir", "target": "/data"}},
+	})
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", w.Code)
 	}
 
-	// Pins should be cleaned up.
-	if !cleanupCalled {
-		t.Error("pins should be cleaned up when supervisor is shutting down")
+	// No pins may be created before admission.
+	if pinCalled {
+		t.Error("pins must not be created when the run is refused by the admission gate")
 	}
 
-	// Supervisor should not contain the operation.
+	// Supervisor should not receive an operation.
 	if len(supervisor.ops) != 0 {
 		t.Error("supervisor should not receive operation when shutting down")
 	}
 
-	// Docker should not be called.
-	if dockerCalled {
-		t.Error("docker should not be called when supervisor is shutting down")
+	// Engine runner should not be called.
+	if captured.reached() {
+		t.Error("Engine runner must not be called when the run is refused")
+	}
+}
+
+// TestRunRefusedWhenLauncherQuiesced proves a quiesced Launcher refuses new
+// launcher-scoped synchronous run admission with the canonical code, and no
+// operation is registered.
+func TestRunRefusedWhenLauncherQuiesced(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	app.OperationSupervisor = newOperationSupervisor()
+
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	app.OperationSupervisor.quiesceLauncher(result.Session.LauncherID)
+
+	pinCalled := false
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinCalled = true
+		return &pinnedMount{PinnedPath: "/pinned/0", cleanup: func() error { return nil }}, nil
+	}
+
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": "subdir", "target": "/data"}},
+	})
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (body %s)", w.Code, w.Body.String())
+	}
+
+	resp := decodeRunResponse(t, w)
+	if resp.Code != "launcher_unavailable" {
+		t.Errorf("expected code 'launcher_unavailable', got %q", resp.Code)
+	}
+
+	if pinCalled {
+		t.Error("pins must not be created when the launcher is quiesced")
+	}
+
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("supervisor should not receive operation when the launcher is quiesced")
+	}
+
+	if captured.reached() {
+		t.Error("Engine runner must not be called when the launcher is quiesced")
 	}
 }
 
@@ -385,19 +388,12 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 		return nil, fmt.Errorf("runtimeDir must be absolute: %q", runtimeDir)
 	}
 
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[{"source":"subdir","target":"/data"}]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": "subdir", "target": "/data"}},
+	})
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)
@@ -408,9 +404,9 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 		t.Error("PinWorkspaceMountSourceFn should be called regardless of RuntimeDir")
 	}
 
-	// Docker should not be called.
-	if dockerCalled {
-		t.Error("docker should not be called when pinning fails")
+	// Engine runner should not be called.
+	if captured.reached() {
+		t.Error("Engine runner must not be called when pinning fails")
 	}
 
 	// Registry should be empty.
@@ -419,8 +415,9 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 	}
 }
 
-// TestRunSystemModeArgvContainsStablePaths verifies Docker receives pinned paths.
-func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
+// TestRunSystemModeSpecContainsStablePaths verifies the run spec carries the
+// pinned paths, not the caller-visible workspace paths.
+func TestRunSystemModeSpecContainsStablePaths(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
@@ -448,43 +445,34 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 		}, nil
 	}
 
-	var dockerArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{
+		"image": "alpine",
+		"mounts": []map[string]any{
+			{"source": "subdir", "target": "/data1"},
+			{"source": "srcfile.txt", "target": "/data2"},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[
-			{"source":"subdir","target":"/data1"},
-			{"source":"srcfile.txt","target":"/data2"}
-		]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	spec := captured.lastSpec()
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	// Build the args string to search in.
-	argsStr := strings.Join(dockerArgs, " ")
-
-	// Stable paths should be present.
-	for _, sp := range stablePaths {
-		if !strings.Contains(argsStr, sp) {
-			t.Errorf("argv should contain stable path %q, got: %v", sp, dockerArgs)
+	// The spec mounts must use the pinned stable paths.
+	for i, sp := range stablePaths {
+		if i >= len(spec.Mounts) || spec.Mounts[i].Source != sp {
+			t.Errorf("mount[%d] = %+v, want source %q", i, spec.Mounts, sp)
 		}
 	}
 
 	// Original paths should NOT be present.
-	if strings.Contains(argsStr, subdir) {
-		t.Errorf("argv should not contain original directory path %q", subdir)
-	}
-	if strings.Contains(argsStr, srcFile) {
-		t.Errorf("argv should not contain original file path %q", srcFile)
+	for _, m := range spec.Mounts {
+		if m.Source == subdir || m.Source == srcFile {
+			t.Errorf("spec must not carry the original workspace path %q", m.Source)
+		}
 	}
 }
 
@@ -506,22 +494,15 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 		return nil, errors.New("should not be called")
 	}
 
-	var dockerArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	captured := setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[{"source":".","target":"/data"}]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": ".", "target": "/data"}},
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
 	// A: PinWorkspaceMountSourceFn must not be called in user mode.
@@ -529,15 +510,14 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 		t.Error("PinWorkspaceMountSourceFn should not be called in user mode")
 	}
 
-	// B: Docker argv must use the resolved workspace path, not a pinned path.
-	argsStr := strings.Join(dockerArgs, " ")
-	expectedMount := fmt.Sprintf("type=bind,source=%s,target=/data", result.Session.Workspace)
-	if !strings.Contains(argsStr, expectedMount) {
-		t.Errorf("argv should contain resolved mount spec %q, got args: %v", expectedMount, dockerArgs)
+	// B: The run spec must use the resolved workspace path, not a pinned path.
+	mounts := captured.lastSpec().Mounts
+	if len(mounts) != 1 || mounts[0].Source != result.Session.Workspace || mounts[0].Target != "/data" {
+		t.Errorf("mounts = %+v, want resolved workspace source", mounts)
 	}
 }
 
-// TestRunStartErrorCleansPinsOnce verifies cleanup on cmd.Start failure.
+// TestRunStartErrorCleansPinsOnce verifies cleanup on Engine adapter failure.
 func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
@@ -565,27 +545,15 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 		}, nil
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, "nonexistent_binary_that_fails")
-		return cmd
-	}
+	setupRunSeam(t, app, runSeamOptions{Err: &engineError{kind: engineErrBackendFailure, cause: errors.New("engine probe")}})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[{"source":"subdir","target":"/data"}]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": "subdir", "target": "/data"}},
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
-
-	// Wait for the operation to complete.
-	op := getLastOp(app.OperationSupervisor)
-	if op != nil {
-		op.Wait()
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected %d, got %d: %s", http.StatusBadGateway, w.Code, w.Body.String())
 	}
 
 	count := atomic.LoadInt32(&cleanupCount)
@@ -594,7 +562,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	}
 }
 
-// TestRunNormalCompletionCleansPinsOnce verifies cleanup after cmd.Wait.
+// TestRunNormalCompletionCleansPinsOnce verifies cleanup after normal completion.
 func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
@@ -622,26 +590,15 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 		}, nil
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[{"source":"subdir","target":"/data"}]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": "subdir", "target": "/data"}},
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
-
-	// Wait for the operation to complete.
-	op := getLastOp(app.OperationSupervisor)
-	if op != nil {
-		op.Wait()
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
 	count := atomic.LoadInt32(&cleanupCount)
@@ -683,30 +640,19 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 		}, nil
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[
-			{"source":"subdir1","target":"/data1"},
-			{"source":"subdir2","target":"/data2"},
-			{"source":"subdir3","target":"/data3"}
-		]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+	w := postRun(t, app, result.Token, map[string]any{
+		"image": "alpine",
+		"mounts": []map[string]any{
+			{"source": "subdir1", "target": "/data1"},
+			{"source": "subdir2", "target": "/data2"},
+			{"source": "subdir3", "target": "/data3"},
+		},
+	})
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
-
-	// Wait for the operation to complete.
-	op := getLastOp(app.OperationSupervisor)
-	if op != nil {
-		op.Wait()
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
 	expectedOrder := []int{2, 1, 0}
@@ -723,7 +669,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 }
 
 // TestRunCleanupErrorDoesNotChangeResult verifies cleanup error doesn't
-// override the operation result.
+// change the run result.
 func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
@@ -747,46 +693,28 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 		}, nil
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": "subdir", "target": "/data"}},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[{"source":"subdir","target":"/data"}]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
-
-	// Wait for the operation to complete.
-	op := getLastOp(app.OperationSupervisor)
-	if op != nil {
-		op.Wait()
-		op.mu.Lock()
-		state := op.State
-		resultCode := ""
-		if op.ResultCode != nil {
-			resultCode = *op.ResultCode
-		}
-		op.mu.Unlock()
-
-		if state != operationSucceeded {
-			t.Errorf("operation state = %s, want succeeded (cleanup error should not change result)", state)
-		}
-		if resultCode != "succeeded" {
-			t.Errorf("result code = %s, want succeeded", resultCode)
-		}
+	resp := decodeRunResponse(t, w)
+	if !resp.OK || resp.ExitCode == nil || *resp.ExitCode != 0 {
+		t.Errorf("response = %+v, want success (cleanup error must not change the result)", resp)
 	}
 }
 
 // TestRunAuditContainsUserSourcePaths verifies audit uses user-provided
 // source paths, not stable runtime paths.
 func TestRunAuditContainsUserSourcePaths(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
@@ -809,45 +737,32 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 		}, nil
 	}
 
-	// Capture audit via operation's auditMounts field.
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0})
+
+	w := postRun(t, app, result.Token, map[string]any{
+		"image":  "alpine",
+		"mounts": []map[string]any{{"source": "subdir", "target": "/data"}},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[{"source":"subdir","target":"/data"}]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	if len(records) == 0 {
+		t.Fatal("no audit records")
 	}
-
-	// Wait for the operation to complete.
-	op := getLastOp(app.OperationSupervisor)
-	if op != nil {
-		op.Wait()
-	}
-
-	if op == nil {
-		t.Fatal("no operation found in supervisor")
-	}
-	op.mu.Lock()
-	defer op.mu.Unlock()
-
-	if len(op.auditMounts) != 1 {
-		t.Fatalf("expected 1 audit mount, got %d", len(op.auditMounts))
+	startRec := records[0]
+	if len(startRec.Mounts) != 1 {
+		t.Fatalf("expected 1 audit mount, got %d", len(startRec.Mounts))
 	}
 
 	// Audit should contain user source, not stable runtime path.
-	if op.auditMounts[0].Source != "subdir" {
-		t.Errorf("audit mount source = %q, want %q", op.auditMounts[0].Source, "subdir")
+	if startRec.Mounts[0].Source != "subdir" {
+		t.Errorf("audit mount source = %q, want %q", startRec.Mounts[0].Source, "subdir")
 	}
-	if strings.Contains(op.auditMounts[0].Source, "/runtime/") {
-		t.Errorf("audit should not contain runtime path: %q", op.auditMounts[0].Source)
+	if strings.Contains(startRec.Mounts[0].Source, "/runtime/") {
+		t.Errorf("audit should not contain runtime path: %q", startRec.Mounts[0].Source)
 	}
 }
 
