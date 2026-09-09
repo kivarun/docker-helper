@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
-# uat-regressions-runner-selinux.sh — collect-all runner for the Release-2
-# targeted UAT regression groups on the Tumbleweed / RPM / SELinux profile
-# (groups 1-4). Runs INSIDE the SELinux guest, as root.
+# uat-regressions-runner-selinux.sh — collect-all runner for the targeted UAT
+# regression groups on the Tumbleweed / RPM / SELinux profile (groups 1-7).
+# Runs INSIDE the SELinux guest, as root. Group 7 is the platform-independent
+# run-requires-Session-capability regression; it exercises the same
+# installed-RPM system daemon under SELinux enforcing.
 #
 # It re-ensures the docker-helper system service (the common black-box UAT may
 # have stopped it during cleanup) and runs every SELinux regression group,
@@ -237,6 +239,7 @@ REGRESSIONS=(
   "4:SELinux mount-boundary guard:uat-regression-selinux-mount-guard.sh"
   "5:SELinux workspace relabel AVC evidence:uat-regression-selinux-relabel-avc.sh"
   "6:SELinux helper_socket enforcing UAT:uat-regression-selinux-helper-socket.sh"
+  "7:Run requires Session capability:uat-regression-run-session-only.sh"
 )
 
 # Fresh AVC/USER_AVC evidence (best-effort; requires auditd started by the
