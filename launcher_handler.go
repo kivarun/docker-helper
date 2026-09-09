@@ -141,7 +141,7 @@ type launcherCredentialResponse struct {
 }
 
 func launcherToJSON(l LauncherWithPrincipal) launcherJSON {
-	allowedRoots := l.AllowedRoots
+	allowedRoots := allowedRootPaths(l.AllowedRoots)
 	if allowedRoots == nil {
 		allowedRoots = []string{}
 	}

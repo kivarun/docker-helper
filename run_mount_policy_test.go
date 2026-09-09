@@ -21,7 +21,7 @@ func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -861,7 +861,7 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 func createSystemSession(t *testing.T, app *App) (*CreatedSession, error) {
 	t.Helper()
 	const username = "runsysowner"
-	home := filepath.Join(app.Config.AllowedRoots[0], "runsysowner-home")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "runsysowner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create system-owner home: %v", err)
 	}

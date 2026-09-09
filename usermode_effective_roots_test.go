@@ -26,7 +26,7 @@ import (
 func setupUserModeEffectiveRootsApp(t *testing.T) (*App, string, string, string) {
 	t.Helper()
 	app := newTestAppWithAdminToken(t)
-	root := app.Config.AllowedRoots[0]
+	root := app.Config.AllowedRoots[0].Path
 	work := filepath.Join(root, "work")
 	proj := filepath.Join(work, "proj")
 	for _, d := range []string{proj} {

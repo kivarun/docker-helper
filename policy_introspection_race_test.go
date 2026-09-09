@@ -138,7 +138,7 @@ func openParkedQueryDB(t *testing.T, dbPath string, points ...*parkedQueryPoint)
 func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	rootA := app1.Config.AllowedRoots[0]
+	rootA := app1.Config.AllowedRoots[0].Path
 
 	// Principal rootview with stored roots [home, stale]: home sits under the
 	// narrowed global root, stale only under the wider pre-reload root A, so
@@ -259,7 +259,7 @@ func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) 
 func TestRacePrincipalRootNarrowingSerializesCreatePolicyIntrospection(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0]
+	root := app1.Config.AllowedRoots[0].Path
 
 	// Principal raceowner with stored roots [home, extra] and a credential.
 	home := filepath.Join(root, "home", "raceowner")
@@ -387,7 +387,7 @@ type narrowingResult struct {
 func TestRacePrincipalDeleteSerializesEffectiveRootsIntrospection(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0]
+	root := app1.Config.AllowedRoots[0].Path
 
 	// Principal victim with stored roots [home, extra] and a credential.
 	home := filepath.Join(root, "home", "victim")
@@ -494,7 +494,7 @@ func TestRacePrincipalDeleteSerializesEffectiveRootsIntrospection(t *testing.T) 
 func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0]
+	root := app1.Config.AllowedRoots[0].Path
 
 	home := filepath.Join(root, "home", "victim")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -510,10 +510,10 @@ func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testi
 	}
 
 	// Park the introspection at its first in-boundary Principal-roots read
-	// (SELECT root_path FROM principal_allowed_roots WHERE principal_id = ?),
+	// (SELECT root_path, access FROM principal_allowed_roots WHERE principal_id = ?),
 	// reached while it holds lifecycleMu. The pattern is distinct from every
 	// other query in the race phase.
-	introspectionPoint := newParkedQueryPoint("SELECT root_path FROM principal_allowed_roots WHERE principal_id")
+	introspectionPoint := newParkedQueryPoint("SELECT root_path, access FROM principal_allowed_roots WHERE principal_id")
 	app := &App{
 		Config:                  app1.Config,
 		DB:                      openParkedQueryDB(t, app1.Config.DatabasePath, introspectionPoint),
@@ -585,7 +585,7 @@ func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testi
 func TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0]
+	root := app1.Config.AllowedRoots[0].Path
 
 	home := filepath.Join(root, "home", "raceowner")
 	extra := filepath.Join(home, "extra")

@@ -58,7 +58,7 @@ func setupReloadApp(t *testing.T, auditEnabled bool) (*App, string, string, *byt
 func writeReloadConfig(t *testing.T, configPath string, cfg *Config, auditEnabled *bool) {
 	t.Helper()
 	newCfg := map[string]any{
-		"allowed_root": cfg.AllowedRoots[0],
+		"allowed_root": cfg.AllowedRoots[0].Path,
 		"session_ttl":  "12h",
 		"log_level":    "info",
 	}
@@ -272,7 +272,7 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revoke-test")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "revoke-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	_, _ = setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "idempotent-test")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "idempotent-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	// Create a real credential that can be revoked.
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "preread-test")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "preread-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +459,7 @@ func TestPullNonZeroNoOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +485,7 @@ func TestPullStartFailureOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +557,7 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -674,7 +674,7 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -779,7 +779,7 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessioncleanupuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "sessioncleanupuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -900,7 +900,7 @@ func TestSessionDeleteCleanupCorrelation(t *testing.T) {
 
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessiondeleteuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "sessiondeleteuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}

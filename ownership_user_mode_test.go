@@ -102,7 +102,7 @@ func TestEnsureUserModeOwnershipRejectsRootedPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO principal_allowed_roots (principal_id, root_path) VALUES (?, ?)`, pid, home); err != nil {
+	if _, err := db.Exec(`INSERT INTO principal_allowed_roots (principal_id, root_path, access) VALUES (?, ?, 'read_write')`, pid, home); err != nil {
 		t.Fatal(err)
 	}
 
@@ -182,7 +182,7 @@ func TestEnsureUserModeOwnershipRejectsBadDefaultLauncher(t *testing.T) {
 		{
 			name: "has_launcher_roots",
 			mutate: func(t *testing.T) {
-				if _, err := db.Exec(`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`, launcherID, home); err != nil {
+				if _, err := db.Exec(`INSERT INTO launcher_allowed_roots (launcher_id, root_path, access) VALUES (?, ?, 'read_write')`, launcherID, home); err != nil {
 					t.Fatal(err)
 				}
 			},

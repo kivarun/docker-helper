@@ -292,7 +292,7 @@ func TestLauncherAllowedRoots(t *testing.T) {
 
 	// A Launcher root can be stored.
 	if _, err := db.Exec(
-		`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, '/home/alice')`,
+		`INSERT INTO launcher_allowed_roots (launcher_id, root_path, access) VALUES (?, '/home/alice', 'read_write')`,
 		launcherID,
 	); err != nil {
 		t.Fatalf("insert allowed root: %v", err)
@@ -300,7 +300,7 @@ func TestLauncherAllowedRoots(t *testing.T) {
 
 	// Duplicate (launcher_id, root_path) is rejected.
 	if _, err := db.Exec(
-		`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, '/home/alice')`,
+		`INSERT INTO launcher_allowed_roots (launcher_id, root_path, access) VALUES (?, '/home/alice', 'read_write')`,
 		launcherID,
 	); err == nil {
 		t.Error("expected UNIQUE(launcher_id, root_path) violation for duplicate root")
@@ -308,7 +308,7 @@ func TestLauncherAllowedRoots(t *testing.T) {
 
 	// A root for a nonexistent Launcher is rejected by the FK.
 	if _, err := db.Exec(
-		`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES ('dhl_missing', '/x')`,
+		`INSERT INTO launcher_allowed_roots (launcher_id, root_path, access) VALUES ('dhl_missing', '/x', 'read_write')`,
 	); err == nil || !strings.Contains(err.Error(), "FOREIGN KEY") {
 		t.Errorf("expected FOREIGN KEY failure for nonexistent launcher, got: %v", err)
 	}
