@@ -102,16 +102,16 @@ else
   reg_fail "workspace escape mount was NOT rejected"
 fi
 
-# --- transport only: no bearer credential means no protected operation -------
+# --- transport only: a bogus bearer credential means no protected operation ---
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
   dh run --image "$IMAGE" --helper-socket --mount .:/workspace \
-  -- sh -ec '/workspace/docker-helper pull alpine:3.24' \
+  -- sh -ec 'DOCKER_HELPER_SESSION_TOKEN=dht_uat_reg16_invalid /workspace/docker-helper pull alpine:3.24' \
   >/tmp/uat-reg16-noauth.out 2>/tmp/uat-reg16-noauth.err
 NOAUTH_RC=$?
 # The inner docker-helper's diagnostic travels through the streamed
 # operation output (dh run stdout), not the outer CLI's stderr.
 if [ "$NOAUTH_RC" != 0 ] && grep -qE "401|unauthorized" /tmp/uat-reg16-noauth.out 2>/dev/null; then
-  reg_ok "socket without a bearer credential performs no protected operation (unauthorized)"
+  reg_ok "bogus bearer credential through the injected socket performs no protected operation (unauthorized)"
 else
   reg_fail "credential-free socket use did not fail closed (rc=$NOAUTH_RC, stdout: $(cat /tmp/uat-reg16-noauth.out 2>/dev/null))"
 fi
