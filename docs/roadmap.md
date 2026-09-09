@@ -522,9 +522,12 @@ snapshot of their existing workspace.
 System mode requires defense-in-depth parity from the active MAC backend. The
 application policy remains the only semantic owner; AppArmor and SELinux consume
 the already-resolved workload exposure plan and independently deny writes to
-read-only exposures. Production implementation is blocked on a feasibility gate
-that proves mixed RW/RO mounts and, for SELinux, concurrent Sessions with
-different snapshots over the same host tree without a global per-mode relabel.
+read-only exposures. The mandatory M0 feasibility gate closed on 2026-09-09:
+AppArmor uses a generated per-workload profile, while SELinux uses a helper-owned
+`bindfs` projection with a read-only workload mount context. Passing evidence
+covers mixed RW/RO mounts and concurrent SELinux Sessions with different
+snapshots over the same host tree without a global per-mode relabel. Production
+implementation and full system-mode UAT remain pending.
 
 Release 2.2 deliberately does not include Managed Containers, Engine migration,
 networking, resources, durable Operations, or any other Release 3 runtime work.

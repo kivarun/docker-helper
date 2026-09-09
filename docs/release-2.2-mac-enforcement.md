@@ -6,6 +6,11 @@ This document owns the Release 2.2 MAC requirements for allowed-root access
 modes and the mandatory feasibility gate that must close before production
 implementation begins.
 
+**M0-A and M0-S are CLOSED as of 2026-09-09.** The accepted mechanisms and
+reproducible evidence are recorded below. This closes mechanism feasibility
+only; the production implementation and its full system-mode UAT remain release
+gates.
+
 The application-policy contract is owned by
 [`release-2.2-allowed-root-access-modes.md`](release-2.2-allowed-root-access-modes.md).
 This document does not create a second policy hierarchy. AppArmor and SELinux
@@ -207,6 +212,92 @@ state.
 If no supported mechanism can satisfy mixed modes plus shared-tree concurrency,
 M0-S remains OPEN and Release 2.2 implementation stops for architecture
 revision. The fallback is not to weaken SELinux parity silently.
+
+## M0 closure record — 2026-09-09
+
+| Gate | Result | Accepted mechanism | Authoritative evidence |
+|---|---|---|---|
+| M0-A | **CLOSED** | Helper-owned generated AppArmor workload profile, selected through Docker's AppArmor security option | [run 34377797007](https://github.com/kivarun/docker-helper/actions/runs/34377797007), artifact `release-2.2-m0-apparmor-34377797007-1`, digest `sha256:ada6cd55186393d42c45a99072f63c9ad133c765b3300cab22a91ba4ec127dd3`, tested commit `26b0e9f50338c43d16bf23397f46943cab1aa91b` |
+| M0-S | **CLOSED** | Helper-owned writable `bindfs` passthrough projection with an SELinux mount context for each read-only exposure | [run 34383031755](https://github.com/kivarun/docker-helper/actions/runs/34383031755), artifact `release-2.2-m0-selinux-34383031755-1`, digest `sha256:797b22725fd51c9c8d69828c3b03d492209863a0a26488d9556ec203f5d697c1`, tested commit `fc43e012245240d34914757a6e0a4edca777fbf4` |
+
+Both runs include a passing static-check job and a passing live workload-mode
+proof job. They are reproducible through
+`.github/workflows/release-2.2-m0-apparmor.yml` and
+`.github/workflows/release-2.2-m0-selinux.yml` respectively.
+
+### Accepted M0-A mechanism
+
+The AppArmor backend generates one bounded, helper-owned workload profile from
+the final container-target/access plan and selects that profile explicitly at
+container creation. The proof established:
+
+- simultaneous read-write and read-only targets in one container;
+- successful writes through the read-write target;
+- AppArmor-attributable `DENIED` records for append, create, and unlink through
+  a deliberately VFS-writable read-only target;
+- literal-safe target-path encoding, load-before-exec, create-failure cleanup,
+  and ownership-bounded startup reconciliation;
+- no generated-profile or container residue and no change to the shipped
+  `docker-helper-system` daemon profile.
+
+Production must preserve the same split: the common layer resolves policy,
+while the AppArmor backend only renders and owns the workload profile. The
+backend-only forced-writable path remains proof infrastructure and must not
+become a public or production bypass.
+
+### Accepted M0-S mechanism
+
+For each resolved read-only exposure, the SELinux backend creates a writable
+`bindfs` passthrough projection from the helper's existing pinned source and
+mounts that projection with
+`system_u:object_r:docker_helper_ro_projection_t:s0`. The container receives
+the projection at the requested target; production also keeps the Docker/VFS
+mount read-only. A resolved read-write exposure remains a direct bind of the
+pinned source.
+
+The projection has its own FUSE superblock and mount context. Consequently the
+workload may retain `docker_helper_container_t` and Docker-assigned MCS
+categories while SELinux denies mutation of the projection type. The backing
+objects retain their existing `docker_helper_workspace_t` labels. Concurrent
+Sessions therefore use independent projections/access plans over live shared
+backing objects without a global per-mode relabel. A regular-file source is
+handled by projecting a private staging directory and binding the selected file
+from that projection.
+
+The enforcing openSUSE Tumbleweed proof established:
+
+- one container with simultaneous read-write and read-only exposures;
+- concurrent read-write and read-only Sessions over the same live tree;
+- regular-file read-only exposure;
+- distinct container MCS categories with matching process/rootfs labels;
+- exact source label and device/inode preservation;
+- attributable AVC denials from `docker_helper_container_t` to
+  `docker_helper_ro_projection_t` while the projection remained VFS-writable;
+- create-failure cleanup, ownership-bounded startup reconciliation, and no
+  policy-module, mount, or container residue.
+
+OverlayFS is not the accepted mechanism: changing an underlying lower tree
+while an overlay is mounted has undefined behavior and cannot satisfy the live
+shared-tree requirement. See the kernel's
+[OverlayFS documentation](https://docs.kernel.org/filesystems/overlayfs.html).
+
+M0-S acceptance adds the following mandatory production constraints:
+
+- `bindfs` is an explicit SELinux system-mode runtime dependency;
+- the shipped policy owns the static `docker_helper_ro_projection_t` type and
+  grants no workload mutation permissions to it;
+- the confined helper's projection worker, `/dev/fuse` access, mount operation,
+  and library/executable permissions must be narrowly added and proven under
+  the normal production SELinux UAT; M0 did not grant them to the shipped
+  daemon policy;
+- projection state is correlated with the container and remains internal;
+- cleanup order is container absent, projection unmounted, `bindfs` worker
+  released, then source mount pin released;
+- startup reconciliation touches only positively identified helper-owned
+  projection state;
+- any failure to create, label, validate, or later clean the projection fails
+  closed. An implementation that replaces this mechanism must reopen M0-S and
+  supply equivalent evidence before it can be accepted.
 
 ## Independent MAC proof method
 
