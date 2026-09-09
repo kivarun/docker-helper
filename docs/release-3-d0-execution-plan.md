@@ -749,5 +749,9 @@ transient-container removal on every exit path, and no run Operation
 identity/polling/cancel — with the 2.1.1 `helper_socket` and
 `--env-from` contracts preserved and the D0 readiness boundary intact
 (no R3 resource readiness is claimed; the cgroup feasibility gate still
-owns the declaration of D0.3b/D1/D2 readiness). The next executable
-step is D0.4 — legacy Operation retirement.
+owns the declaration of D0.3b/D1/D2 readiness). Evidence: branch SHA
+`bac7a1a`, CI run 34365920719 all nine jobs green including the
+real-Engine `TestRunEngineIntegration` run matrix, and the black-box
+UAT artifact gate run 34367698601 all eight jobs green across Ubuntu
+tarball, openSUSE AppArmor, openSUSE SELinux tarball and the regression
+suite. The next executable step is D0.4 — legacy Operation retirement.
