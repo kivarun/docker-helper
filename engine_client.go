@@ -330,6 +330,19 @@ func (a *App) newEngineContainerRunner() (engineContainerRunner, error) {
 	return a.sharedEngineAdapter()
 }
 
+// drainRunWait consumes one ContainerWait stream the normal path will not
+// read (a failed start): the client's wait goroutine delivers only through
+// these channels, and the Engine answers the wait once the failed container
+// is removed.
+func drainRunWait(wait client.ContainerWaitResult) {
+	go func() {
+		select {
+		case <-wait.Result:
+		case <-wait.Error:
+		}
+	}()
+}
+
 // engineBuildStreamMessage extends the Engine JSON stream message with the
 // bare "error" field the docker JSON stream convention carries alongside
 // errorDetail, which the docker CLI also honors as the error message.
@@ -602,7 +615,6 @@ func (e *engineClient) imageBuild(ctx context.Context, spec engineBuildSpec, out
 	var embedded *jsonstream.Error
 	dec := json.NewDecoder(resp.Body)
 	for {
-		// engineBuildStreamMessage extends the Engine JSON stream message
 		// with the bare "error" field the docker JSON stream convention
 		// carries alongside errorDetail; the docker CLI honors it too.
 		var msg engineBuildStreamMessage
@@ -1143,15 +1155,21 @@ func (e *engineClient) containerRun(ctx context.Context, spec engineRunSpec, out
 		_, _ = stdcopy.StdCopy(buf, buf, attach.Reader)
 	}()
 
+	// The wait is registered BEFORE start: the Engine acknowledges the wait
+	// request with its response header immediately, and registering it
+	// after a workload that exits within milliseconds races that exit —
+	// this is the documented Engine API ordering for next-exit waits.
+	wait := e.cli.ContainerWait(ctx, containerID, client.ContainerWaitOptions{Condition: container.WaitConditionNextExit})
+
 	if _, err := e.cli.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
 		attach.Close()
 		joinRunDemux(demuxDone)
 		e.removeRunContainer(ctx, containerID)
+		go drainRunWait(wait)
 		out, truncated := runBufferedOutput(buf)
 		return engineRunResult{Output: out, Truncated: truncated}, normalizeEngineRunStepError(err)
 	}
 
-	wait := e.cli.ContainerWait(ctx, containerID, client.ContainerWaitOptions{Condition: container.WaitConditionNextExit})
 	var exitCode int
 	var runErr error
 	select {
