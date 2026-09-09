@@ -1,0 +1,68 @@
+name: Release 2.2 M0-A AppArmor proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release/2.2
+    paths:
+      - .github/workflows/release-2.2-m0-apparmor.yml
+      - scripts/release-2.2-m0-apparmor-proof.sh
+      - scripts/uat-mac-apparmor.sh
+
+permissions:
+  contents: read
+
+jobs:
+  proof-static-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Validate proof and repository
+        run: |
+          bash -n scripts/release-2.2-m0-apparmor-proof.sh
+          shellcheck scripts/release-2.2-m0-apparmor-proof.sh
+          test -z "$(gofmt -l .)"
+          go test ./...
+          go test -race ./...
+          go vet ./...
+          git diff --check
+
+  apparmor-workload-mode-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install AppArmor UAT dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+
+      - name: Run M0-A proof
+        run: |
+          sudo -E env "PATH=$PATH" \
+            M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.2-m0-apparmor-evidence" \
+            scripts/release-2.2-m0-apparmor-proof.sh
+
+      - name: Upload M0-A evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.2-m0-apparmor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.2-m0-apparmor-evidence
+          if-no-files-found: error
