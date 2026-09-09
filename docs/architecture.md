@@ -1668,8 +1668,12 @@ The Engine sequence is owned by the adapter (`engineClient.containerRun`):
   normal completion, non-zero exit, request cancellation, daemon shutdown,
   and create/start partial failure — through a removal context detached
   from the request context with its own timeout, so a cancelled request
-  still cleans up provably owned state. A failed removal is an operational
-  warning without backend identifiers.
+  still cleans up provably owned state. The removal is part of the
+  synchronous run postcondition: when it cannot complete within its
+  bounded budget (or prove the container absent through a NotFound
+  answer), the run reports the normalized Engine cleanup failure instead
+  of a successful result or a terminal workload result, the bounded output
+  captured so far is preserved, and no backend identifier is exposed.
 
 The backend container ID stays internal: it never reaches the API
 response, audit, or operational logs. The combined workload output is
@@ -1699,8 +1703,13 @@ The response contract:
   (422), `registry_unavailable` (502); an unclassified Engine failure is
   `docker_run_failed` (500). No exit code is guessed from an error string
   and raw Engine error payloads never become public/log/audit contract;
+  the same classification covers a failed forced removal: the run never
+  reports `ok: true` or a terminal workload result when the bounded removal
+  could not complete or prove the container absent;
 - a cancelled run (request cancellation or shutdown) is answered with the
-  generic run failure and audited as `cancelled` with no exit code.
+  generic run failure and audited as `cancelled` with no exit code; when
+  its own cleanup also failed within the bounded budget, the run is
+  answered with the normalized cleanup failure instead.
 
 Validation details:
 

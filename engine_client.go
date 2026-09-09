@@ -82,8 +82,12 @@ type engineContainerRunner interface {
 	// output either way. On an Engine interaction failure err is a
 	// normalized engineError and the output rendered before the failure is
 	// still returned. The adapter owns the bounded deterministic removal of
-	// the transient container on every exit path, so after containerRun
-	// returns no helper-created transient run container remains.
+	// the transient container on every exit path, and that removal is part
+	// of the run postcondition: when the bounded removal cannot complete or
+	// prove the container absent, containerRun returns the normalized
+	// cleanup failure instead of a workload result, so after containerRun
+	// returns either no helper-created transient run container remains or
+	// the run has already failed with a normalized error.
 	containerRun(ctx context.Context, spec engineRunSpec, outputLimit int64) (engineRunResult, error)
 }
 
@@ -1091,6 +1095,20 @@ func normalizeEngineRunStepError(err error) error {
 	return &engineError{kind: engineErrBackendFailure, cause: err}
 }
 
+// normalizeEngineRemoveError maps an Engine forced-removal failure to the
+// normalized error categories. The removal budget expiring is a bounded
+// backend failure, never a client cancellation: the request is not
+// cancelled by its own cleanup deadline.
+func normalizeEngineRemoveError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if client.IsErrConnectionFailed(err) {
+		return &engineError{kind: engineErrBackendUnavailable, cause: err}
+	}
+	return &engineError{kind: engineErrBackendFailure, cause: err}
+}
+
 // runBufferedOutput snapshots the bounded run output buffer.
 func runBufferedOutput(buf *boundedBuffer) (out string, truncated bool) {
 	data, _, truncated := buf.Range(0)
@@ -1110,13 +1128,15 @@ func runBufferedOutput(buf *boundedBuffer) (out string, truncated bool) {
 //     result, never a failure;
 //  5. bounded forced removal of the transient container on every exit path,
 //     including cancellation and daemon shutdown, so no helper-created
-//     transient run container survives the request.
+//     transient run container survives the request; a removal that cannot
+//     complete within its bounded budget fails the run instead of leaving
+//     an unreported leaked container.
 //
 // The combined workload output is captured through the multiplexed attach
 // stream into a bounded buffer with newest-data behavior. The removal uses a
 // context detached from the request context with its own bounded timeout, so
 // a cancelled request still cleans up provably owned state; a failed removal
-// is an operational warning without backend identifiers.
+// becomes the run's normalized error and carries no backend identifiers.
 func (e *engineClient) containerRun(ctx context.Context, spec engineRunSpec, outputLimit int64) (engineRunResult, error) {
 	buf := newBoundedBuffer(outputLimit)
 	config, hostConfig := engineRunContainerConfig(spec)
@@ -1145,8 +1165,14 @@ func (e *engineClient) containerRun(ctx context.Context, spec engineRunSpec, out
 		Stderr: true,
 	})
 	if err != nil {
-		e.removeRunContainer(ctx, containerID)
+		removeErr := e.removeRunContainer(ctx, containerID)
 		out, truncated := runBufferedOutput(buf)
+		if removeErr != nil {
+			// The removal postcondition failed: the run reports the
+			// cleanup failure, never a result derived from the aborted
+			// step.
+			return engineRunResult{Output: out, Truncated: truncated}, removeErr
+		}
 		return engineRunResult{Output: out, Truncated: truncated}, normalizeEngineRunStepError(err)
 	}
 	demuxDone := make(chan struct{})
@@ -1164,9 +1190,12 @@ func (e *engineClient) containerRun(ctx context.Context, spec engineRunSpec, out
 	if _, err := e.cli.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
 		attach.Close()
 		joinRunDemux(demuxDone)
-		e.removeRunContainer(ctx, containerID)
+		removeErr := e.removeRunContainer(ctx, containerID)
 		go drainRunWait(wait)
 		out, truncated := runBufferedOutput(buf)
+		if removeErr != nil {
+			return engineRunResult{Output: out, Truncated: truncated}, removeErr
+		}
 		return engineRunResult{Output: out, Truncated: truncated}, normalizeEngineRunStepError(err)
 	}
 
@@ -1183,8 +1212,18 @@ func (e *engineClient) containerRun(ctx context.Context, spec engineRunSpec, out
 
 	attach.Close()
 	joinRunDemux(demuxDone)
-	e.removeRunContainer(ctx, containerID)
+	removeErr := e.removeRunContainer(ctx, containerID)
 
+	// The forced removal is part of the synchronous run postcondition. When
+	// it cannot complete within its bounded budget, the run reports the
+	// normalized cleanup failure — never a successful result and never a
+	// terminal workload result — while the bounded output captured so far
+	// is preserved and the container keeps its helper-owned correlation
+	// labels for subsequent lifecycle/orphan cleanup.
+	if removeErr != nil {
+		out, truncated := runBufferedOutput(buf)
+		return engineRunResult{Output: out, Truncated: truncated}, removeErr
+	}
 	if runErr != nil {
 		out, truncated := runBufferedOutput(buf)
 		return engineRunResult{Output: out, Truncated: truncated}, normalizeEngineRunStepError(runErr)
@@ -1195,16 +1234,25 @@ func (e *engineClient) containerRun(ctx context.Context, spec engineRunSpec, out
 
 // removeRunContainer performs the bounded forced removal of the transient
 // run container on a context detached from the request, so cancellation and
-// daemon shutdown still reach it. A failed removal is a bounded
-// best-effort operational warning without backend identifiers.
-func (e *engineClient) removeRunContainer(ctx context.Context, containerID string) {
+// daemon shutdown still reach it. The removal is part of the synchronous
+// run postcondition, so the failure is returned as a normalized Engine
+// failure — never swallowed into a best-effort warning — and carries no
+// backend identifiers. A NotFound answer proves the container no longer
+// exists, which is exactly the postcondition.
+func (e *engineClient) removeRunContainer(ctx context.Context, containerID string) error {
 	removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), engineRunRemoveTimeout)
 	defer cancel()
 	if _, err := e.cli.ContainerRemove(removeCtx, containerID, client.ContainerRemoveOptions{Force: true}); err != nil {
+		if cerrdefs.IsNotFound(err) {
+			// The container is gone: the postcondition holds.
+			return nil
+		}
 		opLog(ctx).Warn("transient run container cleanup failed",
 			slog.String("operation", "run"),
 		)
+		return normalizeEngineRemoveError(err)
 	}
+	return nil
 }
 
 // joinRunDemux waits bounded for the attach demultiplexer goroutine to
