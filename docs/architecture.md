@@ -44,6 +44,7 @@
   - [Registry login](#registry-login)
   - [Filesystem policy](#filesystem-policy)
   - [Environment and trusted CA](#environment-and-trusted-ca)
+  - [Helper socket projection](#helper-socket-projection)
   - [Retention and cancellation](#retention-and-cancellation)
 - [Service lifecycle](#service-lifecycle)
   - [Shutdown](#shutdown)
@@ -1231,13 +1232,20 @@ The daemon-backed policy completions are exactly:
 | `launcher create --allowed-root` | Principal effective-root query |
 | `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
 
-Positional `[LAUNCHER] ... PATH` completion on
-`launcher allowed-root add/remove` is generic filesystem completion
-(directories for add, any filesystem entry for remove); the daemon remains
-the final policy boundary and rejects a root outside the effective
-Principal ceiling at execution time. `config allowed-root add` and
-`principal allowed-root add` remain generic filesystem completion, as do
-all other path-valued flags.
+Positional `[LAUNCHER] ... PATH` completion on `launcher allowed-root
+add/remove`: the first positional is grammar-ambiguous — with one
+positional the word is the PATH for the default Launcher, so a relative
+PATH without a slash is legal. A slash-free word therefore completes the
+union of the daemon-backed Launcher selectors and the generic filesystem
+candidates (directories for add, any filesystem entry for remove), a
+failed selector query never removes the PATH candidates, and a word
+containing a slash — which a Launcher name can never contain — is the
+unambiguous PATH and completes filesystem candidates without a selector
+query. Once the first positional is typed, the next position is generic
+filesystem completion. The daemon remains the final policy boundary and
+rejects a root outside the effective Principal ceiling at execution time.
+`config allowed-root add` and `principal allowed-root add` remain generic
+filesystem completion, as do all other path-valued flags.
 
 Positional completion of `principal show USER [FIELD]`: USER completes
 from the same selector-introspection owner as the `--principal` selector
@@ -1510,6 +1518,12 @@ Environment validation ensures variable names match
 `^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
 against the workspace and checks for duplicate targets.
 
+`helper_socket` validation is mode-aware: when the boolean is requested in
+user mode the request is rejected (`invalid_helper_socket`) before any
+lease, pin, or operation state exists. In system mode the capability is
+accepted and a user mount may not use the injected mount point itself
+(`invalid_mount`).
+
 Container lifecycle:
 
 - `--rm` — container is removed on exit;
@@ -1527,6 +1541,8 @@ Validation details:
 - source is resolved through `EvalSymlinks` and checked via `pathWithin`;
 - environment values are never logged (only names in `env_keys`);
 - environment names are sorted for deterministic output;
+- `helper_socket` injects the server-owned read-only runtime projection
+  described in [Helper socket projection](#helper-socket-projection);
 - `shm_size` accepts a plain integer with an optional binary unit (`k`, `m`,
   `g`; case-insensitive); values must be > 0 and <= 2 GiB (hard-coded
   limit); the parsed byte value is passed to Docker as `--shm-size`; this
@@ -1679,6 +1695,34 @@ names appear in `env_keys`. Environment variables are sorted by name
 before being passed to Docker, making the command line deterministic and
 reproducible.
 
+The CLI `run` command additionally accepts `--env-from DEST=SOURCE`. The
+value of SOURCE is read from the CLI process's own environment and
+delivered as DEST through the same request `environment` contract as
+`--env`; the daemon sees no difference between the two flags. Resolution
+is a CLI-side concern and is fail-closed: an unset SOURCE stops the
+command with exit code 2 before any request is sent, so no run Operation
+is created and no runtime residue remains. A SOURCE that is set but empty
+is delivered as an empty value. An invalid DEST name is rejected by the
+existing daemon environment validation exactly like an invalid `--env`
+name. Resolved values exist only in the request body; they are not placed
+in the `docker-helper` process's argv, are not printed in CLI diagnostics,
+are not inherited from the surrounding process environment, and the
+daemon does not log environment values (only names appear in `env_keys`).
+Only explicitly requested variables are forwarded; the rest of the CLI
+process environment is never inherited. When both `--env` and
+`--env-from` define the same name, the `--env-from` value wins.
+
+Known 2.1.x limitation: `run` starts the workload through the legacy
+Docker CLI, and the daemon passes environment values to that child
+process as `--env DEST=value` argv entries, so a resolved value is
+visible in the argv of the daemon-side `docker` child process.
+`--env-from` therefore scopes its guarantee to the `docker-helper` CLI
+process boundary only; it does not promise the value is absent from every
+process argv on the system. Migrating `run` away from the legacy Docker
+CLI is not a 2.1.1 goal.
+`--env-from` introduces no new daemon-side concept: the existing
+`run.environment` contract fully owns delivery.
+
 Trusted CA injection: when `trusted_ca_injection` is set to `"auto"` and
 `trusted_ca_path` points to a valid single PEM X.509 CA certificate,
 docker-helper injects the CA into containers started via `POST /run`:
@@ -1748,6 +1792,75 @@ the operator's responsibility to make readable under that MAC policy. There is
 no silent downgrade: CA preparation and daemon start/reload fail closed when
 the source cannot be read. Older configurations continue to work without
 migration or copying the CA.
+
+### Helper socket projection
+
+`--helper-socket` (HTTP field `helper_socket`) is a server-owned special
+capability that gives a `POST /run` workload transport reachability to the
+existing helper Unix socket through its own existing runtime directory.
+The canonical public name is `helper_socket`; no parallel transport or
+socket exists.
+
+In system mode the daemon injects one additional read-only bind mount:
+
+```
+/run/docker-helper (host runtime directory)
+    -> /run/docker-helper (container, readonly)
+```
+
+The client selects only the boolean. It never chooses the source, the
+target, or the mount mode, and the ordinary mount policy does not change:
+mount sources stay workspace-relative, absolute host sources and workspace
+escapes stay rejected, and allowed-root semantics are untouched. When the
+projection is active, a user mount whose target overlaps the injected
+mount point — exact match, ancestor (`/run`, `/`), or descendant
+(`/run/docker-helper/docker-helper.sock`) — is rejected as `invalid_mount`:
+a caller-owned mount must not be able to shadow, replace, or partially
+cover the server-owned projection (same exact + ancestor + descendant
+principle as trusted-CA injection). Without `helper_socket` the 2.1.0
+mount contract is unchanged.
+
+The projection binds the runtime DIRECTORY, not the socket inode. The
+systemd unit preserves the runtime directory
+(`RuntimeDirectoryPreserve=restart`) and the daemon recreates
+`docker-helper.sock` inside the same directory, so a consumer that does
+survive daemon replacement — for example an orphaned container in a crash
+scenario — observes the recreated socket through its existing directory
+bind where a socket inode bind would go stale. This says nothing about
+the workload lifecycle: a normal graceful `systemctl restart
+docker-helper` still terminates helper-owned run workloads under the
+2.1.x shutdown lifecycle, and `helper_socket` does not change that
+lifecycle. No workload survival across a service restart or a package
+upgrade is promised.
+
+Authority is transport reachability only. The socket grants no
+Session/Launcher/Principal/Admin credential, restores no credential from
+ownership, does not raise the current Session's authority, and carries no
+bearer token; protected operations authenticate exactly as any other API
+client, with the credential passed separately (for example through
+`--env-from`). The injected mount is read-only, so the workload cannot
+create, remove, or replace top-level runtime entries, and helper-private
+runtime state (`builds/`, `mounts/`, `sessions/`, the socket lock, and cid
+files) remains unreadable for the Principal-UID workload through the
+helper-owned directory permissions; the known entry names are not
+authority. Under enforcing SELinux the shipped policy grants the workload
+exactly the traversal and socket-connect permissions needed to reach the
+socket and nothing else; under AppArmor the workload runs unconfined
+(`label=disable`) and the same isolation is provided by the helper-owned
+filesystem permissions and the read-only mount.
+
+In user mode the runtime directory is owned by the daemon owner with
+`0700` permissions, and user-mode workloads run under that same UID, so a
+directory projection would expose the daemon's full runtime state
+(including other Sessions' Docker CLI configuration) to the workload.
+`--helper-socket` therefore fails closed in user mode with the stable
+`invalid_helper_socket` error. This is a documented 2.1.1 limitation, not
+an oversight.
+
+`run.start` and `run.finish` audit records include a `helper_socket`
+boolean (true only when the projection was active for that run). The
+injected mount is not part of the user `mounts` audit, matching the
+trusted-CA injection precedent.
 
 ### Retention and cancellation
 
@@ -1848,10 +1961,12 @@ System unit:
   (mode `0755`), `StateDirectory=docker-helper` (mode `0700`),
   `RuntimeDirectory=docker-helper` (mode `0755`), and
   `RuntimeDirectoryPreserve=restart` — the RuntimeDirectory inode is
-  preserved across service restarts so long-lived agent containers with a
-  bind-mount of `/run/docker-helper` continue to see the updated socket
-  after `systemctl restart`; normal cleanup semantics still apply on a
-  real service stop.
+  preserved across service restarts, so a consumer that does survive
+  daemon replacement observes the recreated socket through its existing
+  directory bind; a normal graceful `systemctl restart docker-helper`
+  still terminates helper-owned run workloads under the 2.1.x shutdown
+  lifecycle, and normal cleanup semantics still apply on a real service
+  stop.
 - MAC binding: `AppArmorProfile=docker-helper-system` on AppArmor systems
   and `SELinuxContext=system_u:system_r:docker_helper_t:s0` on SELinux
   systems, guarded by `ConditionSecurity=|apparmor` / `ConditionSecurity=|selinux`.
@@ -1903,6 +2018,7 @@ Current error codes (non-exhaustive):
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
+| `invalid_helper_socket` | `POST /run` | helper_socket requested in user mode (unsupported there) |
 | `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause |
 | `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
@@ -2205,6 +2321,7 @@ Emitted before a container starts.
 | `env_keys` | string[] | environment variable names, sorted (present when set; values are never logged) |
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection is active for this run |
+| `helper_socket` | boolean | true when the helper runtime projection is active for this run |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |
@@ -2234,6 +2351,7 @@ Does not include `request_id` because completion is not request-scoped.
 | `env_keys` | string[] | environment variable names, sorted (present when set) |
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection was active for this run |
+| `helper_socket` | boolean | true when the helper runtime projection was active for this run |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |

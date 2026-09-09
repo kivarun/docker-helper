@@ -198,13 +198,13 @@ Multi-user deployment. Requires root for initial setup.
 ```bash
 sudo docker-helper init
 sudo systemctl enable --now docker-helper
-sudo docker-helper principal create alice
-sudo docker-helper principal credential create alice
+sudo docker-helper principal create --issue-credential alice
 ```
 
-The `principal credential create` command uses the name `default` unless
-`--name` is provided and prints the token once. On alice's machine (not as
-root):
+The credential is issued together with the Principal: the token is shown
+once — the CLI immediately prints the canonical install hint (the same
+`docker-helper credential install` instruction shown below) — and never
+again. On alice's machine (not as root):
 
 ```bash
 docker-helper credential install
@@ -817,6 +817,50 @@ docker-helper registry login --registry REG --username USER
 logs, and returns the final exit status. Operation IDs and log offsets are
 handled internally.
 
+### Passing secrets to a workload
+
+`run --env-from DEST=SOURCE` takes the value of SOURCE from the CLI
+process's own environment and delivers it to the container as DEST. The
+secret value is not placed in the `docker-helper` command line, is not
+printed in diagnostics, is not inherited from the surrounding shell, and
+the daemon does not log environment values:
+
+```bash
+ORCHESTRATOR_LLM_KEY=secret \
+docker-helper run \
+  --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY \
+  --image NAME -- command args...
+```
+
+An unset SOURCE fails closed before any container operation is created; a
+SOURCE set to the empty string is delivered as an empty value.
+`--env-from` composes with `--env`.
+
+Limitation: the 2.1.x `run` implementation starts the workload through
+the legacy Docker CLI, which receives environment values as
+`--env DEST=value` argv entries, so a resolved value is visible in the
+argv of that daemon-side child process. `--env-from` guarantees nothing
+beyond the `docker-helper` process boundary.
+
+### Reaching the helper socket from a workload (system mode)
+
+`run --helper-socket` makes the daemon's own Unix socket reachable inside
+the container at `/run/docker-helper/docker-helper.sock` through a
+read-only bind of the helper runtime directory. The client chooses only
+the flag; the mount itself is server-owned. The socket provides transport
+only: protected operations still authenticate with a bearer credential,
+which can be passed with `--env-from`:
+
+```bash
+LAUNCHER_CREDENTIAL=... \
+docker-helper run \
+  --helper-socket \
+  --env-from ORCHESTRATOR_CREDENTIAL=LAUNCHER_CREDENTIAL \
+  --image NAME -- workload...
+```
+
+`--helper-socket` is not supported in user mode and is rejected there.
+
 Agent-facing commands (`pull`, `build`, `run`, `registry login`) select the
 daemon endpoint the same way operator commands do, but authenticate with the
 Session token from `DOCKER_HELPER_SESSION_TOKEN` (never a Principal
@@ -1302,8 +1346,10 @@ and MAC confinement. The common workflow handles both:
 ```bash
 # 1. Create the principal.
 #    principal create resolves the OS user; the canonical home directory
-#    becomes the initial allowed root.
-sudo docker-helper principal create --system alice
+#    becomes the initial allowed root. --no-credential defers credential
+#    issuance to step 5 (a named credential), instead of the interactive
+#    default-yes prompt that would issue a `default` credential now.
+sudo docker-helper principal create --system --no-credential alice
 
 # 2. Review the principal's allowed roots.
 sudo docker-helper principal show --system alice

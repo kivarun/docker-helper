@@ -67,6 +67,9 @@ var principalCreateCommand = &Command{
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
 				}
+				if result.Token != "" {
+					printCredentialInstallHint(stderr, "principal")
+				}
 				return 0
 			},
 		}

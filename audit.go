@@ -16,6 +16,7 @@ type auditRecord struct {
 	BuildArgKeys          []string     `json:"build_arg_keys,omitempty"`
 	ShmSize               string       `json:"shm_size,omitempty"`
 	TrustedCAInjected     bool         `json:"trusted_ca_injected,omitempty"`
+	HelperSocket          bool         `json:"helper_socket,omitempty"`
 	Registry              string       `json:"registry,omitempty"`
 	Context               string       `json:"context,omitempty"`
 	Dockerfile            string       `json:"dockerfile,omitempty"`

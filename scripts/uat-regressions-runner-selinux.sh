@@ -236,6 +236,7 @@ REGRESSIONS=(
   "3:SELinux restorecon filesystem-boundary:uat-regression-selinux-fs-boundary.sh"
   "4:SELinux mount-boundary guard:uat-regression-selinux-mount-guard.sh"
   "5:SELinux workspace relabel AVC evidence:uat-regression-selinux-relabel-avc.sh"
+  "6:SELinux helper_socket enforcing UAT:uat-regression-selinux-helper-socket.sh"
 )
 
 # Fresh AVC/USER_AVC evidence (best-effort; requires auditd started by the

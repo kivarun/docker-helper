@@ -199,6 +199,37 @@ docker-helper run \
   -- command arg...
 ```
 
+To pass a secret value (an API key, a credential token) without placing it
+in the `docker-helper` command line, export it in your own environment and
+use `--env-from DEST=SOURCE`, where SOURCE names your environment variable
+and DEST is the name the workload sees. The value is read locally from
+your environment; it is not placed in the `docker-helper` argv, is not
+printed in diagnostics, is not inherited from the surrounding shell, and
+the daemon does not log environment values. Known limitation: `run` starts
+the workload through the legacy Docker CLI, which receives the value as
+`--env DEST=value`, so the value can appear in that daemon-side child
+process's argv; `--env-from` guarantees nothing beyond the `docker-helper`
+process boundary. An unset SOURCE variable stops the command before any
+container operation is created.
+
+```bash
+ORCHESTRATOR_LLM_KEY=secret \
+docker-helper run \
+  --image IMAGE \
+  --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY \
+  -- command arg...
+```
+
+In system mode, `--helper-socket` makes the Docker Helper socket reachable
+inside the container at `/run/docker-helper/docker-helper.sock` (read-only
+projection, chosen server-side). While the projection is active, a `--mount`
+target overlapping `/run/docker-helper` — the path itself, an ancestor such
+as `/run`, or a descendant such as the socket path — is rejected. The socket
+provides transport only; the
+workload still needs a bearer credential for protected operations, which
+can be passed separately with `--env-from`. In user mode the flag is
+rejected.
+
 Optional workspace mounts:
 
 ```bash
@@ -339,7 +370,14 @@ curl --silent --show-error \
 ```
 
 Useful request fields: `image`, `entrypoint`, `command`, `workdir`,
-`environment`, `mounts`, `shm_size`.
+`environment`, `mounts`, `shm_size`, `helper_socket`.
+
+`"helper_socket": true` is the HTTP equivalent of the CLI
+`--helper-socket` (see [Run](#run)): system mode only, a server-owned
+read-only projection of the daemon's runtime directory at
+`/run/docker-helper` that provides transport reachability only — the
+workload still needs a bearer credential passed separately, and user mode
+rejects the flag.
 
 Example mount (portable — works in both user and system mode):
 
