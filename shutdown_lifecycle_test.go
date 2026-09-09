@@ -17,7 +17,7 @@ import (
 func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 	app, supervisor, _, token := setupBuildTest(t)
 
-	readyFile := filepath.Join(app.Config.AllowedRoots[0], ".lifecycle_ready")
+	readyFile := filepath.Join(app.Config.AllowedRoots[0].Path, ".lifecycle_ready")
 	defer os.Remove(readyFile)
 	app.ExecCommandContext = makeIgnoringSignalCmd(t, readyFile)
 
@@ -58,7 +58,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

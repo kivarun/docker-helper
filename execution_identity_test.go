@@ -28,7 +28,7 @@ func TestUserModeSessionUsesDaemonOwnerUIDGID(t *testing.T) {
 
 	// Create the Session through the daemon-owner default Launcher (the same
 	// transparent user-mode path an unauthenticated user-mode client uses).
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestUserModeSessionUsesDaemonOwnerUIDGID(t *testing.T) {
 func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "execuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "execuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -130,8 +130,8 @@ func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
 func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home1 := filepath.Join(app.Config.AllowedRoots[0], "home", "diffuser1")
-	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "diffuser2")
+	home1 := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "diffuser1")
+	home2 := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "diffuser2")
 	if err := os.MkdirAll(filepath.Join(home1, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disabledexecuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "disabledexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revokedexecuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "revokedexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 func TestRunRequestRejectsUserField(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestRunRequestRejectsUserField(t *testing.T) {
 func TestPrincipalIdentityDBError(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dberruser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "dberruser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditexecuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "auditexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 func TestResolveSessionExecutionIdentityFromDB(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "fromdbuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "fromdbuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}

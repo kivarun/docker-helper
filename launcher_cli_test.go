@@ -740,7 +740,7 @@ func TestHandleAuthSessionTokenRejected(t *testing.T) {
 	_, err := app.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"dhs_authtest", hex.EncodeToString(hash[:]), app.Config.AllowedRoots[0],
+		"dhs_authtest", hex.EncodeToString(hash[:]), app.Config.AllowedRoots[0].Path,
 		time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(),
 		app.userModeDefault.launcherID,
 	)
@@ -767,7 +767,7 @@ func TestHandleAuthSessionTokenRejected(t *testing.T) {
 // before revocation stops authenticating and is non-disclosing afterwards.
 func TestHandleAuthRevokedCredential(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "alice")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "alice")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -819,7 +819,7 @@ func TestHandleAuthDisabledPrincipal(t *testing.T) {
 // Launcher was enabled before disabling stops authenticating.
 func TestHandleAuthDisabledLauncher(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "alice")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "alice")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}

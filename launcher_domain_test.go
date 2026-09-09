@@ -27,7 +27,7 @@ func setupPrincipalForLauncherTest(t *testing.T, db *sql.DB, globalRoots []strin
 	OSUserLookup = func(u string) (string, string, string, error) {
 		return "2001", "2001", home, nil
 	}
-	p, err := createPrincipal(db, username, globalRoots)
+	p, err := createPrincipal(db, username, []AllowedRootEntry{allowedRootEntry(globalRoots[0])})
 	if err != nil {
 		t.Fatalf("createPrincipal(%s): %v", username, err)
 	}
@@ -44,7 +44,7 @@ func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, gl
 	if err != nil {
 		t.Fatalf("readPrincipalAllowedRoots: %v", err)
 	}
-	return computeEffectivePrincipalRoots(globalRoots, stored, principalID, 0, false)
+	return computeEffectivePrincipalRoots(globalRoots, allowedRootPaths(stored), principalID, 0, false)
 }
 
 // TestComputeEffectivePrincipalRootsMatrix proves the semantic matrix of the
@@ -274,7 +274,7 @@ func TestLauncherCreateRestricted(t *testing.T) {
 	if l.ScopeMode != LauncherScopeRestricted {
 		t.Errorf("expected restricted scope, got %s", l.ScopeMode)
 	}
-	if len(l.AllowedRoots) != 1 || l.AllowedRoots[0] != proj {
+	if len(l.AllowedRoots) != 1 || l.AllowedRoots[0].Path != proj {
 		t.Errorf("expected stored root %q, got %v", proj, l.AllowedRoots)
 	}
 }
@@ -624,7 +624,7 @@ func TestLauncherScopeReplaceInvalidRootRejectedAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.ScopeMode != LauncherScopeRestricted || len(after.AllowedRoots) != 1 || after.AllowedRoots[0] != proj {
+	if after.ScopeMode != LauncherScopeRestricted || len(after.AllowedRoots) != 1 || after.AllowedRoots[0].Path != proj {
 		t.Errorf("scope/roots changed after failed replacement: %+v", after)
 	}
 }
@@ -975,7 +975,7 @@ func TestLauncherCredentialAuthDisabledPrincipal(t *testing.T) {
 func TestLauncherCredentialControlsOwnSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	globalRoots := app.Config.AllowedRoots
-	home := filepath.Join(globalRoots[0], "home", "victor")
+	home := filepath.Join(allowedRootPaths(globalRoots)[0], "home", "victor")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1120,7 +1120,7 @@ func TestPrincipalRevokeUnchanged(t *testing.T) {
 	OSUserLookup = func(u string) (string, string, string, error) {
 		return "2001", "2001", home, nil
 	}
-	if _, err := createPrincipal(db, "x", globalRoots); err != nil {
+	if _, err := createPrincipal(db, "x", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}); err != nil {
 		t.Fatal(err)
 	}
 	pc, token, err := createPrincipalCredential(db, "x", "oc")

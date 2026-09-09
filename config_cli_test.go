@@ -1830,8 +1830,8 @@ func TestLoadAndPrepareRuntimeConfigAcceptsValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if c.AllowedRoots[0] != allowedRoot {
-		t.Errorf("AllowedRoot = %q, want %q", c.AllowedRoots[0], allowedRoot)
+	if c.AllowedRoots[0].Path != allowedRoot {
+		t.Errorf("AllowedRoot = %q, want %q", c.AllowedRoots[0].Path, allowedRoot)
 	}
 }
 
@@ -2174,10 +2174,11 @@ func TestConfigAllowedRootCommandTree(t *testing.T) {
 		}
 		// Verify config was updated.
 		raw := readConfigJSON(t, configPath)
-		var roots []string
-		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		var entries []AllowedRootEntry
+		if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
 			t.Fatalf("cannot parse allowed_roots: %v", err)
 		}
+		roots := allowedRootPaths(entries)
 		if !slices.Contains(roots, newRoot) {
 			t.Errorf("expected %s in allowed_roots, got: %v", newRoot, roots)
 		}
@@ -2203,10 +2204,11 @@ func TestConfigAllowedRootCommandTree(t *testing.T) {
 		}
 		// Verify config was updated.
 		raw := readConfigJSON(t, configPath)
-		var roots []string
-		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		var entries []AllowedRootEntry
+		if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
 			t.Fatalf("cannot parse allowed_roots: %v", err)
 		}
+		roots := allowedRootPaths(entries)
 		if len(roots) != 1 || roots[0] != allowedRoot {
 			t.Errorf("expected [%s], got: %v", allowedRoot, roots)
 		}

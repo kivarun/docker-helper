@@ -115,7 +115,7 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{allowedRoot},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(allowedRoot)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -178,7 +178,7 @@ func insertTestSession(t *testing.T, db *sql.DB, launcherID, sessionID, workspac
 func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -285,7 +285,7 @@ func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
 
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace := filepath.Join(allowedRoot, "mac-warn-ws")
 	if err := os.MkdirAll(workspace, 0700); err != nil {
 		t.Fatal(err)
@@ -336,7 +336,7 @@ func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
 func TestDBInsertFailurePreservesOwnership(t *testing.T) {
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -370,7 +370,7 @@ func TestDBInsertFailurePreservesOwnership(t *testing.T) {
 func TestDBInsertFailureRemovesOwnershipOnSuccessfulRemoval(t *testing.T) {
 	app, mac, _ := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +529,7 @@ func TestMACPreparationErrorClassification(t *testing.T) {
 func TestDBInsertErrorRemainsDatabaseError(t *testing.T) {
 	app, mac, _ := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -737,7 +737,7 @@ func TestSELinuxRestoreconFailureFailsClosed(t *testing.T) {
 func TestLeaseReleaseIdempotent(t *testing.T) {
 	app, mac, _ := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1192,7 +1192,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1325,7 +1325,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1443,7 +1443,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1578,7 +1578,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1710,7 +1710,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1821,7 +1821,7 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -2353,7 +2353,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2436,7 +2436,7 @@ func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 func TestPrincipalDeleteReleasesMACBindings(t *testing.T) {
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2519,7 +2519,7 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 	// lease release allows boundary removal.
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2620,7 +2620,7 @@ func TestPrincipalDeleteLeasePreserved(t *testing.T) {
 	// Same as TestPrincipalDisableLeasePreserved but for delete.
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2710,7 +2710,7 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 	// boundary accounting remains correct.
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2811,7 +2811,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	// helper-owned boundary.
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 
 	// Create a principal.
 	home := filepath.Join(allowedRoot, "home", "staleauthuser")

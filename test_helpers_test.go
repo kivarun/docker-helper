@@ -235,7 +235,7 @@ func newTestApp(t *testing.T) *App {
 		t.Fatalf("cannot create runtime dir: %v", err)
 	}
 	cfg := &Config{
-		AllowedRoots:          []string{allowedRoot},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(allowedRoot)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,

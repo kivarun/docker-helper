@@ -187,7 +187,7 @@ func TestAuthAuditPrincipalCredentialRevoked_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditrevoked")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "auditrevoked")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestAuthAuditPrincipalDisabled_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditdisabled")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "auditdisabled")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestAuthAuditSessionCapabilityDatabaseError_Run(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
 	// Create a real session so the token is known.
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -540,7 +540,7 @@ func TestAuthAuditNoFailureOnValidSessionCapabilityAuth_Run(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

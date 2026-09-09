@@ -46,20 +46,21 @@ func readLauncherScopeMode(t *testing.T, db *sql.DB, launcherID string) Launcher
 	return LauncherScopeMode(mode)
 }
 
-func readLauncherStoredRoots(t *testing.T, db *sql.DB, launcherID string) []string {
+func readLauncherStoredRoots(t *testing.T, db *sql.DB, launcherID string) []AllowedRootEntry {
 	t.Helper()
-	rows, err := db.Query(`SELECT root_path FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`, launcherID)
+	rows, err := db.Query(`SELECT root_path, access FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`, launcherID)
 	if err != nil {
 		t.Fatalf("read launcher roots: %v", err)
 	}
 	defer rows.Close()
-	var roots []string
+	var roots []AllowedRootEntry
 	for rows.Next() {
 		var r string
-		if err := rows.Scan(&r); err != nil {
+		var access string
+		if err := rows.Scan(&r, &access); err != nil {
 			t.Fatal(err)
 		}
-		roots = append(roots, r)
+		roots = append(roots, AllowedRootEntry{Path: r, Access: AllowedRootAccess(access)})
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
@@ -80,7 +81,7 @@ func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 	if got := readLauncherScopeMode(t, db, l.ID); got != LauncherScopeRestricted {
 		t.Fatalf("scope after first add = %q, want restricted", got)
 	}
-	if got := readLauncherStoredRoots(t, db, l.ID); !slices.Equal(got, []string{inRoot}) {
+	if got := readLauncherStoredRoots(t, db, l.ID); !slices.Equal(got, []AllowedRootEntry{allowedRootEntry(inRoot)}) {
 		t.Fatalf("stored roots = %v, want [%s]", got, inRoot)
 	}
 	// The committed projection reports the post-mutation state without any
@@ -89,7 +90,7 @@ func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 	if committed.ScopeMode != LauncherScopeRestricted {
 		t.Fatalf("committed projection scope = %q, want restricted", committed.ScopeMode)
 	}
-	if !slices.Equal(committed.AllowedRoots, []string{inRoot}) {
+	if !slices.Equal(committed.AllowedRoots, []AllowedRootEntry{allowedRootEntry(inRoot)}) {
 		t.Fatalf("committed projection roots = %v, want [%s]", committed.AllowedRoots, inRoot)
 	}
 
@@ -106,7 +107,7 @@ func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 	if got := readLauncherScopeMode(t, db, l.ID); got != LauncherScopeRestricted {
 		t.Fatalf("scope after duplicate add = %q, want unchanged restricted", got)
 	}
-	if committed.ScopeMode != LauncherScopeRestricted || !slices.Equal(committed.AllowedRoots, []string{inRoot}) {
+	if committed.ScopeMode != LauncherScopeRestricted || !slices.Equal(committed.AllowedRoots, []AllowedRootEntry{allowedRootEntry(inRoot)}) {
 		t.Fatalf("committed projection after duplicate add = (%q, %v), want (restricted, [%s])", committed.ScopeMode, committed.AllowedRoots, inRoot)
 	}
 }
@@ -236,11 +237,11 @@ func TestLauncherAllowedRootCommittedProjectionCanonicalOrder(t *testing.T) {
 
 	// The committed projection is canonically ordered: [/a /z], never the
 	// append order [/z /a].
-	if !slices.Equal(committed.AllowedRoots, []string{aRoot, zRoot}) {
+	if !slices.Equal(committed.AllowedRoots, []AllowedRootEntry{allowedRootEntry(aRoot), allowedRootEntry(zRoot)}) {
 		t.Fatalf("committed projection roots = %v, want [%s %s]", committed.AllowedRoots, aRoot, zRoot)
 	}
 	// The fresh DB projection has the same canonical order.
-	if got := readLauncherStoredRoots(t, db, l.ID); !slices.Equal(got, []string{aRoot, zRoot}) {
+	if got := readLauncherStoredRoots(t, db, l.ID); !slices.Equal(got, []AllowedRootEntry{allowedRootEntry(aRoot), allowedRootEntry(zRoot)}) {
 		t.Fatalf("fresh DB roots = %v, want [%s %s]", got, aRoot, zRoot)
 	}
 }
@@ -270,7 +271,7 @@ func TestLauncherAllowedRootRemoveMatchesCanonicalPath(t *testing.T) {
 
 func TestLauncherAllowedRootLifecycleOwners(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	root := app.Config.AllowedRoots[0]
+	root := app.Config.AllowedRoots[0].Path
 	setupLauncherHandlerPrincipal(t, app, "owner")
 	pa, err := findPrincipalByUsername(app.DB, "owner")
 	if err != nil {

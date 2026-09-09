@@ -20,7 +20,7 @@ import (
 func TestCreateCredential(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "creduser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "creduser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestCreateCredentialPrincipalNotFound(t *testing.T) {
 func TestCreateCredentialDuplicateName(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dupnameuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "dupnameuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +125,8 @@ func TestCreateCredentialDuplicateName(t *testing.T) {
 func TestCreateCredentialSameNameDifferentPrincipals(t *testing.T) {
 	app := newTestApp(t)
 
-	home1 := filepath.Join(app.Config.AllowedRoots[0], "home", "user1")
-	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "user2")
+	home1 := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "user1")
+	home2 := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "user2")
 	if err := os.MkdirAll(home1, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestCreateCredentialSameNameDifferentPrincipals(t *testing.T) {
 func TestCreateCredentialTokenNotStored(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "tokentestuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "tokentestuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestCreateCredentialTokenNotStored(t *testing.T) {
 func TestListCredentials(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "listuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "listuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestListCredentialsPrincipalNotFound(t *testing.T) {
 func TestRevokeCredential(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revokeuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "revokeuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestRevokeCredential(t *testing.T) {
 func TestRevokeCredentialIdempotent(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "idemrevokeuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "idemrevokeuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestRevokeCredentialNotFound(t *testing.T) {
 func TestRevokedCredentialRemainsInList(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revlistuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "revlistuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +403,7 @@ func TestRevokedCredentialRemainsInList(t *testing.T) {
 func TestCredentialNameReusableAfterRevoke(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "reuseuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "reuseuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -702,7 +702,7 @@ func TestCredentialUpgradeConflictFailsClearly(t *testing.T) {
 func TestCredentialHTTPCreate(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "httpcreduser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "httpcreduser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -777,7 +777,7 @@ func TestCredentialHTTPCreatePrincipalNotFound(t *testing.T) {
 func TestCredentialHTTPCreateDuplicateName(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dupnamehttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "dupnamehttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -816,7 +816,7 @@ func TestCredentialHTTPCreateDuplicateName(t *testing.T) {
 func TestCredentialHTTPList(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "listhttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "listhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -865,7 +865,7 @@ func TestCredentialHTTPList(t *testing.T) {
 func TestCredentialHTTPRevoke(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revokehttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "revokehttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -964,7 +964,7 @@ func TestCredentialHTTPAdminAuth(t *testing.T) {
 func TestCredentialCascadeDelete(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "cascadecreduser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "cascadecreduser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1111,7 +1111,7 @@ func TestCredentialAuditNoToken(t *testing.T) {
 func TestCredentialHTTPCreateMissingName(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "missingnameuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "missingnameuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1163,7 +1163,7 @@ func TestCredentialHTTPCreateInvalidJSON(t *testing.T) {
 func TestCredentialMultipleForOnePrincipal(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "multiuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "multiuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1253,7 +1253,7 @@ func TestCredentialHashMatches(t *testing.T) {
 func TestCredentialCreatedAtIndex(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "timeuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "timeuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1412,7 +1412,7 @@ func TestCredentialCLICreateDefaultName(t *testing.T) {
 func TestCredentialHTTPRevokeDBError(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dberruser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "dberruser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1453,7 +1453,7 @@ func TestCredentialHTTPRevokeDBError(t *testing.T) {
 func TestCredentialDuplicateTokenHashRejected(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "duphashuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "duphashuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1515,7 +1515,7 @@ func TestCreatePrincipalCredentialCanonicalInsertion(t *testing.T) {
 		t.Fatal(err)
 	}
 	installOSUserMock(t, map[string]string{"canonuser": home})
-	if _, err := createPrincipal(db, "canonuser", globalRoots); err != nil {
+	if _, err := createPrincipal(db, "canonuser", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -1570,7 +1570,7 @@ func TestCreatePrincipalCredentialCanonicalInsertion(t *testing.T) {
 func TestCreatePrincipalCredentialTokenFailureUsesCanonicalSeam(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "seamuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "seamuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}

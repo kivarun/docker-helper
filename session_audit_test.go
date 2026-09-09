@@ -242,7 +242,7 @@ func TestSessionCreateAuditSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 	reqBody := map[string]string{"workspace": workspace}
 	body, _ := json.Marshal(reqBody)
 
@@ -359,7 +359,7 @@ func TestSessionCreateAuditDatabaseError(t *testing.T) {
 	app.DB = newFailExecDB(t, dbPath, errMockCreateDB)
 	defer app.DB.Close()
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -403,7 +403,7 @@ func TestSessionCreateAuditSystemError(t *testing.T) {
 	if err := os.Symlink("/nonexistent-path-xyz-12345", brokenLink); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
 	}
-	app.Config.AllowedRoots[0] = brokenLink
+	app.Config.AllowedRoots[0].Path = brokenLink
 
 	reqBody := map[string]string{"workspace": validWorkspace}
 	body, _ := json.Marshal(reqBody)
@@ -440,7 +440,7 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 	result, err := createDefaultAdminSessionForTest(app, workspace)
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
@@ -527,7 +527,7 @@ func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 	result, err := createDefaultAdminSessionForTest(app, workspace)
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
