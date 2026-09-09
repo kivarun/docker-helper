@@ -253,17 +253,14 @@ snapshot_source_contexts() {
 }
 
 collect_audit() {
-  local raw
-  if command -v ausearch >/dev/null 2>&1 && pgrep -x auditd >/dev/null 2>&1; then
-    ausearch -m AVC -m USER_AVC -ts "$AUDIT_START_AUSEARCH" 2>/dev/null || true
-    return 0
-  fi
-  raw="$(dmesg 2>/dev/null || true)"
-  if [ -z "$raw" ]; then
+  {
+    ausearch -m AVC,USER_AVC -ts "$AUDIT_START_AUSEARCH" 2>/dev/null || true
+    if [ -r /var/log/audit/audit.log ]; then
+      cat /var/log/audit/audit.log
+    fi
+    dmesg 2>/dev/null || true
     journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true
-  else
-    printf '%s\n' "$raw"
-  fi
+  } | sort -u
 }
 
 assert_policy_is_read_only() {
@@ -284,7 +281,7 @@ printf 'single-seed\n' >"$SHARED_SOURCE/single.txt"
 chmod 0666 "$SHARED_SOURCE/protected.txt" "$SHARED_SOURCE/output/seed.txt" "$SHARED_SOURCE/single.txt"
 
 for command_name in docker bindfs mount mountpoint findmnt checkmodule semodule_package \
-  semodule getenforce sestatus chcon sha256sum sesearch; do
+  semodule getenforce sestatus chcon sha256sum sesearch ausearch auditctl systemctl; do
   require_command "$command_name"
 done
 if command -v fusermount3 >/dev/null 2>&1; then
@@ -366,9 +363,13 @@ printf 'single-seed\n' >"$SHARED_SOURCE/single.txt"
 docker pull "$IMAGE" >/dev/null
 semodule -DB
 DONTAUDIT_DISABLED=1
-if command -v auditctl >/dev/null 2>&1; then
-  auditctl -e 1 >/dev/null 2>&1 || true
-fi
+systemctl enable --now auditd >/dev/null 2>&1 || service auditd start >/dev/null 2>&1 \
+  || fail 'auditd could not be started'
+pgrep -x auditd >/dev/null || fail 'auditd is not running'
+auditctl -e 1 >/dev/null 2>&1 || true
+auditctl -s >"$EVIDENCE_DIR/audit-status.txt"
+grep -Eq '^enabled[[:space:]]+[12]$' "$EVIDENCE_DIR/audit-status.txt" \
+  || fail 'kernel audit subsystem is not enabled'
 AUDIT_START_EPOCH="$(date +%s)"
 AUDIT_START_AUSEARCH="$(date '+%m/%d/%Y %H:%M:%S')"
 
@@ -474,6 +475,7 @@ printf '%s\n' "$SOURCE_CONTEXTS_AFTER" >"$EVIDENCE_DIR/source-contexts-after.txt
   || fail 'per-Session access mode changed a backing object label or identity'
 
 say 'require attributable SELinux AVC evidence'
+sleep 1
 collect_audit >"$EVIDENCE_DIR/audit-all.log"
 grep -E 'avc:[[:space:]]+denied|type=AVC' "$EVIDENCE_DIR/audit-all.log" \
   | grep -E 'scontext=.*:docker_helper_container_t:' \
