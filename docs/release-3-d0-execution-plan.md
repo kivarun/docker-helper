@@ -611,7 +611,12 @@ resource enforcement is advertised as the completed R3 contract.
 - cancellation contract: HTTP request cancellation and daemon shutdown
   cancel the request context; the handler removes the transient container
   through the Engine with a bounded removal context detached from the
-  request context and unmounts the pins before returning;
+  request context and unmounts the pins before returning; the removal is
+  part of the run postcondition — when the bounded removal cannot
+  complete or prove the container absent, the run reports the normalized
+  cleanup failure instead of a successful result or a terminal workload
+  result, keeping the bounded output captured so far and the surviving
+  container's helper-owned correlation labels;
 - the response contract: HTTP 200 flat result with
   `ok/output/truncated/duration/exit_code`; non-zero workload exit is a
   workload result (`container_exit_nonzero`, actual exit code, HTTP 200);
@@ -619,17 +624,24 @@ resource enforcement is advertised as the completed R3 contract.
   (`backend_unavailable` 503, `backend_failure` 502, `image_not_found`
   404, `registry_auth_denied` 422, `registry_unavailable` 502,
   unclassified `docker_run_failed` 500) with no guessed exit code and no
-  raw Engine payload in public/log/audit surfaces;
+  raw Engine payload in public/log/audit surfaces; the failed forced
+  removal is classified through the same normalized kinds (the removal
+  budget expiring is `backend_failure`, never a client cancellation) and
+  never yields `ok: true`, `container_exit_nonzero`, or a guessed exit
+  code;
 - the CLI sends one blocking synchronous request; SIGINT/SIGTERM cancels
   the in-flight request context and exits 130/143; the legacy
   create/poll/cancel CLI machinery is removed;
 - run-specific cidfile/Docker-CLI lifecycle helpers are gone from the
   production run path; `operationSupervisor` keeps only its
   quiesce/terminate/inspection machinery for the D0.4 transfer;
-- local gates, Engine mapping unit tests, and the real-Engine
-  integration test (`TestRunEngineIntegration`, `engine-run` CI job)
-  cover the sequence; the release-2 acceptance oracle discovers running
-  workloads through the reserved helper label set instead of cidfiles.
+- local gates, Engine mapping unit tests, the fake-Engine forced-removal
+  suite (`TestRunEngineRemove*`: successful/non-zero/cancelled workloads
+  plus a removal-budget timeout, and the removal-success control row),
+  and the real-Engine integration test (`TestRunEngineIntegration`,
+  `engine-run` CI job) cover the sequence; the release-2 acceptance
+  oracle discovers running workloads through the reserved helper label
+  set instead of cidfiles.
 
 ### D0.4 — remove legacy public/in-memory Operation
 
@@ -745,13 +757,17 @@ implemented** on the executor branch `feature/r3-d0.3b-run-sync`
 (pending architectural review): one-shot `run` executes synchronously
 through the shared Engine adapter with Launcher-scoped synchronous
 admission, direct bounded result and actual exit code, Engine-owned
-transient-container removal on every exit path, and no run Operation
-identity/polling/cancel — with the 2.1.1 `helper_socket` and
-`--env-from` contracts preserved and the D0 readiness boundary intact
-(no R3 resource readiness is claimed; the cgroup feasibility gate still
-owns the declaration of D0.3b/D1/D2 readiness). Evidence: branch SHA
-`bac7a1a`, CI run 34365920719 all nine jobs green including the
-real-Engine `TestRunEngineIntegration` run matrix, and the black-box
-UAT artifact gate run 34367698601 all eight jobs green across Ubuntu
-tarball, openSUSE AppArmor, openSUSE SELinux tarball and the regression
-suite. The next executable step is D0.4 — legacy Operation retirement.
+transient-container removal on every exit path with the removal as an
+enforced run postcondition (a removal that cannot complete or prove the
+container absent fails the run with the normalized cleanup failure), and
+no run Operation identity/polling/cancel — with the 2.1.1
+`helper_socket` and `--env-from` contracts preserved and the D0
+readiness boundary intact (no R3 resource readiness is claimed; the
+cgroup feasibility gate still owns the declaration of D0.3b/D1/D2
+readiness). Evidence: branch SHA
+`e1f58646f4fa82864dd8a219e3ebae457e60522f`, CI run 34375329603 all nine
+jobs green including the real-Engine `TestRunEngineIntegration` run
+matrix, and the black-box UAT artifact gate run 34375794687 all eight
+jobs green across Ubuntu tarball, openSUSE AppArmor, openSUSE SELinux
+tarball and the regression suite. The next executable step is D0.4 —
+legacy Operation retirement.
