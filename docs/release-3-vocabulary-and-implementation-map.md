@@ -135,6 +135,7 @@ At the Phase-0 baseline `operationSupervisor` owns:
 Therefore D0 may not simply delete it after synchronous build/run migration.
 Responsibility transfer is:
 
+
 | Current responsibility | Final owner |
 | --- | --- |
 | build/run public Operation API | removed |
@@ -146,7 +147,10 @@ Responsibility transfer is:
 | checked parent runtime decision | `launcher_lifecycle.go` consumes the combined result; it does not inspect two private stores itself |
 
 The old supervisor type/name is removed only after all rows in this table have
-production replacements and regression coverage.
+production replacements and regression coverage. (D0.3b status: the
+coordinator rows and the one-shot backend cleanup row have production
+replacements on `feature/r3-d0.3b-run-sync`; the durable-work rows still
+await D0.4/D0.5.)
 
 ## Backend migration map
 
@@ -159,7 +163,7 @@ public classification; adapter methods own only Engine protocol mechanics.
 | pull | Docker CLI + Session `--config` | Engine ImagePull with exact matching Session registry auth |
 | registry login | Docker CLI login writes Session runtime Docker config | adapter validates/login interaction; protected Session credential store remains source for later pull/build |
 | build | Docker CLI + staged context + in-memory Operation | synchronous Engine build; Session auth map for private `FROM`; staging/MAC cleanup stays build-owned |
-| one-shot run | Docker CLI + cidfile + in-memory Operation | synchronous Engine create/start/wait/remove; pins/MAC cleanup stays run-owned; the inherited 2.1.1 helper-socket projection (`helper_socket`, system mode only, user-mode `invalid_helper_socket` fail-closed) and the CLI `--env-from` mechanism must be carried through the new Engine create configuration |
+| one-shot run | **(D0.3b implemented on `feature/r3-d0.3b-run-sync`)** synchronous Engine create/attach/start/wait/remove through the shared adapter; pins/MAC cleanup stays run-owned; the inherited 2.1.1 helper-socket projection (`helper_socket`, system mode only, user-mode `invalid_helper_socket` fail-closed) and the CLI `--env-from` mechanism are carried through the new Engine create configuration |
 | checked parent runtime | Docker CLI inspection | later adapter observation with same fail-closed classification |
 | Managed Container lifecycle/logs/exec/network | absent | later packages consume the same adapter; no second Engine client boundary |
 

@@ -359,7 +359,7 @@ var runContainerCommand = &Command{
 	Summary:    "Run a Docker container",
 	Usage:      "docker-helper run --image NAME [flags] -- [command]",
 	MaxPosArgs: -1, // Unlimited positional args after --
-	Help:       `SIGINT/SIGTERM cancels the running container operation.`,
+	Help:       `SIGINT/SIGTERM cancels the in-flight run; the daemon terminates the workload and removes the transient container.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
 		image := fs.String("image", "", "Image name and tag")
