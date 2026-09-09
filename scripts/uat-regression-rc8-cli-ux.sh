@@ -40,7 +40,8 @@
 #      the admin mutations), the positional [LAUNCHER] reuses the --launcher
 #      selector-introspection owner, the grammar-ambiguous first positional
 #      of launcher allowed-root add/remove offers both continuations as a
-#      unique union, and the --principal selector completion is
+#      unique union (a word containing a slash completes the PATH only,
+#      without a selector query), and the --principal selector completion is
 #      command-context aware.
 #   G. principal show positional completion — the USER positional reuses
 #      the --principal selector-introspection owner (admin sees the

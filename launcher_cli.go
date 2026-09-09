@@ -312,6 +312,9 @@ var launcherCreateCommand = &Command{
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
 				}
+				if result.Token != "" {
+					printCredentialInstallHint(stderr, "launcher")
+				}
 				return 0
 			},
 		}
@@ -719,6 +722,9 @@ var launcherCredentialCreateCommand = &Command{
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
 				}
+				if result.Token != "" {
+					printCredentialInstallHint(stderr, "launcher")
+				}
 				return 0
 			},
 		}
@@ -790,6 +796,9 @@ var launcherCredentialRotateCommand = &Command{
 				if err := encodeJSONOut(stdout, result); err != nil {
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
+				}
+				if result.Token != "" {
+					printCredentialInstallHint(stderr, "launcher")
 				}
 				return 0
 			},

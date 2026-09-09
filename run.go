@@ -93,6 +93,21 @@ func validateShmSize(raw string) (int64, error) {
 	return int64(total), nil
 }
 
+// helperSocketContainerDir is the fixed in-container mount target of the
+// server-owned helper runtime projection. The workload reaches the existing
+// helper Unix socket through it. The bind source is always the daemon's own
+// runtime directory; the client selects only the boolean capability.
+const helperSocketContainerDir = "/run/docker-helper"
+
+// isHelperSocketMountOverlap reports whether a user mount target overlaps
+// the server-owned helper runtime projection: an exact match with the
+// injected mount point, a descendant of it, or one of its ancestors. A
+// caller-owned mount must not be able to shadow, replace, or partially
+// cover the projection. Applied only when helper_socket is requested.
+func isHelperSocketMountOverlap(target string) bool {
+	return pathOverlap(filepath.Clean(target), helperSocketContainerDir) != pathDisjoint
+}
+
 func extractExitCode(err error) *int {
 	var exitCoder interface{ ExitCode() int }
 	if errors.As(err, &exitCoder) {
@@ -287,6 +302,13 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Get config for deployment mode and trusted CA injection.
 	cfg := a.getConfig()
 
+	// helper_socket is a system-mode server-owned capability. User mode
+	// fails closed before any lease, pin, or operation state exists.
+	if req.HelperSocket && cfg.Mode != ModeSystem {
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_helper_socket", "helper_socket is not supported in user mode", session.PrincipalName)
+		return
+	}
+
 	// Acquire workspace-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
@@ -340,6 +362,21 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if cfg.TrustedCAInjection == "auto" {
 		for _, m := range req.Mounts {
 			if isTrustedCAMountOverlap(m.Target) {
+				if leaseRelease != nil {
+					leaseRelease()
+				}
+				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+				return
+			}
+		}
+	}
+
+	// When the helper runtime projection is active, caller-owned mounts
+	// may not overlap the server-owned projection: exact target, ancestor,
+	// or descendant.
+	if req.HelperSocket {
+		for _, m := range req.Mounts {
+			if isHelperSocketMountOverlap(m.Target) {
 				if leaseRelease != nil {
 					leaseRelease()
 				}
@@ -467,6 +504,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	op.auditMounts = mountAudit
 	op.auditEnvKeys = envNames
 	op.auditTrustedCAInjected = trustedCAInjected
+	op.auditHelperSocket = req.HelperSocket && cfg.Mode == ModeSystem
 	if shmSizeBytes > 0 {
 		op.auditShmSize = req.ShmSize
 	}
@@ -561,6 +599,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		EnvKeys:           envNames,
 		ShmSize:           op.auditShmSize,
 		TrustedCAInjected: trustedCAInjected,
+		HelperSocket:      op.auditHelperSocket,
 		PrincipalName:     session.PrincipalName,
 		LauncherID:        session.LauncherID,
 		LauncherName:      session.LauncherName,
@@ -603,6 +642,15 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		caMountSpec := fmt.Sprintf("type=bind,source=%s,target=%s,readonly",
 			cfg.TrustedCAPreparedDir, trustedCAContainerDir)
 		args = append(args, "--mount", caMountSpec)
+	}
+
+	// Add the server-owned helper runtime projection (not included in user
+	// mounts audit): a read-only bind of the daemon's own runtime directory
+	// at the fixed container target, giving the workload transport
+	// reachability to the existing helper Unix socket.
+	if req.HelperSocket && cfg.Mode == ModeSystem {
+		args = append(args, "--mount", fmt.Sprintf("type=bind,source=%s,target=%s,readonly",
+			cfg.RuntimeDir, helperSocketContainerDir))
 	}
 
 	// Add user mounts: pinned paths in system mode, resolved paths in user mode.

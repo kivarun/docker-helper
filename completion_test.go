@@ -1380,7 +1380,7 @@ var treeProviderLeafPaths = []string{
 	// The [LAUNCHER] positional completes from the daemon-backed selector
 	// introspection, and the grammar-ambiguous first positional of the
 	// allowed-root add/remove pair offers those selectors as part of its
-	// union completion.
+	// union completion (slash-free words only).
 	"launcher show",
 	"launcher set",
 	"launcher delete",
@@ -2397,22 +2397,26 @@ func TestCompletionPositionalLauncherMatrix(t *testing.T) {
 	}
 }
 
-// TestCompletionAllowedRootFirstPositionUnion proves the grammar-ambiguous
-// first positional of launcher allowed-root add/remove offers both legal
-// continuations — the daemon-backed Launcher selectors and the PATH
-// candidates for the default Launcher — as a deterministic unique union,
-// and that once the first positional is typed the completion narrows to
-// PATH only.
-func TestCompletionAllowedRootFirstPositionUnion(t *testing.T) {
-	launchers := []launcherJSON{
-		{ID: "dhl_ownkillme", Principal: "alice", Name: "killme"},
-	}
-	endpoint, tokenPath, requests := startAuthoritySelectorServer(t, "principal", "alice", launchers)
+// TestCompletionLauncherAllowedRootFirstPosition proves the first positional
+// of launcher allowed-root add/remove follows the [LAUNCHER] PATH grammar:
+// with one positional the word is the PATH for the default Launcher, so a
+// relative PATH without a slash is legal and a slash-free word stays
+// grammar-ambiguous — completion offers the union of the daemon-backed
+// Launcher selectors and the PATH candidates, and a failed selector query
+// never removes the PATH candidates — while a word containing a slash can
+// only be the PATH (Launcher names never contain a slash) and completes
+// filesystem candidates without a selector query. Once the first positional
+// is typed, the next position completes the PATH only.
+func TestCompletionLauncherAllowedRootFirstPosition(t *testing.T) {
 	script := completionScript(t)
 
 	dir := t.TempDir()
-	sub := filepath.Join(dir, "workspaces")
-	if err := os.MkdirAll(sub, 0755); err != nil {
+	for _, sub := range []string{"work", "workspaces", "alpha", filepath.Join("foo", "bar")} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keepme"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	previousDir, err := os.Getwd()
@@ -2428,7 +2432,21 @@ func TestCompletionAllowedRootFirstPositionUnion(t *testing.T) {
 		}
 	})
 
-	// First positional, add: Launcher selectors and directory candidates.
+	// start gives each case its own selector server so request-recording
+	// assertions stay per-completion. The launcher selector "worker" shares
+	// the "wo" prefix with the relative PATH candidates, so the union cases
+	// prove neither family of candidates swallows the other.
+	start := func(t *testing.T) (endpoint, tokenPath string, requests *policyQueryRecorder) {
+		t.Helper()
+		launchers := []launcherJSON{
+			{ID: "dhl_ownworker", Principal: "alice", Name: "worker"},
+		}
+		return startAuthoritySelectorServer(t, "principal", "alice", launchers)
+	}
+
+	// First positional, empty word: Launcher selectors and filesystem
+	// candidates, deterministically unique.
+	endpoint, tokenPath, requests := start(t)
 	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
 		"",
@@ -2436,8 +2454,11 @@ func TestCompletionAllowedRootFirstPositionUnion(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("union completion must not write to stderr: %q", stderr)
 	}
-	if !slices.Contains(results, "killme") || !slices.Contains(results, "workspaces") {
+	if !slices.Contains(results, "worker") || !slices.Contains(results, "work") {
 		t.Fatalf("add first-positional union = %v, want the Launcher selector and the directory candidate", results)
+	}
+	if !slices.Contains(results, "workspaces") {
+		t.Fatalf("add first-positional union = %v, want the remaining directory candidates", results)
 	}
 	assertNoDuplicates(t, results)
 	snap := requests.snapshot()
@@ -2447,35 +2468,161 @@ func TestCompletionAllowedRootFirstPositionUnion(t *testing.T) {
 		t.Fatalf("selector query missing from %+v", snap)
 	}
 
-	// First positional typed: PATH only, no selector names.
+	// First positional, slash-free prefix "wo": the selector matching "wo"
+	// and the relative PATH candidates matching "wo" — the directory
+	// candidate must not disappear because the prefix carries no slash.
+	endpoint, tokenPath, _ = start(t)
 	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
-		"killme", "",
+		"wo",
 	})
-	if slices.Contains(results, "killme") {
-		t.Fatalf("PATH completion must not re-offer the typed selector: %v", results)
+	if !slices.Contains(results, "worker") {
+		t.Fatalf("slash-free prefix union = %v, want the matching Launcher selector", results)
 	}
-	if !slices.Contains(results, "workspaces") {
-		t.Fatalf("add second-positional PATH completion = %v, want the directory candidates", results)
+	if !slices.Contains(results, "work") || !slices.Contains(results, "workspaces") {
+		t.Fatalf("slash-free prefix union = %v, want the matching relative PATH candidates", results)
 	}
 
-	// First positional, remove: Launcher selectors and filesystem entries.
+	// First positional, empty word, remove: selectors and filesystem
+	// entries (remove accepts any entry, including regular files).
+	endpoint, tokenPath, _ = start(t)
 	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
 		"",
 	})
-	if !slices.Contains(results, "killme") {
-		t.Fatalf("remove first-positional union = %v, want the Launcher selector", results)
+	if !slices.Contains(results, "worker") || !slices.Contains(results, "keepme") {
+		t.Fatalf("remove first-positional union = %v, want the Launcher selector and the filesystem entries", results)
 	}
 	assertNoDuplicates(t, results)
 
-	// First positional typed: filesystem entries only.
+	// First positional, slash-free prefix "wo", remove: matching selector
+	// and matching filesystem entries.
+	endpoint, tokenPath, _ = start(t)
 	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
-		"killme", "",
+		"wo",
 	})
-	if slices.Contains(results, "killme") {
+	if !slices.Contains(results, "worker") || !slices.Contains(results, "work") {
+		t.Fatalf("remove slash-free prefix union = %v, want the matching selector and PATH candidates", results)
+	}
+
+	// Slash word "./...": filesystem only, without a selector query (a
+	// Launcher name never contains a slash, so the word can only be PATH).
+	endpoint, tokenPath, requests = start(t)
+	results, stderr = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
+		"./wo",
+	})
+	if stderr != "" {
+		t.Fatalf("PATH completion must not write to stderr: %q", stderr)
+	}
+	if !slices.Contains(results, "./workspaces") {
+		t.Fatalf("slash-word PATH completion = %v, want the directory candidate", results)
+	}
+	if slices.Contains(results, "worker") {
+		t.Fatalf("slash-word completion must not offer Launcher selectors: %v", results)
+	}
+	snap = requests.snapshot()
+	if slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers"
+	}) {
+		t.Fatalf("slash-word completion must not query selectors: %+v", snap)
+	}
+
+	// Slash word foo/bar: filesystem only, still no selector query.
+	endpoint, tokenPath, requests = start(t)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
+		"foo/ba",
+	})
+	if !slices.Contains(results, "foo/bar") {
+		t.Fatalf("slash-word PATH completion = %v, want the nested directory candidate", results)
+	}
+	if slices.Contains(results, "worker") {
+		t.Fatalf("slash-word completion must not offer Launcher selectors: %v", results)
+	}
+	snap = requests.snapshot()
+	if slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers"
+	}) {
+		t.Fatalf("slash-word completion must not query selectors: %+v", snap)
+	}
+
+	// Absolute slash word: filesystem only, still no selector query.
+	endpoint, tokenPath, requests = start(t)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
+		filepath.Join(dir, "al"),
+	})
+	if want := filepath.Join(dir, "alpha"); !slices.Contains(results, want) {
+		t.Fatalf("absolute PATH completion = %v, want %v", results, want)
+	}
+	if slices.Contains(results, "worker") {
+		t.Fatalf("slash-word completion must not offer Launcher selectors: %v", results)
+	}
+	snap = requests.snapshot()
+	if slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers"
+	}) {
+		t.Fatalf("slash-word completion must not query selectors: %+v", snap)
+	}
+
+	// Slash word, remove: any filesystem entry, still no selector query.
+	endpoint, tokenPath, requests = start(t)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
+		"./wo",
+	})
+	if !slices.Contains(results, "./workspaces") {
+		t.Fatalf("remove slash-word completion = %v, want the filesystem candidate", results)
+	}
+	snap = requests.snapshot()
+	if slices.ContainsFunc(snap, func(q recordedRequest) bool {
+		return q.path == "/launchers"
+	}) {
+		t.Fatalf("remove slash-word completion must not query selectors: %+v", snap)
+	}
+
+	// First positional typed: PATH only, no selector names.
+	endpoint, tokenPath, _ = start(t)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
+		"worker", "",
+	})
+	if slices.Contains(results, "worker") {
 		t.Fatalf("PATH completion must not re-offer the typed selector: %v", results)
+	}
+	if !slices.Contains(results, "work") {
+		t.Fatalf("add second-positional PATH completion = %v, want the directory candidates", results)
+	}
+
+	// First positional typed, remove: filesystem entries only.
+	endpoint, tokenPath, _ = start(t)
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
+		"worker", "",
+	})
+	if slices.Contains(results, "worker") {
+		t.Fatalf("PATH completion must not re-offer the typed selector: %v", results)
+	}
+	if !slices.Contains(results, "keepme") {
+		t.Fatalf("remove second-positional PATH completion = %v, want the filesystem entries", results)
+	}
+
+	// Daemon unavailable: the filesystem candidates survive the failed
+	// selector query, silently.
+	results, stderr = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", "http://127.0.0.1:1", "--token-file", tokenPath,
+		"",
+	})
+	if stderr != "" {
+		t.Fatalf("degraded union completion must not write to stderr: %q", stderr)
+	}
+	if !slices.Contains(results, "work") {
+		t.Fatalf("filesystem fallback after failed selector query = %v, want the PATH candidates", results)
+	}
+	if slices.Contains(results, "worker") {
+		t.Fatalf("failed selector query must not offer selectors: %v", results)
 	}
 }
 

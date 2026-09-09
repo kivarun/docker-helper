@@ -27,6 +27,11 @@ type runRequest struct {
 	Environment map[string]string `json:"environment,omitempty"`
 	Mounts      []mountRequest    `json:"mounts,omitempty"`
 	ShmSize     string            `json:"shm_size,omitempty"`
+	// HelperSocket requests the server-owned helper runtime projection: a
+	// read-only bind of the helper runtime directory into the container so
+	// the workload can reach the existing helper Unix socket. The client
+	// selects only the boolean; source, target, and mount mode are daemon-owned.
+	HelperSocket bool `json:"helper_socket,omitempty"`
 }
 
 // mountRequest is a mount specification for POST /run.

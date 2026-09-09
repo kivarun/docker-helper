@@ -528,6 +528,20 @@ allow docker_helper_container_t docker_helper_trusted_ca_t:dir { getattr search 
 allow docker_helper_container_t docker_helper_trusted_ca_t:file { getattr read open };
 allow docker_helper_container_t docker_helper_trusted_ca_t:lnk_file { getattr read };
 
+# Workload transport reachability to the helper socket (helper_socket
+# capability, 2.1.1). The daemon injects a read-only bind of its runtime
+# directory into the container, so the workload can resolve and connect to
+# the existing docker-helper.sock inside it. Transport only:
+#   - directory traversal/getattr; no directory listing and no access to
+#     runtime file contents (lock/cid/mount machinery);
+#   - the connection itself still requires a bearer credential at the API
+#     authentication boundary; ownership grants no authority;
+#   - connectto is the single process permission, matching the existing
+#     docker_helper_t -> dockerd connectto pattern.
+allow docker_helper_container_t docker_helper_runtime_t:dir { getattr search };
+allow docker_helper_container_t docker_helper_runtime_t:sock_file { getattr open read write };
+allow docker_helper_container_t docker_helper_t:unix_stream_socket { connectto };
+
 # systemd (init_t) cleanup of RuntimeDirectory including trusted CA tree
 # on service stop/failure. Cleanup-only permissions: remove directories and
 # unlink files; no read/write of CA content.

@@ -149,6 +149,10 @@ REGRESSIONS=(
   "12:User-mode effective Principal roots:uat-regression-user-mode-effective-roots.sh"
   "13:RC6 session-list narrowing acceptance:uat-regression-rc6-session-list-narrowing.sh"
   "14:RC8 CLI/UX acceptance:uat-regression-rc8-cli-ux.sh"
+  "15:env-from secret forwarding:uat-regression-env-from.sh"
+  "16:helper_socket runtime projection:uat-regression-helper-socket.sh"
+  "17:env-from + helper-socket dogfood:uat-regression-dogfood-env-socket.sh"
+  "18:User-mode helper_socket fail-closed:uat-regression-user-mode-helper-socket.sh"
 )
 
 declare -A RESULT

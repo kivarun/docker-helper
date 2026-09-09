@@ -429,9 +429,12 @@ var runContainerCommand = &Command{
 		entrypoint := fs.String("entrypoint", "", "Container entrypoint")
 		workdir := fs.String("workdir", "", "Absolute working directory inside container")
 		shmSize := fs.String("shm-size", "", "Size of /dev/shm (e.g. 64m, 1g); max 2g")
+		helperSocket := fs.Bool("helper-socket", false, "Make the helper socket reachable in the container (system mode)")
 		var envSlice stringSlice
+		var envFromSlice stringSlice
 		var mountSlice stringSlice
 		fs.Var(&envSlice, "env", "Environment variable KEY=VALUE (repeatable)")
+		fs.Var(&envFromSlice, "env-from", "Environment variable DEST=SOURCE; value comes from this process environment (repeatable)")
 		fs.Var(&mountSlice, "mount", "Mount WORKSPACE_RELATIVE_SOURCE:ABSOLUTE_TARGET[:ro] (repeatable)")
 
 		return Invocation{
@@ -453,6 +456,31 @@ var runContainerCommand = &Command{
 						return 2
 					}
 					envMap[parts[0]] = parts[1]
+				}
+
+				// Resolve --env-from entries: DEST takes its value from this
+				// CLI process environment. Resolution is local and fail-closed:
+				// an unset SOURCE stops the command before any run Operation
+				// is created. A resolved value exists only in the request body
+				// (the existing run environment contract); it is not placed in
+				// this CLI process's argv, is not printed in CLI diagnostics,
+				// and the daemon does not log environment values. Known 2.1.x
+				// limitation: the legacy run implementation passes the value
+				// to the daemon-side docker CLI as --env argv, so the value
+				// can appear in that child process's argv
+				// (see docs/architecture.md).
+				for _, spec := range envFromSlice.vals {
+					parts := strings.SplitN(spec, "=", 2)
+					if len(parts) != 2 {
+						fmt.Fprintf(stderr, "invalid env-from format: %q (expected DEST=SOURCE)\n", spec)
+						return 2
+					}
+					value, ok := os.LookupEnv(parts[1])
+					if !ok {
+						fmt.Fprintf(stderr, "environment variable %q is not set\n", parts[1])
+						return 2
+					}
+					envMap[parts[0]] = value
 				}
 
 				var runMounts []mountRequest
@@ -498,13 +526,14 @@ var runContainerCommand = &Command{
 				}
 
 				req := runRequest{
-					Image:       *image,
-					Entrypoint:  *entrypoint,
-					Workdir:     *workdir,
-					Command:     command,
-					Environment: envMap,
-					Mounts:      runMounts,
-					ShmSize:     *shmSize,
+					Image:        *image,
+					Entrypoint:   *entrypoint,
+					Workdir:      *workdir,
+					Command:      command,
+					Environment:  envMap,
+					Mounts:       runMounts,
+					ShmSize:      *shmSize,
+					HelperSocket: *helperSocket,
 				}
 
 				resp, err := c.startRun(req)
