@@ -70,14 +70,17 @@ chmod 755 "$WS/docker-helper"
 rm -f "$WS/reg6-child-id" 2>/dev/null || true
 
 # --- 1. ordinary run: no projection, confined container domain ----------------
+# Without --helper-socket no helper SOCKET may appear inside the workload.
+# (The /run/docker-helper DIRECTORY may exist by design: the trusted-CA
+# projection mounts into /run/docker-helper/trusted-ca.)
 if DOCKER_HELPER_SESSION_TOKEN="$STOK" \
    dh run --image "$IMAGE" --mount .:/workspace \
    -- sh -ec '
-     test ! -e /run/docker-helper
+     test ! -S /run/docker-helper/docker-helper.sock
      label="$(cat /proc/self/attr/current 2>/dev/null || true)"
      case "$label" in *docker_helper_container_t*) true;; *) echo "unexpected domain: $label" >&2; exit 1;; esac
      echo DOM-OK' 2>&1 | grep -q 'DOM-OK'; then
-  reg_ok "ordinary run: no helper runtime inside the workload; process domain docker_helper_container_t"
+  reg_ok "ordinary run: no helper socket inside the workload; process domain docker_helper_container_t"
 else
   reg_fail "ordinary run: projection/domain invariant violated"
 fi
