@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -21,8 +24,11 @@ import (
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/moby/moby/api/pkg/authconfig"
+	"github.com/moby/moby/api/pkg/stdcopy"
 	buildtypes "github.com/moby/moby/api/types/build"
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/jsonstream"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
 	"google.golang.org/grpc"
@@ -63,6 +69,60 @@ type engineImageBuilder interface {
 	// carries the output rendered before the failure and err is a
 	// normalized engineError.
 	imageBuild(ctx context.Context, spec engineBuildSpec, outputLimit int64) (engineBuildResult, error)
+}
+
+// engineContainerRunner is the narrow Engine surface consumed by the
+// synchronous one-shot run path. The production implementation is the single
+// Engine adapter owner below; tests may substitute a narrower runner.
+type engineContainerRunner interface {
+	// containerRun executes one prepared trusted container spec through the
+	// Engine create/attach/start/wait lifecycle and renders the workload's
+	// combined output into a bounded buffer. A terminal container exit code
+	// is a result, not an error; the exit code is returned with the bounded
+	// output either way. On an Engine interaction failure err is a
+	// normalized engineError and the output rendered before the failure is
+	// still returned. The adapter owns the bounded deterministic removal of
+	// the transient container on every exit path, so after containerRun
+	// returns no helper-created transient run container remains.
+	containerRun(ctx context.Context, spec engineRunSpec, outputLimit int64) (engineRunResult, error)
+}
+
+// engineRunMount is one prepared trusted bind mount of an Engine run spec.
+// Sources are already resolved and owned by the domain policy owners —
+// pinned workspace paths, the trusted-CA projection, and the helper runtime
+// projection — never caller input; the adapter only forwards them into the
+// Engine create configuration.
+type engineRunMount struct {
+	Source   string
+	Target   string
+	ReadOnly bool
+}
+
+// engineRunSpec is one prepared run request for the Engine adapter. The
+// domain resolves every policy-bearing value; the adapter owns only Engine
+// protocol mechanics. Credential selects the stored Session registry
+// credential used only when the requested image is absent and an implicit
+// pull is required, exactly as the docker CLI run path resolved it.
+type engineRunSpec struct {
+	Image       string
+	Entrypoint  string
+	Command     []string
+	Workdir     string
+	Env         map[string]string
+	User        string
+	SecurityOpt []string
+	Labels      []string
+	Mounts      []engineRunMount
+	ShmSize     int64
+	Credential  *sessionRegistryCredential
+}
+
+// engineRunResult is the bounded combined output and terminal exit code of
+// one Engine run. The exit code is the container's own terminal exit code.
+type engineRunResult struct {
+	Output    string
+	Truncated bool
+	ExitCode  int
 }
 
 // engineBuildSpec is one prepared build request for the Engine adapter.
@@ -256,6 +316,16 @@ func (a *App) newEngineImagePuller() (engineImagePuller, error) {
 func (a *App) newEngineImageBuilder() (engineImageBuilder, error) {
 	if a.NewEngineBuildFn != nil {
 		return a.NewEngineBuildFn()
+	}
+	return a.sharedEngineAdapter()
+}
+
+// newEngineContainerRunner returns the Engine adapter for the synchronous
+// one-shot run path: the test seam when set, otherwise the App's shared
+// adapter.
+func (a *App) newEngineContainerRunner() (engineContainerRunner, error) {
+	if a.NewEngineRunFn != nil {
+		return a.NewEngineRunFn()
 	}
 	return a.sharedEngineAdapter()
 }
@@ -874,4 +944,259 @@ func errorKindOf(err error) engineErrorKind {
 		return engErr.kind
 	}
 	return engineErrBackendFailure
+}
+
+// engineRunRemoveTimeout bounds the deterministic removal of one transient
+// run container after its terminal outcome, including under request
+// cancellation and daemon shutdown. The bounded removal is owned by the run
+// path, not by the shutdown coordinator: the handler calls request end only
+// after the removal attempt finished, so shutdown waits for it under the
+// shared deadline.
+const engineRunRemoveTimeout = 3 * time.Second
+
+// engineRunDemuxJoinTimeout bounds the join of the attach demultiplexer
+// goroutine. The boundedBuffer is thread-safe, so a timed-out join never
+// races the output read; it only means the tail of the output may be missing
+// after an abnormal stream end.
+const engineRunDemuxJoinTimeout = 2 * time.Second
+
+// engineRunContainerConfig maps one prepared trusted run spec onto the
+// Engine create configuration. The adapter owns only this protocol
+// translation: every policy-bearing value (user identity, security option,
+// labels, mount sources) is already resolved by the domain owners and is
+// forwarded unchanged.
+func engineRunContainerConfig(spec engineRunSpec) (*container.Config, *container.HostConfig) {
+	envNames := make([]string, 0, len(spec.Env))
+	for name := range spec.Env {
+		envNames = append(envNames, name)
+	}
+	sort.Strings(envNames)
+	env := make([]string, 0, len(envNames))
+	for _, name := range envNames {
+		env = append(env, name+"="+spec.Env[name])
+	}
+
+	config := &container.Config{
+		Image:        spec.Image,
+		AttachStdout: true,
+		AttachStderr: true,
+		Env:          env,
+		Cmd:          spec.Command,
+	}
+	if spec.Entrypoint != "" {
+		config.Entrypoint = []string{spec.Entrypoint}
+	}
+	if spec.Workdir != "" {
+		config.WorkingDir = spec.Workdir
+	}
+	if spec.User != "" {
+		config.User = spec.User
+	}
+	if len(spec.Labels) > 0 {
+		labels := make(map[string]string, len(spec.Labels))
+		for _, l := range spec.Labels {
+			name, value, _ := strings.Cut(l, "=")
+			labels[name] = value
+		}
+		config.Labels = labels
+	}
+
+	hostConfig := &container.HostConfig{
+		SecurityOpt: spec.SecurityOpt,
+		ShmSize:     spec.ShmSize,
+	}
+	for _, m := range spec.Mounts {
+		hostConfig.Mounts = append(hostConfig.Mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   m.Source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		})
+	}
+	return config, hostConfig
+}
+
+// isRunImageAbsent reports whether an Engine create failure means the
+// requested image is absent: the typed NotFound signal when present, or the
+// Engine's image-not-found message otherwise.
+func isRunImageAbsent(err error) bool {
+	if err == nil {
+		return false
+	}
+	if cerrdefs.IsNotFound(err) {
+		return true
+	}
+	return classifyDockerError(err.Error()) == dockerErrorImageNotFound
+}
+
+// normalizeEngineCreateError maps an Engine container-create failure to the
+// normalized error categories. An image-absent create keeps the
+// image-not-found category; a cancelled request context is its own category
+// so shutdown/cancellation is never misreported as an Engine failure.
+func normalizeEngineCreateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &engineError{kind: engineErrClientCancelled, cause: err}
+	}
+	if client.IsErrConnectionFailed(err) {
+		return &engineError{kind: engineErrBackendUnavailable, cause: err}
+	}
+	if cerrdefs.IsNotFound(err) {
+		return &engineError{kind: engineErrImageNotFound, cause: err}
+	}
+	if cerrdefs.IsUnauthorized(err) || cerrdefs.IsPermissionDenied(err) {
+		return &engineError{kind: engineErrRegistryAuthDenied, cause: err}
+	}
+	switch classifyDockerError(err.Error()) {
+	case dockerErrorAuthDenied:
+		return &engineError{kind: engineErrRegistryAuthDenied, cause: err}
+	case dockerErrorNetwork:
+		return &engineError{kind: engineErrRegistryUnavailable, cause: err}
+	case dockerErrorImageNotFound:
+		return &engineError{kind: engineErrImageNotFound, cause: err}
+	default:
+		return &engineError{kind: engineErrBackendFailure, cause: err}
+	}
+}
+
+// normalizeEngineRunStepError maps an Engine attach/start/wait failure to
+// the normalized error categories. A 404 after the container was created
+// means the container vanished out of band — an Engine interaction the
+// helper cannot reconstruct — not an image problem; a cancelled request
+// context is its own category.
+func normalizeEngineRunStepError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &engineError{kind: engineErrClientCancelled, cause: err}
+	}
+	if client.IsErrConnectionFailed(err) {
+		return &engineError{kind: engineErrBackendUnavailable, cause: err}
+	}
+	return &engineError{kind: engineErrBackendFailure, cause: err}
+}
+
+// runBufferedOutput snapshots the bounded run output buffer.
+func runBufferedOutput(buf *boundedBuffer) (out string, truncated bool) {
+	data, _, truncated := buf.Range(0)
+	return string(data), truncated
+}
+
+// containerRun executes one prepared trusted container spec through the
+// Engine create/attach/start/wait lifecycle — the same daemon operations the
+// docker CLI run path delegated to. The adapter owns the protocol sequence:
+//
+//  1. create; when the image is absent, one implicit pull with the stored
+//     Session registry credential (exactly the docker CLI behavior) whose
+//     progress joins the bounded run output, then one retry;
+//  2. attach before start, so output capture loses nothing;
+//  3. start;
+//  4. wait for the next exit; the container's terminal exit code is a
+//     result, never a failure;
+//  5. bounded forced removal of the transient container on every exit path,
+//     including cancellation and daemon shutdown, so no helper-created
+//     transient run container survives the request.
+//
+// The combined workload output is captured through the multiplexed attach
+// stream into a bounded buffer with newest-data behavior. The removal uses a
+// context detached from the request context with its own bounded timeout, so
+// a cancelled request still cleans up provably owned state; a failed removal
+// is an operational warning without backend identifiers.
+func (e *engineClient) containerRun(ctx context.Context, spec engineRunSpec, outputLimit int64) (engineRunResult, error) {
+	buf := newBoundedBuffer(outputLimit)
+	config, hostConfig := engineRunContainerConfig(spec)
+
+	createOpts := client.ContainerCreateOptions{Config: config, HostConfig: hostConfig}
+	created, createErr := e.cli.ContainerCreate(ctx, createOpts)
+	if createErr != nil && isRunImageAbsent(createErr) {
+		pullResult, pullErr := e.imagePull(ctx, spec.Image, spec.Credential, outputLimit)
+		buf.Write([]byte(pullResult.Output))
+		if pullErr != nil {
+			out, truncated := runBufferedOutput(buf)
+			return engineRunResult{Output: out, Truncated: truncated}, pullErr
+		}
+		created, createErr = e.cli.ContainerCreate(ctx, createOpts)
+	}
+	if createErr != nil {
+		out, truncated := runBufferedOutput(buf)
+		return engineRunResult{Output: out, Truncated: truncated}, normalizeEngineCreateError(createErr)
+	}
+	containerID := created.ID
+
+	// Attach before start so the capture loses nothing the container wrote.
+	attach, err := e.cli.ContainerAttach(ctx, containerID, client.ContainerAttachOptions{
+		Stream: true,
+		Stdout: true,
+		Stderr: true,
+	})
+	if err != nil {
+		e.removeRunContainer(ctx, containerID)
+		out, truncated := runBufferedOutput(buf)
+		return engineRunResult{Output: out, Truncated: truncated}, normalizeEngineRunStepError(err)
+	}
+	demuxDone := make(chan struct{})
+	go func() {
+		defer close(demuxDone)
+		_, _ = stdcopy.StdCopy(buf, buf, attach.Reader)
+	}()
+
+	if _, err := e.cli.ContainerStart(ctx, containerID, client.ContainerStartOptions{}); err != nil {
+		attach.Close()
+		joinRunDemux(demuxDone)
+		e.removeRunContainer(ctx, containerID)
+		out, truncated := runBufferedOutput(buf)
+		return engineRunResult{Output: out, Truncated: truncated}, normalizeEngineRunStepError(err)
+	}
+
+	wait := e.cli.ContainerWait(ctx, containerID, client.ContainerWaitOptions{Condition: container.WaitConditionNextExit})
+	var exitCode int
+	var runErr error
+	select {
+	case werr := <-wait.Error:
+		runErr = werr
+	case wr := <-wait.Result:
+		exitCode = int(wr.StatusCode)
+	case <-ctx.Done():
+		runErr = ctx.Err()
+	}
+
+	attach.Close()
+	joinRunDemux(demuxDone)
+	e.removeRunContainer(ctx, containerID)
+
+	if runErr != nil {
+		out, truncated := runBufferedOutput(buf)
+		return engineRunResult{Output: out, Truncated: truncated}, normalizeEngineRunStepError(runErr)
+	}
+	out, truncated := runBufferedOutput(buf)
+	return engineRunResult{Output: out, Truncated: truncated, ExitCode: exitCode}, nil
+}
+
+// removeRunContainer performs the bounded forced removal of the transient
+// run container on a context detached from the request, so cancellation and
+// daemon shutdown still reach it. A failed removal is a bounded
+// best-effort operational warning without backend identifiers.
+func (e *engineClient) removeRunContainer(ctx context.Context, containerID string) {
+	removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), engineRunRemoveTimeout)
+	defer cancel()
+	if _, err := e.cli.ContainerRemove(removeCtx, containerID, client.ContainerRemoveOptions{Force: true}); err != nil {
+		opLog(ctx).Warn("transient run container cleanup failed",
+			slog.String("operation", "run"),
+		)
+	}
+}
+
+// joinRunDemux waits bounded for the attach demultiplexer goroutine to
+// finish so the output read is complete. The boundedBuffer is thread-safe,
+// so a timed-out join still allows the output read.
+func joinRunDemux(demuxDone <-chan struct{}) {
+	timer := time.NewTimer(engineRunDemuxJoinTimeout)
+	defer timer.Stop()
+	select {
+	case <-demuxDone:
+	case <-timer.C:
+	}
 }
