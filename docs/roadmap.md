@@ -483,6 +483,58 @@ decomposition; splitting the large `packaging_test.go` architecture; broad
 conversion of source-text cross-language assertions; and global test-suite
 consolidation/parallelization.
 
+## 2.2
+
+### Main goal: allowed-root access modes with mandatory MAC parity
+
+Release 2.2 is a narrow minor release based on the published Release 2.1.1
+product line. It adds one complete filesystem-policy capability: each allowed
+root carries an explicit `read_write` or `read_only` access mode.
+
+The existing policy hierarchy is retained and enriched rather than replaced:
+
+```text
+global allowed roots
+  -> effective Principal allowed roots
+    -> effective Launcher allowed roots
+      -> immutable Session filesystem snapshot
+        -> operation filesystem source
+```
+
+Within one scope, the most-specific canonical path wins. Across scopes,
+`read_only` dominates `read_write`, so a lower authority may narrow but never
+widen its parent. Existing path-only config and database rows remain compatible
+and mean `read_write`.
+
+Release 2.2 also closes the writable-parent bypass: a writable bind of a parent
+is rejected when the exposed subtree contains any effective read-only region.
+The daemon never silently downgrades an RW request to RO; policy refusal uses the
+stable `read_only_root` result.
+
+Session policy keeps the Release 2.1 lifecycle rule. The effective path/mode
+policy is snapshotted when the Session is created, so later allowed-root changes
+affect new Sessions but do not retroactively change already-issued Session
+capabilities. Pre-2.2 live Sessions migrate to a compatibility read-write
+snapshot of their existing workspace.
+
+System mode requires defense-in-depth parity from the active MAC backend. The
+application policy remains the only semantic owner; AppArmor and SELinux consume
+the already-resolved workload exposure plan and independently deny writes to
+read-only exposures. Production implementation is blocked on a feasibility gate
+that proves mixed RW/RO mounts and, for SELinux, concurrent Sessions with
+different snapshots over the same host tree without a global per-mode relabel.
+
+Release 2.2 deliberately does not include Managed Containers, Engine migration,
+networking, resources, durable Operations, or any other Release 3 runtime work.
+It is developed on `release/2.2` from `v2.1.1`; after release, the completed
+contract is merged back into `main` for Release 3 to inherit.
+
+Release 2.2 design and execution owners:
+
+- [`release-2.2-allowed-root-access-modes.md`](release-2.2-allowed-root-access-modes.md) — policy/domain/API contract;
+- [`release-2.2-mac-enforcement.md`](release-2.2-mac-enforcement.md) — mandatory AppArmor/SELinux enforcement and feasibility gate;
+- [`release-2.2-implementation-plan.md`](release-2.2-implementation-plan.md) — implementation order, migrations, UAT, and release gates.
+
 ## 3.0
 
 ### Main goal: managed-container runtime
