@@ -107,10 +107,10 @@ fi
 OVERLAP_OK=1
 for OV_TARGET in "/run/docker-helper" "/run/docker-helper/foo" "/run/docker-helper/docker-helper.sock" "/run" "/"; do
   DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-    dh run --image "$IMAGE" --helper-socket --mount ".$OV_TARGET" -- true \
+    dh run --image "$IMAGE" --helper-socket --mount ".:${OV_TARGET}" -- true \
     >/tmp/uat-reg16-overlap.out 2>/tmp/uat-reg16-overlap.err
   OV_RC=$?
-  if [ "$OV_RC" != 0 ] && grep -q "invalid mount" /tmp/uat-reg16-overlap.out /tmp/uat-reg16-overlap.err 2>/dev/null; then
+  if [ "$OV_RC" != 0 ] && grep -q "invalid_mount" /tmp/uat-reg16-overlap.out /tmp/uat-reg16-overlap.err 2>/dev/null; then
     reg_ok "caller mount overlapping the projection rejected ($OV_TARGET)"
   else
     reg_fail "caller mount overlapping the projection was NOT rejected ($OV_TARGET, rc=$OV_RC, out: $(cat /tmp/uat-reg16-overlap.out 2>/dev/null) $(cat /tmp/uat-reg16-overlap.err 2>/dev/null))"
@@ -120,7 +120,7 @@ done
 # Sibling paths must stay allowed under the unchanged 2.1.0 mount contract.
 for OV_TARGET in "/run-other" "/run/docker-helper-other"; do
   DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-    dh run --image "$IMAGE" --helper-socket --mount ".$OV_TARGET" -- true \
+    dh run --image "$IMAGE" --helper-socket --mount ".:${OV_TARGET}" -- true \
     >/tmp/uat-reg16-overlap.out 2>/tmp/uat-reg16-overlap.err
   OV_RC=$?
   if [ "$OV_RC" = 0 ]; then

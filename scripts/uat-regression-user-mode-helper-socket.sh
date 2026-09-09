@@ -99,6 +99,15 @@ else
   reg_result
 fi
 
+# User-mode audit is disabled by default (it derives from log_level); this
+# group's no-Operation proof needs the audit stream, so enable it explicitly.
+if dhx config set audit_enabled true >"$TMPDIR_UHS/audit.log" 2>&1; then
+  reg_ok "user-mode audit_enabled=true set for the group's audit assertions"
+else
+  reg_fail "user-mode config set audit_enabled failed (see $TMPDIR_UHS/audit.log)"
+  reg_result
+fi
+
 U_SOCK="$U_XDG/docker-helper/docker-helper.sock"
 # The redirect lands on sudo's child (the daemon); sudo itself is quiet.
 # shellcheck disable=SC2024
@@ -142,6 +151,9 @@ else
 fi
 
 # --- B. --helper-socket fails closed with invalid_helper_socket ---------------
+# The successful A-run emitted one run.start; the rejected request must not
+# add another one (no run Operation is created for it).
+STARTS_BEFORE="$(grep -c '"event":"run.start"' "$TMPDIR_UHS/serve.log" 2>/dev/null || true)"
 B_OUT="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$A_TOK" \
   /usr/bin/docker-helper run --image alpine:3.24 --helper-socket -- true 2>&1)"
 B_RC=$?
@@ -159,10 +171,11 @@ else
   reg_fail "C: a container started for the rejected helper_socket request"
 fi
 sleep 2
-if grep -q '"event":"run.start"' "$TMPDIR_UHS/serve.log" 2>/dev/null; then
-  reg_fail "C: the user-mode daemon logged run.start (a run Operation exists)"
+STARTS_AFTER="$(grep -c '"event":"run.start"' "$TMPDIR_UHS/serve.log" 2>/dev/null || true)"
+if [ "$STARTS_AFTER" = "$STARTS_BEFORE" ]; then
+  reg_ok "C: the rejected request created no run Operation (run.start count unchanged: $STARTS_AFTER)"
 else
-  reg_ok "C: the user-mode daemon created no run Operation for the rejected request"
+  reg_fail "C: the rejected request created a run Operation (run.start $STARTS_BEFORE -> $STARTS_AFTER)"
 fi
 if grep -q '"result":"invalid_helper_socket"' "$TMPDIR_UHS/serve.log" 2>/dev/null; then
   reg_ok "C: the rejection was classified at daemon policy (run.rejected invalid_helper_socket)"
