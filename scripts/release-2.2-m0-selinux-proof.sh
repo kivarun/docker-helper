@@ -384,6 +384,16 @@ docker run -d --name "$RW_CONTAINER" \
   --mount "type=bind,source=$SHARED_SOURCE,target=/m0/tree" \
   "$IMAGE" sh -c 'sleep 300' >/dev/null
 
+docker inspect "$RO_CONTAINER" "$RW_CONTAINER" >"$EVIDENCE_DIR/containers-after-start.json"
+docker ps -a --filter "name=^/${RO_CONTAINER}$" --filter "name=^/${RW_CONTAINER}$" \
+  >"$EVIDENCE_DIR/containers-after-start.txt"
+[ "$(docker inspect --format '{{.State.Running}}' "$RO_CONTAINER")" = true ] \
+  || fail "RO Session exited after start: $(docker logs "$RO_CONTAINER" 2>&1 || true)"
+[ "$(docker inspect --format '{{.State.Running}}' "$RW_CONTAINER")" = true ] \
+  || fail "RW Session exited after start: $(docker logs "$RW_CONTAINER" 2>&1 || true)"
+docker exec "$RO_CONTAINER" true
+docker exec "$RW_CONTAINER" true
+
 RO_PID="$(docker inspect --format '{{.State.Pid}}' "$RO_CONTAINER")"
 RW_PID="$(docker inspect --format '{{.State.Pid}}' "$RW_CONTAINER")"
 RO_PROCESS_CONTEXT="$(tr -d '\0' <"/proc/$RO_PID/attr/current")"
@@ -395,8 +405,8 @@ RW_PROCESS_CONTEXT="$(tr -d '\0' <"/proc/$RW_PID/attr/current")"
 [ "$(ctx_range "$RO_PROCESS_CONTEXT")" != "$(ctx_range "$RW_PROCESS_CONTEXT")" ] \
   || fail 'concurrent Sessions received the same MCS range'
 
-RO_ROOTFS_CONTEXT="$(stat -Lc '%C' "/proc/$RO_PID/root/bin/sh")"
-RW_ROOTFS_CONTEXT="$(stat -Lc '%C' "/proc/$RW_PID/root/bin/sh")"
+RO_ROOTFS_CONTEXT="$(stat -Lc '%C' "/proc/$RO_PID/root")"
+RW_ROOTFS_CONTEXT="$(stat -Lc '%C' "/proc/$RW_PID/root")"
 [ "$(ctx_type "$RO_ROOTFS_CONTEXT")" = container_file_t ] \
   || fail "RO Session rootfs has wrong type: $RO_ROOTFS_CONTEXT"
 [ "$(ctx_type "$RW_ROOTFS_CONTEXT")" = container_file_t ] \
