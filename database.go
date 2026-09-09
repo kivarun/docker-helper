@@ -173,10 +173,10 @@ func initializeDatabase(db *sql.DB) error {
 	// row (the entire pre-2.2 state) becomes read_write. Each table is
 	// classified independently, so a startup interrupted between the two
 	// rebuilds resumes cleanly; already-final tables are never mutated.
-	if err := migrateAllowedRootsTableToAccessSchema(db, "principal_allowed_roots", "principal_id", "principals", true); err != nil {
+	if err := migrateAllowedRootsTableToAccessSchema(db, "principal_allowed_roots", "principal_id", "INTEGER", "principals", true); err != nil {
 		return err
 	}
-	if err := migrateAllowedRootsTableToAccessSchema(db, "launcher_allowed_roots", "launcher_id", "launchers", false); err != nil {
+	if err := migrateAllowedRootsTableToAccessSchema(db, "launcher_allowed_roots", "launcher_id", "TEXT", "launchers", false); err != nil {
 		return err
 	}
 
@@ -1364,17 +1364,23 @@ func unsupportedAllowedRootsSchema(table, detail string) error {
 	return fmt.Errorf("unsupported %s schema: %s", table, detail)
 }
 
-// allowedRootsColumn captures the schema fields of one allowed-roots column.
+// allowedRootsColumn captures the full declared schema of one allowed-roots
+// column: name, declared type, nullability, primary-key position, and any
+// declared default. The classifier requires exact values for every field, so
+// a table that differs in any of them is unsupported state.
 type allowedRootsColumn struct {
-	name    string
-	notNull bool
-	pk      int
+	name       string
+	colType    string
+	notNull    bool
+	pk         int
+	hasDefault bool
+	defaultVal sql.NullString
 }
 
 // readAllowedRootsColumns returns the named table's columns in declared order.
 func readAllowedRootsColumns(db *sql.DB, table string) ([]allowedRootsColumn, error) {
 	rows, err := db.Query(
-		`SELECT name, "notnull", pk FROM pragma_table_info(?) ORDER BY cid`,
+		`SELECT name, type, "notnull", dflt_value, pk FROM pragma_table_info(?) ORDER BY cid`,
 		table,
 	)
 	if err != nil {
@@ -1385,9 +1391,10 @@ func readAllowedRootsColumns(db *sql.DB, table string) ([]allowedRootsColumn, er
 	var cols []allowedRootsColumn
 	for rows.Next() {
 		var c allowedRootsColumn
-		if err := rows.Scan(&c.name, &c.notNull, &c.pk); err != nil {
+		if err := rows.Scan(&c.name, &c.colType, &c.notNull, &c.defaultVal, &c.pk); err != nil {
 			return nil, fmt.Errorf("cannot scan %s column: %w", table, err)
 		}
+		c.hasDefault = c.defaultVal.Valid
 		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -1430,44 +1437,116 @@ func readAllowedRootsForeignKeys(db *sql.DB, table string) ([]allowedRootsFK, er
 	return out, nil
 }
 
+// allowedRootsColumnSpec is the canonical declaration contract of one
+// allowed-roots column: exact declared type, NOT NULL, and primary-key
+// position as SQLite reports them through pragma_table_info.
+type allowedRootsColumnSpec struct {
+	name    string
+	colType string
+	notNull bool
+	pk      int
+}
+
+// The canonical column contracts for every supported allowed-roots schema
+// generation. The principal table's INTEGER PRIMARY KEY AUTOINCREMENT id is a
+// rowid alias, so SQLite reports its NOT NULL as false while it still never
+// stores NULL. Every canonical column must declare no DEFAULT: access is an
+// explicit persisted value, and a default such as
+// `access TEXT NOT NULL DEFAULT 'read_write'` would silently re-introduce a
+// database-level path-only fallback instead of the canonical explicit state.
+var (
+	allowedRootsPrincipalColumns = []allowedRootsColumnSpec{
+		{"id", "INTEGER", false, 1},
+		{"principal_id", "INTEGER", true, 0},
+		{"root_path", "TEXT", true, 0},
+		{"access", "TEXT", true, 0},
+	}
+	allowedRootsPrincipalLegacyColumns = []allowedRootsColumnSpec{
+		{"id", "INTEGER", false, 1},
+		{"principal_id", "INTEGER", true, 0},
+		{"root_path", "TEXT", true, 0},
+	}
+	allowedRootsLauncherColumns = []allowedRootsColumnSpec{
+		{"launcher_id", "TEXT", true, 0},
+		{"root_path", "TEXT", true, 0},
+		{"access", "TEXT", true, 0},
+	}
+	allowedRootsLauncherLegacyColumns = []allowedRootsColumnSpec{
+		{"launcher_id", "TEXT", true, 0},
+		{"root_path", "TEXT", true, 0},
+	}
+)
+
+// verifyAllowedRootsColumns positively checks one allowed-roots table's
+// columns against a canonical contract: exact column set, exact declared
+// types, exact nullability, exact primary-key positions, and no declared
+// defaults. A primary-key contract of zero for every column rejects both a
+// PRIMARY KEY(access) table and any composite primary key.
+func verifyAllowedRootsColumns(table string, cols []allowedRootsColumn, expected []allowedRootsColumnSpec) error {
+	colSet := make(map[string]allowedRootsColumn, len(cols))
+	names := make([]string, 0, len(cols))
+	for _, c := range cols {
+		colSet[c.name] = c
+		names = append(names, c.name)
+	}
+	if len(cols) != len(expected) {
+		return unsupportedAllowedRootsSchema(table, fmt.Sprintf("unexpected column set %v", names))
+	}
+	for _, spec := range expected {
+		c, ok := colSet[spec.name]
+		if !ok {
+			return unsupportedAllowedRootsSchema(table, fmt.Sprintf("missing column %q", spec.name))
+		}
+		if !strings.EqualFold(strings.TrimSpace(c.colType), spec.colType) {
+			return unsupportedAllowedRootsSchema(table, fmt.Sprintf(
+				"column %q has declared type %q, want %q", spec.name, c.colType, spec.colType))
+		}
+		if c.notNull != spec.notNull {
+			if spec.notNull {
+				return unsupportedAllowedRootsSchema(table, fmt.Sprintf("column %q must be NOT NULL", spec.name))
+			}
+			return unsupportedAllowedRootsSchema(table, fmt.Sprintf("column %q must not declare NOT NULL", spec.name))
+		}
+		if c.pk != spec.pk {
+			return unsupportedAllowedRootsSchema(table, fmt.Sprintf(
+				"column %q has primary-key position %d, want %d", spec.name, c.pk, spec.pk))
+		}
+		if c.hasDefault {
+			return unsupportedAllowedRootsSchema(table, fmt.Sprintf(
+				"column %q must not declare a default (default %s)", spec.name, c.defaultVal.String))
+		}
+	}
+	return nil
+}
+
 // classifyAllowedRootsTable positively recognizes the supported shapes of one
 // allowed-roots table from SQLite semantic metadata. A malformed table — an
-// unexpected column set, a broken owner/path nullability/PK/unique structure,
-// a non-canonical foreign key, an access column without the canonical CHECK
-// constraint, or an unexpected CHECK on the legacy path-only shape — is
-// rejected as unsupported rather than silently accepted or destructively
-// normalized. withID selects the principal table's AUTOINCREMENT id column;
-// the launcher table has no id column.
+// unexpected column set, a wrong declared type, an unexpected nullability,
+// primary-key structure, or declared default, a broken owner/path nullability
+// or unique structure, a non-canonical foreign key, an access column without
+// the canonical CHECK constraint, or an unexpected CHECK on the legacy
+// path-only shape — is rejected as unsupported rather than silently accepted
+// or destructively normalized. withID selects the principal table's
+// AUTOINCREMENT id column; the launcher table has no id column.
 func classifyAllowedRootsTable(db *sql.DB, table, ownerCol, ownerTable string, withID bool) (allowedRootsSchemaClass, error) {
 	cols, err := readAllowedRootsColumns(db, table)
 	if err != nil {
 		return allowedRootsSchemaUnsupported, err
 	}
-	colSet := make(map[string]allowedRootsColumn, len(cols))
-	for _, c := range cols {
-		colSet[c.name] = c
-	}
-
-	// Every supported generation shares the owner/path column semantics:
-	// the optional id is the primary key, and the owner and root_path
-	// columns are NOT NULL.
+	finalSpecs, legacySpecs := allowedRootsLauncherColumns, allowedRootsLauncherLegacyColumns
 	if withID {
-		idCol, ok := colSet["id"]
-		if !ok {
-			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, `missing column "id"`)
-		}
-		if idCol.pk != 1 {
-			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "id is not the primary key")
-		}
+		finalSpecs, legacySpecs = allowedRootsPrincipalColumns, allowedRootsPrincipalLegacyColumns
 	}
-	for _, name := range []string{ownerCol, "root_path"} {
-		c, ok := colSet[name]
-		if !ok {
-			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, fmt.Sprintf("missing column %q", name))
+	finalContractErr := verifyAllowedRootsColumns(table, cols, finalSpecs)
+	legacyContractErr := verifyAllowedRootsColumns(table, cols, legacySpecs)
+	if legacyContractErr != nil && finalContractErr != nil {
+		// Neither supported shape: report the contract the table is closest
+		// to. A table without the access column reads as a broken legacy
+		// shape; otherwise the final contract is the intended target.
+		if colSetAccessed(cols) {
+			return allowedRootsSchemaUnsupported, finalContractErr
 		}
-		if !c.notNull {
-			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, fmt.Sprintf("column %q must be NOT NULL", name))
-		}
+		return allowedRootsSchemaUnsupported, legacyContractErr
 	}
 
 	// Exactly one canonical FK: the owner reference with ON DELETE CASCADE.
@@ -1534,61 +1613,58 @@ func classifyAllowedRootsTable(db *sql.DB, table, ownerCol, ownerTable string, w
 	}
 	checks := sqliteCheckExpressions(ddl.String)
 
-	if _, hasAccess := colSet["access"]; hasAccess {
-		// Final schema: exactly the owner/path/access column set with the
-		// canonical access CHECK.
-		expectedCols := 3
-		if withID {
-			expectedCols = 4
-		}
-		if len(cols) != expectedCols {
-			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "unexpected column set")
-		}
-		if !colSet["access"].notNull {
-			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, `column "access" must be NOT NULL`)
-		}
-		if len(checks) != 1 {
+	if legacyContractErr == nil {
+		// Legacy path-only schema: the exact pre-2.2 column contract with no
+		// CHECK constraints. Any CHECK is unsupported hand-mutated state.
+		if len(checks) != 0 {
 			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table,
-				fmt.Sprintf("expected exactly one access check constraint, found %d", len(checks)))
+				fmt.Sprintf("expected no check constraints on the legacy path-only schema, found %d", len(checks)))
 		}
-		if checks[0] != allowedRootAccessCheck {
-			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "non-canonical allowed-root access check")
-		}
-		return allowedRootsSchemaFinal, nil
+		return allowedRootsSchemaLegacyPathOnly, nil
 	}
 
-	// Legacy path-only schema: exactly the pre-2.2 column set with no CHECK
-	// constraints. Any other shape is unsupported hand-mutated state.
-	expectedCols := 2
-	if withID {
-		expectedCols = 3
-	}
-	if len(cols) != expectedCols {
-		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "unexpected column set")
-	}
-	if len(checks) != 0 {
+	// Final schema: the canonical owner/path/access column contract with
+	// exactly the canonical access CHECK.
+	if len(checks) != 1 {
 		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table,
-			fmt.Sprintf("expected no check constraints on the legacy path-only schema, found %d", len(checks)))
+			fmt.Sprintf("expected exactly one access check constraint, found %d", len(checks)))
 	}
-	return allowedRootsSchemaLegacyPathOnly, nil
+	if checks[0] != allowedRootAccessCheck {
+		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "non-canonical allowed-root access check")
+	}
+	return allowedRootsSchemaFinal, nil
+}
+
+// colSetAccessed reports whether a table's column set already includes the
+// access column, used only to pick the more meaningful classification error.
+func colSetAccessed(cols []allowedRootsColumn) bool {
+	for _, c := range cols {
+		if c.name == "access" {
+			return true
+		}
+	}
+	return false
 }
 
 // allowedRootsNewTableSQL returns the canonical access-bearing CREATE TABLE
-// statement for the _new rebuild target of one allowed-roots table.
-func allowedRootsNewTableSQL(table, ownerCol, ownerTable string, withID bool) string {
+// statement for the _new rebuild target of one allowed-roots table. The owner
+// column keeps the referenced owner table's id type: INTEGER for the
+// principals table, TEXT for the launchers table, so the rebuilt table is
+// semantically identical to a fresh canonical database.
+func allowedRootsNewTableSQL(table, ownerCol, ownerType, ownerTable string, withID bool) string {
 	idDef := ""
 	if withID {
 		idDef = `id INTEGER PRIMARY KEY AUTOINCREMENT,
 			`
 	}
 	return fmt.Sprintf(`CREATE TABLE %s_new (
-			%s%s TEXT NOT NULL,
+			%s%s %s NOT NULL,
 			root_path TEXT NOT NULL,
 			access TEXT NOT NULL,
 			FOREIGN KEY (%s) REFERENCES %s(id) ON DELETE CASCADE,
 			UNIQUE (%s, root_path),
 			CHECK (access IN ('read_write', 'read_only'))
-		)`, table, idDef, ownerCol, ownerCol, ownerTable, ownerCol)
+		)`, table, idDef, ownerCol, ownerType, ownerCol, ownerTable, ownerCol)
 }
 
 // migrateAllowedRootsTableToAccessSchema migrates one allowed-roots table to
@@ -1604,7 +1680,7 @@ func allowedRootsNewTableSQL(table, ownerCol, ownerTable string, withID bool) st
 // shape fails closed and is never destructively normalized. A crash before
 // commit leaves the old table usable; a crash after commit leaves the final
 // table usable and the next call classifies it as final.
-func migrateAllowedRootsTableToAccessSchema(db *sql.DB, table, ownerCol, ownerTable string, withID bool) error {
+func migrateAllowedRootsTableToAccessSchema(db *sql.DB, table, ownerCol, ownerType, ownerTable string, withID bool) error {
 	class, err := classifyAllowedRootsTable(db, table, ownerCol, ownerTable, withID)
 	if err != nil {
 		return err
@@ -1620,7 +1696,7 @@ func migrateAllowedRootsTableToAccessSchema(db *sql.DB, table, ownerCol, ownerTa
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(allowedRootsNewTableSQL(table, ownerCol, ownerTable, withID)); err != nil {
+	if _, err := tx.Exec(allowedRootsNewTableSQL(table, ownerCol, ownerType, ownerTable, withID)); err != nil {
 		return fmt.Errorf("cannot create new %s table: %w", table, err)
 	}
 

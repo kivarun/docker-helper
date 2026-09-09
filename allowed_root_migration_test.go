@@ -2,8 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -99,18 +101,57 @@ func assertAllowedRootsAccessSchema(t *testing.T, db *sql.DB, table, ownerCol, o
 	}
 }
 
+// allowedRootsColumnSignatures builds one comparable semantic signature per
+// column of an allowed-roots table: declared name, type, nullability,
+// primary-key position, and any declared default.
+func allowedRootsColumnSignatures(t *testing.T, db *sql.DB, table string) []string {
+	t.Helper()
+	cols, err := readAllowedRootsColumns(db, table)
+	if err != nil {
+		t.Fatalf("read %s columns: %v", table, err)
+	}
+	out := make([]string, 0, len(cols))
+	for _, c := range cols {
+		sig := c.name + " " + c.colType
+		if c.notNull {
+			sig += " NOT NULL"
+		}
+		if c.pk != 0 {
+			sig += fmt.Sprintf(" PK=%d", c.pk)
+		}
+		if c.hasDefault {
+			sig += " DEFAULT " + c.defaultVal.String
+		}
+		out = append(out, sig)
+	}
+	return out
+}
+
 // TestInitializeDatabaseCreatesAllowedRootsAccessSchema proves the fresh 2.2
 // database declares the canonical access-bearing allowed-roots schema for both
-// tables and that initialization is idempotent on it.
+// tables and that a real second initialization is idempotent: it must succeed
+// and leave the schema and its semantic signatures unchanged.
 func TestInitializeDatabaseCreatesAllowedRootsAccessSchema(t *testing.T) {
 	db := openFreshTestDB(t)
 
 	assertAllowedRootsAccessSchema(t, db, "principal_allowed_roots", "principal_id", "principals", true)
 	assertAllowedRootsAccessSchema(t, db, "launcher_allowed_roots", "launcher_id", "launchers", false)
+	principalBefore := allowedRootsColumnSignatures(t, db, "principal_allowed_roots")
+	launcherBefore := allowedRootsColumnSignatures(t, db, "launcher_allowed_roots")
 
-	// Idempotency: a second initialization must not change the schema.
+	// Idempotency: a second real initialization must succeed and must not
+	// change the schema.
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("second initializeDatabase() error: %v", err)
+	}
 	assertAllowedRootsAccessSchema(t, db, "principal_allowed_roots", "principal_id", "principals", true)
 	assertAllowedRootsAccessSchema(t, db, "launcher_allowed_roots", "launcher_id", "launchers", false)
+	if got := allowedRootsColumnSignatures(t, db, "principal_allowed_roots"); !slices.Equal(got, principalBefore) {
+		t.Errorf("principal signatures changed after second initialize: %v -> %v", principalBefore, got)
+	}
+	if got := allowedRootsColumnSignatures(t, db, "launcher_allowed_roots"); !slices.Equal(got, launcherBefore) {
+		t.Errorf("launcher signatures changed after second initialize: %v -> %v", launcherBefore, got)
+	}
 }
 
 // v211AllowedRootsFixture captures the stable identifiers and stored paths of
@@ -457,6 +498,73 @@ func TestMigrateV211AllowedRootsToReadWrite(t *testing.T) {
 	}
 }
 
+// TestMigrateV211AllowedRootsSchemaMatchesFresh proves a migrated v2.1.1
+// database and a fresh 2.2 database declare semantically identical
+// allowed-roots schemas: exact column sets, declared types, nullability,
+// primary-key positions, and no defaults. The declared types are asserted
+// explicitly as well, so a rebuild that widens an owner column to TEXT or
+// narrows access to another type fails here instead of shipping.
+func TestMigrateV211AllowedRootsSchemaMatchesFresh(t *testing.T) {
+	fresh := openFreshTestDB(t)
+	defer fresh.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openDatabase(path)
+	if err != nil {
+		t.Fatalf("reopenDatabase() error: %v", err)
+	}
+	defer db.Close()
+	f := createV211AllowedRootsFixture(t, db)
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() on v2.1.1 fixture: %v", err)
+	}
+	_ = f
+
+	for _, spec := range []struct {
+		table  string
+		withID bool
+	}{
+		{"principal_allowed_roots", true},
+		{"launcher_allowed_roots", false},
+	} {
+		want := allowedRootsColumnSignatures(t, fresh, spec.table)
+		got := allowedRootsColumnSignatures(t, db, spec.table)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s migrated signatures %v != fresh signatures %v", spec.table, got, want)
+		}
+	}
+
+	// Explicit declared types: the owner column types differ between the two
+	// tables and must survive the rebuild.
+	principal := allowedRootsColumnSignatures(t, db, "principal_allowed_roots")
+	wantPrincipal := []string{
+		"id INTEGER PK=1",
+		"principal_id INTEGER NOT NULL",
+		"root_path TEXT NOT NULL",
+		"access TEXT NOT NULL",
+	}
+	if !slices.Equal(principal, wantPrincipal) {
+		t.Errorf("principal declared schema = %v, want %v", principal, wantPrincipal)
+	}
+	launcher := allowedRootsColumnSignatures(t, db, "launcher_allowed_roots")
+	wantLauncher := []string{
+		"launcher_id TEXT NOT NULL",
+		"root_path TEXT NOT NULL",
+		"access TEXT NOT NULL",
+	}
+	if !slices.Equal(launcher, wantLauncher) {
+		t.Errorf("launcher declared schema = %v, want %v", launcher, wantLauncher)
+	}
+}
+
 // snapshotAllowedRootsRows reads the full canonical content of both
 // allowed-roots tables in a stable order for idempotency comparison.
 func snapshotAllowedRootsRows(t *testing.T, db *sql.DB) []string {
@@ -573,10 +681,11 @@ func TestAllowedRootsAccessConstraintRejectsInvalidValues(t *testing.T) {
 // without the unique constraint) all fail closed with no migration performed.
 func TestMigrateV211AllowedRootsCorruptSchemasFailClosed(t *testing.T) {
 	tests := []struct {
-		name  string
-		table string // which allowed-roots table the corruption is applied to
-		ddl   string // corrupt table definition replacing the canonical one
-		rows  string // optional seed rows after the corrupt table is created
+		name       string
+		table      string // which allowed-roots table the corruption is applied to
+		ddl        string // corrupt table definition replacing the canonical one
+		rows       string // optional seed rows after the corrupt table is created
+		wantDetail string // additional refusal detail beyond "unsupported"
 	}{
 		{
 			name:  "access column without check constraint",
@@ -645,6 +754,93 @@ func TestMigrateV211AllowedRootsCorruptSchemasFailClosed(t *testing.T) {
 					UNIQUE (launcher_id, root_path),
 					CHECK (access IN ('read_write', 'read_only'))
 				)`,
+		},
+		{
+			name:  "access column with a hidden read_write default",
+			table: "principal_allowed_roots",
+			ddl: `
+				CREATE TABLE principal_allowed_roots (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					principal_id INTEGER NOT NULL,
+					root_path TEXT NOT NULL,
+					access TEXT NOT NULL DEFAULT 'read_write',
+					FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+					UNIQUE(principal_id, root_path),
+					CHECK (access IN ('read_write', 'read_only'))
+				)`,
+			wantDetail: "must not declare a default",
+		},
+		{
+			name:  "access column with a hidden read_write default on the launcher table",
+			table: "launcher_allowed_roots",
+			ddl: `
+				CREATE TABLE launcher_allowed_roots (
+					launcher_id TEXT NOT NULL,
+					root_path TEXT NOT NULL,
+					access TEXT NOT NULL DEFAULT 'read_write',
+					FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+					UNIQUE (launcher_id, root_path),
+					CHECK (access IN ('read_write', 'read_only'))
+				)`,
+			wantDetail: "must not declare a default",
+		},
+		{
+			name:  "owner column declared as text in the principal table",
+			table: "principal_allowed_roots",
+			ddl: `
+				CREATE TABLE principal_allowed_roots (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					principal_id TEXT NOT NULL,
+					root_path TEXT NOT NULL,
+					access TEXT NOT NULL,
+					FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+					UNIQUE(principal_id, root_path),
+					CHECK (access IN ('read_write', 'read_only'))
+				)`,
+			wantDetail: "declared type",
+		},
+		{
+			name:  "access column declared as integer",
+			table: "launcher_allowed_roots",
+			ddl: `
+				CREATE TABLE launcher_allowed_roots (
+					launcher_id TEXT NOT NULL,
+					root_path TEXT NOT NULL,
+					access INTEGER NOT NULL,
+					FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+					UNIQUE (launcher_id, root_path),
+					CHECK (access IN ('read_write', 'read_only'))
+				)`,
+			wantDetail: "declared type",
+		},
+		{
+			name:  "access column declared as the primary key",
+			table: "launcher_allowed_roots",
+			ddl: `
+				CREATE TABLE launcher_allowed_roots (
+					launcher_id TEXT NOT NULL,
+					root_path TEXT NOT NULL,
+					access TEXT NOT NULL PRIMARY KEY,
+					FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+					UNIQUE (launcher_id, root_path),
+					CHECK (access IN ('read_write', 'read_only'))
+				)`,
+			wantDetail: "primary-key position",
+		},
+		{
+			name:  "composite primary key through access on the launcher table",
+			table: "launcher_allowed_roots",
+			ddl: `
+				CREATE TABLE launcher_allowed_roots (
+					launcher_id TEXT NOT NULL,
+					root_path TEXT NOT NULL,
+					access TEXT NOT NULL,
+					PRIMARY KEY (access, root_path),
+					FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+					UNIQUE (launcher_id, root_path),
+					CHECK (access IN ('read_write', 'read_only'))
+				)`,
+			wantDetail: "primary-key position",
 		},
 		{
 			name:  "legacy table missing unique identity",
@@ -723,6 +919,9 @@ func TestMigrateV211AllowedRootsCorruptSchemasFailClosed(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "unsupported") {
 				t.Errorf("error = %v, want an unsupported-schema refusal", err)
+			}
+			if tt.wantDetail != "" && !strings.Contains(err.Error(), tt.wantDetail) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.wantDetail)
 			}
 		})
 	}
