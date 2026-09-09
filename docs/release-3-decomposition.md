@@ -59,6 +59,7 @@ Responsibilities:
 
 - retire the current build/run Operation types, status/log/cancel workflow, and related retention configuration;
 - introduce one narrow official Moby Engine API adapter and move `pull`, `build`, and `run` directly to their target synchronous paths without rebuilding the legacy asynchronous workflow on the new backend;
+- preserve the shipped Release 2.1.1 one-shot `run` contract through the Engine API migration: `--helper-socket` / `helper_socket` with its server-owned runtime-directory projection must be expressed through the new Engine create configuration, and the CLI `--env-from` mechanism must be retained. This is a compatibility requirement over already-released behavior, not a new D0 architecture decision;
 - preserve existing Session-scoped private-registry behavior by explicitly bridging pull and build credentials through the adapter;
 - move `build` and `run` into bounded synchronous request handling while preserving their normal blocking CLI behavior;
 - define the shared Operation handler boundary for separate `Execute` and `Recover` behavior;
@@ -83,6 +84,10 @@ Responsibilities:
 - immutable image, optional entrypoint override, command, workdir, environment,
   workspace-contained mounts, resource limits, and publications accepted at
   create time;
+- the optional `helper_socket` policy fact as part of the immutable create
+  specification: a server-owned transport projection requested only at create,
+  stored as requested-or-not so integrity observation and restart recovery can
+  verify it, never as a caller-controlled host path;
 - persistent management projection required for authorization, inspection, policy, and backend correlation without environment values, registry credentials, or a recreate-capable Docker request;
 - lookup and ownership verification;
 - projection of backend runtime state into a bounded public status model;
@@ -120,6 +125,13 @@ Responsibilities:
 
 - authorization before backend access;
 - validation of allowed state transitions;
+- validation of the helper-socket contract in the create service: the
+  system-mode-only rule with the existing `invalid_helper_socket` user-mode
+  rejection before backend creation, fail-closed mount-overlap validation
+  against the server-owned projection target, and delivery of the derived
+  projection into the one backend container-create path so every container
+  creation path shares the same helper-socket policy semantics; no separate
+  helper-socket container creator is added;
 - serialization or conflict handling for concurrent commands against one container;
 - bounded timeouts and cancellation behavior;
 - consistent failure and partial-failure semantics;
@@ -165,7 +177,7 @@ ownership, but integrity observation never deletes or repairs anything.
 Competing lifecycle mutations still return a non-queued `409` with the active
 Operation ID and are not reported as `container_busy`.
 
-Completion criterion: every lifecycle mutation has one ownership check, one state-transition contract, one backend execution path, and one externally observable result.
+Completion criterion: every lifecycle mutation has one ownership check, one state-transition contract, one backend execution path, and one externally observable result; and every container creation path reaches one backend execution path with the same helper-socket policy semantics.
 
 ### D3. Session networking
 

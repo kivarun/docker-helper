@@ -297,13 +297,16 @@ The public flags are:
 --shm-size SIZE
 --publish CONTAINER_PORT
 --publish HOST_PORT:CONTAINER_PORT
+--helper-socket
 --json
 ```
 
 `--env`, `--mount`, and `--publish` are repeatable. One port means automatic
 host-port allocation; `HOST_PORT:CONTAINER_PORT` requests one explicit allowed
-host port. Host address and protocol are not CLI inputs. Arguments after `--`
-form the `command` array. Their omission preserves image `CMD`.
+host port. Host address and protocol are not CLI inputs. `--helper-socket` is a
+boolean flag (default false) carrying the same helper-socket capability as the
+Release 2.1.1 `run` flag with identical semantics. Arguments after `--` form
+the `command` array. Their omission preserves image `CMD`.
 
 Create is synchronous and has no `--detach` flag.
 
@@ -343,7 +346,8 @@ The complete JSON shape is:
     {
       "container_port": 9187
     }
-  ]
+  ],
+  "helper_socket": true
 }
 ```
 
@@ -351,7 +355,7 @@ Only `image` is unconditionally required. `session_id` follows the authority
 selection rule above. An omitted `name` follows the immutable image-basename
 derivation rule. Omitted `entrypoint` and `command` preserve the image values;
 an explicitly empty value is rejected rather than interpreted as a request to
-clear an image default.
+clear an image default. `helper_socket` is optional and defaults to false.
 
 `env` adds or replaces image environment entries for this container. Mount
 sources are relative to the Session workspace and targets are absolute
@@ -364,10 +368,36 @@ protocol are not request fields because Release 3 fixes them to `127.0.0.1`
 and TCP. The complete publication list is limited to 16 entries under the
 rules in `release-3-port-publishing.md`.
 
+`helper_socket` carries the same create-time capability as one-shot `run`.
+Every docker-helper workload-container creation path carries the same
+`helper_socket` capability: one-shot `run` preserves the Release 2.1.1
+contract, and Managed Container create adds the same create-time option. The
+canonical contract is unchanged and shared by both paths: CLI
+`--helper-socket`, JSON field `helper_socket`, default false. When true, the
+capability is available only in system mode; the daemon, not the caller,
+selects the host source and the container target; the target remains the
+canonical `/run/docker-helper`; the projection is read-only; the helper
+runtime directory is bound rather than any caller-selected socket or path; the
+ordinary workspace mount policy is not extended and no arbitrary absolute host
+mount appears. Transport reachability never becomes authority: the bearer
+credential must still be delivered separately, and docker-helper never
+reconstructs a Principal or Launcher credential from ownership. A caller
+mount may not shadow or overlap the server-owned projection: an exact target,
+ancestor, or descendant overlap fails closed. User mode returns the existing
+`invalid_helper_socket` rejection before any backend container creation. No
+second spelling or contract is introduced: `helper_api`, `helper_mount`,
+`helper_transport`, and `socket_path` are not valid names for this capability.
+`helper_socket` is accepted only at create; it becomes part of the immutable
+create specification, and start, restart, and exec never accept or change it.
+The domain-level semantics, persistence, and integrity rules are owned by
+`release-3-managed-container-domain.md`.
+
 The request uses the existing 16 KiB body limit, rejects unknown fields, and
-contains no restart policy, named volume, arbitrary host path, network mode,
-additional alias, privilege, capability, user override, or mutable-update
-surface.
+contains no restart policy, named volume, caller-selected arbitrary host
+path, network mode, additional alias, privilege, capability, user override,
+or mutable-update surface. The only host path a `helper_socket` request can
+produce is the fixed server-owned runtime-directory projection described
+above; it is never a caller-supplied mount source.
 
 ### Container representation
 
@@ -583,7 +613,8 @@ Its complete Release 3 request is:
     "memory_bytes": 2147483648,
     "pids": 256,
     "shared_memory_bytes": 268435456
-  }
+  },
+  "helper_socket": false
 }
 ```
 
@@ -591,7 +622,7 @@ Only `image` is required. The request requires a Session bearer; the
 optional `session_id` field only narrows or validates the token's own
 Session. Omitted `entrypoint` and `command` preserve the image values;
 explicitly empty values are rejected rather than interpreted as clearing
-an image default.
+an image default. `helper_socket` is optional and defaults to false.
 `env`, `mounts`, and `limits` use exactly the same normalization, workspace,
 policy, and default rules as Managed Container create.
 
@@ -607,9 +638,19 @@ docker-helper run [--session SESSION_ID] --image IMAGE [flags] -- \
 ```
 
 The supported request flags are `--entrypoint`, `--workdir`, repeatable
-`--env`, repeatable `--mount`, `--cpus`, `--memory`, `--pids-limit`, and
-`--shm-size`. Arguments after `--` form `command`. There is no `--detach` or
-stdin flag.
+`--env`, repeatable `--mount`, `--cpus`, `--memory`, `--pids-limit`,
+`--shm-size`, and `--helper-socket`. Arguments after `--` form `command`.
+There is no `--detach` or stdin flag.
+
+Run compatibility with Release 2.1.1 is inherited, not redesigned: the
+shipped `--helper-socket` flag and `helper_socket` request field remain
+part of this contract with unchanged spellings and semantics, and no HTTP
+or CLI alias is created. The D0 synchronous/Engine-API migration of one-shot
+`run` has no authority to lose the capability: the server-owned
+runtime-directory projection must be expressed through the new Engine create
+configuration exactly as the legacy Docker CLI path expressed it, including
+the system-mode-only requirement and the existing `invalid_helper_socket`
+user-mode rejection before backend container creation.
 
 ## Pull request and CLI
 

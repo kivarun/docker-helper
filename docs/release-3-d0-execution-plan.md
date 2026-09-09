@@ -23,6 +23,26 @@ If `main` moves before an executor starts D0, the executor must compare the new
 head with this baseline and stop on any change touching the owners listed
 below. Replacing the SHA without rechecking owners is not sufficient.
 
+### Baseline re-check after Release 2.1.1
+
+`main` moved past the Phase-0 baseline with the release sync of Release
+2.1.1 (`de2cc2f` merging `88e80c0`, tag `v2.1.1`). The re-check against the
+owner list above found no ownership transfer or removal; the production
+change that touches D0 is on the one-shot `run` path, which is exactly the
+path D0.3b migrates:
+
+- Release 2.1.1 is now inherited production behavior on `main`.
+- `run --helper-socket` (HTTP `helper_socket`) and `run --env-from` are
+  already shipped production contracts, including user-mode fail-closed
+  rejection (`invalid_helper_socket`) before backend container creation.
+- The D0.3b Engine API migration must preserve both: the helper-socket
+  capability is expressed through the new Engine create configuration —
+  the server-owned read-only runtime-directory projection at the canonical
+  `/run/docker-helper` target with fail-closed mount-overlap validation —
+  and must not be lost when the legacy Docker CLI path is removed.
+- `--env-from` stays a CLI-side mechanism delivering environment values
+  through the existing run environment contract; it gains no HTTP field.
+
 `docs/architecture.md` is current-state truth. This document and the other
 `release-3-*` documents describe target Release 3 behavior.
 
@@ -560,6 +580,13 @@ before this path is declared Release-3-ready.
 - migrate one-shot run to the adapter/coordinator;
 - preserve UID/GID, workspace/mount policy, pinning, CA injection, cleanup,
   audit, and exit-code behavior;
+- preserve the inherited Release 2.1.1 run contract: `--helper-socket` /
+  `helper_socket` (system-mode-only, server-owned read-only runtime-directory
+  projection at `/run/docker-helper`, fail-closed caller-mount overlap
+  validation, existing `invalid_helper_socket` user-mode rejection before
+  backend creation) carried through the new Engine create configuration, and
+  the CLI `--env-from` mechanism delivering environment values through the
+  existing run environment contract;
 - remove run Operation identity and polling/cancel API use;
 - keep the path behind the D0 readiness gate until resource hierarchy and
   explicit workload-limit enforcement are implemented together.
@@ -649,6 +676,11 @@ Required migration/regression cases include:
   source;
 - base-image freshness: a re-pushed base at the same tag is refreshed by the
   build (`pull=1`), without helper-side pre-pull;
+- the migrated Engine-backed one-shot run preserves the inherited 2.1.1
+  helper-socket contract: the server-owned projection appears in the Engine
+  create configuration, a caller mount overlapping its target fails closed,
+  user mode rejects `helper_socket` before backend creation, and `--env-from`
+  still resolves CLI-process environment values into the run environment;
 - system/rootless cgroup enforcement before R3 run/container readiness.
 
 ## D0 start gate after Phase 0

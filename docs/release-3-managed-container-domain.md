@@ -17,7 +17,10 @@ A Managed Container:
 - is authorized through persistent docker-helper ownership data, never through Docker labels alone;
 - has runtime state observed from Docker Engine rather than maintained as desired state;
 - is never recreated, restarted, stopped, or adopted merely because stored and observed state differ;
-- has an immutable create specification and is initially stopped.
+- has an immutable create specification and is initially stopped;
+- accepts the optional server-owned `helper_socket` transport projection only
+  at create, where it becomes part of that immutable create specification and
+  is never a caller-selected host mount.
 
 ## Ownership and lifetime
 
@@ -292,8 +295,8 @@ SQLite and Docker Engine cannot participate in one atomic transaction. Managed C
 
 The create sequence is:
 
-1. authorize and validate the complete request, including the explicit or derived name;
-2. resolve Session, workspace, mount, policy, network, limit, and publishing inputs without allocating a Managed Container;
+1. authorize and validate the complete request, including the explicit or derived name and the helper-socket mode contract: `helper_socket` may be requested only in system mode, and user mode returns the existing `invalid_helper_socket` rejection before any backend work;
+2. resolve Session, workspace, mount, policy, network, limit, and publishing inputs without allocating a Managed Container; a requested `helper_socket` is resolved in this same pre-backend phase through mount-overlap validation — a caller mount that exactly targets, is an ancestor of, or is a descendant of the server-owned projection target fails closed — and through server-owned projection derivation that fixes the host source, the container target, and the read-only mode, with no caller-selected path;
 3. resolve the image and, when it is absent locally, complete the synchronous pull under the Request context;
 4. re-resolve the Session and, in one transaction, require it to remain `active`, allocate ManagedContainerID and any port leases, and insert the persistent `creating` management projection;
 5. under the short server-owned context, provision or verify the lazy Session network and create the backend container with the diagnostic name and matching ownership metadata;
@@ -327,6 +330,15 @@ and at most 16 loopback TCP publications. No caller-requested named volumes,
 arbitrary host paths, `volumes-from`, tmpfs surface, or general volume API is
 added. The writable layer and image-declared anonymous volumes survive
 stop/start/restart and are removed with the Managed Container.
+
+`helper_socket` shares the one-shot `run` contract exactly: the same mode
+validation, the same fail-closed mount-overlap rule against the server-owned
+projection target, and the same derived read-only runtime-directory
+projection. Before the provisional commit it is already unambiguous whether
+the capability is permitted and which server-owned projection applies, so
+backend creation and every later lifecycle observation see one fixed create
+policy. The capability carries transport reachability only and never widens
+the workspace mount policy or grants any credential.
 
 ## Restart recovery
 
@@ -366,7 +378,8 @@ supplemented by a read-only integrity scan once per minute. The scan compares
 persistent records with Docker objects in the exact docker-helper ownership
 namespace and verifies backend correlation, immutable ownership metadata,
 Session-network membership and alias, diagnostic backend name, resource policy,
-and verifiable publication data.
+verifiable publication data, and the expected helper-owned `helper_socket`
+projection derived from the persistent policy fact.
 
 The scan detects missing objects, orphans, ownership mismatch, and policy
 mismatch. It emits an operational warning and audit observation only when the
@@ -451,8 +464,16 @@ The persistent record is a management projection, not a normalized copy of the
 Docker create request. It retains identity and ownership, ManagedContainerID
 and internal BackendContainerID correlation, name, image reference and
 immutable image ID, entrypoint, command and workdir, environment key names without
-values, mount descriptors, resource limits, port publications, management
+values, mount descriptors, the `helper_socket` policy fact as a boolean,
+resource limits, port publications, management
 state, runtime-correlation data, and required timestamps.
+
+The `helper_socket` fact records only whether the capability was requested
+(its default is false) so that integrity observation can verify the expected
+helper-owned projection and daemon-restart recovery can restore management
+correlation safely. It stores no caller-controlled host source, because none
+exists: the projection's source, target, and read-only mode are derived by the
+server at create time, and the fact is not a general mount specification.
 
 It does not retain environment values, registry credentials, a secret-bearing Docker create payload, or enough configuration to recreate the container autonomously. Docker Engine remains authoritative for the complete runtime configuration.
 

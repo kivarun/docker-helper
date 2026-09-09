@@ -23,6 +23,14 @@ before executor handoff, compare the new head with the Phase-0 close SHA and
 revalidate every touched owner below; new documentation or instrumentation
 commits do not change the ownership facts. A SHA-only edit is not a rebaseline.
 
+Baseline re-check after the Release 2.1.1 sync (`main` `de2cc2f` merging tag
+`v2.1.1`): no ownership fact in this map changed. One-shot `run` gained the
+shipped `--helper-socket` / `helper_socket` contract (system mode only,
+server-owned read-only runtime-directory projection, user-mode
+`invalid_helper_socket` rejection before backend creation) and the CLI-only
+`--env-from` mechanism. The one-shot `run` row in the backend migration map
+below is revalidated to carry both through the Engine create configuration.
+
 `docs/architecture.md` owns implemented truth. Release-3 documents own target
 behavior.
 
@@ -151,7 +159,7 @@ public classification; adapter methods own only Engine protocol mechanics.
 | pull | Docker CLI + Session `--config` | Engine ImagePull with exact matching Session registry auth |
 | registry login | Docker CLI login writes Session runtime Docker config | adapter validates/login interaction; protected Session credential store remains source for later pull/build |
 | build | Docker CLI + staged context + in-memory Operation | synchronous Engine build; Session auth map for private `FROM`; staging/MAC cleanup stays build-owned |
-| one-shot run | Docker CLI + cidfile + in-memory Operation | synchronous Engine create/start/wait/remove; pins/MAC cleanup stays run-owned |
+| one-shot run | Docker CLI + cidfile + in-memory Operation | synchronous Engine create/start/wait/remove; pins/MAC cleanup stays run-owned; the inherited 2.1.1 helper-socket projection (`helper_socket`, system mode only, user-mode `invalid_helper_socket` fail-closed) and the CLI `--env-from` mechanism must be carried through the new Engine create configuration |
 | checked parent runtime | Docker CLI inspection | later adapter observation with same fail-closed classification |
 | Managed Container lifecycle/logs/exec/network | absent | later packages consume the same adapter; no second Engine client boundary |
 

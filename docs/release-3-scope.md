@@ -69,6 +69,18 @@ Each Managed Container has one immutable Session-local `name`. A caller may prov
 
 Managed Container storage remains bounded by the existing workspace model. Caller-requested named volumes, arbitrary host paths, `volumes-from`, and a general volume API are outside the release. The writable container layer and image-declared anonymous volumes survive stop/start/restart but are removed with the Managed Container or its owning Session.
 
+A Managed Container may, at creation only, request the trusted docker-helper
+runtime projection for transport reachability to the existing helper Unix
+socket: the same `--helper-socket` / `helper_socket` contract one-shot `run`
+already carries since Release 2.1.1. One contract serves both creation paths;
+`build` and `exec` are not container-creation surfaces and gain no flag. The
+projection remains transport, not authority: reachability of the helper socket
+never substitutes for a bearer credential, the daemon rather than the caller
+selects the host source and container target, the projection is read-only, and
+it adds no arbitrary host-mount capability and no widening of the ordinary
+workspace mount policy. Start and restart cannot add or change the projection;
+it is fixed by the immutable create specification.
+
 Its lifetime is bounded by that Session. When the owning Session expires or is explicitly closed, docker-helper tears down its containers, external publications, and Session network before removing the Session record.
 
 Integrity observation never deletes or mutates a container. Explicit Session

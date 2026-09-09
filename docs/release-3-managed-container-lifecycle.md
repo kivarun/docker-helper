@@ -383,6 +383,12 @@ network attachment, limits, and publications are committed and verified. It
 creates no Operation. The transactional and crash-consistency sequence is
 defined in `release-3-managed-container-domain.md`.
 
+`helper_socket` is accepted only at create and becomes immutable workload
+configuration. Start, restart, and other lifecycle Commands neither accept it
+nor override it: they act on the already-created backend container whose
+configuration carries the fixed server-owned projection. Exact flags and JSON
+remain owned by `release-3-api-cli.md`.
+
 ### Start and stop
 
 Start means reach `running`; it resumes a container paused outside
