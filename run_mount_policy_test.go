@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
@@ -790,4 +791,56 @@ func createSystemSession(t *testing.T, app *App) (*CreatedSession, error) {
 		createSelector{principal: username},
 		workspace,
 	)
+}
+
+// TestRunVisibleToLauncherLifecycleInspection proves that a live
+// synchronous run is visible to checked parent-lifecycle inspection through
+// the shared Launcher-scoped admission (no second visibility mechanism):
+// while the Engine work is in flight the Launcher has live work, and after
+// the result it no longer does.
+func TestRunVisibleToLauncherLifecycleInspection(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	app.OperationSupervisor = newOperationSupervisor()
+
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	proceed := make(chan struct{})
+	setupRunSeam(t, app, runSeamOptions{ExitCode: 0, Block: proceed})
+
+	done := make(chan struct{})
+	go func() {
+		w := postRun(t, app, result.Token, map[string]any{"image": "alpine"})
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d", w.Code)
+		}
+		close(done)
+	}()
+
+	// Wait until the Engine work is live, then inspect.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if app.SyncExecutionCoordinator.hasLiveForLauncher(result.Session.LauncherID) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !app.SyncExecutionCoordinator.hasLiveForLauncher(result.Session.LauncherID) {
+		t.Fatal("the live synchronous run must be visible to Launcher lifecycle inspection")
+	}
+
+	close(proceed)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not complete")
+	}
+
+	if app.SyncExecutionCoordinator.hasLiveForLauncher(result.Session.LauncherID) {
+		t.Error("the completed run must no longer be visible to Launcher lifecycle inspection")
+	}
 }

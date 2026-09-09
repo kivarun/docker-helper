@@ -6,10 +6,10 @@ import (
 )
 
 // syncExecutionCoordinator owns admission, cancellation, and bounded shutdown
-// termination for synchronous Engine-backed requests (currently pull and
-// build). It is the synchronous companion of the operationSupervisor:
-// unlike the legacy run operation, a synchronous request has no stored
-// operation record to terminate, so the coordinator tracks the derived
+// termination for synchronous Engine-backed requests (pull, build, and
+// run). It is the synchronous companion of the operationSupervisor:
+// unlike a synchronous request, a legacy operation has a stored record
+// the supervisor terminates; the coordinator instead tracks the derived
 // request contexts that are live right now.
 //
 // Admission and the shutdown gate are one atomic step: admit either derives
