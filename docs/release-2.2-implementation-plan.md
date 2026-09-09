@@ -48,7 +48,11 @@ The design owners are:
 
 ## Phase M0 — mandatory MAC feasibility evidence
 
-**This phase blocks production implementation.**
+**Status: CLOSED (2026-09-09).** M0-A and M0-S have authoritative passing
+evidence in the
+[`release-2.2-mac-enforcement.md`](release-2.2-mac-enforcement.md) closure
+record. Phase 2.2.1 is unblocked; production implementation and system-mode UAT
+are not implied complete by this feasibility result.
 
 Before adding access-mode fields to production config/database/API code, close
 both feasibility rows in `release-2.2-mac-enforcement.md`.
@@ -84,6 +88,19 @@ A global `*_ro_t` / `*_rw_t` relabel and a whole-container read-only process
 domain are not acceptable proofs.
 
 ### M0 outcome
+
+Accepted outcome:
+
+- AppArmor: a helper-owned generated per-workload profile selected explicitly
+  through Docker;
+- SELinux: a helper-owned per-read-only-exposure `bindfs` passthrough
+  projection with the static `docker_helper_ro_projection_t` mount context,
+  while read-write exposures remain direct binds.
+
+The exact run, artifact, commit, cleanup, concurrency, and denial evidence is
+recorded in `release-2.2-mac-enforcement.md`. The SELinux implementation must
+also add and prove the confined projection worker and `/dev/fuse` policy delta;
+substituting another projection mechanism reopens M0-S.
 
 Record for each backend:
 
