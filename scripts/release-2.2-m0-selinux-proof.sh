@@ -398,15 +398,21 @@ RO_PID="$(docker inspect --format '{{.State.Pid}}' "$RO_CONTAINER")"
 RW_PID="$(docker inspect --format '{{.State.Pid}}' "$RW_CONTAINER")"
 RO_PROCESS_CONTEXT="$(tr -d '\0' <"/proc/$RO_PID/attr/current")"
 RW_PROCESS_CONTEXT="$(tr -d '\0' <"/proc/$RW_PID/attr/current")"
+RO_DOCKER_PROCESS_LABEL="$(docker inspect --format '{{.ProcessLabel}}' "$RO_CONTAINER")"
+RW_DOCKER_PROCESS_LABEL="$(docker inspect --format '{{.ProcessLabel}}' "$RW_CONTAINER")"
 [ "$(ctx_type "$RO_PROCESS_CONTEXT")" = docker_helper_container_t ] \
   || fail "RO Session has wrong process type: $RO_PROCESS_CONTEXT"
 [ "$(ctx_type "$RW_PROCESS_CONTEXT")" = docker_helper_container_t ] \
   || fail "RW Session has wrong process type: $RW_PROCESS_CONTEXT"
+[ "$RO_PROCESS_CONTEXT" = "$RO_DOCKER_PROCESS_LABEL" ] \
+  || fail 'RO Session kernel process context differs from Docker ProcessLabel'
+[ "$RW_PROCESS_CONTEXT" = "$RW_DOCKER_PROCESS_LABEL" ] \
+  || fail 'RW Session kernel process context differs from Docker ProcessLabel'
 [ "$(ctx_range "$RO_PROCESS_CONTEXT")" != "$(ctx_range "$RW_PROCESS_CONTEXT")" ] \
   || fail 'concurrent Sessions received the same MCS range'
 
-RO_ROOTFS_CONTEXT="$(stat -Lc '%C' "/proc/$RO_PID/root")"
-RW_ROOTFS_CONTEXT="$(stat -Lc '%C' "/proc/$RW_PID/root")"
+RO_ROOTFS_CONTEXT="$(docker inspect --format '{{.MountLabel}}' "$RO_CONTAINER")"
+RW_ROOTFS_CONTEXT="$(docker inspect --format '{{.MountLabel}}' "$RW_CONTAINER")"
 [ "$(ctx_type "$RO_ROOTFS_CONTEXT")" = container_file_t ] \
   || fail "RO Session rootfs has wrong type: $RO_ROOTFS_CONTEXT"
 [ "$(ctx_type "$RW_ROOTFS_CONTEXT")" = container_file_t ] \
