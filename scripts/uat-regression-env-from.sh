@@ -155,7 +155,7 @@ DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
   dh run --image "$IMAGE" --env "BAD-NAME=from-env" -- sh -ec 'true' \
   >/tmp/uat-reg15-badenv.out 2>/tmp/uat-reg15-badenv.err
 ENV_BAD_RC=$?
-DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
+DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_SENTINEL_SOURCE="$SENTINEL" \
   dh run --image "$IMAGE" --env-from "BAD-NAME=UAT_SENTINEL_SOURCE" -- sh -ec 'true' \
   >/tmp/uat-reg15-badfrom.out 2>/tmp/uat-reg15-badfrom.err
 FROM_BAD_RC=$?

@@ -106,7 +106,7 @@ DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_LAUNCHER_CRED_SOURCE="$CRED_TOK
     # Authorized child-Session operation through the injected socket.
     DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock \
     DOCKER_HELPER_SESSION_TOKEN="$CHILD_TOKEN" \
-      "$DH" run -- true
+      "$DH" run --image alpine:3.24 -- true
 
     # Cleanup through the launcher authority.
     "$DH" session delete \

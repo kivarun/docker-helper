@@ -108,10 +108,12 @@ DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
   -- sh -ec '/workspace/docker-helper pull alpine:3.24' \
   >/tmp/uat-reg16-noauth.out 2>/tmp/uat-reg16-noauth.err
 NOAUTH_RC=$?
-if [ "$NOAUTH_RC" != 0 ] && grep -q "unauthorized" /tmp/uat-reg16-noauth.err 2>/dev/null; then
+# The inner docker-helper's diagnostic travels through the streamed
+# operation output (dh run stdout), not the outer CLI's stderr.
+if [ "$NOAUTH_RC" != 0 ] && grep -qE "401|unauthorized" /tmp/uat-reg16-noauth.out 2>/dev/null; then
   reg_ok "socket without a bearer credential performs no protected operation (unauthorized)"
 else
-  reg_fail "credential-free socket use did not fail closed (rc=$NOAUTH_RC, stderr: $(cat /tmp/uat-reg16-noauth.err 2>/dev/null))"
+  reg_fail "credential-free socket use did not fail closed (rc=$NOAUTH_RC, stdout: $(cat /tmp/uat-reg16-noauth.out 2>/dev/null))"
 fi
 
 # --- runtime directory protection: read-only bind ----------------------------
