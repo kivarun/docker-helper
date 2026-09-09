@@ -41,11 +41,12 @@ type principalChangedResponse struct {
 }
 
 // principalToResponse is the single projection owner for the public
-// Principal resource document (create and show). allowed_roots is always
+// Principal resource document (create and show). allowed_roots is the
+// 2.1 path-only projection of the canonical rich entries and is always
 // serialized as a JSON array: zero stored roots project the empty array,
 // never null. Internal nil slices are not mutated.
 func principalToResponse(p *PrincipalWithRoots) principalResponse {
-	roots := p.AllowedRoots
+	roots := allowedRootPaths(p.AllowedRoots)
 	if roots == nil {
 		roots = []string{}
 	}

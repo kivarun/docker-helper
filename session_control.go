@@ -140,22 +140,22 @@ type createSelector struct {
 }
 
 // sessionOwnershipSnapshot is a consistent single-transaction projection of a
-// Launcher and its owning Principal (roots and scope) used for Session-creation
-// admission. It is deliberately a snapshot, not a live query: the admission
-// policy must observe one consistent Principal/Launcher state, read in its own
-// transaction. Persistence later conditionally re-validates (via a
-// conditional INSERT/SELECT) that the Launcher and Principal still exist and
-// remain enabled before inserting the Session.
+// Launcher and its owning Principal (allowed-root entries and scope) used for
+// Session-creation admission. It is deliberately a snapshot, not a live query:
+// the admission policy must observe one consistent Principal/Launcher state,
+// read in its own transaction. Persistence later conditionally re-validates
+// (via a conditional INSERT/SELECT) that the Launcher and Principal still
+// exist and remain enabled before inserting the Session.
 type sessionOwnershipSnapshot struct {
 	launcherID       string
 	launcherName     string
 	launcherEnabled  bool
 	launcherScope    LauncherScopeMode
-	launcherRoots    []string
+	launcherRoots    []AllowedRootEntry
 	principalID      int64
 	principalName    string
 	principalEnabled bool
-	principalRoots   []string
+	principalRoots   []AllowedRootEntry
 }
 
 // resolveSessionOwnershipSnapshot loads a Launcher and its Principal (with
@@ -209,19 +209,20 @@ func loadSessionOwnershipSnapshot(q txQuerier, launcherID string) (*sessionOwner
 
 	if snap.launcherScope == LauncherScopeRestricted {
 		rows, err := q.Query(
-			`SELECT root_path FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`,
+			`SELECT root_path, access FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`,
 			launcherID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("cannot query launcher allowed roots: %w", err)
 		}
 		for rows.Next() {
-			var root string
-			if err := rows.Scan(&root); err != nil {
+			var rootPath string
+			var access string
+			if err := rows.Scan(&rootPath, &access); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("cannot scan launcher allowed root: %w", err)
 			}
-			snap.launcherRoots = append(snap.launcherRoots, root)
+			snap.launcherRoots = append(snap.launcherRoots, AllowedRootEntry{Path: rootPath, Access: AllowedRootAccess(access)})
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -230,19 +231,20 @@ func loadSessionOwnershipSnapshot(q txQuerier, launcherID string) (*sessionOwner
 	}
 
 	rows, err := q.Query(
-		`SELECT root_path FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
+		`SELECT root_path, access FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
 		snap.principalID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot query principal allowed roots: %w", err)
 	}
 	for rows.Next() {
-		var root string
-		if err := rows.Scan(&root); err != nil {
+		var rootPath string
+		var access string
+		if err := rows.Scan(&rootPath, &access); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("cannot scan principal allowed root: %w", err)
 		}
-		snap.principalRoots = append(snap.principalRoots, root)
+		snap.principalRoots = append(snap.principalRoots, AllowedRootEntry{Path: rootPath, Access: AllowedRootAccess(access)})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -270,17 +272,17 @@ var ErrLauncherUnavailable = errors.New("launcher unavailable")
 //     against the current effective Principal ceiling (rejecting stale or
 //     directly-injected out-of-ceiling roots), then intersects.
 func computeLauncherEffectiveRoots(globalAllowedRoots []string, snap *sessionOwnershipSnapshot, daemonOwnerPrincipalID int64, userMode bool) ([]string, error) {
-	principalCeiling := computeEffectivePrincipalRoots(globalAllowedRoots, snap.principalRoots, snap.principalID, daemonOwnerPrincipalID, userMode)
+	principalCeiling := computeEffectivePrincipalRoots(globalAllowedRoots, allowedRootPaths(snap.principalRoots), snap.principalID, daemonOwnerPrincipalID, userMode)
 
 	if snap.launcherScope == LauncherScopeRestricted {
 		// Revalidate stored roots against the current ceiling; fail closed on
 		// stale or injected out-of-ceiling roots.
-		for _, stored := range snap.launcherRoots {
+		for _, stored := range allowedRootPaths(snap.launcherRoots) {
 			if !isWithinAnyAllowedRoot(stored, principalCeiling) {
 				return nil, ErrLauncherUnavailable
 			}
 		}
-		return intersectAllowedRootScopes(principalCeiling, snap.launcherRoots), nil
+		return intersectAllowedRootScopes(principalCeiling, allowedRootPaths(snap.launcherRoots)), nil
 	}
 	return principalCeiling, nil
 }
@@ -313,11 +315,34 @@ func resolveAllowedRootPaths(roots []string) ([]string, error) {
 	return out, nil
 }
 
+// resolveAllowedRootEntries returns each configured global allowed-root entry
+// with its path symlink-resolved (the same resolution semantics as
+// resolveAllowedRootPaths), preserving the canonical access mode; resolution
+// failure of any root fails closed with an error.
+func resolveAllowedRootEntries(entries []AllowedRootEntry) ([]AllowedRootEntry, error) {
+	out := make([]AllowedRootEntry, 0, len(entries))
+	for _, e := range entries {
+		resolved, err := filepath.EvalSymlinks(e.Path)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve allowed root %q: %w: %w", e.Path, err, ErrSystem)
+		}
+		out = append(out, AllowedRootEntry{Path: resolved, Access: e.Access})
+	}
+	return out, nil
+}
+
 // appResolvedGlobalRoots returns the canonicalized global allowed roots (the
 // config owner). Each root is symlink-resolved; resolution failure of any root
 // fails closed with an error.
 func (a *App) appResolvedGlobalRoots() ([]string, error) {
-	return resolveAllowedRootPaths(a.getConfig().AllowedRoots)
+	return resolveAllowedRootPaths(allowedRootPaths(a.getConfig().AllowedRoots))
+}
+
+// appResolvedGlobalRootEntries returns the canonical global allowed-root
+// entries (the config owner) with each path symlink-resolved; resolution
+// failure of any root fails closed with an error.
+func (a *App) appResolvedGlobalRootEntries() ([]AllowedRootEntry, error) {
+	return resolveAllowedRootEntries(a.getConfig().AllowedRoots)
 }
 
 // resolveCreateLauncher maps an authenticated authority and create selectors

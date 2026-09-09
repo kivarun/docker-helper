@@ -340,7 +340,7 @@ func configAllowedRootList(stdout, stderr io.Writer) int {
 		return 1
 	}
 	for _, r := range requestedRoots {
-		fmt.Fprintln(stdout, r)
+		fmt.Fprintln(stdout, r.Path)
 	}
 	return 0
 }
@@ -406,19 +406,19 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		// Build removable roots with identity resolution.
 		roots := make([]removableRoot, 0, len(storedRoots))
 		for _, r := range storedRoots {
-			if r == "" || !filepath.IsAbs(r) {
-				return configMutationResult{}, fmt.Errorf("invalid stored root %q", r)
+			if r.Path == "" || !filepath.IsAbs(r.Path) {
+				return configMutationResult{}, fmt.Errorf("invalid stored root %q", r.Path)
 			}
-			abs, err := filepath.Abs(r)
+			abs, err := filepath.Abs(r.Path)
 			if err != nil {
-				return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r, err)
+				return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r.Path, err)
 			}
 			identity, err := filepath.EvalSymlinks(abs)
 			if err != nil {
 				if os.IsNotExist(err) {
 					identity = filepath.Clean(abs)
 				} else {
-					return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r, err)
+					return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r.Path, err)
 				}
 			}
 			roots = append(roots, removableRoot{Stored: r, Identity: identity})
@@ -426,7 +426,7 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 
 		// Find and remove the root (match by identity).
 		found := false
-		newStored := make([]string, 0, len(roots))
+		newStored := make([]AllowedRootEntry, 0, len(roots))
 		for _, rr := range roots {
 			if rr.Identity == requestedIdentity {
 				found = true
@@ -782,7 +782,7 @@ func addAllowedRootToConfig(canonical string, stdout, stderr io.Writer) int {
 		// Check if already present.
 		present := false
 		for _, r := range existingRoots {
-			if r == canonical {
+			if r.Path == canonical {
 				present = true
 				break
 			}
@@ -801,8 +801,9 @@ func addAllowedRootToConfig(canonical string, stdout, stderr io.Writer) int {
 			}, nil
 		}
 
-		// Add new root to canonical roots list.
-		rawBytes, _ := json.Marshal(append(existingRoots, canonical))
+		// Persist the canonical rich entry list. 2.2 writes always emit the
+		// canonical object form.
+		rawBytes, _ := json.Marshal(append(existingRoots, allowedRootEntry(canonical)))
 		raw["allowed_roots"] = rawBytes
 
 		return configMutationResult{
@@ -1053,8 +1054,8 @@ func formatRollbackReloadError(r reloadOutcome) string {
 
 // removableRoot separates stored representation from comparison identity.
 type removableRoot struct {
-	Stored   string // original absolute stored spelling
-	Identity string // EvalSymlinks result or cleaned abs on ENOENT
+	Stored   AllowedRootEntry // canonical stored entry
+	Identity string           // EvalSymlinks result or cleaned abs on ENOENT
 }
 
 // trustedCAPreflightWarning is printed to stderr when a successful system-mode
@@ -1128,7 +1129,7 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 			fmt.Fprintf(stderr, "error: cannot canonicalize allowed_root %q: %v\n", legacyVal, canonErr)
 			return 1
 		}
-		newRoots, _ := json.Marshal([]string{canon})
+		newRoots, _ := json.Marshal([]AllowedRootEntry{allowedRootEntry(canon)})
 		raw["allowed_roots"] = newRoots
 		delete(raw, "allowed_root")
 		migrated = true

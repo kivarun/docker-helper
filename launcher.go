@@ -40,7 +40,7 @@ type Launcher struct {
 }
 
 // LauncherWithPrincipal is a Launcher projection carrying its owning Principal
-// name and its canonical allowed roots (empty for inherit scope).
+// name and its canonical allowed-root entries (empty for inherit scope).
 type LauncherWithPrincipal struct {
 	ID            string
 	PrincipalID   int64
@@ -48,7 +48,7 @@ type LauncherWithPrincipal struct {
 	Name          string
 	Enabled       bool
 	ScopeMode     LauncherScopeMode
-	AllowedRoots  []string
+	AllowedRoots  []AllowedRootEntry
 	CreatedAt     time.Time
 }
 
@@ -93,10 +93,11 @@ var (
 	ErrLauncherNameRequiresPrincipal = errors.New("launcher name requires principal context")
 )
 
-// readLauncherAllowedRoots returns the canonical stored roots of a Launcher.
-func readLauncherAllowedRoots(db *sql.DB, launcherID string) ([]string, error) {
+// readLauncherAllowedRoots returns the canonical stored allowed-root entries
+// of a Launcher.
+func readLauncherAllowedRoots(db *sql.DB, launcherID string) ([]AllowedRootEntry, error) {
 	rows, err := db.Query(
-		`SELECT root_path FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`,
+		`SELECT root_path, access FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`,
 		launcherID,
 	)
 	if err != nil {
@@ -104,13 +105,14 @@ func readLauncherAllowedRoots(db *sql.DB, launcherID string) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var roots []string
+	var roots []AllowedRootEntry
 	for rows.Next() {
-		var root string
-		if err := rows.Scan(&root); err != nil {
+		var rootPath string
+		var access string
+		if err := rows.Scan(&rootPath, &access); err != nil {
 			return nil, fmt.Errorf("cannot scan launcher allowed root: %w", err)
 		}
-		roots = append(roots, root)
+		roots = append(roots, AllowedRootEntry{Path: rootPath, Access: AllowedRootAccess(access)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate launcher allowed roots: %w", err)
@@ -302,10 +304,11 @@ func queryLaunchersForScope(db *sql.DB, principalID *int64, launcherSelector str
 	return []LauncherWithPrincipal{*l}, nil
 }
 
-// readPrincipalAllowedRoots returns the canonical stored roots of a Principal.
-func readPrincipalAllowedRoots(db *sql.DB, principalID int64) ([]string, error) {
+// readPrincipalAllowedRoots returns the canonical stored allowed-root entries
+// of a Principal.
+func readPrincipalAllowedRoots(db *sql.DB, principalID int64) ([]AllowedRootEntry, error) {
 	rows, err := db.Query(
-		`SELECT root_path FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
+		`SELECT root_path, access FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
 		principalID,
 	)
 	if err != nil {
@@ -313,13 +316,14 @@ func readPrincipalAllowedRoots(db *sql.DB, principalID int64) ([]string, error) 
 	}
 	defer rows.Close()
 
-	var roots []string
+	var roots []AllowedRootEntry
 	for rows.Next() {
-		var root string
-		if err := rows.Scan(&root); err != nil {
+		var rootPath string
+		var access string
+		if err := rows.Scan(&rootPath, &access); err != nil {
 			return nil, fmt.Errorf("cannot scan principal allowed root: %w", err)
 		}
-		roots = append(roots, root)
+		roots = append(roots, AllowedRootEntry{Path: rootPath, Access: AllowedRootAccess(access)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate principal allowed roots: %w", err)
@@ -364,7 +368,7 @@ func computeEffectivePrincipalRoots(globalRoots []string, storedPrincipalRoots [
 // resolvePrincipalEffectiveRootsSnapshot.
 func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error) {
 	cfg := a.getConfig()
-	globalRoots, err := resolveAllowedRootPaths(cfg.AllowedRoots)
+	globalRoots, err := resolveAllowedRootPaths(allowedRootPaths(cfg.AllowedRoots))
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +381,7 @@ func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error
 	if userMode && a.userModeDefault != nil {
 		daemonOwnerPrincipalID = a.userModeDefault.principalID
 	}
-	return computeEffectivePrincipalRoots(globalRoots, stored, principalID, daemonOwnerPrincipalID, userMode), nil
+	return computeEffectivePrincipalRoots(globalRoots, allowedRootPaths(stored), principalID, daemonOwnerPrincipalID, userMode), nil
 }
 
 // principalEffectiveRootsSnapshot is the immutable read-only projection of one
@@ -426,17 +430,18 @@ func (a *App) resolvePrincipalEffectiveRootsSnapshot(auth *operatorAuthority, us
 
 // validateLauncherAllowedRoots canonicalizes each root using the same canonical
 // path semantics as Principal roots and requires each to be under the current
-// effective Principal roots. Returns the deduplicated canonical set in
-// deterministic lexical order, so the persisted root set and every projection
-// constructed from it (create and scope-replace responses) are one canonical
-// representation — the same order a fresh DB/show projection of the committed
-// state returns.
-func validateLauncherAllowedRoots(roots []string, effectivePrincipalRoots []string) ([]string, error) {
+// effective Principal roots. The 2.1 path-only request form carries no access
+// value, so every requested root is the canonical read_write grant. Returns
+// the deduplicated canonical entry set in deterministic lexical order, so the
+// persisted root set and every projection constructed from it (create and
+// scope-replace responses) are one canonical representation — the same order
+// a fresh DB/show projection of the committed state returns.
+func validateLauncherAllowedRoots(roots []string, effectivePrincipalRoots []string) ([]AllowedRootEntry, error) {
 	if len(roots) == 0 {
 		return nil, fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
 	}
 	seen := make(map[string]bool)
-	var canonical []string
+	var canonical []AllowedRootEntry
 	for _, r := range roots {
 		resolved, err := validatePrincipalAllowedRootForAdd(r)
 		if err != nil {
@@ -447,10 +452,10 @@ func validateLauncherAllowedRoots(roots []string, effectivePrincipalRoots []stri
 		}
 		if !seen[resolved] {
 			seen[resolved] = true
-			canonical = append(canonical, resolved)
+			canonical = append(canonical, allowedRootEntry(resolved))
 		}
 	}
-	sort.Strings(canonical)
+	sort.Slice(canonical, func(i, j int) bool { return canonical[i].Path < canonical[j].Path })
 	return canonical, nil
 }
 
@@ -511,7 +516,7 @@ func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherSc
 	}
 	principalName := owner.Username
 
-	var canonicalRoots []string
+	var canonicalRoots []AllowedRootEntry
 	if scope == LauncherScopeRestricted {
 		if len(allowedRoots) == 0 {
 			return nil, nil, "", fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
@@ -554,8 +559,8 @@ func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherSc
 	if scope == LauncherScopeRestricted {
 		for _, root := range canonicalRoots {
 			if _, err := tx.Exec(
-				`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`,
-				id, root,
+				`INSERT INTO launcher_allowed_roots (launcher_id, root_path, access) VALUES (?, ?, ?)`,
+				id, root.Path, string(root.Access),
 			); err != nil {
 				return nil, nil, "", fmt.Errorf("cannot add launcher allowed root: %w", err)
 			}
@@ -616,7 +621,7 @@ func replaceLauncherScope(db *sql.DB, current *LauncherWithPrincipal, scope Laun
 		return nil, fmt.Errorf("unknown scope %q: %w", scope, ErrInvalidScope)
 	}
 
-	var canonicalRoots []string
+	var canonicalRoots []AllowedRootEntry
 	var err error
 	if scope == LauncherScopeRestricted {
 		if len(allowedRoots) == 0 {
@@ -647,8 +652,8 @@ func replaceLauncherScope(db *sql.DB, current *LauncherWithPrincipal, scope Laun
 	}
 	for _, root := range canonicalRoots {
 		if _, err := tx.Exec(
-			`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`,
-			current.ID, root,
+			`INSERT INTO launcher_allowed_roots (launcher_id, root_path, access) VALUES (?, ?, ?)`,
+			current.ID, root.Path, string(root.Access),
 		); err != nil {
 			return nil, fmt.Errorf("cannot add launcher allowed root: %w", err)
 		}
@@ -696,8 +701,8 @@ func addLauncherAllowedRoot(db *sql.DB, current *LauncherWithPrincipal, rootPath
 	defer tx.Rollback()
 
 	result, err := tx.Exec(
-		`INSERT OR IGNORE INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`,
-		current.ID, resolved,
+		`INSERT OR IGNORE INTO launcher_allowed_roots (launcher_id, root_path, access) VALUES (?, ?, ?)`,
+		current.ID, resolved, string(AllowedRootAccessReadWrite),
 	)
 	if err != nil {
 		return nil, false, "", fmt.Errorf("cannot add launcher allowed root: %w", err)
@@ -728,8 +733,10 @@ func addLauncherAllowedRoot(db *sql.DB, current *LauncherWithPrincipal, rootPath
 		// The committed projection carries the canonical lexical root
 		// ordering a fresh readLauncherAllowedRoots projection has, composed
 		// without any post-commit DB read.
-		committed.AllowedRoots = append(slices.Clone(current.AllowedRoots), resolved)
-		slices.Sort(committed.AllowedRoots)
+		committed.AllowedRoots = append(slices.Clone(current.AllowedRoots), allowedRootEntry(resolved))
+		sort.Slice(committed.AllowedRoots, func(i, j int) bool {
+			return committed.AllowedRoots[i].Path < committed.AllowedRoots[j].Path
+		})
 	}
 	return committed, affected > 0, resolved, nil
 }

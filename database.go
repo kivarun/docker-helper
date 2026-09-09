@@ -56,8 +56,10 @@ func initializeDatabase(db *sql.DB) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			principal_id INTEGER NOT NULL,
 			root_path TEXT NOT NULL,
+			access TEXT NOT NULL,
 			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
-			UNIQUE(principal_id, root_path)
+			UNIQUE(principal_id, root_path),
+			CHECK (access IN ('read_write', 'read_only'))
 		);
 
 		CREATE TABLE IF NOT EXISTS launchers (
@@ -81,8 +83,10 @@ func initializeDatabase(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS launcher_allowed_roots (
 			launcher_id TEXT NOT NULL,
 			root_path TEXT NOT NULL,
+			access TEXT NOT NULL,
 			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
-			UNIQUE (launcher_id, root_path)
+			UNIQUE (launcher_id, root_path),
+			CHECK (access IN ('read_write', 'read_only'))
 		);
 
 		CREATE TABLE IF NOT EXISTS credentials (
@@ -162,6 +166,18 @@ func initializeDatabase(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("cannot create active credential unique index: %w", err)
+	}
+
+	// Release 2.2 migration: allowed-root persistence gains the canonical
+	// access column backed by a real CHECK constraint. Every legacy path-only
+	// row (the entire pre-2.2 state) becomes read_write. Each table is
+	// classified independently, so a startup interrupted between the two
+	// rebuilds resumes cleanly; already-final tables are never mutated.
+	if err := migrateAllowedRootsTableToAccessSchema(db, "principal_allowed_roots", "principal_id", "principals", true); err != nil {
+		return err
+	}
+	if err := migrateAllowedRootsTableToAccessSchema(db, "launcher_allowed_roots", "launcher_id", "launchers", false); err != nil {
+		return err
 	}
 
 	// Additive migration: mac_boundaries tracks docker-helper-owned MAC boundaries.
@@ -1315,8 +1331,327 @@ func migrateCredentialsToConcreteOwnerSchema(db *sql.DB) error {
 	return nil
 }
 
-// cleanupExpiredSessions removes expired session rows from the database.
+// allowedRootAccessCheck is the canonical allowed-root access CHECK
+// expression, normalized (lowercase, whitespace-stripped) as produced by
+// sqliteCheckExpressions from the declared schema: access is exactly
+// read_write or read_only.
+const allowedRootAccessCheck = "accessin('read_write','read_only')"
+
+// allowedRootsSchemaClass classifies one allowed-roots table shape. Ownership
+// is exactly one of: legacy path-only (the entire pre-2.2 state), final
+// canonical access-bearing schema, or unsupported (any other shape => fail
+// closed).
+type allowedRootsSchemaClass int
+
+const (
+	// allowedRootsSchemaUnsupported is any unexpected shape (extra or missing
+	// columns, a missing/wrong/extra CHECK, a missing owner/path unique
+	// invariant, or a non-canonical foreign key). Initialization fails closed
+	// rather than guessing at policy state.
+	allowedRootsSchemaUnsupported allowedRootsSchemaClass = iota
+	// allowedRootsSchemaLegacyPathOnly is the exact pre-2.2 path-only shape
+	// that migrateAllowedRootsTableToAccessSchema rebuilds.
+	allowedRootsSchemaLegacyPathOnly
+	// allowedRootsSchemaFinal is the canonical access-bearing schema with the
+	// canonical CHECK constraint.
+	allowedRootsSchemaFinal
+)
+
+// unsupportedAllowedRootsSchema returns a fail-closed error for an
+// unrecognized allowed-roots table schema. The detail is a narrow
+// human-readable reason; no destructive normalization is attempted.
+func unsupportedAllowedRootsSchema(table, detail string) error {
+	return fmt.Errorf("unsupported %s schema: %s", table, detail)
+}
+
+// allowedRootsColumn captures the schema fields of one allowed-roots column.
+type allowedRootsColumn struct {
+	name    string
+	notNull bool
+	pk      int
+}
+
+// readAllowedRootsColumns returns the named table's columns in declared order.
+func readAllowedRootsColumns(db *sql.DB, table string) ([]allowedRootsColumn, error) {
+	rows, err := db.Query(
+		`SELECT name, "notnull", pk FROM pragma_table_info(?) ORDER BY cid`,
+		table,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s columns: %w", table, err)
+	}
+	defer rows.Close()
+
+	var cols []allowedRootsColumn
+	for rows.Next() {
+		var c allowedRootsColumn
+		if err := rows.Scan(&c.name, &c.notNull, &c.pk); err != nil {
+			return nil, fmt.Errorf("cannot scan %s column: %w", table, err)
+		}
+		cols = append(cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s columns: %w", table, err)
+	}
+	return cols, nil
+}
+
+// allowedRootsFK captures one foreign key declared on an allowed-roots table.
+type allowedRootsFK struct {
+	table    string
+	from     string
+	to       string
+	onDelete string
+}
+
+// readAllowedRootsForeignKeys returns all foreign keys declared on the named
+// allowed-roots table.
+func readAllowedRootsForeignKeys(db *sql.DB, table string) ([]allowedRootsFK, error) {
+	rows, err := db.Query(
+		`SELECT "table", "from", "to", "on_delete" FROM pragma_foreign_key_list(?)`,
+		table,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s foreign keys: %w", table, err)
+	}
+	defer rows.Close()
+
+	var out []allowedRootsFK
+	for rows.Next() {
+		var fk allowedRootsFK
+		if err := rows.Scan(&fk.table, &fk.from, &fk.to, &fk.onDelete); err != nil {
+			return nil, fmt.Errorf("cannot scan %s foreign key: %w", table, err)
+		}
+		out = append(out, fk)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s foreign keys: %w", table, err)
+	}
+	return out, nil
+}
+
+// classifyAllowedRootsTable positively recognizes the supported shapes of one
+// allowed-roots table from SQLite semantic metadata. A malformed table — an
+// unexpected column set, a broken owner/path nullability/PK/unique structure,
+// a non-canonical foreign key, an access column without the canonical CHECK
+// constraint, or an unexpected CHECK on the legacy path-only shape — is
+// rejected as unsupported rather than silently accepted or destructively
+// normalized. withID selects the principal table's AUTOINCREMENT id column;
+// the launcher table has no id column.
+func classifyAllowedRootsTable(db *sql.DB, table, ownerCol, ownerTable string, withID bool) (allowedRootsSchemaClass, error) {
+	cols, err := readAllowedRootsColumns(db, table)
+	if err != nil {
+		return allowedRootsSchemaUnsupported, err
+	}
+	colSet := make(map[string]allowedRootsColumn, len(cols))
+	for _, c := range cols {
+		colSet[c.name] = c
+	}
+
+	// Every supported generation shares the owner/path column semantics:
+	// the optional id is the primary key, and the owner and root_path
+	// columns are NOT NULL.
+	if withID {
+		idCol, ok := colSet["id"]
+		if !ok {
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, `missing column "id"`)
+		}
+		if idCol.pk != 1 {
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "id is not the primary key")
+		}
+	}
+	for _, name := range []string{ownerCol, "root_path"} {
+		c, ok := colSet[name]
+		if !ok {
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, fmt.Sprintf("missing column %q", name))
+		}
+		if !c.notNull {
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, fmt.Sprintf("column %q must be NOT NULL", name))
+		}
+	}
+
+	// Exactly one canonical FK: the owner reference with ON DELETE CASCADE.
+	fks, err := readAllowedRootsForeignKeys(db, table)
+	if err != nil {
+		return allowedRootsSchemaUnsupported, err
+	}
+	if len(fks) != 1 ||
+		fks[0] != (allowedRootsFK{table: ownerTable, from: ownerCol, to: "id", onDelete: "CASCADE"}) {
+		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+			fmt.Sprintf("expected exactly one %s(%s) -> %s(id) foreign key with ON DELETE CASCADE", table, ownerCol, ownerTable))
+	}
+
+	// Exactly one canonical unique index on (owner, root_path): one policy
+	// entry per canonical path under one owner.
+	indexRows, err := db.Query(
+		`SELECT name, "partial" FROM pragma_index_list(?) WHERE "unique"=1 AND "origin"!='pk'`,
+		table,
+	)
+	if err != nil {
+		return allowedRootsSchemaUnsupported, fmt.Errorf("cannot read %s unique indexes: %w", table, err)
+	}
+	var uniqueIndexes [][]string
+	for indexRows.Next() {
+		var name string
+		var partial int
+		if err := indexRows.Scan(&name, &partial); err != nil {
+			indexRows.Close()
+			return allowedRootsSchemaUnsupported, fmt.Errorf("cannot scan %s unique index: %w", table, err)
+		}
+		if partial == 1 {
+			indexRows.Close()
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "unexpected partial unique index")
+		}
+		indexCols, err := credentialsIndexColumns(db, name)
+		if err != nil {
+			indexRows.Close()
+			return allowedRootsSchemaUnsupported, err
+		}
+		uniqueIndexes = append(uniqueIndexes, indexCols)
+	}
+	if err := indexRows.Err(); err != nil {
+		indexRows.Close()
+		return allowedRootsSchemaUnsupported, fmt.Errorf("iterate %s unique indexes: %w", table, err)
+	}
+	indexRows.Close()
+	if len(uniqueIndexes) != 1 {
+		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+			fmt.Sprintf("expected exactly one unique (%s, root_path) index, found %d", ownerCol, len(uniqueIndexes)))
+	}
+	if len(uniqueIndexes[0]) != 2 || uniqueIndexes[0][0] != ownerCol || uniqueIndexes[0][1] != "root_path" {
+		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+			fmt.Sprintf("unique index is not (%s, root_path)", ownerCol))
+	}
+
+	// CHECK constraints are recognized only through the stored table DDL.
+	var ddl sql.NullString
+	err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&ddl)
+	if err != nil {
+		return allowedRootsSchemaUnsupported, fmt.Errorf("cannot inspect %s table definition: %w", table, err)
+	}
+	if !ddl.Valid || ddl.String == "" {
+		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "table definition unavailable")
+	}
+	checks := sqliteCheckExpressions(ddl.String)
+
+	if _, hasAccess := colSet["access"]; hasAccess {
+		// Final schema: exactly the owner/path/access column set with the
+		// canonical access CHECK.
+		expectedCols := 3
+		if withID {
+			expectedCols = 4
+		}
+		if len(cols) != expectedCols {
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "unexpected column set")
+		}
+		if !colSet["access"].notNull {
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, `column "access" must be NOT NULL`)
+		}
+		if len(checks) != 1 {
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+				fmt.Sprintf("expected exactly one access check constraint, found %d", len(checks)))
+		}
+		if checks[0] != allowedRootAccessCheck {
+			return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "non-canonical allowed-root access check")
+		}
+		return allowedRootsSchemaFinal, nil
+	}
+
+	// Legacy path-only schema: exactly the pre-2.2 column set with no CHECK
+	// constraints. Any other shape is unsupported hand-mutated state.
+	expectedCols := 2
+	if withID {
+		expectedCols = 3
+	}
+	if len(cols) != expectedCols {
+		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table, "unexpected column set")
+	}
+	if len(checks) != 0 {
+		return allowedRootsSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+			fmt.Sprintf("expected no check constraints on the legacy path-only schema, found %d", len(checks)))
+	}
+	return allowedRootsSchemaLegacyPathOnly, nil
+}
+
+// allowedRootsNewTableSQL returns the canonical access-bearing CREATE TABLE
+// statement for the _new rebuild target of one allowed-roots table.
+func allowedRootsNewTableSQL(table, ownerCol, ownerTable string, withID bool) string {
+	idDef := ""
+	if withID {
+		idDef = `id INTEGER PRIMARY KEY AUTOINCREMENT,
+			`
+	}
+	return fmt.Sprintf(`CREATE TABLE %s_new (
+			%s%s TEXT NOT NULL,
+			root_path TEXT NOT NULL,
+			access TEXT NOT NULL,
+			FOREIGN KEY (%s) REFERENCES %s(id) ON DELETE CASCADE,
+			UNIQUE (%s, root_path),
+			CHECK (access IN ('read_write', 'read_only'))
+		)`, table, idDef, ownerCol, ownerCol, ownerTable, ownerCol)
+}
+
+// migrateAllowedRootsTableToAccessSchema migrates one allowed-roots table to
+// the canonical access-bearing schema in one atomic transaction. Every
+// legacy path-only row is preserved exactly with access read_write; the
+// owner/path unique identity and the owner FK are re-declared by the rebuilt
+// table. Plain INSERT (never INSERT OR IGNORE) means any conflicting or
+// orphaned source row aborts the migration and startup fails closed instead
+// of silently dropping policy state.
 //
+// The schema is classified before any mutation. A final schema is accepted
+// unchanged (idempotent); the legacy path-only shape is rebuilt; any other
+// shape fails closed and is never destructively normalized. A crash before
+// commit leaves the old table usable; a crash after commit leaves the final
+// table usable and the next call classifies it as final.
+func migrateAllowedRootsTableToAccessSchema(db *sql.DB, table, ownerCol, ownerTable string, withID bool) error {
+	class, err := classifyAllowedRootsTable(db, table, ownerCol, ownerTable, withID)
+	if err != nil {
+		return err
+	}
+	if class == allowedRootsSchemaFinal {
+		// Already at the canonical access-bearing schema; never mutate it.
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("cannot begin %s migration: %w", table, err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(allowedRootsNewTableSQL(table, ownerCol, ownerTable, withID)); err != nil {
+		return fmt.Errorf("cannot create new %s table: %w", table, err)
+	}
+
+	selectCols := fmt.Sprintf("%s, root_path", ownerCol)
+	insertCols := fmt.Sprintf("%s, root_path, access", ownerCol)
+	if withID {
+		selectCols = fmt.Sprintf("id, %s, root_path", ownerCol)
+		insertCols = fmt.Sprintf("id, %s, root_path, access", ownerCol)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(
+		`INSERT INTO %s_new (%s) SELECT %s, 'read_write' FROM %s`,
+		table, insertCols, selectCols, table,
+	)); err != nil {
+		return fmt.Errorf("cannot migrate %s data: %w", table, err)
+	}
+
+	if _, err := tx.Exec(fmt.Sprintf(`DROP TABLE %s`, table)); err != nil {
+		return fmt.Errorf("cannot drop old %s table: %w", table, err)
+	}
+
+	if _, err := tx.Exec(fmt.Sprintf(`ALTER TABLE %s_new RENAME TO %s`, table, table)); err != nil {
+		return fmt.Errorf("cannot rename %s table: %w", table, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cannot commit %s migration: %w", table, err)
+	}
+	return nil
+}
+
+// cleanupExpiredSessions removes expired session rows from the database.
 // Precondition: the caller must ensure no live daemon instance is running.
 // During daemon startup, this is guaranteed because startup holds the daemon
 // instance lock and calls this function before creating the MAC coordinator.

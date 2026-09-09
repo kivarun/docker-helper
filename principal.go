@@ -28,7 +28,7 @@ type Principal struct {
 
 type PrincipalWithRoots struct {
 	Principal
-	AllowedRoots []string
+	AllowedRoots []AllowedRootEntry
 }
 
 // OSUserLookup can be replaced in tests.
@@ -122,7 +122,7 @@ func findPrincipalIDByUsername(db *sql.DB, username string) (int, error) {
 // ErrPrincipalRootOutsideGlobal is returned when a principal root is outside global roots.
 var ErrPrincipalRootOutsideGlobal = errors.New("principal root outside global allowed roots")
 
-func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (*PrincipalWithRoots, error) {
+func createPrincipal(db *sql.DB, username string, globalAllowedRoots []AllowedRootEntry) (*PrincipalWithRoots, error) {
 	p, _, _, err := createPrincipalWithOptionalCredential(db, username, globalAllowedRoots, false)
 	return p, err
 }
@@ -138,7 +138,7 @@ func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (
 // launcher allowed roots, no credential): every Principal exists only through
 // the Launcher-owned Session model, so a freshly created Principal must never
 // lack its default ownership anchor.
-func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []string, issueCredential bool) (*PrincipalWithRoots, *PrincipalCredential, string, error) {
+func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []AllowedRootEntry, issueCredential bool) (*PrincipalWithRoots, *PrincipalCredential, string, error) {
 	if username == "" {
 		return nil, nil, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -159,7 +159,7 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 	}
 
 	// Validate the home directory is under at least one global allowed root.
-	if !isWithinAnyAllowedRoot(canonicalHome, globalAllowedRoots) {
+	if !isWithinAnyAllowedRoot(canonicalHome, allowedRootPaths(globalAllowedRoots)) {
 		return nil, nil, "", fmt.Errorf("OS user %q home directory %q is not under any global allowed root: %w", username, canonicalHome, ErrPrincipalRootOutsideGlobal)
 	}
 
@@ -187,9 +187,9 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO principal_allowed_roots (principal_id, root_path)
-		 VALUES (?, ?)`,
-		principalID, canonicalHome,
+		`INSERT INTO principal_allowed_roots (principal_id, root_path, access)
+		 VALUES (?, ?, ?)`,
+		principalID, canonicalHome, string(AllowedRootAccessReadWrite),
 	); err != nil {
 		return nil, nil, "", fmt.Errorf("cannot add default allowed root: %w", err)
 	}
@@ -223,7 +223,7 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 			Home:     home,
 			Enabled:  true,
 		},
-		AllowedRoots: []string{canonicalHome},
+		AllowedRoots: []AllowedRootEntry{allowedRootEntry(canonicalHome)},
 	}
 	return p, cred, token, nil
 }
@@ -244,7 +244,7 @@ func findPrincipalByUsername(db *sql.DB, username string) (*PrincipalWithRoots, 
 	}
 
 	rows, err := db.Query(
-		`SELECT root_path FROM principal_allowed_roots
+		`SELECT root_path, access FROM principal_allowed_roots
 		 WHERE principal_id = ?
 		 ORDER BY root_path`,
 		principalID,
@@ -254,13 +254,14 @@ func findPrincipalByUsername(db *sql.DB, username string) (*PrincipalWithRoots, 
 	}
 	defer rows.Close()
 
-	roots := []string{}
+	roots := []AllowedRootEntry{}
 	for rows.Next() {
 		var rootPath string
-		if err := rows.Scan(&rootPath); err != nil {
+		var access string
+		if err := rows.Scan(&rootPath, &access); err != nil {
 			return nil, fmt.Errorf("cannot scan allowed root: %w", err)
 		}
-		roots = append(roots, rootPath)
+		roots = append(roots, AllowedRootEntry{Path: rootPath, Access: AllowedRootAccess(access)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate allowed roots: %w", err)
@@ -456,10 +457,11 @@ func addPrincipalAllowedRoot(db *sql.DB, username string, rootPath string, globa
 		return false, "", err
 	}
 
+	// A path-only Principal root add is the canonical read_write grant.
 	result, err := db.Exec(
-		`INSERT OR IGNORE INTO principal_allowed_roots (principal_id, root_path)
-		 VALUES (?, ?)`,
-		principalID, resolved,
+		`INSERT OR IGNORE INTO principal_allowed_roots (principal_id, root_path, access)
+		 VALUES (?, ?, ?)`,
+		principalID, resolved, string(AllowedRootAccessReadWrite),
 	)
 	if err != nil {
 		return false, "", fmt.Errorf("cannot add allowed root: %w", err)
