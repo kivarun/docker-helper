@@ -194,6 +194,7 @@ func completionPTYStubHandler(rec *policyQueryRecorder, optDir, homeDir string) 
 				OK: true,
 				Launchers: []launcherJSON{
 					{ID: "dhl_michaelkillme", Principal: "michael", Name: "killme"},
+					{ID: "dhl_michaelworker", Principal: "michael", Name: "worker"},
 				},
 			})
 		case r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet:
@@ -375,6 +376,122 @@ func TestCompletionInteractiveExplicitHTTPEndpoint(t *testing.T) {
 		t.Fatalf("HTTP endpoint session workspace <TAB>: completion output missing %s:\n%s", httpOpt, out)
 	}
 	assertCompletionPTYHTTPQuery(t, httpRec, "session policy", "/sessions/create-policy", "launcher=killme")
+}
+
+// TestCompletionInteractiveLauncherAllowedRootFirstPosition proves the
+// first-positional contract of launcher allowed-root add/remove under a real
+// interactive Bash and real TAB keystrokes: a slash-free word stays
+// grammar-ambiguous (one positional means PATH for the default Launcher), so
+// completion offers the union of the daemon-backed Launcher selectors and
+// the filesystem candidates — a directory with the same prefix as a Launcher
+// selector must survive — while a word containing a slash can only be the
+// PATH (Launcher names never contain a slash) and completes filesystem
+// candidates without a selector query.
+func TestCompletionInteractiveLauncherAllowedRootFirstPosition(t *testing.T) {
+	sockPath, _, principalTokenPath, rec, _ := startCompletionPTYServer(t)
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	for _, sub := range []string{"work", "workspaces", filepath.Join("foo", "bar")} {
+		if err := os.MkdirAll(filepath.Join(home, sub), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "keepme"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	countLaunchers := func(rec *policyQueryRecorder) int {
+		n := 0
+		for _, req := range rec.snapshot() {
+			if req.path == "/launchers" {
+				n++
+			}
+		}
+		return n
+	}
+
+	p := startCompletionPTY(t, completionScript(t))
+	p.send(t, "cd "+home+"\n")
+	p.waitNext(t, "R> ", 10*time.Second)
+
+	// Empty first positional: the union of the Launcher selectors and the
+	// working directory's entries. With no common prefix to insert, the
+	// first TAB rings the bell and the second TAB lists the matches. The
+	// wait anchor is the last listed candidate (LC_ALL=C order puts
+	// "workspaces/" after "worker"), so the segment spans the whole line.
+	p.resetLine(t)
+	p.send(t, "docker-helper launcher allowed-root add --endpoint "+sockPath+" --token-file "+principalTokenPath+" ")
+	p.waitNext(t, principalTokenPath, 10*time.Second)
+	start := p.consumed
+	p.send(t, "\t\t")
+	out := p.waitNext(t, "workspaces/", 10*time.Second)[start:]
+	if !strings.Contains(out, "worker") {
+		t.Fatalf("first positional union must not lose the Launcher selectors:\n%s", out)
+	}
+
+	// Slash-free prefix "wo": the Launcher selector matching "wo" and the
+	// relative PATH candidates matching "wo" — the first TAB inserts the
+	// common prefix "work", a bell, then the listing shows the full union.
+	p.resetLine(t)
+	p.send(t, "docker-helper launcher allowed-root add --endpoint "+sockPath+" --token-file "+principalTokenPath+" wo")
+	p.waitNext(t, "wo", 10*time.Second)
+	start = p.consumed
+	p.send(t, "\t\t\t")
+	out = p.waitNext(t, "workspaces/", 10*time.Second)[start:]
+	if !strings.Contains(out, "worker") {
+		t.Fatalf("slash-free prefix union must offer both the selector and the directory candidates:\n%s", out)
+	}
+
+	// Slash word: the PATH candidates only, without a selector query.
+	p.resetLine(t)
+	p.send(t, "docker-helper launcher allowed-root add --endpoint "+sockPath+" --token-file "+principalTokenPath+" ./wo")
+	p.waitNext(t, "./wo", 10*time.Second)
+	start = p.consumed
+	before := countLaunchers(rec)
+	p.send(t, "\t\t\t")
+	out = p.waitNext(t, "workspaces/", 10*time.Second)[start:]
+	if strings.Contains(out, "worker") {
+		t.Fatalf("slash word must not offer Launcher selectors:\n%s", out)
+	}
+	if got := countLaunchers(rec); got != before {
+		t.Fatalf("slash word must not query selectors: %d new /launchers requests", got-before)
+	}
+
+	// Nested slash word foo/bar: filesystem only, still no selector query.
+	// The single candidate is inserted directly; the segment is captured
+	// before typing so the completed word is observable as one piece.
+	p.resetLine(t)
+	start = p.consumed
+	before = countLaunchers(rec)
+	p.send(t, "docker-helper launcher allowed-root add --endpoint "+sockPath+" --token-file "+principalTokenPath+" foo/ba\t")
+	out = p.waitNext(t, "foo/bar/", 10*time.Second)[start:]
+	if strings.Contains(out, "worker") {
+		t.Fatalf("slash word must not offer Launcher selectors:\n%s", out)
+	}
+	if got := countLaunchers(rec); got != before {
+		t.Fatalf("slash word must not query selectors: %d new /launchers requests", got-before)
+	}
+
+	// Slash word, remove: any filesystem entry, still no selector query.
+	p.resetLine(t)
+	before = countLaunchers(rec)
+	p.send(t, "docker-helper launcher allowed-root remove --endpoint "+sockPath+" --token-file "+principalTokenPath+" ./ke\t")
+	p.waitNext(t, "keepme", 10*time.Second)
+	if got := countLaunchers(rec); got != before {
+		t.Fatalf("remove slash word must not query selectors: %d new /launchers requests", got-before)
+	}
+
+	// Explicit first positional typed: the next position completes the
+	// PATH only — the typed selector is never re-offered.
+	p.resetLine(t)
+	p.send(t, "docker-helper launcher allowed-root add --endpoint "+sockPath+" --token-file "+principalTokenPath+" worker ")
+	p.waitNext(t, "worker ", 10*time.Second)
+	start = p.consumed
+	p.send(t, "\t\t")
+	out = p.waitNext(t, "workspaces/", 10*time.Second)[start:]
+	if strings.Contains(out, "worker") {
+		t.Fatalf("PATH completion must not re-offer the typed selector:\n%s", out)
+	}
 }
 
 // assertCompletionPTYHTTPQuery proves the specified HTTP daemon received the

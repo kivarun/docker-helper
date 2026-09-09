@@ -1232,13 +1232,20 @@ The daemon-backed policy completions are exactly:
 | `launcher create --allowed-root` | Principal effective-root query |
 | `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
 
-Positional `[LAUNCHER] ... PATH` completion on
-`launcher allowed-root add/remove` is generic filesystem completion
-(directories for add, any filesystem entry for remove); the daemon remains
-the final policy boundary and rejects a root outside the effective
-Principal ceiling at execution time. `config allowed-root add` and
-`principal allowed-root add` remain generic filesystem completion, as do
-all other path-valued flags.
+Positional `[LAUNCHER] ... PATH` completion on `launcher allowed-root
+add/remove`: the first positional is grammar-ambiguous — with one
+positional the word is the PATH for the default Launcher, so a relative
+PATH without a slash is legal. A slash-free word therefore completes the
+union of the daemon-backed Launcher selectors and the generic filesystem
+candidates (directories for add, any filesystem entry for remove), a
+failed selector query never removes the PATH candidates, and a word
+containing a slash — which a Launcher name can never contain — is the
+unambiguous PATH and completes filesystem candidates without a selector
+query. Once the first positional is typed, the next position is generic
+filesystem completion. The daemon remains the final policy boundary and
+rejects a root outside the effective Principal ceiling at execution time.
+`config allowed-root add` and `principal allowed-root add` remain generic
+filesystem completion, as do all other path-valued flags.
 
 Positional completion of `principal show USER [FIELD]`: USER completes
 from the same selector-introspection owner as the `--principal` selector

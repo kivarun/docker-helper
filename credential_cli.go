@@ -66,12 +66,7 @@ var principalCredentialCreateCommand = &Command{
 				fmt.Fprintf(stdout, "  ID:    %s\n", result.Credential.ID)
 				fmt.Fprintf(stdout, "  Name:  %s\n", result.Credential.Name)
 				fmt.Fprintf(stdout, "  Token: %s\n", result.Token)
-				fmt.Fprintln(stdout, "")
-				fmt.Fprintln(stdout, "IMPORTANT: Save the token now. It will not be shown again.")
-				fmt.Fprintln(stdout, "")
-				fmt.Fprintln(stdout, "Give this token securely to the principal.")
-				fmt.Fprintln(stdout, "The principal installs it with:")
-				fmt.Fprintln(stdout, "  docker-helper credential install")
+				printCredentialInstallHint(stdout, "principal")
 				return 0
 			},
 		}
@@ -247,10 +242,37 @@ authentication.`,
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
 				}
+				if result.Token != "" {
+					printCredentialInstallHint(stderr, "principal")
+				}
 				return 0
 			},
 		}
 	},
+}
+
+// printCredentialInstallHint renders the canonical one-time token install
+// hint for the audience a just-issued bearer token belongs to: "principal"
+// (token handed to the principal user) or "launcher" (token installed in the
+// environment acting as the Launcher). It is a presentation concern only: it
+// receives the audience, never the token, so it structurally cannot re-print
+// the one-time secret. Commands whose main result is machine-readable JSON
+// render it on stderr to keep stdout pure JSON; commands whose main result is
+// human-readable text render it on stdout.
+func printCredentialInstallHint(w io.Writer, audience string) {
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "IMPORTANT: Save the token now. It will not be shown again.")
+	fmt.Fprintln(w, "")
+	switch audience {
+	case "principal":
+		fmt.Fprintln(w, "Give this token securely to the principal.")
+		fmt.Fprintln(w, "The principal installs it with:")
+	case "launcher":
+		fmt.Fprintln(w, "Install this token in the environment that will act as this Launcher:")
+	default:
+		panic(fmt.Sprintf("unknown credential install audience %q", audience))
+	}
+	fmt.Fprintln(w, "  docker-helper credential install")
 }
 
 // credentialCommand is the top-level credential entry point: `install` is the
