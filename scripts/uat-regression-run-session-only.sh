@@ -72,7 +72,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
 
-reg_init "19. Run requires Session capability"
+reg_init "Run requires Session capability"
 
 reg_require_root
 reg_require_service
@@ -105,8 +105,21 @@ ws="$home/ws-runonly"
 xdg="$home/.config-uat19"
 installed_cred_file="$xdg/docker-helper/credential.token"
 mkdir -p "$ws" "$xdg"
-chown -R "$USER_NAME:$USER_NAME" "$home"
+# The workspace must be ROOT-owned while Session creation relabels it (the
+# SELinux adapter's restorecon needs fowner on the root-owned tree — the same
+# root-owned-at-create / principal-owned-at-run / root-owned-at-delete pattern
+# as the SELinux workspace lifecycle group). It is chowned to the fixture user
+# right after each Session create (the workload runs as the unprivileged
+# session execution identity) and back to root before each Session delete.
+# Only the private XDG_CONFIG_HOME is user-owned from the start (canonical
+# credential install).
 chmod 700 "$xdg"
+chown -R "$USER_NAME:$USER_NAME" "$xdg"
+
+# ws_root_owned / ws_user_owned bracket every Session create/delete and the
+# workload runs in subcases D and E.
+ws_root_owned() { chown -R root:root "$ws" >/dev/null 2>&1 || true; }
+ws_user_owned() { chown -R "$USER_NAME:$USER_NAME" "$ws" >/dev/null 2>&1 || true; }
 
 default_launcher_json="$(dh launcher show --system --principal "$USER_NAME" 2>/dev/null)" \
   || { reg_fail "fixture: launcher show failed"; reg_result; }
@@ -170,11 +183,15 @@ dhx_env() { # ASSIGNMENT... -- docker-helper args...
     "${assignments[@]}" /usr/bin/docker-helper "$@"
 }
 
-# --- journal window helpers ---------------------------------------------------
+# --- journal helpers ----------------------------------------------------------
 
-# journal_window E0 E1: daemon journal lines for the [E0, E1] wall-clock window.
-journal_window() {
-  journalctl -u docker-helper.service -o cat --utc --since "@$1" --until "@$2" 2>/dev/null || true
+# journal_since E0: daemon journal lines from E0 on, snapshotted at call time.
+# The positive-control and refused-request presence checks use it with a
+# bounded retry; the absence checks use it as a single-shot snapshot taken
+# immediately after the invocation returns (strictly sequential harness, so
+# the snapshot cannot contain a later subcase's records).
+journal_since() {
+  journalctl -u docker-helper.service -o cat --utc --since "@$1" 2>/dev/null || true
 }
 
 # journal_wait_for E0 PATTERN: bounded wait for a record that must appear
@@ -182,7 +199,7 @@ journal_window() {
 journal_wait_for() { # e0 pattern
   local e0="$1" pattern="$2" tries=6
   while [ "$tries" -gt 0 ]; do
-    if journal_window "$e0" "$(date +%s)" | grep -qF -- "$pattern"; then
+    if journal_since "$e0" | grep -qF -- "$pattern"; then
       return 0
     fi
     tries=$((tries - 1))
@@ -191,26 +208,24 @@ journal_wait_for() { # e0 pattern
   return 1
 }
 
-# assert_no_run_journal LABEL E0 E1 REACHED_DAEMON(yes|no): proves the
-# invocation window contains no run.* audit evidence (no admitted run, no
-# rejected-after-auth run, no workload completion). A flushed record cannot
-# un-happen, so the absence checks are single-shot over the closed window.
-# When REACHED_DAEMON=yes, an auth.failure for /run MUST be present (the
-# request reached the daemon and was refused exactly at Session
-# authentication); that presence check retries bounded for journald flush.
-assert_no_run_journal() { # label e0 e1 reached
-  local label="$1" e0="$2" e1="$3" reached="$4" w
-  w="$(journal_window "$e0" "$e1")"
+# assert_no_run_journal LABEL E0 REACHED_DAEMON(yes|no): proves the journal
+# contains no run.* audit evidence since E0 (no admitted run, no
+# rejected-after-auth run, no workload completion). When REACHED_DAEMON=yes,
+# an auth.failure for /run MUST be present (the request reached the daemon
+# and was refused exactly at Session authentication).
+assert_no_run_journal() { # label e0 reached
+  local label="$1" e0="$2" reached="$3" w
+  w="$(journal_since "$e0")"
   if printf '%s\n' "$w" | grep -qE '"event":"run\.(start|finish|rejected)"'; then
     reg_fail "$label: run audit evidence appeared (the run Operation/container path was reached)"
     return 1
   fi
   if [ "$reached" = "yes" ]; then
     if journal_wait_for "$e0" '"event":"auth.failure"' \
-      && printf '%s\n' "$(journal_window "$e0" "$(date +%s)")" | grep -q '"path":"/run"'; then
+      && printf '%s\n' "$(journal_since "$e0")" | grep -q '"path":"/run"'; then
       reg_ok "$label: request reached the daemon and was refused at Session auth (auth.failure on /run)"
     else
-      reg_fail "$label: expected auth.failure for /run was not observed in the journal window"
+      reg_fail "$label: expected auth.failure for /run was not observed in the journal"
     fi
   else
     if printf '%s\n' "$w" | grep -q '"event":"auth.failure"'; then
@@ -329,16 +344,15 @@ assert_http_session_auth_failure() { # label
 # ---------------------------------------------------------------------------
 subcase_a() {
   reg_info "subcase A: CLI run without DOCKER_HELPER_SESSION_TOKEN"
-  local marker="uat19-a.marker" s_before s_after e0 e1
+  local marker="uat19-a.marker" s_before s_after e0
   rm -f "$ws/$marker"
   s_before="$(session_set)"
   reg_info "invocation env: DOCKER_HELPER_SESSION_TOKEN present: no"
   e0="$(date +%s)"
   cli_run "$marker"
-  e1="$(date +%s)"
   assert_cli_fail_closed "A" "DOCKER_HELPER_SESSION_TOKEN is not set" || return
   assert_no_workload "A" "$marker"
-  assert_no_run_journal "A" "$e0" "$e1" no
+  assert_no_run_journal "A" "$e0" no
   s_after="$(session_set)"
   assert_session_set_unchanged "A" "$s_before" "$s_after"
 }
@@ -349,7 +363,7 @@ subcase_a() {
 # ---------------------------------------------------------------------------
 subcase_b() {
   reg_info "subcase B: installed Launcher credential is not implicit run authorization"
-  local marker s_before s_after e0 e1 out
+  local marker s_before s_after e0 out
 
   # B0: canonical install by the owning user (never as root). The redirect
   # is opened by the invoking (root) shell so the owning user receives the
@@ -397,10 +411,9 @@ subcase_b() {
   reg_info "invocation env: DOCKER_HELPER_SESSION_TOKEN present: no (installed credential present)"
   e0="$(date +%s)"
   cli_run "$marker"
-  e1="$(date +%s)"
   assert_cli_fail_closed "B2" "DOCKER_HELPER_SESSION_TOKEN is not set" || return
   assert_no_workload "B2" "$marker"
-  assert_no_run_journal "B2" "$e0" "$e1" no
+  assert_no_run_journal "B2" "$e0" no
   s_after="$(session_set)"
   assert_session_set_unchanged "B2" "$s_before" "$s_after"
 
@@ -419,10 +432,9 @@ subcase_b() {
   reg_info "invocation env: DOCKER_HELPER_SESSION_TOKEN present: yes (invalid canary bearer)"
   e0="$(date +%s)"
   cli_run "$marker" "DOCKER_HELPER_SESSION_TOKEN=$(cat "$CANARY_TOKEN_FILE")"
-  e1="$(date +%s)"
   assert_cli_fail_closed "B4" "Session authentication required" || return
   assert_no_workload "B4" "$marker"
-  assert_no_run_journal "B4" "$e0" "$e1" yes
+  assert_no_run_journal "B4" "$e0" yes
   s_after="$(session_set)"
   assert_session_set_unchanged "B4" "$s_before" "$s_after"
 
@@ -440,7 +452,7 @@ subcase_b() {
 # ---------------------------------------------------------------------------
 subcase_c() {
   reg_info "subcase C: direct POST /run negative controls on the system socket"
-  local marker s_before s_after e0 e1
+  local marker s_before s_after e0
 
   # C1: no Authorization bearer.
   marker="uat19-c1.marker"
@@ -448,10 +460,9 @@ subcase_c() {
   s_before="$(session_set)"
   e0="$(date +%s)"
   http_run_negative "C1" "$marker" ""
-  e1="$(date +%s)"
   assert_http_session_auth_failure "C1" || return
   assert_no_workload "C1" "$marker"
-  assert_no_run_journal "C1" "$e0" "$e1" yes
+  assert_no_run_journal "C1" "$e0" yes
   s_after="$(session_set)"
   assert_session_set_unchanged "C1" "$s_before" "$s_after"
 
@@ -461,10 +472,9 @@ subcase_c() {
   s_before="$(session_set)"
   e0="$(date +%s)"
   http_run_negative "C2" "$marker" "$LAUNCHER_CRED_TOKEN_FILE"
-  e1="$(date +%s)"
   assert_http_session_auth_failure "C2" || return
   assert_no_workload "C2" "$marker"
-  assert_no_run_journal "C2" "$e0" "$e1" yes
+  assert_no_run_journal "C2" "$e0" yes
   s_after="$(session_set)"
   assert_session_set_unchanged "C2" "$s_before" "$s_after"
 
@@ -474,10 +484,9 @@ subcase_c() {
   s_before="$(session_set)"
   e0="$(date +%s)"
   http_run_negative "C3" "$marker" "$PRINCIPAL_CRED_TOKEN_FILE"
-  e1="$(date +%s)"
   assert_http_session_auth_failure "C3" || return
   assert_no_workload "C3" "$marker"
-  assert_no_run_journal "C3" "$e0" "$e1" yes
+  assert_no_run_journal "C3" "$e0" yes
   s_after="$(session_set)"
   assert_session_set_unchanged "C3" "$s_before" "$s_after"
 
@@ -487,10 +496,9 @@ subcase_c() {
   s_before="$(session_set)"
   e0="$(date +%s)"
   http_run_negative "C4" "$marker" "$ADMIN_TOKEN"
-  e1="$(date +%s)"
   assert_http_session_auth_failure "C4" || return
   assert_no_workload "C4" "$marker"
-  assert_no_run_journal "C4" "$e0" "$e1" yes
+  assert_no_run_journal "C4" "$e0" yes
   s_after="$(session_set)"
   assert_session_set_unchanged "C4" "$s_before" "$s_after"
 
@@ -500,10 +508,9 @@ subcase_c() {
   s_before="$(session_set)"
   e0="$(date +%s)"
   http_run_negative "C5" "$marker" "$CANARY_TOKEN_FILE"
-  e1="$(date +%s)"
   assert_http_session_auth_failure "C5" || return
   assert_no_workload "C5" "$marker"
-  assert_no_run_journal "C5" "$e0" "$e1" yes
+  assert_no_run_journal "C5" "$e0" yes
   s_after="$(session_set)"
   assert_session_set_unchanged "C5" "$s_before" "$s_after"
 }
@@ -544,6 +551,9 @@ create_fixture_session() { # label
 }
 
 delete_fixture_session() { # label sid
+  # Root ownership first: the delete-time relabel-back must not need an
+  # un-granted fowner capability on the principal-owned tree.
+  ws_root_owned
   if dh session delete --system --id "$2" >/dev/null 2>&1; then
     reg_ok "$1: fixture Session deleted"
   else
@@ -556,12 +566,14 @@ delete_fixture_session() { # label sid
 # ---------------------------------------------------------------------------
 subcase_d() {
   reg_info "subcase D: positive control (Session bearer runs the workload)"
-  local marker="uat19-d.marker" s_before s_after e0 e1 sid stok
+  local marker="uat19-d.marker" s_before s_after e0 sid stok
   rm -f "$ws/$marker"
   s_before="$(session_set)"
+  ws_root_owned
   create_fixture_session "D" || return
   sid="$(cat "$TMPDIR_REG19/sid")"
   stok="$(cat "$TMPDIR_REG19/stok")"
+  ws_user_owned
   s_after="$(session_set)"
   if printf '%s' "$s_after" | grep -qF "$sid"; then
     reg_ok "D: fixture Session is visible to Session list (created, not implicit)"
@@ -572,7 +584,6 @@ subcase_d() {
   reg_info "invocation env: DOCKER_HELPER_SESSION_TOKEN present: yes (real Session bearer)"
   e0="$(date +%s)"
   cli_run "$marker" "DOCKER_HELPER_SESSION_TOKEN=$stok"
-  e1="$(date +%s)"
   if [ "$CLI_RC" = 0 ] && [ "$(cat "$ws/$marker" 2>/dev/null || true)" = "UAT19-RAN" ]; then
     reg_ok "D: run with a real Session bearer executed the marker workload (exit 0, marker content)"
   else
@@ -580,7 +591,7 @@ subcase_d() {
     delete_fixture_session "D (cleanup)" "$sid"
     return
   fi
-  if journal_wait_for "$e0" '"event":"run.start"' && printf '%s' "$(journal_window "$e0" "$(date +%s)")" | grep -q '"event":"run.finish"'; then
+  if journal_wait_for "$e0" '"event":"run.start"' && journal_wait_for "$e0" '"event":"run.finish"'; then
     reg_ok "D: run.start/run.finish audit evidence present for the admitted run"
   else
     reg_fail "D: run.start/run.finish audit evidence missing for the admitted run"
@@ -601,9 +612,11 @@ subcase_e() {
   local marker="uat19-e1.marker" marker2="uat19-e2.marker" s_before s_after sid stok
   rm -f "$ws/$marker" "$ws/$marker2"
   s_before="$(session_set)"
+  ws_root_owned
   create_fixture_session "E" || return
   sid="$(cat "$TMPDIR_REG19/sid")"
   stok="$(cat "$TMPDIR_REG19/stok")"
+  ws_user_owned
 
   # E1: installed Launcher credential + valid Session bearer -> run succeeds.
   cli_run "$marker" "DOCKER_HELPER_SESSION_TOKEN=$stok"
