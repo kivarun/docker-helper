@@ -307,32 +307,38 @@ func (c *apiClient) build(ctx context.Context, req buildRequest) (*buildResponse
 	return &result, nil
 }
 
-// startRun sends POST /run and returns the operation ID.
-func (c *apiClient) startRun(req runRequest) (*operationCreatedResponse, error) {
+// run sends the synchronous POST /run request and returns the flat result.
+// The request context cancellation stops the HTTP request; the daemon
+// cancels the workload and performs run-owned backend cleanup.
+func (c *apiClient) run(ctx context.Context, req runRequest) (*runResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
 
-	resp, err := c.doAuthenticatedRequest("POST", "/run", bytes.NewReader(body))
+	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "POST", "/run", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	respBody, err := c.readResponseBody(resp)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot read response: %w", err)
 	}
 
-	var result operationCreatedResponse
+	var result runResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &result, parseAPIError(resp.StatusCode, respBody)
+	}
+
 	return &result, nil
 }
 
-// operationStatus returns the current status of the operation, honoring ctx.
 func (c *apiClient) operationStatus(ctx context.Context, opID string) (*operationStatusResponse, error) {
 	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "GET", "/operations/"+opID, nil)
 	if err != nil {
@@ -352,48 +358,6 @@ func (c *apiClient) operationStatus(ctx context.Context, opID string) (*operatio
 	return &result, nil
 }
 
-// cancelOperationTimeout is the deadline for a best-effort cancel request.
-// The daemon cancel endpoint is blocking: it waits for graceful termination
-// (defaultTerminationTimeout=5s) plus force cleanup (defaultForceCleanupTimeout=3s).
-// The client timeout covers the daemon worst case with a small margin.
-const cancelOperationTimeout = 12 * time.Second
-
-// cancelOperation sends POST /operations/{id}/cancel synchronously with a
-// bounded timeout. Cancellation is best-effort: the call waits for the daemon
-// response or timeout, and reports any failure to the caller.
-func (c *apiClient) cancelOperation(opID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), cancelOperationTimeout)
-	defer cancel()
-
-	token, err := c.tokenSource()
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/operations/"+opID+"/cancel", nil)
-	if err != nil {
-		return fmt.Errorf("cannot create cancel request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	// Reuse the existing transport (which knows the socket path)
-	// but create a new client with a bounded timeout.
-	timeoutClient := &http.Client{
-		Transport: c.httpClient.Transport,
-		Timeout:   cancelOperationTimeout,
-	}
-
-	resp, err := timeoutClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	_, err = c.readResponseBody(resp)
-	return err
-}
-
-// operationLogs returns the operation logs from the given offset, honoring ctx.
 func (c *apiClient) operationLogs(ctx context.Context, opID string, offset int64) (*operationLogsResponse, error) {
 	path := "/operations/" + opID + "/logs?offset=" + strconv.FormatInt(offset, 10)
 	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "GET", path, nil)
