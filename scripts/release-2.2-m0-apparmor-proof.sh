@@ -236,7 +236,8 @@ cp "$ESCAPE_PROFILE_FILE" "$EVIDENCE_DIR/path-literal-test.profile"
 apparmor_parser --preprocess "$PROFILE_FILE" >"$EVIDENCE_DIR/generated-workload.preprocessed"
 
 # Establish a fresh audit window before any intentional generated-profile deny.
-export AA_AUDIT_START_EPOCH="$(date +%s)"
+AA_AUDIT_START_EPOCH="$(date +%s)"
+export AA_AUDIT_START_EPOCH
 # shellcheck source=/dev/null
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/uat-mac-apparmor.sh"
 
