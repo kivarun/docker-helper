@@ -116,6 +116,24 @@ and return to architecture. Do not weaken the release requirement silently.
 
 ## Phase 2.2.1 — canonical policy value and persistence migration
 
+**Status: implemented, awaiting architectural acceptance.** Implemented on
+`feature/2.2.1-policy-persistence` (base `release/2.2@9e9c88d`). Evidence:
+canonical `AllowedRootEntry{Path, Access}` value in `allowed_root.go`;
+config decode accepts legacy string entries (normalized `read_write`), the
+canonical `{"path","access"}` object form, and mixed arrays, with unknown
+access, unknown object fields, and conflicting canonical paths failing closed
+(`validateAllowedRootEntryValue`, `resolveAllowedRoots`); 2.2 config writes
+persist the object form; `principal_allowed_roots` and `launcher_allowed_roots`
+carry `access TEXT NOT NULL CHECK (access IN ('read_write','read_only'))` with
+the owner/path unique identity preserved, rebuilt per table from the legacy
+path-only shape in one atomic, idempotent, fail-closed transaction
+(`classifyAllowedRootsTable`, `migrateAllowedRootsTableToAccessSchema`);
+migration, config, constraint, and persistence tests in
+`allowed_root_migration_test.go` and `config_allowed_root_test.go`. Not yet
+done by design: the resolver (2.2.2), rich HTTP/CLI projection (2.2.3), and the
+Session snapshot (2.2.4); public `allowed_roots` remains the 2.1 path-only
+projection.
+
 Dependencies: M0-A and M0-S CLOSED.
 
 Introduce one canonical internal allowed-root value, conceptually:
