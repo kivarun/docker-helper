@@ -198,13 +198,13 @@ Multi-user deployment. Requires root for initial setup.
 ```bash
 sudo docker-helper init
 sudo systemctl enable --now docker-helper
-sudo docker-helper principal create alice
-sudo docker-helper principal credential create alice
+sudo docker-helper principal create --issue-credential alice
 ```
 
-The `principal credential create` command uses the name `default` unless
-`--name` is provided and prints the token once. On alice's machine (not as
-root):
+The credential is issued together with the Principal: the token is shown
+once — the CLI immediately prints the canonical install hint (the same
+`docker-helper credential install` instruction shown below) — and never
+again. On alice's machine (not as root):
 
 ```bash
 docker-helper credential install
@@ -1346,8 +1346,10 @@ and MAC confinement. The common workflow handles both:
 ```bash
 # 1. Create the principal.
 #    principal create resolves the OS user; the canonical home directory
-#    becomes the initial allowed root.
-sudo docker-helper principal create --system alice
+#    becomes the initial allowed root. --no-credential defers credential
+#    issuance to step 5 (a named credential), instead of the interactive
+#    default-yes prompt that would issue a `default` credential now.
+sudo docker-helper principal create --system --no-credential alice
 
 # 2. Review the principal's allowed roots.
 sudo docker-helper principal show --system alice

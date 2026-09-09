@@ -56,10 +56,13 @@ Multi-user deployment. Requires root for initial setup.
 .nf
 sudo docker-helper init
 sudo systemctl enable --now docker-helper
-sudo docker-helper principal create alice
-sudo docker-helper principal credential create alice
+sudo docker-helper principal create --issue\-credential alice
 .fi
 .RE
+.PP
+The credential is issued together with the Principal: the token is shown
+once \(em the CLI immediately prints the canonical install hint \(em and
+never again.
 .PP
 On alice's machine (not as root):
 .PP
