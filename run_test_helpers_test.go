@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -95,7 +97,19 @@ func setupRunSeam(t *testing.T, app *App, opts runSeamOptions) *capturedRun {
 // body; there is no operation to wait for.
 func postRun(t *testing.T, app *App, token string, body map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
-	req := newRunRequest(body, token)
+	return postRunCtx(t, app, token, body, context.Background())
+}
+
+// postRunCtx drives handleRun with the given request context.
+func postRunCtx(t *testing.T, app *App, token string, body map[string]any, reqCtx context.Context) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal run request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(data)).WithContext(reqCtx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 	return w

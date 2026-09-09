@@ -89,7 +89,7 @@ func TestRunEngineIntegration(t *testing.T) {
 
 	// Row 1: a successful workload returns the flat synchronous result
 	// with combined bounded output and the real exit code.
-	w := postRun(t, app, session.Token, map[string]any{
+	w := boundedRunRow(t, app, session.Token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"sh", "-ec", "echo RUN-OUT-OK; echo RUN-ERR-OK >&2"},
 	})
@@ -117,7 +117,7 @@ func TestRunEngineIntegration(t *testing.T) {
 
 	// Row 2: a non-zero workload exit is a workload result with the
 	// actual exit code and the preserved bounded output.
-	w = postRun(t, app, session.Token, map[string]any{
+	w = boundedRunRow(t, app, session.Token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"sh", "-ec", "echo BEFORE-FAIL; exit 7"},
 	})
@@ -142,7 +142,7 @@ func TestRunEngineIntegration(t *testing.T) {
 
 	// Row 3: environment values reach the workload through the create
 	// config environment, not through any CLI argv.
-	w = postRun(t, app, session.Token, map[string]any{
+	w = boundedRunRow(t, app, session.Token, map[string]any{
 		"image":       "alpine:3.24",
 		"environment": map[string]any{"RUN_INTEG_KEY": "RUN_INTEG_VALUE"},
 		"command":     []string{"sh", "-ec", "echo KEY=$RUN_INTEG_KEY"},
@@ -156,7 +156,7 @@ func TestRunEngineIntegration(t *testing.T) {
 	}
 
 	// Row 4: entrypoint and workdir are honored through the create config.
-	w = postRun(t, app, session.Token, map[string]any{
+	w = boundedRunRow(t, app, session.Token, map[string]any{
 		"image":      "alpine:3.24",
 		"entrypoint": "/bin/sh",
 		"workdir":    "/tmp",
@@ -177,7 +177,7 @@ func TestRunEngineIntegration(t *testing.T) {
 		[]byte("RUN-INTEGRATION-CONTENT\n"), 0o644); err != nil {
 		t.Fatalf("write workspace file: %v", err)
 	}
-	w = postRun(t, app, session.Token, map[string]any{
+	w = boundedRunRow(t, app, session.Token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"sh", "-ec", "cat /mnt/run-in.txt"},
 		"mounts":  []map[string]any{{"source": ".", "target": "/mnt"}},
@@ -191,7 +191,7 @@ func TestRunEngineIntegration(t *testing.T) {
 	}
 
 	// Row 6: a read-only mount refuses writes as a workload result.
-	w = postRun(t, app, session.Token, map[string]any{
+	w = boundedRunRow(t, app, session.Token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"sh", "-ec", "touch /mnt/no-write && echo wrote"},
 		"mounts": []map[string]any{
@@ -283,7 +283,7 @@ func TestRunEngineIntegration(t *testing.T) {
 	deadApp.NewEngineRunFn = func() (engineContainerRunner, error) {
 		return newEngineClientAgainstFake(t, deadURL), nil
 	}
-	w = postRun(t, deadApp, deadSession.Token, map[string]any{
+	w = boundedRunRow(t, deadApp, deadSession.Token, map[string]any{
 		"image":   "alpine:3.24",
 		"command": []string{"echo", "hi"},
 	})
@@ -345,7 +345,7 @@ func TestRunEngineIntegration(t *testing.T) {
 	// helper_socket true: the workload sees the daemon-owned read-only
 	// projection at /run/docker-helper and cannot write through it. The
 	// caller mount surface stays ordinary workspace mount policy.
-	w = postRun(t, systemApp, systemResult.Token, map[string]any{
+	w = boundedRunRow(t, systemApp, systemResult.Token, map[string]any{
 		"image":         "alpine:3.24",
 		"helper_socket": true,
 		"command": []string{"sh", "-ec",
@@ -362,7 +362,7 @@ func TestRunEngineIntegration(t *testing.T) {
 	// Trusted-CA injection and helper_socket projection coexist: the CA
 	// environment is present and the socket projection is mounted.
 	setupCADir(t, systemApp)
-	w = postRun(t, systemApp, systemResult.Token, map[string]any{
+	w = boundedRunRow(t, systemApp, systemResult.Token, map[string]any{
 		"image":         "alpine:3.24",
 		"helper_socket": true,
 		"command": []string{"sh", "-ec",
@@ -376,6 +376,17 @@ func TestRunEngineIntegration(t *testing.T) {
 		t.Errorf("trusted CA and helper_socket projections must coexist: %+v", coexist)
 	}
 	assertNoHelperOwnedContainers(ctx, t, provisioning, systemResult.Session.ID)
+}
+
+// boundedRunRow drives one synchronous integration row with a bounded
+// request context. The workloads in the rows are short-lived; a wedged
+// Engine wait must surface as the classified cancellation (with the
+// handler-owned container cleanup) instead of hanging the whole job.
+func boundedRunRow(t *testing.T, app *App, token string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	reqCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	return postRunCtx(t, app, token, body, reqCtx)
 }
 
 // runRunAsync drives one blocking synchronous run through the production
