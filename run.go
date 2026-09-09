@@ -99,12 +99,13 @@ func validateShmSize(raw string) (int64, error) {
 // runtime directory; the client selects only the boolean capability.
 const helperSocketContainerDir = "/run/docker-helper"
 
-// isHelperSocketMountOverlap reports whether a user mount target is exactly
-// the helper runtime mount point. When helper_socket injection is active,
-// such a mount is a duplicate mount point for the injected projection and is
-// rejected cleanly instead of failing inside docker at run time.
+// isHelperSocketMountOverlap reports whether a user mount target overlaps
+// the server-owned helper runtime projection: an exact match with the
+// injected mount point, a descendant of it, or one of its ancestors. A
+// caller-owned mount must not be able to shadow, replace, or partially
+// cover the projection. Applied only when helper_socket is requested.
 func isHelperSocketMountOverlap(target string) bool {
-	return filepath.Clean(target) == helperSocketContainerDir
+	return pathOverlap(filepath.Clean(target), helperSocketContainerDir) != pathDisjoint
 }
 
 func extractExitCode(err error) *int {

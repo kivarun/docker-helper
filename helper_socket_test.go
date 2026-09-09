@@ -161,38 +161,72 @@ func TestHelperSocketUserModeFailClosed(t *testing.T) {
 	}
 }
 
-func TestHelperSocketUserMountExactTargetRejected(t *testing.T) {
+func TestHelperSocketUserMountOverlapRejected(t *testing.T) {
+	// With helper_socket the caller-owned mount must not shadow, replace, or
+	// partially cover the server-owned projection: exact, ancestor, and
+	// descendant targets are all rejected through the real handler path.
+	table := []struct {
+		name   string
+		target string
+	}{
+		{name: "exact projection target", target: "/run/docker-helper"},
+		{name: "ancestor of the projection", target: "/run"},
+		{name: "descendant of the projection", target: "/run/docker-helper/docker-helper.sock"},
+	}
+	for _, tc := range table {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newSystemModeRunTestApp(t)
+			app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+				return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
+			}
 
-	app := newSystemModeRunTestApp(t)
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-		return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
-	}
+			result, err := createSystemSession(t, app)
+			if err != nil {
+				t.Fatalf("createSession: %v", err)
+			}
 
-	result, err := createSystemSession(t, app)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
+			dockerCalled := false
+			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				dockerCalled = true
+				return exec.CommandContext(ctx, "/bin/true")
+			}
 
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
+			w, _ := postRunRequest(app, result.Token,
+				`{"image":"alpine:3.24","helper_socket":true,"command":["true"],"mounts":[{"source":".","target":"`+tc.target+`"}]}`)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+			var resp map[string]any
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("cannot decode response: %v", err)
+			}
+			if resp["code"] != "invalid_mount" {
+				t.Errorf("expected invalid_mount code, got %v", resp)
+			}
+			if dockerCalled {
+				t.Error("conflicting helper runtime mount must be rejected before any docker call")
+			}
+		})
 	}
+}
 
-	w, _ := postRunRequest(app, result.Token,
-		`{"image":"alpine:3.24","helper_socket":true,"command":["true"],"mounts":[{"source":".","target":"/run/docker-helper"}]}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+func TestHelperSocketMountOverlapTable(t *testing.T) {
+	table := []struct {
+		target  string
+		overlap bool
+	}{
+		{"/run/docker-helper", true},
+		{"/run/docker-helper/foo", true},
+		{"/run/docker-helper/docker-helper.sock", true},
+		{"/run", true},
+		{"/", true},
+		{"/run-other", false},
+		{"/run/docker-helper-other", false},
 	}
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	if resp["code"] != "invalid_mount" {
-		t.Errorf("expected invalid_mount code, got %v", resp)
-	}
-	if dockerCalled {
-		t.Error("conflicting helper runtime mount must be rejected before any docker call")
+	for _, tc := range table {
+		if got := isHelperSocketMountOverlap(tc.target); got != tc.overlap {
+			t.Errorf("isHelperSocketMountOverlap(%q) = %v, want %v", tc.target, got, tc.overlap)
+		}
 	}
 }
 
