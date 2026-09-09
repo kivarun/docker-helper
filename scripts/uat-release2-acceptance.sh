@@ -133,9 +133,11 @@ json_field() { # field
 #   auth    — a registry auth/authorization-denial marker is present and no
 #             network marker matched.
 #   unknown — neither; NOT proof of a registry auth/authorization denial.
-# Markers mirror production classifyDockerError (docker_error_classify.go) and
-# are matched case-insensitively. Fail-closed: only "auth" may satisfy an
-# auth-denial acceptance assertion.
+# Markers mirror production classifyDockerError (docker_error_classify.go)
+# plus the synchronous R3 canonical registry denial contract
+# (code registry_auth_denied, message "registry authentication denied").
+# Markers are matched case-insensitively. Fail-closed: only "auth" may
+# satisfy an auth-denial acceptance assertion.
 classify_registry_failure() {
   local stream="$1"
 
@@ -146,7 +148,7 @@ classify_registry_failure() {
   fi
 
   if grep -qiE \
-      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials' <<<"$stream"; then
+      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials|registry_auth_denied|registry authentication denied' <<<"$stream"; then
     printf 'auth\n'
     return 0
   fi
