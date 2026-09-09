@@ -152,6 +152,7 @@ REGRESSIONS=(
   "15:env-from secret forwarding:uat-regression-env-from.sh"
   "16:helper_socket runtime projection:uat-regression-helper-socket.sh"
   "17:env-from + helper-socket dogfood:uat-regression-dogfood-env-socket.sh"
+  "18:User-mode helper_socket fail-closed:uat-regression-user-mode-helper-socket.sh"
 )
 
 declare -A RESULT
