@@ -1821,11 +1821,17 @@ principle as trusted-CA injection). Without `helper_socket` the 2.1.0
 mount contract is unchanged.
 
 The projection binds the runtime DIRECTORY, not the socket inode. The
-systemd unit preserves the runtime directory across service restarts
-(`RuntimeDirectoryPreserve=restart`), and the daemon recreates
-`docker-helper.sock` inside the same directory, so an existing directory
-bind keeps working across the supported restart lifecycle while a socket
-inode bind would go stale.
+systemd unit preserves the runtime directory
+(`RuntimeDirectoryPreserve=restart`) and the daemon recreates
+`docker-helper.sock` inside the same directory, so a consumer that does
+survive daemon replacement — for example an orphaned container in a crash
+scenario — observes the recreated socket through its existing directory
+bind where a socket inode bind would go stale. This says nothing about
+the workload lifecycle: a normal graceful `systemctl restart
+docker-helper` still terminates helper-owned run workloads under the
+2.1.x shutdown lifecycle, and `helper_socket` does not change that
+lifecycle. No workload survival across a service restart or a package
+upgrade is promised.
 
 Authority is transport reachability only. The socket grants no
 Session/Launcher/Principal/Admin credential, restores no credential from
@@ -1955,10 +1961,12 @@ System unit:
   (mode `0755`), `StateDirectory=docker-helper` (mode `0700`),
   `RuntimeDirectory=docker-helper` (mode `0755`), and
   `RuntimeDirectoryPreserve=restart` — the RuntimeDirectory inode is
-  preserved across service restarts so long-lived agent containers with a
-  bind-mount of `/run/docker-helper` continue to see the updated socket
-  after `systemctl restart`; normal cleanup semantics still apply on a
-  real service stop.
+  preserved across service restarts, so a consumer that does survive
+  daemon replacement observes the recreated socket through its existing
+  directory bind; a normal graceful `systemctl restart docker-helper`
+  still terminates helper-owned run workloads under the 2.1.x shutdown
+  lifecycle, and normal cleanup semantics still apply on a real service
+  stop.
 - MAC binding: `AppArmorProfile=docker-helper-system` on AppArmor systems
   and `SELinuxContext=system_u:system_r:docker_helper_t:s0` on SELinux
   systems, guarded by `ConditionSecurity=|apparmor` / `ConditionSecurity=|selinux`.

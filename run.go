@@ -371,8 +371,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// When the helper runtime projection is active, a user mount may not use
-	// the injected mount point itself (duplicate mount point).
+	// When the helper runtime projection is active, caller-owned mounts
+	// may not overlap the server-owned projection: exact target, ancestor,
+	// or descendant.
 	if req.HelperSocket {
 		for _, m := range req.Mounts {
 			if isHelperSocketMountOverlap(m.Target) {

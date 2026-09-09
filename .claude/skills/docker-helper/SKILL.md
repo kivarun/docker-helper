@@ -370,7 +370,14 @@ curl --silent --show-error \
 ```
 
 Useful request fields: `image`, `entrypoint`, `command`, `workdir`,
-`environment`, `mounts`, `shm_size`.
+`environment`, `mounts`, `shm_size`, `helper_socket`.
+
+`"helper_socket": true` is the HTTP equivalent of the CLI
+`--helper-socket` (see [Run](#run)): system mode only, a server-owned
+read-only projection of the daemon's runtime directory at
+`/run/docker-helper` that provides transport reachability only — the
+workload still needs a bearer credential passed separately, and user mode
+rejects the flag.
 
 Example mount (portable — works in both user and system mode):
 
