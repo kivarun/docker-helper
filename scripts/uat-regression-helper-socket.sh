@@ -180,7 +180,14 @@ else
 fi
 
 RUNTIME_DIR_INODE_AFTER="$(stat -c %i /run/docker-helper)"
-SOCKET_INODE_AFTER="$(stat -c %i /run/docker-helper/docker-helper.sock)"
+# The socket file is created by the daemon after the unit reports active;
+# wait (bounded) for the recreated socket before stat'ing its inode.
+SOCKET_INODE_AFTER=""
+for _ in $(seq 1 30); do
+  SOCKET_INODE_AFTER="$(stat -c %i /run/docker-helper/docker-helper.sock 2>/dev/null || true)"
+  [ -n "$SOCKET_INODE_AFTER" ] && break
+  sleep 1
+done
 if [ "$RUNTIME_DIR_INODE_BEFORE" = "$RUNTIME_DIR_INODE_AFTER" ]; then
   reg_ok "runtime directory inode preserved across the real restart (bindable, not socket inode)"
 else
