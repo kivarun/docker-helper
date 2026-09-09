@@ -7988,6 +7988,12 @@ func productionClassifyMarkers(t *testing.T) (network, auth []string) {
 	return network, auth
 }
 
+// canonicalRegistryDenialMarkers are the helper's own synchronous R3 denial
+// contract markers the acceptance oracle must recognize on top of the
+// production backend-text markers: the public code name and the public
+// message of the canonical registry-auth denial response.
+var canonicalRegistryDenialMarkers = []string{"registry_auth_denied", "registry authentication denied"}
+
 // scriptClassifierMarkers returns the network and auth marker sets used by the
 // classify_registry_failure helper in the Release-2 acceptance script.
 func scriptClassifierMarkers(t *testing.T) (network, auth []string) {
@@ -8015,7 +8021,8 @@ func scriptClassifierMarkers(t *testing.T) (network, auth []string) {
 // acceptance script uses exactly one registry-failure classifier
 // (classify_registry_failure) in both the no-credentials and isolation checks,
 // with no ad-hoc marker regex left in the checks, and that the helper's
-// network/auth marker sets exactly match production classifyDockerError.
+// network/auth marker sets exactly match production classifyDockerError plus
+// the canonical synchronous R3 registry-denial contract markers.
 func TestRelease2AcceptanceClassifierSingleOwner(t *testing.T) {
 	data, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
 	if err != nil {
@@ -8042,8 +8049,9 @@ func TestRelease2AcceptanceClassifierSingleOwner(t *testing.T) {
 	if !markerSetsEqual(prodNet, scriptNet) {
 		t.Errorf("classifier network markers mismatch production\ngot:  %v\nwant: %v", scriptNet, prodNet)
 	}
-	if !markerSetsEqual(prodAuth, scriptAuth) {
-		t.Errorf("classifier auth markers mismatch production\ngot:  %v\nwant: %v", scriptAuth, prodAuth)
+	expectedAuth := append(append([]string{}, prodAuth...), canonicalRegistryDenialMarkers...)
+	if !markerSetsEqual(expectedAuth, scriptAuth) {
+		t.Errorf("classifier auth markers mismatch production\ngot:  %v\nwant: %v", scriptAuth, expectedAuth)
 	}
 	// Neither marker set may contain a bare "401" alternative.
 	bare401 := regexp.MustCompile(`(^|\|)401(\||$)`)
