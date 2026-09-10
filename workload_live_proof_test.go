@@ -240,8 +240,12 @@ func TestLiveWorkloadAppArmor(t *testing.T) {
 	if containsString(loaded, profileName) {
 		t.Fatal("generated profile must be unloaded after cleanup")
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "state", "op_liveaa1")); !os.IsNotExist(statErr) {
-		t.Errorf("owned state must be removed after cleanup, got %v", statErr)
+	// The backend cleanup releases the kernel MAC state and the generated
+	// profile source; the durable ownership record directory remains as
+	// the reconciliation retry marker and is removed only by the
+	// coordinator finalization boundary.
+	if _, statErr := os.Stat(filepath.Join(dir, "state", "op_liveaa1", appArmorWorkloadProfileFileName)); !os.IsNotExist(statErr) {
+		t.Errorf("generated profile source must be removed by the backend cleanup, got %v", statErr)
 	}
 }
 
@@ -465,17 +469,8 @@ func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 	}
 
 	projection := prepared.MountSources[0]
-	// Independent-MAC proof precondition: the projected item is VFS
-	// writable underneath and carries the exact projection type.
-	if err := os.WriteFile(projection, []byte("x"), 0600); err != nil {
-		t.Fatalf("projected item is not VFS-writable for the proof: %v", err)
-	}
-	if got, err := b.ops.selinuxTypeOf(projection); err != nil || got != selinuxROProjectionType {
-		t.Fatalf("projected item effective type: got %q (err %v), want %q", got, err, selinuxROProjectionType)
-	}
-
 	// Read through the projected regular file must succeed and return the
-	// pinned content.
+	// pinned content before any proof-side mutation.
 	readOut, readErr := liveContainerOutput(t, prepared.SecurityOpts,
 		fmt.Sprintf("%s:/inputs:rw", projection),
 		"cat /inputs",
@@ -485,6 +480,17 @@ func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 	}
 	if strings.TrimSpace(readOut) != "seed-content" {
 		t.Fatalf("projected regular file must carry the pinned content, got %q", readOut)
+	}
+	// Independent-MAC proof precondition: the projected item is VFS
+	// writable underneath (a write-only open succeeds; nothing is mutated)
+	// and carries the exact projection type.
+	probeFD, probeErr := os.OpenFile(projection, os.O_WRONLY, 0)
+	if probeErr != nil {
+		t.Fatalf("projected item is not VFS-writable for the proof: %v", probeErr)
+	}
+	probeFD.Close()
+	if got, err := b.ops.selinuxTypeOf(projection); err != nil || got != selinuxROProjectionType {
+		t.Fatalf("projected item effective type: got %q (err %v), want %q", got, err, selinuxROProjectionType)
 	}
 
 	// The write must be denied by the projection type while the VFS view
@@ -507,6 +513,14 @@ func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 	liveEvidence(t, "selinux-regular-file-summary.txt",
 		fmt.Sprintf("TESTED_SOURCE=%s\nRESULT=CLOSED\n", repoHead(t)))
 
+	// The denied write must not have mutated the pinned source content.
+	afterContent, readErr := os.ReadFile(source)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(afterContent) != "seed-content\n" {
+		t.Fatalf("denied write must not mutate the pinned source, got %q", afterContent)
+	}
 	if err := prepared.Cleanup(); err != nil {
 		t.Fatalf("production SELinux regular-file cleanup: %v", err)
 	}
