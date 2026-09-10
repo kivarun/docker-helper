@@ -259,7 +259,13 @@ func TestSELinuxPolicySemanageTransition(t *testing.T) {
 		"allow docker_helper_t semanage_t:process2 { nnp_transition };",
 		"allow docker_helper_t semanage_exec_t:file { execute read open getattr map };",
 		"allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };",
-		"allow docker_helper_t bin_t:file { execute read open getattr map };",
+		// execute_no_trans is required for the same-domain exec of a generic
+		// bin_t binary (observed on the exact-candidate UAT: the confined
+		// daemon could not fork/exec /usr/bin/bindfs while it still carried
+		// the generic bin_t label; libfuse's fusermount helper exec has the
+		// same shape). Without it the execute grant cannot complete a
+		// same-domain exec.
+		"allow docker_helper_t bin_t:file { execute read open getattr map execute_no_trans };",
 	} {
 		if !strings.Contains(content, rule) {
 			t.Errorf("policy must grant: %s", rule)

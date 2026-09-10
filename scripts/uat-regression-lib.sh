@@ -139,6 +139,14 @@ dh() { /usr/bin/docker-helper "$@"; }
 # system service with global allowed root /home, so every /home/* home below is
 # authorized for principal/session use.
 
+# reg_config_global_roots prints the global allowed root paths from
+# `config allowed-root list`, one per line. The 2.2 list is the human
+# PATH/ACCESS table: skip the PATH header and print the first (path) field
+# of each data row; plain path-only output stays valid.
+reg_config_global_roots() {
+  dh config allowed-root list 2>/dev/null | awk 'NF && $1 ~ /^\// {print $1}'
+}
+
 # reg_setup_principal USER creates (or reuses) the OS user + docker-helper
 # principal (enabled), and prints the user's home directory.
 reg_setup_principal() {
@@ -156,14 +164,14 @@ reg_setup_principal() {
         if [ "$root" = "/home" ]; then home_base="/home"; root_ok=1; break; fi
         ;;
     esac
-  done <<< "$(dh config allowed-root list 2>/dev/null || true)"
+  done <<< "$(reg_config_global_roots)"
   if [ "$root_ok" != 1 ]; then
-    if dh config allowed-root list 2>/dev/null | grep -qx '/opt'; then
+    if reg_config_global_roots | grep -qx '/opt'; then
       home_base="/opt"; root_ok=1
     fi
   fi
   if [ "$root_ok" != 1 ]; then
-    home_base="$(dh config allowed-root list 2>/dev/null | sed -n '1p')"
+    home_base="$(reg_config_global_roots | sed -n '1p')"
   fi
   if [ -z "$home_base" ]; then
     echo "error: no global allowed root under which to place principal '$user' home" >&2

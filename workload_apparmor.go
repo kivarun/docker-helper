@@ -163,7 +163,13 @@ func (b *workloadAppArmorBackend) prepare(p workloadPreparation) (*preparedWorkl
 	if err := atomicWriteFile(profilePath, []byte(profile), 0600); err != nil {
 		return nil, fmt.Errorf("cannot write generated workload profile: %w", err)
 	}
-	if err := b.runParser(b.parserPath, []string{"--replace", "--skip-read-cache", profilePath}); err != nil {
+	// --skip-cache: perform no caching at all (disables cache write, implies
+	// --skip-read-cache). The generated workload profile is ephemeral, and a
+	// confined daemon must not depend on access to the shared parser cache
+	// directory (observed on openSUSE: "Failed setting up policy cache
+	// (/var/cache/apparmor): Permission denied"); the session-MAC profile
+	// manager uses the same argument.
+	if err := b.runParser(b.parserPath, []string{"--replace", "--skip-cache", profilePath}); err != nil {
 		return nil, fmt.Errorf("cannot load generated workload profile: %w", err)
 	}
 	if err := b.requireProfileLoaded(profileName); err != nil {

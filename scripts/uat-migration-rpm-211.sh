@@ -87,6 +87,17 @@ BLOCKED_COUNT=0
 acc_ok() { printf '  ok:   %s\n' "$*"; }
 acc_fail() { printf '  FAIL: %s\n' "$*" >&2; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 acc_blocked() { printf '  BLOCKED: %s\n' "$*" >&2; BLOCKED_COUNT=$((BLOCKED_COUNT + 1)); }
+# acc_fail_ctx prints the FAIL line plus the first lines of each diagnostic
+# capture file. Capture files may contain credential output; redact() masks
+# bearer tokens before anything reaches the log.
+acc_fail_ctx() { # msg diagfile...
+  acc_fail "$1"
+  shift
+  local f
+  for f in "$@"; do
+    [ -s "$f" ] && sed -n '1,2p' "$f" | redact | sed 's/^/      | /' >&2
+  done
+}
 scenario() { say "scenario $1"; }
 
 dh() { /usr/bin/docker-helper "$@"; }
@@ -152,66 +163,80 @@ wait_health || acc_fail "v2.1.1 daemon not healthy (migration gate)"
 # ==============================================================================
 scenario "R2: v2.1.1 pre-upgrade state"
 M_USER="$PRINCIPAL"
+umask 077
+M_DIAG=/tmp/uat-mig211-diag
+rm -rf "$M_DIAG"; mkdir -p "$M_DIAG"
+umask 022
+if ! getent passwd "$M_USER" >/dev/null 2>&1; then
+  if useradd -m "$M_USER" >"$M_DIAG/useradd.out" 2>&1; then
+    acc_ok "OS user for principal seeding created ($M_USER)"
+  else
+    acc_blocked "cannot create OS user $M_USER (useradd failed): $(redact <"$M_DIAG/useradd.out" | head -2)"
+  fi
+fi
 M_HOME="$(getent passwd "$M_USER" | cut -d: -f6)"
 M_POLICY="$M_HOME/uat-mig211-policy"
 mkdir -p "$M_HOME/ws" "$M_POLICY/sub/ws"
 printf 'mig-input\n' > "$M_POLICY/sub/ws/input.txt"
-chown -R "$M_USER:$M_USER" "$M_POLICY" "$M_HOME/ws"
-if dh config allowed-root add "$M_POLICY" >/dev/null 2>&1 \
-    && dh config allowed-root list 2>/dev/null | grep -qx "$M_POLICY" \
+chown -R "$M_USER:$M_USER" "$M_POLICY" "$M_HOME/ws" >"$M_DIAG/chown.out" 2>&1 || true
+dh config allowed-root add "$M_POLICY" >"$M_DIAG/gadd.out" 2>&1
+if dh config allowed-root list 2>/dev/null | grep -qx "$M_POLICY" \
     && dh config allowed-root list 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
   acc_ok "R2 two path-only global roots seeded"
 else
-  acc_fail "R2 global allowed-root seeding failed"
+  acc_fail_ctx "R2 global allowed-root seeding failed" "$M_DIAG/gadd.out"
 fi
 
-dh principal create --system --no-credential "$M_USER" >/dev/null 2>&1 || true
-dh principal set --system "$M_USER" enabled true >/dev/null 2>&1 || true
-dh principal allowed-root add --system "$M_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
-dh principal allowed-root add --system "$M_USER" "$M_POLICY" >/dev/null 2>&1 || true
-if dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -qx "$M_POLICY" \
+dh principal create --system --no-credential "$M_USER" >"$M_DIAG/pcreate.out" 2>&1 || true
+dh principal set --system "$M_USER" enabled true >"$M_DIAG/pset.out" 2>&1 || true
+dh principal allowed-root add --system "$M_USER" "$ALLOWED_ROOT" >"$M_DIAG/padd1.out" 2>&1 || true
+dh principal allowed-root add --system "$M_USER" "$M_POLICY" >"$M_DIAG/padd2.out" 2>&1 || true
+if dh principal allowed-root list --system "$M_USER" 2>"$M_DIAG/plist.err" | grep -qx "$M_POLICY" \
     && dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
   acc_ok "R2 two path-only Principal roots seeded"
 else
-  acc_fail "R2 Principal allowed-root seeding failed"
+  acc_fail_ctx "R2 Principal allowed-root seeding failed" "$M_DIAG/pcreate.out" "$M_DIAG/padd2.out" "$M_DIAG/plist.err"
 fi
 
-M_P_CRED_OUT="$(dh credential create --system --name mig211 "$M_USER" 2>/dev/null || true)"
+dh credential create --system --name mig211 "$M_USER" >"$M_DIAG/pcred.out" 2>&1 || true
+M_P_CRED_OUT="$(cat "$M_DIAG/pcred.out")"
 M_P_TOKEN="$(printf '%s\n' "$M_P_CRED_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
 if [ -n "$M_P_TOKEN" ]; then
   printf '%s\n' "$M_P_TOKEN" > /tmp/uat-mig211-pc.tok; chmod 600 /tmp/uat-mig211-pc.tok
   acc_ok "R2 principal credential issued"
 else
-  acc_fail "R2 principal credential issuance failed"
+  acc_fail_ctx "R2 principal credential issuance failed" "$M_DIAG/pcred.out"
 fi
 
-M_L_OUT="$(dh launcher create --system --principal "$M_USER" --name mlaunch \
-  --allowed-root "$M_POLICY/sub" --no-credential 2>/dev/null || true)"
+dh launcher create --system --principal "$M_USER" --name mlaunch \
+  --allowed-root "$M_POLICY/sub" --no-credential >"$M_DIAG/lcreate.out" 2>&1 || true
+M_L_OUT="$(cat "$M_DIAG/lcreate.out")"
 M_L_ID="$(printf '%s\n' "$M_L_OUT" | json_field id)"
 if [ -n "$M_L_ID" ] \
-    && dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>/dev/null | grep -qx "$M_POLICY/sub"; then
+    && dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>"$M_DIAG/llist.err" | grep -qx "$M_POLICY/sub"; then
   acc_ok "R2 restricted path-only Launcher root seeded ($M_L_ID)"
 else
-  acc_fail "R2 restricted Launcher root seeding failed"
+  acc_fail_ctx "R2 restricted Launcher root seeding failed" "$M_DIAG/lcreate.out" "$M_DIAG/llist.err"
 fi
-M_LC_OUT="$(dh launcher credential create --system --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
+dh launcher credential create --system --principal "$M_USER" "$M_L_ID" >"$M_DIAG/lcred.out" 2>&1 || true
+M_LC_OUT="$(cat "$M_DIAG/lcred.out")"
 M_LC_TOKEN="$(printf '%s\n' "$M_LC_OUT" | json_field token)"
 if [ -n "$M_LC_TOKEN" ]; then
   printf '%s\n' "$M_LC_TOKEN" > /tmp/uat-mig211-lc.tok; chmod 600 /tmp/uat-mig211-lc.tok
   acc_ok "R2 launcher credential issued"
 else
-  acc_fail "R2 launcher credential issuance failed"
+  acc_fail_ctx "R2 launcher credential issuance failed" "$M_DIAG/lcred.out"
 fi
 
-M_S1_JSON="$(dh session create --system --token-file /tmp/uat-mig211-lc.tok --workspace "$M_POLICY/sub/ws" --json 2>/dev/null || true)"
+M_S1_JSON="$(dh session create --system --token-file /tmp/uat-mig211-lc.tok --workspace "$M_POLICY/sub/ws" --json 2>"$M_DIAG/s1.err" || true)"
 M_S1_ID="$(printf '%s' "$M_S1_JSON" | json_field id)"
 M_S1_TOKEN="$(printf '%s' "$M_S1_JSON" | json_field token)"
-M_S2_JSON="$(dh session create --system --token-file /tmp/uat-mig211-pc.tok --workspace "$M_HOME/ws" --json 2>/dev/null || true)"
+M_S2_JSON="$(dh session create --system --token-file /tmp/uat-mig211-pc.tok --workspace "$M_HOME/ws" --json 2>"$M_DIAG/s2.err" || true)"
 M_S2_ID="$(printf '%s' "$M_S2_JSON" | json_field id)"
 if [ -n "$M_S1_ID" ] && [ -n "$M_S2_ID" ]; then
   acc_ok "R2 live Sessions seeded (launcher=$M_S1_ID principal=$M_S2_ID)"
 else
-  acc_fail "R2 Session seeding failed (launcher: '$M_S1_ID', principal: '$M_S2_ID')"
+  acc_fail_ctx "R2 Session seeding failed (launcher: '$M_S1_ID', principal: '$M_S2_ID')" "$M_DIAG/s1.err" "$M_DIAG/s2.err"
 fi
 
 M_CONFIG_SHA="$(sha256sum /etc/docker-helper/config.json | awk '{print $1}')"

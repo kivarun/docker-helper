@@ -72,7 +72,22 @@ systemctl is-active --quiet docker-helper.service || { echo "error: service not 
 docker-helper principal create --system --no-credential opc >/dev/null 2>&1 || true
 docker-helper principal allowed-root add --system opc /home/opc >/dev/null 2>&1 || true
 mkdir -p /home/opc/uat-workspace
-SESSION_JSON="$(docker-helper session create --system --workspace /home/opc/uat-workspace --json 2>&1 || true)"
+# A Session owner is a Launcher: use the 2.2 admin principal-selector contract
+# (the eager default launcher of principal opc is the resolved owner), mirroring
+# the black-box UAT control-plane proof. A selector-less admin create is
+# rejected with missing_launcher_selector and is never a valid session source.
+ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
+SESSION_JSON=""
+if [ -n "$ADMIN_TOKEN" ]; then
+  SESSION_JSON="$(curl --silent --max-time 5 \
+    --unix-socket /run/docker-helper/docker-helper.sock \
+    -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+    -d '{"workspace":"/home/opc/uat-workspace","principal":"opc"}' \
+    http://localhost/sessions 2>/dev/null || true)"
+fi
+if [ -z "$SESSION_JSON" ]; then
+  SESSION_JSON="$(docker-helper session create --system --workspace /home/opc/uat-workspace --json 2>&1 || true)"
+fi
 TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
 if [ -z "$TOKEN" ]; then
   echo "MICROPROOF_SESSION_CREATED=no"

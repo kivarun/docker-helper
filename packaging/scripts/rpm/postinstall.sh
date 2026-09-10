@@ -62,6 +62,10 @@ if [ "$selinux_active" = "true" ]; then
   fi
   if command -v restorecon >/dev/null 2>&1; then
     restorecon /usr/bin/docker-helper || true
+    # bindfs is an explicit RPM Requires (SELinux read-only projection
+    # backend); apply the shipped docker_helper_bindfs_exec_t file context
+    # so the confined daemon can exec the projection worker.
+    restorecon /usr/bin/bindfs 2>/dev/null || true
     restorecon -R /etc/docker-helper 2>/dev/null || true
     restorecon -R /var/lib/docker-helper 2>/dev/null || true
     # Relabel only the helper-owned /run/docker-helper dir itself to

@@ -2930,6 +2930,25 @@ func TestSystemProfileAppArmorProfilesInventoryReadable(t *testing.T) {
 	}
 }
 
+func TestSystemProfileAppArmorRemoveWritable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
+	}
+	content := string(data)
+
+	// The 2.2 workload-MAC lifecycle unloads generated workload profiles on
+	// cleanup and prepare rollback through `apparmor_parser --remove`, which
+	// writes the profile name to the kernel .remove interface. Without this
+	// grant the confined daemon cannot unload its own generated profiles:
+	// "Access denied. You need policy admin privileges to manage profiles"
+	// (observed on the exact-candidate UAT run), leaving helper-owned
+	// workload residue behind.
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/.remove w,") {
+		t.Error("system profile must grant write to the .remove interface for generated profile unload")
+	}
+}
+
 func TestSystemProfileAppArmorInterfaceDirReadable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
@@ -3023,28 +3042,6 @@ func TestSystemProfileNoGenericSecurityfsWrite(t *testing.T) {
 			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
 			if strings.Contains(perm, "w") {
 				t.Errorf("system profile must not grant generic write to /sys/kernel/security/apparmor/** (found: %s)", trimmed)
-			}
-		}
-	}
-}
-
-func TestSystemProfileNoRemoveWritable(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatalf("cannot read system profile (repository artifact): %v", err)
-	}
-	content := string(data)
-
-	// .remove must NOT be writable — we only need replacement, not removal.
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
-			continue
-		}
-		if strings.Contains(trimmed, ".remove") {
-			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
-			if strings.Contains(perm, "w") {
-				t.Errorf("system profile must not grant write to .remove (found: %s)", trimmed)
 			}
 		}
 	}

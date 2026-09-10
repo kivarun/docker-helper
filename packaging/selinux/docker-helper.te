@@ -355,7 +355,12 @@ allow docker_helper_t semanage_t:process { transition siginh noatsecure rlimitin
 allow docker_helper_t semanage_t:process2 { nnp_transition };
 allow docker_helper_t semanage_exec_t:file { execute read open getattr map };
 allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };
-allow docker_helper_t bin_t:file { execute read open getattr map };
+# Generic bin_t exec support (from live AVC evidence). execute_no_trans is
+# required to complete a same-domain exec (no process transition): the
+# confined daemon could not fork/exec /usr/bin/bindfs while it still carried
+# the generic bin_t label, and a libfuse fusermount helper exec has the same
+# shape. Exec only, no process transition.
+allow docker_helper_t bin_t:file { execute read open getattr map execute_no_trans };
 
 # --- SELinux workspace serialization lock (/run/lock/docker-helper-selinux.lock) ---
 # ensureWorkspaceFcontext acquires this global lock before listing/adding

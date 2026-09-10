@@ -3640,6 +3640,24 @@ func TestRPMPostinstallNoRecursiveRuntimeRestorecon(t *testing.T) {
 	}
 }
 
+// TestRPMPostinstallBindfsRestorecon verifies the RPM postinstall applies the
+// shipped docker_helper_bindfs_exec_t file context to /usr/bin/bindfs. bindfs
+// is an explicit RPM Requires (the SELinux read-only projection backend) and
+// zypper installs it with the generic binary label; without the relabel the
+// confined daemon fails the projection worker exec with "fork/exec
+// /usr/bin/bindfs: permission denied" (observed on the exact-candidate UAT).
+func TestRPMPostinstallBindfsRestorecon(t *testing.T) {
+	data, err := os.ReadFile("packaging/scripts/rpm/postinstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "restorecon /usr/bin/bindfs") {
+		t.Error("rpm postinstall must restorecon /usr/bin/bindfs (shipped docker_helper_bindfs_exec_t file context)")
+	}
+}
+
 // TestRPMSelinuxDependencies verifies that the RPM depends on packages
 // providing semodule and restorecon (policycoreutils on openSUSE).
 func TestRPMSelinuxDependencies(t *testing.T) {

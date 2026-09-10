@@ -448,7 +448,14 @@ func (b *workloadSELinuxBackend) awaitProjectionReady(entry *projectionEntry) er
 			return fmt.Errorf("bindfs projection did not mount in time")
 		}
 		if entry.worker != nil && !entry.worker.alive() {
-			return fmt.Errorf("bindfs projection worker exited before the projection mounted")
+			// The worker died before the projection mounted; surface its
+			// exit error (including captured stderr) so the failure names
+			// the actual cause instead of a bare worker-exit fact.
+			detail := ""
+			if waitErr := entry.worker.waitExit(workloadMountReadyTimeout); waitErr != nil {
+				detail = fmt.Sprintf(": %v", waitErr)
+			}
+			return fmt.Errorf("bindfs projection worker exited before the projection mounted%s", detail)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
