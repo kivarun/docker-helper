@@ -274,9 +274,11 @@ func liveContainerOutput(t *testing.T, securityOpts []string, bind, snippet stri
 	return stdout.String(), nil
 }
 
-// selinuxAVCMatched returns a recent AVC line involving the projection type
-// and the given access, or "" when none is found.
-func selinuxAVCMatched(t *testing.T, targetType, access string) string {
+// selinuxAVCMatched returns a recent AVC line involving the projection
+// type, the given access, and the exact object class, or "" when none is
+// found. The class match keeps each proof's denial evidence attributable
+// to its own write instead of a neighboring test's AVC.
+func selinuxAVCMatched(t *testing.T, targetType, access, tclass string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -285,7 +287,7 @@ func selinuxAVCMatched(t *testing.T, targetType, access string) string {
 		return ""
 	}
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, targetType) && strings.Contains(line, access) {
+		if strings.Contains(line, targetType) && strings.Contains(line, access) && strings.Contains(line, "tclass="+tclass) {
 			return strings.TrimSpace(line)
 		}
 	}
@@ -380,7 +382,7 @@ func TestLiveWorkloadSELinux(t *testing.T) {
 	}
 	t.Logf("denied write output: %v", writeErr)
 
-	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write")
+	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write", "dir")
 	if avc == "" {
 		t.Fatal("matching SELinux AVC not found")
 	}
@@ -494,7 +496,7 @@ func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 	}
 
 	// The write must be denied by the projection type while the VFS view
-	// is writable.
+	// is writable: the shell surfaces the MAC denial as EACCES.
 	writeErr := runInContainerWithOpts(t, prepared.SecurityOpts,
 		fmt.Sprintf("%s:/inputs:rw", projection),
 		"echo live-proof-write > /inputs",
@@ -502,9 +504,12 @@ func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 	if writeErr == nil {
 		t.Fatal("write through the projected regular file must fail under docker_helper_container_t")
 	}
+	if !strings.Contains(writeErr.Error(), "Permission denied") {
+		t.Fatalf("the regular-file write must be denied by the MAC layer, got %v", writeErr)
+	}
 	t.Logf("denied write output: %v", writeErr)
 
-	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write")
+	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write", "file")
 	if avc == "" {
 		t.Fatal("matching SELinux AVC not found")
 	}
@@ -617,7 +622,7 @@ func TestLiveWorkloadMCSConcurrentRWRO(t *testing.T) {
 		t.Fatal("read-only container write through the projection must be denied")
 	}
 	t.Logf("denied read-only write output: %v", roErr)
-	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write")
+	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write", "dir")
 	if avc == "" {
 		t.Fatal("matching SELinux AVC not found")
 	}
