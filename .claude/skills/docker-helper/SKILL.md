@@ -120,6 +120,34 @@ Both interfaces share the same path semantics. Define once, apply everywhere.
 Do not call operator commands such as `config show mode` to discover the
 deployment mode.
 
+### Session filesystem policy
+
+The session's filesystem policy is an immutable snapshot issued when the
+session was created (visible through `session show` as a PATH/ACCESS
+table; do not run `session show` unless you were provisioned with a
+credential that authorizes it). It does not change during the session's
+lifetime, and parent allowed-root policy changes do not affect an
+already-issued session.
+
+What this means for mounts:
+
+- A requested **writable** mount can be refused with
+  **`read_only_root`** when the source resolves to a read-only region of
+  the issued snapshot, or when it would cover such a region. This is a
+  policy refusal, distinct from `invalid_mount` (which reports a
+  structurally invalid mount). Correct responses are to request the
+  source read-only or to stop and report the policy limitation — never
+  to retry the same writable request, re-spell the source path (for
+  example through a symlink), or bypass Docker Helper.
+- If a source is only needed for reading, request it read-only
+  (`--mount source:target:ro` or `"read_only": true`). A read-only
+  request is valid for a source in either access mode.
+- If the workload genuinely requires write access that the session
+  snapshot forbids, report the policy limitation to the user and request
+  a suitable session from the environment owner. Do not attempt to
+  bypass Docker Helper or use symlink spellings to widen authority; the
+  daemon decides on the canonical resolved source, never on the spelling.
+
 ### Trusted CA injection
 
 When the administrator enables `trusted_ca_injection` to `"auto"`, Docker
@@ -467,6 +495,11 @@ Do not describe Docker Helper as unavailable after an HTTP response.
   policy was rejected. After this error, inspect the source, target, and
   deployment-mode restrictions described in the Path model section, then
   correct the request.
+- **`read_only_root`** specifically means the issued session filesystem
+  policy refuses a writable exposure of the source. This is a policy
+  refusal, not a structural error and not daemon unavailability: request
+  the source read-only when reads suffice, or report the policy
+  limitation as described in the Session filesystem policy section.
 - **Transport/connectivity failure** (e.g., inability to connect to the
   configured Unix socket) is the only condition that indicates Docker Helper
   is unavailable.

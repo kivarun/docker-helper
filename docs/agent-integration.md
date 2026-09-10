@@ -54,6 +54,29 @@ for inode-pinned mounts.
   mounts via `open_tree` + `move_mount`. Pinning requires Linux kernel
   support and `CAP_SYS_ADMIN`; it fails closed when unavailable.
 
+## Issued Session filesystem policy (Release 2.2)
+
+A Session captures the effective allowed-root policy as an immutable
+filesystem snapshot at creation time and keeps it for its whole lifetime;
+parent-policy changes affect only new Sessions. The snapshot is the single
+data-plane filesystem authority for every mount and build context of that
+Session.
+
+Agent-facing consequences:
+
+- A requested writable mount is refused with `read_only_root` when the
+  source resolves to a read-only region of the issued snapshot or covers
+  such a region. This is a policy refusal, distinct from the structural
+  `invalid_mount`; the daemon never silently downgrades a writable
+  request to read-only.
+- A read-only request (`:ro` / `read_only: true`) is valid for a source
+  in either access mode, so request it read-only when reads suffice.
+- The daemon decides on the canonical resolved source identity, never on
+  the caller spelling: symlink spellings cannot widen authority, and
+  bypassing the helper does not either. Report a policy limitation or
+  request a suitable Session from the owner instead of attempting a
+  bypass.
+
 ## Error interpretation
 
 - Structured HTTP errors (HTTP 4xx with an error `code`) mean the daemon
@@ -61,6 +84,9 @@ for inode-pinned mounts.
   daemon unavailability.
 - `invalid_mount` is a request or policy failure — inspect the mount
   specification and deployment-mode restrictions, then correct the request.
+- `read_only_root` is a filesystem-policy refusal of a writable exposure
+  by the issued Session snapshot — request the source read-only or report
+  the policy limitation; do not retry the same writable request.
 - Docker Helper is only unavailable after an actual transport/connectivity
   failure (e.g., cannot connect to the Unix socket).
 
