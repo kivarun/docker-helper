@@ -198,9 +198,11 @@ with the stable `409 user_mode_owner_reserved` conflict before any durable
 or runtime change:
 
 - daemon-owner Principal: disable, delete, allowed-root add, allowed-root
-  remove (re-enabling an already-enabled Principal is the natural no-op);
+  set-access, allowed-root remove (re-enabling an already-enabled Principal
+  is the natural no-op);
 - daemon-owner `default` Launcher: disable, delete, rename away from
-  `default`, restricted scope, and any non-empty inherit replacement
+  `default`, restricted scope, and any non-empty inherit replacement, plus
+  every narrow allowed-root mutation — add, set-access, remove
   (re-enable, rename to `default`, and `inherit` with zero roots are
   no-ops; inherit with roots is `400 invalid_allowed_roots` for every
   launcher).
@@ -974,8 +976,9 @@ root (set-access; never changes the scope mode), and `DELETE
 .../allowed-roots` removes one root; removal never changes the scope mode,
 so removing the last root leaves the launcher restricted with an empty
 root set (fail-closed: no admissible session workspace until an explicit
-inherit). Both the add and the set-access reject the user-mode reserved
-default launcher with `409 user_mode_owner_reserved`. The CLI verbs are
+inherit). Every narrow launcher root mutation — add, set-access, and
+remove — rejects the user-mode reserved default launcher with
+`409 user_mode_owner_reserved`. The CLI verbs are
 `launcher allowed-root add/list/set-access/remove/inherit` and
 `principal allowed-root add/list/set-access/remove`;
 `launcher scope` no longer exists in the CLI.
@@ -1055,7 +1058,7 @@ persisted immutable filesystem snapshot through the single canonical
 snapshot loader (the data-plane enforcement consumer uses the same
 owner), under the Session-control authorization matrix (an admin token, a Principal
 credential, or a Launcher credential; a Session bearer has no control-plane
-introspection authority) and the same ownership scope as list/delete — a
+introspection authority) and the same ownership scope as list/show/delete — a
 missing or foreign Session is the same non-disclosing
 `404 session_not_found`. A snapshot corruption discovered after startup is
 `500 internal_error` with an operational log, never silently hidden as
@@ -2141,9 +2144,14 @@ files) remains unreadable for the Principal-UID workload through the
 helper-owned directory permissions; the known entry names are not
 authority. Under enforcing SELinux the shipped policy grants the workload
 exactly the traversal and socket-connect permissions needed to reach the
-socket and nothing else; under AppArmor the workload runs unconfined
-(`label=disable`) and the same isolation is provided by the helper-owned
-filesystem permissions and the read-only mount.
+socket and nothing else; under AppArmor system mode the workload remains
+confined by the generated per-workload
+`docker-helper-workload-<operation-id>` profile (Docker's SELinux labeling
+is disabled with `label=disable`, which does not disable AppArmor — see
+[System-mode run mounts](#system-mode-run-mounts)), and the same isolation
+is provided by the helper-owned filesystem permissions, the read-only
+mount, and unchanged bearer authentication: reachability to the helper
+socket grants no authority.
 
 In user mode the runtime directory is owned by the daemon owner with
 `0700` permissions, and user-mode workloads run under that same UID, so a
@@ -2345,7 +2353,8 @@ where `<kind>` is `pull`, `build`, or `run`. Authentication failures
 remain owned by the existing `auth.failure` path and do not additionally
 emit `<kind>.rejected`.
 
-The rejected event schema contains only:
+The generic rejected event schema (`writeDockerActionRejected`) contains
+only:
 
 - `event`: `<kind>.rejected`
 - `result`: the public API error code (e.g., `invalid_image`, `invalid_mount`,
@@ -2359,6 +2368,17 @@ Rejected events intentionally omit request payload metadata (image,
 mounts, env, command, context, dockerfile, etc.) to avoid logging
 partially validated input. No `operation_id` is included because a
 rejected request was never accepted as an operation.
+
+The one narrow policy-aware exception is `run.rejected` with
+`result=read_only_root`: the filesystem-policy refusal adds the ordinary
+`mounts` field with exactly one offending exposure record — the caller
+`source`, the `target`, the requested mode (`read_only=false`, never
+rewritten), the canonical `resolved_source` the snapshot owner decided
+on, the effective `access`, and `writable_allowed=false` — plus the
+session's ownership provenance. It never lists the contents of a
+protected subtree or the specific nested blocker path, and it carries no
+`operation_id` because the request was never admitted (the full facts are
+described with the run audit schema below).
 
 ### Audit logging
 
@@ -2634,6 +2654,7 @@ Emitted before a container starts.
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection is active for this run |
 | `helper_socket` | boolean | true when the helper runtime projection is active for this run |
+| `workload_mac_backend` | string | system mode only: the MAC backend that materialized the already-accepted filesystem exposure plan for this run (`apparmor` or `selinux`); absent in user mode. This is an observability fact, not a policy authority; generated internal profile/projection paths are deliberately not audited |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |
@@ -2673,6 +2694,7 @@ Does not include `request_id` because completion is not request-scoped.
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection was active for this run |
 | `helper_socket` | boolean | true when the helper runtime projection was active for this run |
+| `workload_mac_backend` | string | system mode only: the MAC backend that materialized the already-accepted filesystem exposure plan for this run (`apparmor` or `selinux`); absent in user mode. This is an observability fact, not a policy authority; generated internal profile/projection paths are deliberately not audited |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |
@@ -2755,8 +2777,8 @@ Header parse and admin-token codes:
 | `admin.wrong_token` | Bearer token does not match the configured admin token |
 | `session.parse_failed` | header parse failure on a session-token data-plane endpoint |
 
-Credential authentication on Session control (create/list/delete) is
-discriminated per failure mode:
+Credential authentication on Session-control endpoints (create, list,
+show, delete) is discriminated per failure mode:
 
 | Code | Condition |
 |------|-----------|
@@ -2955,7 +2977,11 @@ through the HTTP API.
 docker-helper applies a fixed security policy when running containers:
 
 - `--rm` — remove the container on exit;
-- user mode and AppArmor system mode use `--security-opt label=disable`;
+- user mode and AppArmor system mode pass `--security-opt label=disable`
+  (SELinux labeling disabled; this does not disable AppArmor — an AppArmor
+  system-mode run workload is additionally confined by the generated
+  per-workload AppArmor profile, see
+  [System-mode run mounts](#system-mode-run-mounts));
 - SELinux system mode uses
   `--security-opt label=type:docker_helper_container_t` and keeps MCS
   confinement;
