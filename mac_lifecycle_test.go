@@ -104,6 +104,9 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
+	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
+		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
+	}
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)

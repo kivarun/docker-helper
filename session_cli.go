@@ -104,6 +104,7 @@ var sessionCommand = &Command{
 	Subcommands: []*Command{
 		sessionCreateCommand,
 		sessionListCommand,
+		sessionShowCommand,
 		sessionDeleteCommand,
 		sessionCleanupCommand,
 	},
@@ -309,6 +310,94 @@ var sessionDeleteCommand = &Command{
 			},
 		}
 	},
+}
+
+var sessionShowCommand = &Command{
+	Name:    "show",
+	Summary: "Show one session with its issued filesystem snapshot",
+	Usage:   "docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]",
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		id := fs.String("id", "", "Session ID to show")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
+
+		return Invocation{
+			Validate: func() error {
+				if *id == "" || strings.HasPrefix(*id, "-") {
+					return fmt.Errorf("--id is required")
+				}
+				return nil
+			},
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				// The daemon authorizes the read against the authenticated
+				// bearer and loads the persisted immutable snapshot through
+				// the canonical snapshot owner; the CLI performs no
+				// client-side ownership check and never recomputes policy.
+				result, err := client.getSession(*id)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				if *jsonOut {
+					enc := json.NewEncoder(stdout)
+					enc.SetIndent("", "  ")
+					if err := enc.Encode(result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
+						return 1
+					}
+					return 0
+				}
+
+				printSessionShow(stdout, result)
+				return 0
+			},
+		}
+	},
+}
+
+// printSessionShow renders the compact human session-show output: the usual
+// Session metadata block and the persisted immutable filesystem snapshot as a
+// PATH/ACCESS table in its exact persisted canonical ordering. The access
+// mode is never hidden.
+func printSessionShow(w io.Writer, result *sessionShowJSON) {
+	fmt.Fprintf(w, "ID:        %s\n", result.ID)
+	fmt.Fprintf(w, "WORKSPACE: %s\n", result.Workspace)
+	principal := "-"
+	if result.Principal != nil {
+		principal = *result.Principal
+	}
+	fmt.Fprintf(w, "LAUNCHER:  %s\n", principalLabel(result.Launcher))
+	fmt.Fprintf(w, "PRINCIPAL: %s\n", principal)
+	fmt.Fprintf(w, "CREATED:   %s\n", result.CreatedAt)
+	fmt.Fprintf(w, "EXPIRES:   %s\n", result.ExpiresAt)
+
+	fmt.Fprintf(w, "\nFILESYSTEM SNAPSHOT\n")
+	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
+	fmt.Fprintln(tw, "PATH\tACCESS")
+	for _, entry := range result.FilesystemSnapshot.Entries {
+		fmt.Fprintf(tw, "%s\t%s\n", entry.Path, entry.Access)
+	}
+	tw.Flush()
+}
+
+// principalLabel renders an optional ownership name for the human session
+// output: "-" when the Session projection carries no name.
+func principalLabel(name *string) string {
+	if name == nil {
+		return "-"
+	}
+	return *name
 }
 
 func printSessionsTable(w io.Writer, sessions []sessionJSON) {

@@ -211,6 +211,30 @@ func (c *apiClient) deleteSession(id string) error {
 	return err
 }
 
+// getSession fetches one Session's public metadata and its persisted
+// immutable filesystem snapshot (GET /sessions/{id}). Authorization is the
+// daemon's Session-control scope; the CLI performs no client-side ownership
+// checks.
+func (c *apiClient) getSession(id string) (*sessionShowJSON, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/sessions/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result sessionShowJSON
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
 type registryLoginResponse struct {
 	OK      bool   `json:"ok"`
 	Message string `json:"message,omitempty"`

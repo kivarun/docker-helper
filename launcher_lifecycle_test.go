@@ -1798,9 +1798,7 @@ func freshFileTestDB(t *testing.T) (*sql.DB, string) {
 		t.Fatalf("openDatabase: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 	return db, dbPath
 }
 
