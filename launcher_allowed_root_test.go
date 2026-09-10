@@ -71,12 +71,13 @@ func readLauncherStoredRoots(t *testing.T, db *sql.DB, launcherID string) []Allo
 func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 
-	committed, changed, canonical, err := addLauncherAllowedRoot(db, l, inRoot, testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot}))
+	committed, changed, entry, err := addLauncherAllowedRoot(db, l, inRoot, AllowedRootAccessReadWrite, testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot}))
 	if err != nil {
 		t.Fatalf("addLauncherAllowedRoot: %v", err)
 	}
-	if !changed || canonical != inRoot {
-		t.Fatalf("add = (changed=%v, %q), want (true, %q)", changed, canonical, inRoot)
+	wantEntry := AllowedRootEntry{Path: inRoot, Access: AllowedRootAccessReadWrite}
+	if !changed || entry != wantEntry {
+		t.Fatalf("add = (changed=%v, %+v), want (true, %+v)", changed, entry, wantEntry)
 	}
 	if got := readLauncherScopeMode(t, db, l.ID); got != LauncherScopeRestricted {
 		t.Fatalf("scope after first add = %q, want restricted", got)
@@ -97,7 +98,7 @@ func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 	// Adding the same root again is the idempotent no-op and must not disturb
 	// the committed scope; the committed projection keeps reflecting the
 	// actual committed state (restricted, unchanged roots).
-	committed, changed, _, err = addLauncherAllowedRoot(db, committed, inRoot, testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot}))
+	committed, changed, _, err = addLauncherAllowedRoot(db, committed, inRoot, AllowedRootAccessReadWrite, testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot}))
 	if err != nil {
 		t.Fatalf("second addLauncherAllowedRoot: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestLauncherAllowedRootAddNarrowsInherit(t *testing.T) {
 func TestLauncherAllowedRootRemoveLastStaysRestricted(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
-	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, ceiling); err != nil {
+	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, AllowedRootAccessReadWrite, ceiling); err != nil {
 		t.Fatalf("addLauncherAllowedRoot: %v", err)
 	}
 
@@ -151,7 +152,7 @@ func TestLauncherAllowedRootRemoveLastStaysRestricted(t *testing.T) {
 func TestLauncherAllowedRootExplicitInheritRestoresCeiling(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
-	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, ceiling); err != nil {
+	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, AllowedRootAccessReadWrite, ceiling); err != nil {
 		t.Fatalf("addLauncherAllowedRoot: %v", err)
 	}
 	cur, err := findLauncherByID(db, l.ID)
@@ -192,7 +193,7 @@ func TestLauncherAllowedRootOutsideCeilingRejected(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(outside) })
 
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
-	_, _, _, err := addLauncherAllowedRoot(db, l, outside, ceiling)
+	_, _, _, err := addLauncherAllowedRoot(db, l, outside, AllowedRootAccessReadWrite, ceiling)
 	if !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("add outside the ceiling = %v, want ErrLauncherRootOutsidePrincipal", err)
 	}
@@ -220,14 +221,14 @@ func TestLauncherAllowedRootCommittedProjectionCanonicalOrder(t *testing.T) {
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
 
 	// current roots: [/z]; then add /a.
-	committed, changed, _, err := addLauncherAllowedRoot(db, l, zRoot, ceiling)
+	committed, changed, _, err := addLauncherAllowedRoot(db, l, zRoot, AllowedRootAccessReadWrite, ceiling)
 	if err != nil {
 		t.Fatalf("add z root: %v", err)
 	}
 	if !changed {
 		t.Fatal("z add reported no change")
 	}
-	committed, changed, _, err = addLauncherAllowedRoot(db, committed, aRoot, ceiling)
+	committed, changed, _, err = addLauncherAllowedRoot(db, committed, aRoot, AllowedRootAccessReadWrite, ceiling)
 	if err != nil {
 		t.Fatalf("add a root: %v", err)
 	}
@@ -249,7 +250,7 @@ func TestLauncherAllowedRootCommittedProjectionCanonicalOrder(t *testing.T) {
 func TestLauncherAllowedRootRemoveMatchesCanonicalPath(t *testing.T) {
 	db, l, globalRoot, inRoot := setupLauncherAllowedRootDomain(t)
 	ceiling := testEffectivePrincipalRoots(t, db, l.PrincipalID, []string{globalRoot})
-	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, ceiling); err != nil {
+	if _, _, _, err := addLauncherAllowedRoot(db, l, inRoot, AllowedRootAccessReadWrite, ceiling); err != nil {
 		t.Fatalf("addLauncherAllowedRoot: %v", err)
 	}
 
@@ -289,10 +290,10 @@ func TestLauncherAllowedRootLifecycleOwners(t *testing.T) {
 	}
 
 	// The add owner resolves the ceiling and refuses an outside-ceiling root.
-	if _, _, _, err := app.addLauncherAllowedRootWithLifecycle(l.ID, filepath.Dir(root)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
+	if _, _, _, err := app.addLauncherAllowedRootWithLifecycle(l.ID, filepath.Dir(root), AllowedRootAccessReadWrite); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("owner add outside ceiling = %v, want ErrLauncherRootOutsidePrincipal", err)
 	}
-	committed, changed, _, err := app.addLauncherAllowedRootWithLifecycle(l.ID, inRoot)
+	committed, changed, _, err := app.addLauncherAllowedRootWithLifecycle(l.ID, inRoot, AllowedRootAccessReadWrite)
 	if err != nil {
 		t.Fatalf("owner add: %v", err)
 	}
@@ -305,7 +306,7 @@ func TestLauncherAllowedRootLifecycleOwners(t *testing.T) {
 		t.Fatalf("owner committed projection scope = %q, want restricted", committed.ScopeMode)
 	}
 	// Unknown Launcher is not found.
-	if _, _, _, err := app.addLauncherAllowedRootWithLifecycle("dhl_00000000000000000000000000000000", inRoot); !errors.Is(err, ErrLauncherNotFound) {
+	if _, _, _, err := app.addLauncherAllowedRootWithLifecycle("dhl_00000000000000000000000000000000", inRoot, AllowedRootAccessReadWrite); !errors.Is(err, ErrLauncherNotFound) {
 		t.Fatalf("owner add unknown launcher = %v, want ErrLauncherNotFound", err)
 	}
 	// The remove owner never changes the scope mode.

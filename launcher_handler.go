@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,18 +69,21 @@ func writeControlAudit(ctx context.Context, rec auditRecord, auth *operatorAutho
 }
 
 // Launcher JSON contract uses "scope" as the public term and "allowed_roots"
-// for the canonical stored roots (restricted scope only), always serialized
-// as a JSON array — zero roots are the empty array, never null
+// for the derived 2.1 path-only projection of the canonical stored roots
+// (restricted scope only), always serialized as a JSON array — zero roots are
+// the empty array, never null. allowed_root_entries is the authoritative rich
+// projection of the same entries with the identical ordering contract
 // (launcherToJSON owns the projection). principal_id is never
 // exposed as public authorization state.
 type launcherJSON struct {
-	ID           string   `json:"id"`
-	Principal    string   `json:"principal"`
-	Name         string   `json:"name"`
-	Enabled      bool     `json:"enabled"`
-	Scope        string   `json:"scope"`
-	AllowedRoots []string `json:"allowed_roots"`
-	CreatedAt    string   `json:"created_at"`
+	ID                 string             `json:"id"`
+	Principal          string             `json:"principal"`
+	Name               string             `json:"name"`
+	Enabled            bool               `json:"enabled"`
+	Scope              string             `json:"scope"`
+	AllowedRoots       []string           `json:"allowed_roots"`
+	AllowedRootEntries []AllowedRootEntry `json:"allowed_root_entries"`
+	CreatedAt          string             `json:"created_at"`
 }
 
 // launcherCreateName is the presence-aware "name" field of the Launcher-create
@@ -111,9 +115,63 @@ type patchLauncherRequest struct {
 	Enabled *bool   `json:"enabled,omitempty"`
 }
 
+// optionalLauncherRootsSlice is the presence-aware legacy path-only roots
+// field of the Launcher scope-replace request. A field absent from the JSON
+// object (or JSON null, which the 2.1 Go client emits for an inherit
+// replacement) selects the legacy-absent form; an explicitly supplied array —
+// including the empty array — is the supplied legacy form. This distinction
+// is what keeps the legacy form and the rich form unambiguous.
+type optionalLauncherRootsSlice struct {
+	present bool
+	value   []string
+}
+
+// UnmarshalJSON marks the field present on any array occurrence and treats
+// JSON null as absent, preserving the exact 2.1 wire semantics where a nil
+// slice serializes as null and means no roots.
+func (s *optionalLauncherRootsSlice) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	s.present = true
+	return json.Unmarshal(data, &s.value)
+}
+
+// allowedRootEntryInput is the strict rich form of one restricted root in a
+// Launcher scope replacement: exactly the {"path","access"} object with a
+// canonical access vocabulary value. The legacy path string is the shape of
+// the allowed_roots form and is rejected here, so the two wire forms cannot
+// be confused.
+type allowedRootEntryInput struct {
+	Path   string `json:"path"`
+	Access string `json:"access"`
+}
+
+// allowedRootEntryInputSlice is the presence-aware rich roots field of the
+// Launcher scope-replace request, with the same null-means-absent rule as the
+// legacy field.
+type allowedRootEntryInputSlice struct {
+	present bool
+	value   []allowedRootEntryInput
+}
+
+func (s *allowedRootEntryInputSlice) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	s.present = true
+	return json.Unmarshal(data, &s.value)
+}
+
+// allowedRootsReplaceRequest is the complete-replacement request of the
+// Launcher allowed-roots PUT route. The legacy path-only form
+// (allowed_roots) and the canonical rich form (allowed_root_entries) are
+// mutually exclusive; supplying both is refused even when one of them is
+// empty, so the requested policy is never ambiguous.
 type allowedRootsReplaceRequest struct {
-	Scope        string   `json:"scope"`
-	AllowedRoots []string `json:"allowed_roots"`
+	Scope              string                     `json:"scope"`
+	AllowedRoots       optionalLauncherRootsSlice `json:"allowed_roots"`
+	AllowedRootEntries allowedRootEntryInputSlice `json:"allowed_root_entries"`
 }
 
 type createLauncherResponse struct {
@@ -145,14 +203,19 @@ func launcherToJSON(l LauncherWithPrincipal) launcherJSON {
 	if allowedRoots == nil {
 		allowedRoots = []string{}
 	}
+	entries := l.AllowedRoots
+	if entries == nil {
+		entries = []AllowedRootEntry{}
+	}
 	return launcherJSON{
-		ID:           l.ID,
-		Principal:    l.PrincipalName,
-		Name:         l.Name,
-		Enabled:      l.Enabled,
-		Scope:        string(l.ScopeMode),
-		AllowedRoots: allowedRoots,
-		CreatedAt:    l.CreatedAt.Format(time.RFC3339),
+		ID:                 l.ID,
+		Principal:          l.PrincipalName,
+		Name:               l.Name,
+		Enabled:            l.Enabled,
+		Scope:              string(l.ScopeMode),
+		AllowedRoots:       allowedRoots,
+		AllowedRootEntries: entries,
+		CreatedAt:          l.CreatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -612,25 +675,107 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 		writeError(ctx, w, http.StatusBadRequest, "invalid_scope", "invalid scope")
 		return
 	}
-	if scopeMode == LauncherScopeRestricted && len(req.AllowedRoots) == 0 {
+
+	// The two roots wire forms are mutually exclusive: the 2.1 path-only
+	// form (allowed_roots) and the canonical rich form (allowed_root_entries)
+	// must never be combined, even when one of them is empty, so the
+	// requested policy is never ambiguous. JSON null is the absent form for
+	// both fields (the 2.1 Go client serializes a nil slice as null).
+	if req.AllowedRoots.present && req.AllowedRootEntries.present {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.scope_replace",
 			LauncherID: l.ID,
 			Result:     "invalid_allowed_roots",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
 		}, auth, nil)
-		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots",
+			"provide either allowed_roots or allowed_root_entries, not both")
 		return
 	}
-	if scopeMode == LauncherScopeInherit && len(req.AllowedRoots) > 0 {
-		writeLauncherControlAudit(ctx, auditRecord{
-			Event:      "launcher.scope_replace",
-			LauncherID: l.ID,
-			Result:     "invalid_allowed_roots",
-			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
-		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
-		return
+
+	var requestedEntries []AllowedRootEntry
+	switch {
+	case req.AllowedRootEntries.present:
+		if scopeMode == LauncherScopeInherit {
+			writeLauncherControlAudit(ctx, auditRecord{
+				Event:      "launcher.scope_replace",
+				LauncherID: l.ID,
+				Result:     "invalid_allowed_roots",
+				Duration:   time.Since(started).Round(time.Millisecond).String(),
+			}, auth, nil)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
+			return
+		}
+		if len(req.AllowedRootEntries.value) == 0 {
+			writeLauncherControlAudit(ctx, auditRecord{
+				Event:      "launcher.scope_replace",
+				LauncherID: l.ID,
+				Result:     "invalid_allowed_roots",
+				Duration:   time.Since(started).Round(time.Millisecond).String(),
+			}, auth, nil)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
+			return
+		}
+		// The rich form is the canonical representation: every entry carries
+		// its access value, parsed here at the request boundary so an empty
+		// or unknown spelling is never silently reinterpreted as omission.
+		requestedEntries = make([]AllowedRootEntry, 0, len(req.AllowedRootEntries.value))
+		for _, in := range req.AllowedRootEntries.value {
+			access, aerr := parseAllowedRootAccess(in.Access)
+			if aerr != nil {
+				writeLauncherControlAudit(ctx, auditRecord{
+					Event:      "launcher.scope_replace",
+					LauncherID: l.ID,
+					Result:     "invalid_access",
+					Duration:   time.Since(started).Round(time.Millisecond).String(),
+				}, auth, nil)
+				writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
+				return
+			}
+			requestedEntries = append(requestedEntries, AllowedRootEntry{Path: in.Path, Access: access})
+		}
+	case req.AllowedRoots.present:
+		// The legacy form preserves the 2.1 contract exactly: an inherit
+		// replacement with an explicitly supplied empty array (or null,
+		// which the 2.1 Go client serializes) is the documented valid
+		// inherit body; a restricted replacement requires at least one
+		// root. The form carries no access value, so every requested root
+		// is the canonical read_write grant.
+		if scopeMode == LauncherScopeInherit {
+			if len(req.AllowedRoots.value) > 0 {
+				writeLauncherControlAudit(ctx, auditRecord{
+					Event:      "launcher.scope_replace",
+					LauncherID: l.ID,
+					Result:     "invalid_allowed_roots",
+					Duration:   time.Since(started).Round(time.Millisecond).String(),
+				}, auth, nil)
+				writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
+				return
+			}
+			break
+		}
+		if len(req.AllowedRoots.value) == 0 {
+			writeLauncherControlAudit(ctx, auditRecord{
+				Event:      "launcher.scope_replace",
+				LauncherID: l.ID,
+				Result:     "invalid_allowed_roots",
+				Duration:   time.Since(started).Round(time.Millisecond).String(),
+			}, auth, nil)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
+			return
+		}
+		requestedEntries = allowedRootEntriesForPaths(req.AllowedRoots.value)
+	default:
+		if scopeMode == LauncherScopeRestricted {
+			writeLauncherControlAudit(ctx, auditRecord{
+				Event:      "launcher.scope_replace",
+				LauncherID: l.ID,
+				Result:     "invalid_allowed_roots",
+				Duration:   time.Since(started).Round(time.Millisecond).String(),
+			}, auth, nil)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
+			return
+		}
 	}
 
 	// The Launcher scope replacement is a policy-authority mutation: it shares
@@ -640,7 +785,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 	// replaceLauncherScopeWithLifecycle owns that boundary and the current
 	// policy snapshot inside it, and refuses any narrowing or rooting of the
 	// reserved user-mode daemon-owner default Launcher before any change.
-	updated, err := a.replaceLauncherScopeWithLifecycle(l.ID, scopeMode, req.AllowedRoots)
+	updated, err := a.replaceLauncherScopeWithLifecycle(l.ID, scopeMode, requestedEntries)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		result := "error"
@@ -663,6 +808,8 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			writeError(ctx, w, http.StatusBadRequest, "invalid_scope", "invalid scope")
 		case isErrInvalidAllowedRoots(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "invalid allowed roots")
+		case errors.Is(err, ErrInvalidAllowedRootAccess):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
 		case isErrLauncherRootOutsidePrincipal(err):
 			writeError(ctx, w, http.StatusBadRequest, "outside_principal_root", "launcher root is not under the effective principal roots")
 		default:
@@ -693,18 +840,25 @@ type launcherAllowedRootResponse struct {
 	LauncherID string `json:"launcher_id"`
 	Field      string `json:"field"`
 	Changed    bool   `json:"changed"`
+	Path       string `json:"path,omitempty"`
+	Access     string `json:"access,omitempty"`
 	Message    string `json:"message,omitempty"`
 }
 
 // launcherAllowedRootResponseOf composes the narrow mutation response from the
 // domain result: a changed=false mutation carries the stable "unchanged"
-// message exactly like the Principal allowed-root contract.
-func launcherAllowedRootResponseOf(launcherID string, changed bool) launcherAllowedRootResponse {
+// message exactly like the Principal allowed-root contract, and the canonical
+// path and stored access are always reported for the add and set-access
+// mutations — for an idempotent no-op the stored access is the pre-existing
+// value, which may differ from the requested one.
+func launcherAllowedRootResponseOf(launcherID string, entry AllowedRootEntry, changed bool) launcherAllowedRootResponse {
 	resp := launcherAllowedRootResponse{
 		OK:         true,
 		LauncherID: launcherID,
 		Field:      "allowed_roots",
 		Changed:    changed,
+		Path:       entry.Path,
+		Access:     string(entry.Access),
 	}
 	if !changed {
 		resp.Message = "unchanged"
@@ -757,11 +911,31 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Parse the presence-aware optional access: an omitted field is the
+	// canonical read_write grant (the 2.1 path-only semantics); an explicitly
+	// supplied value — including the empty string — must parse, so an empty
+	// or unknown spelling is never silently reinterpreted as omission.
+	requestedAccess := AllowedRootAccessReadWrite
+	if req.Access != nil {
+		parsed, aerr := parseAllowedRootAccess(*req.Access)
+		if aerr != nil {
+			writeLauncherControlAudit(ctx, auditRecord{
+				Event:      "launcher.allowed_root_add",
+				LauncherID: l.ID,
+				Result:     "invalid_access",
+				Duration:   time.Since(started).Round(time.Millisecond).String(),
+			}, auth, nil)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
+			return
+		}
+		requestedAccess = parsed
+	}
+
 	// The narrow add shares the lifecycle serialization with Session creation
 	// and the other ownership mutations (see handleReplaceLauncherAllowedRoots):
 	// addLauncherAllowedRootWithLifecycle owns that boundary, the current
 	// policy snapshot inside it, and the reserved-launcher refusal.
-	committed, changed, canonicalPath, err := a.addLauncherAllowedRootWithLifecycle(l.ID, req.Path)
+	committed, changed, entry, err := a.addLauncherAllowedRootWithLifecycle(l.ID, req.Path, requestedAccess)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		result := "error"
@@ -782,6 +956,8 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
+		case errors.Is(err, ErrInvalidAllowedRootAccess):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
 		case isErrLauncherRootOutsidePrincipal(err):
 			writeError(ctx, w, http.StatusBadRequest, "outside_principal_root", "launcher root is not under the effective principal roots")
 		default:
@@ -796,12 +972,14 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 
 	writeLauncherControlAudit(ctx, auditRecord{
 		Event:               "launcher.allowed_root_add",
-		LauncherAllowedRoot: canonicalPath,
+		LauncherAllowedRoot: entry.Path,
+		RequestedAccess:     string(requestedAccess),
+		StoredAccess:        string(entry.Access),
 		Result:              "success",
 		Duration:            duration,
 	}, auth, committed)
 
-	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(committed.ID, changed))
+	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(committed.ID, entry, changed))
 }
 
 // handleRemoveLauncherAllowedRoot removes one stored root from a Launcher
@@ -888,7 +1066,123 @@ func (a *App) handleRemoveLauncherAllowedRoot(w http.ResponseWriter, r *http.Req
 		Duration:            duration,
 	}, auth, l)
 
-	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(l.ID, changed))
+	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(l.ID, AllowedRootEntry{Path: canonicalPath}, changed))
+}
+
+// handleSetLauncherAllowedRootAccess changes the access mode of exactly one
+// stored Launcher root (PATCH .../allowed-roots). It is the targeted access
+// mutation: the daemon performs one conditional mutation on the exact
+// canonical stored identity — the CLI never performs a read-modify-write over
+// the root list, so the daemon owns the mutation and its concurrency
+// semantics. Unlike the idempotent remove, a missing stored root is refused
+// (404 allowed_root_not_found) so a mistyped path can never be silently
+// reported as satisfied, and the reserved user-mode daemon-owner default
+// Launcher is refused like every other mutation. The mutation shares the
+// lifecycle serialization with Session creation and the other root-policy
+// mutations; no ceiling re-check is performed here, because the effective
+// policy is composed by the canonical 2.2 effective-root owner at every
+// consumption boundary. The scope mode is never changed.
+func (a *App) handleSetLauncherAllowedRootAccess(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
+	if err != nil || auth == nil {
+		return
+	}
+	ctx := r.Context()
+
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
+		return
+	}
+
+	var req allowedRootSetAccessRequest
+	if err := decodeJSONRequest(w, r, &req); err != nil {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_set_access",
+			LauncherID: l.ID,
+			Result:     "invalid_json",
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
+		}, auth, nil)
+		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		return
+	}
+	if req.Path == "" {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_set_access",
+			LauncherID: l.ID,
+			Result:     "missing_path",
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
+		}, auth, nil)
+		writeError(ctx, w, http.StatusBadRequest, "missing_path", "path is required")
+		return
+	}
+	requestedAccess, aerr := parseAllowedRootAccess(req.Access)
+	if aerr != nil {
+		// The HTTP code distinguishes the two refusals; the audit result
+		// vocabulary is missing_access/invalid_access.
+		code := "missing_access"
+		result := "missing_access"
+		if req.Access != "" {
+			code = "invalid_allowed_root_access"
+			result = "invalid_access"
+		}
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_set_access",
+			LauncherID: l.ID,
+			Result:     result,
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
+		}, auth, nil)
+		writeError(ctx, w, http.StatusBadRequest, code, "access must be read_write or read_only")
+		return
+	}
+
+	// Same lifecycle serialization boundary as the add, the remove, and the
+	// scope replacement; setLauncherAllowedRootAccessWithLifecycle owns it.
+	changed, entry, err := a.setLauncherAllowedRootAccessWithLifecycle(l.ID, req.Path, requestedAccess)
+	duration := time.Since(started).Round(time.Millisecond).String()
+	if err != nil {
+		result := "error"
+		if isErrUserModeOwnerReserved(err) {
+			result = "user_mode_owner_reserved"
+		}
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.allowed_root_set_access",
+			LauncherID: l.ID,
+			Result:     result,
+			Duration:   duration,
+		}, auth, nil)
+		switch {
+		case isErrLauncherNotFound(err):
+			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+		case isErrUserModeOwnerReserved(err):
+			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
+				"this launcher is managed by transparent user mode and cannot be mutated in this way")
+		case isErrInvalidAllowedRoot(err):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
+		case errors.Is(err, ErrInvalidAllowedRootAccess):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
+		case errors.Is(err, ErrAllowedRootNotFound):
+			writeError(ctx, w, http.StatusNotFound, "allowed_root_not_found", "allowed root not found")
+		default:
+			opLog(ctx).Error("launcher allowed_root_set_access failed",
+				slog.String("operation", "launcher_allowed_root_set_access"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+
+	writeLauncherControlAudit(ctx, auditRecord{
+		Event:               "launcher.allowed_root_set_access",
+		LauncherAllowedRoot: entry.Path,
+		RequestedAccess:     string(requestedAccess),
+		StoredAccess:        string(entry.Access),
+		Result:              "success",
+		Duration:            duration,
+	}, auth, l)
+
+	writeJSONRaw(ctx, w, http.StatusOK, launcherAllowedRootResponseOf(l.ID, entry, changed))
 }
 
 func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {

@@ -109,14 +109,18 @@ const sessionOwnershipProjection = `
 
 // sessionCreatePolicy contains the resolved context needed to create a session.
 // LauncherID is the resolved owning Launcher. EffectiveAllowedRoots is the
-// already-computed effective session-creation allowed-root scope (the three-level
-// evaluation result).
+// already-computed effective session-creation allowed-root scope (the
+// three-level evaluation result) in its derived 2.1 path-only form;
+// EffectiveAllowedRootEntries is the same scope as its authoritative rich
+// entries — both are projected from one canonical evaluation, never
+// computed twice.
 type sessionCreatePolicy struct {
-	Workspace             string
-	EffectiveAllowedRoots []string
-	LauncherID            string
-	LauncherName          string
-	PrincipalName         string
+	Workspace                   string
+	EffectiveAllowedRoots       []string
+	EffectiveAllowedRootEntries []AllowedRootEntry
+	LauncherID                  string
+	LauncherName                string
+	PrincipalName               string
 }
 
 // createSessionWithPolicyLocked is the internal persistence/MAC stage beneath

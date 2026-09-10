@@ -16,20 +16,38 @@ type setPrincipalRequest struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
+// allowedRootRequest is the per-root control-plane request for the Principal
+// allowed-root add and remove. Path is required. Access is the presence-aware
+// optional access vocabulary for the add: an omitted field selects the
+// canonical read_write grant (the 2.1 path-only semantics), while an
+// explicitly supplied value — including the empty string — is parsed and
+// must be exactly one of read_write/read_only, so it is never reinterpreted
+// as omission. The remove never carries an access value.
 type allowedRootRequest struct {
-	Path string `json:"path"`
+	Path   string  `json:"path"`
+	Access *string `json:"access,omitempty"`
+}
+
+// allowedRootSetAccessRequest is the targeted set-access request: both the
+// stored-root identity and the new access vocabulary value are required; an
+// explicitly absent or empty access is the missing_access refusal, not a
+// default.
+type allowedRootSetAccessRequest struct {
+	Path   string `json:"path"`
+	Access string `json:"access"`
 }
 
 type principalResponse struct {
-	OK           bool                     `json:"ok"`
-	Username     string                   `json:"username"`
-	UID          int                      `json:"uid"`
-	GID          int                      `json:"gid"`
-	Home         string                   `json:"home"`
-	Enabled      bool                     `json:"enabled"`
-	AllowedRoots []string                 `json:"allowed_roots"`
-	Credential   *principalCredentialJSON `json:"credential,omitempty"`
-	Token        string                   `json:"token,omitempty"`
+	OK                 bool                     `json:"ok"`
+	Username           string                   `json:"username"`
+	UID                int                      `json:"uid"`
+	GID                int                      `json:"gid"`
+	Home               string                   `json:"home"`
+	Enabled            bool                     `json:"enabled"`
+	AllowedRoots       []string                 `json:"allowed_roots"`
+	AllowedRootEntries []AllowedRootEntry       `json:"allowed_root_entries"`
+	Credential         *principalCredentialJSON `json:"credential,omitempty"`
+	Token              string                   `json:"token,omitempty"`
 }
 
 type principalChangedResponse struct {
@@ -37,6 +55,8 @@ type principalChangedResponse struct {
 	Username string `json:"username"`
 	Field    string `json:"field"`
 	Changed  bool   `json:"changed"`
+	Path     string `json:"path,omitempty"`
+	Access   string `json:"access,omitempty"`
 	Message  string `json:"message,omitempty"`
 }
 
@@ -44,20 +64,27 @@ type principalChangedResponse struct {
 // Principal resource document (create and show). allowed_roots is the
 // 2.1 path-only projection of the canonical rich entries and is always
 // serialized as a JSON array: zero stored roots project the empty array,
-// never null. Internal nil slices are not mutated.
+// never null. allowed_root_entries is the authoritative rich projection of
+// the same entries, with the identical ordering contract; internal nil
+// slices are not mutated.
 func principalToResponse(p *PrincipalWithRoots) principalResponse {
 	roots := allowedRootPaths(p.AllowedRoots)
 	if roots == nil {
 		roots = []string{}
 	}
+	entries := p.AllowedRoots
+	if entries == nil {
+		entries = []AllowedRootEntry{}
+	}
 	return principalResponse{
-		OK:           true,
-		Username:     p.Username,
-		UID:          p.UID,
-		GID:          p.GID,
-		Home:         p.Home,
-		Enabled:      p.Enabled,
-		AllowedRoots: roots,
+		OK:                 true,
+		Username:           p.Username,
+		UID:                p.UID,
+		GID:                p.GID,
+		Home:               p.Home,
+		Enabled:            p.Enabled,
+		AllowedRoots:       roots,
+		AllowedRootEntries: entries,
 	}
 }
 
@@ -397,6 +424,28 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Parse the presence-aware optional access: an omitted field is the
+	// canonical read_write grant (the 2.1 path-only semantics); an explicitly
+	// supplied value — including the empty string — must parse, so an empty
+	// or unknown spelling is never silently reinterpreted as omission.
+	requestedAccess := AllowedRootAccessReadWrite
+	if req.Access != nil {
+		parsed, aerr := parseAllowedRootAccess(*req.Access)
+		if aerr != nil {
+			duration := time.Since(started).Round(time.Millisecond).String()
+			writeRequestContextAudit(ctx, auditRecord{
+				Event:         "principal.allowed_root_add",
+				PrincipalName: username,
+				Result:        "invalid_access",
+				Duration:      duration,
+			})
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access",
+				"access must be read_write or read_only")
+			return
+		}
+		requestedAccess = parsed
+	}
+
 	// The Principal allowed-root mutation is a policy-authority mutation: it
 	// shares the lifecycle serialization with Session creation so a concurrent
 	// create either linearizes before the mutation (and observed the old
@@ -404,7 +453,7 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	// addPrincipalAllowedRootWithLifecycle owns that boundary and the current
 	// policy snapshot inside it, and refuses the reserved user-mode
 	// daemon-owner Principal before any change.
-	changed, canonicalPath, err := a.addPrincipalAllowedRootWithLifecycle(username, req.Path)
+	changed, entry, err := a.addPrincipalAllowedRootWithLifecycle(username, req.Path, requestedAccess)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -427,6 +476,8 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 				"this principal is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
+		case errors.Is(err, ErrInvalidAllowedRootAccess):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
 		case errors.Is(err, ErrPrincipalRootOutsideGlobal):
 			writeError(ctx, w, http.StatusBadRequest, "outside_global_root", "path is not under any global allowed root")
 		default:
@@ -444,6 +495,8 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 		Username: username,
 		Field:    "allowed_roots",
 		Changed:  changed,
+		Path:     entry.Path,
+		Access:   string(entry.Access),
 	}
 	if !changed {
 		resp.Message = "unchanged"
@@ -452,7 +505,9 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:                "principal.allowed_root_add",
 		PrincipalName:        username,
-		PrincipalAllowedRoot: canonicalPath,
+		PrincipalAllowedRoot: entry.Path,
+		RequestedAccess:      string(requestedAccess),
+		StoredAccess:         string(entry.Access),
 		Result:               "success",
 		Duration:             duration,
 	})
@@ -557,6 +612,147 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 		Event:                "principal.allowed_root_remove",
 		PrincipalName:        username,
 		PrincipalAllowedRoot: canonicalPath,
+		Result:               "success",
+		Duration:             duration,
+	})
+
+	writeJSONRaw(ctx, w, http.StatusOK, resp)
+}
+
+// handleSetPrincipalAllowedRootAccess changes the access mode of exactly one
+// stored Principal root (PATCH /principals/{username}/allowed-roots). It is
+// the targeted access mutation: the daemon performs one conditional mutation
+// on the exact canonical stored identity — the CLI never performs a
+// read-modify-write over the root list, so the daemon owns the mutation and
+// its concurrency semantics. Unlike the idempotent remove, a missing stored
+// root is refused (404 allowed_root_not_found) so a mistyped path can never
+// be silently reported as satisfied, and the reserved user-mode daemon-owner
+// Principal is refused like every other mutation. The mutation shares the
+// lifecycle serialization with Session creation and the other root-policy
+// mutations; no ceiling re-check is performed here, because the effective
+// policy is composed by the canonical 2.2 effective-root owner at every
+// consumption boundary.
+func (a *App) handleSetPrincipalAllowedRootAccess(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+
+	if !a.requireAdmin(w, r) {
+		return
+	}
+
+	ctx := r.Context()
+
+	username := r.PathValue("username")
+	if username == "" {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:    "principal.allowed_root_set_access",
+			Result:   "missing_username",
+			Duration: duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest, "missing_username", "username is required")
+		return
+	}
+
+	var req allowedRootSetAccessRequest
+	if err := decodeJSONRequest(w, r, &req); err != nil {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:         "principal.allowed_root_set_access",
+			PrincipalName: username,
+			Result:        "invalid_json",
+			Duration:      duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		return
+	}
+
+	if req.Path == "" {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:         "principal.allowed_root_set_access",
+			PrincipalName: username,
+			Result:        "missing_path",
+			Duration:      duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest, "missing_path", "path is required")
+		return
+	}
+	requestedAccess, aerr := parseAllowedRootAccess(req.Access)
+	if aerr != nil {
+		// The HTTP code distinguishes the two refusals; the audit result
+		// vocabulary is missing_access/invalid_access.
+		code := "missing_access"
+		result := "missing_access"
+		if req.Access != "" {
+			code = "invalid_allowed_root_access"
+			result = "invalid_access"
+		}
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:         "principal.allowed_root_set_access",
+			PrincipalName: username,
+			Result:        result,
+			Duration:      duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest, code, "access must be read_write or read_only")
+		return
+	}
+
+	changed, entry, err := a.setPrincipalAllowedRootAccessWithLifecycle(username, req.Path, requestedAccess)
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	if err != nil {
+		result := "error"
+		if isErrUserModeOwnerReserved(err) {
+			result = "user_mode_owner_reserved"
+		}
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:         "principal.allowed_root_set_access",
+			PrincipalName: username,
+			Result:        result,
+			Duration:      duration,
+		})
+
+		switch {
+		case isErrPrincipalNotFound(err):
+			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+		case isErrUserModeOwnerReserved(err):
+			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
+				"this principal is managed by transparent user mode and cannot be mutated in this way")
+		case isErrInvalidAllowedRoot(err):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
+		case errors.Is(err, ErrInvalidAllowedRootAccess):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
+		case errors.Is(err, ErrAllowedRootNotFound):
+			writeError(ctx, w, http.StatusNotFound, "allowed_root_not_found", "allowed root not found")
+		default:
+			opLog(ctx).Error("principal allowed_root_set_access failed",
+				slog.String("operation", "principal_allowed_root_set_access"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+
+	resp := principalChangedResponse{
+		OK:       true,
+		Username: username,
+		Field:    "allowed_roots",
+		Changed:  changed,
+		Path:     entry.Path,
+		Access:   string(entry.Access),
+	}
+	if !changed {
+		resp.Message = "unchanged"
+	}
+
+	writeRequestContextAudit(ctx, auditRecord{
+		Event:                "principal.allowed_root_set_access",
+		PrincipalName:        username,
+		PrincipalAllowedRoot: entry.Path,
+		RequestedAccess:      string(requestedAccess),
+		StoredAccess:         string(entry.Access),
 		Result:               "success",
 		Duration:             duration,
 	})

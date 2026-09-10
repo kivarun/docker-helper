@@ -439,11 +439,12 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 	}
 
 	return &sessionCreatePolicy{
-		Workspace:             workspace,
-		EffectiveAllowedRoots: allowedRootPaths(effectiveEntries),
-		LauncherID:            snap.launcherID,
-		LauncherName:          snap.launcherName,
-		PrincipalName:         snap.principalName,
+		Workspace:                   workspace,
+		EffectiveAllowedRoots:       allowedRootPaths(effectiveEntries),
+		EffectiveAllowedRootEntries: effectiveEntries,
+		LauncherID:                  snap.launcherID,
+		LauncherName:                snap.launcherName,
+		PrincipalName:               snap.principalName,
 	}, nil
 }
 

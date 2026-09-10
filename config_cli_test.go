@@ -202,7 +202,7 @@ func TestConfigShowSingleField(t *testing.T) {
 		field string
 		want  string
 	}{
-		{"allowed_roots", "[\n  \"/home/user/work\"\n]\n"},
+		{"allowed_roots", "[\n  {\n    \"path\": \"/home/user/work\",\n    \"access\": \"read_write\"\n  }\n]\n"},
 		{"session_ttl", "12h\n"},
 		{"log_level", "warn\n"},
 	}

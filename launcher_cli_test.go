@@ -1166,7 +1166,15 @@ func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 			positional: []string{"dhl_1"},
 			wantPath:   "/principals/alice/launchers/dhl_1/allowed-roots",
 			wantMethod: http.MethodPut,
-			wantBody:   `{"scope":"inherit","allowed_roots":[]}`,
+			wantBody:   `{"scope":"inherit"}`,
+		},
+		{
+			name:       "set-access sends the targeted access mutation",
+			args:       []string{"launcher", "allowed-root", "set-access", "--principal", "alice"},
+			positional: []string{"dhl_1", "/a", "read_only"},
+			wantPath:   "/principals/alice/launchers/dhl_1/allowed-roots",
+			wantMethod: http.MethodPatch,
+			wantBody:   `{"path":"/a","access":"read_only"}`,
 		},
 	}
 	for _, tc := range tests {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -347,12 +348,16 @@ func TestLoadAndPrepareRuntimeConfigRichObjectForm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths, err := resolveAllowedRootsForShow(raw, fc)
+	entries, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) != 2 || paths[0] != other || paths[1] != root {
-		t.Errorf("show projection = %v, want [%s %s]", paths, other, root)
+	wantShow := []AllowedRootEntry{
+		allowedRootEntry(other),
+		{Path: root, Access: AllowedRootAccessReadOnly},
+	}
+	if !slices.Equal(entries, wantShow) {
+		t.Errorf("show projection = %v, want %v", entries, wantShow)
 	}
 }
 
@@ -520,7 +525,7 @@ func TestAllowedRootPersistenceCarriesReadWrite(t *testing.T) {
 	if err := os.MkdirAll(extra, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := addPrincipalAllowedRoot(db, "rwuser", extra, []string{globalRoot}); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(db, "rwuser", extra, AllowedRootAccessReadWrite, []string{globalRoot}); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot: %v", err)
 	}
 	entries, err := readPrincipalAllowedRoots(db, pid)
@@ -556,7 +561,7 @@ func TestAllowedRootPersistenceCarriesReadWrite(t *testing.T) {
 	if err := os.MkdirAll(repl, 0755); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []string{repl}, []string{home})
+	updated, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []AllowedRootEntry{allowedRootEntry(repl)}, []string{home})
 	if err != nil {
 		t.Fatalf("replaceLauncherScope: %v", err)
 	}

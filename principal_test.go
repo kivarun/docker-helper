@@ -215,7 +215,7 @@ func TestAddAllowedRootDuplicate(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	changed, _, err := addPrincipalAllowedRoot(app.DB, "duprootuser", home, allowedRootPaths(app.Config.AllowedRoots))
+	changed, _, err := addPrincipalAllowedRoot(app.DB, "duprootuser", home, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots))
 	if err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestAddAllowedRootTildeRejected(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	_, _, err := addPrincipalAllowedRoot(app.DB, "tildeuser", "~/some/path", allowedRootPaths(app.Config.AllowedRoots))
+	_, _, err := addPrincipalAllowedRoot(app.DB, "tildeuser", "~/some/path", AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots))
 	if err == nil {
 		t.Fatal("expected error for tilde path")
 	}
@@ -274,7 +274,7 @@ func TestRemoveAllowedRoot(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "remuser", extraRoot, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "remuser", extraRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -318,7 +318,7 @@ func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", extraRoot, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", extraRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -894,7 +894,7 @@ func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "delhttpuser", extraRoot, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "delhttpuser", extraRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -1101,12 +1101,13 @@ func TestPrincipalCLIHelp(t *testing.T) {
 
 func TestExtractPrincipalField(t *testing.T) {
 	p := &principalResponse{
-		Username:     "testuser",
-		UID:          1000,
-		GID:          1000,
-		Home:         "/home/testuser",
-		Enabled:      true,
-		AllowedRoots: []string{"/home/testuser", "/shared"},
+		Username:           "testuser",
+		UID:                1000,
+		GID:                1000,
+		Home:               "/home/testuser",
+		Enabled:            true,
+		AllowedRoots:       []string{"/home/testuser", "/shared"},
+		AllowedRootEntries: []AllowedRootEntry{{Path: "/home/testuser", Access: AllowedRootAccessReadWrite}},
 	}
 
 	tests := []struct {
@@ -1120,6 +1121,7 @@ func TestExtractPrincipalField(t *testing.T) {
 		{"home", "/home/testuser", true},
 		{"enabled", "true", true},
 		{"allowed_roots", `["/home/testuser","/shared"]`, true},
+		{"allowed_root_entries", `[{"path":"/home/testuser","access":"read_write"}]`, true},
 		{"unknown", "", false},
 	}
 
@@ -1305,12 +1307,12 @@ func TestPrincipalErrorWrapping(t *testing.T) {
 		t.Fatal("expected error for empty username in update")
 	}
 
-	_, _, err = addPrincipalAllowedRoot(app.DB, "", "/tmp", allowedRootPaths(app.Config.AllowedRoots))
+	_, _, err = addPrincipalAllowedRoot(app.DB, "", "/tmp", AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots))
 	if err == nil {
 		t.Fatal("expected error for empty username in addAllowedRoot")
 	}
 
-	_, _, err = addPrincipalAllowedRoot(app.DB, "user", "", allowedRootPaths(app.Config.AllowedRoots))
+	_, _, err = addPrincipalAllowedRoot(app.DB, "user", "", AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots))
 	if err == nil {
 		t.Fatal("expected error for empty path in addAllowedRoot")
 	}
@@ -1413,7 +1415,7 @@ func TestPrincipalCascadeDelete(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "cascadeuser", extraRoot, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "cascadeuser", extraRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -1534,7 +1536,7 @@ func TestPrincipalAllowedRootPathResolution(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	changed, _, err := addPrincipalAllowedRoot(app.DB, "pathresuser", extraRoot+"/", allowedRootPaths(app.Config.AllowedRoots))
+	changed, _, err := addPrincipalAllowedRoot(app.DB, "pathresuser", extraRoot+"/", AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots))
 	if err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
@@ -1892,5 +1894,79 @@ func TestPrincipalHTTPAddAllowedRootOutsideGlobal(t *testing.T) {
 	}
 	if resp.Code != "outside_global_root" {
 		t.Errorf("expected error code outside_global_root, got %q", resp.Code)
+	}
+}
+
+// TestPrincipalAllowedRootCLISingleRequest proves the principal allowed-root
+// commands issue exactly one request each — no GET and no read-modify-write:
+// the daemon owns the policy mutation and its concurrency semantics. The
+// access flag is presence-aware: omitting --access must not carry an access
+// fact on the wire.
+func TestPrincipalAllowedRootCLISingleRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantPath   string
+		wantMethod string
+		wantBody   string
+	}{
+		{
+			name:       "add without --access omits the access fact",
+			args:       []string{"principal", "allowed-root", "add", "--endpoint", "EP", "--token-file", "TF", "alice", "/a"},
+			wantPath:   "/principals/alice/allowed-roots",
+			wantMethod: http.MethodPost,
+			wantBody:   `{"path":"/a"}`,
+		},
+		{
+			name:       "add --access read_only sends the access fact",
+			args:       []string{"principal", "allowed-root", "add", "--access", "read_only", "--endpoint", "EP", "--token-file", "TF", "alice", "/a"},
+			wantPath:   "/principals/alice/allowed-roots",
+			wantMethod: http.MethodPost,
+			wantBody:   `{"path":"/a","access":"read_only"}`,
+		},
+		{
+			name:       "set-access sends the targeted access mutation",
+			args:       []string{"principal", "allowed-root", "set-access", "--endpoint", "EP", "--token-file", "TF", "alice", "/a", "read_only"},
+			wantPath:   "/principals/alice/allowed-roots",
+			wantMethod: http.MethodPatch,
+			wantBody:   `{"path":"/a","access":"read_only"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/principals/") && r.Method != http.MethodGet {
+					writeJSONResponse(w, http.StatusOK, principalChangedResponse{OK: true, Username: "alice", Field: "allowed_roots", Changed: true})
+					return
+				}
+				http.NotFound(w, r)
+			})
+
+			args := make([]string, 0, len(tc.args)+2)
+			for _, a := range tc.args {
+				switch a {
+				case "EP":
+					args = append(args, endpoint)
+				case "TF":
+					args = append(args, tokenPath)
+				default:
+					args = append(args, a)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+			}
+			if len(*requests) != 1 {
+				t.Fatalf("requests = %+v, want exactly one mutation request (no read-modify-write)", *requests)
+			}
+			if (*requests)[0].method != tc.wantMethod || (*requests)[0].path != tc.wantPath {
+				t.Fatalf("request = %s %s, want %s %s", (*requests)[0].method, (*requests)[0].path, tc.wantMethod, tc.wantPath)
+			}
+			if strings.TrimSpace((*requests)[0].body) != tc.wantBody {
+				t.Errorf("body = %q, want %q", (*requests)[0].body, tc.wantBody)
+			}
+		})
 	}
 }

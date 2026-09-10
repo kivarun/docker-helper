@@ -34,7 +34,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "deluser"))
 
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", home, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", home, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addAllowedRoot: %v", err)
 	}
 

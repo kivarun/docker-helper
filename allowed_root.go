@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 )
 
 // AllowedRootAccess is the canonical allowed-root access-mode vocabulary. The
@@ -23,6 +24,13 @@ const (
 // isValid reports whether a is exactly one of the two canonical access values.
 func (a AllowedRootAccess) isValid() bool {
 	return a == AllowedRootAccessReadWrite || a == AllowedRootAccessReadOnly
+}
+
+// allowedRootAccessVocabulary is the static vocabulary of the canonical
+// access modes, in canonical order. It is the single source for completion
+// and help surfaces that enumerate the access values.
+func allowedRootAccessVocabulary() []string {
+	return []string{string(AllowedRootAccessReadWrite), string(AllowedRootAccessReadOnly)}
 }
 
 // AllowedRootEntry is the single canonical allowed-root policy value: one
@@ -104,4 +112,36 @@ func allowedRootEntriesForPaths(paths []string) []AllowedRootEntry {
 		out = append(out, allowedRootEntry(p))
 	}
 	return out
+}
+
+// parseAllowedRootAccess parses a request-supplied access vocabulary value
+// into the canonical access mode. It is the single vocabulary parser for
+// control-plane inputs (HTTP request fields, CLI flags and positional
+// arguments): any value other than the two canonical spellings fails closed
+// with ErrInvalidAllowedRootAccess, never a silent default.
+func parseAllowedRootAccess(access string) (AllowedRootAccess, error) {
+	parsed := AllowedRootAccess(access)
+	if !parsed.isValid() {
+		return "", fmt.Errorf("access must be read_write or read_only, got %q: %w", access, ErrInvalidAllowedRootAccess)
+	}
+	return parsed, nil
+}
+
+// resolveAllowedRootIdentity resolves the canonical stored-root identity a
+// control-plane mutation targets (set-access and the exact-match remove
+// semantics): the absolute path, symlink-resolved when the target still
+// exists on the filesystem, the cleaned absolute form otherwise. A stored
+// root is always matched by this identity, so a symlink alias names the same
+// stored entry as its target and a deleted directory keeps its stored
+// identity. It is the shared owner of that resolution for every allowed-root
+// family (global config, Principal, Launcher).
+func resolveAllowedRootIdentity(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve path: %w: %w", err, ErrInvalidAllowedRoot)
+	}
+	if canonical, err := filepath.EvalSymlinks(abs); err == nil {
+		return canonical, nil
+	}
+	return filepath.Clean(abs), nil
 }

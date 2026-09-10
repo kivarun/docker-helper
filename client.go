@@ -556,8 +556,8 @@ func (c *apiClient) setPrincipalEnabled(username string, enabled bool) (*princip
 	return &result, nil
 }
 
-func (c *apiClient) addPrincipalAllowedRoot(username, path string) (*principalChangedResponse, error) {
-	body, err := json.Marshal(allowedRootRequest{Path: path})
+func (c *apiClient) addPrincipalAllowedRoot(username, path string, access *AllowedRootAccess) (*principalChangedResponse, error) {
+	body, err := json.Marshal(allowedRootRequest{Path: path, Access: accessStringPtr(access)})
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
@@ -602,6 +602,44 @@ func (c *apiClient) removePrincipalAllowedRoot(username, path string) (*principa
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
 	return &result, nil
+}
+
+// setPrincipalAllowedRootAccess sends the daemon-owned targeted access
+// mutation (PATCH .../allowed-roots): one conditional mutation on the exact
+// canonical stored identity, never a read-modify-write over the root list.
+func (c *apiClient) setPrincipalAllowedRootAccess(username, path string, access AllowedRootAccess) (*principalChangedResponse, error) {
+	body, err := json.Marshal(allowedRootSetAccessRequest{Path: path, Access: string(access)})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest(http.MethodPatch, "/principals/"+url.PathEscape(username)+"/allowed-roots", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result principalChangedResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// accessStringPtr projects the CLI-side optional access to the wire form: a
+// nil access is omitted entirely (the 2.1 path-only request), a parsed access
+// is always sent explicitly.
+func accessStringPtr(access *AllowedRootAccess) *string {
+	if access == nil {
+		return nil
+	}
+	s := string(*access)
+	return &s
 }
 
 func (c *apiClient) createPrincipalCredential(username, name string) (*principalCredentialTokenResponse, error) {
@@ -870,8 +908,19 @@ func (c *apiClient) patchLauncher(username, selector string, req patchLauncherRe
 	return &launcher, nil
 }
 
-func (c *apiClient) replaceLauncherScope(username, selector string, req allowedRootsReplaceRequest) (*launcherJSON, error) {
-	body, err := json.Marshal(req)
+// launcherRootsReplaceWireRequest is the CLI wire form of the Launcher scope
+// replacement: the 2.1 path-only roots (omitted for an inherit replacement,
+// so the daemon-side form distinction is never ambiguous).
+type launcherRootsReplaceWireRequest struct {
+	Scope        string   `json:"scope"`
+	AllowedRoots []string `json:"allowed_roots,omitempty"`
+}
+
+func (c *apiClient) replaceLauncherScope(username, selector string, scope LauncherScopeMode, roots []string) (*launcherJSON, error) {
+	body, err := json.Marshal(launcherRootsReplaceWireRequest{
+		Scope:        string(scope),
+		AllowedRoots: roots,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
@@ -909,18 +958,46 @@ func (c *apiClient) deleteLauncher(username, selector string) error {
 // (POST .../allowed-roots). The CLI never performs a read-modify-write over
 // the replace operation: the daemon owns the policy mutation and its
 // concurrency semantics.
-func (c *apiClient) addLauncherAllowedRoot(username, selector, path string) (*launcherAllowedRootResponse, error) {
-	return c.mutateLauncherAllowedRoot(http.MethodPost, username, selector, path)
+func (c *apiClient) addLauncherAllowedRoot(username, selector, path string, access *AllowedRootAccess) (*launcherAllowedRootResponse, error) {
+	return c.mutateLauncherAllowedRoot(http.MethodPost, username, selector, path, access)
 }
 
 // removeLauncherAllowedRoot sends the daemon-owned narrow allowed-root remove
 // (DELETE .../allowed-roots). Removal never changes the Launcher scope.
 func (c *apiClient) removeLauncherAllowedRoot(username, selector, path string) (*launcherAllowedRootResponse, error) {
-	return c.mutateLauncherAllowedRoot(http.MethodDelete, username, selector, path)
+	return c.mutateLauncherAllowedRoot(http.MethodDelete, username, selector, path, nil)
 }
 
-func (c *apiClient) mutateLauncherAllowedRoot(method, username, selector, path string) (*launcherAllowedRootResponse, error) {
-	body, err := json.Marshal(allowedRootRequest{Path: path})
+// setLauncherAllowedRootAccess sends the daemon-owned targeted access
+// mutation (PATCH .../allowed-roots): one conditional mutation on the exact
+// canonical stored identity, never a read-modify-write over the root list.
+// The scope mode is never changed.
+func (c *apiClient) setLauncherAllowedRootAccess(username, selector, path string, access AllowedRootAccess) (*launcherAllowedRootResponse, error) {
+	body, err := json.Marshal(allowedRootSetAccessRequest{Path: path, Access: string(access)})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest(http.MethodPatch, launcherControlPath(username, selector, "/allowed-roots"), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result launcherAllowedRootResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) mutateLauncherAllowedRoot(method, username, selector, path string, access *AllowedRootAccess) (*launcherAllowedRootResponse, error) {
+	body, err := json.Marshal(allowedRootRequest{Path: path, Access: accessStringPtr(access)})
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}

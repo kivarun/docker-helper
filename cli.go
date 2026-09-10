@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 
 	"golang.org/x/term"
 )
@@ -527,6 +528,53 @@ func getInitDefaultRoot() string {
 		return ""
 	}
 	return home
+}
+
+// accessFlag is the presence-aware --access flag value shared by the
+// allowed-root add commands: an explicitly supplied value must parse to the
+// canonical vocabulary (an empty or unknown spelling is rejected at parse
+// time, never reinterpreted as omission); an unsupplied flag selects the
+// canonical read_write grant at the call site.
+type accessFlag struct {
+	set    bool
+	access AllowedRootAccess
+}
+
+func (f *accessFlag) String() string {
+	return string(f.access)
+}
+
+func (f *accessFlag) Set(value string) error {
+	parsed, err := parseAllowedRootAccess(value)
+	if err != nil {
+		return err
+	}
+	f.set = true
+	f.access = parsed
+	return nil
+}
+
+// optionalAccessFromFlag projects the parsed --access flag to the wire form:
+// an unsupplied flag is nil (the 2.1 path-only request), a supplied flag is
+// always sent explicitly.
+func optionalAccessFromFlag(f *accessFlag) *AllowedRootAccess {
+	if !f.set {
+		return nil
+	}
+	return &f.access
+}
+
+// printAllowedRootAccessTable prints the human allowed-root listing shared by
+// the config, Principal, and Launcher allowed-root list commands: a
+// PATH/ACCESS table in the canonical stored-entry order, so the access mode
+// of every root is always visible in the human surface.
+func printAllowedRootAccessTable(w io.Writer, entries []AllowedRootEntry) {
+	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
+	fmt.Fprintln(tw, "PATH\tACCESS")
+	for _, e := range entries {
+		fmt.Fprintf(tw, "%s\t%s\n", e.Path, e.Access)
+	}
+	tw.Flush()
 }
 
 var versionCommand = &Command{
