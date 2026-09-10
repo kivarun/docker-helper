@@ -457,7 +457,7 @@ Configuration fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowed_roots` | array of strings | Canonical root directories for agent workspaces (required) |
+| `allowed_roots` | array of rich entries | Canonical root directories for agent workspaces (required). Canonical entries are `{"path": "/srv/run-root", "access": "read_write"}` objects with `access` exactly `read_write` or `read_only`; a legacy plain string entry is accepted for compatibility and means `read_write`. This is the global authorization ceiling only; it does not own MAC state. See [Allowed-root access modes](#allowed-root-access-modes) |
 | `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
 | `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
 | `audit_enabled` | boolean | Override audit behavior (default: `true` in system mode; in user mode, `true` only when `log_level` is `debug`) |
@@ -722,6 +722,18 @@ admin narrowing by name must also pass `--principal`; without it only the
 global `dhl_...` launcher ID is accepted. Foreign or missing targets fail
 with the non-disclosing not-found error.
 
+### Show a session
+
+```bash
+docker-helper session show --id dhs_...
+```
+
+Displays the session metadata plus the persisted immutable filesystem
+snapshot (a PATH/ACCESS table) that governs this session's Docker
+operations. The snapshot is issued at session creation time and never
+changes afterwards — see
+[Allowed-root access modes](#allowed-root-access-modes).
+
 ### Delete a session
 
 ```bash
@@ -942,7 +954,7 @@ records contain only `build_arg_keys`, never build-arg values.
 Response (HTTP 201):
 
 ```json
-{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
+{"ok":true,"operation_id":"op_abcdef1234567890abcdef1234567890","status":"running"}
 ```
 
 **Poll status** until `status` is `succeeded` or `failed`:
@@ -950,7 +962,7 @@ Response (HTTP 201):
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
-  http://localhost/operations/op_abcdef1234567890
+  http://localhost/operations/op_abcdef1234567890abcdef1234567890
 ```
 
 **Read incremental logs** using the `offset` parameter:
@@ -958,7 +970,7 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
-  'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
+  'http://localhost/operations/op_abcdef1234567890abcdef1234567890/logs?offset=0'
 ```
 
 The logs response includes `next_offset` (use it as the `offset` for the
@@ -985,7 +997,7 @@ Example: `"64m"`, `"1g"`. Maximum is 2 GiB. If omitted, Docker uses its default.
 Response (HTTP 201):
 
 ```json
-{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
+{"ok":true,"operation_id":"op_abcdef1234567890abcdef1234567890","status":"running"}
 ```
 
 Track progress using the same operation workflow as build:
@@ -995,7 +1007,7 @@ Track progress using the same operation workflow as build:
   ```bash
   curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
     -H "Authorization: Bearer $SESSION_TOKEN" \
-    http://localhost/operations/op_abcdef1234567890
+    http://localhost/operations/op_abcdef1234567890abcdef1234567890
   ```
 
 - **Read incremental logs** using the `offset` parameter:
@@ -1003,7 +1015,7 @@ Track progress using the same operation workflow as build:
   ```bash
   curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
     -H "Authorization: Bearer $SESSION_TOKEN" \
-    'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
+    'http://localhost/operations/op_abcdef1234567890abcdef1234567890/logs?offset=0'
   ```
 
 Run-specific result codes:
@@ -1013,6 +1025,12 @@ Run-specific result codes:
 - `container_exit_nonzero` — container exited with a non-zero status;
 - `cancelled` — operation cancelled by client.
 
+A run whose requested writable mount is refused by the issued Session
+filesystem policy fails before any container starts with the
+`read_only_root` error — a policy refusal, distinct from the structural
+`invalid_mount` (see
+[Allowed-root access modes](#allowed-root-access-modes)).
+
 ### Cancel an operation
 
 Cancel a running build or run operation:
@@ -1020,7 +1038,7 @@ Cancel a running build or run operation:
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
-  -X POST 'http://localhost/operations/op_abcdef1234567890/cancel'
+  -X POST 'http://localhost/operations/op_abcdef1234567890abcdef1234567890/cancel'
 ```
 
 The operation becomes terminal with `status=failed` and `result_code=cancelled`.
@@ -1167,6 +1185,12 @@ sudo docker-helper config allowed-root add /path/to/workspace
 It does NOT prepare MAC state. MAC preparation occurs at session creation
 time for the concrete workspace.
 
+Access modes are also enforced independently by the active MAC backend in
+system mode: for every run, the daemon additionally protects each
+read-only exposure with backend-owned state so a workload cannot write
+through a read-only exposure even if the bind itself were writable. The
+application policy remains the only owner of the access-mode decision.
+
 ### AppArmor
 
 System mode uses mandatory AppArmor confinement with the
@@ -1178,6 +1202,12 @@ not own MAC state.
 
 MAC preparation occurs at session creation time for the concrete workspace.
 `docker-helper init` does NOT prepare MAC state for the bootstrap allowed root.
+
+For read-only allowed-root exposures, each run workload additionally runs
+under a helper-owned generated AppArmor profile
+(`docker-helper-workload-<operation-id>`) that denies writes to the
+read-only container targets; the profile is removed when the operation
+finishes or is reconciled at daemon startup.
 
 Advanced backend-specific management:
 
@@ -1197,6 +1227,13 @@ installed manually.
 On an enforcing SELinux system, the systemd service runs in
 `docker_helper_t`; containers started by the service use
 `docker_helper_container_t` with MCS confinement.
+
+For read-only allowed-root exposures, each run additionally materializes
+a helper-owned `bindfs` projection mounted with the
+`docker_helper_ro_projection_t` context, which independently denies
+workload writes while the container keeps its MCS confinement; the
+backing tree keeps its labels and is never relabeled, and read-write
+exposures remain direct binds.
 
 #### Workspace SELinux labeling
 
@@ -1338,6 +1375,72 @@ New workspace roots are resolved to their canonical path through symlink
 resolution before policy evaluation; the canonical path is the effective
 and stored root.
 
+### Allowed-root access modes
+
+Every allowed root carries an access mode. The only values are
+`read_write` (the default; a legacy plain string entry means
+`read_write`) and `read_only`.
+
+Canonical object form in `config.json`:
+
+```json
+"allowed_roots": [
+  {"path": "/srv/run-root", "access": "read_write"},
+  {"path": "/srv/run-root/pipeline-inputs", "access": "read_only"}
+]
+```
+
+The legacy string array `"allowed_roots": ["/srv/run-root"]` is still
+accepted and means `read_write`; after a 2.2 write the config persists
+the canonical object form. `config show` displays both projections of
+the same stored entries: the authoritative rich `allowed_root_entries`
+and the 2.x path-only `allowed_roots` compatibility projection.
+
+Set the mode when adding a root and change it later:
+
+```bash
+docker-helper config allowed-root add --access read_only /srv/run-root/pipeline-inputs
+docker-helper config allowed-root set-access /srv/run-root/pipeline-inputs read_write
+```
+
+The same `--access` flag and `set-access` command exist for
+`principal allowed-root` and `launcher allowed-root`.
+
+Hierarchy behavior: within one scope the most-specific path wins; across
+scopes a lower authority (principal, launcher) may narrow but never widen
+its parent — `read_only` dominates. A writable mount is admitted only
+when the source is `read_write` and covers no effective nested
+`read_only` region; the daemon refuses it with `read_only_root` — a
+policy refusal, distinct from the structural `invalid_mount` — and never
+silently downgrades the request to read-only.
+
+A Session captures the effective filesystem policy as an immutable
+snapshot at creation time (visible through `docker-helper session
+show`). Later allowed-root changes affect only new Sessions; an issued
+Session keeps its issued snapshot for its whole lifetime.
+
+A practical example — one run tree with separate data planes:
+
+```text
+run-root/
+  project/           read_write
+  pipeline-inputs/   read_only
+  pipeline-outputs/  read_write
+```
+
+With `/srv/run-root` as the session workspace (system mode permits the
+subdirectory mounts):
+
+- mounting `project` or `pipeline-outputs` writable succeeds and the
+  workload can write;
+- mounting `pipeline-inputs` reads fine, but requesting it writable
+  fails before any container starts with `read_only_root`;
+- a writable mount of the workspace root itself (`.`) is refused with
+  `read_only_root`, because it would cover the nested read-only
+  `pipeline-inputs` region;
+- if a source is only needed for reading, request it read-only
+  (`--mount source:target:ro`) so the exposure is valid in either mode.
+
 ## System mode: provisioning a principal
 
 System mode requires the operator to configure both docker-helper policy
@@ -1377,7 +1480,9 @@ sudo docker-helper principal credential create \
 The allowed-root narrowing model (global → principal → launcher → session):
 
 - **Global allowed root** — system-wide ceiling managed by
-  `config allowed-root add`; authorization-only, does NOT prepare MAC.
+  `config allowed-root add` (with `--access read_write|read_only`;
+  see [Allowed-root access modes](#allowed-root-access-modes));
+  authorization-only, does NOT prepare MAC.
 - **Principal allowed root** — per-principal narrowing managed by
   `principal allowed-root add`; does not prepare MAC.
 - **Launcher allowed root** — per-launcher narrowing for launchers in
