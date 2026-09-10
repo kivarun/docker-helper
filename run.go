@@ -261,10 +261,11 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 }
 
 func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
-	session, ok := a.requireSessionCapability(w, r)
+	authority, ok := a.requireSessionFilesystemCapability(w, r)
 	if !ok {
 		return
 	}
+	session := authority.Session
 
 	ctx := withSessionID(r.Context(), session.ID)
 
@@ -411,19 +412,54 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	mountAudit := make([]auditMount, 0, len(req.Mounts))
-	for _, m := range req.Mounts {
-		mountAudit = append(mountAudit, auditMount{
-			Source:   m.Source,
-			Target:   m.Target,
-			ReadOnly: m.ReadOnly,
-		})
-	}
-
 	var cmdArgCount *int
 	if len(req.Command) > 0 {
 		n := len(req.Command)
 		cmdArgCount = &n
+	}
+
+	// Resolve the data-plane filesystem exposure of every mount against the
+	// persisted immutable Session filesystem snapshot — the filesystem
+	// authority issued at Session creation. Policy identity is only the
+	// canonical resolved source; the caller spelling (including symlinks)
+	// never selects an access mode. Read-only requests are permitted from
+	// either access mode; writable requests require the snapshot owner's
+	// writable-parent query. A refusal happens before any mount pin,
+	// operation, or Docker state exists, and the lease is released.
+	exposurePlan := make([]sessionFilesystemExposure, 0, len(resolvedMounts))
+	for i, resolved := range resolvedMounts {
+		exposure, err := resolveSessionFilesystemExposure(authority.Snapshot, resolved.SourcePath, resolved.Target, resolved.ReadOnly)
+		if err != nil {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
+			if errors.Is(err, ErrReadOnlyRoot) {
+				writeRunReadOnlyRootRejected(ctx, w, session, req.Mounts[i], exposure)
+				return
+			}
+			opLog(ctx).Error("cannot resolve session filesystem exposure",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
+			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			return
+		}
+		exposurePlan = append(exposurePlan, exposure)
+	}
+
+	// Audit mounts keep the existing caller fields and project the resolved
+	// policy facts (canonical source, effective snapshot access, and the
+	// writable-exposure permission — false is meaningful and must survive).
+	mountAudit := make([]auditMount, 0, len(exposurePlan))
+	for i := range exposurePlan {
+		mountAudit = append(mountAudit, auditMount{
+			Source:          req.Mounts[i].Source,
+			Target:          req.Mounts[i].Target,
+			ReadOnly:        req.Mounts[i].ReadOnly,
+			ResolvedSource:  exposurePlan[i].SourcePath,
+			Access:          string(exposurePlan[i].Access),
+			WritableAllowed: &exposurePlan[i].WritableAllowed,
+		})
 	}
 
 	// Determine trusted CA injection.
@@ -689,14 +725,17 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			cfg.RuntimeDir, helperSocketContainerDir))
 	}
 
-	// Add user mounts: pinned paths in system mode, resolved paths in user mode.
-	for i, m := range resolvedMounts {
-		dockerBindSource := m.SourcePath
+	// Add user mounts from the accepted exposure plan: the bind source is
+	// the pinned path in system mode and the canonical resolved path in user
+	// mode; the readonly flag follows exactly the caller-requested
+	// consumption mode, never the snapshot access of the source.
+	for i, exposure := range exposurePlan {
+		dockerBindSource := exposure.SourcePath
 		if cfg.Mode == ModeSystem {
 			dockerBindSource = pinnedMounts[i].PinnedPath
 		}
-		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", dockerBindSource, m.Target)
-		if m.ReadOnly {
+		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", dockerBindSource, exposure.Target)
+		if exposure.RequestedReadOnly {
 			mountSpec += ",readonly"
 		}
 		args = append(args, "--mount", mountSpec)

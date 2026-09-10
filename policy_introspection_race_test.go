@@ -67,12 +67,22 @@ func (p *parkedQueryPoint) maybePark(query string) {
 type parkedQueryConn struct {
 	driver.Conn
 	points    []*parkedQueryPoint
+	watchers  []queryWatcher
 	keepAlive *sql.DB
+}
+
+// queryWatcher is the passively observing point contract shared with
+// counting points: it records matches without ever parking a query.
+type queryWatcher interface {
+	maybePark(query string)
 }
 
 func (c *parkedQueryConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	for _, p := range c.points {
 		p.maybePark(query)
+	}
+	for _, w := range c.watchers {
+		w.maybePark(query)
 	}
 	if queryer, ok := c.Conn.(driver.QueryerContext); ok {
 		return queryer.QueryContext(ctx, query, args)
@@ -96,7 +106,8 @@ func (c *parkedQueryConn) Close() error {
 }
 
 type parkedQueryDriver struct {
-	points []*parkedQueryPoint
+	points   []*parkedQueryPoint
+	watchers []queryWatcher
 }
 
 func (d *parkedQueryDriver) Open(dsn string) (driver.Conn, error) {
@@ -104,16 +115,25 @@ func (d *parkedQueryDriver) Open(dsn string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &parkedQueryConn{Conn: realConn, keepAlive: keepAlive, points: d.points}, nil
+	return &parkedQueryConn{Conn: realConn, keepAlive: keepAlive, points: d.points, watchers: d.watchers}, nil
 }
 
 // openParkedQueryDB reopens an already-initialized database file through the
 // parked-query driver. The fixture must have been prepared on a normal
 // connection first: park points would otherwise trip during setup.
-func openParkedQueryDB(t *testing.T, dbPath string, points ...*parkedQueryPoint) *sql.DB {
+func openParkedQueryDB(t *testing.T, dbPath string, points ...queryWatcher) *sql.DB {
 	t.Helper()
 	name := nextMockDriverName("pqp")
-	sql.Register(name, &parkedQueryDriver{points: points})
+	var parks []*parkedQueryPoint
+	var watch []queryWatcher
+	for _, p := range points {
+		if park, ok := p.(*parkedQueryPoint); ok {
+			parks = append(parks, park)
+		} else {
+			watch = append(watch, p)
+		}
+	}
+	sql.Register(name, &parkedQueryDriver{points: parks, watchers: watch})
 	db, err := sql.Open(name, dbPath)
 	if err != nil {
 		t.Fatalf("sql.Open(parked): %v", err)

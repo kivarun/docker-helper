@@ -383,9 +383,10 @@ No authority changes:
 
 ## Phase 2.2.4 — Session filesystem snapshot persistence
 
-**Status: implemented, awaiting architectural acceptance.** Implemented on
-`feature/2.2.4-session-filesystem-snapshot` (base `release/2.2@f168d0b`, final
-SHA recorded in the phase report). Evidence summary: the canonical
+**Status: CLOSED.** Implemented on
+`feature/2.2.4-session-filesystem-snapshot` (base `release/2.2@f168d0b`, merged
+as `dedb49830d1092b51f556f1267f953a7207be1c8` after architectural acceptance
+and the accepted helper-socket locator corrective commit). Evidence summary: the canonical
 `session_filesystem_snapshot_entries` child table (exact schema classification
 with fail-closed near-match refusal) persists the immutable snapshot as
 Session child state; the legacy cutover is table-presence-owned (one
@@ -456,6 +457,37 @@ owners/admin as part of the existing Session show/policy surface selected by the
 design. It has no mutation endpoint.
 
 ## Phase 2.2.5 — data-plane enforcement
+
+**Status: implemented, awaiting architectural acceptance.** Implemented on
+`feature/2.2.5-data-plane-enforcement` (base `release/2.2@dedb498`). Evidence
+summary: the coherent filesystem authority read
+(`requireSessionFilesystemCapability`) captures the authenticated Session and
+its persisted snapshot in one short read transaction through the shared
+`findSessionByTokenQuerier` SQL owner, so a concurrent Session delete either
+linearizes first (401) or after the captured authority (the in-flight request
+continues) and the illegal split outcome (authenticated Session, cascaded-away
+snapshot, false 500) is structurally impossible — proven with parked-query
+regressions in both linearization orders; `resolveSessionFilesystemExposure`
+is the one adapter between the persisted snapshot and the data-plane
+consumers (run mounts, build context/Dockerfile as read-only host inputs,
+and the later MAC workload projection), delegating source lookup to
+`LookupAccess` and writable permission to `CanExposeWritable`; run
+enforcement runs after the existing structural validation and before any
+pin/operation/Docker state, refuses a requested writable exposure with the
+typed `400 read_only_root` contract (`run.rejected` audit carrying the
+offending canonical exposure facts, no protected-subtree listing, no silent
+downgrade to readonly), materializes Docker binds exactly in the
+caller-requested mode from one accepted exposure plan, and never consults
+current global/Principal/Launcher policy on the data plane (parked-query
+negative proof); symlink spellings are canonicalized by the existing
+`resolveMount` before any policy decision; snapshot corruption at request
+time is `500 internal_error` with the session ID and integrity cause in the
+operational log, never a policy or auth code; build evaluates both canonical
+paths as read-only consumption with canonical policy facts added to the
+`build.start` audit, and a regression proves the real staging owner writes
+only under the helper runtime (source tree byte- and metadata-identical,
+Docker receives staged paths only). MAC workload projection (2.2.6) is out of
+scope.
 
 Dependencies: 2.2.4.
 

@@ -995,8 +995,8 @@ authenticated authority class, not policy (see
 introspection surface: it answers what was actually issued to an existing
 Session, not what a Session created now would get. It loads the Session's
 persisted immutable filesystem snapshot through the single canonical
-snapshot loader (the future 2.2.5 runtime consumer uses the same owner),
-under the Session-control authorization matrix (an admin token, a Principal
+snapshot loader (the data-plane enforcement consumer of 2.2.5 uses the same
+owner), under the Session-control authorization matrix (an admin token, a Principal
 credential, or a Launcher credential; a Session bearer has no control-plane
 introspection authority) and the same ownership scope as list/delete — a
 missing or foreign Session is the same non-disclosing
@@ -1539,6 +1539,17 @@ Validation details:
 - build-arg keys are sorted for deterministic Docker argv;
 - build-arg values are never logged or audited (only `build_arg_keys`).
 
+Build context and Dockerfile are read-only host inputs of the helper:
+after `validateBuildRequest` canonicalizes both paths, they are evaluated
+against the persisted Session filesystem snapshot as read-only
+consumption, which is permitted for either snapshot access mode — a build
+is never refused because the context or Dockerfile lies in a read_only
+region, and a snapshot/integrity evaluation failure here is `500
+internal_error` before staging, operation, or Docker state exists. The
+staging owner writes only into helper-owned staging under the runtime
+directory; it never writes into the source tree (see
+[Data-plane filesystem authority](#data-plane-filesystem-authority)).
+
 ### Run
 
 `docker-helper run` uses the same lifecycle semantics as `build`.
@@ -1546,7 +1557,7 @@ Validation details:
 absolute container path.
 
 ```
-Authentication
+Authentication + coherent filesystem authority read
     │
 Request validation
     │
@@ -1554,7 +1565,9 @@ Workdir validation
     │
 Environment validation
     │
-Mount resolution
+Mount resolution (canonical source identity)
+    │
+Filesystem exposure resolution against the persisted snapshot
     │
 Operation registration (supervisor admission — atomic with shutdown gate)
     │
@@ -1571,7 +1584,12 @@ Request validation checks that the image field is non-empty. Workdir
 validation ensures the value is an absolute path if provided.
 Environment validation ensures variable names match
 `^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
-against the workspace and checks for duplicate targets.
+against the workspace and checks for duplicate targets. After all
+structural validation, every mount's access mode is resolved against the
+persisted Session filesystem snapshot (see
+[Data-plane filesystem authority](#data-plane-filesystem-authority)); a
+refused writable exposure is answered `read_only_root` before any
+pin/operation/Docker state exists, and the MAC lease is released.
 
 `helper_socket` validation is mode-aware: when the boolean is requested in
 user mode the request is rejected (`invalid_helper_socket`) before any
@@ -1707,6 +1725,68 @@ Forbidden:
 
 Requiring a relative source ensures the mount is always scoped to the
 session workspace; an absolute source could bypass workspace isolation.
+
+On top of the structural validation, the access mode of every accepted
+mount is enforced against the persisted immutable Session filesystem
+snapshot — the only data-plane filesystem authority, issued at Session
+creation. The policy decision uses only the canonical source identity
+produced by `resolveMount` (`filepath.Abs` + `EvalSymlinks` + workspace
+containment + type validation), never the caller spelling: a symlink
+spelling never selects a different access mode. A read-only request is
+permitted for either snapshot access mode; a writable request is permitted
+only through the snapshot owner's writable-parent query
+(`CanExposeWritable`), so a read_write source spanning a nested read_only
+region is refused. A refused writable request is answered with `400
+read_only_root` before any mount pin, operation, or Docker state exists —
+it is distinct from `invalid_mount` (structural validation) and never
+rewrites the request to read-only silently. The Docker bind is
+materialized exactly in the caller-requested mode (readonly flag follows
+the request, not the snapshot access of the source).
+
+Requiring a relative source ensures the mount is always scoped to the
+session workspace; an absolute source could bypass workspace isolation.
+
+Requiring a relative source ensures the mount is always scoped to the
+session workspace; an absolute source could bypass workspace isolation.
+
+#### Data-plane filesystem authority
+
+Every filesystem-consuming data-plane request (`run` mounts, `build`
+context/Dockerfile) resolves its host filesystem decisions exclusively
+against the persisted immutable Session filesystem snapshot loaded through
+the canonical loader. Current global/Principal/Launcher allowed-root
+policy is never read on the data plane: parent-policy mutations cannot
+change an already-issued Session's runtime authority, and a Session created
+under older policy keeps behaving by its issued snapshot.
+
+The Session bearer authentication and the snapshot load of such a request
+read one database generation: the filesystem-capability variant of the
+Session auth captures both in one short read transaction. A concurrent
+Session deletion or invalidation either linearizes before that read
+transaction (the lookup fails closed with 401) or after the captured
+immutable authority (the already-started request continues); an
+authenticated Session whose snapshot vanished through the deletion cascade
+is structurally impossible. The read transaction ends when the authority
+is captured and is never held across filesystem I/O, pinning, staging, or
+Docker execution. The pathless data-plane actions (pull, registry login,
+operation status/logs/cancel) keep the plain Session authentication because
+they consume no Session-controlled host filesystem source.
+
+A snapshot that is genuinely corrupt when a request loads it (post-startup
+state surgery or filesystem-level damage) is an internal integrity failure:
+the request fails closed with `500 internal_error` and the operational log
+carries the session ID and the integrity cause. It is never answered as
+unauthorized, `invalid_mount`, or `read_only_root`, and it is never repaired
+at request time.
+
+The shared decision adapter between the persisted snapshot and the
+data-plane consumers is `resolveSessionFilesystemExposure`: it resolves one
+canonical source identity against the snapshot for the requested
+consumption mode and returns the accepted exposure facts (canonical source,
+target, caller-requested read-only mode, effective snapshot access, and the
+writable-exposure permission). Run materialization and the 2.2.6 MAC
+workload projection consume this same accepted exposure plan; the MAC
+backends do not load snapshots or recompute writable-parent semantics.
 
 #### System-mode run mounts
 
@@ -2091,6 +2171,7 @@ Current error codes (non-exhaustive):
 | `invalid_build_args` | `POST /build` | build-arg name invalid |
 | `invalid_image` | `POST /run`, `POST /pull` | image name is empty |
 | `invalid_mount` | `POST /run` | mount validation failure |
+| `read_only_root` | `POST /run` | the issued Session filesystem snapshot refuses the requested writable exposure of the mount source |
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
@@ -2240,6 +2321,10 @@ Emitted before a Docker build begins.
 | `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
+| `build_context_resolved` | string | canonical build context path the filesystem authority evaluated (present when resolved) |
+| `build_context_access` | string | effective snapshot access of the resolved context: `read_write` or `read_only` |
+| `build_dockerfile_resolved` | string | canonical Dockerfile path the filesystem authority evaluated (present when resolved) |
+| `build_dockerfile_access` | string | effective snapshot access of the resolved Dockerfile |
 | `build_arg_keys` | string[] | build-arg names, sorted (present when set; values are never logged) |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
@@ -2411,6 +2496,15 @@ Each entry in `mounts` has:
 | `source` | string | source path relative to the workspace |
 | `target` | string | absolute target path inside the container |
 | `read_only` | boolean | whether the mount is read-only |
+| `resolved_source` | string | canonical policy identity the filesystem authority decided on (present when the exposure was resolved) |
+| `access` | string | effective snapshot access of the resolved source: `read_write` or `read_only` |
+| `writable_allowed` | boolean | whether the snapshot owner permits writable exposure of the source (explicitly `false` for a source spanning a protected read_only region) |
+
+The mount policy facts of a `read_only_root` refusal are recorded on the
+`run.rejected` event with `result=read_only_root`: only the offending
+mount's exposure facts (caller source, resolved canonical source, target,
+requested mode, access, `writable_allowed=false`). The contents of a
+protected subtree and the specific nested blocker path are never listed.
 
 #### run.finish
 
