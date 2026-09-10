@@ -1813,7 +1813,10 @@ verifies the load through the kernel profile inventory, and passes
 Docker. Under the SELinux backend it builds one bindfs passthrough
 projection per read-only exposure from the pinned source with mount context
 `system_u:object_r:docker_helper_ro_projection_t:s0` (read-write exposures
-bind the pinned source directly), verifies mountpoint + FUSE worker +
+bind the pinned source directly; a regular-file source is bound onto a
+helper-owned lower item and the lower directory is projected, with the
+deterministic `mount` mountpoint created for both projection kinds before
+the FUSE worker starts), verifies mountpoint + FUSE worker +
 effective SELinux type, and keeps `--security-opt
 label=type:docker_helper_container_t` so Docker retains MCS ownership;
 accepted read-write exposures still bind the pinned source directly. The
@@ -1821,10 +1824,18 @@ backend-neutral prepared result carries only Docker security options and
 per-mount bind sources; build inputs receive no workload MAC material.
 
 Run resources are released by one unified cleanup owner through a frozen
-order — container proven absent, workload MAC state, source pins,
-workspace-use lease, cidfile — from every terminal path, including
-pre-start failures (no container by construction) and post-start paths
-with one canonical container-absence proof. A failed proof or failed MAC
+order — container proven absent, workload MAC state, source pins, durable
+workload ownership record/state, workspace-use lease, cidfile — from every
+terminal path, including pre-start failures (no container by construction)
+and post-start paths with one canonical container-absence proof. The
+durable ownership record is removed only after the stages it anchors are
+positively proven done, so a failed proof or failed cleanup leaves it as
+the reconciliation retry marker for whatever helper state remains; the
+backend prepared cleanup itself releases only kernel MAC state and backend
+files and never removes the durable record. A partial durable-state removal
+fails ordered (transient runtime directory first, durable record
+directory last) so a runtime-removal failure cannot strand surviving state
+without its owner. A failed proof or failed MAC
 cleanup retains dependent state (fail closed) for startup reconciliation,
 which runs before the daemon accepts HTTP requests and cleans only
 positively identified helper-owned state. A preparation failure whose
@@ -1846,11 +1857,18 @@ timestamp; every backend-specific kernel identity (for example the AppArmor
 profile name) is derived deterministically from the schema and the
 operation ID at validation/cleanup time, never stored as a second owner.
 The decoder is exact (`DisallowUnknownFields`, one JSON value, canonical
-session shape, exact backend enum); malformed state is retained, never
-normalized. Startup reconciliation proves the exact deterministic runtime
-shape (real directories, canonical `mount-<decimal index>` names, expected
+issued identity shapes for the operation and session IDs — exact prefix
+and exact lowercase hex length, not merely path-safe strings — and exact
+backend enum); malformed state is retained, never normalized. Startup
+reconciliation proves the exact deterministic runtime shape (real
+directories, canonical `mount-<decimal index>` names, expected
 `mount`/`lower`/`item` nodes) before any unmount or removal and retains
-anything else. Container correlation uses the reserved server-owned runtime
+anything else. Projection release follows a frozen dependency order:
+projection unmount with positive absence proof, owned worker exit proven
+(a live bindfs worker backs on the lower tree), lower file bind unmount
+with positive absence proof, then projection state removal; reconciliation
+entries carry no worker handle and never adopt or signal workers by PID.
+Container correlation uses the reserved server-owned runtime
 labels (schema, `com.dockerhelper.operation.id`, Session ID), never a PID.
 
 #### User-mode run mounts

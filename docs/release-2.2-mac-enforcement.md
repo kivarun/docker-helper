@@ -51,13 +51,25 @@ Phase 2.2.5 / PR #14), awaiting architectural acceptance:
   runtime label schema. A preparation failure whose partial MAC state
   cannot be rolled back is a typed retained outcome: the run path retains
   the dependent source pins and workspace-use lease until startup
-  reconciliation.
+  reconciliation. The ownership-record decoder is exact: exactly one JSON
+  value with exactly the current-owner fields, and the operation and
+  session IDs must be exactly the canonical issued production shapes
+  (exact prefix plus exact lowercase hex length), so a record naming
+  foreign identity is retained, never normalized.
 - One unified run cleanup owner (`run_cleanup.go`) releases container
-  (proven absent) → workload MAC → pins → workspace lease → cidfile from
-  every terminal path, and startup reconciliation cleans only positively
-  identified helper-owned state (foreign/ambiguous state is retained; a
-  failed mount-inventory proof or an unverified unmount is an error and
-  retains the owned state and its dependent pins).
+  (proven absent) → workload MAC → pins → durable workload ownership
+  record/state → workspace lease → cidfile from every terminal path; the
+  backend prepared cleanup never removes the durable ownership record
+  (it stays as the reconciliation retry marker until the dependent cleanup
+  is positively proven done, and durable-state removal is ordered transient
+  runtime directory first, record directory last). Startup reconciliation
+  cleans only positively identified helper-owned state (foreign/ambiguous
+  state is retained; a failed mount-inventory proof or an unverified
+  unmount is an error and retains the owned state and its dependent pins).
+  Projection release follows the frozen dependency order projection
+  unmount → owned worker exit proven → lower file bind unmount →
+  projection state removal; both projection kinds create the deterministic
+  `mount` mountpoint before the FUSE worker starts.
 - Static SELinux policy adds `docker_helper_ro_projection_t` and
   `docker_helper_bindfs_exec_t` to the shipped module with read/execute-only
   workload semantics and minimal daemon/FUSE mount mechanics; bindfs is an

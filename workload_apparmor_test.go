@@ -317,7 +317,7 @@ func TestCoordinatorPrepareCommitsRecordBeforeParserLoad(t *testing.T) {
 // container: profile unloaded and owned state removed.
 func TestCoordinatorReconcileOwnedStaleProfile(t *testing.T) {
 	dir := t.TempDir()
-	opID := "op_rec1"
+	opID := testOperationID(41)
 	name := workloadAppArmorProfileName(opID)
 	stateRoot := filepath.Join(dir, "state")
 	runtimeRoot := filepath.Join(dir, "runtime")
@@ -417,7 +417,7 @@ func TestCoordinatorReconcileRetainsAmbiguousContainers(t *testing.T) {
 	dir := t.TempDir()
 	stateRoot := filepath.Join(dir, "state")
 	runtimeRoot := filepath.Join(dir, "runtime")
-	opID := "op_amb1"
+	opID := testOperationID(43)
 	recDir := filepath.Join(stateRoot, opID)
 	if err := os.MkdirAll(recDir, 0700); err != nil {
 		t.Fatal(err)
@@ -452,12 +452,12 @@ func TestCoordinatorReconcileRetainsAmbiguousContainers(t *testing.T) {
 	}
 
 	// Docker query failure: retain, never guess.
-	recDir2 := filepath.Join(stateRoot, "op_amb2")
+	recDir2 := filepath.Join(stateRoot, testOperationID(44))
 	if err := os.MkdirAll(recDir2, 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeWorkloadMACRecord(recDir2, workloadMACRecord{
-		Schema: workloadMACStateSchema, OperationID: "op_amb2", SessionID: testWorkloadSessionID, Backend: string(LSMAppArmor),
+		Schema: workloadMACStateSchema, OperationID: testOperationID(44), SessionID: testWorkloadSessionID, Backend: string(LSMAppArmor),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestCoordinatorReconcileRemovesStaleOwnedContainer(t *testing.T) {
 	dir := t.TempDir()
 	stateRoot := filepath.Join(dir, "state")
 	runtimeRoot := filepath.Join(dir, "runtime")
-	opID := "op_stale1"
+	opID := testOperationID(42)
 	recDir := filepath.Join(stateRoot, opID)
 	if err := os.MkdirAll(recDir, 0700); err != nil {
 		t.Fatal(err)

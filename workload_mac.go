@@ -336,12 +336,16 @@ func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorklo
 	return prepared, nil
 }
 
-// removeWorkloadMACState removes both the durable and the transient state
-// directories of one operation; absence is success.
+// removeWorkloadMACState removes the transient runtime state directory and
+// then the durable ownership state directory of one operation; absence is
+// success. The durable directory carries the ownership record: it is removed
+// only after the transient runtime state is gone, so a partial removal
+// failure keeps the reconciliation retry marker instead of forgetting it.
 func (c *workloadMACCoordinator) removeWorkloadMACState(operationID string) error {
-	stateErr := removeWorkloadMACStateDir(c.stateRoot, operationID)
-	runtimeErr := removeWorkloadMACStateDir(c.runtimeRoot, operationID)
-	return errors.Join(stateErr, runtimeErr)
+	if err := removeWorkloadMACStateDir(c.runtimeRoot, operationID); err != nil {
+		return err
+	}
+	return removeWorkloadMACStateDir(c.stateRoot, operationID)
 }
 
 // ReconcileStartup scans only positively identified helper-owned workload
@@ -579,11 +583,11 @@ func writeWorkloadMACRecord(stateDir string, rec workloadMACRecord) error {
 // readWorkloadMACRecord reads and validates the durable ownership record of
 // one state directory. The decoder is exact: the record must be exactly one
 // JSON value carrying exactly the current-owner fields, the schema must be
-// the current schema, the operation ID must be safe, the session ID must
-// carry the canonical shape, and the backend must be an exact known enum
-// value. Anything unreadable, schema-incompatible, or malformed is an error
-// so the caller retains the directory instead of guessing. Malformed state
-// is never normalized.
+// the current schema, the operation and session IDs must be exactly the
+// canonical issued production shapes, and the backend must be an exact
+// known enum value. Anything unreadable, schema-incompatible, or malformed
+// is an error so the caller retains the directory instead of guessing.
+// Malformed state is never normalized.
 func readWorkloadMACRecord(stateDir string) (workloadMACRecord, error) {
 	var rec workloadMACRecord
 	data, err := os.ReadFile(filepath.Join(stateDir, "ownership"))
@@ -601,11 +605,11 @@ func readWorkloadMACRecord(stateDir string) (workloadMACRecord, error) {
 	if rec.Schema != workloadMACStateSchema {
 		return rec, fmt.Errorf("unsupported ownership record schema %d", rec.Schema)
 	}
-	if !isOperationIDSafe(rec.OperationID) {
-		return rec, fmt.Errorf("ownership record names an unsafe operation ID")
+	if !isCanonicalOperationID(rec.OperationID) {
+		return rec, fmt.Errorf("ownership record names a non-canonical operation ID")
 	}
-	if !isSessionIDShape(rec.SessionID) {
-		return rec, fmt.Errorf("ownership record names an invalid session ID")
+	if !isCanonicalSessionIDShape(rec.SessionID) {
+		return rec, fmt.Errorf("ownership record names a non-canonical session ID")
 	}
 	if rec.Backend != string(LSMAppArmor) && rec.Backend != string(LSMSELinux) {
 		return rec, fmt.Errorf("ownership record names an unknown backend %q", rec.Backend)
@@ -613,23 +617,38 @@ func readWorkloadMACRecord(stateDir string) (workloadMACRecord, error) {
 	return rec, nil
 }
 
-// isSessionIDShape reports whether value carries the canonical Session ID
-// shape issued by the session owner: `dhs_` + lowercase hex characters.
-func isSessionIDShape(value string) bool {
-	const sessionIDPrefix = "dhs_"
-	if !strings.HasPrefix(value, sessionIDPrefix) {
+// isCanonicalPrefixedHexID reports whether value is exactly one canonical
+// prefixed identifier: the exact prefix plus exactly hexLength lowercase
+// hex characters. Durable ownership identity requires the exact issued
+// shape — wrong length, wrong prefix, uppercase, or non-hex characters are
+// foreign and fail closed.
+func isCanonicalPrefixedHexID(value, prefix string, hexLength int) bool {
+	if len(value) != len(prefix)+hexLength {
 		return false
 	}
-	rest := value[len(sessionIDPrefix):]
-	if rest == "" {
+	if !strings.HasPrefix(value, prefix) {
 		return false
 	}
-	for _, r := range rest {
+	for _, r := range value[len(prefix):] {
 		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 			return false
 		}
 	}
 	return true
+}
+
+// isCanonicalOperationID reports whether value is exactly one production
+// operation ID as issued by the operation supervisor
+// (operationIDPrefix + operationIDHexLength lowercase hex).
+func isCanonicalOperationID(value string) bool {
+	return isCanonicalPrefixedHexID(value, operationIDPrefix, operationIDHexLength)
+}
+
+// isCanonicalSessionIDShape reports whether value is exactly one production
+// Session ID as issued by the session owner
+// (sessionIDPrefix + sessionIDHexLength lowercase hex).
+func isCanonicalSessionIDShape(value string) bool {
+	return isCanonicalPrefixedHexID(value, sessionIDPrefix, sessionIDHexLength)
 }
 
 // removeWorkloadMACStateDir removes one operation directory under a state

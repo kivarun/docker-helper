@@ -31,8 +31,8 @@ func newTestWorkloadCoordinator(t *testing.T, backendImpl workloadMACBackend, st
 // the state instead of normalizing it.
 func TestWorkloadOwnershipRecordDecoderExact(t *testing.T) {
 	valid := func() string {
-		return fmt.Sprintf(`{"schema":%d,"operation_id":"op_dec1","session_id":%q,"backend":"apparmor","created_at":"2026-01-01T00:00:00Z"}`,
-			workloadMACStateSchema, testWorkloadSessionID)
+		return fmt.Sprintf(`{"schema":%d,"operation_id":%q,"session_id":%q,"backend":"apparmor","created_at":"2026-01-01T00:00:00Z"}`,
+			workloadMACStateSchema, testOperationID(1), testWorkloadSessionID)
 	}
 	cases := []struct {
 		name   string
@@ -48,7 +48,7 @@ func TestWorkloadOwnershipRecordDecoderExact(t *testing.T) {
 		{"unknown backend enum rejected", strings.Replace(valid(), `"backend":"apparmor"`, `"backend":"foreign"`, 1), true},
 		{"empty session ID rejected", strings.Replace(valid(), `"session_id":"`+testWorkloadSessionID+`"`, `"session_id":""`, 1), true},
 		{"wrong session ID shape rejected", strings.Replace(valid(), testWorkloadSessionID, "sess1", 1), true},
-		{"unsafe operation ID rejected", strings.Replace(valid(), "op_dec1", "../escape", 1), true},
+		{"unsafe operation ID rejected", strings.Replace(valid(), testOperationID(1), "../escape", 1), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,13 +71,59 @@ func TestWorkloadOwnershipRecordDecoderExact(t *testing.T) {
 // also rejects trailing JSON content after the single record value.
 func TestWorkloadOwnershipRecordSecondDecodeMustBeEOF(t *testing.T) {
 	dir := t.TempDir()
-	body := fmt.Sprintf(`{"schema":%d,"operation_id":"op_eof1","session_id":%q,"backend":"selinux","created_at":"2026-01-01T00:00:00Z"} 42`,
-		workloadMACStateSchema, testWorkloadSessionID)
+	body := fmt.Sprintf(`{"schema":%d,"operation_id":%q,"session_id":%q,"backend":"selinux","created_at":"2026-01-01T00:00:00Z"} 42`,
+		workloadMACStateSchema, testOperationID(2), testWorkloadSessionID)
 	if err := os.WriteFile(filepath.Join(dir, "ownership"), []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readWorkloadMACRecord(dir); err == nil {
 		t.Fatal("trailing non-whitespace content after the record must be rejected")
+	}
+}
+
+// TestWorkloadOwnershipRecordIdentityMustBeCanonical proves the durable
+// ownership identity contract: the record's operation and session IDs must
+// be exactly the canonical issued production shapes (exact prefix, exact
+// lowercase hex length). Wrong length, wrong prefix, uppercase, and non-hex
+// characters are foreign identity and fail closed.
+func TestWorkloadOwnershipRecordIdentityMustBeCanonical(t *testing.T) {
+	valid := func(opID, sessionID string) string {
+		return fmt.Sprintf(`{"schema":%d,"operation_id":%q,"session_id":%q,"backend":"apparmor","created_at":"2026-01-01T00:00:00Z"}`,
+			workloadMACStateSchema, opID, sessionID)
+	}
+	cases := []struct {
+		name      string
+		opID      string
+		sessionID string
+	}{
+		{"canonical accepted", testOperationID(61), testWorkloadSessionID},
+		{"operation ID too short", "op_1", testWorkloadSessionID},
+		{"operation ID too long", testOperationID(61) + "a", testWorkloadSessionID},
+		{"operation ID wrong prefix", strings.Replace(testOperationID(61), "op_", "run_", 1), testWorkloadSessionID},
+		{"operation ID uppercase hex", strings.Replace(testOperationID(61), "3d", "3D", 1), testWorkloadSessionID},
+		{"operation ID non-hex", strings.Replace(testOperationID(61), "3d", "3g", 1), testWorkloadSessionID},
+		{"session ID too short", "dhs_0f", testWorkloadSessionID},
+		{"session ID too long", testWorkloadSessionID + "ab", testWorkloadSessionID},
+		{"session ID uppercase hex", strings.Replace(testWorkloadSessionID, "0f", "0F", 1), testWorkloadSessionID},
+		{"session ID non-hex", "dhs_" + strings.Repeat("g", 32), testWorkloadSessionID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "ownership"), []byte(valid(tc.opID, tc.sessionID)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := readWorkloadMACRecord(dir)
+			if tc.name == "canonical accepted" {
+				if err != nil {
+					t.Fatalf("canonical record must decode: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("non-canonical durable identity must be rejected: op=%q session=%q", tc.opID, tc.sessionID)
+			}
+		})
 	}
 }
 
@@ -87,12 +133,13 @@ func TestWorkloadOwnershipRecordSecondDecodeMustBeEOF(t *testing.T) {
 func TestWorkloadOwnershipRecordOperationIDMustMatchDirectory(t *testing.T) {
 	stateRoot := t.TempDir()
 	runtimeRoot := t.TempDir()
-	dir := filepath.Join(stateRoot, "op_dirname0000000000000001")
+	dirName := testOperationID(11)
+	dir := filepath.Join(stateRoot, dirName)
 	if err := os.MkdirAll(dir, workloadMACStateDirPerm); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeWorkloadMACRecord(dir, workloadMACRecord{
-		Schema: workloadMACStateSchema, OperationID: "op_other000000000000001",
+		Schema: workloadMACStateSchema, OperationID: testOperationID(12),
 		SessionID: testWorkloadSessionID, Backend: string(LSMAppArmor),
 		CreatedAt: "2026-01-01T00:00:00Z",
 	}); err != nil {
@@ -124,7 +171,7 @@ func TestCoordinatorRoundTripAppArmorReconcilesProducedState(t *testing.T) {
 	dir := t.TempDir()
 	stateRoot := filepath.Join(dir, "state")
 	runtimeRoot := filepath.Join(dir, "runtime")
-	opID := "op_rt_aa1"
+	opID := testOperationID(21)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
 	if _, err := first.Prepare(workloadPreparation{
@@ -178,7 +225,7 @@ func TestCoordinatorRoundTripSELinuxReconcilesProducedState(t *testing.T) {
 	firstBackend, _ := newTestSELinuxBackend(t)
 	first := newTestWorkloadCoordinator(t, firstBackend, stateRoot, runtimeRoot)
 	prepared, err := first.Prepare(workloadPreparation{
-		OperationID:   "op_rt_sel1",
+		OperationID:   testOperationID(22),
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
 		PinnedSources: []string{pinned},
@@ -199,10 +246,10 @@ func TestCoordinatorRoundTripSELinuxReconcilesProducedState(t *testing.T) {
 	if err := fresh.ReconcileStartup(context.Background()); err != nil {
 		t.Fatalf("ReconcileStartup: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(stateRoot, "op_rt_sel1")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(stateRoot, testOperationID(22))); !os.IsNotExist(err) {
 		t.Errorf("durable owned state must be removed after reconciliation, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(runtimeRoot, "op_rt_sel1")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(runtimeRoot, testOperationID(22))); !os.IsNotExist(err) {
 		t.Errorf("transient projection state must be removed after reconciliation, got %v", err)
 	}
 	if len(freshSeam.unmountCalls) != 1 {
@@ -217,7 +264,7 @@ func TestCoordinatorRoundTripSELinuxReconcilesProducedState(t *testing.T) {
 func TestCoordinatorReconcileRetainsLoadedProfileWithoutSource(t *testing.T) {
 	stateRoot := t.TempDir()
 	runtimeRoot := t.TempDir()
-	opID := "op_cw_loaded"
+	opID := testOperationID(23)
 
 	// Produce the real durable record through a real Prepare, then rebuild
 	// the crash window: record committed, profile source gone, profile
@@ -261,7 +308,7 @@ func TestCoordinatorReconcileRetainsLoadedProfileWithoutSource(t *testing.T) {
 func TestCoordinatorReconcileClassifiesCrashBeforeProfileSource(t *testing.T) {
 	stateRoot := t.TempDir()
 	runtimeRoot := t.TempDir()
-	opID := "op_cw_empty"
+	opID := testOperationID(24)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
 	if _, err := first.Prepare(workloadPreparation{
@@ -401,7 +448,7 @@ func pinsDirFor(runtimeRoot, operationID string) string {
 func TestCoordinatorReconcileRetriesAfterPinCleanupFailure(t *testing.T) {
 	stateRoot := t.TempDir()
 	runtimeRoot := t.TempDir()
-	opID := "op_retry1"
+	opID := testOperationID(31)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
 	if _, err := first.Prepare(workloadPreparation{

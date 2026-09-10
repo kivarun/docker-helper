@@ -345,11 +345,13 @@ func (b *workloadSELinuxBackend) prepare(p workloadPreparation) (*preparedWorklo
 		Backend:      LSMSELinux,
 		SecurityOpts: []string{"label=type:docker_helper_container_t"},
 		MountSources: mountSources,
+		// The cleanup releases only the kernel projection state and its
+		// owned worker. The durable ownership record and the runtime
+		// directory root stay behind as the reconciliation retry marker
+		// until the run-level finalization boundary proves the dependent
+		// cleanup done.
 		cleanup: func() error {
-			if err := b.cleanupOwnedProjections(projections); err != nil {
-				return err
-			}
-			return removeAllStateDirs(p)
+			return b.cleanupOwnedProjections(projections)
 		},
 	}, nil
 }
@@ -372,13 +374,17 @@ func (b *workloadSELinuxBackend) prepareProjection(p workloadPreparation, index 
 		return nil, fmt.Errorf("cannot create projection state: %w", err)
 	}
 
+	// Both projection kinds own the same deterministic mountpoint layout:
+	// the projection mount directory must exist before bindfs starts,
+	// because bindfs is started with that path as its mountpoint.
+	if err := os.Mkdir(mountDir, workloadMACStateDirPerm); err != nil {
+		os.Remove(projState)
+		return nil, fmt.Errorf("cannot create projection mountpoint: %w", err)
+	}
+
 	if info.IsDir() {
 		// Directory source: bindfs projects the pinned directory itself.
 		entry.kind = selinuxProjectionDirectory
-		if err := os.Mkdir(mountDir, workloadMACStateDirPerm); err != nil {
-			os.Remove(projState)
-			return nil, fmt.Errorf("cannot create projection mountpoint: %w", err)
-		}
 	} else if info.Mode().IsRegular() {
 		// Regular-file source: bind the exact pinned file onto a
 		// helper-owned lower item, project the lower directory, and expose
@@ -402,6 +408,7 @@ func (b *workloadSELinuxBackend) prepareProjection(p workloadPreparation, index 
 		entry.lowerItem = item
 		entry.dockerSource = filepath.Join(mountDir, "item")
 	} else {
+		os.RemoveAll(projState)
 		return nil, fmt.Errorf("pinned source is neither a directory nor a regular file")
 	}
 
@@ -463,24 +470,32 @@ func (b *workloadSELinuxBackend) awaitProjectionReady(entry *projectionEntry) er
 }
 
 // cleanupOwnedProjections releases owned projections in reverse creation
-// order: projection unmount, lower file bind unmount, owned worker exit,
-// then state removal. It tolerates already-absent pieces; any unknown or
-// failed step is returned so the caller retains dependent state. Unknown is
-// never treated as absent: a failed mount-inventory proof stops the
-// cleanup before any removal.
+// order. For every entry the dependency order is frozen:
+//
+//	projection unmount + positive absence proof
+//	  -> owned worker exit proven (a live worker backs on the lower tree)
+//	  -> lower file bind unmount + positive absence proof
+//	  -> projection state removal
+//
+// It tolerates already-absent pieces; any unknown or failed step is
+// returned so the caller retains dependent state. Unknown is never treated
+// as absent: a failed mount-inventory proof stops the cleanup before any
+// removal. A reconciliation entry carries no worker handle (the worker of a
+// crashed daemon is never adopted and never signaled by PID); it skips the
+// exit wait and releases the same owned paths in the same order.
 func (b *workloadSELinuxBackend) cleanupOwnedProjections(projections []*projectionEntry) error {
 	for i := len(projections) - 1; i >= 0; i-- {
 		entry := projections[i]
 		if err := b.proveUnmountOwnedMount(entry.mountDir); err != nil {
 			return err
 		}
-		if entry.lowerItem != "" {
-			if err := b.proveUnmountOwnedMount(entry.lowerItem); err != nil {
+		if entry.worker != nil {
+			if err := entry.worker.waitExit(workloadWorkerExitTimeout); err != nil {
 				return err
 			}
 		}
-		if entry.worker != nil {
-			if err := entry.worker.waitExit(workloadWorkerExitTimeout); err != nil {
+		if entry.lowerItem != "" {
+			if err := b.proveUnmountOwnedMount(entry.lowerItem); err != nil {
 				return err
 			}
 		}
@@ -704,29 +719,6 @@ func runFusermountUnmount(path string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("fusermount -u %s: %w", path, err)
-	}
-	return nil
-}
-
-// removeAllStateDirs removes both owned state directories of one prepared
-// operation; absence is success.
-func removeAllStateDirs(p workloadPreparation) error {
-	var errs []error
-	if err := os.RemoveAll(p.StateDir); err != nil {
-		errs = append(errs, err)
-	}
-	if err := os.RemoveAll(p.RuntimeDir); err != nil {
-		errs = append(errs, err)
-	}
-	return firstError(errs)
-}
-
-// firstError returns the first non-nil error, if any.
-func firstError(errs []error) error {
-	for _, err := range errs {
-		if err != nil {
-			return err
-		}
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,8 +18,16 @@ import (
 )
 
 // testWorkloadSessionID is a Session ID in the canonical issued shape
-// (`dhs_` + lowercase hex), suitable for durable workload ownership records.
+// (`dhs_` + 32 lowercase hex), suitable for durable workload ownership
+// records.
 const testWorkloadSessionID = "dhs_0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+
+// testOperationID returns a canonical production operation ID
+// (`op_` + 32 lowercase hex) with a unique deterministic hex tail per n,
+// so tests exercise the exact durable-ownership identity shape.
+func testOperationID(n int) string {
+	return fmt.Sprintf("op_%032x", n)
+}
 
 // profileNameFromSource extracts the declared profile name from a generated
 // profile source, mirroring how the kernel inventory names loaded profiles.
@@ -106,12 +115,19 @@ func newTestAppArmorWorkloadBackend(t *testing.T) (*workloadAppArmorBackend, *te
 
 // testProjectionWorker is the fake projection worker of the SELinux harness.
 type testProjectionWorker struct {
-	isAlive bool
+	isAlive    bool
+	seam       *testSELinuxWorkloadSeam
+	mountpoint string
 }
 
 func (w *testProjectionWorker) alive() bool { return w.isAlive }
 
-func (w *testProjectionWorker) waitExit(timeout time.Duration) error { return nil }
+func (w *testProjectionWorker) waitExit(timeout time.Duration) error {
+	if w.seam != nil {
+		w.seam.events = append(w.seam.events, "worker-exit "+w.mountpoint)
+	}
+	return nil
+}
 
 // testWorkerCall records one bindfs worker invocation.
 type testWorkerCall struct {
@@ -146,6 +162,9 @@ type testSELinuxWorkloadSeam struct {
 	// unmount has been performed (post-unmount inventory path).
 	postUnmountInventoryErr error
 	unmountCount            int
+	// events records the release-mechanics call order (unmounts and worker
+	// exits) so tests can prove dependency ordering.
+	events []string
 }
 
 // testMountOps is the fake workloadMountOps bound to the seam.
@@ -184,6 +203,7 @@ func (m *testMountOps) unmountLazy(path string) error {
 
 func (m *testMountOps) unmountPath(path string) error {
 	m.seam.unmountCalls = append(m.seam.unmountCalls, "unmountPath "+path)
+	m.seam.events = append(m.seam.events, "unmount "+path)
 	m.seam.unmountCount++
 	if !m.seam.unmountLeavesMounted {
 		delete(m.seam.mounted, path)
@@ -222,7 +242,7 @@ func newTestSELinuxBackend(t *testing.T) (*workloadSELinuxBackend, *testSELinuxW
 		if seam.startErr != nil {
 			return nil, seam.startErr
 		}
-		worker := &testProjectionWorker{isAlive: true}
+		worker := &testProjectionWorker{isAlive: true, seam: seam, mountpoint: mountpoint}
 		seam.workers = append(seam.workers, worker)
 		seam.mounted[mountpoint] = true
 		seam.mountCalls = append(seam.mountCalls, testWorkerCall{backing: backing, mountpoint: mountpoint, context: context})

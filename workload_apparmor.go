@@ -177,11 +177,12 @@ func (b *workloadAppArmorBackend) prepare(p workloadPreparation) (*preparedWorkl
 		// must never rely on an implicit default after preparation.
 		SecurityOpts: []string{"label=disable", "apparmor=" + profileName},
 		MountSources: p.PinnedSources,
+		// The cleanup releases only the kernel MAC state and the backend
+		// files that depend on it. The durable ownership record stays
+		// behind as the reconciliation retry marker until the run-level
+		// finalization boundary proves the dependent cleanup done.
 		cleanup: func() error {
-			if err := b.cleanupPrepared(p.StateDir, profileName); err != nil {
-				return err
-			}
-			return removeAllStateDirs(p)
+			return b.cleanupPrepared(p.StateDir, profileName)
 		},
 	}, nil
 }

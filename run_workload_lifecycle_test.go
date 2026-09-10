@@ -296,6 +296,79 @@ func TestRunWorkloadCleanupFailureRetainsDependencies(t *testing.T) {
 	}
 }
 
+// TestRunWorkloadPinFailureRetainsRecordUntilReconciliation is the
+// normal-run regression for the frozen finalization boundary: the workload
+// MAC cleanup succeeds, the pin cleanup fails, and the durable ownership
+// record must survive so a fresh startup reconciliation can finish the
+// cleanup. Removing the record before the dependent cleanup would strand
+// the surviving pins without a reconciliation owner.
+func TestRunWorkloadPinFailureRetainsRecordUntilReconciliation(t *testing.T) {
+	f := newRunWorkloadLifecycleFixture(t)
+	app := f.app
+	f.parser(t, false)
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinned := filepath.Join(runtimeDir, "mounts", operationID, fmt.Sprint(mountIndex))
+		if err := os.MkdirAll(filepath.Dir(pinned), 0700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(pinned, nil, 0600); err != nil {
+			return nil, err
+		}
+		return &pinnedMount{
+			PinnedPath: pinned,
+			cleanup: func() error {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				f.pinCleaned = append(f.pinCleaned, pinned)
+				return fmt.Errorf("simulated pin cleanup failure")
+			},
+		}, nil
+	}
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSystemSession: %v", err)
+	}
+	subdir := filepath.Join(result.Session.Workspace, "fin")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"image":"alpine","mounts":[{"source":"fin","target":"/data"}],"command":["true"]}`
+	w, op := f.run(t, result.Token, body)
+	if w.Code != 201 {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if op == nil {
+		t.Fatal("operation must exist")
+	}
+
+	// The run completed with a successful MAC cleanup and a failed pin
+	// cleanup: the durable ownership record must survive as the
+	// reconciliation retry marker.
+	stateRoot := filepath.Join(app.Config.StateDir, workloadMACStateRootName)
+	runtimeRoot := filepath.Join(app.Config.RuntimeDir, workloadMACStateRootName)
+	if _, err := os.Stat(filepath.Join(stateRoot, op.ID, "ownership")); err != nil {
+		t.Fatalf("durable ownership record must survive the failed dependent pin cleanup: %v", err)
+	}
+	pinsDir := pinsDirFor(runtimeRoot, op.ID)
+	if _, err := os.Stat(pinsDir); err != nil {
+		t.Fatalf("failed pin cleanup must retain the pin layout: %v", err)
+	}
+
+	// A fresh daemon start reconciles the retained record through the
+	// production pin-layout owner and finishes the cleanup.
+	fresh := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	fresh.cleanupStalePins = fresh.cleanupStalePinsIn
+	if err := fresh.ReconcileStartup(context.Background()); err != nil {
+		t.Fatalf("fresh ReconcileStartup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateRoot, op.ID)); !os.IsNotExist(err) {
+		t.Errorf("successful reconciliation must remove the retained durable record, got %v", err)
+	}
+	if _, err := os.Stat(pinsDir); !os.IsNotExist(err) {
+		t.Errorf("successful reconciliation must remove the stale pins, got %v", err)
+	}
+}
+
 // TestRunWorkloadStaleOwnedContainerForceRemoved proves the stale-container
 // contract after a docker CLI process ended: the canonical absence proof
 // finds exactly one proven-owned correlated container, force-removes it,

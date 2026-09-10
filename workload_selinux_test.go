@@ -99,6 +99,15 @@ func TestSELinuxWorkloadPrepareRegularFileProjection(t *testing.T) {
 	if prepared.MountSources[0] != wantSource {
 		t.Errorf("file projection Docker source: got %q, want %q", prepared.MountSources[0], wantSource)
 	}
+	// The projection mountpoint is helper-owned real state for both
+	// projection kinds: bindfs was started with it as its mountpoint.
+	mountInfo, err := os.Lstat(filepath.Join(prep.RuntimeDir, "mount-0", "mount"))
+	if err != nil {
+		t.Fatalf("regular-file projection must own a real mountpoint directory: %v", err)
+	}
+	if !mountInfo.IsDir() || mountInfo.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("projection mountpoint must be a real helper-owned directory, got %v", mountInfo.Mode())
+	}
 	// The pinned file must be bound onto the lower item exactly once.
 	bind := [2]string{pinnedFile, filepath.Join(prep.RuntimeDir, "mount-0", "lower", "item")}
 	bindSeen := false
@@ -282,11 +291,72 @@ func TestSELinuxWorkloadCleanupReverseOrder(t *testing.T) {
 	if err := prepared.Cleanup(); err != nil {
 		t.Errorf("cleanup must be idempotent: %v", err)
 	}
-	if _, err := os.Stat(prep.RuntimeDir); !os.IsNotExist(err) {
-		t.Errorf("runtime projection state must be removed, got %v", err)
+	// The backend cleanup releases the per-projection state; the durable
+	// ownership record and the runtime directory root are removed only by
+	// the coordinator finalization boundary after the dependent cleanup.
+	if _, err := os.Stat(filepath.Join(prep.RuntimeDir, "mount-0")); !os.IsNotExist(err) {
+		t.Errorf("projection state mount-0 must be removed, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(prep.RuntimeDir, "mount-1")); !os.IsNotExist(err) {
+		t.Errorf("projection state mount-1 must be removed, got %v", err)
 	}
 	if got := len(seam.unmountCalls); got != 2 {
 		t.Errorf("expected two projection unmounts, got %v", seam.unmountCalls)
+	}
+}
+
+// TestSELinuxWorkloadCleanupOrderProvesWorkerExitBeforeLowerUnmount proves
+// the frozen dependency order of a live regular-file projection cleanup:
+// the projection mount is proven gone, then the owned worker exit is
+// proven, and only then may the lower file bind be released — the worker
+// backs on the lower tree.
+func TestSELinuxWorkloadCleanupOrderProvesWorkerExitBeforeLowerUnmount(t *testing.T) {
+	dir := t.TempDir()
+	b, seam := newTestSELinuxBackend(t)
+	pinnedFile := filepath.Join(dir, "pinned.txt")
+	if err := os.WriteFile(pinnedFile, []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prep := workloadPreparation{
+		OperationID:   "op_s6",
+		SessionID:     "sess1",
+		StateDir:      filepath.Join(dir, "state", "op_s6"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_s6"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/inputs/config.txt", RequestedReadOnly: true}},
+		PinnedSources: []string{pinnedFile},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepare(prep)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := prepared.Cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	mountDir := filepath.Join(prep.RuntimeDir, "mount-0", "mount")
+	lowerItem := filepath.Join(prep.RuntimeDir, "mount-0", "lower", "item")
+	mountIdx, workerIdx, lowerIdx := -1, -1, -1
+	for i, event := range seam.events {
+		switch event {
+		case "unmount " + mountDir:
+			mountIdx = i
+		case "worker-exit " + mountDir:
+			workerIdx = i
+		case "unmount " + lowerItem:
+			lowerIdx = i
+		}
+	}
+	if mountIdx < 0 || workerIdx < 0 || lowerIdx < 0 {
+		t.Fatalf("expected projection unmount, worker exit, and lower unmount events, got %v", seam.events)
+	}
+	if !(mountIdx < workerIdx && workerIdx < lowerIdx) {
+		t.Errorf("dependency order violated: unmount %d < worker-exit %d < lower unmount %d (events %v)",
+			mountIdx, workerIdx, lowerIdx, seam.events)
 	}
 }
 
@@ -573,7 +643,7 @@ func TestSELinuxReconcileAdversarialRuntimeShape(t *testing.T) {
 			if err := os.MkdirAll(runtimeRoot, 0700); err != nil {
 				t.Fatal(err)
 			}
-			opID := "op_adv1"
+			opID := testOperationID(51)
 			newTestSELinuxOwnedState(t, stateRoot, runtimeRoot, opID)
 
 			// The foreign tree the symlink points into, pre-seeded with a

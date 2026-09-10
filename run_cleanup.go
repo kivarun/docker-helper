@@ -10,8 +10,14 @@ package main
 //	container proven absent
 //	  -> workload MAC state removed
 //	  -> source pins removed
+//	  -> durable workload ownership record/state removed
 //	  -> workspace-use lease released
 //	  -> cidfile removed
+//
+// The durable ownership record is removed only after every stage it
+// anchors is positively proven done: until then it is the reconciliation
+// retry marker that still binds the surviving helper state to the
+// operation.
 //
 // A cleanup failure at any stage retains everything the failed stage
 // depends on and is left to startup reconciliation; a cleanup failure is
@@ -77,7 +83,7 @@ func (a *App) cleanupAfterRunProcess(op *operation) {
 	// depend on them is gone.
 	cleanupErr := cleanupPinnedMounts(op)
 	if cleanupErr != nil {
-		opLog(ctx).Error("pinned mount cleanup failed — workspace lease intentionally retained because workspace-dependent cleanup did not complete",
+		opLog(ctx).Error("pinned mount cleanup failed — durable workload ownership record and workspace lease intentionally retained",
 			slog.String("operation", "run"),
 			slog.String("operation_id", op.ID),
 			slog.String("error", cleanupErr.Error()),
@@ -85,22 +91,35 @@ func (a *App) cleanupAfterRunProcess(op *operation) {
 		return
 	}
 
-	// Stage 4: release the workspace-use lease.
+	// Stage 4: the durable ownership record is removed only after the
+	// backend/kernel MAC state and the pins are positively proven gone;
+	// until then it is the reconciliation retry marker for whatever
+	// helper state remains.
+	if err := a.WorkloadMAC.removeWorkloadMACState(op.ID); err != nil {
+		opLog(ctx).Error("durable workload ownership state removal failed — workspace lease intentionally retained",
+			slog.String("operation", "run"),
+			slog.String("operation_id", op.ID),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	// Stage 5: release the workspace-use lease.
 	if op.macLeaseRelease != nil {
 		op.macLeaseRelease()
 	}
 
-	// Stage 5: the cidfile is no longer needed once every owned resource is
+	// Stage 6: the cidfile is no longer needed once every owned resource is
 	// released.
 	cleanupCidfile(op)
 }
 
 // rollbackRunPreparation reverses prepared run resources before any
-// container can exist: workload MAC state, pins, lease, cidfile. It is used
-// by every pre-start failure path (MAC preparation failure, MAC validation
-// failure, admission refusal, shutdown gate before process start, and
-// cmd.Start failure). No container exists by construction, so no
-// container-absence proof is needed.
+// container can exist: workload MAC state, pins, the durable ownership
+// record, lease, cidfile. It is used by every pre-start failure path (MAC
+// preparation failure, MAC validation failure, admission refusal, shutdown
+// gate before process start, and cmd.Start failure). No container exists by
+// construction, so no container-absence proof is needed.
 func (a *App) rollbackRunPreparation(ctx context.Context, op *operation) {
 	if op.workloadMAC != nil {
 		if err := op.workloadMAC.Cleanup(); err != nil {
@@ -114,12 +133,25 @@ func (a *App) rollbackRunPreparation(ctx context.Context, op *operation) {
 	}
 	cleanupErr := cleanupPinnedMounts(op)
 	if cleanupErr != nil {
-		opLog(ctx).Error("pin cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
+		opLog(ctx).Error("pin cleanup failed — durable workload ownership record and MAC lease intentionally retained",
 			slog.String("operation", "run"),
 			slog.String("operation_id", op.ID),
 			slog.String("error", cleanupErr.Error()),
 		)
 		return
+	}
+	if a.WorkloadMAC != nil {
+		// The durable ownership record is removed only after the MAC
+		// state and the pins are positively proven released (absence of
+		// both is success on this pre-container path).
+		if err := a.WorkloadMAC.removeWorkloadMACState(op.ID); err != nil {
+			opLog(ctx).Error("durable workload ownership state removal failed — MAC lease intentionally retained",
+				slog.String("operation", "run"),
+				slog.String("operation_id", op.ID),
+				slog.String("error", err.Error()),
+			)
+			return
+		}
 	}
 	if op.macLeaseRelease != nil {
 		op.macLeaseRelease()

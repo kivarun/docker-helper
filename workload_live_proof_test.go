@@ -138,8 +138,6 @@ func appArmorDenialLogged(t *testing.T, profileName string) (bool, string) {
 	return false, ""
 }
 
-// selinuxAVCMatched returns a recent AVC line involving the projection type
-
 // liveContainerProcessLabel runs one container carrying the given security
 // options and reports the process label observed inside the container.
 func liveContainerProcessLabel(t *testing.T, securityOpts []string) (string, error) {
@@ -245,6 +243,31 @@ func TestLiveWorkloadAppArmor(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(dir, "state", "op_liveaa1")); !os.IsNotExist(statErr) {
 		t.Errorf("owned state must be removed after cleanup, got %v", statErr)
 	}
+}
+
+// liveContainerOutput is runInContainerWithOpts with the container stdout
+// returned for content proofs (nonzero exit = error with the output).
+func liveContainerOutput(t *testing.T, securityOpts []string, bind, snippet string) (string, error) {
+	t.Helper()
+	args := []string{"run", "--rm"}
+	for _, opt := range securityOpts {
+		args = append(args, "--security-opt", opt)
+	}
+	if bind != "" {
+		args = append(args, "-v", bind)
+	}
+	args = append(args, "alpine:3.19", "/bin/sh", "-c", snippet)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("container output: %s %s: %w",
+			strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), err)
+	}
+	return stdout.String(), nil
 }
 
 // selinuxAVCMatched returns a recent AVC line involving the projection type
@@ -369,6 +392,128 @@ func TestLiveWorkloadSELinux(t *testing.T) {
 		t.Fatalf("source device/inode/context must be unchanged after cleanup: before=%q after=%q", before, after)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "runtime", "op_livesel1", "mount-0")); !os.IsNotExist(statErr) {
+		t.Errorf("owned projection runtime state must be removed after cleanup, got %v", statErr)
+	}
+}
+
+// TestLiveWorkloadSELinuxRegularFile drives the production SELinux
+// regular-file mechanism end to end: a real pinned regular file, the
+// lower-item bind, the bindfs projection of the lower directory with the
+// exact mount context, a container carrying the production label that reads
+// the projected item successfully and is denied writing it, an attributable
+// AVC, and a cleanup that leaves the backing inode and context unchanged.
+func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
+	requireLiveProof(t)
+	if !dockerLiveAvailable(t) {
+		t.Skip("docker daemon unavailable")
+	}
+	if _, err := os.Stat(selinuxDevFusePath); err != nil {
+		t.Skip("/dev/fuse unavailable")
+	}
+	if _, err := exec.LookPath("bindfs"); err != nil {
+		t.Skip("bindfs unavailable")
+	}
+	if state, err := getenforceLive(); err != nil || state != "Enforcing" {
+		t.Skipf("SELinux is not enforcing: %v", state)
+	}
+	dir, err := os.MkdirTemp("", "docker-helper-live-selfile-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	// Deliberately writable parent: the file mutation denial below must be
+	// attributable to the projection type, not the VFS.
+	if err := os.MkdirAll(filepath.Join(dir, "backing"), 0777); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dir, "backing", "seed.txt")
+	if err := os.WriteFile(source, []byte("seed-content\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin the regular file through the production mount-pin owner.
+	pinned, err := pinWorkspaceMountSource(filepath.Dir(source), source,
+		filepath.Join(dir, "runtime"), "op_liveself1", 0)
+	if err != nil {
+		t.Fatalf("production pin: %v", err)
+	}
+	defer pinned.Cleanup()
+
+	before := inodeContextOf(source)
+	b := newWorkloadSELinuxBackend()
+	prep := workloadPreparation{
+		OperationID:   "op_liveself1",
+		SessionID:     "live",
+		StateDir:      filepath.Join(dir, "state", "op_liveself1"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_liveself1"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned.PinnedPath},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepErr := b.prepare(prep)
+	if prepErr != nil {
+		t.Fatalf("production SELinux regular-file prepare: %v", prepErr)
+	}
+	defer prepared.Cleanup()
+	if after := inodeContextOf(source); after != before {
+		t.Fatalf("source device/inode/context must be preserved: before=%q after=%q", before, after)
+	}
+
+	projection := prepared.MountSources[0]
+	// Independent-MAC proof precondition: the projected item is VFS
+	// writable underneath and carries the exact projection type.
+	if err := os.WriteFile(projection, []byte("x"), 0600); err != nil {
+		t.Fatalf("projected item is not VFS-writable for the proof: %v", err)
+	}
+	if got, err := b.ops.selinuxTypeOf(projection); err != nil || got != selinuxROProjectionType {
+		t.Fatalf("projected item effective type: got %q (err %v), want %q", got, err, selinuxROProjectionType)
+	}
+
+	// Read through the projected regular file must succeed and return the
+	// pinned content.
+	readOut, readErr := liveContainerOutput(t, prepared.SecurityOpts,
+		fmt.Sprintf("%s:/inputs:rw", projection),
+		"cat /inputs",
+	)
+	if readErr != nil {
+		t.Fatalf("read through the projected regular file must succeed: %v", readErr)
+	}
+	if strings.TrimSpace(readOut) != "seed-content" {
+		t.Fatalf("projected regular file must carry the pinned content, got %q", readOut)
+	}
+
+	// The write must be denied by the projection type while the VFS view
+	// is writable.
+	writeErr := runInContainerWithOpts(t, prepared.SecurityOpts,
+		fmt.Sprintf("%s:/inputs:rw", projection),
+		"echo live-proof-write > /inputs",
+	)
+	if writeErr == nil {
+		t.Fatal("write through the projected regular file must fail under docker_helper_container_t")
+	}
+	t.Logf("denied write output: %v", writeErr)
+
+	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write")
+	if avc == "" {
+		t.Fatal("matching SELinux AVC not found")
+	}
+	t.Logf("attributable AVC: %s", avc)
+	liveEvidence(t, "selinux-regular-file-avc.txt", avc+"\n")
+	liveEvidence(t, "selinux-regular-file-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nRESULT=CLOSED\n", repoHead(t)))
+
+	if err := prepared.Cleanup(); err != nil {
+		t.Fatalf("production SELinux regular-file cleanup: %v", err)
+	}
+	if after := inodeContextOf(source); after != before {
+		t.Fatalf("source device/inode/context must be unchanged after cleanup: before=%q after=%q", before, after)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "runtime", "op_liveself1", "mount-0")); !os.IsNotExist(statErr) {
 		t.Errorf("owned projection runtime state must be removed after cleanup, got %v", statErr)
 	}
 }

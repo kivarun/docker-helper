@@ -149,12 +149,20 @@ func newRunOperation(sessionID, image string, bufSize int64, principalName, laun
 	}
 }
 
+// The canonical issued operation ID shape: the production prefix plus
+// exactly operationIDHexLength lowercase hex characters (16 random bytes).
+// Durable ownership proofs validate against this exact shape.
+const (
+	operationIDPrefix    = "op_"
+	operationIDHexLength = 32
+)
+
 func generateOperationID() string {
-	b := make([]byte, 16)
+	b := make([]byte, operationIDHexLength/2)
 	if _, err := rand.Read(b); err != nil {
 		panic(fmt.Sprintf("cannot generate operation ID: %v", err))
 	}
-	return "op_" + hex.EncodeToString(b)
+	return operationIDPrefix + hex.EncodeToString(b)
 }
 
 type operationSupervisor struct {
