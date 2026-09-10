@@ -447,10 +447,19 @@ docker-helper serve
     │
     ├── loads config.json
     ├── reads admin token, computes SHA-256 hash
-    ├── opens SQLite database
+    ├── opens SQLite database and initializes the schema (DB init)
+    ├── provisions user-mode ownership (ensureUserModeOwnership)
+    ├── runs the Session ownership migration (idempotent;
+    │   see Ownership migration)
+    ├── runs the default-Launcher migration (idempotent)
     ├── deletes expired session rows (expires_at <= now)
-    ├── runs ownership migration (idempotent; see Ownership migration)
-    ├── resolves user-mode ownership (ensureUserModeOwnership)
+    ├── runs the Session filesystem snapshot migration/integrity gate
+    │   (compatibility backfill or fail-closed validation)
+    ├── creates the Session MAC coordinator (nil in user mode) and
+    │   reconciles live sessions' MAC state (ReconcileLiveSessions)
+    ├── creates the workload MAC coordinator and reconciles
+    │   helper-owned workload MAC state (ReconcileStartup)
+    ├── removes stale session runtime directories
     └── starts HTTP server on the configured transports
 ```
 
@@ -531,7 +540,8 @@ resolve exactly one target Launcher
 derive the owning Principal through the Launcher
     ↓
 resolve effective workspace policy
-    (global roots ∩ effective Principal roots ∩ launcher restricted roots)
+    (the meet of the global, effective Principal, and — when restricted —
+     launcher scopes; `read_only` dominance)
     ↓
 validate workspace inside the effective roots
     ↓
@@ -559,7 +569,9 @@ and before MAC reconciliation: a table-absent (pre-cutover) database gets
 one compatibility backfill of `position=0, path=sessions.workspace,
 access=read_write` for every remaining Session; a table-present database is
 post-cutover and missing/partial/corrupt snapshot state fails startup closed.
-Runtime enforcement of the persisted access modes is Phase 2.2.5; the
+Data-plane enforcement of the persisted access modes is the current
+Release 2.2 behavior (see
+[Data-plane filesystem authority](#data-plane-filesystem-authority)); the
 workspace-level MAC lifecycle is unchanged.
 
 The HTTP body of `POST /sessions` accepts
@@ -819,6 +831,12 @@ ownership column.
 
 ### Root-policy hierarchy
 
+Every stored allowed root is a canonical rich value `{path, access}` — the
+canonical `AllowedRootEntry` — where `access` is exactly `read_write` or
+`read_only`; there is no other access vocabulary. A legacy path-only entry
+(string in config.json, pre-2.2 database row, or 2.x API input) is the
+`read_write` grant.
+
 The workspace authorization hierarchy has three policy ceilings, then one
 concrete selection:
 
@@ -827,13 +845,34 @@ policy ceilings:  global roots
                     ⊇ effective Principal roots
                         ⊇ effective Launcher roots
 concrete:               Session workspace (ephemeral)
+                          └── immutable Session filesystem snapshot
+                              (persisted at creation; the single
+                              data-plane filesystem authority of the
+                              issued Session)
 ```
 
-- **Global allowed_roots** (config.json) — the system-wide authorization
-  ceiling, managed by `config allowed-root list/add/remove`. Changing
-  allowed roots is a policy-only operation; it does NOT prepare MAC state.
+Within one scope, the most-specific canonical path wins. Across scopes, the
+effective value is the meet of the parent scope and the child scope — path
+authority intersects and access meets with `read_only` dominance — so a
+lower authority may narrow but never widen its parent. A writable exposure
+is admitted only when the source itself resolves `read_write` and covers no
+effective nested `read_only` region (the snapshot owner's single
+writable-parent query, `CanExposeWritable`); the daemon never silently
+downgrades a requested writable mount to read-only — a refused writable
+exposure is the stable `read_only_root` policy refusal, and an issued
+Session keeps its persisted immutable snapshot regardless of later
+parent-policy mutations (see
+[Data-plane filesystem authority](#data-plane-filesystem-authority)).
+
+- **Global allowed roots** (config.json `allowed_roots`) — the system-wide
+  authorization ceiling, managed by `config allowed-root
+  list/add/set-access/remove` (canonical rich entries; legacy string input
+  means `read_write`; `config show` projects the authoritative
+  `allowed_root_entries` beside the 2.x path-only `allowed_roots`
+  compatibility projection). Changing allowed roots is a policy-only
+  operation; it does NOT prepare MAC state.
 - **Principal allowed roots** (database) — per-principal narrowing, managed
-  by `principal allowed-root add/remove`. Does not prepare MAC.
+  by `principal allowed-root add/set-access/remove`. Does not prepare MAC.
 - **Launcher allowed roots** (database, `restricted` scope only) —
   per-launcher narrowing beneath one principal; `inherit` scope applies no
   launcher-level narrowing. Evaluated at session-creation time against
@@ -842,14 +881,22 @@ concrete:               Session workspace (ephemeral)
   selected only at session creation time via `session create --workspace
   PATH`. Must be under a global, the principal, and (when restricted) the
   launcher allowed root.
+- **Session filesystem snapshot** (persisted, immutable Session child
+  state) — derived from the effective entries at the creation
+  linearization point and committed atomically with the Session. It is the
+  single data-plane filesystem authority of an existing Session: current
+  global/Principal/Launcher policy is never read on the data plane, so
+  parent-policy mutations affect only Sessions created afterwards.
 
 `effective Principal roots` is the Principal ceiling owned by
-`computeEffectivePrincipalRoots`: the intersection of the global roots and
-the stored Principal roots, with one documented exception — in user mode the
+`computeEffectivePrincipalRoots`: the meet of the global roots and the
+stored Principal roots — path intersection with `read_only`-dominant
+access meet — with one documented exception: in user mode the
 daemon-owner Principal with zero stored roots collapses onto the global
 roots. `effective Launcher roots` are the Principal ceiling for `inherit`
-scope, or its intersection with the Launcher's stored roots for `restricted`
-scope (stale out-of-ceiling Launcher roots are rejected, never truncated).
+scope, or the meet of that ceiling with the Launcher's stored entries for
+`restricted` scope (stale out-of-ceiling Launcher roots are rejected,
+never truncated).
 
 MAC state is derived from the concrete live session/workspace lifecycle,
 not from the authorization ceiling. Only the session workspace participates
@@ -899,7 +946,7 @@ created through that launcher; it never widens and never owns MAC state:
 | Launcher scope | Effective roots for new sessions |
 |---|---|
 | `inherit` | the effective Principal ceiling (canonical owner above) |
-| `restricted` | effective Principal ceiling ∩ launcher allowed roots |
+| `restricted` | the meet of the effective Principal ceiling with the launcher's stored entries (`read_only` dominance) |
 
 Evaluation happens at session-creation time against current state; a
 launcher root that is no longer under the principal ceiling is rejected
@@ -908,19 +955,29 @@ produce a session outside the principal's allowed roots.
 
 Scope replacement remains the one complete-scope mutation:
 `PUT /principals/{username}/launchers/{launcher}/allowed-roots` accepts
-the complete scope (`{"scope": "inherit", "allowed_roots": []}` or
-`{"scope": "restricted", "allowed_roots": [...]}`); the CLI exposes it
-only as the fixed single-request `launcher allowed-root inherit` verb —
-there is no read-modify-write policy mutation through the CLI. The narrow
-per-root mutations are separate single-request operations:
-`POST .../allowed-roots` adds one root (narrowing an inherit launcher to
-restricted scope atomically with the insert) and `DELETE
+the complete scope. The canonical rich form carries mode-bearing entries
+(`{"scope": "restricted", "allowed_root_entries": [{"path": ...,
+"access": "read_write"|"read_only"}, ...]}`, `access` required per
+entry); the 2.x path-only compatibility form
+(`{"scope": "inherit", "allowed_roots": []}` or
+`{"scope": "restricted", "allowed_roots": [...]}`, every path a
+`read_write` grant) stays valid, and the two forms are mutually
+exclusive in one request. The CLI exposes it only as the fixed
+single-request `launcher allowed-root inherit` verb — there is no
+read-modify-write policy mutation through the CLI. The narrow per-root
+mutations are separate single-request operations:
+`POST .../allowed-roots` adds one root (presence-aware `--access`,
+omission is the `read_write` grant; narrowing an inherit launcher to
+restricted scope atomically with the insert),
+`PATCH .../allowed-roots` changes the access mode of exactly one stored
+root (set-access; never changes the scope mode), and `DELETE
 .../allowed-roots` removes one root; removal never changes the scope mode,
 so removing the last root leaves the launcher restricted with an empty
 root set (fail-closed: no admissible session workspace until an explicit
-inherit). Both reject the user-mode reserved default launcher with
-`409 user_mode_owner_reserved`. The CLI verbs are `launcher allowed-root
-add/list/remove/inherit` and `principal allowed-root add/list/remove`;
+inherit). Both the add and the set-access reject the user-mode reserved
+default launcher with `409 user_mode_owner_reserved`. The CLI verbs are
+`launcher allowed-root add/set-access/list/remove/inherit` and
+`principal allowed-root add/set-access/list/remove`;
 `launcher scope` no longer exists in the CLI.
 
 ### Session workspace
@@ -995,7 +1052,7 @@ authenticated authority class, not policy (see
 introspection surface: it answers what was actually issued to an existing
 Session, not what a Session created now would get. It loads the Session's
 persisted immutable filesystem snapshot through the single canonical
-snapshot loader (the data-plane enforcement consumer of 2.2.5 uses the same
+snapshot loader (the data-plane enforcement consumer uses the same
 owner), under the Session-control authorization matrix (an admin token, a Principal
 credential, or a Launcher credential; a Session bearer has no control-plane
 introspection authority) and the same ownership scope as list/delete — a
@@ -1033,7 +1090,8 @@ a Launcher credential has no Principal authority):
 | `GET /principals/{username}` | show principal (scope-first read: an admin reads any Principal, a Principal credential reads exactly its own — the daemon authorizes the target, the CLI performs no local self-check; a foreign selector is the non-disclosing not-found; a Launcher credential is unauthorized) |
 | `PATCH /principals/{username}` | enable / disable (session teardown propagation) |
 | `DELETE /principals/{username}` | checked delete (runtime-active guard, FK cascade teardown) |
-| `POST /principals/{username}/allowed-roots` | add one Principal allowed root (authorization-only, never MAC preparation) |
+| `POST /principals/{username}/allowed-roots` | add one Principal allowed root (presence-aware `--access`; authorization-only, never MAC preparation) |
+| `PATCH /principals/{username}/allowed-roots` | set-access: change the access mode (`read_write`/`read_only`) of exactly one stored Principal allowed root (matched by the stored canonical identity; never MAC preparation) |
 | `DELETE /principals/{username}/allowed-roots` | remove one Principal allowed root (authorization-only, never MAC preparation) |
 | `GET /principals/{username}/effective-allowed-roots` | Principal effective-root introspection (see [Policy introspection](#policy-introspection)) |
 | `POST /principals/{username}/credentials` | create a named Principal credential (one-time token; administrator-controlled) |
@@ -1045,13 +1103,16 @@ a Launcher credential has no Principal authority):
 | `DELETE /sessions/{id}` | Session deletion (authority-scoped; see [Session](#session)) |
 
 CLI surface: `principal create|list|show|set|delete`,
-`principal allowed-root add|list|remove`,
+`principal allowed-root add|set-access|list|remove`,
 `principal credential create|list|revoke|rotate`. Every command accepts
 the common operator flags (see [CLI conventions](#cli-conventions)).
 `principal allowed-root` mutations are authorization-only and never
 prepare MAC state; `principal allowed-root list` is a CLI projection of
 the show endpoint (`GET /principals/{username}`), not a separate HTTP
-list route.
+list route. The show response carries the canonical rich
+`allowed_root_entries` projection beside the 2.x path-only
+`allowed_roots` compatibility projection, and `principal allowed-root
+list` renders it as the PATH/ACCESS table.
 
 ### Launcher
 
@@ -1065,8 +1126,9 @@ credential cannot manage launchers):
 | `GET /launchers` | scope-first launcher list (authority visibility + optional `?principal=` and `?launcher=` narrowing filters) |
 | `GET /principals/{username}/launchers/{launcher}` | show launcher |
 | `PATCH /principals/{username}/launchers/{launcher}` | rename / enable / disable |
-| `PUT /principals/{username}/launchers/{launcher}/allowed-roots` | atomic scope replacement |
-| `POST /principals/{username}/launchers/{launcher}/allowed-roots` | add one allowed root (narrow-to-restricted on the first add) |
+| `PUT /principals/{username}/launchers/{launcher}/allowed-roots` | atomic complete-scope replacement (canonical rich `allowed_root_entries` entries, or the mutually exclusive 2.x path-only `allowed_roots` compatibility input mapping every path to `read_write`) |
+| `POST /principals/{username}/launchers/{launcher}/allowed-roots` | add one allowed root (presence-aware `--access`; narrows an inherit launcher to restricted on the first add) |
+| `PATCH /principals/{username}/launchers/{launcher}/allowed-roots` | set-access: change the access mode of exactly one stored launcher allowed root (never changes the scope mode) |
 | `DELETE /principals/{username}/launchers/{launcher}/allowed-roots` | remove one allowed root (never changes scope mode) |
 | `DELETE /principals/{username}/launchers/{launcher}` | delete launcher (checked delete) |
 | `PUT /principals/{username}/launchers/{launcher}/credential` | issue the launcher's single credential |
@@ -1084,7 +1146,10 @@ and a malformed, missing, or foreign selector is the same non-disclosing
 a name lookup, never a global name scan).
 
 Launcher projection: `{"id", "principal", "name", "enabled", "scope",
-"allowed_roots", "created_at"}`. Create response carries the one-time
+"allowed_roots", "allowed_root_entries", "created_at"}` — `allowed_roots`
+is the 2.x path-only compatibility projection of the stored restricted
+entries and `allowed_root_entries` the authoritative rich projection of
+the same entries. Create response carries the one-time
 credential token only when issuance was requested. Exactly one credential
 may exist per launcher (`launcher_credential_exists` on a second issuance;
 rotation replaces the existing credential and its token).
@@ -1106,6 +1171,8 @@ docker-helper launcher delete [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER]
 docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--access ACCESS] [LAUNCHER] PATH
+docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT]
+    [--token-file PATH] [--principal USER] [LAUNCHER] PATH ACCESS
 docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER]
 docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
@@ -1640,12 +1707,17 @@ them:
 com.dockerhelper.session.id      = <session id>
 com.dockerhelper.launcher.id     = <launcher id>
 com.dockerhelper.principal.name  = <principal username>
+com.dockerhelper.operation.id    = <operation id> (run containers only)
 com.dockerhelper.schema = 1
 ```
 
 Labels are correlation/cleanup evidence, not authorization state. The
 namespace is deliberately neutral: only the Launcher is the Session owner;
-the Session and Principal labels are provenance.
+the Session and Principal labels are provenance. The run-only Operation ID
+label is the correlation key between a container and its helper-owned
+workload MAC state (see
+[System-mode run mounts](#system-mode-run-mounts)); reconciliation uses
+that label, never a PID.
 
 ### Pull
 
@@ -1778,8 +1850,8 @@ data-plane consumers is `resolveSessionFilesystemExposure`: it resolves one
 canonical source identity against the snapshot for the requested
 consumption mode and returns the accepted exposure facts (canonical source,
 target, caller-requested read-only mode, effective snapshot access, and the
-writable-exposure permission). Run materialization and the 2.2.6 MAC
-workload projection consume this same accepted exposure plan; the MAC
+writable-exposure permission). Run materialization and the workload MAC
+projection consume this same accepted exposure plan; the MAC
 backends do not load snapshots or recompute writable-parent semantics.
 
 #### System-mode run mounts
@@ -1799,7 +1871,7 @@ fail, the operation fails closed with no pathname fallback. Pinned mounts
 are cleaned up as part of the operation lifecycle.
 
 After the pins and before admission, the workload MAC coordinator
-(`workloadMACCoordinator`, Phase 2.2.6) materializes the accepted
+(`workloadMACCoordinator`) materializes the accepted
 `sessionFilesystemExposure` plan as an additional mandatory-access-control
 layer. The workload RO/RW mode is the caller-requested mode
 (`RequestedReadOnly`); the coordinator never reads allowed-root tables,
@@ -1923,14 +1995,15 @@ Only explicitly requested variables are forwarded; the rest of the CLI
 process environment is never inherited. When both `--env` and
 `--env-from` define the same name, the `--env-from` value wins.
 
-Known 2.1.x limitation: `run` starts the workload through the legacy
+Known limitation (introduced with the 2.1.x run implementation and still
+current in Release 2.2): `run` starts the workload through the legacy
 Docker CLI, and the daemon passes environment values to that child
 process as `--env DEST=value` argv entries, so a resolved value is
 visible in the argv of the daemon-side `docker` child process.
 `--env-from` therefore scopes its guarantee to the `docker-helper` CLI
 process boundary only; it does not promise the value is absent from every
 process argv on the system. Migrating `run` away from the legacy Docker
-CLI is not a 2.1.1 goal.
+CLI is Release 3 work, not a Release 2.2 goal.
 `--env-from` introduces no new daemon-side concept: the existing
 `run.environment` contract fully owns delivery.
 
@@ -2077,8 +2150,8 @@ In user mode the runtime directory is owned by the daemon owner with
 directory projection would expose the daemon's full runtime state
 (including other Sessions' Docker CLI configuration) to the workload.
 `--helper-socket` therefore fails closed in user mode with the stable
-`invalid_helper_socket` error. This is a documented 2.1.1 limitation, not
-an oversight.
+`invalid_helper_socket` error. This is a documented limitation (since
+2.1.1, still current in Release 2.2), not an oversight.
 
 `run.start` and `run.finish` audit records include a `helper_socket`
 boolean (true only when the projection was active for that run). The
@@ -2338,9 +2411,9 @@ Implemented event families are:
 | Area | Events |
 |---|---|
 | Authentication | `auth.failure`, `auth.session` |
-| Sessions | `session.create`, `session.list`, `session.delete` |
-| Principals | `principal.create`, `principal.enabled_change`, `principal.allowed_root_add`, `principal.allowed_root_remove`, `principal.delete` |
-| Launchers | `launcher.create`, `launcher.list`, `launcher.update`, `launcher.scope_replace`, `launcher.allowed_root_add`, `launcher.allowed_root_remove`, `launcher.delete`, `launcher.credential_issue`, `launcher.credential_rotate`, `launcher.credential_delete` |
+| Sessions | `session.create`, `session.list`, `session.show`, `session.delete` |
+| Principals | `principal.create`, `principal.enabled_change`, `principal.allowed_root_add`, `principal.allowed_root_set_access`, `principal.allowed_root_remove`, `principal.delete` |
+| Launchers | `launcher.create`, `launcher.list`, `launcher.update`, `launcher.scope_replace`, `launcher.allowed_root_add`, `launcher.allowed_root_set_access`, `launcher.allowed_root_remove`, `launcher.delete`, `launcher.credential_issue`, `launcher.credential_rotate`, `launcher.credential_delete` |
 | Credentials/admin | `principal.credential_create`, `principal.credential_list`, `principal.credential_rotate`, `principal.credential_revoke`, `admin_token.rotate` |
 | Docker operations | `pull.start`, `pull.finish`, `pull.rejected`, `build.start`, `build.finish`, `build.rejected`, `run.start`, `run.finish`, `run.rejected`, `registry.login.start`, `registry.login.finish` |
 | Configuration | `config.reload` |
@@ -2528,11 +2601,22 @@ rotate when the credential was replaced).
 | `launcher_id` | string | launcher identifier |
 | `launcher_name` | string | launcher name (present where known) |
 | `launcher_scope` | string | `inherit` or `restricted` (create/scope_replace) |
-| `launcher_path` | string | the allowed root a narrow allowed-root mutation touched (allowed_root_add/allowed_root_remove) |
+| `launcher_path` | string | the allowed root a narrow allowed-root mutation touched (allowed_root_add/allowed_root_set_access/allowed_root_remove) |
 | `launcher_enabled` | boolean | requested enabled state (update) |
 | `principal_name` | string | owning principal |
 | `result` | string | outcome code |
 | `duration` | string | request wall-clock time |
+
+Access-bearing allowed-root mutations
+(`principal.allowed_root_add`, `principal.allowed_root_set_access`,
+`launcher.allowed_root_add`, `launcher.allowed_root_set_access`) carry
+`requested_access` (the access value the caller requested) and
+`stored_access` (the access actually stored after the mutation) as
+separate facts, so an idempotent no-op that observed a different stored
+value is never audited as if the requested access had been stored.
+`stored_access` appears only when a stored entry was actually known
+(never for a refusal that stored or read nothing), and a value that was
+never a canonical access mode is never logged as one.
 
 #### run.start
 
@@ -2761,14 +2845,14 @@ Examples (ownership provenance fields reflect the documented schema):
 Successful build:
 
 ```json
-{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
-{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"5s"}
+{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
+{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"5s"}
 ```
 
 Successful session creation:
 
 ```json
-{"time":"2026-01-15T10:29:55Z","stream":"audit","event":"session.create","session_id":"dhs_0a1b2c3d4e5f","workspace":"/home/alice/project","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","principal_name":"alice","credential_id":"dhcr_9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d","result":"success","duration":"1ms"}
+{"time":"2026-01-15T10:29:55Z","stream":"audit","event":"session.create","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","workspace":"/home/alice/project","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","principal_name":"alice","credential_id":"dhcr_9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d","result":"success","duration":"1ms"}
 ```
 
 Authorization failure:
@@ -2780,8 +2864,8 @@ Authorization failure:
 Container run:
 
 ```json
-{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
-{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"1s"}
+{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
+{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"1s"}
 ```
 
 ### Operational logging
