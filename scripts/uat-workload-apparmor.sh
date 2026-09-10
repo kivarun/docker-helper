@@ -453,6 +453,11 @@ fi
 # scenario W10: bounded audit window evidence
 # ==============================================================================
 say "W10: audit window carries the attributable denial and no unexpected denies"
+# The shared audit-window helpers (audit_ts, the shipped adapter's benign
+# allowlist) come from the MAC acceptance library; source it before any
+# record is classified.
+# shellcheck source=scripts/uat-mac-apparmor.sh
+source "$REPO_DIR_IN/scripts/uat-mac-apparmor.sh"
 # Required independent evidence: a fresh kernel DENIED record attributable to
 # a generated workload profile (produced by the W6 forced-writable proof).
 # The raw audit sources are read once and concatenated: /var/log/audit/audit.log
@@ -480,8 +485,6 @@ fi
 
 # No unexpected denials under the daemon profile (the shipped adapter's
 # allowlist of demonstrated benign probes is reused, never widened).
-# shellcheck source=scripts/uat-mac-apparmor.sh
-source "$REPO_DIR_IN/scripts/uat-mac-apparmor.sh"
 SYSTEM_DENIALS="$(printf '%s\n' "$AA_RAW_AUDIT" \
   | grep 'apparmor="DENIED"' | grep -F 'profile="docker-helper-system"' || true)"
 UNEXPECTED=0

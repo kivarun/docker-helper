@@ -105,7 +105,7 @@ scenario() { say "scenario $1"; }
 dh() { /usr/bin/docker-helper "$@"; }
 SOCK="/run/docker-helper/docker-helper.sock"
 
-json_field() { grep -oP "\"$1\": \"\K[^\"]+" | head -1; }
+json_field() { grep -oP "\"$1\": ?\"\K[^\"]+" | head -1; }
 
 wait_health() {
   local _i=0

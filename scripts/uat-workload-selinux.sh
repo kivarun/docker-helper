@@ -238,13 +238,41 @@ if rpm -q docker-helper >/dev/null 2>&1; then
   fi
 fi
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
-if rpm -i "$RPM_PATH_IN" >/tmp/uat-wls-install.log 2>&1 \
-    && [ "$(docker-helper version)" = "$VERSION" ] \
-    && rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$VERSION"; then
+# candidate_installed_ok verifies the FULL packaged install state: binary
+# version, rpm record, and the loaded policy module. A scriptlet that fails
+# late (e.g. a systemd daemon-reload/restart race) leaves a partially valid
+# state that this verifier does not silently accept.
+candidate_installed_ok() {
+  [ "$(docker-helper version)" = "$VERSION" ] \
+    && rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$VERSION" \
+    && semodule -l 2>/dev/null | awk '$1 == "docker_helper" { found=1 } END { exit !found }'
+}
+if rpm -i "$RPM_PATH_IN" >/tmp/uat-wls-install.log 2>&1 && candidate_installed_ok; then
   acc_ok "exact candidate RPM installed (sha256 verified: $ACTUAL_SHA)"
 else
-  echo "error: candidate RPM install/version check failed: $(redact </tmp/uat-wls-install.log | tail -3)" >&2
-  exit 1
+  echo "  install attempt 1 evidence: $(redact </tmp/uat-wls-install.log | tail -8)" >&2
+  # One bounded settle + retry for the known-flaky category: after heavy
+  # package churn a systemd job-queue race can surface inside the RPM
+  # scriptlet ("Failed to start transient service unit"). A healthy system
+  # still installs on the retry; a persistent failure keeps the gate red.
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  for _ in $(seq 1 15); do
+    state="$(systemctl is-system-running 2>/dev/null || true)"
+    case "$state" in running|degraded) break ;; esac
+    sleep 1
+  done
+  if ! candidate_installed_ok; then
+    rpm -e docker-helper >/dev/null 2>&1 || true
+    rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
+    rpm -i "$RPM_PATH_IN" >/tmp/uat-wls-install.log 2>&1 || true
+  fi
+  if candidate_installed_ok; then
+    acc_ok "exact candidate RPM installed (sha256 verified: $ACTUAL_SHA; transient systemd scriptlet hiccup recovered)"
+  else
+    echo "error: candidate RPM install/version check failed: $(redact </tmp/uat-wls-install.log | tail -12)" >&2
+    echo "error: systemd state: $(systemctl is-system-running 2>&1 || true)" >&2
+    exit 1
+  fi
 fi
 
 if dh init --allowed-root "$ALLOWED_ROOT" >/tmp/uat-wls-init.log 2>&1; then

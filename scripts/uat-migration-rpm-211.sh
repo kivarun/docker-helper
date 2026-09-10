@@ -240,7 +240,19 @@ M_S2_ID="$(printf '%s' "$M_S2_JSON" | json_field id)"
 if [ -n "$M_S1_ID" ] && [ -n "$M_S2_ID" ]; then
   acc_ok "R2 live Sessions seeded (launcher=$M_S1_ID principal=$M_S2_ID)"
 else
-  acc_fail_ctx "R2 Session seeding failed (launcher: '$M_S1_ID', principal: '$M_S2_ID')" "$M_DIAG/s1.err" "$M_DIAG/s2.err"
+  # Self-diagnosing capture: the v2.1.1 daemon answers a failed create with
+  # the generic 500 internal_error, but names the internal cause in its
+  # operational log ("session creation error"); the loaded policy module and
+  # the workspace labels pin down which MAC path the baseline exercised.
+  journalctl -u docker-helper.service -n 200 --no-pager -o cat 2>"$M_DIAG/journal.err" \
+    | grep -E 'session creation' | tail -4 >"$M_DIAG/daemon-journal.txt" || true
+  {
+    semodule -l 2>&1 | grep -w docker_helper || echo "(docker_helper module not loaded)"
+    getenforce 2>&1 || true
+    ls -Zd "$M_HOME" "$M_HOME/ws" "$M_POLICY/sub/ws" 2>&1 || true
+  } >"$M_DIAG/sel-state.txt" 2>&1
+  acc_fail_ctx "R2 Session seeding failed (launcher: '$M_S1_ID', principal: '$M_S2_ID')" \
+    "$M_DIAG/s1.err" "$M_DIAG/s2.err" "$M_DIAG/daemon-journal.txt" "$M_DIAG/sel-state.txt"
 fi
 
 M_CONFIG_SHA="$(sha256sum /etc/docker-helper/config.json | awk '{print $1}')"

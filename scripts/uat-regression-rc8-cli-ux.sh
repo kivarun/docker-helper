@@ -383,7 +383,7 @@ subcase_c() {
   # read_write home ceiling): the effective-root projection normalizes
   # redundant nesting away, so only a genuine mode transition is guaranteed
   # to reach the introspection and completion surfaces.
-  if ! out="$(dh principal allowed-root add --system "$user" --access read_only "$opt" 2>&1)"; then
+  if ! out="$(dh principal allowed-root add --system --access read_only "$user" "$opt" 2>&1)"; then
     reg_fail "C: nested root fixture failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     rm -f "$cred"

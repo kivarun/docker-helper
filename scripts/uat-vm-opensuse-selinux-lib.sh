@@ -71,6 +71,8 @@ echo "--- getenforce ---"; (command -v getenforce >/dev/null 2>&1 && getenforce 
 echo "--- loaded docker_helper policy modules ---"; (command -v semodule >/dev/null 2>&1 && semodule -l 2>&1 | grep docker_helper) || echo "(semodule absent)"
 echo "--- docker-helper service ---"; systemctl status docker-helper.service --no-pager 2>&1 | head -30
 echo "--- docker-helper journal (last 80) ---"; journalctl -u docker-helper.service -n 80 --no-pager 2>&1
+echo "--- guest AVC records (ausearch --start recent) ---"; if command -v ausearch >/dev/null 2>&1 && pgrep -x auditd >/dev/null 2>&1; then sudo -n ausearch -m AVC -m USER_AVC --start recent 2>&1 | tail -60; else echo "(auditd not running; kernel fallback below)"; fi
+echo "--- guest kernel audit tail (journalctl -k) ---"; sudo -n sh -c "journalctl -k --no-pager 2>/dev/null | grep -i 'avc' | tail -40" 2>&1 || true
 echo "--- systemd ---"; systemctl is-system-running 2>&1
 RMT
 )" || true

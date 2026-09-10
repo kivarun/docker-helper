@@ -283,6 +283,19 @@ fi
 record_stage "A2 socket micro-proof" "$MICRO_RESULT"
 
 # ---------------------------------------------------------------------------
+# 8b2. A3 bounded projection micro-proof (evidence collection; not a gate)
+# ---------------------------------------------------------------------------
+log "== 8b2. A3 projection micro-proof (dontaudit off, bounded) =="
+A3MICRO_RESULT=FAIL
+if run_guest_capture "A3 projection micro-proof inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin scripts/uat-projection-microproof.sh"; then
+  A3MICRO_RESULT=PASS
+else
+  log "A3 projection micro-proof did not complete (recorded; evidence may be partial)"
+fi
+record_stage "A3 projection micro-proof" "$A3MICRO_RESULT"
+
+# ---------------------------------------------------------------------------
 # 8c. Release-2 SELinux targeted regression groups 1-6 (collect-all)
 # ---------------------------------------------------------------------------
 log "== 8c. SELinux targeted regression groups 1-6 (collect-all runner) =="
