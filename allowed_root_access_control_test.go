@@ -877,6 +877,17 @@ func TestAllowedRootReplaceFieldDecoders(t *testing.T) {
 			t.Fatal("trailing JSON after the array must be rejected by the nested decode")
 		}
 	})
+
+	t.Run("rich slice rejects a malformed trailing token after the array", func(t *testing.T) {
+		var s allowedRootEntryInputSlice
+		// The EOF check (not a More() probe) refuses this shape: More()
+		// reports false for a trailing closing delimiter, so this exact
+		// input is the regression case.
+		err := s.UnmarshalJSON([]byte(`[{"path":"/x","access":"read_only"}] ]`))
+		if err == nil {
+			t.Fatal("a malformed trailing token after the array must be rejected by the EOF check")
+		}
+	})
 }
 
 func quoteJSON(t *testing.T, s string) string {
@@ -1700,4 +1711,73 @@ func TestLauncherAddRefusalAuditRetainsTargetProvenance(t *testing.T) {
 		t.Error("refusal audit must retain the resolved launcher_id")
 	}
 	assertNoSecrets(t, raw, m, testAdminToken, testAdminToken)
+}
+
+// TestLauncherScopeReplaceRefusalAuditRetainsTargetProvenance proves every
+// pre-mutation scope-replacement refusal keeps the target provenance of the
+// resolved Launcher (principal_name, launcher identity): the audit names the
+// Launcher the refused request addressed, for the request-side refusals as
+// well as for the post-mutation refusals.
+func TestLauncherScopeReplaceRefusalAuditRetainsTargetProvenance(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAdminToken(t)
+	username := "lscrefprov"
+	home, root, l := setupLauncherWithStoredRoot(t, app, username)
+	_ = home
+	launcherPath := "/principals/" + username + "/launchers/" + defaultLauncherName + "/allowed-roots"
+
+	cases := []struct {
+		name   string
+		body   string
+		result string
+	}{
+		{
+			name:   "invalid scope",
+			body:   `{"scope":"bogus"}`,
+			result: "invalid_scope",
+		},
+		{
+			// Both roots keys occur — the rich key as JSON null — so the
+			// dual-form refusal also proves a null occurrence counts as
+			// present.
+			name:   "dual form",
+			body:   `{"scope":"inherit","allowed_roots":[],"allowed_root_entries":null}`,
+			result: "invalid_allowed_roots",
+		},
+		{
+			name:   "invalid rich access",
+			body:   `{"scope":"restricted","allowed_root_entries":[{"path":` + quoteJSON(t, root) + `,"access":"typo"}]}`,
+			result: "invalid_access",
+		},
+	}
+
+	for _, tc := range cases {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, tc.body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, body=%s", tc.name, w.Code, w.Body.String())
+		}
+	}
+
+	lines := findAuditLinesByEvent(auditBuf, "launcher.scope_replace")
+	if len(lines) != len(cases) {
+		t.Fatalf("scope_replace audit lines = %d, want %d\n%s", len(lines), len(cases), auditBuf.String())
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := parseAuditMap(t, lines[i])
+			if m["result"] != tc.result {
+				t.Errorf("result = %v, want %s", m["result"], tc.result)
+			}
+			if m["principal_name"] != username {
+				t.Errorf("principal_name = %v, want the target owner %q", m["principal_name"], username)
+			}
+			if m["launcher_name"] != defaultLauncherName {
+				t.Errorf("launcher_name = %v, want %q", m["launcher_name"], defaultLauncherName)
+			}
+			if m["launcher_id"] != l.ID {
+				t.Errorf("launcher_id = %v, want %s", m["launcher_id"], l.ID)
+			}
+			assertNoSecrets(t, lines[i], m, testAdminToken, testAdminToken)
+		})
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -178,7 +179,12 @@ func (s *allowedRootEntryInputSlice) UnmarshalJSON(data []byte) error {
 	if err := dec.Decode(&value); err != nil {
 		return err
 	}
-	if dec.More() {
+	// After the first successful value, the next decode must return io.EOF:
+	// any other result is trailing or malformed JSON after the array. The
+	// More() probe alone is not sufficient, because it reports false for a
+	// trailing closing bracket such as `[ ... ] ]`.
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
 		return fmt.Errorf("trailing data after allowed_root_entries")
 	}
 	s.value = value
@@ -727,7 +733,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			LauncherID: l.ID,
 			Result:     "invalid_json",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
@@ -739,7 +745,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			LauncherID: l.ID,
 			Result:     "invalid_scope",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_scope", "invalid scope")
 		return
 	}
@@ -757,7 +763,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			LauncherID: l.ID,
 			Result:     "invalid_allowed_roots",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots",
 			"provide either allowed_roots or allowed_root_entries, not both")
 		return
@@ -772,7 +778,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 				LauncherID: l.ID,
 				Result:     "invalid_allowed_roots",
 				Duration:   time.Since(started).Round(time.Millisecond).String(),
-			}, auth, nil)
+			}, auth, l)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
 			return
 		}
@@ -782,7 +788,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 				LauncherID: l.ID,
 				Result:     "invalid_allowed_roots",
 				Duration:   time.Since(started).Round(time.Millisecond).String(),
-			}, auth, nil)
+			}, auth, l)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
 			return
 		}
@@ -798,7 +804,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 					LauncherID: l.ID,
 					Result:     "invalid_access",
 					Duration:   time.Since(started).Round(time.Millisecond).String(),
-				}, auth, nil)
+				}, auth, l)
 				writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
 				return
 			}
@@ -818,7 +824,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 					LauncherID: l.ID,
 					Result:     "invalid_allowed_roots",
 					Duration:   time.Since(started).Round(time.Millisecond).String(),
-				}, auth, nil)
+				}, auth, l)
 				writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
 				return
 			}
@@ -830,7 +836,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 				LauncherID: l.ID,
 				Result:     "invalid_allowed_roots",
 				Duration:   time.Since(started).Round(time.Millisecond).String(),
-			}, auth, nil)
+			}, auth, l)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
 			return
 		}
@@ -842,7 +848,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 				LauncherID: l.ID,
 				Result:     "invalid_allowed_roots",
 				Duration:   time.Since(started).Round(time.Millisecond).String(),
-			}, auth, nil)
+			}, auth, l)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
 			return
 		}
