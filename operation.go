@@ -87,6 +87,11 @@ type operation struct {
 	// pinnedMounts are the inode-pinned mount destinations for system-mode
 	// run operations. They are cleaned up after cmd.Wait completes.
 	pinnedMounts []*pinnedMount
+	// workloadMAC is the prepared workload MAC state of a system-mode run
+	// operation (2.2.6). It is bounded runtime cleanup state only: it
+	// carries the Docker materialization facts of the already-accepted
+	// exposure plan, never policy authority.
+	workloadMAC *preparedWorkloadMAC
 	// stagedCtx is the staged build context for build operations.
 	// It is cleaned up after the operation completes or fails.
 	stagedCtx *stagedBuildContext
@@ -94,15 +99,16 @@ type operation struct {
 	// nil when no lease was acquired (user mode or no MAC backend).
 	macLeaseRelease func()
 	// audit metadata for finish event, set by operation-specific factory.
-	auditCommandArgCount   *int
-	auditMounts            []auditMount
-	auditEnvKeys           []string
-	auditBuildArgKeys      []string
-	auditShmSize           string
-	auditTrustedCAInjected bool
-	auditHelperSocket      bool
-	auditPrincipalName     string
-	auditLauncherName      string
+	auditCommandArgCount    *int
+	auditMounts             []auditMount
+	auditEnvKeys            []string
+	auditBuildArgKeys       []string
+	auditShmSize            string
+	auditTrustedCAInjected  bool
+	auditHelperSocket       bool
+	auditWorkloadMACBackend string
+	auditPrincipalName      string
+	auditLauncherName       string
 }
 
 func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64, principalName, launcherID, launcherName string) *operation {
@@ -688,25 +694,26 @@ func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 		dur = *duration
 	}
 	writeRequestContextAudit(context.Background(), auditRecord{
-		Event:             op.Kind + ".finish",
-		SessionID:         op.SessionID,
-		OperationID:       op.ID,
-		Image:             op.Image,
-		Context:           op.Context,
-		Dockerfile:        op.Dockerfile,
-		CommandArgCount:   op.auditCommandArgCount,
-		Mounts:            op.auditMounts,
-		EnvKeys:           op.auditEnvKeys,
-		BuildArgKeys:      op.auditBuildArgKeys,
-		ShmSize:           op.auditShmSize,
-		TrustedCAInjected: op.auditTrustedCAInjected,
-		HelperSocket:      op.auditHelperSocket,
-		PrincipalName:     op.auditPrincipalName,
-		LauncherID:        op.LauncherID,
-		LauncherName:      op.auditLauncherName,
-		Result:            *op.ResultCode,
-		ExitCode:          exitCode,
-		Duration:          dur,
+		Event:              op.Kind + ".finish",
+		SessionID:          op.SessionID,
+		OperationID:        op.ID,
+		Image:              op.Image,
+		Context:            op.Context,
+		Dockerfile:         op.Dockerfile,
+		CommandArgCount:    op.auditCommandArgCount,
+		Mounts:             op.auditMounts,
+		EnvKeys:            op.auditEnvKeys,
+		BuildArgKeys:       op.auditBuildArgKeys,
+		ShmSize:            op.auditShmSize,
+		TrustedCAInjected:  op.auditTrustedCAInjected,
+		HelperSocket:       op.auditHelperSocket,
+		WorkloadMACBackend: op.auditWorkloadMACBackend,
+		PrincipalName:      op.auditPrincipalName,
+		LauncherID:         op.LauncherID,
+		LauncherName:       op.auditLauncherName,
+		Result:             *op.ResultCode,
+		ExitCode:           exitCode,
+		Duration:           dur,
 	})
 }
 

@@ -359,6 +359,22 @@ func runDaemon(stdout, stderr io.Writer) error {
 			}
 		}
 
+		// Workload MAC coordinator (2.2.6): operation/container-lifetime
+		// workload MAC state, separate from the session MAC coordinator.
+		// Startup reconciliation of helper-owned workload state happens
+		// before the daemon accepts new HTTP requests.
+		workloadMAC, err := newWorkloadMACCoordinatorForMode(cfg, detectLSM)
+		if err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+		if workloadMAC != nil {
+			if err := workloadMAC.ReconcileStartup(context.Background()); err != nil {
+				serveStartupError(err, "workload MAC state cannot be reconciled")
+				return err
+			}
+		}
+
 		// Clean up stale session runtime directories that no longer
 		// correspond to an active session.
 		if err := cleanupStaleSessionRuntimeDirs(db, cfg.RuntimeDir); err != nil {
@@ -374,6 +390,7 @@ func runDaemon(stdout, stderr io.Writer) error {
 			AdminTokenHash:      adminHash,
 			OperationSupervisor: newOperationSupervisor(),
 			MACCoordinator:      macCoordinator,
+			WorkloadMAC:         workloadMAC,
 			userModeDefault:     userModeDefault,
 		}
 

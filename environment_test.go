@@ -22,7 +22,9 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -82,7 +84,9 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -142,7 +146,9 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -310,7 +316,9 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -371,6 +379,7 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 		"--label", runtimeLabelSessionID + "=" + result.Session.ID,
 		"--label", runtimeLabelLauncherID + "=" + result.Session.LauncherID,
 		"--label", runtimeLabelPrincipalName + "=" + result.Session.PrincipalName,
+		"--label", runtimeLabelOperationID + "=" + opID,
 	}
 	for i, expected := range expectedLabels {
 		if capturedArgs[labelStart+i] != expected {

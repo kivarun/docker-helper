@@ -1214,6 +1214,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	// Create workspace and session.
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
@@ -1349,6 +1350,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
@@ -1740,6 +1742,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	// Force admit rejection.
 	app.OperationSupervisor.beginShutdown()
 

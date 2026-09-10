@@ -6232,21 +6232,31 @@ func TestSELinuxFCNoWorkspacePaths(t *testing.T) {
 // TestRunSELinuxContainerSecurityOpt verifies that the run command uses
 // the correct SELinux container security option.
 func TestRunSELinuxContainerSecurityOpt(t *testing.T) {
-	// Verify the run.go code uses docker_helper_container_t for SELinux
-	data, err := os.ReadFile("run.go")
+	// The SELinux security option is produced by the workload MAC backend
+	// (2.2.6); run.go consumes the prepared result.
+	selinuxSrc, err := os.ReadFile("workload_selinux.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
+	content := string(selinuxSrc)
 
-	// Must use docker_helper_container_t for SELinux system mode
+	// Must use docker_helper_container_t for SELinux system mode.
 	if !strings.Contains(content, "docker_helper_container_t") {
-		t.Error("run.go must use docker_helper_container_t for SELinux system mode")
+		t.Error("SELinux workload backend must use docker_helper_container_t")
 	}
 
-	// Must check for LSMSELinux before using custom type
-	if !strings.Contains(content, "LSMSELinux") {
-		t.Error("run.go must check for LSMSELinux before using custom container type")
+	// The security option must be the concrete container type selection.
+	if !strings.Contains(content, `"label=type:docker_helper_container_t"`) {
+		t.Error("SELinux workload backend must select docker_helper_container_t")
+	}
+
+	// The AppArmor backend must keep label=disable for its path.
+	appArmorSrc, err := os.ReadFile("workload_apparmor.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(appArmorSrc), `"label=disable"`) {
+		t.Error("AppArmor workload backend must keep label=disable")
 	}
 }
 

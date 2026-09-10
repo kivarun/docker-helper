@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -149,6 +150,7 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	result, err := createSystemSession(t, app)
 	if err != nil {
@@ -226,6 +228,7 @@ func TestRunSecondPinError(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createSystemSession(t, app)
@@ -300,6 +303,7 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	supervisor := newOperationSupervisor()
 	supervisor.beginShutdown()
 	app.OperationSupervisor = supervisor
@@ -364,6 +368,7 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.Config.RuntimeDir = ""
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -424,6 +429,7 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createSystemSession(t, app)
@@ -449,8 +455,11 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	}
 
 	var dockerArgs []string
+	var dockerMu sync.Mutex
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerMu.Lock()
 		dockerArgs = args
+		dockerMu.Unlock()
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -470,7 +479,9 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	}
 
 	// Build the args string to search in.
+	dockerMu.Lock()
 	argsStr := strings.Join(dockerArgs, " ")
+	dockerMu.Unlock()
 
 	// Stable paths should be present.
 	for _, sp := range stablePaths {
@@ -542,6 +553,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createSystemSession(t, app)
@@ -599,6 +611,7 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createSystemSession(t, app)
@@ -655,6 +668,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createSystemSession(t, app)
@@ -728,6 +742,7 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createSystemSession(t, app)
@@ -790,6 +805,7 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createSystemSession(t, app)
