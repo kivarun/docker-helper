@@ -133,6 +133,12 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# Only .replace is writable; .load and .remove are intentionally excluded.
 	/sys/kernel/security/apparmor/.replace w,
 
+	# Kernel profile inventory — the workload-MAC backend verifies that a
+	# generated workload profile is loaded (prepare) and that reconciliation
+	# removed helper-owned profiles (rollback/cleanup) by reading this
+	# inventory. Read-only; .replace remains the only profile-mutation path.
+	/sys/kernel/security/apparmor/profiles r,
+
 	# /proc/mounts — apparmor_parser reads the global mount list to discover
 	# the AppArmor securityfs mount point when --subdomainfs is not provided.
 	/proc/mounts r,

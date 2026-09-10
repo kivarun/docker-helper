@@ -2907,6 +2907,29 @@ func TestSystemProfileAppArmorReplaceWritable(t *testing.T) {
 	}
 }
 
+func TestSystemProfileAppArmorProfilesInventoryReadable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
+	}
+	content := string(data)
+
+	// The workload-MAC backend verifies that a generated workload profile is
+	// loaded (prepare) and that reconciliation removed helper-owned profiles
+	// (rollback/cleanup) by reading the kernel profile inventory. Without
+	// this read the confined daemon fails every run with "cannot verify
+	// AppArmor profile inventory".
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/profiles r,") {
+		t.Error("system profile must grant read to the AppArmor profile inventory for workload-MAC verification")
+	}
+
+	// The inventory grant is read-only: .replace remains the only
+	// profile-mutation path.
+	if strings.Contains(content, "/sys/kernel/security/apparmor/profiles w,") {
+		t.Error("system profile must not grant write to the AppArmor profile inventory")
+	}
+}
+
 func TestSystemProfileAppArmorInterfaceDirReadable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {

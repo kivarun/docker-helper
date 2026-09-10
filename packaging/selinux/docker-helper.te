@@ -208,8 +208,12 @@ allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink 
 allow docker_helper_t docker_helper_runtime_t:lnk_file { create read unlink };
 
 # State (from live AVC evidence)
-allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name };
-allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink };
+# dir create/rmdir: the 2.2 workload-MAC lifecycle creates the durable
+# workload-mac state root and per-operation directories at startup and
+# removes them through reconciliation; file rename: the crash-safe
+# ownership-record commit (write temp file + rename).
+allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name create rmdir };
+allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink rename };
 
 # Trusted CA material is dynamically created by the daemon under
 # /run/docker-helper/trusted-ca. Type transitions label newly created snapshot

@@ -50,7 +50,10 @@ platform_preflight() {
 # profile on openSUSE (apparmor-parser/apparmor-utils alone are insufficient).
 # policycoreutils / policycoreutils-python-utils are installed because the RPM
 # declares them as runtime Requires for the SELinux backend (see
-# packaging/nfpm.yaml); neither is build tooling. Required provisioning steps
+# packaging/nfpm.yaml); neither is build tooling. bindfs is installed for the
+# same reason: the candidate RPM Requires it (the SELinux workload read-only
+# projection backend) and the guest install path uses rpm -i without
+# dependency resolution. Required provisioning steps
 # (zypper refresh/install) explicitly propagate failure; the Docker
 # enable/start is deliberately best-effort because the common UAT preflight
 # will later prove whether Docker actually works.
@@ -67,6 +70,7 @@ platform_install_deps() {
     apparmor-parser apparmor-utils openssl \
     apparmor-abstractions \
     policycoreutils policycoreutils-python-utils \
+    bindfs \
     tar gzip file curl docker \
     || return $?
 

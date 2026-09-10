@@ -1914,6 +1914,27 @@ func TestSELinuxRootSlashEquivalenceSourceOverlap(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyWorkloadMACStateAccess verifies the SELinux policy grants
+// the confined daemon the durable workload-MAC state lifecycle on
+// /var/lib/docker-helper (docker_helper_state_t): directory create/rmdir for
+// the workload-mac state root and per-operation directories, and file rename
+// for the crash-safe ownership-record commit. Without the dir create grant
+// the daemon fails startup on the enforcing guest with
+// "mkdir /var/lib/docker-helper/workload-mac: permission denied".
+func TestSELinuxPolicyWorkloadMACStateAccess(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name create rmdir };") {
+		t.Error("SELinux policy must grant dir create/rmdir on docker_helper_state_t for the durable workload-MAC state lifecycle")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink rename };") {
+		t.Error("SELinux policy must grant file rename on docker_helper_state_t for the crash-safe ownership-record commit")
+	}
+}
+
 func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
 	if err != nil {
