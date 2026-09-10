@@ -1743,11 +1743,8 @@ rewrites the request to read-only silently. The Docker bind is
 materialized exactly in the caller-requested mode (readonly flag follows
 the request, not the snapshot access of the source).
 
-Requiring a relative source ensures the mount is always scoped to the
-session workspace; an absolute source could bypass workspace isolation.
-
-Requiring a relative source ensures the mount is always scoped to the
-session workspace; an absolute source could bypass workspace isolation.
+materialized exactly in the caller-requested mode (readonly flag follows
+the request, not the snapshot access of the source).
 
 #### Data-plane filesystem authority
 

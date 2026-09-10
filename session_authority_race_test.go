@@ -215,10 +215,6 @@ func TestRunOldSessionKeepsIssuedSnapshotUnderParentPolicyChange(t *testing.T) {
 	if _, _, err := addPrincipalAllowedRoot(app.DB, "policyshifter", inputs, AllowedRootAccessReadOnly, allowedRootPaths(app.getConfig().AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot(inputs): %v", err)
 	}
-	// Policy A: nested read_only transition on the workspace inputs.
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "policyshifter", inputs, AllowedRootAccessReadOnly, allowedRootPaths(app.getConfig().AllowedRoots)); err != nil {
-		t.Fatalf("addPrincipalAllowedRoot(inputs): %v", err)
-	}
 	oldSession := createSessionThroughMux(app, credentialToken, workspace)
 	if oldSession.Code != http.StatusCreated {
 		t.Fatalf("create old session: %d %s", oldSession.Code, oldSession.Body.String())

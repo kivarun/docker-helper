@@ -402,6 +402,16 @@ func TestRunRefusalAuditCarriesOffendingExposure(t *testing.T) {
 		if m.WritableAllowed == nil || *m.WritableAllowed {
 			t.Errorf("writable_allowed must be explicitly false, got %v", m.WritableAllowed)
 		}
+		// The resolved ownership provenance travels with the refusal.
+		if rec.PrincipalName != created.Session.PrincipalName {
+			t.Errorf("principal_name = %q, want %q", rec.PrincipalName, created.Session.PrincipalName)
+		}
+		if rec.LauncherID != created.Session.LauncherID {
+			t.Errorf("launcher_id = %q, want %q", rec.LauncherID, created.Session.LauncherID)
+		}
+		if rec.LauncherName != created.Session.LauncherName {
+			t.Errorf("launcher_name = %q, want %q", rec.LauncherName, created.Session.LauncherName)
+		}
 		return
 	}
 	t.Fatal("run.rejected/read_only_root audit record not found")
@@ -564,7 +574,9 @@ func TestRunCorruptSnapshotAtRequestTime(t *testing.T) {
 	if n := len(app.OperationSupervisor.ops); n != 0 {
 		t.Errorf("no operation must be registered on snapshot integrity failure, got %d", n)
 	}
-	_ = dockerCalled
+	if dockerCalled {
+		t.Error("docker must not be called on snapshot integrity failure")
+	}
 }
 
 // TestRunReadOnlyRootRefusalReleasesLease proves the MAC lease acquired

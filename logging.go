@@ -260,6 +260,8 @@ func writeRunReadOnlyRootRejected(
 		Result:        "read_only_root",
 		SessionID:     session.ID,
 		PrincipalName: session.PrincipalName,
+		LauncherID:    session.LauncherID,
+		LauncherName:  session.LauncherName,
 		Mounts: []auditMount{{
 			Source:          callerMount.Source,
 			Target:          callerMount.Target,
