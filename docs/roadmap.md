@@ -525,12 +525,16 @@ AppArmor uses a generated per-workload profile, while SELinux uses a helper-owne
 `bindfs` projection with a read-only workload mount context. Passing evidence
 covers mixed RW/RO mounts and concurrent SELinux Sessions with different
 snapshots over the same host tree without a global per-mode relabel. Production
-implementation and full system-mode UAT remain pending.
+implementation of Phases 2.2.1-2.2.6 is complete and architecturally accepted on
+`release/2.2` (see [`docs/release-2.2-implementation-plan.md`](release-2.2-implementation-plan.md)
+for the closure evidence); what remains pending is the release closure itself —
+the Phase 2.2.7 documentation/release integration, final UAT, and artifacts.
 
 Release 2.2 deliberately does not include Managed Containers, Engine migration,
 networking, resources, durable Operations, or any other Release 3 runtime work.
 It is developed on `release/2.2` from `v2.1.1`; after release, the completed
-contract is merged back into `main` for Release 3 to inherit.
+capability is deliberately forward-ported and reconciled into `main`/Release 3
+against the Release 3 architecture. A whole-branch merge is not the contract.
 
 Release 2.2 design and execution owners:
 

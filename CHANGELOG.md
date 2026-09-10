@@ -2,6 +2,22 @@
 
 This file summarizes user-visible release changes. Commit-level history remains available through the GitHub compare links for each release.
 
+## [2.2.0] (unreleased)
+
+Release 2.2 adds one complete filesystem-policy capability: every allowed root carries an explicit access mode, and system mode independently enforces read-only exposures with the mandatory MAC backend. This entry documents the implemented capability of the release line; the release is not yet tagged or published.
+
+### Highlights
+
+- Access-bearing allowed roots: every allowed root now carries an explicit `read_write` or `read_only` access mode beside its canonical path. `config allowed-root add`, `principal allowed-root add`, and `launcher allowed-root add` accept `--access` (omission is the canonical `read_write` grant), and new `set-access` commands change the mode of exactly one stored root in all three families (global config, Principal, Launcher) as one server-side conditional mutation. Human `allowed-root list` output is a PATH/ACCESS table.
+- Hierarchy with read-only dominance: within one scope the most-specific canonical path wins; across scopes (global → Principal → Launcher → Session) the access modes meet with `read_only` dominance, so a lower authority can narrow but never widen its parent. `read_write` and `read_only` are the only access values.
+- Immutable Session filesystem snapshots: each Session captures the effective filesystem policy as a persisted immutable snapshot at creation time (`session_filesystem_snapshot_entries`); it is the single data-plane filesystem authority of the Session and is visible through `session show`. Later allowed-root changes affect only new Sessions. Existing pre-2.2 Sessions migrate to a compatibility read-write snapshot of their workspace; missing/corrupt snapshot state fails startup closed.
+- Writable-parent protection: a writable bind of a parent is refused when the exposed subtree contains any effective read-only region. The daemon never silently downgrades a writable request to read-only; the refusal is the stable `read_only_root` policy error, distinct from the structural `invalid_mount`, and is answered before any pin, operation, or container state exists.
+- AppArmor workload enforcement: each system-mode run under the AppArmor backend executes under a helper-owned generated profile (`docker-helper-workload-<operation-id>`) derived from the resolved exposure plan, which independently denies writes to read-only container targets; the profile is removed with the operation or reconciled at daemon startup.
+- SELinux workload enforcement: under enforcing SELinux, each read-only exposure is materialized as a helper-owned `bindfs` passthrough projection mounted with the static `docker_helper_ro_projection_t` context, which independently denies workload writes while the container keeps its `docker_helper_container_t` MCS confinement; the backing tree is never relabeled and read-write exposures remain direct binds.
+- Legacy 2.1 compatibility: path-only config entries, database rows, and API inputs are still accepted everywhere and mean `read_write`; `allowed_roots` remains the 2.x path-only projection beside the authoritative rich `allowed_root_entries` projection on show/list/introspection surfaces, and the Launcher complete-scope PUT keeps the documented path-only form alongside the canonical rich form.
+
+Full changes since 2.1.1: https://github.com/kivarun/docker-helper/compare/v2.1.1...release/2.2 (release line; no tag has been created yet)
+
 ## [2.1.1]
 
 A compatible patch release over 2.1.0 adding two opt-in workload capabilities and targeted CLI usability fixes. Without the new flags, workload behavior is unchanged; the CLI usability fixes apply to every installation.

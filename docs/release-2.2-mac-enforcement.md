@@ -11,10 +11,16 @@ reproducible evidence are recorded below. This closes mechanism feasibility
 only; the production implementation and its full system-mode UAT remain release
 gates.
 
-**Production status (Phase 2.2.6, 2026-09-10).** The accepted mechanisms are
-implemented on `feature/2.2.6-mac-workload-projection` (base
-`release/2.2@d4257406e8802964e6a9056d46d6826bf9490618`, the merge of accepted
-Phase 2.2.5 / PR #14), awaiting architectural acceptance:
+**Production status (Phase 2.2.6, CLOSED 2026-09-10).** The accepted mechanisms
+are implemented and architecturally accepted on `release/2.2` (merge of
+`feature/2.2.6-mac-workload-projection`, PR #15, merge commit
+`2e25cf60d76e079177287dfd0da15229eb0065cf`; implementation head
+`fe9638d460111fde94877979bf7a54175696d4bd`). Gate evidence on that head, all
+success: normal CI run `34509320349`, AppArmor live workload proof run
+`34509315214`, and SELinux enforcing live workload proof run `34509315152`
+(including the attributable regular-file read-only denial,
+`tclass=file` on `docker_helper_ro_projection_t`). The full system-mode UAT
+matrices remain Phase 2.2.7 release gates. The accepted production shape:
 
 - `workloadMACCoordinator` (workload_mac.go) is the single operation-lifetime
   owner; it never reads allowed-root tables, Session snapshots,
