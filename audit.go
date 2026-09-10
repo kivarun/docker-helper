@@ -17,9 +17,13 @@ type auditRecord struct {
 	ShmSize           string       `json:"shm_size,omitempty"`
 	TrustedCAInjected bool         `json:"trusted_ca_injected,omitempty"`
 	HelperSocket      bool         `json:"helper_socket,omitempty"`
-	Registry          string       `json:"registry,omitempty"`
-	Context           string       `json:"context,omitempty"`
-	Dockerfile        string       `json:"dockerfile,omitempty"`
+	// WorkloadMACBackend is the one bounded workload MAC fact of a run: the
+	// backend that materialized the accepted exposure plan. Generated
+	// internal profile/projection paths are deliberately not audited.
+	WorkloadMACBackend string `json:"workload_mac_backend,omitempty"`
+	Registry           string `json:"registry,omitempty"`
+	Context            string `json:"context,omitempty"`
+	Dockerfile         string `json:"dockerfile,omitempty"`
 	// BuildContextResolved/BuildDockerfileResolved carry the canonical policy
 	// identity and effective snapshot access of the build host inputs.
 	// Build consumption is read-only by definition: the helper reads the

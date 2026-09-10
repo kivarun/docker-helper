@@ -458,8 +458,10 @@ design. It has no mutation endpoint.
 
 ## Phase 2.2.5 — data-plane enforcement
 
-**Status: implemented, awaiting architectural acceptance.** Implemented on
-`feature/2.2.5-data-plane-enforcement` (base `release/2.2@dedb498`). Evidence
+**Status: CLOSED.** Implemented on `feature/2.2.5-data-plane-enforcement`
+(base `release/2.2@dedb498`) and merged to `release/2.2` as
+`d4257406e8802964e6a9056d46d6826bf9490618` (PR #14). Summary of the accepted
+implementation:
 summary: the coherent filesystem authority read
 (`requireSessionFilesystemCapability`) captures the authenticated Session and
 its persisted snapshot in one short read transaction through the shared
@@ -530,6 +532,11 @@ operator explanation while continuing to exclude bearer values, environment
 values, registry secrets, and workload output.
 
 ## Phase 2.2.6 — MAC workload projection
+
+**Status: implemented, awaiting architectural acceptance.** Implemented on
+`feature/2.2.6-mac-workload-projection` (base
+`release/2.2@d4257406e8802964e6a9056d46d6826bf9490618`, the merge of accepted
+Phase 2.2.5 / PR #14).
 
 Dependencies: M0 CLOSED and 2.2.5 common exposure plan implemented.
 

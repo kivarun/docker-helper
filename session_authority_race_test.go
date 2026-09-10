@@ -61,12 +61,14 @@ func legacyRunEnforcementApp(t *testing.T, dir, dbPath string, db *sql.DB, allow
 		OperationLogMaxBytes:  4 * 1024 * 1024,
 		Mode:                  ModeSystem,
 	}
-	return &App{
+	app := &App{
 		Config:              cfg,
 		DB:                  db,
 		MACCoordinator:      mac,
 		OperationSupervisor: newOperationSupervisor(),
 	}
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
+	return app
 }
 
 // TestRaceRunAuthorityReadCoherentUnderSessionDelete proves the coherent
@@ -317,7 +319,9 @@ func TestRunLegacyMigratedSessionKeepsWritableBehavior(t *testing.T) {
 	app := legacyRunEnforcementApp(t, dir, dbPath, db, root, mac)
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {

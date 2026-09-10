@@ -50,6 +50,16 @@ type App struct {
 	// MACCoordinator is the session MAC coordinator owner.
 	// nil in user mode or when no MAC driver is active.
 	MACCoordinator *sessionMACCoordinator
+	// WorkloadMAC is the workload MAC coordinator owner (2.2.6). It owns
+	// operation/container-lifetime workload MAC state, separate from the
+	// session MAC coordinator's Session workspace coverage. nil in user
+	// mode or when no MAC backend is active.
+	WorkloadMAC *workloadMACCoordinator
+	// InspectOperationContainers, when set, overrides the Docker-based
+	// correlated-run container inspection used by the container-absence
+	// proof. It is a narrow test seam; production shells out to the Docker
+	// CLI with the reserved label set.
+	InspectOperationContainers func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error)
 	// InspectHelperContainers, when set, overrides the Docker-based helper
 	// container inspection used by checked Launcher/Principal deletion. It is a
 	// narrow test seam; production default shells out to the Docker CLI.

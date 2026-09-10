@@ -24,7 +24,9 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -64,6 +66,7 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 func TestMountRelativeSubdir(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
@@ -109,6 +112,7 @@ func TestMountRelativeSubdir(t *testing.T) {
 func TestMountRegularFile(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
@@ -161,7 +165,9 @@ func TestMountReadOnly(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -208,7 +214,9 @@ func TestMountSameSourceDifferentTargets(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -459,7 +467,9 @@ func TestMountTargetRoot(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -507,7 +517,9 @@ func TestDockerSecurityOpt(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -540,6 +552,7 @@ func TestDockerSecurityOpt(t *testing.T) {
 func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMSELinux)
 
 	result, err := createSystemSession(t, app)
 	if err != nil {
@@ -548,7 +561,9 @@ func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -591,6 +606,7 @@ func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	result, err := createSystemSession(t, app)
 	if err != nil {
@@ -599,7 +615,9 @@ func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -758,7 +776,9 @@ func TestDockerUser(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -988,7 +1008,9 @@ func TestMountNormalizedTargetInDockerArgs(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 

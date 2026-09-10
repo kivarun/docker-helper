@@ -95,6 +95,8 @@ module docker_helper 1.0;
 		type semanage_exec_t;
 		type bin_t;
 		type var_lock_t;
+		type fusefs_t;
+		type fuse_device_t;
 
 		role system_r;
 
@@ -105,7 +107,7 @@ module docker_helper 1.0;
 		class chr_file { append create getattr ioctl read watch open write };
 		class blk_file { append create getattr ioctl read };
 		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock relabelfrom relabelto };
-		class filesystem { mount remount unmount getattr };
+		class filesystem { mount remount unmount getattr associate mounton };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
@@ -571,3 +573,89 @@ allow docker_helper_container_t docker_helper_t:unix_stream_socket { connectto }
 allow init_t docker_helper_trusted_ca_t:dir { write remove_name rmdir };
 allow init_t docker_helper_trusted_ca_t:file { unlink };
 allow init_t docker_helper_trusted_ca_t:lnk_file { unlink };
+
+# --- Workload read-only projection (Release 2.2 Phase 2.2.6, M0-S accepted) ---
+#
+# Mechanism: the helper builds one bindfs FUSE passthrough projection per
+# accepted read-only exposure from the pinned kernel materialization source.
+# bindfs projects the pinned backing tree with a fixed mount context
+# (system_u:object_r:docker_helper_ro_projection_t:s0); the backing source
+# label, device, and inode never change. The container receives the
+# projection (or the pinned source directly for read-write mounts) through a
+# Docker bind that stays readonly in production.
+#
+# The projection type is a dedicated file type. It deliberately does not
+# carry container_file_type: container-selinux's generic writable-volume
+# rules must not apply to it. It deliberately does not carry any attribute
+# that would grant mutation semantics.
+
+type docker_helper_ro_projection_t, file_type;
+
+# Mount-context labels on FUSE must be associable with the FUSE filesystem.
+allow docker_helper_ro_projection_t fusefs_t:filesystem associate;
+
+# Workload read/execute compatibility with an explicit mutation exclusion.
+# Deliberately omitted for the projection type: write, append, create,
+# setattr, add_name, remove_name, unlink, rename, link, and reparent.
+allow docker_helper_container_t docker_helper_ro_projection_t:file {
+	execute execute_no_trans entrypoint getattr ioctl lock map open read
+};
+allow docker_helper_container_t docker_helper_ro_projection_t:dir {
+	getattr ioctl lock open read search
+};
+allow docker_helper_container_t docker_helper_ro_projection_t:lnk_file { getattr read };
+allow docker_helper_container_t docker_helper_ro_projection_t:sock_file {
+	getattr ioctl lock open read
+};
+allow docker_helper_container_t docker_helper_ro_projection_t:fifo_file {
+	getattr ioctl lock open read
+};
+allow docker_helper_container_t fusefs_t:filesystem getattr;
+
+# Docker/runc may inspect the already-mounted projection while constructing
+# the bind in the container mount namespace. Setup-only read grants; workload
+# mutation remains governed by docker_helper_container_t above.
+allow container_runtime_t docker_helper_ro_projection_t:dir { getattr open read search };
+allow container_runtime_t docker_helper_ro_projection_t:file { getattr open read };
+allow container_runtime_t docker_helper_ro_projection_t:lnk_file { getattr read };
+allow container_runtime_t fusefs_t:filesystem getattr;
+
+# --- Helper-side projection mechanics (bindfs/FUSE) ---
+
+# bindfs executable: the helper execs the bindfs worker in its own domain
+# (no process transition). The dedicated exec type is applied by the shipped
+# file context rule for /usr/bin/bindfs.
+type docker_helper_bindfs_exec_t, file_type, exec_type;
+
+allow docker_helper_t docker_helper_bindfs_exec_t:file {
+	getattr open read execute execute_no_trans map
+};
+
+# /dev/fuse (fuse_device_t, from the base policy) is required by the bindfs
+# FUSE worker to open the FUSE device.
+allow docker_helper_t fuse_device_t:chr_file { getattr open read write ioctl };
+
+# The bindfs worker (docker_helper_t process) performs the FUSE mount of the
+# projection with the fixed projection mount context, and the helper unmounts
+# the projection (fusermount, then kernel umount fallback) during run cleanup
+# and startup reconciliation.
+allow docker_helper_t fusefs_t:filesystem { mount unmount getattr };
+
+# The projection mountpoints live under the helper-owned runtime tree.
+allow docker_helper_t docker_helper_runtime_t:dir { mounton };
+
+# The lower-item bind for regular-file projections mounts onto a
+# helper-owned lower item under the runtime tree (docker_helper_runtime_t,
+# covered by the runtime dir/file mounton grants above). No workspace-typed
+# or home-typed object receives a mounton grant: regular-file bind targets
+# are always helper-owned runtime items, never workspace files. If an
+# enforcing live run ever shows a real mounton AVC for a workspace/home
+# source object, record the exact source context, target context, tclass,
+# denied permission, and syscall/mount direction first, then add only the
+# one minimal grant that evidence requires.
+
+# The helper proves the projection after preparation (security.selinux
+# getxattr) by getattr/open on the mounted projection files.
+allow docker_helper_t docker_helper_ro_projection_t:dir { getattr open read search };
+allow docker_helper_t docker_helper_ro_projection_t:file { getattr open read };
+allow docker_helper_t docker_helper_ro_projection_t:lnk_file { getattr read };

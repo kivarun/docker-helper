@@ -22,6 +22,10 @@ overrides:
       - apparmor-abstractions
       - policycoreutils
       - policycoreutils-python-utils
+      # bindfs is the required passthrough projection mechanism for the
+      # SELinux workload read-only exposure path (Release 2.2 Phase 2.2.6).
+      # The SELinux backend fails closed when the binary is missing.
+      - bindfs
     scripts:
       postinstall: packaging/scripts/rpm/postinstall.sh
       preremove: packaging/scripts/rpm/preremove.sh

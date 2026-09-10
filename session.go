@@ -20,6 +20,13 @@ var ErrDatabase = errors.New("database error")
 var ErrSystem = errors.New("system error")
 var ErrMAC = errors.New("MAC preparation failed")
 
+// The canonical issued Session ID shape: the production prefix plus exactly
+// sessionIDHexLength lowercase hex characters (16 random bytes).
+const (
+	sessionIDPrefix    = "dhs_"
+	sessionIDHexLength = 32
+)
+
 func classifyCreateSessionError(err error) string {
 	switch {
 	case errors.Is(err, ErrInvalidWorkspace):
@@ -194,12 +201,15 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 
 	// Generate Session identity and bearer after policy resolution and before
 	// MAC/persistence work; lifecycleMu is already held by
-	// createSessionAuthorized.
-	idBytes := make([]byte, 16)
+	// createSessionAuthorized. The canonical issued Session ID shape is the
+	// production prefix plus exactly sessionIDHexLength lowercase hex
+	// characters (16 random bytes); durable ownership proofs validate
+	// against this exact shape.
+	idBytes := make([]byte, sessionIDHexLength/2)
 	if _, err := rand.Read(idBytes); err != nil {
 		return nil, fmt.Errorf("cannot generate session ID: %w: %w", err, ErrSystem)
 	}
-	sessionID := "dhs_" + hex.EncodeToString(idBytes)
+	sessionID := sessionIDPrefix + hex.EncodeToString(idBytes)
 
 	token, err := generateSessionToken()
 	if err != nil {

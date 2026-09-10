@@ -2925,12 +2925,13 @@ exit 0
 			restoreconCalls = append(restoreconCalls, c)
 		}
 	}
-	if len(restoreconCalls) != 4 {
-		t.Errorf("expected exactly 4 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
+	if len(restoreconCalls) != 5 {
+		t.Errorf("expected exactly 5 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
 	}
 	joined := strings.Join(restoreconCalls, "\n")
 	for _, want := range []string{
 		"restorecon /usr/bin/docker-helper",
+		"restorecon /usr/bin/bindfs",
 		"restorecon -R /etc/docker-helper",
 		"restorecon -R /var/lib/docker-helper",
 		"restorecon /run/docker-helper",
@@ -2946,6 +2947,7 @@ exit 0
 	// daemon/socket path may be relabeled by the installer.
 	allowedTargets := map[string]bool{
 		"/usr/bin/docker-helper": true,
+		"/usr/bin/bindfs":        true,
 		"/etc/docker-helper":     true,
 		"/var/lib/docker-helper": true,
 		"/run/docker-helper":     true,
@@ -6186,6 +6188,38 @@ func TestSELinuxPolicyNoGlobalContainerAccess(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyProjectionMountonScoping verifies that regular-file bind
+// targets get no workspace- or home-typed mounton grants: they always live
+// under the helper RuntimeDir (docker_helper_runtime_t), whose dir/file
+// mounton grants are the only projection mount rules.
+func TestSELinuxPolicyProjectionMountonScoping(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	runtimeFileMounton := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "allow docker_helper_t user_home_type:file") && strings.Contains(trimmed, "mounton") {
+			t.Errorf("user_home_type:file must not carry a mounton grant: %s", trimmed)
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_t docker_helper_workspace_t:file") && strings.Contains(trimmed, "mounton") {
+			t.Errorf("docker_helper_workspace_t:file must not carry a mounton grant: %s", trimmed)
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_t docker_helper_runtime_t:file") && strings.Contains(trimmed, "mounton") {
+			runtimeFileMounton = true
+		}
+	}
+	if !runtimeFileMounton {
+		t.Error("docker_helper_runtime_t:file mounton must remain for the regular-file lower bind")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_runtime_t:dir { mounton };") {
+		t.Error("docker_helper_runtime_t:dir mounton must remain for the projection mountpoints")
+	}
+}
+
 // TestSELinuxPolicyCustomContainerType verifies that the SELinux policy
 // defines a custom container type for docker-helper containers.
 func TestSELinuxPolicyCustomContainerType(t *testing.T) {
@@ -6232,21 +6266,31 @@ func TestSELinuxFCNoWorkspacePaths(t *testing.T) {
 // TestRunSELinuxContainerSecurityOpt verifies that the run command uses
 // the correct SELinux container security option.
 func TestRunSELinuxContainerSecurityOpt(t *testing.T) {
-	// Verify the run.go code uses docker_helper_container_t for SELinux
-	data, err := os.ReadFile("run.go")
+	// The SELinux security option is produced by the workload MAC backend
+	// (2.2.6); run.go consumes the prepared result.
+	selinuxSrc, err := os.ReadFile("workload_selinux.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
+	content := string(selinuxSrc)
 
-	// Must use docker_helper_container_t for SELinux system mode
+	// Must use docker_helper_container_t for SELinux system mode.
 	if !strings.Contains(content, "docker_helper_container_t") {
-		t.Error("run.go must use docker_helper_container_t for SELinux system mode")
+		t.Error("SELinux workload backend must use docker_helper_container_t")
 	}
 
-	// Must check for LSMSELinux before using custom type
-	if !strings.Contains(content, "LSMSELinux") {
-		t.Error("run.go must check for LSMSELinux before using custom container type")
+	// The security option must be the concrete container type selection.
+	if !strings.Contains(content, `"label=type:docker_helper_container_t"`) {
+		t.Error("SELinux workload backend must select docker_helper_container_t")
+	}
+
+	// The AppArmor backend must keep label=disable for its path.
+	appArmorSrc, err := os.ReadFile("workload_apparmor.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(appArmorSrc), `"label=disable"`) {
+		t.Error("AppArmor workload backend must keep label=disable")
 	}
 }
 
