@@ -20,14 +20,17 @@ package main
 // reconciliation able to prove ownership of whatever kernel state remains.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -117,14 +120,18 @@ func (p *preparedWorkloadMAC) Cleanup() error {
 // workloadMACRecord is the durable ownership record for one operation's
 // workload MAC state. It is written atomically before the first kernel-side
 // MAC resource of the operation is created.
+//
+// The record deliberately carries no backend identity beyond the exact
+// backend enum: every backend-specific kernel identity (for example the
+// AppArmor profile name) is derived deterministically from the schema and
+// the Operation ID at validation/cleanup time. Storing a second owner of a
+// derivable name would create a crash window in which the durable record
+// and the derived identity could disagree.
 type workloadMACRecord struct {
 	Schema      int    `json:"schema"`
 	OperationID string `json:"operation_id"`
 	SessionID   string `json:"session_id"`
 	Backend     string `json:"backend"`
-	// ProfileName is set only for the AppArmor backend and must equal the
-	// deterministic profile name derived from the Operation ID.
-	ProfileName string `json:"profile,omitempty"`
 	CreatedAt   string `json:"created_at"`
 	// StateDir is not serialized: the coordinator resolves the directory
 	// that owns the record and fills it before backend validation/cleanup.
@@ -144,6 +151,22 @@ func (r *workloadMACRecord) RuntimeDirPath() string {
 	return r.RuntimeDir
 }
 
+// workloadMACRetainedError marks a failed workload MAC preparation whose
+// partial MAC state could not be rolled back and remains on the host. The
+// caller MUST retain every dependent resource — source pins and the
+// workspace-use lease — so startup reconciliation can still release the
+// full ownership state; removing pins or releasing the lease would strand
+// live MAC kernel state on deleted sources.
+type workloadMACRetainedError struct {
+	err error
+}
+
+func (e *workloadMACRetainedError) Error() string {
+	return "workload MAC state retained after failed preparation: " + e.err.Error()
+}
+
+func (e *workloadMACRetainedError) Unwrap() error { return e.err }
+
 // workloadMACBackend is the backend-specific adapter for workload MAC
 // preparation and owned-state cleanup. The backend MUST NOT query Sessions,
 // allowed roots, or snapshots, and MUST NOT re-decide any access mode.
@@ -152,6 +175,9 @@ type workloadMACBackend interface {
 	backend() LSMBackend
 	// prepare materializes the accepted exposure plan. The coordinator has
 	// already created the durable ownership record and both state roots.
+	// On failure the backend must have attempted to roll back every
+	// kernel-side resource it created; whether that rollback succeeded is
+	// observable only through the coordinator's retained-outcome contract.
 	prepare(p workloadPreparation) (*preparedWorkloadMAC, error)
 	// validateOwnedState proves the durable state is exact and current-owner.
 	// Reconciliation retains anything that fails validation.
@@ -181,9 +207,10 @@ type workloadMACCoordinator struct {
 	// removeContainer force-removes one proven-owned correlated container.
 	removeContainer func(ctx context.Context, containerID string) error
 	// cleanupStalePins removes leftover inode pins of one proven-gone
-	// operation. Production uses the deterministic pin layout; tests may
-	// replace it.
-	cleanupStalePins func(operationID string)
+	// operation and returns the failure that forces the caller to retain
+	// the durable ownership record. Production uses the deterministic pin
+	// layout; tests may replace it.
+	cleanupStalePins func(operationID string) error
 }
 
 // newWorkloadMACCoordinatorForMode builds the workload MAC coordinator for
@@ -240,6 +267,15 @@ func (c *workloadMACCoordinator) Backend() LSMBackend {
 // backend. The coordinator creates the durable ownership state and the
 // transient runtime directory before the backend creates its first
 // kernel-side resource, so every crash window leaves provable ownership.
+//
+// Failure contract (single terminal classification for the caller):
+//
+//   - the returned error is a *workloadMACRetainedError exactly when
+//     partial MAC state could not be rolled back and remains on the host;
+//     the caller must retain the dependent source pins and the
+//     workspace-use lease and let startup reconciliation finish;
+//   - any other error means the MAC state was fully rolled back and the
+//     caller must release the dependent resources as usual.
 func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorkloadMAC, error) {
 	if err := ensureWorkloadStateRoot(c.stateRoot); err != nil {
 		return nil, err
@@ -272,6 +308,10 @@ func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorklo
 		Backend:     string(c.backend.backend()),
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
+	// The rollback path below cleans through the same resolved paths the
+	// backend prepared from; they are never serialized.
+	rec.StateDir = stateDir
+	rec.RuntimeDir = runtimeDir
 	if err := writeWorkloadMACRecord(stateDir, rec); err != nil {
 		_ = removeWorkloadMACStateDir(c.stateRoot, p.OperationID)
 		_ = removeWorkloadMACStateDir(c.runtimeRoot, p.OperationID)
@@ -280,11 +320,16 @@ func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorklo
 
 	prepared, err := c.backend.prepare(p)
 	if err != nil {
+		// Fail closed on the dependent resources: when the partial MAC
+		// state cannot be rolled back, the pins and lease that the
+		// projections depend on must remain until reconciliation.
 		if cleanupErr := c.backend.cleanupOwnedState(rec); cleanupErr != nil {
 			logRetainedWorkloadState(context.Background(), p.OperationID, "prepare_rollback", cleanupErr)
-		} else {
-			_ = removeWorkloadMACStateDir(c.stateRoot, p.OperationID)
-			_ = removeWorkloadMACStateDir(c.runtimeRoot, p.OperationID)
+			return nil, &workloadMACRetainedError{err: err}
+		}
+		if stateErr := c.removeWorkloadMACState(p.OperationID); stateErr != nil {
+			logRetainedWorkloadState(context.Background(), p.OperationID, "prepare_rollback_state_removal", stateErr)
+			return nil, &workloadMACRetainedError{err: err}
 		}
 		return nil, err
 	}
@@ -406,36 +451,111 @@ func (c *workloadMACCoordinator) reconcileOne(ctx context.Context, rec workloadM
 	}
 
 	// Container proven absent: release backend state, then dependent pin
-	// residue, then the durable record.
+	// residue, then the durable record. The durable record is removed only
+	// after every earlier stage is positively proven gone; a failed stage
+	// leaves the record as the reconciliation retry marker.
 	if err := c.backend.cleanupOwnedState(rec); err != nil {
 		return fmt.Errorf("backend workload state cleanup failed: %w", err)
 	}
-	c.cleanupStalePins(rec.OperationID)
+	if err := c.cleanupStalePins(rec.OperationID); err != nil {
+		return fmt.Errorf("stale pin cleanup failed: %w", err)
+	}
 	if err := c.removeWorkloadMACState(rec.OperationID); err != nil {
 		return fmt.Errorf("cannot remove owned workload state: %w", err)
 	}
 	return nil
 }
 
-// cleanupStalePinsIn removes leftover inode pins of one proven-gone
+// cleanupStalePins removes leftover inode pins of one proven-gone
 // operation from the deterministic pin layout under the runtime directory.
 // The pins were created by the mount-pin owner; after the container is
 // proven absent and the projections that depended on them are released,
-// they are pure residue.
-func (c *workloadMACCoordinator) cleanupStalePinsIn(operationID string) {
+// they are pure residue. Every failure is returned so the caller retains
+// the durable ownership record as the retry marker.
+func (c *workloadMACCoordinator) cleanupStalePinsIn(operationID string) error {
 	pinsDir := filepath.Join(filepath.Dir(c.runtimeRoot), "mounts", operationID)
+	info, err := os.Lstat(pinsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("cannot inspect stale pin directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("stale pin directory %s is not a helper-owned directory", pinsDir)
+	}
 	entries, err := os.ReadDir(pinsDir)
 	if err != nil {
-		return
+		return fmt.Errorf("cannot scan stale mount pins: %w", err)
 	}
 	for _, entry := range entries {
-		path := filepath.Join(pinsDir, entry.Name())
-		if err := unmountPathBestEffort(path); err != nil {
-			continue
+		if err := validateStalePinEntry(pinsDir, entry); err != nil {
+			return err
 		}
-		_ = os.Remove(path)
+		path := filepath.Join(pinsDir, entry.Name())
+		mounted, err := procMountinfoContains(path)
+		if err != nil {
+			return fmt.Errorf("cannot inventory stale pin %s: %w", path, err)
+		}
+		if mounted {
+			if err := unmountOwnedStalePin(path); err != nil {
+				return err
+			}
+			stillMounted, err := procMountinfoContains(path)
+			if err != nil {
+				return fmt.Errorf("cannot verify stale pin unmount %s: %w", path, err)
+			}
+			if stillMounted {
+				return fmt.Errorf("stale pin %s remained mounted after unmount", path)
+			}
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("cannot remove stale pin %s: %w", path, err)
+		}
 	}
-	_ = os.Remove(pinsDir)
+	if err := os.Remove(pinsDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("cannot remove stale pin directory %s: %w", pinsDir, err)
+	}
+	return nil
+}
+
+// validateStalePinEntry proves one pin-layout entry is exactly a
+// deterministic helper-owned pin destination: a canonical decimal index
+// naming a real directory or regular file. Anything else — symlink,
+// foreign name, unexpected node — fails closed so the caller retains the
+// owned state instead of unmounting or removing an unproven object.
+func validateStalePinEntry(pinsDir string, entry os.DirEntry) error {
+	if !isCanonicalDecimalIndex(entry.Name()) {
+		return fmt.Errorf("unexpected pin layout entry %q; refusing cleanup", entry.Name())
+	}
+	info, err := os.Lstat(filepath.Join(pinsDir, entry.Name()))
+	if err != nil {
+		return fmt.Errorf("cannot inspect stale pin %q: %w", entry.Name(), err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("stale pin %q is not a helper-owned mount destination", entry.Name())
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return fmt.Errorf("stale pin %q is neither a directory nor a regular file", entry.Name())
+	}
+	return nil
+}
+
+// isCanonicalDecimalIndex reports whether name is the canonical decimal
+// spelling of a non-negative index: digits only with no leading zeros.
+func isCanonicalDecimalIndex(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	if len(name) > 1 && name[0] == '0' {
+		return false
+	}
+	return true
 }
 
 // writeWorkloadMACRecord writes the durable ownership record atomically
@@ -457,16 +577,26 @@ func writeWorkloadMACRecord(stateDir string, rec workloadMACRecord) error {
 }
 
 // readWorkloadMACRecord reads and validates the durable ownership record of
-// one state directory. Anything unreadable or schema-incompatible is an
-// error so the caller retains the directory instead of guessing.
+// one state directory. The decoder is exact: the record must be exactly one
+// JSON value carrying exactly the current-owner fields, the schema must be
+// the current schema, the operation ID must be safe, the session ID must
+// carry the canonical shape, and the backend must be an exact known enum
+// value. Anything unreadable, schema-incompatible, or malformed is an error
+// so the caller retains the directory instead of guessing. Malformed state
+// is never normalized.
 func readWorkloadMACRecord(stateDir string) (workloadMACRecord, error) {
 	var rec workloadMACRecord
 	data, err := os.ReadFile(filepath.Join(stateDir, "ownership"))
 	if err != nil {
 		return rec, fmt.Errorf("cannot read ownership record: %w", err)
 	}
-	if err := json.Unmarshal(data, &rec); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&rec); err != nil {
 		return rec, fmt.Errorf("ownership record is malformed: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return rec, fmt.Errorf("ownership record must contain exactly one JSON value")
 	}
 	if rec.Schema != workloadMACStateSchema {
 		return rec, fmt.Errorf("unsupported ownership record schema %d", rec.Schema)
@@ -474,7 +604,32 @@ func readWorkloadMACRecord(stateDir string) (workloadMACRecord, error) {
 	if !isOperationIDSafe(rec.OperationID) {
 		return rec, fmt.Errorf("ownership record names an unsafe operation ID")
 	}
+	if !isSessionIDShape(rec.SessionID) {
+		return rec, fmt.Errorf("ownership record names an invalid session ID")
+	}
+	if rec.Backend != string(LSMAppArmor) && rec.Backend != string(LSMSELinux) {
+		return rec, fmt.Errorf("ownership record names an unknown backend %q", rec.Backend)
+	}
 	return rec, nil
+}
+
+// isSessionIDShape reports whether value carries the canonical Session ID
+// shape issued by the session owner: `dhs_` + lowercase hex characters.
+func isSessionIDShape(value string) bool {
+	const sessionIDPrefix = "dhs_"
+	if !strings.HasPrefix(value, sessionIDPrefix) {
+		return false
+	}
+	rest := value[len(sessionIDPrefix):]
+	if rest == "" {
+		return false
+	}
+	for _, r := range rest {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // removeWorkloadMACStateDir removes one operation directory under a state

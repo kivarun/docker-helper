@@ -1827,12 +1827,31 @@ pre-start failures (no container by construction) and post-start paths
 with one canonical container-absence proof. A failed proof or failed MAC
 cleanup retains dependent state (fail closed) for startup reconciliation,
 which runs before the daemon accepts HTTP requests and cleans only
-positively identified helper-owned state. Durable ownership records live
-under `<StateDir>/workload-mac/<operation-id>/` and are committed before
-any kernel-side resource; transient projection state lives under
-`<RuntimeDir>/workload-mac/<operation-id>/`. Container correlation uses the
-reserved server-owned runtime labels (schema, `com.dockerhelper.operation.id`,
-Session ID), never a PID.
+positively identified helper-owned state. A preparation failure whose
+partial MAC state could not be rolled back is returned to the run path as
+a typed retained outcome (`workloadMACRetainedError`): the run fails, no
+container starts, and the dependent source pins and workspace-use lease
+remain until startup reconciliation; any other preparation failure means
+the MAC state was fully rolled back and the caller releases the dependent
+resources as usual. Reconciliation removes the durable ownership record
+only after the correlated container is proven absent, the backend MAC
+state is positively gone (mount-inventory proofs; an unverified unmount or
+an unknown inventory retains state), and the stale pin residue is
+positively removed — a failed stage leaves the record as the retry marker.
+Durable ownership records live under `<StateDir>/workload-mac/<operation-id>/`
+and are committed before any kernel-side resource; transient projection
+state lives under `<RuntimeDir>/workload-mac/<operation-id>/`. The record
+carries the exact schema, operation ID, session ID, backend enum, and
+timestamp; every backend-specific kernel identity (for example the AppArmor
+profile name) is derived deterministically from the schema and the
+operation ID at validation/cleanup time, never stored as a second owner.
+The decoder is exact (`DisallowUnknownFields`, one JSON value, canonical
+session shape, exact backend enum); malformed state is retained, never
+normalized. Startup reconciliation proves the exact deterministic runtime
+shape (real directories, canonical `mount-<decimal index>` names, expected
+`mount`/`lower`/`item` nodes) before any unmount or removal and retains
+anything else. Container correlation uses the reserved server-owned runtime
+labels (schema, `com.dockerhelper.operation.id`, Session ID), never a PID.
 
 #### User-mode run mounts
 

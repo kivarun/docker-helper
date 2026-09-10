@@ -16,6 +16,10 @@ import (
 	"time"
 )
 
+// testWorkloadSessionID is a Session ID in the canonical issued shape
+// (`dhs_` + lowercase hex), suitable for durable workload ownership records.
+const testWorkloadSessionID = "dhs_0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+
 // profileNameFromSource extracts the declared profile name from a generated
 // profile source, mirroring how the kernel inventory names loaded profiles.
 func profileNameFromSource(source string) string {
@@ -129,12 +133,34 @@ type testSELinuxWorkloadSeam struct {
 	mountCalls   []testWorkerCall
 	// typeErr makes every xattr proof fail (proof-unavailable path).
 	typeErr error
+	// mountErrByPath fails the inventory proof for exactly those paths
+	// (targeted unknown-inventory injection).
+	mountErrByPath map[string]error
+	// mountInventoryErr makes every isMountpoint proof fail
+	// (inventory-unavailable path).
+	mountInventoryErr error
+	// unmountLeavesMounted makes unmountPath claim success while the
+	// mount inventory keeps reporting the mount (verification-failure path).
+	unmountLeavesMounted bool
+	// postUnmountInventoryErr makes isMountpoint fail once at least one
+	// unmount has been performed (post-unmount inventory path).
+	postUnmountInventoryErr error
+	unmountCount            int
 }
 
 // testMountOps is the fake workloadMountOps bound to the seam.
 type testMountOps struct{ seam *testSELinuxWorkloadSeam }
 
 func (m *testMountOps) isMountpoint(path string) (bool, error) {
+	if err, ok := m.seam.mountErrByPath[path]; ok {
+		return false, err
+	}
+	if m.seam.mountInventoryErr != nil {
+		return false, m.seam.mountInventoryErr
+	}
+	if m.seam.postUnmountInventoryErr != nil && m.seam.unmountCount > 0 {
+		return false, m.seam.postUnmountInventoryErr
+	}
 	return m.seam.mounted[path], nil
 }
 
@@ -158,7 +184,10 @@ func (m *testMountOps) unmountLazy(path string) error {
 
 func (m *testMountOps) unmountPath(path string) error {
 	m.seam.unmountCalls = append(m.seam.unmountCalls, "unmountPath "+path)
-	delete(m.seam.mounted, path)
+	m.seam.unmountCount++
+	if !m.seam.unmountLeavesMounted {
+		delete(m.seam.mounted, path)
+	}
 	return nil
 }
 
@@ -177,8 +206,9 @@ func (m *testMountOps) selinuxTypeOf(path string) (string, error) {
 func newTestSELinuxBackend(t *testing.T) (*workloadSELinuxBackend, *testSELinuxWorkloadSeam) {
 	t.Helper()
 	seam := &testSELinuxWorkloadSeam{
-		mounted:    map[string]bool{},
-		typeByPath: map[string]string{},
+		mounted:        map[string]bool{},
+		mountErrByPath: map[string]error{},
+		typeByPath:     map[string]string{},
 	}
 	b := newWorkloadSELinuxBackend()
 	b.lookPath = func(string) (string, error) {
@@ -227,7 +257,7 @@ func installTestWorkloadMACForTest(t *testing.T, app *App, backend LSMBackend) *
 			return nil, nil
 		},
 		removeContainer:  func(ctx context.Context, containerID string) error { return nil },
-		cleanupStalePins: func(operationID string) {},
+		cleanupStalePins: func(operationID string) error { return nil },
 	}
 	app.WorkloadMAC = c
 	return c

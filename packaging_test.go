@@ -6188,6 +6188,38 @@ func TestSELinuxPolicyNoGlobalContainerAccess(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyProjectionMountonScoping verifies that regular-file bind
+// targets get no workspace- or home-typed mounton grants: they always live
+// under the helper RuntimeDir (docker_helper_runtime_t), whose dir/file
+// mounton grants are the only projection mount rules.
+func TestSELinuxPolicyProjectionMountonScoping(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	runtimeFileMounton := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "allow docker_helper_t user_home_type:file") && strings.Contains(trimmed, "mounton") {
+			t.Errorf("user_home_type:file must not carry a mounton grant: %s", trimmed)
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_t docker_helper_workspace_t:file") && strings.Contains(trimmed, "mounton") {
+			t.Errorf("docker_helper_workspace_t:file must not carry a mounton grant: %s", trimmed)
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_t docker_helper_runtime_t:file") && strings.Contains(trimmed, "mounton") {
+			runtimeFileMounton = true
+		}
+	}
+	if !runtimeFileMounton {
+		t.Error("docker_helper_runtime_t:file mounton must remain for the regular-file lower bind")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_runtime_t:dir { mounton };") {
+		t.Error("docker_helper_runtime_t:dir mounton must remain for the projection mountpoints")
+	}
+}
+
 // TestSELinuxPolicyCustomContainerType verifies that the SELinux policy
 // defines a custom container type for docker-helper containers.
 func TestSELinuxPolicyCustomContainerType(t *testing.T) {

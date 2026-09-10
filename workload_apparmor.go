@@ -262,19 +262,27 @@ func (b *workloadAppArmorBackend) ensureParserAvailable() error {
 }
 
 // validateOwnedState proves the durable AppArmor workload state is exact:
-// the directory is a real helper-owned directory, the record names the
-// deterministic profile of its operation, and the profile source file is a
-// helper-owned regular file. Anything else fails closed.
+// the directory is a helper-owned directory whose record names the current
+// backend, and the profile source file — when present — is a helper-owned
+// regular file. The profile identity itself is derived from the record's
+// operation ID at cleanup time, so a missing profile source is the safely
+// classifiable crash window "ownership committed, crash before the profile
+// source was written": an empty owned state whose cleanup is a no-op when
+// the deterministic profile is absent from the kernel inventory. Anything
+// else fails closed.
 func (b *workloadAppArmorBackend) validateOwnedState(record workloadMACRecord) error {
 	if record.Backend != string(LSMAppArmor) {
 		return fmt.Errorf("record backend %q is not apparmor", record.Backend)
 	}
-	if want := workloadAppArmorProfileName(record.OperationID); record.ProfileName != want {
-		return fmt.Errorf("ownership record profile %q does not match the deterministic profile %q", record.ProfileName, want)
-	}
 	info, err := os.Lstat(filepath.Join(record.StateDirPath(), appArmorWorkloadProfileFileName))
 	if err != nil {
-		return fmt.Errorf("generated profile source is missing: %w", err)
+		if os.IsNotExist(err) {
+			// Ownership committed, crash before the profile source was
+			// written: empty owned state, classified by cleanup against the
+			// kernel inventory.
+			return nil
+		}
+		return fmt.Errorf("cannot inspect generated profile source: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("generated profile source is not a helper-owned regular file")
@@ -284,11 +292,30 @@ func (b *workloadAppArmorBackend) validateOwnedState(record workloadMACRecord) e
 
 // cleanupOwnedState removes the kernel profile and the helper-owned profile
 // file of one owned record. Called only after container absence is proven.
+//
+// The profile name is derived from the record's operation ID, never read
+// from durable state. A loaded deterministic profile without its profile
+// source has no safe unload path and fails closed; an absent profile makes
+// the remaining owned state empty and its cleanup a pure state removal.
 func (b *workloadAppArmorBackend) cleanupOwnedState(record workloadMACRecord) error {
 	stateDir := record.StateDirPath()
 	profilePath := filepath.Join(stateDir, appArmorWorkloadProfileFileName)
-	if err := b.unloadProfile(profilePath, record.ProfileName); err != nil {
+	profileName := workloadAppArmorProfileName(record.OperationID)
+	loaded, err := b.isProfileLoaded(profileName)
+	if err != nil {
 		return err
+	}
+	if loaded {
+		info, err := os.Lstat(profilePath)
+		if err != nil {
+			return fmt.Errorf("loaded workload profile %s has no profile source for a safe unload: %w", profileName, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("generated profile source is not a helper-owned regular file")
+		}
+		if err := b.unloadProfile(profilePath, profileName); err != nil {
+			return err
+		}
 	}
 	if err := os.Remove(profilePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("cannot remove generated profile source: %w", err)

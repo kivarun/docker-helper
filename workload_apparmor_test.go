@@ -209,7 +209,8 @@ func TestWorkloadAppArmorPrepareLoadFailureFailsClosed(t *testing.T) {
 }
 
 // TestWorkloadAppArmorCleanupUnloadsProfileOnce proves cleanup unloads the
-// loaded profile, removes the owned profile source, and is idempotent.
+// loaded profile (identity derived from the record's operation ID), removes
+// the owned profile source, and is idempotent.
 func TestWorkloadAppArmorCleanupUnloadsProfileOnce(t *testing.T) {
 	b, h := newTestAppArmorWorkloadBackend(t)
 	dir := t.TempDir()
@@ -218,7 +219,7 @@ func TestWorkloadAppArmorCleanupUnloadsProfileOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, appArmorWorkloadProfileFileName), []byte(renderWorkloadAppArmorProfile(name, nil, false)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	rec := workloadMACRecord{OperationID: "op_c1", SessionID: "s", Backend: string(LSMAppArmor), ProfileName: name}
+	rec := workloadMACRecord{OperationID: "op_c1", SessionID: "s", Backend: string(LSMAppArmor)}
 	rec.StateDir = dir
 	rec.RuntimeDir = dir
 	if err := b.cleanupOwnedState(rec); err != nil {
@@ -237,40 +238,37 @@ func TestWorkloadAppArmorCleanupUnloadsProfileOnce(t *testing.T) {
 }
 
 // TestWorkloadAppArmorValidateOwnedStateRejectsMalformed proves strict
-// owned-state validation: foreign record, mismatched profile name, symlinked
-// or missing profile source all fail validation and reconciliation retains
-// them.
+// owned-state validation: foreign records and symlinked profile sources
+// fail validation, while a missing profile source is the safely
+// classifiable crash window (empty owned state) and a well-formed source
+// validates.
 func TestWorkloadAppArmorValidateOwnedStateRejectsMalformed(t *testing.T) {
 	b, _ := newTestAppArmorWorkloadBackend(t)
 	name := workloadAppArmorProfileName("op_v1")
 	stateDir := t.TempDir()
 
 	// Foreign backend record.
-	rec := workloadMACRecord{OperationID: "op_v1", SessionID: "s", Backend: "foreign", ProfileName: name}
+	rec := workloadMACRecord{OperationID: "op_v1", SessionID: "s", Backend: "foreign"}
 	rec.StateDir = stateDir
 	if err := b.validateOwnedState(rec); err == nil {
 		t.Error("foreign backend record must fail validation")
 	}
 
-	// Record naming a profile that is not the deterministic one.
-	rec = workloadMACRecord{OperationID: "op_v1", SessionID: "s", Backend: string(LSMAppArmor), ProfileName: "docker-helper-workload-other"}
+	// Ownership committed, crash before the profile source was written:
+	// empty owned state validates and its cleanup classifies against the
+	// kernel inventory.
+	rec = workloadMACRecord{OperationID: "op_v1", SessionID: "s", Backend: string(LSMAppArmor)}
 	rec.StateDir = stateDir
-	if err := b.validateOwnedState(rec); err == nil {
-		t.Error("mismatched profile name must fail validation")
-	}
-
-	// Missing profile source.
-	rec = workloadMACRecord{OperationID: "op_v1", SessionID: "s", Backend: string(LSMAppArmor), ProfileName: name}
-	rec.StateDir = stateDir
-	if err := b.validateOwnedState(rec); err == nil {
-		t.Error("missing profile source must fail validation")
+	if err := b.validateOwnedState(rec); err != nil {
+		t.Errorf("missing profile source must classify as empty owned state: %v", err)
 	}
 
 	// Symlinked profile source must never validate as owned state.
-	if err := os.WriteFile(filepath.Join(t.TempDir(), "target"), []byte("x"), 0600); err != nil {
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(t.TempDir(), "target"), filepath.Join(stateDir, appArmorWorkloadProfileFileName)); err != nil {
+	if err := os.Symlink(target, filepath.Join(stateDir, appArmorWorkloadProfileFileName)); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.validateOwnedState(rec); err == nil {
@@ -328,8 +326,8 @@ func TestCoordinatorReconcileOwnedStaleProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := writeWorkloadMACRecord(recDir, workloadMACRecord{
-		Schema: workloadMACStateSchema, OperationID: opID, SessionID: "sess1",
-		Backend: string(LSMAppArmor), ProfileName: name,
+		Schema: workloadMACStateSchema, OperationID: opID, SessionID: testWorkloadSessionID,
+		Backend: string(LSMAppArmor),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +352,7 @@ func TestCoordinatorReconcileOwnedStaleProfile(t *testing.T) {
 			return nil, nil
 		},
 		removeContainer:  func(ctx context.Context, id string) error { return nil },
-		cleanupStalePins: func(operationID string) {},
+		cleanupStalePins: func(operationID string) error { return nil },
 	}
 	if err := c.ReconcileStartup(context.Background()); err != nil {
 		t.Fatalf("ReconcileStartup: %v", err)
@@ -401,7 +399,7 @@ func TestCoordinatorReconcileRetainsForeignState(t *testing.T) {
 			t.Fatal("foreign state must not remove containers")
 			return nil
 		},
-		cleanupStalePins: func(operationID string) { t.Fatal("foreign state must not clean pins") },
+		cleanupStalePins: func(operationID string) error { t.Fatal("foreign state must not clean pins"); return nil },
 	}
 	if err := c.ReconcileStartup(context.Background()); err != nil {
 		t.Fatalf("ReconcileStartup: %v", err)
@@ -425,8 +423,7 @@ func TestCoordinatorReconcileRetainsAmbiguousContainers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := writeWorkloadMACRecord(recDir, workloadMACRecord{
-		Schema: workloadMACStateSchema, OperationID: opID, SessionID: "sess1", Backend: string(LSMAppArmor),
-		ProfileName: workloadAppArmorProfileName(opID),
+		Schema: workloadMACStateSchema, OperationID: opID, SessionID: testWorkloadSessionID, Backend: string(LSMAppArmor),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +442,7 @@ func TestCoordinatorReconcileRetainsAmbiguousContainers(t *testing.T) {
 			t.Fatal("ambiguous correlation must not remove containers")
 			return nil
 		},
-		cleanupStalePins: func(operationID string) { t.Fatal("ambiguous state must not clean pins") },
+		cleanupStalePins: func(operationID string) error { t.Fatal("ambiguous state must not clean pins"); return nil },
 	}
 	if err := c.ReconcileStartup(context.Background()); err != nil {
 		t.Fatalf("ReconcileStartup with >1 correlated containers must retain: %v", err)
@@ -460,8 +457,7 @@ func TestCoordinatorReconcileRetainsAmbiguousContainers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := writeWorkloadMACRecord(recDir2, workloadMACRecord{
-		Schema: workloadMACStateSchema, OperationID: "op_amb2", SessionID: "sess1", Backend: string(LSMAppArmor),
-		ProfileName: workloadAppArmorProfileName("op_amb2"),
+		Schema: workloadMACStateSchema, OperationID: "op_amb2", SessionID: testWorkloadSessionID, Backend: string(LSMAppArmor),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -489,8 +485,8 @@ func TestCoordinatorReconcileRemovesStaleOwnedContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := writeWorkloadMACRecord(recDir, workloadMACRecord{
-		Schema: workloadMACStateSchema, OperationID: opID, SessionID: "sess1",
-		Backend: string(LSMAppArmor), ProfileName: workloadAppArmorProfileName(opID),
+		Schema: workloadMACStateSchema, OperationID: opID, SessionID: testWorkloadSessionID,
+		Backend: string(LSMAppArmor),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +512,10 @@ func TestCoordinatorReconcileRemovesStaleOwnedContainer(t *testing.T) {
 			removed = append(removed, id)
 			return nil
 		},
-		cleanupStalePins: func(operationID string) { pinsCleaned = append(pinsCleaned, operationID) },
+		cleanupStalePins: func(operationID string) error {
+			pinsCleaned = append(pinsCleaned, operationID)
+			return nil
+		},
 	}
 	if err := c.ReconcileStartup(context.Background()); err != nil {
 		t.Fatalf("ReconcileStartup: %v", err)

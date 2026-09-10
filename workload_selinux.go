@@ -23,6 +23,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -169,9 +171,11 @@ func (productionMountOps) selinuxTypeOf(path string) (string, error) {
 	return parts[2], nil
 }
 
-// unmountPathBestEffort unmounts one helper-owned mount path, tolerating
-// the already-unmounted case, and is used for owned stale residue only.
-func unmountPathBestEffort(path string) error {
+// unmountOwnedStalePin unmounts one stale pin mount of a proven-gone
+// operation, tolerating the already-unmounted kernel answer. The caller
+// must positively verify the mount inventory afterwards; a silent failure
+// is never tolerated here.
+func unmountOwnedStalePin(path string) error {
 	if err := unix.Unmount(path, 0); err != nil {
 		if errno, ok := err.(syscall.Errno); ok && errno == syscall.EINVAL {
 			return nil // not a mount point
@@ -180,7 +184,7 @@ func unmountPathBestEffort(path string) error {
 			if errno, ok := err.(syscall.Errno); ok && errno == syscall.EINVAL {
 				return nil
 			}
-			return fmt.Errorf("unmount %s: %w", path, err)
+			return fmt.Errorf("unmount stale pin %s: %w", path, err)
 		}
 	}
 	return nil
@@ -460,102 +464,215 @@ func (b *workloadSELinuxBackend) awaitProjectionReady(entry *projectionEntry) er
 
 // cleanupOwnedProjections releases owned projections in reverse creation
 // order: projection unmount, lower file bind unmount, owned worker exit,
-// then state removal. It tolerates already-absent pieces; a real failure
-// is returned so the caller retains dependent state.
+// then state removal. It tolerates already-absent pieces; any unknown or
+// failed step is returned so the caller retains dependent state. Unknown is
+// never treated as absent: a failed mount-inventory proof stops the
+// cleanup before any removal.
 func (b *workloadSELinuxBackend) cleanupOwnedProjections(projections []*projectionEntry) error {
-	var errs []error
 	for i := len(projections) - 1; i >= 0; i-- {
 		entry := projections[i]
-		if mounted, err := b.ops.isMountpoint(entry.mountDir); err == nil && mounted {
-			if err := b.ops.unmountPath(entry.mountDir); err != nil {
-				errs = append(errs, err)
-				continue
-			}
+		if err := b.proveUnmountOwnedMount(entry.mountDir); err != nil {
+			return err
 		}
 		if entry.lowerItem != "" {
-			if mounted, err := b.ops.isMountpoint(entry.lowerItem); err == nil && mounted {
-				if err := b.ops.unmountPath(entry.lowerItem); err != nil {
-					errs = append(errs, err)
-					continue
-				}
+			if err := b.proveUnmountOwnedMount(entry.lowerItem); err != nil {
+				return err
 			}
 		}
 		if entry.worker != nil {
 			if err := entry.worker.waitExit(workloadWorkerExitTimeout); err != nil {
-				errs = append(errs, err)
-				continue
+				return err
 			}
 		}
 		if err := os.RemoveAll(entry.stateDir); err != nil {
-			errs = append(errs, err)
+			return fmt.Errorf("cannot remove projection state %s: %w", entry.stateDir, err)
 		}
 	}
-	return firstError(errs)
+	return nil
+}
+
+// proveUnmountOwnedMount unmounts one helper-owned mount path only after
+// the mount inventory positively reports it mounted, and then positively
+// proves absence before the caller may remove filesystem state. An
+// inventory error or a mount that remains after the claimed unmount is an
+// error: unknown is never treated as absent.
+func (b *workloadSELinuxBackend) proveUnmountOwnedMount(path string) error {
+	mounted, err := b.ops.isMountpoint(path)
+	if err != nil {
+		return fmt.Errorf("cannot inventory mount state of %s: %w", path, err)
+	}
+	if !mounted {
+		return nil
+	}
+	if err := b.ops.unmountPath(path); err != nil {
+		return err
+	}
+	stillMounted, err := b.ops.isMountpoint(path)
+	if err != nil {
+		return fmt.Errorf("cannot verify unmount of %s: %w", path, err)
+	}
+	if stillMounted {
+		return fmt.Errorf("mount %s remained mounted after unmount", path)
+	}
+	return nil
 }
 
 // validateOwnedState proves the durable SELinux workload state is exact:
-// the record is a helper-owned SELinux record and carries no AppArmor
-// profile. Runtime projection state is transient under the runtime
-// directory; reconciliation correlates it by the deterministic layout,
-// never by a recorded PID.
+// the record is a helper-owned SELinux record. Runtime projection state is
+// transient under the runtime directory; reconciliation correlates it by
+// the deterministic layout, never by a recorded PID, and proves its exact
+// shape at cleanup time.
 func (b *workloadSELinuxBackend) validateOwnedState(record workloadMACRecord) error {
 	if record.Backend != string(LSMSELinux) {
 		return fmt.Errorf("record backend %q is not selinux", record.Backend)
-	}
-	if record.ProfileName != "" {
-		return fmt.Errorf("SELinux ownership record must not carry an AppArmor profile")
 	}
 	return nil
 }
 
 // cleanupOwnedState removes the transient projection runtime state of one
-// owned record after its correlated container is proven absent. Unmount
-// order is projection first, lower file bind second.
+// owned record after its correlated container is proven absent. Before any
+// unmount or removal it proves the exact deterministic runtime shape:
+//
+//	RuntimeDir/<op-id>        real directory, not a symlink
+//	mount-<decimal index>     real directory, not a symlink, canonical name
+//	mount                     real directory when present
+//	lower                     real directory when present
+//	lower/item                real regular file when present
+//
+// Any symlink, unexpected regular file, foreign child, malformed mount
+// name, or unexpected shape retains the entire operation state: no unmount
+// and no removal happens against unproven objects. Unmount order is
+// projection first, lower file bind second, and every unmount is positively
+// verified against the mount inventory before filesystem state is removed.
 func (b *workloadSELinuxBackend) cleanupOwnedState(record workloadMACRecord) error {
-	runtimeDir := record.RuntimeDirPath()
-	entries, err := os.ReadDir(runtimeDir)
+	projections, err := b.proveProjectionRuntimeShape(record.RuntimeDirPath())
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("cannot scan owned projection state: %w", err)
+		return err
 	}
-	for _, e := range entries {
-		projState := filepath.Join(runtimeDir, e.Name())
-		if e.IsDir() && !isProjectionDirName(e.Name()) {
-			return fmt.Errorf("unexpected non-projection state directory %q; refusing cleanup", e.Name())
-		}
-		mountDir := filepath.Join(projState, "mount")
-		if mounted, err := productionMountOpsValue.isMountpoint(mountDir); err == nil && mounted {
-			if err := b.ops.unmountPath(mountDir); err != nil {
-				return fmt.Errorf("cannot unmount stale projection: %w", err)
-			}
-		}
-		lowerItem := filepath.Join(projState, "lower", "item")
-		if mounted, err := productionMountOpsValue.isMountpoint(lowerItem); err == nil && mounted {
-			if err := b.ops.unmountPath(lowerItem); err != nil {
-				return fmt.Errorf("cannot unmount stale lower file bind: %w", err)
-			}
-		}
-		if err := os.RemoveAll(projState); err != nil {
-			return fmt.Errorf("cannot remove stale projection state: %w", err)
-		}
-	}
-	return nil
+	return b.cleanupOwnedProjections(projections)
 }
 
-// isProjectionDirName reports whether a runtime state entry is a
-// deterministic projection directory name (mount-<index>).
-func isProjectionDirName(name string) bool {
-	if !strings.HasPrefix(name, "mount-") || len(name) <= len("mount-") {
-		return false
+// proveProjectionRuntimeShape proves the exact owned runtime layout of one
+// operation and returns the projection entries in deterministic index
+// order. A missing runtime directory is positively empty owned state.
+func (b *workloadSELinuxBackend) proveProjectionRuntimeShape(runtimeDir string) ([]*projectionEntry, error) {
+	info, err := os.Lstat(runtimeDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("cannot inspect owned projection runtime state: %w", err)
 	}
-	for _, r := range name[len("mount-"):] {
-		if r < '0' || r > '9' {
-			return false
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("owned projection runtime state %s is not a helper-owned directory", runtimeDir)
+	}
+	children, err := os.ReadDir(runtimeDir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot scan owned projection runtime state: %w", err)
+	}
+	var projections []*projectionEntry
+	for _, child := range children {
+		index, err := parseProjectionDirName(child.Name())
+		if err != nil {
+			return nil, fmt.Errorf("unexpected runtime state entry %q; refusing cleanup", child.Name())
+		}
+		projState := filepath.Join(runtimeDir, child.Name())
+		projInfo, err := os.Lstat(projState)
+		if err != nil {
+			return nil, fmt.Errorf("cannot inspect owned projection state %q: %w", child.Name(), err)
+		}
+		if !projInfo.IsDir() || projInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("owned projection state %q is not a helper-owned directory", child.Name())
+		}
+		entry, err := b.proveProjectionEntryShape(projState, index)
+		if err != nil {
+			return nil, err
+		}
+		projections = append(projections, entry)
+	}
+	sort.Slice(projections, func(i, j int) bool {
+		return projections[i].index < projections[j].index
+	})
+	return projections, nil
+}
+
+// proveProjectionEntryShape proves the exact shape of one mount-<index>
+// projection state directory and returns its cleanup entry.
+func (b *workloadSELinuxBackend) proveProjectionEntryShape(projState string, index int) (*projectionEntry, error) {
+	entry := &projectionEntry{
+		index:    index,
+		stateDir: projState,
+		mountDir: filepath.Join(projState, "mount"),
+	}
+	items, err := os.ReadDir(projState)
+	if err != nil {
+		return nil, fmt.Errorf("cannot scan owned projection state %s: %w", projState, err)
+	}
+	for _, item := range items {
+		switch item.Name() {
+		case "mount":
+			info, err := os.Lstat(entry.mountDir)
+			if err != nil {
+				return nil, fmt.Errorf("cannot inspect owned projection mountpoint: %w", err)
+			}
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("owned projection mountpoint %s is not a helper-owned directory", entry.mountDir)
+			}
+		case "lower":
+			lowerDir := filepath.Join(projState, "lower")
+			info, err := os.Lstat(lowerDir)
+			if err != nil {
+				return nil, fmt.Errorf("cannot inspect owned projection lower directory: %w", err)
+			}
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("owned projection lower directory %s is not a helper-owned directory", lowerDir)
+			}
+			lowerItems, err := os.ReadDir(lowerDir)
+			if err != nil {
+				return nil, fmt.Errorf("cannot scan owned projection lower directory: %w", err)
+			}
+			for _, lowerItem := range lowerItems {
+				if lowerItem.Name() != "item" {
+					return nil, fmt.Errorf("unexpected lower entry %q; refusing cleanup", lowerItem.Name())
+				}
+				itemPath := filepath.Join(lowerDir, "item")
+				itemInfo, err := os.Lstat(itemPath)
+				if err != nil {
+					return nil, fmt.Errorf("cannot inspect owned projection lower item: %w", err)
+				}
+				if !itemInfo.Mode().IsRegular() || itemInfo.Mode()&os.ModeSymlink != 0 {
+					return nil, fmt.Errorf("owned projection lower item %s is not a helper-owned regular file", itemPath)
+				}
+				entry.lowerItem = itemPath
+			}
+		default:
+			return nil, fmt.Errorf("unexpected projection state entry %q; refusing cleanup", item.Name())
 		}
 	}
-	return true
+	return entry, nil
+}
+
+// parseProjectionDirName parses a canonical mount-<decimal index>
+// projection directory name. Any other spelling — missing index, leading
+// zeros, non-decimal characters — is malformed and fails closed.
+func parseProjectionDirName(name string) (int, error) {
+	rest, ok := strings.CutPrefix(name, "mount-")
+	if !ok || rest == "" {
+		return 0, fmt.Errorf("malformed projection directory name %q", name)
+	}
+	for _, r := range rest {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("malformed projection directory name %q", name)
+		}
+	}
+	if len(rest) > 1 && rest[0] == '0' {
+		return 0, fmt.Errorf("malformed projection directory name %q", name)
+	}
+	index, err := strconv.Atoi(rest)
+	if err != nil {
+		return 0, fmt.Errorf("malformed projection directory name %q", name)
+	}
+	return index, nil
 }
 
 // unmountPath unmounts one helper-owned projection path, preferring the

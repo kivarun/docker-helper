@@ -621,7 +621,19 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("backend", string(a.WorkloadMAC.Backend())),
 				slog.String("error", err.Error()),
 			)
-			a.rollbackRunPreparation(ctx, op)
+			var retained *workloadMACRetainedError
+			if errors.As(err, &retained) {
+				// Partial MAC state could not be rolled back: the pins and
+				// the workspace-use lease that the projections depend on
+				// must remain until startup reconciliation. No container
+				// was started.
+				opLog(ctx).Error("workload MAC state retained after prepare failure — dependent pins and workspace lease intentionally retained",
+					slog.String("operation", "run"),
+					slog.String("operation_id", op.ID),
+				)
+			} else {
+				a.rollbackRunPreparation(ctx, op)
+			}
 			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}

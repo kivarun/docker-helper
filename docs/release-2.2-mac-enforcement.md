@@ -40,12 +40,24 @@ Phase 2.2.5 / PR #14), awaiting architectural acceptance:
   `<StateDir>/workload-mac/<operation-id>/` (ownership record committed
   before the first kernel resource; generated AppArmor profile source) and
   `<RuntimeDir>/workload-mac/<operation-id>/` (transient projection state);
-  state roots are 0700 helper-owned. Reserved correlation label
-  `com.dockerhelper.operation.id` joins the existing runtime label schema.
+  state roots are 0700 helper-owned. The ownership record stores no
+  backend-derivable kernel identity: the generated AppArmor profile name is
+  derived from the operation ID at validation/cleanup time, so the crash
+  window "ownership committed, crash before the profile source was
+  written" is safely classifiable (empty owned state; cleanup is a no-op
+  while the deterministic profile is absent from the kernel inventory, and
+  fails closed when a loaded profile has no safe-unload source). Reserved
+  correlation label `com.dockerhelper.operation.id` joins the existing
+  runtime label schema. A preparation failure whose partial MAC state
+  cannot be rolled back is a typed retained outcome: the run path retains
+  the dependent source pins and workspace-use lease until startup
+  reconciliation.
 - One unified run cleanup owner (`run_cleanup.go`) releases container
   (proven absent) → workload MAC → pins → workspace lease → cidfile from
   every terminal path, and startup reconciliation cleans only positively
-  identified helper-owned state (foreign/ambiguous state is retained).
+  identified helper-owned state (foreign/ambiguous state is retained; a
+  failed mount-inventory proof or an unverified unmount is an error and
+  retains the owned state and its dependent pins).
 - Static SELinux policy adds `docker_helper_ro_projection_t` and
   `docker_helper_bindfs_exec_t` to the shipped module with read/execute-only
   workload semantics and minimal daemon/FUSE mount mechanics; bindfs is an

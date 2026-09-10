@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -388,5 +389,110 @@ func TestRunWorkloadAmbiguousProofRetainsState(t *testing.T) {
 	opStateDir := filepath.Join(app.Config.StateDir, workloadMACStateRootName, resp.OperationID)
 	if _, statErr := os.Stat(opStateDir); statErr != nil {
 		t.Fatalf("ambiguous proof must retain owned workload state: %v", statErr)
+	}
+}
+
+// TestRunWorkloadSELinuxPartialProjectionRetainsDependencies is the
+// run-level regression for the retained-prepare-failure contract: a partial
+// SELinux projection exists, the projection proof fails, and the partial
+// projection cleanup also fails. The run must produce no Docker invocation,
+// the durable workload state must be retained, and the dependent pins and
+// the workspace-use lease must remain until startup reconciliation.
+func TestRunWorkloadSELinuxPartialProjectionRetainsDependencies(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	app.OperationSupervisor = newOperationSupervisor()
+	coord := installTestWorkloadMACForTest(t, app, LSMSELinux)
+	backend := coord.backend.(*workloadSELinuxBackend)
+	seam := backend.ops.(*testMountOps).seam
+
+	// Workspace MAC coverage plus a workspace-use lease: the run path
+	// acquires a real lease whose release must be retained.
+	app.MACCoordinator = newSessionMACCoordinator(app.DB, newTestWorkspaceMACDriver(LSMSELinux))
+
+	var mu sync.Mutex
+	var pinCleaned []string
+	var dockerArgv [][]string
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinned := filepath.Join(runtimeDir, "mounts", operationID, fmt.Sprint(mountIndex))
+		if err := os.MkdirAll(filepath.Dir(pinned), 0700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(pinned, nil, 0600); err != nil {
+			return nil, err
+		}
+		return &pinnedMount{
+			PinnedPath: pinned,
+			cleanup: func() error {
+				mu.Lock()
+				defer mu.Unlock()
+				pinCleaned = append(pinCleaned, pinned)
+				return nil
+			},
+		}, nil
+	}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		mu.Lock()
+		defer mu.Unlock()
+		dockerArgv = append(dockerArgv, append([]string{name}, args...))
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSystemSession: %v", err)
+	}
+	subdir := filepath.Join(result.Session.Workspace, "seldata")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The effective-type proof fails after mount-0 is fully materialized,
+	// and the partial-projection rollback cannot prove its unmount either.
+	seam.typeErr = errors.New("xattr proof unavailable")
+	seam.unmountLeavesMounted = true
+
+	body := `{"image":"alpine","mounts":[{"source":"seldata","target":"/data","read_only":true}]}`
+	req := httptest.NewRequest("POST", "/run", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	if w.Code != 500 {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["code"] != "internal_error" {
+		t.Errorf("retained prepare failure must use the internal failure family, got %v", resp["code"])
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dockerArgv) != 0 {
+		t.Errorf("no Docker run may happen after a retained prepare failure, got %v", dockerArgv)
+	}
+	if len(pinCleaned) != 0 {
+		t.Errorf("dependent pins must remain when partial MAC state is retained, got %v", pinCleaned)
+	}
+	leases := app.MACCoordinator.workspaceUseLeases
+	if len(leases) == 0 {
+		t.Fatal("the workspace-use lease must remain when partial MAC state is retained")
+	}
+	for _, ws := range leases {
+		if ws != result.Session.Workspace {
+			t.Errorf("retained lease must cover the run workspace, got %q", ws)
+		}
+	}
+	// The durable state of the failed operation is the only workload-mac
+	// operation directory present.
+	entries, readErr := os.ReadDir(filepath.Join(app.Config.StateDir, workloadMACStateRootName))
+	if readErr != nil || len(entries) != 1 {
+		t.Fatalf("exactly one retained workload MAC operation state expected, got %v (%v)", entries, readErr)
+	}
+	opStateDir := filepath.Join(app.Config.StateDir, workloadMACStateRootName, entries[0].Name())
+	if _, statErr := os.Stat(opStateDir); statErr != nil {
+		t.Fatalf("durable workload state must be retained after a failed prepare, got %v", statErr)
 	}
 }

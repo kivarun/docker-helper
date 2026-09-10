@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -252,7 +253,6 @@ func TestSELinuxWorkloadMissingBindfsFailsClosed(t *testing.T) {
 func TestSELinuxWorkloadCleanupReverseOrder(t *testing.T) {
 	dir := t.TempDir()
 	b, seam := newTestSELinuxBackend(t)
-	defer func() { _ = seam }()
 	pinned := filepath.Join(dir, "pinned")
 	if err := os.MkdirAll(pinned, 0700); err != nil {
 		t.Fatal(err)
@@ -284,5 +284,325 @@ func TestSELinuxWorkloadCleanupReverseOrder(t *testing.T) {
 	}
 	if _, err := os.Stat(prep.RuntimeDir); !os.IsNotExist(err) {
 		t.Errorf("runtime projection state must be removed, got %v", err)
+	}
+	if got := len(seam.unmountCalls); got != 2 {
+		t.Errorf("expected two projection unmounts, got %v", seam.unmountCalls)
+	}
+}
+
+// TestSELinuxWorkloadCleanupRetainsOnMountInventoryError proves the
+// unknown-is-not-absent contract: when the mount inventory is unavailable
+// before the unmount, the cleanup fails, the mount stays mounted, and no
+// owned filesystem state is removed.
+func TestSELinuxWorkloadCleanupRetainsOnMountInventoryError(t *testing.T) {
+	dir := t.TempDir()
+	b, seam := newTestSELinuxBackend(t)
+	pinned := filepath.Join(dir, "pinned")
+	if err := os.MkdirAll(pinned, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prep := workloadPreparation{
+		OperationID:   "op_inv1",
+		SessionID:     "sess1",
+		StateDir:      filepath.Join(dir, "state", "op_inv"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_inv"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/data", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepare(prep)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	projection := prepared.MountSources[0]
+	seam.mountInventoryErr = errors.New("mount inventory unavailable")
+	if err := prepared.Cleanup(); err == nil {
+		t.Fatal("unknown mount inventory must fail cleanup")
+	}
+	if !seam.mounted[projection] {
+		t.Fatal("the projection mount must stay mounted on an inventory error")
+	}
+	if _, err := os.Stat(prep.RuntimeDir); err != nil {
+		t.Errorf("owned runtime state must be retained on an inventory error, got %v", err)
+	}
+	if _, err := os.Stat(prep.StateDir); err != nil {
+		t.Errorf("owned durable state must be retained on an inventory error, got %v", err)
+	}
+}
+
+// TestSELinuxWorkloadCleanupRetainsOnPostUnmountInventoryError proves that
+// an inventory failure after the claimed unmount fails the cleanup: absence
+// must be proven, never assumed.
+func TestSELinuxWorkloadCleanupRetainsOnPostUnmountInventoryError(t *testing.T) {
+	dir := t.TempDir()
+	b, seam := newTestSELinuxBackend(t)
+	pinned := filepath.Join(dir, "pinned")
+	if err := os.MkdirAll(pinned, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prep := workloadPreparation{
+		OperationID:   "op_inv2",
+		SessionID:     "sess1",
+		StateDir:      filepath.Join(dir, "state", "op_inv2"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_inv2"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/a", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepare(prep)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	seam.postUnmountInventoryErr = errors.New("inventory unreadable after unmount")
+	if err := prepared.Cleanup(); err == nil {
+		t.Fatal("post-unmount inventory failure must fail the cleanup")
+	}
+	if _, err := os.Stat(filepath.Join(prep.RuntimeDir, "mount-0")); err != nil {
+		t.Errorf("owned projection state must be retained when absence is unprovable, got %v", err)
+	}
+}
+
+// TestSELinuxWorkloadCleanupRetainsWhenUnmountLeavesMount proves that a
+// claimed-but-unproven unmount (the mount inventory still lists the mount)
+// retains the owned state instead of removing it.
+func TestSELinuxWorkloadCleanupRetainsWhenUnmountLeavesMounted(t *testing.T) {
+	dir := t.TempDir()
+	b, seam := newTestSELinuxBackend(t)
+	pinned := filepath.Join(dir, "pinned")
+	if err := os.MkdirAll(pinned, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prep := workloadPreparation{
+		OperationID:   "op_inv3",
+		SessionID:     "sess1",
+		StateDir:      filepath.Join(dir, "state", "op_inv3"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_inv3"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/a", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepare(prep)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	seam.unmountLeavesMounted = true
+	if err := prepared.Cleanup(); err == nil {
+		t.Fatal("an unverified unmount must fail the cleanup")
+	}
+	if _, err := os.Stat(filepath.Join(prep.RuntimeDir, "mount-0")); err != nil {
+		t.Errorf("projection state must be retained when absence is unproven, got %v", err)
+	}
+}
+
+// TestSELinuxWorkloadCleanupRetainsOnLowerFileBindInventoryError proves the
+// regular-file lower bind gets the same unknown-is-not-absent treatment.
+func TestSELinuxWorkloadCleanupRetainsOnLowerFileBindInventoryError(t *testing.T) {
+	dir := t.TempDir()
+	b, seam := newTestSELinuxBackend(t)
+	pinnedFile := filepath.Join(dir, "pinned.txt")
+	if err := os.WriteFile(pinnedFile, []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prep := workloadPreparation{
+		OperationID:   "op_inv4",
+		SessionID:     "sess1",
+		StateDir:      filepath.Join(dir, "state", "op_inv4"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_inv4"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/inputs/config.txt", RequestedReadOnly: true}},
+		PinnedSources: []string{pinnedFile},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepare(prep)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	lowerItem := filepath.Join(prep.RuntimeDir, "mount-0", "lower", "item")
+	// The projection unmounts and verifies; the lower-file bind inventory
+	// then reports unknown.
+	seam.mountErrByPath[lowerItem] = errors.New("lower inventory unavailable")
+	if err := prepared.Cleanup(); err == nil {
+		t.Fatal("lower-file inventory failure must fail the cleanup")
+	}
+	if _, err := os.Stat(filepath.Join(prep.RuntimeDir, "mount-0")); err != nil {
+		t.Errorf("owned state must be retained when the lower bind inventory is unknown, got %v", err)
+	}
+	if !seam.mounted[lowerItem] {
+		t.Errorf("lower item mount must remain mounted when its inventory is unknown, got %v", seam.mounted)
+	}
+}
+
+// newTestSELinuxOwnedState produces one owned SELinux operation state
+// through the real coordinator Prepare path so the adversarial shape tests
+// mutate state the production writer actually created.
+func newTestSELinuxOwnedState(t *testing.T, stateRoot, runtimeRoot, opID string) {
+	t.Helper()
+	pinned := filepath.Join(t.TempDir(), "pinned")
+	if err := os.MkdirAll(pinned, 0700); err != nil {
+		t.Fatal(err)
+	}
+	firstBackend, _ := newTestSELinuxBackend(t)
+	first := newTestWorkloadCoordinator(t, firstBackend, stateRoot, runtimeRoot)
+	if _, err := first.Prepare(workloadPreparation{
+		OperationID:   opID,
+		SessionID:     testWorkloadSessionID,
+		Exposures:     []sessionFilesystemExposure{{Target: "/data", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned},
+	}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+}
+
+// TestSELinuxReconcileAdversarialRuntimeShape proves the exact-shape
+// ownership proof: every deviation — a symlinked mount-<index> entry, a
+// symlinked mountpoint, a malformed name, a foreign child, or an unexpected
+// node — retains the entire operation state and performs zero unmount
+// attempts, including against the foreign target of a symlink.
+func TestSELinuxReconcileAdversarialRuntimeShape(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, runtimeOpDir, foreignMount, foreignLower string)
+	}{
+		{
+			name: "mount-0 is a symlink to a foreign tree",
+			mutate: func(t *testing.T, runtimeOpDir, foreignMount, _ string) {
+				if err := os.RemoveAll(filepath.Join(runtimeOpDir, "mount-0")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Dir(foreignMount), filepath.Join(runtimeOpDir, "mount-0")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "mount is a symlink to a foreign mount",
+			mutate: func(t *testing.T, runtimeOpDir, foreignMount, _ string) {
+				if err := os.Remove(filepath.Join(runtimeOpDir, "mount-0", "mount")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(foreignMount, filepath.Join(runtimeOpDir, "mount-0", "mount")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed projection name with leading zero",
+			mutate: func(t *testing.T, runtimeOpDir, _, _ string) {
+				if err := os.Rename(filepath.Join(runtimeOpDir, "mount-0"), filepath.Join(runtimeOpDir, "mount-01")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed projection name with non-decimal suffix",
+			mutate: func(t *testing.T, runtimeOpDir, _, _ string) {
+				if err := os.Rename(filepath.Join(runtimeOpDir, "mount-0"), filepath.Join(runtimeOpDir, "mount-0x")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "foreign child next to projection state",
+			mutate: func(t *testing.T, runtimeOpDir, _, _ string) {
+				if err := os.WriteFile(filepath.Join(runtimeOpDir, "notes.txt"), []byte("x"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "mountpoint is an unexpected regular file",
+			mutate: func(t *testing.T, runtimeOpDir, _, _ string) {
+				if err := os.RemoveAll(filepath.Join(runtimeOpDir, "mount-0", "mount")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(runtimeOpDir, "mount-0", "mount"), []byte("x"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "lower item is a symlink to a foreign file",
+			mutate: func(t *testing.T, runtimeOpDir, _, _ string) {
+				// Directory projections carry no lower tree; build one so
+				// the adversarial mutation targets the real layout shape.
+				if err := os.MkdirAll(filepath.Join(runtimeOpDir, "mount-0", "lower"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(runtimeOpDir, "mount-0", "lower", "item"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				foreignFile := filepath.Join(t.TempDir(), "foreign-file")
+				if err := os.WriteFile(foreignFile, []byte("x"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(runtimeOpDir, "mount-0", "lower", "item")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(foreignFile, filepath.Join(runtimeOpDir, "mount-0", "lower", "item")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stateRoot := filepath.Join(t.TempDir(), "state")
+			runtimeRoot := filepath.Join(t.TempDir(), "runtime")
+			if err := os.MkdirAll(stateRoot, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(runtimeRoot, 0700); err != nil {
+				t.Fatal(err)
+			}
+			opID := "op_adv1"
+			newTestSELinuxOwnedState(t, stateRoot, runtimeRoot, opID)
+
+			// The foreign tree the symlink points into, pre-seeded with a
+			// mount at the exact expected layout so any shape bypass would
+			// attempt an unmount against it.
+			foreignRoot := filepath.Join(t.TempDir(), "foreign")
+			foreignMount := filepath.Join(foreignRoot, "mount-target", "mount")
+			if err := os.MkdirAll(foreignMount, 0755); err != nil {
+				t.Fatal(err)
+			}
+			foreignLower := filepath.Join(foreignRoot, "mount-target", "lower")
+
+			tc.mutate(t, filepath.Join(runtimeRoot, opID), foreignMount, foreignLower)
+
+			freshBackend, freshSeam := newTestSELinuxBackend(t)
+			freshSeam.mounted[foreignMount] = true
+			fresh := newTestWorkloadCoordinator(t, freshBackend, stateRoot, runtimeRoot)
+			if err := fresh.ReconcileStartup(context.Background()); err != nil {
+				t.Fatalf("ReconcileStartup must retain, not fail: %v", err)
+			}
+			if len(freshSeam.unmountCalls) != 0 {
+				t.Errorf("adversarial shape must cause zero unmount attempts, got %v", freshSeam.unmountCalls)
+			}
+			if _, err := os.Stat(foreignMount); err != nil {
+				t.Errorf("foreign tree must be untouched: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(stateRoot, opID)); err != nil {
+				t.Errorf("adversarial state must be retained for review: %v", err)
+			}
+		})
 	}
 }
