@@ -133,9 +133,7 @@ migration, config, constraint, and persistence tests in
 `allowed_root_migration_test.go` and `config_allowed_root_test.go`. Not yet
 done by design at 2.2.1: the rich HTTP/CLI projection (2.2.3), the Session
 snapshot (2.2.4), and runtime enforcement; public `allowed_roots` remains the
-2.1 path-only projection. The later phases were accepted and closed through
-their own implementation cycles (2.2.2 resolver, 2.2.3 control plane,
-2.2.4 snapshot persistence, 2.2.5 data-plane enforcement).
+2.1 path-only projection.
 
 Dependencies: M0-A and M0-S CLOSED.
 

@@ -878,3 +878,105 @@ func TestSnapshotEquivalenceWithEffectivePolicy(t *testing.T) {
 		}
 	}
 }
+
+// TestDaemonOwnerCollapseIsCanonicalized proves the user-mode daemon-owner
+// collapse returns the same canonical normalized representation as every
+// other resolver output: intentionally unordered global input collapses to
+// the normalized effective entries byte-for-byte, independent of insertion
+// order, and an inherit Launcher over the collapse receives the same
+// normalized result.
+func TestDaemonOwnerCollapseIsCanonicalized(t *testing.T) {
+	unorderedGlobal := []AllowedRootEntry{
+		rwP("/g/project"),
+		roP("/g/input"),
+		rwP("/g"),
+		rwP("/g/other"),
+	}
+	want := []AllowedRootEntry{rwP("/g"), roP("/g/input")}
+	const owner = int64(7)
+
+	for i := 0; i < 4; i++ {
+		// Rotate the input to prove order independence.
+		rotated := append(append([]AllowedRootEntry{}, unorderedGlobal[i:]...), unorderedGlobal[:i]...)
+		got := effectivePrincipalAllowedRoots(rotated, nil, owner, owner, true)
+		if !slices.Equal(got, want) {
+			t.Fatalf("collapse %d = %v, want %v", i, got, want)
+		}
+	}
+
+	// An inherit Launcher over the collapse inherits the same normalized
+	// effective policy.
+	snap := newOwnershipSnapshotForTest(owner, LauncherScopeInherit, nil, nil)
+	got, err := effectiveLauncherAllowedRoots(unorderedGlobal, snap, owner, true)
+	if err != nil {
+		t.Fatalf("inherit over collapse error: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("inherit over collapse = %v, want %v", got, want)
+	}
+}
+
+// TestNewSessionFilesystemSnapshotBoundary proves the reusable snapshot
+// boundary rejects persisted policy data that does not match the trusted
+// Session workspace: wrong root (ancestor or descendant), outside entries,
+// empty entries, and invalid entries all fail closed.
+func TestNewSessionFilesystemSnapshotBoundary(t *testing.T) {
+	const workspace = "/run/job"
+	tests := []struct {
+		name    string
+		entries []AllowedRootEntry
+	}{
+		{name: "ancestor root", entries: []AllowedRootEntry{rwP("/run"), roP("/run/job/inputs")}},
+		{name: "descendant root", entries: []AllowedRootEntry{rwP("/run/job/sub"), roP("/run/job/sub/in")}},
+		{name: "workspace root plus outside entry", entries: []AllowedRootEntry{rwP("/run/job"), rwP("/elsewhere")}},
+		{name: "empty entries", entries: nil},
+		{name: "invalid access", entries: []AllowedRootEntry{{Path: workspace}}},
+		{name: "conflicting duplicates", entries: []AllowedRootEntry{rwP(workspace), roP(workspace)}},
+		{name: "uncleaned path", entries: []AllowedRootEntry{rwP(workspace), rwP(workspace + "//x")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap, err := newSessionFilesystemSnapshot(workspace, tt.entries)
+			if err == nil {
+				t.Fatalf("newSessionFilesystemSnapshot() = %+v, want refusal", snap)
+			}
+		})
+	}
+
+	// The trusted workspace is never guessed from the entries: a relative
+	// workspace fails closed even with matching entries.
+	if _, err := newSessionFilesystemSnapshot("run/job", []AllowedRootEntry{rwP("run/job")}); err == nil {
+		t.Error("relative workspace accepted, want refusal")
+	}
+	// The valid shape keeps the invariant: root == workspace, all entries
+	// inside, canonically ordered.
+	valid := []AllowedRootEntry{rwP(workspace), roP(workspace + "/inputs"), rwP(workspace + "/inputs/gen")}
+	snap, err := newSessionFilesystemSnapshot(workspace, valid)
+	if err != nil {
+		t.Fatalf("valid snapshot rejected: %v", err)
+	}
+	if snap.Workspace != workspace || !slices.Equal(snap.Entries, valid) {
+		t.Fatalf("valid snapshot = (%q, %v), want (%q, %v)", snap.Workspace, snap.Entries, workspace, valid)
+	}
+}
+
+// TestUnknownLauncherScopeFailsClosed proves a corrupt or unknown stored
+// Launcher scope is never silently treated as inherit: empty and garbage
+// scope values fail closed as unavailable instead of returning the Principal
+// ceiling.
+func TestUnknownLauncherScopeFailsClosed(t *testing.T) {
+	global := []AllowedRootEntry{rwP("/g")}
+	for _, scope := range []LauncherScopeMode{"", "garbage"} {
+		snap := newOwnershipSnapshotForTest(11, scope, nil, []AllowedRootEntry{rwP("/g")})
+		got, err := effectiveLauncherAllowedRoots(global, snap, 7, false)
+		if err == nil {
+			t.Fatalf("scope %q returned the Principal ceiling %v, want refusal", scope, got)
+		}
+		if !errors.Is(err, ErrLauncherUnavailable) {
+			t.Errorf("scope %q error = %v, want the typed ErrLauncherUnavailable contract", scope, err)
+		}
+		if got != nil {
+			t.Errorf("scope %q returned entries %v alongside the refusal", scope, got)
+		}
+	}
+}

@@ -177,7 +177,7 @@ func composeAllowedRootScopes(ceiling, narrowing []AllowedRootEntry) []AllowedRo
 // stored Principal entries, and the daemon-owner identity, and pass them in.
 func effectivePrincipalAllowedRoots(globalEntries, storedPrincipalEntries []AllowedRootEntry, principalID, daemonOwnerPrincipalID int64, userMode bool) []AllowedRootEntry {
 	if userMode && principalID == daemonOwnerPrincipalID && len(storedPrincipalEntries) == 0 {
-		return slices.Clone(globalEntries)
+		return normalizeAllowedRootEntries(globalEntries)
 	}
 	return composeAllowedRootScopes(globalEntries, storedPrincipalEntries)
 }
@@ -197,10 +197,18 @@ func effectivePrincipalAllowedRoots(globalEntries, storedPrincipalEntries []Allo
 //     with the Principal ceiling. A restricted entry whose mode is wider than
 //     the upstream mode is ordinary policy state, not corruption: the meet
 //     keeps the upstream read_only.
+//   - any other stored scope value is corrupt state: it is never treated as
+//     inherit, and the Launcher fails closed as unavailable (the existing
+//     typed Session-create contract).
 func effectiveLauncherAllowedRoots(globalEntries []AllowedRootEntry, snap *sessionOwnershipSnapshot, daemonOwnerPrincipalID int64, userMode bool) ([]AllowedRootEntry, error) {
 	principalCeiling := effectivePrincipalAllowedRoots(globalEntries, snap.principalRoots, snap.principalID, daemonOwnerPrincipalID, userMode)
-	if snap.launcherScope != LauncherScopeRestricted {
+	switch snap.launcherScope {
+	case LauncherScopeInherit:
 		return principalCeiling, nil
+	case LauncherScopeRestricted:
+		// Revalidate and compose below.
+	default:
+		return nil, fmt.Errorf("launcher scope mode %q is not supported: %w", string(snap.launcherScope), ErrLauncherUnavailable)
 	}
 	principalPaths := allowedRootPaths(principalCeiling)
 	for _, stored := range snap.launcherRoots {
@@ -220,25 +228,32 @@ type sessionFilesystemSnapshot struct {
 	Entries   []AllowedRootEntry
 }
 
-// newSessionFilesystemSnapshot validates one canonical snapshot value. The
-// entries must be canonical, non-empty, and all inside the workspace, with
-// the workspace itself as the first (root) entry. Any other state is corrupt
+// newSessionFilesystemSnapshot validates one canonical snapshot value
+// against the independent trusted Session workspace. The workspace must be a
+// canonical absolute path, the entries must be canonical, non-empty, begin
+// with the workspace itself, and stay inside it. Any other state is corrupt
 // and fails closed: the snapshot is the authority an issued Session bearer
-// grants, so it is never guessed.
-func newSessionFilesystemSnapshot(entries []AllowedRootEntry) (*sessionFilesystemSnapshot, error) {
+// grants, so the boundary never guesses the workspace from persisted policy
+// data and never accepts a snapshot rooted elsewhere.
+func newSessionFilesystemSnapshot(workspace string, entries []AllowedRootEntry) (*sessionFilesystemSnapshot, error) {
 	if err := validateCanonicalAllowedRootEntries(entries); err != nil {
 		return nil, err
+	}
+	if !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace {
+		return nil, fmt.Errorf("session workspace %q is not a canonical absolute path", workspace)
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("session filesystem snapshot has no entries")
 	}
-	root := entries[0]
+	if entries[0].Path != workspace {
+		return nil, fmt.Errorf("session filesystem snapshot root %q is not the workspace %q", entries[0].Path, workspace)
+	}
 	for _, e := range entries[1:] {
-		if !pathWithin(root.Path, e.Path) {
-			return nil, fmt.Errorf("session filesystem snapshot entry %q is outside the workspace %q", e.Path, root.Path)
+		if !pathWithin(workspace, e.Path) {
+			return nil, fmt.Errorf("session filesystem snapshot entry %q is outside the workspace %q", e.Path, workspace)
 		}
 	}
-	return &sessionFilesystemSnapshot{Workspace: root.Path, Entries: slices.Clone(entries)}, nil
+	return &sessionFilesystemSnapshot{Workspace: workspace, Entries: slices.Clone(entries)}, nil
 }
 
 // deriveSessionFilesystemSnapshot derives the pure Session filesystem
@@ -276,7 +291,7 @@ func deriveSessionFilesystemSnapshot(effective []AllowedRootEntry, workspace str
 		}
 	}
 	normalized := normalizeAllowedRootEntries(candidates)
-	return newSessionFilesystemSnapshot(normalized)
+	return newSessionFilesystemSnapshot(workspace, normalized)
 }
 
 // LookupAccess resolves one source path against the snapshot: the
