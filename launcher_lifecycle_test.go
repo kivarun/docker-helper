@@ -2049,7 +2049,7 @@ func TestLauncherScopeReplaceCommitsWithoutPostCommitLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, err := app.replaceLauncherScopeWithLifecycle(l.ID, LauncherScopeRestricted, []string{proj})
+	updated, err := app.replaceLauncherScopeWithLifecycle(l.ID, LauncherScopeRestricted, []AllowedRootEntry{allowedRootEntry(proj)})
 	if err != nil {
 		t.Fatalf("scope replace under post-commit query failure: %v", err)
 	}

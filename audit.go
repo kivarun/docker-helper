@@ -33,9 +33,17 @@ type auditRecord struct {
 	LauncherScope         string       `json:"launcher_scope,omitempty"`
 	LauncherEnabled       *bool        `json:"launcher_enabled,omitempty"`
 	LauncherAllowedRoot   string       `json:"launcher_path,omitempty"`
-	Result                string       `json:"result,omitempty"`
-	ExitCode              *int         `json:"exit_code,omitempty"`
-	Duration              string       `json:"duration,omitempty"`
+	// RequestedAccess and StoredAccess carry the allowed-root access-mode
+	// facts of the 2.2 control-plane mutations: the access value the caller
+	// requested and the access actually stored after the mutation. They are
+	// distinguished so an idempotent no-op that observed a different stored
+	// value (for example re-adding a read_only root) can never be audited as
+	// if the requested access had been stored.
+	RequestedAccess string `json:"requested_access,omitempty"`
+	StoredAccess    string `json:"stored_access,omitempty"`
+	Result          string `json:"result,omitempty"`
+	ExitCode        *int   `json:"exit_code,omitempty"`
+	Duration        string `json:"duration,omitempty"`
 }
 
 type auditMount struct {

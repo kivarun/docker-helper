@@ -286,6 +286,33 @@ Cover at minimum:
 
 ## Phase 2.2.3 — control-plane HTTP/CLI and introspection
 
+**Status: implemented, awaiting architectural acceptance.** Implemented on
+`feature/2.2.3-control-plane-access` (base `release/2.2@6b33a1e`, final SHA
+recorded in the phase report). Evidence: the canonical
+`AllowedRootEntry{Path,Access}` is carried end-to-end from the 2.2.1/2.2.2
+owners through every public boundary — presence-aware `--access` add and
+targeted `set-access` on all three families (global config, Principal,
+Launcher), with the set-access mutation performed once server-side as one
+conditional mutation (no CLI read-modify-write; a missing stored root is
+refused `404 allowed_root_not_found`, a same-value request is the idempotent
+unchanged no-op, and the reserved user-mode daemon-owner Principal is refused
+like every other mutation); the rich `allowed_root_entries` projection beside
+the preserved 2.1 `allowed_roots` path-only form on Principal show, Launcher
+show/list, effective-roots introspection, Session create-policy, and `config
+show`, with human allowed-root lists as PATH/ACCESS tables and CLI field
+extraction (`allowed_root_entries` on `principal show`) and completion sharing
+the same owners; the Launcher complete-scope PUT extended with the strict rich
+entry form while the 2.1 path-only form keeps mapping to `read_write` and the
+documented legacy `{"scope":"inherit","allowed_roots":[]}` shape stays valid;
+audit records for the access-bearing add/set-access mutations carry
+`requested_access` and `stored_access` so an idempotent no-op that ignores a
+conflicting request is observable; the JSON `--access` vocabulary is offered
+by completion only where an access value is legal. No authority changes:
+Principal credential and Session bearer retain no allowed-root mutation
+authority. Not implemented by design here: snapshot persistence (2.2.4) and
+runtime enforcement (2.2.5); README/architecture prose rework is deferred to
+the 2.2.7 documentation pass.
+
 Dependencies: 2.2.1 and 2.2.2.
 
 Extend existing allowed-root commands/routes; do not create a second ACL API.
@@ -295,10 +322,13 @@ Extend existing allowed-root commands/routes; do not create a second ACL API.
 Support optional access on add:
 
 ```text
-config allowed-root add PATH --access ACCESS
-principal allowed-root add USER PATH --access ACCESS
-launcher allowed-root add [LAUNCHER] PATH --access ACCESS
+config allowed-root add [--access ACCESS] PATH
+principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] USER PATH
+launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [LAUNCHER] PATH
 ```
+
+The project CLI parser requires flags to precede positional arguments, so the
+optional `--access` flag is always written before the positional PATH.
 
 Omission preserves old behavior: `read_write`.
 

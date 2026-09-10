@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 )
 
 // AllowedRootAccess is the canonical allowed-root access-mode vocabulary. The
@@ -23,6 +26,13 @@ const (
 // isValid reports whether a is exactly one of the two canonical access values.
 func (a AllowedRootAccess) isValid() bool {
 	return a == AllowedRootAccessReadWrite || a == AllowedRootAccessReadOnly
+}
+
+// allowedRootAccessVocabulary is the static vocabulary of the canonical
+// access modes, in canonical order. It is the single source for completion
+// and help surfaces that enumerate the access values.
+func allowedRootAccessVocabulary() []string {
+	return []string{string(AllowedRootAccessReadWrite), string(AllowedRootAccessReadOnly)}
 }
 
 // AllowedRootEntry is the single canonical allowed-root policy value: one
@@ -104,4 +114,87 @@ func allowedRootEntriesForPaths(paths []string) []AllowedRootEntry {
 		out = append(out, allowedRootEntry(p))
 	}
 	return out
+}
+
+// parseAllowedRootAccess parses a request-supplied access vocabulary value
+// into the canonical access mode. It is the single vocabulary parser for
+// control-plane inputs (HTTP request fields, CLI flags and positional
+// arguments): any value other than the two canonical spellings fails closed
+// with ErrInvalidAllowedRootAccess, never a silent default.
+func parseAllowedRootAccess(access string) (AllowedRootAccess, error) {
+	parsed := AllowedRootAccess(access)
+	if !parsed.isValid() {
+		return "", fmt.Errorf("access must be read_write or read_only, got %q: %w", access, ErrInvalidAllowedRootAccess)
+	}
+	return parsed, nil
+}
+
+// allowedRootAccessInput is the presence-aware optional access field of the
+// per-root allowed-root add request (Principal and Launcher): occurrence and
+// value are distinct facts. A field absent from the JSON object selects the
+// canonical read_write grant (the 2.1 path-only semantics); any occurrence —
+// including JSON null, the empty string, or an unknown spelling — is an
+// explicitly supplied value that must parse as exactly read_write or
+// read_only, so JSON null can never be reinterpreted as omission and silently
+// widen the grant to read_write.
+type allowedRootAccessInput struct {
+	present bool
+	value   string
+}
+
+// UnmarshalJSON marks the field present on any occurrence, including JSON
+// null, which decodes as the explicitly supplied unparsable empty value and
+// is rejected by the vocabulary parser instead of defaulting. A non-string,
+// non-null value is a malformed request and fails the decode.
+func (a *allowedRootAccessInput) UnmarshalJSON(data []byte) error {
+	a.present = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	return json.Unmarshal(data, &a.value)
+}
+
+// allowedRootNotFoundError is the typed refusal of a targeted access
+// mutation (set-access) whose resolved canonical stored identity has no
+// stored entry. It carries the canonical identity so the refusal audit can
+// name exactly which stored entry was targeted, and unwraps to
+// ErrAllowedRootNotFound for the stable HTTP/CLI classification.
+type allowedRootNotFoundError struct {
+	path string
+}
+
+func (e allowedRootNotFoundError) Error() string {
+	return fmt.Sprintf("allowed root %q not found", e.path)
+}
+
+func (e allowedRootNotFoundError) Unwrap() error {
+	return ErrAllowedRootNotFound
+}
+
+// resolveAllowedRootIdentity resolves the canonical stored-root identity a
+// control-plane mutation targets (set-access and the exact-match remove
+// semantics): the absolute path, symlink-resolved when the target still
+// exists on the filesystem, the cleaned absolute form only when the
+// filesystem reports the path as nonexistent, and a fail-closed error for
+// every other resolution failure. A symlink loop, a permission error, or any
+// other resolution error is never demoted to a lexical lookup, so resolution
+// failure always refuses the mutation instead of silently addressing a
+// different stored entry. A stored root is always matched by this identity,
+// so a symlink alias names the same stored entry as its target and a deleted
+// directory keeps its stored identity. It is the shared owner of that
+// resolution for every allowed-root family (global config, Principal,
+// Launcher).
+func resolveAllowedRootIdentity(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve path: %w: %w", err, ErrInvalidAllowedRoot)
+	}
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return canonical, nil
+	}
+	if os.IsNotExist(err) {
+		return filepath.Clean(abs), nil
+	}
+	return "", fmt.Errorf("cannot resolve allowed-root identity %q: %w: %w", abs, err, ErrInvalidAllowedRoot)
 }

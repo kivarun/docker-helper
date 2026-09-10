@@ -118,6 +118,11 @@ type configFieldSpec struct {
 var configFields = []configFieldSpec{
 	{name: "allowed_roots", writable: true, required: true},
 	{name: "allowed_root", writable: false, required: false},
+	// allowed_root_entries is the rich CLI show projection of the canonical
+	// stored allowed_roots; it is a show surface, never a config-file field,
+	// so the read-only classification makes a config.json carrying it a
+	// fail-closed validation error.
+	{name: "allowed_root_entries"},
 	{name: "session_ttl", writable: true, required: true},
 	{name: "log_level", writable: true},
 	{name: "audit_enabled", writable: true},
@@ -539,8 +544,13 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]Allo
 
 // resolveAllowedRootsForShow resolves allowed_roots for config show.
 // It does not canonicalize paths, just resolves legacy migration and projects
-// the stored paths of the canonical entries in first-occurrence order.
-func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]string, error) {
+// the stored entries in first-occurrence order: the stored paths keep their
+// stored spelling and every entry reports its authoritative access (a legacy
+// path-only entry is the read_write grant). The returned entries are the one
+// canonical policy value from which both public `config show` projections
+// (allowed_roots and allowed_root_entries) derive; see
+// allowedRootShowProjections.
+func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
 	hasLegacy := raw["allowed_root"] != nil
 	hasNew := raw["allowed_roots"] != nil
 	if hasLegacy && hasNew {
@@ -558,7 +568,7 @@ func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) 
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
 	}
 	seen := make(map[string]bool)
-	result := make([]string, 0, len(entries))
+	result := make([]AllowedRootEntry, 0, len(entries))
 	for _, e := range entries {
 		if e.Path == "" {
 			return nil, fmt.Errorf("allowed_roots contains an empty entry")
@@ -570,7 +580,7 @@ func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) 
 			continue
 		}
 		seen[e.Path] = true
-		result = append(result, e.Path)
+		result = append(result, e)
 	}
 	if len(result) == 0 {
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")

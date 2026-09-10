@@ -206,6 +206,16 @@ var principalFields = []principalField{
 			return string(data), true
 		},
 	},
+	{
+		name: "allowed_root_entries",
+		extract: func(p *principalResponse) (string, bool) {
+			data, err := json.Marshal(p.AllowedRootEntries)
+			if err != nil {
+				return "", false
+			}
+			return string(data), true
+		},
+	},
 }
 
 // principalShowFieldNames returns the canonical FIELD vocabulary in
@@ -325,6 +335,7 @@ var principalAllowedRootCommand = &Command{
 	Subcommands: []*Command{
 		principalAllowedRootAddCommand,
 		principalAllowedRootListCommand,
+		principalAllowedRootSetAccessCommand,
 		principalAllowedRootRemoveCommand,
 	},
 }
@@ -357,9 +368,7 @@ var principalAllowedRootListCommand = &Command{
 					return 1
 				}
 
-				for _, root := range result.AllowedRoots {
-					fmt.Fprintln(stdout, root)
-				}
+				printAllowedRootAccessTable(stdout, result.AllowedRootEntries)
 				return 0
 			},
 		}
@@ -369,11 +378,13 @@ var principalAllowedRootListCommand = &Command{
 var principalAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root for a principal",
-	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH",
+	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		access := &accessFlag{}
+		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -390,7 +401,7 @@ var principalAllowedRootAddCommand = &Command{
 					return 1
 				}
 
-				result, err := client.addPrincipalAllowedRoot(username, path)
+				result, err := client.addPrincipalAllowedRoot(username, path, optionalAccessFromFlag(access))
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -398,7 +409,56 @@ var principalAllowedRootAddCommand = &Command{
 
 				fmt.Fprintf(stdout, "added %q to %s\n", path, username)
 				if result.Message == "unchanged" {
-					fmt.Fprintln(stdout, "(already present)")
+					fmt.Fprintf(stdout, "(already present with access %s)\n", result.Access)
+				}
+				return 0
+			},
+		}
+	},
+}
+
+// principalAllowedRootSetAccessCommand changes the access mode of exactly one
+// stored root: USER PATH ACCESS. The daemon performs the conditional
+// mutation, so the CLI never reads and re-sends the root list.
+var principalAllowedRootSetAccessCommand = &Command{
+	Name:       "set-access",
+	Summary:    "Change the access mode of a principal allowed root",
+	Usage:      "docker-helper principal allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH ACCESS",
+	MinPosArgs: 3,
+	MaxPosArgs: 3,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				args := fs.Args()
+				username := args[0]
+				path := args[1]
+
+				access, err := parseAllowedRootAccess(args[2])
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 2
+				}
+
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				result, err := client.setPrincipalAllowedRootAccess(username, path, access)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				fmt.Fprintf(stdout, "access of %q on %s is %s\n", result.Path, username, result.Access)
+				if result.Message == "unchanged" {
+					fmt.Fprintln(stdout, "(unchanged)")
 				}
 				return 0
 			},

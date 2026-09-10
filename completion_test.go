@@ -719,9 +719,9 @@ func TestCompletionConfigUnsetNoStaleAllowedRoot(t *testing.T) {
 func TestCompletionAllowedRootSubcommands(t *testing.T) {
 	script := completionScript(t)
 
-	// config allowed-root must complete list, add, remove.
+	// config allowed-root must complete list, add, set-access, remove.
 	results := runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", ""})
-	expected := []string{"list", "add", "remove"}
+	expected := []string{"list", "add", "set-access", "remove"}
 	if len(results) != len(expected) {
 		t.Fatalf("expected %d subcommands, got %d: %v", len(expected), len(results), results)
 	}
@@ -1396,6 +1396,12 @@ var treeProviderLeafPaths = []string{
 	// selector introspection (the --principal owner), and the FIELD
 	// positional after USER completes the canonical show-field vocabulary.
 	"principal show",
+	// The set-access leaves complete the stored-root PATH and the static
+	// access vocabulary; the launcher form keeps the grammar-ambiguous
+	// first-positional union contract of the add/remove pair.
+	"config allowed-root set-access",
+	"principal allowed-root set-access",
+	"launcher allowed-root set-access",
 	"help",
 }
 
@@ -3382,8 +3388,8 @@ func TestCompletionPrincipalShowFieldVocabulary(t *testing.T) {
 		}
 	}
 
-	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "a"}); !slices.Equal(got, []string{"allowed_roots"}) {
-		t.Fatalf("principal show michael a<TAB> = %v, want [allowed_roots]", got)
+	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "a"}); !slices.Equal(got, []string{"allowed_roots", "allowed_root_entries"}) {
+		t.Fatalf("principal show michael a<TAB> = %v, want [allowed_roots allowed_root_entries]", got)
 	}
 
 	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "uid", ""}); len(got) != 0 {

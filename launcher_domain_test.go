@@ -144,7 +144,7 @@ func TestLauncherScopeReplaceInheritRejectsRootsAtDomain(t *testing.T) {
 	}
 
 	// inherit + roots must be rejected at the domain boundary.
-	if _, err := replaceLauncherScope(db, l, LauncherScopeInherit, []string{proj}, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
+	if _, err := replaceLauncherScope(db, l, LauncherScopeInherit, []AllowedRootEntry{allowedRootEntry(proj)}, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
 		t.Fatalf("expected ErrInvalidAllowedRoots for inherit+roots, got: %v", err)
 	}
 	// Prior scope/roots unchanged.
@@ -538,7 +538,7 @@ func TestLauncherScopeReplaceInheritToRestricted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots))
+	updated, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []AllowedRootEntry{allowedRootEntry(proj)}, testEffectivePrincipalRoots(t, db, pid, globalRoots))
 	if err != nil {
 		t.Fatalf("replaceLauncherScope: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestLauncherScopeReplaceInvalidRootRejectedAtomically(t *testing.T) {
 	if err := os.MkdirAll(outside, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []string{outside}, testEffectivePrincipalRoots(t, db, pid, globalRoots)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
+	if _, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []AllowedRootEntry{allowedRootEntry(outside)}, testEffectivePrincipalRoots(t, db, pid, globalRoots)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("expected ErrLauncherRootOutsidePrincipal, got: %v", err)
 	}
 	// Old scope/roots unchanged.

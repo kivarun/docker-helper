@@ -395,7 +395,7 @@ func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add second allowed root.
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "wsuser2", secondRoot, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "wsuser2", secondRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -1412,7 +1412,7 @@ func TestGlobalPolicyNarrowing(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add the broad root to the principal.
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "narrowuser", broadRoot, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "narrowuser", broadRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -1489,7 +1489,7 @@ func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add a root that will become stale.
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "staleuser", staleRoot, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "staleuser", staleRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
