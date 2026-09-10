@@ -69,7 +69,7 @@
 #   UAT_BASELINE_RPM       v2.0.0 baseline RPM path (default
 #                          /opt/uat-import/docker-helper-baseline.rpm)
 #   UAT_BASELINE_SHA256    expected baseline SHA-256 (optional; verified when set)
-#   UAT_VERSION            candidate version string (default 2.1.0-uat)
+#   UAT_VERSION            candidate version string (default 2.2.0-uat)
 #   UAT_BASELINE_VERSION   baseline version string (default 2.0.0)
 #   UAT_ALLOWED_ROOT       global allowed root for baseline init (default /home)
 #   UAT_IMAGE              consumer image (default alpine:3.24, the image the
@@ -117,7 +117,7 @@ CANDIDATE_RPM="${UAT_RPM:-}"
 CANDIDATE_SHA256="${UAT_RPM_SHA256:-}"
 BASELINE_RPM="${UAT_BASELINE_RPM:-/opt/uat-import/docker-helper-baseline.rpm}"
 BASELINE_SHA256="${UAT_BASELINE_SHA256:-}"
-VERSION="${UAT_VERSION:-2.1.0-uat}"
+VERSION="${UAT_VERSION:-2.2.0-uat}"
 BASELINE_VERSION="${UAT_BASELINE_VERSION:-2.0.0}"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home}"
 IMAGE="${UAT_IMAGE:-alpine:3.24}"

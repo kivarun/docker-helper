@@ -12,9 +12,9 @@ on:
           - full
           - selinux
       uat_version:
-        description: 'Version string baked into the candidate artifacts (default 2.1.0-uat)'
+        description: 'Version string baked into the candidate artifacts (default 2.2.0-uat)'
         required: false
-        default: '2.1.0-uat'
+        default: '2.2.0-uat'
         type: string
 
 permissions:

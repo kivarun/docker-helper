@@ -104,14 +104,14 @@ record_stage() { # name result
 }
 
 # selinux_stage_accept BB_RESULT SELREG_RESULT MP_RESULT LIFECYCLE_RESULT
-#                      SELCHECK_RESULT RUNDIR_RESULT:
+#                      SELCHECK_RESULT RUNDIR_RESULT WLMAC_RESULT MIG211_RESULT:
 # overall acceptance of the normal SELinux UAT (fail-closed). Every gating
 # stage must be PASS: a BLOCKED stage means the required scenario was NOT
 # exercised, which is not acceptable for Release-2. Returns 0 only when all
-# six are PASS.
+# eight are PASS.
 selinux_stage_accept() {
   [ "$1" = "PASS" ] && [ "$2" = "PASS" ] && [ "$3" = "PASS" ] && [ "$4" = "PASS" ] \
-    && [ "$5" = "PASS" ] && [ "$6" = "PASS" ]
+    && [ "$5" = "PASS" ] && [ "$6" = "PASS" ] && [ "$7" = "PASS" ] && [ "$8" = "PASS" ]
 }
 
 # ---------------------------------------------------------------------------

@@ -7950,7 +7950,10 @@ func TestRelease2AcceptanceClassifierMarkerExactMatch(t *testing.T) {
 
 // TestArtifactGateConsumersNoRebuild verifies every consumer of the artifact
 // gate downloads the candidate set, resolves its artifact from the producer
-// SHA256SUMS and never builds locally (no setup-go, no build scripts).
+// SHA256SUMS and never builds the candidate locally (no build scripts, no
+// nfpm). setup-go is allowed only in the two jobs that compile the test-only
+// live-workload harness (production has no force-writable bypass); those jobs
+// must bind the harness to the candidate source SHA and manifest.
 func TestArtifactGateConsumersNoRebuild(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/artifact-gate.yml")
 	if err != nil {
@@ -7958,32 +7961,42 @@ func TestArtifactGateConsumersNoRebuild(t *testing.T) {
 	}
 	content := string(data)
 
-	consumers := []string{
-		"uat-blackbox-ubuntu",
-		"uat-blackbox-ubuntu-tarball",
-		"uat-regressions-ubuntu",
-		"uat-blackbox-opensuse-apparmor",
-		"uat-blackbox-opensuse-selinux",
-		"uat-blackbox-opensuse-tarball-selinux",
+	// allowSetupGo marks the jobs whose setup-go exists solely to compile the
+	// test-only live-workload harness (never a candidate artifact).
+	consumers := []struct {
+		name         string
+		allowSetupGo bool
+	}{
+		{"uat-blackbox-ubuntu", false},
+		{"uat-blackbox-ubuntu-tarball", false},
+		{"uat-regressions-ubuntu", false},
+		{"uat-access-modes-ubuntu", false},
+		{"uat-workload-apparmor-ubuntu", true},
+		{"uat-blackbox-opensuse-apparmor", false},
+		{"uat-blackbox-opensuse-selinux", true},
+		{"uat-blackbox-opensuse-tarball-selinux", false},
 	}
 	for _, c := range consumers {
-		job := findJobSection(content, c)
+		job := findJobSection(content, c.name)
 		if job == "" {
-			t.Fatalf("artifact-gate.yml must contain consumer job %s", c)
+			t.Fatalf("artifact-gate.yml must contain consumer job %s", c.name)
 		}
 		if !strings.Contains(job, "needs: producer") {
-			t.Errorf("consumer job %s must depend on the producer", c)
+			t.Errorf("consumer job %s must depend on the producer", c.name)
 		}
-		for _, banned := range []string{"setup-go", "build-bundle.sh", "build-packages.sh", "build-static.sh", "nfpm"} {
+		for _, banned := range []string{"build-bundle.sh", "build-packages.sh", "build-static.sh", "nfpm"} {
 			if strings.Contains(job, banned) {
-				t.Errorf("consumer job %s must not contain %s (no local rebuild)", c, banned)
+				t.Errorf("consumer job %s must not contain %s (no local rebuild)", c.name, banned)
 			}
 		}
+		if !c.allowSetupGo && strings.Contains(job, "setup-go") {
+			t.Errorf("consumer job %s must not contain setup-go (no local rebuild)", c.name)
+		}
 		if !strings.Contains(job, "release-candidate-artifact.sh") {
-			t.Errorf("consumer job %s must resolve its artifact via release-candidate-artifact.sh", c)
+			t.Errorf("consumer job %s must resolve its artifact via release-candidate-artifact.sh", c.name)
 		}
 		if !strings.Contains(job, "download-artifact") {
-			t.Errorf("consumer job %s must download the candidate artifact", c)
+			t.Errorf("consumer job %s must download the candidate artifact", c.name)
 		}
 	}
 
@@ -7992,6 +8005,18 @@ func TestArtifactGateConsumersNoRebuild(t *testing.T) {
 	reg := findJobSection(content, "uat-regressions-ubuntu")
 	if !strings.Contains(reg, "UAT_ARTIFACT_PATH") || !strings.Contains(reg, "UAT_ARTIFACT_SHA256") {
 		t.Error("uat-regressions-ubuntu must consume the exact candidate DEB")
+	}
+
+	// The live-workload harness consumers must bind the harness to the same
+	// candidate source SHA/manifest; without that binding a source-only
+	// workflow could stand in for the release gate.
+	wla := findJobSection(content, "uat-workload-apparmor-ubuntu")
+	if !strings.Contains(wla, "UAT_SOURCE_SHA") || !strings.Contains(wla, "UAT_MANIFEST_PATH") {
+		t.Error("uat-workload-apparmor-ubuntu must bind the live harness to the candidate source SHA/manifest")
+	}
+	sel := findJobSection(content, "uat-blackbox-opensuse-selinux")
+	if !strings.Contains(sel, "UAT_SOURCE_SHA") || !strings.Contains(sel, "UAT_MANIFEST") {
+		t.Error("uat-blackbox-opensuse-selinux must bind the live harness to the candidate source SHA/manifest")
 	}
 }
 
@@ -8375,15 +8400,15 @@ func TestUpgradeBaselineGenericVocabulary(t *testing.T) {
 // TestUpgradeBaselineLifecycleSemantics verifies the DEB and RPM lifecycle
 // scripts consume the source-owned stable v2.0.0 baseline identity from the
 // single fixture owner (never as caller-controlled env inputs) and expect a
-// 2.1.x UAT candidate (a real forward upgrade).
+// 2.2.x UAT candidate (a real forward upgrade).
 func TestUpgradeBaselineLifecycleSemantics(t *testing.T) {
 	deb, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	debContent := string(deb)
-	if !strings.Contains(debContent, "UAT_VERSION:-2.1.0-uat") {
-		t.Error("DEB acceptance must default the candidate to 2.1.0-uat")
+	if !strings.Contains(debContent, "UAT_VERSION:-2.2.0-uat") {
+		t.Error("DEB acceptance must default the candidate to 2.2.0-uat")
 	}
 	if !strings.Contains(debContent, "UPGRADE_BASELINE_VERSION") {
 		t.Error("DEB acceptance must consume the fixture baseline version")
@@ -8397,8 +8422,8 @@ func TestUpgradeBaselineLifecycleSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	rpmContent := string(rpm)
-	if !strings.Contains(rpmContent, "UAT_VERSION:-2.1.0-uat") {
-		t.Error("RPM lifecycle must default the candidate to 2.1.0-uat")
+	if !strings.Contains(rpmContent, "UAT_VERSION:-2.2.0-uat") {
+		t.Error("RPM lifecycle must default the candidate to 2.2.0-uat")
 	}
 	if !strings.Contains(rpmContent, "uat-upgrade-baseline-fixture.sh") {
 		t.Error("RPM lifecycle must source the upgrade-baseline fixture owner")

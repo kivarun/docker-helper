@@ -30,9 +30,10 @@
 # This file owns the RPM-specific stages ONLY — the exact RPM transfer, and the
 # RPM SELinux stage set (black-box UAT, SELinux mount-pin / RPM postinstall
 # regression, the Phase-A2 docker socket micro-proof, the Release-2 SELinux
-# targeted regression groups 1-5, the RPM/SELinux lifecycle, and the
-# RuntimeDirectory socket replacement regression). All VM mechanics live in the
-# harness; all
+# targeted regression groups 1-6, the RPM/SELinux lifecycle, the
+# RuntimeDirectory socket replacement regression, the Release-2 SELinux
+# workload-MAC acceptance matrix, and the 2.1.1 -> candidate RPM migration
+# gate). All VM mechanics live in the harness; all
 # SELinux host construction lives in the shared lib; the guest-side UAT is the
 # existing scripts/uat-blackbox.sh with its uat-platform-opensuse.sh (platform
 # owner) and uat-mac-selinux.sh (MAC owner) adapters, which remain the owners of
@@ -40,7 +41,7 @@
 #
 # Collect-all: a failure in the common black-box UAT or the mount-pin
 # regression never prevents the remaining stages (socket micro-proof, Release-2
-# regressions 1-5) from executing; the final summary records every stage and
+# regressions 1-6) from executing; the final summary records every stage and
 # the job exits nonzero only when a gating stage failed.
 #
 # Flow:
@@ -69,11 +70,18 @@
 #          UAT_MAC=selinux, prebuilt RPM)            [result recorded, collect-all]
 #       -> SELinux mount-pin / RPM postinstall regression  [result recorded]
 #       -> A2 docker socket micro-proof (dontaudit off, bounded evidence)
-#       -> Release-2 SELinux targeted regression groups 1-5 (collect-all runner)
+#       -> Release-2 SELinux targeted regression groups 1-6 (collect-all runner)
 #       -> RPM/SELinux lifecycle                  [result recorded, collect-all]
 #       -> RuntimeDirectory socket replacement regression
 #          (real zypper upgrade + --force reinstall, long-lived bind-mount
 #          consumer)                             [result recorded, collect-all]
+#       -> Release-2 SELinux workload-MAC acceptance matrix (the full
+#          docs/release-2.2-mac-enforcement.md SELinux matrix, inside the
+#          enforcing guest, with the host-compiled live harness bound to the
+#          candidate source SHA/manifest)        [result recorded, collect-all]
+#       -> 2.1.1 -> candidate RPM migration gate (pinned published v2.1.1
+#          baseline through real rpm -U with the service running)
+#                                                 [result recorded, collect-all]
 #
 # The Tumbleweed cloud image ships SELinux-active by default (the filesystem
 # is already labeled for the targeted policy), so the harness keeps SELinux as
@@ -89,7 +97,10 @@
 #   UAT_REPO_DIR     host checkout of docker-helper (default: repo root of this script)
 #   UAT_RPM          path to the exact prebuilt RPM artifact
 #   UAT_RPM_SHA256   expected SHA-256 produced by the build job
-#   UAT_VERSION      version string (default 2.1.0-uat)
+#   UAT_MANIFEST     path to candidate.manifest produced by the gate (workload-MAC stage)
+#   UAT_SOURCE_SHA   the gate source SHA (github.sha) bound into the manifest and
+#                    the host-compiled live harness (workload-MAC stage binding)
+#   UAT_VERSION      version string (default 2.2.0-uat)
 #   UAT_KEEP         keep the VM/workdir on failure for debugging
 #
 # Exit 0 = full openSUSE/SELinux black-box UAT + mount-pin regression passed
@@ -105,12 +116,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UAT_REPO_DIR="${UAT_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 UAT_RPM="${UAT_RPM:-}"
 UAT_RPM_SHA256="${UAT_RPM_SHA256:-}"
-VERSION="${UAT_VERSION:-2.1.0-uat}"
+UAT_MANIFEST="${UAT_MANIFEST:-}"
+UAT_SOURCE_SHA="${UAT_SOURCE_SHA:-}"
+VERSION="${UAT_VERSION:-2.2.0-uat}"
 KEEP="${UAT_KEEP:-}"
 
 [ -n "$UAT_RPM" ] || fail "UAT_RPM is required (exact prebuilt RPM artifact)"
 [ -f "$UAT_RPM" ] || fail "UAT_RPM is not a file: $UAT_RPM"
 [ -n "$UAT_RPM_SHA256" ] || fail "UAT_RPM_SHA256 is required (producer SHA-256)"
+[ -n "$UAT_MANIFEST" ] || fail "UAT_MANIFEST is required (candidate.manifest for the workload-MAC stage)"
+[ -f "$UAT_MANIFEST" ] || fail "UAT_MANIFEST is not a file: $UAT_MANIFEST"
+[ -n "$UAT_SOURCE_SHA" ] || fail "UAT_SOURCE_SHA is required (candidate source SHA binding)"
 [ -f "$UAT_REPO_DIR/scripts/uat-blackbox.sh" ] \
   || fail "UAT_REPO_DIR has no scripts/uat-blackbox.sh: $UAT_REPO_DIR"
 
@@ -128,6 +144,17 @@ if upgrade_baseline_fetch_rpm /tmp/uat-baseline-docker-helper.rpm >/tmp/baseline
   log "v2.0.0 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
 else
   fail "could not download/verify the v2.0.0 baseline RPM (pinned fixture)"
+fi
+
+# The published v2.1.1 package is the immutable migration baseline for the
+# Release-2.2 2.1.1 -> candidate RPM migration gate (same single fixture
+# owner, same pinned-digest contract).
+BASELINE211_RPM_PATH=""
+if upgrade211_fetch_rpm /tmp/uat-baseline211-docker-helper.rpm >/tmp/baseline211-rpm.path 2>/dev/null; then
+  BASELINE211_RPM_PATH="$(cat /tmp/baseline211-rpm.path)"
+  log "v2.1.1 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
+else
+  fail "could not download/verify the v2.1.1 baseline RPM (pinned fixture)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -171,6 +198,23 @@ log "== 6. transfer repo + RPM into the guest =="
 vm_selinux_transfer_repo
 vm_selinux_transfer_artifact "docker-helper.rpm" "$UAT_RPM"
 vm_selinux_transfer_artifact "docker-helper-baseline.rpm" "$BASELINE_RPM_PATH"
+vm_selinux_transfer_artifact "docker-helper-baseline-2.1.1.rpm" "$BASELINE211_RPM_PATH"
+
+# ---------------------------------------------------------------------------
+# 6c. compile the live-workload proof harness on the host and bind it to the
+#     candidate source SHA. Production intentionally has no force-writable
+#     bypass, so the backend-only forced-writable RO proof uses the test-only
+#     live harness compiled from THIS gate checkout; the guest acceptance
+#     verifies candidate.manifest source_sha == UAT_SOURCE_SHA before use.
+# ---------------------------------------------------------------------------
+log "== 6c. compile the live-workload harness (host, candidate source binding) =="
+REPO_HEAD="$(git -C "$UAT_REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+[ "$REPO_HEAD" = "$UAT_SOURCE_SHA" ] \
+  || fail "live harness source binding broken (repo HEAD '$REPO_HEAD' != UAT_SOURCE_SHA '$UAT_SOURCE_SHA')"
+( cd "$UAT_REPO_DIR" && go test -c -o /tmp/uat-wls-proof.test . ) \
+  || fail "live-workload harness compilation failed"
+vm_selinux_transfer_artifact "workload-live-proof.test" /tmp/uat-wls-proof.test
+vm_selinux_transfer_artifact "candidate.manifest" "$UAT_MANIFEST"
 
 # ---------------------------------------------------------------------------
 # 6b-7a. two-stage Docker preparation + Docker SELinux health gate
@@ -239,17 +283,17 @@ fi
 record_stage "A2 socket micro-proof" "$MICRO_RESULT"
 
 # ---------------------------------------------------------------------------
-# 8c. Release-2 SELinux targeted regression groups 1-5 (collect-all)
+# 8c. Release-2 SELinux targeted regression groups 1-6 (collect-all)
 # ---------------------------------------------------------------------------
-log "== 8c. SELinux targeted regression groups 1-5 (collect-all runner) =="
+log "== 8c. SELinux targeted regression groups 1-6 (collect-all runner) =="
 SELREG_RESULT=FAIL
-if run_guest_capture "SELinux regression groups 1-5 inside the guest" \
+if run_guest_capture "SELinux regression groups 1-6 inside the guest" \
   "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-regressions-runner-selinux.sh"; then
   SELREG_RESULT=PASS
 else
-  log "SELinux regression groups 1-5 reported a failure (recorded)"
+  log "SELinux regression groups 1-6 reported a failure (recorded)"
 fi
-record_stage "SELinux regressions (1-5)" "$SELREG_RESULT"
+record_stage "SELinux regressions (1-6)" "$SELREG_RESULT"
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +331,52 @@ record_stage "RuntimeDirectory socket regression" "$RUNDIR_RESULT"
 
 
 # ---------------------------------------------------------------------------
+# 8f. Release-2 SELinux workload-MAC acceptance matrix (the full
+#     docs/release-2.2-mac-enforcement.md SELinux matrix) inside the enforcing
+#     guest, against the exact candidate RPM, with the host-compiled live
+#     harness bound to the candidate source SHA/manifest
+# ---------------------------------------------------------------------------
+log "== 8f. SELinux workload-MAC acceptance matrix (exact candidate) =="
+WLMAC_RESULT=FAIL
+if run_guest_capture "SELinux workload-MAC acceptance inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_PROOF_BIN=/opt/uat-import/workload-live-proof.test UAT_SOURCE_SHA=$UAT_SOURCE_SHA UAT_MANIFEST=/opt/uat-import/candidate.manifest UAT_PRINCIPAL=opc scripts/uat-workload-selinux.sh"; then
+  WLMAC_RESULT=PASS
+  log "SELinux workload-MAC acceptance passed inside the guest"
+else
+  WLMAC_EC=$?
+  if [ "$WLMAC_EC" = 2 ]; then
+    WLMAC_RESULT=BLOCKED
+    log "SELinux workload-MAC acceptance BLOCKED inside the guest (required scenario not exercised; fails the job)"
+  else
+    log "SELinux workload-MAC acceptance FAILED inside the guest (recorded)"
+  fi
+fi
+record_stage "SELinux workload-MAC acceptance" "$WLMAC_RESULT"
+
+
+# ---------------------------------------------------------------------------
+# 8g. Release-2.2 migration gate 2.1.1 -> candidate on the RPM path (pinned
+#     published v2.1.1 baseline, real rpm -U upgrade with the service running)
+# ---------------------------------------------------------------------------
+log "== 8g. 2.1.1 -> candidate RPM migration gate =="
+MIG211_RESULT=FAIL
+if run_guest_capture "2.1.1 -> candidate RPM migration inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_BASELINE211_RPM=/opt/uat-import/docker-helper-baseline-2.1.1.rpm UAT_BASELINE211_SHA256=$UPGRADE211_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-migration-rpm-211.sh"; then
+  MIG211_RESULT=PASS
+  log "2.1.1 -> candidate RPM migration gate passed inside the guest"
+else
+  MIG211_EC=$?
+  if [ "$MIG211_EC" = 2 ]; then
+    MIG211_RESULT=BLOCKED
+    log "2.1.1 -> candidate RPM migration BLOCKED inside the guest (required scenario not exercised; fails the job)"
+  else
+    log "2.1.1 -> candidate RPM migration FAILED inside the guest (recorded)"
+  fi
+fi
+record_stage "2.1.1 RPM migration" "$MIG211_RESULT"
+
+
+# ---------------------------------------------------------------------------
 # 9. Summary
 # ---------------------------------------------------------------------------
 T1="$(date +%s)"
@@ -304,6 +394,7 @@ echo "getenforce:       $GETENF"
 echo "RPM:              $UAT_RPM"
 echo "RPM sha256:       $UAT_RPM_SHA256 (producer, verified by UAT)"
 echo "v2.0.0 baseline RPM: $BASELINE_RPM_PATH (pinned fixture, verified)"
+echo "v2.1.1 baseline RPM: $BASELINE211_RPM_PATH (pinned fixture, verified)"
 echo "UAT version:      $VERSION"
 echo "Docker SELinux:   ${DOCKER_HEALTHY:-0}=naturally healthy two-stage setup (container-selinux before Docker)"
 echo "total:            ${TOTAL}s"
@@ -315,7 +406,7 @@ echo "============================="
 # is not acceptable for Release-2 — the historical docker socket blocker that
 # once justified treating BLOCKED as success is closed, so it must not remain
 # encoded as acceptance semantics.
-if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT"; then
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"
