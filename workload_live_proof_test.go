@@ -95,7 +95,7 @@ func inodeContextOf(path string) string {
 // command error (nonzero exit = the denial surfaced inside the container).
 func runInContainerWithOpts(t *testing.T, securityOpts []string, bind, snippet string) error {
 	t.Helper()
-	args := []string{"run", "--rm", "--entrypoint", "/bin/sh"}
+	args := []string{"run", "--rm"}
 	for _, opt := range securityOpts {
 		args = append(args, "--security-opt", opt)
 	}
@@ -486,11 +486,11 @@ func TestLiveWorkloadMCSConcurrentRWRO(t *testing.T) {
 // security options and returns the observed process label.
 func containerProcessLabel(t *testing.T, securityOpts []string, bind string) string {
 	t.Helper()
-	args := []string{"run", "--rm", "--entrypoint", "/bin/cat"}
+	args := []string{"run", "--rm"}
 	for _, opt := range securityOpts {
 		args = append(args, "--security-opt", opt)
 	}
-	args = append(args, "-v", fmt.Sprintf("%s:/inputs:ro", bind), "alpine:3.19", "/proc/self/attr/current")
+	args = append(args, "-v", fmt.Sprintf("%s:/inputs:ro", bind), "alpine:3.19", "/bin/cat", "/proc/self/attr/current")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", args...)

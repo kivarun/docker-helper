@@ -67,14 +67,6 @@ jobs:
             "$RUNNER_TEMP/workload-live-proof.test" \
             -test.run 'TestLiveWorkloadAppArmor' -test.v
 
-      - name: Record proof summary
-        if: always()
-        run: |
-          {
-            printf 'TESTED_SOURCE=%s\n' "$(git rev-parse HEAD)"
-            printf 'PROOF_RESULT=PASS\n'
-          } > "$RUNNER_TEMP/release-2.2-workload-apparmor-evidence/host-summary.txt"
-
       - name: Upload live proof evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
