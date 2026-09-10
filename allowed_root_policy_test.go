@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -943,11 +944,9 @@ func TestNewSessionFilesystemSnapshotBoundary(t *testing.T) {
 		})
 	}
 
-	// The trusted workspace is never guessed from the entries: a relative
-	// workspace fails closed even with matching entries.
-	if _, err := newSessionFilesystemSnapshot("run/job", []AllowedRootEntry{rwP("run/job")}); err == nil {
-		t.Error("relative workspace accepted, want refusal")
-	}
+	// The trusted workspace is never guessed from the entries: the
+	// independent-workspace refusal with canonical entries is proven by
+	// TestSnapshotBoundaryRejectsNonCanonicalWorkspace.
 	// The valid shape keeps the invariant: root == workspace, all entries
 	// inside, canonically ordered.
 	valid := []AllowedRootEntry{rwP(workspace), roP(workspace + "/inputs"), rwP(workspace + "/inputs/gen")}
@@ -978,5 +977,85 @@ func TestUnknownLauncherScopeFailsClosed(t *testing.T) {
 		if got != nil {
 			t.Errorf("scope %q returned entries %v alongside the refusal", scope, got)
 		}
+	}
+}
+
+// TestDaemonOwnerCollapseRejectsCorruptGlobalPolicy proves the collapse
+// branch enforces the same structural boundary as composition: unknown
+// access, conflicting duplicates, and non-canonical global entries yield no
+// authority instead of passing corrupt policy through normalization.
+func TestDaemonOwnerCollapseRejectsCorruptGlobalPolicy(t *testing.T) {
+	const owner = int64(7)
+	tests := []struct {
+		name   string
+		global []AllowedRootEntry
+	}{
+		{name: "unknown access", global: []AllowedRootEntry{accE("/g")}},
+		{name: "conflicting duplicate exact path", global: []AllowedRootEntry{rwP("/g"), roP("/g")}},
+		{name: "relative entry", global: []AllowedRootEntry{rwP("g")}},
+		{name: "uncleaned entry", global: []AllowedRootEntry{rwP("/g//sub")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := effectivePrincipalAllowedRoots(tt.global, nil, owner, owner, true)
+			if got != nil {
+				t.Errorf("collapse with corrupt global policy = %v, want no authority", got)
+			}
+		})
+	}
+
+	// Valid unordered input keeps canonicalizing through the collapse.
+	unordered := []AllowedRootEntry{rwP("/g/project"), roP("/g/input"), rwP("/g")}
+	if got := effectivePrincipalAllowedRoots(unordered, nil, owner, owner, true); !slices.Equal(got, []AllowedRootEntry{rwP("/g"), roP("/g/input")}) {
+		t.Errorf("valid collapse = %v, want the canonical normalized entries", got)
+	}
+}
+
+// TestNewSessionFilesystemSnapshotCanonicalRepresentation proves the
+// boundary accepts exactly the canonical normalized representation: an
+// unordered persisted snapshot and a redundant same-mode child are corrupt
+// stored state and are refused instead of silently sorted or normalized.
+func TestNewSessionFilesystemSnapshotCanonicalRepresentation(t *testing.T) {
+	const workspace = "/run/job"
+
+	// Positive: real mode transitions in canonical form.
+	valid := []AllowedRootEntry{rwP(workspace), roP(workspace + "/inputs"), rwP(workspace + "/inputs/gen")}
+	snap, err := newSessionFilesystemSnapshot(workspace, valid)
+	if err != nil {
+		t.Fatalf("valid snapshot rejected: %v", err)
+	}
+	if snap.Workspace != workspace || !slices.Equal(snap.Entries, valid) {
+		t.Fatalf("valid snapshot = (%q, %v)", snap.Workspace, snap.Entries)
+	}
+
+	// Unordered descendant transitions: semantically equivalent but not the
+	// canonical persisted representation.
+	unordered := []AllowedRootEntry{rwP(workspace), roP(workspace + "/z"), roP(workspace + "/a")}
+	if snap, err := newSessionFilesystemSnapshot(workspace, unordered); err == nil {
+		t.Fatalf("unordered snapshot accepted: %+v", snap)
+	}
+
+	// Redundant same-mode child: corrupt stored authority state.
+	redundant := []AllowedRootEntry{rwP(workspace), rwP(workspace + "/project")}
+	if snap, err := newSessionFilesystemSnapshot(workspace, redundant); err == nil {
+		t.Fatalf("redundant snapshot accepted: %+v", snap)
+	}
+}
+
+// TestSnapshotBoundaryRejectsNonCanonicalWorkspace proves the trusted
+// workspace argument is validated on its own: with fully canonical entries,
+// a relative workspace is refused because of the workspace boundary, not
+// because of the entries.
+func TestSnapshotBoundaryRejectsNonCanonicalWorkspace(t *testing.T) {
+	entries := []AllowedRootEntry{rwP("/run/job"), roP("/run/job/inputs")}
+	if err := validateCanonicalAllowedRootEntries(entries); err != nil {
+		t.Fatalf("entries themselves must be canonical for this proof: %v", err)
+	}
+	snap, err := newSessionFilesystemSnapshot("run/job", entries)
+	if err == nil {
+		t.Fatalf("relative workspace accepted: %+v", snap)
+	}
+	if !strings.Contains(err.Error(), "session workspace") {
+		t.Errorf("error = %v, want the workspace-boundary refusal", err)
 	}
 }

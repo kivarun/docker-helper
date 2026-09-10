@@ -173,10 +173,20 @@ func composeAllowedRootScopes(ceiling, narrowing []AllowedRootEntry) []AllowedRo
 //     plain composition: empty or disjoint stored roots mean an empty
 //     ceiling, fail-closed.
 //
+// Structurally impossible global policy (unknown access, duplicate exact
+// paths, relative or uncleaned entries) is corrupt state on every branch:
+// the collapse validates its input through the same boundary as the
+// composition and yields empty authority instead of guessing. The function
+// keeps its error-free signature because every caller already handles the
+// empty fail-closed ceiling as no-Session-authority.
+//
 // It is a pure policy function: callers resolve the global entries, the
 // stored Principal entries, and the daemon-owner identity, and pass them in.
 func effectivePrincipalAllowedRoots(globalEntries, storedPrincipalEntries []AllowedRootEntry, principalID, daemonOwnerPrincipalID int64, userMode bool) []AllowedRootEntry {
 	if userMode && principalID == daemonOwnerPrincipalID && len(storedPrincipalEntries) == 0 {
+		if err := validateCanonicalAllowedRootEntries(globalEntries); err != nil {
+			return nil
+		}
 		return normalizeAllowedRootEntries(globalEntries)
 	}
 	return composeAllowedRootScopes(globalEntries, storedPrincipalEntries)
@@ -231,10 +241,13 @@ type sessionFilesystemSnapshot struct {
 // newSessionFilesystemSnapshot validates one canonical snapshot value
 // against the independent trusted Session workspace. The workspace must be a
 // canonical absolute path, the entries must be canonical, non-empty, begin
-// with the workspace itself, and stay inside it. Any other state is corrupt
-// and fails closed: the snapshot is the authority an issued Session bearer
-// grants, so the boundary never guesses the workspace from persisted policy
-// data and never accepts a snapshot rooted elsewhere.
+// with the workspace itself, and stay inside it. The entries must also be
+// exactly the canonical normalized representation: the boundary proves the
+// stored shape instead of silently sorting, deduplicating, or reconstructing
+// persisted Session authority. Any other state is corrupt and fails closed:
+// the snapshot is the authority an issued Session bearer grants, so the
+// boundary never guesses the workspace from persisted policy data and never
+// accepts a snapshot rooted elsewhere or in a noncanonical form.
 func newSessionFilesystemSnapshot(workspace string, entries []AllowedRootEntry) (*sessionFilesystemSnapshot, error) {
 	if err := validateCanonicalAllowedRootEntries(entries); err != nil {
 		return nil, err
@@ -252,6 +265,9 @@ func newSessionFilesystemSnapshot(workspace string, entries []AllowedRootEntry) 
 		if !pathWithin(workspace, e.Path) {
 			return nil, fmt.Errorf("session filesystem snapshot entry %q is outside the workspace %q", e.Path, workspace)
 		}
+	}
+	if canonical := normalizeAllowedRootEntries(entries); !slices.Equal(entries, canonical) {
+		return nil, fmt.Errorf("session filesystem snapshot entries are not the canonical normalized representation")
 	}
 	return &sessionFilesystemSnapshot{Workspace: workspace, Entries: slices.Clone(entries)}, nil
 }
