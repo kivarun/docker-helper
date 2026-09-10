@@ -1743,9 +1743,6 @@ rewrites the request to read-only silently. The Docker bind is
 materialized exactly in the caller-requested mode (readonly flag follows
 the request, not the snapshot access of the source).
 
-materialized exactly in the caller-requested mode (readonly flag follows
-the request, not the snapshot access of the source).
-
 #### Data-plane filesystem authority
 
 Every filesystem-consuming data-plane request (`run` mounts, `build`
