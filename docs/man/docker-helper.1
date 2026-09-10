@@ -497,6 +497,11 @@ Build a Docker image. \-\-build-arg may be repeated to pass multiple build argum
 .TP
 .B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] \-\- [command]
 Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
+A requested writable mount whose source resolves to a read-only region of
+the issued Session filesystem snapshot is refused before any container
+starts with the \fBread_only_root\fR error \- a policy refusal, distinct
+from the structural \fBinvalid_mount\fR. When a source is only needed for
+reading, request it read-only (\fB:ro\fR).
 .TP
 .B \-\-env\-from DEST=SOURCE
 Pass an environment variable without placing its value in the
