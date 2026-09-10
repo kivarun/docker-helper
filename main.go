@@ -201,6 +201,7 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /registry/login", app.handleRegistryLogin)
 	mux.HandleFunc("POST /sessions", app.handleCreateSession)
 	mux.HandleFunc("GET /sessions", app.handleListSessions)
+	mux.HandleFunc("GET /sessions/{id}", app.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
 	mux.HandleFunc("POST /reload", app.handleReload)
 	mux.HandleFunc("GET /operations/{id}", app.handleOperationStatus)
@@ -323,6 +324,19 @@ func runDaemon(stdout, stderr io.Writer) error {
 		}
 
 		if _, err := cleanupExpiredSessions(db); err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+
+		// Session filesystem snapshot migration/integrity gate. Runs after the
+		// ownership cutover and expired-Session cleanup, so the legacy cutover
+		// backfill covers exactly the remaining live Sessions, and before any
+		// MAC consumer so MAC never reconciles a live Session whose issued
+		// filesystem authority is not proven. The snapshot table's presence is
+		// the cutover marker: absent -> one atomic compatibility backfill from
+		// sessions.workspace alone; present -> post-cutover validation that
+		// fails closed on any missing/partial/corrupt snapshot.
+		if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
 			serveStartupError(err, "")
 			return err
 		}

@@ -100,6 +100,35 @@ type listSessionsResponse struct {
 	Sessions []sessionJSON `json:"sessions"`
 }
 
+// sessionFilesystemSnapshotJSON is the canonical public projection of the
+// persisted immutable Session filesystem snapshot. The workspace is not
+// repeated here: the top-level Session workspace is its canonical public
+// owner, and the snapshot's first entry carries the root access mode.
+type sessionFilesystemSnapshotJSON struct {
+	Entries []AllowedRootEntry `json:"entries"`
+}
+
+// sessionShowJSON is the flat GET /sessions/{id} response body: the Session's
+// usual public metadata plus the persisted immutable filesystem snapshot in
+// its exact canonical persisted ordering. It never includes the token, the
+// token hash, parent live policy, or MAC internals.
+type sessionShowJSON struct {
+	sessionJSON
+
+	FilesystemSnapshot sessionFilesystemSnapshotJSON `json:"filesystem_snapshot"`
+}
+
+// sessionShowToJSON projects one Session and its persisted snapshot to the
+// canonical public show body. entries is always an array, never null.
+func sessionShowToJSON(s Session, snapshot *sessionFilesystemSnapshot) sessionShowJSON {
+	entries := make([]AllowedRootEntry, 0, len(snapshot.Entries))
+	entries = append(entries, snapshot.Entries...)
+	return sessionShowJSON{
+		sessionJSON:        sessionToJSON(s),
+		FilesystemSnapshot: sessionFilesystemSnapshotJSON{Entries: entries},
+	}
+}
+
 func sessionToJSON(s Session) sessionJSON {
 	launcherName := (*string)(nil)
 	if s.LauncherName != "" {
@@ -577,4 +606,143 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetSession serves the read-only Session introspection surface
+// (GET /sessions/{id}): the Session's usual public metadata plus its persisted
+// immutable filesystem snapshot loaded through the single canonical snapshot
+// loader. It shares the Session-control authority allow-list (an admin token,
+// a Principal credential, or a Launcher credential — a Session bearer has no
+// control-plane introspection authority) and the same ownership scope as
+// Session list/delete: a missing or foreign Session is the same non-disclosing
+// 404 session_not_found. A snapshot corruption discovered after startup is an
+// internal error with an operational log (never silently hidden as not-found).
+func (a *App) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+
+	authCtx, err := a.authenticateSessionControlRequest(w, r)
+	if err != nil || authCtx == nil {
+		return
+	}
+
+	ctx := r.Context()
+
+	id := r.PathValue("id")
+	if id == "" {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:    "session.show",
+			Result:   "invalid_session_id",
+			Duration: duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest, "invalid_session_id", "session id is required")
+		return
+	}
+
+	scope, err := a.resolveSessionControlScope(authCtx)
+	if err != nil {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:     "session.show",
+			SessionID: id,
+			Result:    "database_error",
+			Duration:  duration,
+		})
+		opLog(ctx).Error("session show error",
+			slog.String("operation", "session_show"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	s, err := a.findSessionInScope(id, scope)
+
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	if err != nil {
+		resultCode := "database_error"
+		var workspace string
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			resultCode = "not_found"
+		case errors.Is(err, ErrDatabase):
+			if s != nil {
+				workspace = s.Workspace
+			}
+		default:
+			resultCode = "unknown_error"
+		}
+		auditRec := auditRecord{
+			Event:     "session.show",
+			SessionID: id,
+			Result:    resultCode,
+			Duration:  duration,
+		}
+		if workspace != "" {
+			auditRec.Workspace = workspace
+		}
+		if s != nil {
+			auditRec.LauncherID = s.LauncherID
+			auditRec.LauncherName = s.LauncherName
+			auditRec.PrincipalName = s.PrincipalName
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		writeRequestContextAudit(ctx, auditRec)
+
+		if errors.Is(err, ErrSessionNotFound) {
+			// Non-disclosing: a Session outside the authority's scope (or a
+			// nonexistent Session) is never revealed with a 403.
+			writeError(ctx, w, http.StatusNotFound, "session_not_found", "session not found")
+		} else {
+			opLog(ctx).Error("session show error",
+				slog.String("operation", "session_show"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+
+	// The persisted snapshot is loaded through the single canonical loader,
+	// the same owner the future data-plane consumers use. A post-startup
+	// corruption is an internal integrity failure, not a policy refusal, and
+	// is never hidden as not-found.
+	snapshot, err := loadSessionFilesystemSnapshot(a.DB, s.ID, s.Workspace)
+	if err != nil {
+		auditRec := auditRecord{
+			Event:         "session.show",
+			SessionID:     s.ID,
+			Workspace:     s.Workspace,
+			LauncherID:    s.LauncherID,
+			LauncherName:  s.LauncherName,
+			PrincipalName: s.PrincipalName,
+			Result:        "database_error",
+			Duration:      time.Since(started).Round(time.Millisecond).String(),
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		writeRequestContextAudit(ctx, auditRec)
+		opLog(ctx).Error("session show error",
+			slog.String("operation", "session_show"),
+			slog.String("session_id", s.ID),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	auditRec := auditRecord{
+		Event:         "session.show",
+		SessionID:     s.ID,
+		Workspace:     s.Workspace,
+		LauncherID:    s.LauncherID,
+		LauncherName:  s.LauncherName,
+		PrincipalName: s.PrincipalName,
+		Result:        "success",
+		Duration:      time.Since(started).Round(time.Millisecond).String(),
+	}
+	a.populateSessionAudit(&auditRec, authCtx)
+	writeRequestContextAudit(ctx, auditRec)
+
+	writeJSONRaw(ctx, w, http.StatusOK, sessionShowToJSON(*s, snapshot))
 }

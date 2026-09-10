@@ -210,6 +210,23 @@ func writeTestTokenFile(t *testing.T, path, token string) {
 // testAdminToken is the admin token used in unit tests.
 const testAdminToken = "dht_test_admin_token"
 
+// initializeTestDatabase runs the startup database owners a test database
+// needs before it can create Sessions: the schema initialization followed by
+// the Session filesystem snapshot migration, mirroring the production startup
+// order for tests that build an App without the full daemon startup.
+func initializeTestDatabase(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
+	// Session filesystem snapshot persistence: the test database goes through
+	// the same startup migration owner, so session creation tests exercise the
+	// canonical snapshot table.
+	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
+		t.Fatalf("migrateSessionFilesystemSnapshots() error: %v", err)
+	}
+}
+
 // newTestApp creates a minimal *App with an in-memory SQLite database,
 // a valid allowed root, and a runtime directory. It does not set
 // AdminTokenHash; use newTestAppWithAdminToken for tests that require admin authorization.
@@ -224,9 +241,7 @@ func newTestApp(t *testing.T) *App {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	allowedRoot := testAllowedRootDir(t)
 

@@ -25,9 +25,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openDatabase: %v", err)
 	}
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	allowedRoot := testAllowedRootDir(t)
 	// Create a RuntimeDir where MkdirAll will fail: put a regular file
@@ -157,9 +155,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openDatabase: %v", err)
 	}
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	allowedRoot := testAllowedRootDir(t)
 	// Create a RuntimeDir where MkdirAll will fail: put a regular file

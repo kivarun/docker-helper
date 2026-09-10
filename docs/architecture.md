@@ -535,12 +535,32 @@ resolve effective workspace policy
     ↓
 validate workspace inside the effective roots
     ↓
-create Session with launcher_id
+derive the immutable Session filesystem snapshot
+    (deriveSessionFilesystemSnapshot(effective entries, workspace) inside
+     the lifecycleMu create linearization point)
+    ↓
+commit Session + snapshot atomically
     (session ID dhs_<32 hex>, session token dht_<64 hex>,
-     SHA-256 hash stored in SQLite)
+     SHA-256 hash stored in SQLite; snapshot entries persisted in the
+     session_filesystem_snapshot_entries child table in one transaction —
+     a Session bearer becomes usable only after the snapshot commit)
     ↓
 return session + one-time token
 ```
+
+The persisted snapshot is immutable Session child state
+(`session_filesystem_snapshot_entries`, ordered `position` entries with
+`UNIQUE(session_id, path)` and `ON DELETE CASCADE` from `sessions`). Later
+parent-policy mutations never mutate an issued snapshot: the snapshot is
+loaded through the single canonical loader (`loadSessionFilesystemSnapshot`)
+and is cleaned up only by Session deletion (FK `ON DELETE CASCADE`).
+Startup runs the snapshot migration/owner after `cleanupExpiredSessions`
+and before MAC reconciliation: a table-absent (pre-cutover) database gets
+one compatibility backfill of `position=0, path=sessions.workspace,
+access=read_write` for every remaining Session; a table-present database is
+post-cutover and missing/partial/corrupt snapshot state fails startup closed.
+Runtime enforcement of the persisted access modes is Phase 2.2.5; the
+workspace-level MAC lifecycle is unchanged.
 
 The HTTP body of `POST /sessions` accepts
 `{"workspace", "launcher_id", "principal"}`:
@@ -743,9 +763,14 @@ POST /operations/{id}/cancel  (session token)
     ├── bounded force-cleanup fallback if process does not exit
     └── operation becomes terminal (status=failed, result_code=cancelled)
     │
+GET /sessions/{id}  (admin token, Principal credential, or Launcher credential)
+    │
+    └── read-only introspection: session metadata + persisted immutable
+        filesystem snapshot (404 session_not_found for missing/foreign)
+    │
 DELETE /sessions/{id}  (admin token, Principal credential, or Launcher credential)
     │
-    └── physically deletes session row
+    └── physically deletes session row (snapshot entries cascade)
     │
 subsequent requests with deleted session token
     │
@@ -966,6 +991,19 @@ real mutations use, and neither surface widens authority.
 authenticated authority class, not policy (see
 [Authority model](#authority-model)).
 
+`GET /sessions/{id}` is the separate read-only **issued-Snapshot**
+introspection surface: it answers what was actually issued to an existing
+Session, not what a Session created now would get. It loads the Session's
+persisted immutable filesystem snapshot through the single canonical
+snapshot loader (the future 2.2.5 runtime consumer uses the same owner),
+under the Session-control authorization matrix (an admin token, a Principal
+credential, or a Launcher credential; a Session bearer has no control-plane
+introspection authority) and the same ownership scope as list/delete — a
+missing or foreign Session is the same non-disclosing
+`404 session_not_found`. A snapshot corruption discovered after startup is
+`500 internal_error` with an operational log, never silently hidden as
+not-found. It never recomputes current parent policy.
+
 ### MAC lifecycle
 
 MAC state follows the concrete Session lifecycle, not the policy ceilings:
@@ -1003,6 +1041,7 @@ a Launcher credential has no Principal authority):
 | `POST /principals/{username}/credentials/{name}/rotate` | atomic credential rotation |
 | `POST /credentials/{id}/revoke` | revoke a credential by its credential ID (administrator-controlled) |
 | `GET /credentials` | scope-first Principal credential list (optional `?principal=` narrowing) |
+| `GET /sessions/{id}` | read-only issued-Snapshot introspection (authority-scoped; see [Policy introspection](#policy-introspection)) |
 | `DELETE /sessions/{id}` | Session deletion (authority-scoped; see [Session](#session)) |
 
 CLI surface: `principal create|list|show|set|delete`,
@@ -1121,6 +1160,7 @@ CLI surface (every command accepts the common operator flags):
 ```
 docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
+docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
 docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
 docker-helper session cleanup
 ```
@@ -1151,6 +1191,17 @@ missing or foreign Launcher (name or ID) is the non-disclosing
 error (never collapsed into not-found). Returns a table of active
 sessions with ID, workspace, launcher, creation time, and expiration
 time.
+
+`session show` — the read-only introspection surface for one issued
+Session: the flat response carries the usual public metadata plus the
+persisted immutable `filesystem_snapshot` in its exact persisted canonical
+ordering (`entries` is always an array; the top-level `workspace` remains
+the canonical owner and is not duplicated inside the snapshot; no token,
+token hash, parent live policy, or MAC internals). Human output renders a
+compact metadata block and an explicit `FILESYSTEM SNAPSHOT` PATH/ACCESS
+table — the access mode is never hidden. The loader is the single canonical
+snapshot loader (see [Session creation](#session-creation) and the issued
+-snapshot introspection paragraph), so the CLI never recomputes policy.
 
 `session delete` — permanently removes the session; subsequent requests
 with the session's token receive 401 Unauthorized. With admin token: can
@@ -1526,7 +1577,16 @@ against the workspace and checks for duplicate targets.
 user mode the request is rejected (`invalid_helper_socket`) before any
 lease, pin, or operation state exists. In system mode the capability is
 accepted and a user mount may not use the injected mount point itself
-(`invalid_mount`).
+(`invalid_mount`). The capability also owns the socket locator: the daemon
+injects the server-owned `DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock`
+when the caller omitted it, accepts a caller-supplied exactly-canonical
+value as one docker argv entry (remaining part of the caller env-key
+audit), and refuses a conflicting value fail-closed
+(`invalid_helper_socket`) before any lease, pin, operation, or Docker
+state exists. The locator is transport reachability only — the Session
+bearer is never injected by the daemon; without `helper_socket` the
+locator is an ordinary caller environment variable with unchanged
+behavior.
 
 Container lifecycle:
 
@@ -1823,6 +1883,18 @@ a caller-owned mount must not be able to shadow, replace, or partially
 cover the server-owned projection (same exact + ancestor + descendant
 principle as trusted-CA injection). Without `helper_socket` the 2.1.0
 mount contract is unchanged.
+
+The projection also carries one server-owned socket locator: with
+`helper_socket` the daemon injects
+`DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock` into the
+docker argv when the caller omitted it, accepts a caller-supplied
+exactly-canonical value (kept as one argv entry and still part of the
+caller env-key audit), and refuses a conflicting value as
+`invalid_helper_socket` before any lease, pin, operation, or Docker state
+exists. The locator describes transport reachability only; the Session
+bearer is never injected (the caller passes `DOCKER_HELPER_SESSION_TOKEN`
+explicitly when the workload needs authority), and without
+`helper_socket` the variable is an ordinary caller environment variable.
 
 The projection binds the runtime DIRECTORY, not the socket inode. The
 systemd unit preserves the runtime directory

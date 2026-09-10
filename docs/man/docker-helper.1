@@ -181,6 +181,17 @@ credential the list stays restricted to that launcher's sessions and the
 selectors are invalid. A missing or foreign target is the non-disclosing
 \fBlauncher not found\fR / \fBprincipal not found\fR.
 .TP
+.B docker-helper session show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-id SESSION_ID [\-\-json]
+Show one session: its public metadata plus the persisted immutable
+\fBFILESYSTEM SNAPSHOT\fR in its exact canonical ordering (an explicit
+PATH/ACCESS table in human output; the access mode is never hidden).
+Authorization follows the Session-control matrix (admin token, Principal
+credential, or Launcher credential; a session bearer has no introspection
+authority), and a missing or foreign session is the non-disclosing
+\fB404 session_not_found\fR. The snapshot is the persisted state loaded by
+the daemon's canonical snapshot loader, never a recomputation of current
+policy.
+.TP
 .B docker-helper session delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-id SESSION_ID [\-\-json]
 Delete a session by ID. With \-\-json, output in JSON format.
 .TP

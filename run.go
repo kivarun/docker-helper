@@ -99,6 +99,18 @@ func validateShmSize(raw string) (int64, error) {
 // runtime directory; the client selects only the boolean capability.
 const helperSocketContainerDir = "/run/docker-helper"
 
+// helperSocketLocatorEnv is the server-owned socket locator environment
+// variable the daemon provides to the workload alongside the helper runtime
+// projection. The socket is transport reachability only; the Session bearer
+// authority is a separate capability and is never injected (the workload
+// receives the credential only when the caller passes it explicitly).
+const helperSocketLocatorEnv = "DOCKER_HELPER_SOCKET_PATH"
+
+// helperSocketLocatorEnvValue is the canonical locator value: the fixed
+// in-container projection target plus the helper Unix socket file name. A
+// caller-supplied locator must match exactly or the request is refused.
+const helperSocketLocatorEnvValue = helperSocketContainerDir + "/docker-helper.sock"
+
 // isHelperSocketMountOverlap reports whether a user mount target overlaps
 // the server-owned helper runtime projection: an exact match with the
 // injected mount point, a descendant of it, or one of its ancestors. A
@@ -309,6 +321,19 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// With the helper runtime projection active, the server owns the socket
+	// locator: the caller may either omit it or supply exactly the canonical
+	// value. A conflicting locator is refused fail-closed before any lease,
+	// pin, operation, or Docker state exists; it is never silently
+	// overwritten. Without helper_socket the locator is an ordinary caller
+	// environment variable with unchanged behavior.
+	if req.HelperSocket && cfg.Mode == ModeSystem {
+		if v, exists := req.Environment[helperSocketLocatorEnv]; exists && v != helperSocketLocatorEnvValue {
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_helper_socket", "helper_socket requires the canonical socket locator", session.PrincipalName)
+			return
+		}
+	}
+
 	// Acquire workspace-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
@@ -415,6 +440,17 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, exists := allEnv[trustedCAEnvNodeExtra]; !exists {
 			allEnv[trustedCAEnvNodeExtra] = trustedCAEnvNodeExtraValue
+		}
+	}
+	// Server-owned socket locator injection (only when absent): with the
+	// helper runtime projection the workload always receives the canonical
+	// locator; a caller-supplied identical value is accepted and stays a
+	// single argv entry (the map is keyed by name). The injection is
+	// server-owned and is not a caller env key, so the audit env keys stay
+	// caller-provided only. No Session token is ever injected here.
+	if req.HelperSocket && cfg.Mode == ModeSystem {
+		if _, exists := allEnv[helperSocketLocatorEnv]; !exists {
+			allEnv[helperSocketLocatorEnv] = helperSocketLocatorEnvValue
 		}
 	}
 

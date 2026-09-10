@@ -201,9 +201,9 @@ Do not silently discard duplicate/conflicting policy state.
 
 ## Phase 2.2.2 — one effective policy resolver
 
-**Status: implemented, awaiting architectural acceptance.** Implemented on
-`feature/2.2.2-effective-policy-resolver` (base `release/2.2@65f0406`, final
-SHA recorded in the phase report). Evidence: the pure domain owner
+**Status: CLOSED.** Implemented on `feature/2.2.2-effective-policy-resolver`
+(base `release/2.2@65f0406`), merged to `release/2.2` as
+`6b33a1e24ea03de9152867e46a4f5a4be0ec2e5a` after architectural acceptance. Evidence: the pure domain owner
 `allowed_root_policy.go` implements most-specific lookup within one scope
 (`lookupAllowedRootAccess`), access-mode meet with `read_only` dominance
 (`meetAllowedRootAccess`), scope composition with derived path-only
@@ -286,9 +286,9 @@ Cover at minimum:
 
 ## Phase 2.2.3 — control-plane HTTP/CLI and introspection
 
-**Status: implemented, awaiting architectural acceptance.** Implemented on
-`feature/2.2.3-control-plane-access` (base `release/2.2@6b33a1e`, final SHA
-recorded in the phase report). Evidence: the canonical
+**Status: CLOSED.** Implemented on `feature/2.2.3-control-plane-access`
+(base `release/2.2@6b33a1e`), merged to `release/2.2` as
+`f168d0b99cd7de86c180fcad18f2e30218568b9b` after architectural acceptance. Evidence: the canonical
 `AllowedRootEntry{Path,Access}` is carried end-to-end from the 2.2.1/2.2.2
 owners through every public boundary — presence-aware `--access` add and
 targeted `set-access` on all three families (global config, Principal,
@@ -382,6 +382,26 @@ No authority changes:
   allowed-root policy.
 
 ## Phase 2.2.4 — Session filesystem snapshot persistence
+
+**Status: implemented, awaiting architectural acceptance.** Implemented on
+`feature/2.2.4-session-filesystem-snapshot` (base `release/2.2@f168d0b`, final
+SHA recorded in the phase report). Evidence summary: the canonical
+`session_filesystem_snapshot_entries` child table (exact schema classification
+with fail-closed near-match refusal) persists the immutable snapshot as
+Session child state; the legacy cutover is table-presence-owned (one
+transaction creates the table and backfills `position=0, workspace,
+read_write` from `sessions.workspace` alone, ignoring all current parent
+policy) and post-cutover missing/partial/corrupt state fails startup closed;
+`createSessionWithPolicyLocked` derives the snapshot from
+`resolveCreatePolicy`'s effective entries inside the existing `lifecycleMu`
+linearization point and commits Session + snapshot in one transaction (MAC
+callback unchanged), so no issued Session bearer can exist without its
+snapshot; parent-policy mutations never touch an issued snapshot (verified
+across restart); `GET /sessions/{id}` + `session show` load the issued
+snapshot through the single canonical loader with the Session-control
+authorization matrix (Session bearer excluded, non-disclosing 404), a
+`session.show` audit event, and a lightweight `session list`. Runtime
+enforcement (2.2.5) and MAC projection (2.2.6) remain out of scope.
 
 Dependencies: 2.2.2; schema primitives from 2.2.1.
 

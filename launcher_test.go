@@ -18,9 +18,7 @@ func openFreshTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("openDatabase() error: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
+	initializeTestDatabase(t, db)
 	return db
 }
 

@@ -57,6 +57,12 @@ type Session struct {
 type CreatedSession struct {
 	Session Session
 	Token   string
+
+	// FilesystemSnapshot is the immutable snapshot committed atomically with
+	// the Session row: the response/test projection of the persisted Session
+	// authority, not a second long-lived authoritative copy (the persisted
+	// Session child state remains the one owner).
+	FilesystemSnapshot *sessionFilesystemSnapshot
 }
 
 // intersectAllowedRootScopes returns the effective allowed-root scope: the
@@ -174,6 +180,18 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("workspace must be inside an allowed root: %w", ErrInvalidWorkspace)
 	}
 
+	// Derive the immutable Session filesystem snapshot from the effective
+	// policy at the Session-create linearization point: lifecycleMu is already
+	// held by createSessionAuthorized, so the snapshot corresponds exactly to
+	// the policy state of this Session-create critical section. The effective
+	// entries from resolveCreatePolicy are the only parent-policy input; no
+	// policy is re-read after derivation. A derivation failure fails the
+	// Session creation before any persistence.
+	snapshot, err := deriveSessionFilesystemSnapshot(p.EffectiveAllowedRootEntries, absWorkspace)
+	if err != nil {
+		return nil, fmt.Errorf("cannot derive session filesystem snapshot: %w", err)
+	}
+
 	// Generate Session identity and bearer after policy resolution and before
 	// MAC/persistence work; lifecycleMu is already held by
 	// createSessionAuthorized.
@@ -196,11 +214,17 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	// Acquire coordinator serialization and prepare MAC.
 	// CreateSessionBinding holds the lock through DB insert and rollback.
 	insertSession := func() error {
+		tx, err := a.DB.Begin()
+		if err != nil {
+			return fmt.Errorf("cannot begin session creation transaction: %w", err)
+		}
+		defer tx.Rollback()
+
 		// Conditional insert: only succeeds if the owning Launcher and its
 		// Principal both exist and are enabled. This prevents a stale-auth race
 		// where the Launcher/Principal was disabled or deleted between
 		// resolution and session creation.
-		_, err := a.DB.Exec(
+		result, err := tx.Exec(
 			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 SELECT ?, ?, ?, ?, ?, ?
 			 FROM launchers l JOIN principals p ON p.id = l.principal_id
@@ -222,18 +246,21 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		// policy mutation, so it surfaces only as a defense-in-depth recheck;
 		// the stale-owner rejection is a deterministic typed contract
 		// (422 launcher_unavailable), never an invalid_workspace relabel.
-		var count int
-		err = a.DB.QueryRow(
-			`SELECT COUNT(*) FROM sessions WHERE id = ?`,
-			sessionID,
-		).Scan(&count)
+		inserted, err := result.RowsAffected()
 		if err != nil {
-			return err
+			return fmt.Errorf("cannot check session insert result: %w", err)
 		}
-		if count == 0 {
+		if inserted == 0 {
 			return fmt.Errorf("launcher is no longer available: %w", ErrLauncherUnavailable)
 		}
-		return nil
+
+		// The snapshot entries commit in the same transaction as the Session
+		// row: there is never a committed Session bearer whose Session row
+		// lacks its filesystem snapshot.
+		if err := insertSessionFilesystemSnapshot(tx, sessionID, snapshot.Entries); err != nil {
+			return fmt.Errorf("cannot persist session filesystem snapshot: %w", err)
+		}
+		return tx.Commit()
 	}
 
 	if a.MACCoordinator != nil {
@@ -271,7 +298,8 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 			LauncherName:  p.LauncherName,
 			PrincipalName: p.PrincipalName,
 		},
-		Token: token,
+		Token:              token,
+		FilesystemSnapshot: snapshot,
 	}, nil
 }
 
@@ -375,6 +403,30 @@ func (a *App) deleteSessionScoped(id string, scope sessionControlScope) (*Sessio
 		a.MACCoordinator.ReleaseSessionBinding(id)
 	}
 
+	return &s, nil
+}
+
+// findSessionInScope returns the Session with the given ID when it belongs to
+// the given ownership scope, or ErrSessionNotFound otherwise (non-disclosing:
+// a missing or foreign Session is the same not-found outcome). The scope is
+// expressed directly in the ownership query; admin reads any Session. This is
+// the read-only form of the deleteSessionScoped lookup.
+func (a *App) findSessionInScope(id string, scope sessionControlScope) (*Session, error) {
+	pred, args := sessionScopePredicate(scope)
+
+	row := a.DB.QueryRow(
+		`SELECT `+sessionOwnershipProjection+`
+		 WHERE s.id = ?`+pred,
+		append([]any{id}, args...)...,
+	)
+
+	s, err := scanSessionWithOwnership(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
+		}
+		return nil, fmt.Errorf("cannot find session: %w: %w", err, ErrDatabase)
+	}
 	return &s, nil
 }
 
