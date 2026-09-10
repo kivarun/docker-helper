@@ -1182,9 +1182,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1239,6 +1237,10 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
+
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
 
 	// Inject a pinned mount with a failing Cleanup.
 	sentinelErr := errors.New("injected pinned mount cleanup error")
@@ -1315,9 +1317,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1371,6 +1371,10 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
+
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
 
 	// Inject a pinned mount with a successful Cleanup.
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
@@ -1433,9 +1437,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1491,6 +1493,10 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
+
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
 
 	// Inject staging seam with failing Cleanup.
 	sentinelErr := errors.New("injected staging cleanup error")
@@ -1568,9 +1574,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1626,6 +1630,10 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
+
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
 
 	// Inject staging seam with successful Cleanup.
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -1700,9 +1708,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1760,6 +1766,10 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
+
 	var cleanupOrder []string
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
@@ -1811,9 +1821,7 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1872,6 +1880,10 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
+
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
 
 	var cleanupCalled bool
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {

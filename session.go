@@ -489,12 +489,22 @@ func resolveSessionExecutionIdentity(db *sql.DB, session *Session) (uid, gid int
 }
 
 func (a *App) findSessionByToken(token string) (*Session, error) {
+	return findSessionByTokenQuerier(a.DB, token)
+}
+
+// findSessionByTokenQuerier is the one SQL owner of Session bearer
+// authentication: the token-hash lookup requires a live (unexpired) Session
+// owned by an enabled Launcher with an enabled Principal. The App-level
+// findSessionByToken is a thin *sql.DB wrapper over this querier, and the
+// coherent filesystem authority read reuses the same query inside its read
+// transaction, so the auth semantics cannot drift between callers.
+func findSessionByTokenQuerier(q txQuerier, token string) (*Session, error) {
 	tokenHash := sha256.Sum256([]byte(token))
 	tokenHashHex := hex.EncodeToString(tokenHash[:])
 
 	now := time.Now().Unix()
 
-	row := a.DB.QueryRow(
+	row := q.QueryRow(
 		`SELECT `+sessionOwnershipProjection+`
 		 WHERE s.token_hash = ? AND s.expires_at > ?
 		 AND l.enabled = 1 AND p.enabled = 1

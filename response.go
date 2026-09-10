@@ -236,6 +236,104 @@ func (a *App) requireSessionCapability(w http.ResponseWriter, r *http.Request) (
 	return session, true
 }
 
+// sessionFilesystemAuthority is the immutable coherent data-plane filesystem
+// authority for one filesystem-consuming request: the authenticated live
+// Session plus its persisted immutable filesystem snapshot, captured together
+// in one short read transaction. A concurrent Session deletion linearizing
+// after the read transaction does not invalidate the captured authority.
+type sessionFilesystemAuthority struct {
+	Session  *Session
+	Snapshot *sessionFilesystemSnapshot
+}
+
+// requireSessionFilesystemCapability is the filesystem-capability variant of
+// requireSessionCapability for the data-plane requests that consume a
+// Session-controlled host filesystem source (run mounts, build
+// context/Dockerfile). It reads the Session bearer authentication and the
+// persisted filesystem snapshot in one short read transaction, so the two
+// reads cannot observe different database generations: a Session deletion or
+// invalidation that commits concurrently either linearizes before the read
+// transaction (the lookup fails closed with 401) or after the captured
+// authority (the already-started request continues). A split read — an
+// authenticated Session whose snapshot vanished through the deletion cascade
+// — is structurally impossible. The transaction ends when the authority is
+// captured; it is never held across filesystem I/O, pinning, staging, or
+// Docker execution.
+//
+// Snapshot load failure after a successful auth query is a state/integrity
+// failure, not an authentication outcome: it fails closed with 500
+// internal_error and never with 401 or a mount-policy code. The pathless
+// data-plane actions (pull, registry login, operation status/logs/cancel)
+// keep using requireSessionCapability because they consume no
+// Session-controlled host filesystem source.
+func (a *App) requireSessionFilesystemCapability(w http.ResponseWriter, r *http.Request) (*sessionFilesystemAuthority, bool) {
+	ctx := r.Context()
+	token, ok := parseBearerToken(r)
+	if !ok {
+		writeAuthFailure(ctx, r, "session.parse_failed")
+		writeUnauthorizedSessionCapability(ctx, w)
+		return nil, false
+	}
+
+	tx, err := a.DB.Begin()
+	if err != nil {
+		opLog(ctx).Error("cannot begin session filesystem authority read",
+			slog.String("operation", "session_lookup"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return nil, false
+	}
+
+	session, err := findSessionByTokenQuerier(tx, token)
+	if err != nil {
+		tx.Rollback()
+		resultCode := "session.not_found"
+		if !errors.Is(err, ErrSessionNotFound) {
+			resultCode = "session.database_error"
+		}
+		writeAuthFailure(ctx, r, resultCode)
+
+		if !errors.Is(err, ErrSessionNotFound) {
+			opLog(ctx).Error("session lookup error",
+				slog.String("operation", "session_lookup"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		} else {
+			writeUnauthorizedSessionCapability(ctx, w)
+		}
+		return nil, false
+	}
+
+	snapshot, err := loadSessionFilesystemSnapshot(tx, session.ID, session.Workspace)
+	if err != nil {
+		tx.Rollback()
+		// A corrupted issued snapshot is an internal integrity failure, not
+		// an authentication or mount-policy outcome, and is never repaired at
+		// request time.
+		opLog(ctx).Error("cannot load session filesystem snapshot",
+			slog.String("operation", "session_lookup"),
+			slog.String("session_id", session.ID),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return nil, false
+	}
+
+	if err := tx.Commit(); err != nil {
+		opLog(ctx).Error("cannot commit session filesystem authority read",
+			slog.String("operation", "session_lookup"),
+			slog.String("session_id", session.ID),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return nil, false
+	}
+
+	return &sessionFilesystemAuthority{Session: session, Snapshot: snapshot}, true
+}
+
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(r.Context(), w, http.StatusOK, response{
 		OK:      true,

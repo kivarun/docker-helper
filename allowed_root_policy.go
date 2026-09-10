@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -341,4 +342,80 @@ func (s *sessionFilesystemSnapshot) CanExposeWritable(source string) bool {
 		}
 	}
 	return true
+}
+
+// ErrReadOnlyRoot is the typed data-plane refusal: the requested writable
+// exposure of one canonical source is refused by the persisted Session
+// filesystem snapshot. It is distinct from structural mount validation
+// (invalid_mount) and from authentication (unauthorized): the Session is
+// authenticated and the source is inside its workspace, but the issued
+// snapshot does not permit writable exposure.
+var ErrReadOnlyRoot = errors.New("writable exposure refused by the issued session filesystem snapshot")
+
+// sessionFilesystemExposure is the accepted data-plane filesystem exposure
+// decision for one canonical source: the persisted immutable Session
+// filesystem snapshot remains the only filesystem authority, and this value
+// carries the resolved policy facts (effective snapshot access, the
+// caller-requested consumption mode, and the writable exposure permission)
+// downstream instead of exposing raw snapshot entries. The pinned path is
+// never part of this representation: pinning is a downstream materialization
+// detail, not policy identity.
+type sessionFilesystemExposure struct {
+	// SourcePath is the canonical policy identity of the source, produced by
+	// the existing canonicalization owner before this decision.
+	SourcePath string
+	// Target is the container target for run user mounts; empty for
+	// target-less consumers such as the build host inputs.
+	Target string
+	// RequestedReadOnly is the caller-requested consumption mode. The Docker
+	// bind-mount materialization follows exactly this mode; it is never
+	// derived from Access.
+	RequestedReadOnly bool
+	// Access is the effective read_write/read_only mode of the canonical
+	// source inside the issued snapshot.
+	Access AllowedRootAccess
+	// WritableAllowed records whether the snapshot owner permits writable
+	// exposure of this canonical source (no read_only transition at or
+	// strictly below it). False is meaningful: a read_write source can span
+	// a protected read_only region and then not be writable-exposable.
+	WritableAllowed bool
+}
+
+// resolveSessionFilesystemExposure is the one adapter between the persisted
+// snapshot and the data-plane consumers (run mounts, build host inputs, and
+// the later MAC workload projection). It resolves one canonical source
+// identity against the snapshot for the requested consumption mode:
+// read-only consumption is permitted for either snapshot access mode, while
+// writable consumption requires the snapshot owner's writable-parent query.
+// LookupAccess failing for a workspace-contained source is an internal
+// state/integrity error, never a default grant and never the
+// read_only_root refusal.
+func resolveSessionFilesystemExposure(
+	snapshot *sessionFilesystemSnapshot,
+	sourcePath, target string,
+	requestedReadOnly bool,
+) (sessionFilesystemExposure, error) {
+	access, ok := snapshot.LookupAccess(sourcePath)
+	if !ok {
+		return sessionFilesystemExposure{}, fmt.Errorf("canonical source %q has no issued filesystem snapshot entry in workspace %q", sourcePath, snapshot.Workspace)
+	}
+	exposure := sessionFilesystemExposure{
+		SourcePath:        sourcePath,
+		Target:            target,
+		RequestedReadOnly: requestedReadOnly,
+		Access:            access,
+	}
+	if requestedReadOnly {
+		// Read-only consumption of a read_write source keeps the recorded
+		// writable-parent fact so audit can still show why no writable
+		// exposure of this region would be accepted.
+		exposure.WritableAllowed = snapshot.CanExposeWritable(sourcePath)
+		return exposure, nil
+	}
+	if !snapshot.CanExposeWritable(sourcePath) {
+		exposure.WritableAllowed = false
+		return exposure, fmt.Errorf("canonical source %q: %w", sourcePath, ErrReadOnlyRoot)
+	}
+	exposure.WritableAllowed = true
+	return exposure, nil
 }

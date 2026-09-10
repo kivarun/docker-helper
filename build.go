@@ -14,10 +14,11 @@ import (
 )
 
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
-	session, ok := a.requireSessionCapability(w, r)
+	authority, ok := a.requireSessionFilesystemCapability(w, r)
 	if !ok {
 		return
 	}
+	session := authority.Session
 
 	ctx := withSessionID(r.Context(), session.ID)
 
@@ -60,6 +61,39 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			leaseRelease()
 		}
 		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
+		return
+	}
+
+	// The build context and Dockerfile are read-only host inputs of the
+	// helper: both canonical paths are evaluated against the persisted
+	// immutable Session filesystem snapshot as read-only consumption, which
+	// is permitted for either snapshot access mode. This is an integrity
+	// evaluation of workspace-contained paths, so a failure here is an
+	// internal error before any build-arg validation, Docker directory,
+	// staging, operation, or Docker state exists — never a read_only_root
+	// refusal for an ordinary read of a valid source.
+	contextExposure, err := resolveSessionFilesystemExposure(authority.Snapshot, contextPath, "", true)
+	if err != nil {
+		if leaseRelease != nil {
+			leaseRelease()
+		}
+		opLog(ctx).Error("cannot resolve build context filesystem exposure",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
+		return
+	}
+	dockerfileExposure, err := resolveSessionFilesystemExposure(authority.Snapshot, dockerfilePath, "", true)
+	if err != nil {
+		if leaseRelease != nil {
+			leaseRelease()
+		}
+		opLog(ctx).Error("cannot resolve dockerfile filesystem exposure",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -138,16 +172,20 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	op.macLeaseRelease = leaseRelease
 
 	writeRequestContextAudit(ctx, auditRecord{
-		Event:         "build.start",
-		SessionID:     session.ID,
-		OperationID:   op.ID,
-		Image:         req.Image,
-		Context:       req.Context,
-		Dockerfile:    req.Dockerfile,
-		BuildArgKeys:  buildArgKeys,
-		PrincipalName: session.PrincipalName,
-		LauncherID:    session.LauncherID,
-		LauncherName:  session.LauncherName,
+		Event:                   "build.start",
+		SessionID:               session.ID,
+		OperationID:             op.ID,
+		Image:                   req.Image,
+		Context:                 req.Context,
+		Dockerfile:              req.Dockerfile,
+		BuildContextResolved:    contextExposure.SourcePath,
+		BuildContextAccess:      string(contextExposure.Access),
+		BuildDockerfileResolved: dockerfileExposure.SourcePath,
+		BuildDockerfileAccess:   string(dockerfileExposure.Access),
+		BuildArgKeys:            buildArgKeys,
+		PrincipalName:           session.PrincipalName,
+		LauncherID:              session.LauncherID,
+		LauncherName:            session.LauncherName,
 	})
 
 	// Build the command using staged paths — Docker never sees workspace paths.

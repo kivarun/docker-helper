@@ -227,6 +227,42 @@ func initializeTestDatabase(t *testing.T, db *sql.DB) {
 	}
 }
 
+// insertTestSessionSnapshot issues the persisted filesystem snapshot rows for
+// a directly seeded test session: the canonical issuance backfill is the
+// single-entry workspace-read_write snapshot, exactly what the startup
+// migration derives for a legacy Session. The coherent run/build authority
+// read fails closed without these rows.
+func insertTestSessionSnapshot(t *testing.T, db *sql.DB, sessionID, workspace string) {
+	t.Helper()
+	insertTestSessionSnapshotEntries(t, db, sessionID, []AllowedRootEntry{
+		{Path: workspace, Access: AllowedRootAccessReadWrite},
+	})
+}
+
+// insertTestSessionSnapshotEntries issues an exact persisted filesystem
+// snapshot for a seeded test session, replacing any rows the Session-create
+// owner already derived. Enforcement tests use it to control the issued
+// data-plane authority precisely; snapshot derivation from live parent
+// policy is separately owned by the Session-create tests.
+func insertTestSessionSnapshotEntries(t *testing.T, db *sql.DB, sessionID string, entries []AllowedRootEntry) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin snapshot insert: %v", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM session_filesystem_snapshot_entries WHERE session_id = ?`, sessionID); err != nil {
+		tx.Rollback()
+		t.Fatalf("clear snapshot for seeded session %s: %v", sessionID, err)
+	}
+	if err := insertSessionFilesystemSnapshot(tx, sessionID, entries); err != nil {
+		tx.Rollback()
+		t.Fatalf("insert snapshot for seeded session %s: %v", sessionID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit snapshot insert: %v", err)
+	}
+}
+
 // newTestApp creates a minimal *App with an in-memory SQLite database,
 // a valid allowed root, and a runtime directory. It does not set
 // AdminTokenHash; use newTestAppWithAdminToken for tests that require admin authorization.

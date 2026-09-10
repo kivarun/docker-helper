@@ -239,6 +239,41 @@ func writeDockerActionRejected(
 	writeError(ctx, w, status, resultCode, message)
 }
 
+// writeRunReadOnlyRootRejected is the narrow policy-aware rejection path for
+// the read_only_root filesystem policy refusal. The generic
+// writeDockerActionRejected contract (no payload metadata) is preserved for
+// every other rejection; this helper adds only the offending canonical
+// exposure facts needed to explain the refusal: the caller spelling, the
+// canonical policy identity, the target, the requested mode (never rewritten
+// to read-only), and the exposure owner's decision facts. It never lists the
+// contents of a protected subtree or names the nested blocker path.
+func writeRunReadOnlyRootRejected(
+	ctx context.Context,
+	w http.ResponseWriter,
+	session *Session,
+	callerMount mountRequest,
+	exposure sessionFilesystemExposure,
+) {
+	writableAllowed := false
+	writeRequestContextAudit(ctx, auditRecord{
+		Event:         "run.rejected",
+		Result:        "read_only_root",
+		SessionID:     session.ID,
+		PrincipalName: session.PrincipalName,
+		LauncherID:    session.LauncherID,
+		LauncherName:  session.LauncherName,
+		Mounts: []auditMount{{
+			Source:          callerMount.Source,
+			Target:          callerMount.Target,
+			ReadOnly:        false,
+			ResolvedSource:  exposure.SourcePath,
+			Access:          string(exposure.Access),
+			WritableAllowed: &writableAllowed,
+		}},
+	})
+	writeError(ctx, w, http.StatusBadRequest, "read_only_root", "writable access is not permitted for this mount source")
+}
+
 // opLog returns the operational logger with request-scoped attributes.
 // It adds request_id and session_id when available in the context.
 func opLog(ctx context.Context) *slog.Logger {
