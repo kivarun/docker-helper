@@ -402,6 +402,9 @@ apply_selinux_restorecon() {
 	if ! "$RESTORECON" /usr/bin/docker-helper; then
 		warn "restorecon /usr/bin/docker-helper failed (continuing; module + unit confinement apply)"
 	fi
+	# bindfs executable label for the workload read-only projection
+	# (Release 2.2 Phase 2.2.6); best-effort like the rest of the tree.
+	"$RESTORECON" /usr/bin/bindfs 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper 2>/dev/null || true
 	"$RESTORECON" /run/docker-helper 2>/dev/null || true

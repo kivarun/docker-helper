@@ -2925,12 +2925,13 @@ exit 0
 			restoreconCalls = append(restoreconCalls, c)
 		}
 	}
-	if len(restoreconCalls) != 4 {
-		t.Errorf("expected exactly 4 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
+	if len(restoreconCalls) != 5 {
+		t.Errorf("expected exactly 5 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
 	}
 	joined := strings.Join(restoreconCalls, "\n")
 	for _, want := range []string{
 		"restorecon /usr/bin/docker-helper",
+		"restorecon /usr/bin/bindfs",
 		"restorecon -R /etc/docker-helper",
 		"restorecon -R /var/lib/docker-helper",
 		"restorecon /run/docker-helper",
@@ -2946,6 +2947,7 @@ exit 0
 	// daemon/socket path may be relabeled by the installer.
 	allowedTargets := map[string]bool{
 		"/usr/bin/docker-helper": true,
+		"/usr/bin/bindfs":        true,
 		"/etc/docker-helper":     true,
 		"/var/lib/docker-helper": true,
 		"/run/docker-helper":     true,

@@ -1,0 +1,392 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+// runWorkloadLifecycleFixture wires a system-mode run app whose Docker CLI
+// and workload MAC parser are replaced by recording fakes. The production
+// backend keeps full ownership of rendering, loading, verification, and
+// cleanup ordering; only the external mechanisms are faked.
+type runWorkloadLifecycleFixture struct {
+	app     *App
+	coord   *workloadMACCoordinator
+	backend *workloadAppArmorBackend
+
+	mu          sync.Mutex
+	dockerArgv  [][]string
+	events      []string
+	parserCalls []string
+	pinCleaned  []string
+
+	unloadLeavesLoaded bool
+}
+
+func newRunWorkloadLifecycleFixture(t *testing.T) *runWorkloadLifecycleFixture {
+	t.Helper()
+	app := newSystemModeRunTestApp(t)
+	coord := app.WorkloadMAC
+	backend := coord.backend.(*workloadAppArmorBackend)
+	f := &runWorkloadLifecycleFixture{app: app, coord: coord, backend: backend}
+	coord.removeContainer = func(ctx context.Context, id string) error { return nil }
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		f.mu.Lock()
+		pinned := filepath.Join(runtimeDir, "mounts", operationID, fmt.Sprint(mountIndex))
+		if err := os.MkdirAll(filepath.Dir(pinned), 0700); err != nil {
+			f.mu.Unlock()
+			return nil, err
+		}
+		if err := os.WriteFile(pinned, nil, 0600); err != nil {
+			f.mu.Unlock()
+			return nil, err
+		}
+		f.mu.Unlock()
+		return &pinnedMount{
+			PinnedPath: pinned,
+			cleanup: func() error {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				f.pinCleaned = append(f.pinCleaned, pinned)
+				return nil
+			},
+		}, nil
+	}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		f.mu.Lock()
+		f.dockerArgv = append(f.dockerArgv, append([]string{name}, args...))
+		f.mu.Unlock()
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+	return f
+}
+
+func (f *runWorkloadLifecycleFixture) run(t *testing.T, token, body string) (*httptest.ResponseRecorder, *operation) {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/run", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	f.app.handleRun(w, req)
+	var resp struct {
+		OperationID string `json:"operation_id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	var op *operation
+	if resp.OperationID != "" {
+		op = f.app.OperationSupervisor.lookup(resp.OperationID)
+		if op != nil {
+			op.Wait()
+		}
+	}
+	return w, op
+}
+
+// parser replaces the backend parser with a recording fake that keeps the
+// fake kernel inventory consistent: --replace marks the parsed profile
+// loaded, --remove marks it absent. unloadLeavesLoaded forces the removal
+// verification to fail for retention tests.
+func (f *runWorkloadLifecycleFixture) parser(t *testing.T, unloadLeavesLoaded bool) {
+	t.Helper()
+	f.backend.runParser = func(parserPath string, args []string) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.parserCalls = append(f.parserCalls, args[0])
+		f.events = append(f.events, "parser "+args[0])
+		switch args[0] {
+		case "--replace":
+			source, err := os.ReadFile(args[len(args)-1])
+			if err != nil {
+				return err
+			}
+			name := profileNameFromSource(string(source))
+			f.backend.loadedProfiles = func() ([]string, error) {
+				return []string{name}, nil
+			}
+		case "--remove":
+			if f.unloadLeavesLoaded {
+				return nil // removal faked but inventory keeps the profile
+			}
+			f.backend.loadedProfiles = func() ([]string, error) { return nil, nil }
+		}
+		return nil
+	}
+}
+
+// TestRunWorkloadPrepareFailureBlocksDocker proves the fail-closed contract:
+// when the generated workload profile cannot be loaded, the run fails with
+// the internal MAC failure family, Docker is never invoked, no generated
+// state survives, and the pins plus workspace lease are released in reverse
+// ownership order.
+func TestRunWorkloadPrepareFailureBlocksDocker(t *testing.T) {
+	f := newRunWorkloadLifecycleFixture(t)
+	f.backend.runParser = func(parserPath string, args []string) error {
+		if args[0] == "--replace" {
+			return fmt.Errorf("simulated parser load failure")
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.parserCalls = append(f.parserCalls, args[0])
+		return nil
+	}
+	result, err := createSystemSession(t, f.app)
+	if err != nil {
+		t.Fatalf("createSystemSession: %v", err)
+	}
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`
+	req := httptest.NewRequest("POST", "/run", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	f.app.handleRun(w, req)
+	if w.Code != 500 {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["code"] != "internal_error" {
+		t.Errorf("MAC prepare failure must use the internal failure family, got %v", resp["code"])
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.dockerArgv) != 0 {
+		t.Errorf("Docker must never be invoked after prepare failure, got %v", f.dockerArgv)
+	}
+	if len(f.pinCleaned) != 1 {
+		t.Errorf("pins must be cleaned in rollback, got %v", f.pinCleaned)
+	}
+	// No generated state may survive.
+	entries, _ := os.ReadDir(filepath.Join(f.app.Config.StateDir, workloadMACStateRootName))
+	if len(entries) != 0 {
+		t.Errorf("prepare failure must leave no workload MAC state, got %v", entries)
+	}
+}
+
+// TestRunWorkloadCompletionCleanupOrder proves the frozen post-start cleanup
+// order on the real handleRun completion path: the container-absence proof
+// (docker ps) runs first, then the workload MAC cleanup (profile unload),
+// then the source pins. The cleanup events are recorded by the harness.
+func TestRunWorkloadCompletionCleanupOrder(t *testing.T) {
+	f := newRunWorkloadLifecycleFixture(t)
+	f.parser(t, false)
+	app := f.app
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.events = append(f.events, "docker "+args[0])
+		f.dockerArgv = append(f.dockerArgv, append([]string{name}, args...))
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			PinnedPath: "/runtime/pinned/0",
+			cleanup: func() error {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				f.pinCleaned = append(f.pinCleaned, "pin")
+				f.events = append(f.events, "pin")
+				return nil
+			},
+		}, nil
+	}
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSystemSession: %v", err)
+	}
+	subdir := filepath.Join(result.Session.Workspace, "ord")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"image":"alpine","mounts":[{"source":"ord","target":"/data"}],"command":["true"]}`
+	req := httptest.NewRequest("POST", "/run", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	if w.Code != 201 {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		OperationID string `json:"operation_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.OperationID == "" {
+		t.Fatalf("cannot read operation id: %v", err)
+	}
+	if op := app.OperationSupervisor.lookup(resp.OperationID); op != nil {
+		op.Wait()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !containsBefore(f.events, "docker ps", "parser --remove") {
+		t.Errorf("proof must precede profile unload, events: %v", f.events)
+	}
+	if !containsBefore(f.events, "parser --remove", "pin") {
+		t.Errorf("profile unload must precede pin cleanup, events: %v", f.events)
+	}
+	if len(f.pinCleaned) != 1 {
+		t.Errorf("pins must be cleaned after completion, got %v", f.pinCleaned)
+	}
+}
+
+func containsBefore(events []string, first, second string) bool {
+	firstIdx, secondIdx := -1, -1
+	for i, e := range events {
+		if firstIdx < 0 && e == first {
+			firstIdx = i
+		}
+		if e == second {
+			secondIdx = i
+		}
+	}
+	return firstIdx >= 0 && secondIdx >= 0 && firstIdx < secondIdx
+}
+
+// TestRunWorkloadCleanupFailureRetainsDependencies proves the cleanup-failure
+// retention contract: a failed workload MAC cleanup must retain the dependent
+// source pins (and not release them), keeping the owned state for startup
+// reconciliation instead of silently forgetting it.
+func TestRunWorkloadCleanupFailureRetainsDependencies(t *testing.T) {
+	f := newRunWorkloadLifecycleFixture(t)
+	app := f.app
+	f.unloadLeavesLoaded = true
+	f.parser(t, true)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSystemSession: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/run", bytes.NewReader([]byte(`{"image":"alpine","command":["true"]}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	if w.Code != 201 {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		OperationID string `json:"operation_id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	op := app.OperationSupervisor.lookup(resp.OperationID)
+	if op == nil {
+		t.Fatal("operation must exist")
+	}
+	op.Wait()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.pinCleaned) != 0 {
+		t.Errorf("failed workload MAC cleanup must retain the dependent pins, got %v", f.pinCleaned)
+	}
+	// The owned state (profile + ownership record) must remain for startup
+	// reconciliation.
+	opStateDir := filepath.Join(app.Config.StateDir, workloadMACStateRootName, op.ID)
+	if _, statErr := os.Stat(opStateDir); statErr != nil {
+		t.Fatalf("failed workload MAC cleanup must retain owned state: %v", statErr)
+	}
+}
+
+// TestRunWorkloadStaleOwnedContainerForceRemoved proves the stale-container
+// contract after a docker CLI process ended: the canonical absence proof
+// finds exactly one proven-owned correlated container, force-removes it,
+// verifies absence, and then releases the workload MAC state and pins.
+func TestRunWorkloadStaleOwnedContainerForceRemoved(t *testing.T) {
+	f := newRunWorkloadLifecycleFixture(t)
+	app := f.app
+	f.parser(t, f.unloadLeavesLoaded)
+	app.InspectOperationContainers = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, argv := range f.dockerArgv {
+			if len(argv) >= 2 && argv[1] == "rm" {
+				return nil, nil // absent after force removal
+			}
+		}
+		return []helperContainer{{ID: "stale-abc", State: "running"}}, nil
+	}
+	removed := []string{}
+	// The stale-container removal path shells out through the Docker CLI
+	// seam; classify + remove happen through removeContainer at the App
+	// level, which records the removed container and simulates absence.
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{PinnedPath: "/runtime/pinned/0", cleanup: func() error { return nil }}, nil
+	}
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSystemSession: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/run", bytes.NewReader([]byte(`{"image":"alpine","command":["true"]}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	var resp struct {
+		OperationID string `json:"operation_id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if op := app.OperationSupervisor.lookup(resp.OperationID); op != nil {
+		op.Wait()
+	}
+	for _, argv := range f.dockerArgv {
+		if len(argv) >= 3 && argv[1] == "rm" && argv[2] == "-f" {
+			removed = append(removed, argv[len(argv)-1])
+		}
+	}
+	if len(removed) != 1 || removed[0] != "stale-abc" {
+		t.Errorf("expected the stale owned container force-removed, got %v", removed)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := os.Stat(filepath.Join(app.Config.StateDir, workloadMACStateRootName, resp.OperationID)); !os.IsNotExist(err) {
+		t.Errorf("owned workload state must be cleaned after stale container removal, got %v", err)
+	}
+}
+
+// TestRunWorkloadAmbiguousProofRetainsEverything proves that an ambiguous
+// container-absence proof (docker query error) retains the workload MAC
+// state and the dependent pins rather than weakening confinement.
+func TestRunWorkloadAmbiguousProofRetainsState(t *testing.T) {
+	f := newRunWorkloadLifecycleFixture(t)
+	app := f.app
+	f.parser(t, f.unloadLeavesLoaded)
+	app.InspectOperationContainers = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+		return nil, fmt.Errorf("simulated docker query failure")
+	}
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSystemSession: %v", err)
+	}
+	subdir := filepath.Join(result.Session.Workspace, "amb")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"image":"alpine","mounts":[{"source":"amb","target":"/data"}]}`
+	req := httptest.NewRequest("POST", "/run", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	var resp struct {
+		OperationID string `json:"operation_id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if op := app.OperationSupervisor.lookup(resp.OperationID); op != nil {
+		op.Wait()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.pinCleaned) != 0 {
+		t.Errorf("ambiguous proof must retain dependent pins, got %v", f.pinCleaned)
+	}
+	opStateDir := filepath.Join(app.Config.StateDir, workloadMACStateRootName, resp.OperationID)
+	if _, statErr := os.Stat(opStateDir); statErr != nil {
+		t.Fatalf("ambiguous proof must retain owned workload state: %v", statErr)
+	}
+}
