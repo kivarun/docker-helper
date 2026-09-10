@@ -976,8 +976,8 @@ so removing the last root leaves the launcher restricted with an empty
 root set (fail-closed: no admissible session workspace until an explicit
 inherit). Both the add and the set-access reject the user-mode reserved
 default launcher with `409 user_mode_owner_reserved`. The CLI verbs are
-`launcher allowed-root add/set-access/list/remove/inherit` and
-`principal allowed-root add/set-access/list/remove`;
+`launcher allowed-root add/list/set-access/remove/inherit` and
+`principal allowed-root add/list/set-access/remove`;
 `launcher scope` no longer exists in the CLI.
 
 ### Session workspace
@@ -1103,7 +1103,7 @@ a Launcher credential has no Principal authority):
 | `DELETE /sessions/{id}` | Session deletion (authority-scoped; see [Session](#session)) |
 
 CLI surface: `principal create|list|show|set|delete`,
-`principal allowed-root add|set-access|list|remove`,
+`principal allowed-root add|list|set-access|remove`,
 `principal credential create|list|revoke|rotate`. Every command accepts
 the common operator flags (see [CLI conventions](#cli-conventions)).
 `principal allowed-root` mutations are authorization-only and never
