@@ -41,7 +41,6 @@
 #   UAT_BASELINE211_RPM     guest path of the pinned v2.1.1 baseline RPM (required)
 #   UAT_BASELINE211_SHA256  expected SHA-256 of the baseline RPM (required)
 #   UAT_ALLOWED_ROOT        global allowed root (default /opt)
-#   UAT_PRINCIPAL           OS user mapped to the principal (default opc)
 #
 # Requires: root, systemd, Docker, rpm. Exits as above.
 
@@ -50,7 +49,6 @@ set -uo pipefail
 VERSION="${UAT_VERSION:-2.2.0-uat}"
 BASELINE_VERSION="2.1.1"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/opt}"
-PRINCIPAL="${UAT_PRINCIPAL:-opc}"
 RPM_PATH_IN="${UAT_RPM:-}"
 RPM_SHA256_IN="${UAT_RPM_SHA256:-}"
 BASELINE_RPM_IN="${UAT_BASELINE211_RPM:-}"
@@ -162,14 +160,20 @@ wait_health || acc_fail "v2.1.1 daemon not healthy (migration gate)"
 # R2: seed real pre-upgrade state through the v2.1.1 CLI
 # ==============================================================================
 scenario "R2: v2.1.1 pre-upgrade state"
-M_USER="$PRINCIPAL"
+# The migration principal is scenario-owned: v2.1.1 requires the principal's
+# OS home to sit under a global allowed root at creation (outside_global_root),
+# and the guest's opc SSH user (cloud-init home /home/opc) must not be moved.
+# A dedicated user with its home under the global allowed root satisfies the
+# baseline's own contract without touching the guest's own user.
+M_USER="mig211u"
 umask 077
 M_DIAG=/tmp/uat-mig211-diag
 rm -rf "$M_DIAG"; mkdir -p "$M_DIAG"
 umask 022
 if ! getent passwd "$M_USER" >/dev/null 2>&1; then
-  if useradd -m "$M_USER" >"$M_DIAG/useradd.out" 2>&1; then
-    acc_ok "OS user for principal seeding created ($M_USER)"
+  mkdir -p "$ALLOWED_ROOT/mig211-home"
+  if useradd -m -d "$ALLOWED_ROOT/mig211-home" "$M_USER" >"$M_DIAG/useradd.out" 2>&1; then
+    acc_ok "OS user for principal seeding created ($M_USER, home under the global root)"
   else
     acc_blocked "cannot create OS user $M_USER (useradd failed): $(redact <"$M_DIAG/useradd.out" | head -2)"
   fi

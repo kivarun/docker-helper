@@ -1730,10 +1730,10 @@ H_SEL_DEF_JSON="$(dh launcher show --system --principal "$H_USER" 2>/dev/null ||
 H_SEL_DEF_ID="$(printf '%s' "$H_SEL_DEF_JSON" | json_field id || true)"
 H_SEL_DEF_NAME_ID="$(dh launcher show --system --principal "$H_USER" default 2>/dev/null | json_field id || true)"
 H_SEL_ALPHA_NAME_ID="$(dh launcher show --system --principal "$H_USER" alpha 2>/dev/null | json_field id || true)"
-H_SEL_UPG_DEF_ID="$(dh launcher show --system --principal "$G_USER" 2>/dev/null | json_field id || true)"
+H_SEL_UPG_DEF_ID="$(dh launcher show --system --principal "$M_USER" 2>/dev/null | json_field id || true)"
 H_SEL_FOREIGN_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
   --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
-  "http://localhost/principals/$G_USER/launchers/alpha" 2>/dev/null || true)"
+  "http://localhost/principals/$M_USER/launchers/alpha" 2>/dev/null || true)"
 H_SEL_MALFORMED_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
   --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
   "http://localhost/principals/$H_USER/launchers/Foo" 2>/dev/null || true)"

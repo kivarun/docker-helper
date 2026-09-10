@@ -235,15 +235,17 @@ else
   reg_fail "fresh --helper-socket workload did NOT see the recreated socket"
 fi
 
-# --- pre-existing projection across a daemon crash-restart -------------------
-# The graceful restart terminates run workloads by design, so the surviving
-# pre-existing-bind scenario is exercised on the crash-restart path: the
-# daemon is SIGKILLed (hard crash), the service auto-restarts, and the
-# orphaned workload observes the recreated socket through its already
-# existing directory bind and performs an authorized launcher operation
-# through it.
-rm -f "$ws/reg16-orphan-old" "$ws/reg16-orphan-new" "$ws/reg16-orphan-ready" \
-      "$ws/reg16-orphan-result" "$ws/reg16-orphan-list.json" "$ws/reg16-orphan-list.err" 2>/dev/null || true
+# --- orphaned helper-owned workload across a daemon crash-restart ------------
+# 2.2 contract finding: the operation supervisor never adopts containers
+# across a daemon restart, and startup reconciliation force-removes a
+# proven-owned stale run workload before the daemon accepts requests
+# (workload_mac.go reconcileOne). The 2.1-era premise that a running
+# workload survives a daemon crash and keeps using its pre-existing
+# projection is superseded by that fail-closed cleanup contract: the orphan
+# and its workload MAC state must be removed, while the runtime directory
+# itself stays bindable and the recreated socket stays reachable for fresh
+# workloads (asserted above).
+rm -f "$ws/reg16-orphan-old" "$ws/reg16-orphan-ready" "$ws/reg16-orphan-cid" 2>/dev/null || true
 
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_LAUNCHER_CRED_SOURCE="$LAUNCHER_CRED_TOKEN" \
   dh run --image "$IMAGE" \
@@ -254,24 +256,7 @@ DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_LAUNCHER_CRED_SOURCE="$LAUNCHER
     OLD_I=$(stat -c %i /run/docker-helper/docker-helper.sock)
     printf "%s" "$OLD_I" > /workspace/reg16-orphan-old
     touch /workspace/reg16-orphan-ready
-    NEW_I=0
-    for i in $(seq 1 90); do
-      NEW_I=$(stat -c %i /run/docker-helper/docker-helper.sock 2>/dev/null || echo 0)
-      if [ "$NEW_I" != "0" ] && [ "$NEW_I" != "$OLD_I" ]; then break; fi
-      sleep 1
-    done
-    printf "%s" "$NEW_I" > /workspace/reg16-orphan-new
-    printf "%s\n" "$UAT_REG16_CRED" > /tmp/launcher-cred
-    chmod 600 /tmp/launcher-cred
-    if /workspace/docker-helper session list \
-        --endpoint /run/docker-helper/docker-helper.sock \
-        --token-file /tmp/launcher-cred --json \
-        > /workspace/reg16-orphan-list.json 2> /workspace/reg16-orphan-list.err; then
-      echo ok > /workspace/reg16-orphan-result
-    else
-      echo fail > /workspace/reg16-orphan-result
-    fi
-    rm -f /tmp/launcher-cred
+    sleep 300
   ' >/tmp/uat-reg16-orphan.out 2>/tmp/uat-reg16-orphan.err &
 ORPHAN_CLI_PID=$!
 
@@ -285,38 +270,46 @@ if [ ! -f "$ws/reg16-orphan-ready" ]; then
   reg_result
 fi
 
+# Capture the orphan's container ID while the daemon is still serving: it is
+# the deterministic removal target of startup reconciliation. Earlier group
+# workloads have already exited, so the only running session workload is the
+# orphan probe itself.
+ORPHAN_CIDS="$(docker ps -q --filter "label=com.dockerhelper.session.id=$REG_SESSION_ID" 2>/dev/null || true)"
+if [ -z "$ORPHAN_CIDS" ]; then
+  reg_fail "orphan probe container not found before the daemon crash"
+  kill -9 "$ORPHAN_CLI_PID" 2>/dev/null || true
+  reg_result
+fi
+
 # Hard-crash the daemon (no graceful cleanup): only the daemon cgroup dies;
-# the container process lives in its own Docker cgroup and survives.
+# the orphaned workload container outlives the crash until startup
+# reconciliation removes it.
 systemctl kill --kill-whom=all --signal=SIGKILL docker-helper.service
 for _ in $(seq 1 90); do
   systemctl is-active --quiet docker-helper.service && break
   sleep 1
 done
-systemctl is-active --quiet docker-helper.service || { reg_fail "service did not auto-restart after the crash"; reg_result; }
+systemctl is-active --quiet docker-helper.service || { reg_fail "service did not auto-restart after the crash"; kill -9 "$ORPHAN_CLI_PID" 2>/dev/null || true; reg_result; }
 
-for _ in $(seq 1 120); do
-  [ -f "$ws/reg16-orphan-result" ] && break
-  sleep 1
+ORPHAN_ALIVE=""
+for cid in $ORPHAN_CIDS; do
+  if docker inspect -f '{{.State.Running}}' "$cid" >/dev/null 2>&1; then
+    ORPHAN_ALIVE="$ORPHAN_ALIVE $cid"
+  fi
 done
+if [ -z "$ORPHAN_ALIVE" ]; then
+  reg_ok "startup reconciliation force-removed the orphaned helper-owned workload (2.2 cleanup contract)"
+else
+  reg_fail "orphaned helper-owned workload survived the daemon crash-restart (stale container not cleaned:$ORPHAN_ALIVE)"
+fi
 
-ORPHAN_RESULT="$(cat "$ws/reg16-orphan-result" 2>/dev/null || echo missing)"
-ORPHAN_OLD_I="$(cat "$ws/reg16-orphan-old" 2>/dev/null || echo 0)"
-ORPHAN_NEW_I="$(cat "$ws/reg16-orphan-new" 2>/dev/null || echo 0)"
-if [ "$ORPHAN_RESULT" = "ok" ]; then
-  reg_ok "surviving pre-existing directory projection performed an authorized operation after daemon recovery"
+if [ -z "$(ls -A /var/lib/docker-helper/workload-mac 2>/dev/null || true)" ]; then
+  reg_ok "no orphaned workload MAC state remains after startup reconciliation"
 else
-  reg_fail "surviving pre-existing projection failed (result=$ORPHAN_RESULT, stderr: $(cat "$ws/reg16-orphan-list.err" 2>/dev/null))"
+  reg_fail "orphaned workload MAC state remains: $(ls -A /var/lib/docker-helper/workload-mac 2>/dev/null | head -3 | tr '\n' ' ')"
 fi
-if [ "$ORPHAN_NEW_I" != "$ORPHAN_OLD_I" ] && [ "$ORPHAN_NEW_I" != "0" ]; then
-  reg_ok "pre-existing projection observed the newly created socket inode"
-else
-  reg_fail "pre-existing projection did not observe a new socket inode ($ORPHAN_OLD_I -> $ORPHAN_NEW_I)"
-fi
-if [ -s "$ws/reg16-orphan-list.json" ]; then
-  reg_ok "authorized launcher operation returned session data through the injected socket"
-else
-  reg_fail "authorized launcher operation returned no session data"
-fi
+
+kill -9 "$ORPHAN_CLI_PID" 2>/dev/null || true
 
 # --- cleanup: stop the orphaned probe container ------------------------------
 CID_LIST="$(docker ps -q --filter "label=com.dockerhelper.session.id=$REG_SESSION_ID" 2>/dev/null || true)"

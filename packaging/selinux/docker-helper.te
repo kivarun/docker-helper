@@ -650,6 +650,15 @@ allow docker_helper_t fuse_device_t:chr_file { getattr open read write ioctl };
 # and startup reconciliation.
 allow docker_helper_t fusefs_t:filesystem { mount unmount getattr };
 
+# With the fixed context= mount option the mounted superblock carries the
+# projection context itself, so the mount/unmount/getattr checks name
+# docker_helper_ro_projection_t, not the fuse filesystem type. Without this
+# grant the FUSE mount fails with EACCES under enforcing SELinux and the
+# read-only projection backend is unreachable (observed as
+# "fuse: mount failed: Permission denied" on the packaged RPM and tarball
+# paths of the exact-artifact UAT).
+allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr };
+
 # The projection mountpoints live under the helper-owned runtime tree.
 allow docker_helper_t docker_helper_runtime_t:dir { mounton };
 

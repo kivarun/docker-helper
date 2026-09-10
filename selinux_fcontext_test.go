@@ -1941,6 +1941,38 @@ func TestSELinuxPolicyWorkloadMACStateAccess(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyBindfsProjectionMount proves the shipped SELinux mount
+// mechanics of the bindfs read-only projection backend. With the fixed
+// context= mount option the mounted superblock carries the projection
+// context itself (docker_helper_ro_projection_t), so mount/unmount/getattr
+// must be granted for that type in addition to the fuse filesystem type;
+// without it the FUSE mount fails closed with EACCES under enforcing
+// SELinux and the read-only projection backend is unreachable.
+func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Join(strings.Fields(string(data)), " ")
+	for _, rule := range []string{
+		"allow docker_helper_t docker_helper_bindfs_exec_t:file { getattr open read execute execute_no_trans map };",
+		"allow docker_helper_t fuse_device_t:chr_file { getattr open read write ioctl };",
+		"allow docker_helper_t fusefs_t:filesystem { mount unmount getattr };",
+		"allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr };",
+		"allow docker_helper_ro_projection_t fusefs_t:filesystem associate;",
+		"allow docker_helper_t docker_helper_runtime_t:dir { mounton };",
+		"allow docker_helper_t self:capability { dac_read_search sys_admin };",
+	} {
+		if !strings.Contains(content, rule) {
+			t.Errorf("SELinux policy must grant: %s", rule)
+		}
+	}
+	if strings.Contains(content, "domain_auto_trans docker_helper_t docker_helper_bindfs_exec_t") ||
+		strings.Contains(content, "type_transition docker_helper_t docker_helper_bindfs_exec_t") {
+		t.Error("bindfs must stay in the daemon domain (execute_no_trans), not transition to its own domain")
+	}
+}
+
 func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
 	if err != nil {

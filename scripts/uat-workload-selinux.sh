@@ -224,14 +224,26 @@ else
   exit 1
 fi
 
-rpm -e docker-helper >/dev/null 2>&1 || true
+# Deterministic clean slate: the previous guest stage can leave the service
+# active, failed, or in an auto-restart backoff, and a swallowed erase makes
+# the candidate install hit "already installed". Stop, reset, erase, and
+# prove the erase happened before installing.
+systemctl stop docker-helper.service >/dev/null 2>&1 || true
+systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
+if rpm -q docker-helper >/dev/null 2>&1; then
+  rpm -e docker-helper >/tmp/uat-wls-erase.log 2>&1 || true
+  if rpm -q docker-helper >/dev/null 2>&1; then
+    echo "error: candidate erase failed, package still installed: $(redact </tmp/uat-wls-erase.log | tail -3)" >&2
+    exit 1
+  fi
+fi
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 if rpm -i "$RPM_PATH_IN" >/tmp/uat-wls-install.log 2>&1 \
     && [ "$(docker-helper version)" = "$VERSION" ] \
     && rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$VERSION"; then
   acc_ok "exact candidate RPM installed (sha256 verified: $ACTUAL_SHA)"
 else
-  echo "error: candidate RPM install/version check failed (see /tmp/uat-wls-install.log)" >&2
+  echo "error: candidate RPM install/version check failed: $(redact </tmp/uat-wls-install.log | tail -3)" >&2
   exit 1
 fi
 

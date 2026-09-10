@@ -289,7 +289,24 @@ WSA_TOKEN="$(cat "/tmp/uat-wla-tok-$WSA_ID")"
 acc_ok "acceptance session $WSA_ID with mixed policy tree"
 
 # The kernel-audit window starts now: every check below runs inside it.
+# Independent AppArmor denial evidence needs a drained kernel audit stream:
+# hosted CI runners run without auditd, so the audit fallback (printk/kmsg
+# and the netlink backlog) silently drops records under rate limiting and
+# the attributable denial is structurally unobservable. Start auditd before
+# the window opens when it is available; the raw-evidence collectors below
+# then read /var/log/audit/audit.log first.
 AA_AUDIT_START_EPOCH="$(date +%s)"
+if ! pgrep -x auditd >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1 && ! command -v auditd >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends auditd >/dev/null 2>&1 || true
+  fi
+  systemctl start auditd 2>/dev/null || service auditd start 2>/dev/null || auditd 2>/dev/null || true
+fi
+if pgrep -x auditd >/dev/null 2>&1; then
+  acc_ok "kernel audit stream drained by auditd for the denial-evidence window"
+else
+  info "auditd unavailable; denial evidence relies on the kernel printk fallback"
+fi
 
 # ==============================================================================
 # scenario W1: RW exposure is really writable
@@ -438,12 +455,17 @@ fi
 say "W10: audit window carries the attributable denial and no unexpected denies"
 # Required independent evidence: a fresh kernel DENIED record attributable to
 # a generated workload profile (produced by the W6 forced-writable proof).
-# The raw audit source is read once (dmesg preferred, journalctl -k fallback)
-# and every record is filtered to the UAT audit window.
-AA_RAW_AUDIT="$(dmesg 2>/dev/null || true)"
-if [ -z "$AA_RAW_AUDIT" ]; then
+# The raw audit sources are read once and concatenated: /var/log/audit/audit.log
+# first (authoritative while auditd drains the netlink queue), then dmesg, then
+# journalctl -k as the last fallback; duplicates are removed so a record that
+# reached two sinks is judged once. Every record is filtered to the UAT audit
+# window.
+AA_RAW_AUDIT="$(cat /var/log/audit/audit.log 2>/dev/null || true)
+$(dmesg 2>/dev/null || true)"
+if [ -z "$(printf '%s' "$AA_RAW_AUDIT" | tr -d '[:space:]')" ]; then
   AA_RAW_AUDIT="$(journalctl -k --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true)"
 fi
+AA_RAW_AUDIT="$(printf '%s\n' "$AA_RAW_AUDIT" | awk '!seen[$0]++' || true)"
 AA_WL_DENIAL_LINE="$(printf '%s\n' "$AA_RAW_AUDIT" \
   | grep 'apparmor="DENIED"' | grep -F 'profile="docker-helper-workload-' \
   | while IFS= read -r line; do

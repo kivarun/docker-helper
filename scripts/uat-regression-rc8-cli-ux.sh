@@ -379,7 +379,11 @@ subcase_c() {
   reg_principal_credential "$user" "$cred" || { reg_fail "C: principal credential create failed"; cleanup_principal "$user"; return; }
 
   # Nested roots: the default Launcher's ceiling spans home and home/opt.
-  if ! out="$(dh principal allowed-root add --system "$user" "$opt" 2>&1)"; then
+  # The nested root is a real access-mode transition (read_only inside the
+  # read_write home ceiling): the effective-root projection normalizes
+  # redundant nesting away, so only a genuine mode transition is guaranteed
+  # to reach the introspection and completion surfaces.
+  if ! out="$(dh principal allowed-root add --system "$user" --access read_only "$opt" 2>&1)"; then
     reg_fail "C: nested root fixture failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     rm -f "$cred"
@@ -819,11 +823,11 @@ subcase_g() {
   #    list is LC_ALL=C sorted: assert_completion compares sorted-unique.)
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "")"
   assert_completion "G: principal show USER <TAB> offers the FIELD vocabulary" \
-    "allowed_roots|enabled|gid|home|uid|username" "$out" || true
+    "allowed_root_entries|allowed_roots|enabled|gid|home|uid|username" "$out" || true
 
   # 6. FIELD partial: a typed prefix filters the vocabulary.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "a")"
-  assert_completion "G: principal show USER a<TAB> offers allowed_roots" "allowed_roots" "$out" || true
+  assert_completion "G: principal show USER a<TAB> offers the allowed_ro* vocabulary" "allowed_root_entries|allowed_roots" "$out" || true
 
   # 7. after a complete USER+FIELD pair: no further positional suggestions.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" uid "")"
@@ -832,7 +836,7 @@ subcase_g() {
   # 8. operator flags (bool and value-taking) never shift the FIELD position.
   out="$(run_completion "$script" /usr/bin/docker-helper principal show --system --token-file "$cred" "$user" "")"
   assert_completion "G: flags do not shift the FIELD position" \
-    "allowed_roots|enabled|gid|home|uid|username" "$out" || true
+    "allowed_root_entries|allowed_roots|enabled|gid|home|uid|username" "$out" || true
 
   cleanup_principal "$user"
   cleanup_principal "$user2"

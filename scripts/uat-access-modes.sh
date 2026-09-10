@@ -349,9 +349,11 @@ fi
 # P6: rich Launcher scope replacement through PUT allowed_root_entries.
 # A restricted launcher requires at least one allowed root at creation
 # (restricted scope requires at least one allowed root), so create with the
-# rich single-entry form and let the PUT below replace the whole set.
+# path-only single-root form (the create route carries legacy paths; rich
+# entries are the allowed-roots PUT route's own form) and let the PUT below
+# replace the whole set with the rich three-entry form.
 MAIN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
-  '{"name":"main","scope":"restricted","allowed_root_entries":[{"path":"'"$TREE"'","access":"read_write"}]}')"
+  '{"name":"main","scope":"restricted","allowed_roots":["'"$TREE"'"]}')"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher 'main' create failed: $MAIN_L_JSON" >&2; exit 1; }
 RICH_BODY="$(printf '{"scope":"restricted","allowed_root_entries":[{"path":"%s","access":"read_write"},{"path":"%s","access":"read_only"},{"path":"%s","access":"read_write"}]}' \

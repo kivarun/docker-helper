@@ -117,10 +117,14 @@ func runInContainerWithOpts(t *testing.T, securityOpts []string, bind, snippet s
 }
 
 // appArmorDenialLogged scans the kernel log for an AppArmor DENIED record
-// attributable to the generated workload profile.
+// attributable to the generated workload profile. The audit.log sink is
+// checked first: while auditd drains the kernel audit netlink queue, records
+// reach only audit.log, whereas the printk fallback (dmesg, journalctl -k)
+// rate-limits and can silently drop the attributable record.
 func appArmorDenialLogged(t *testing.T, profileName string) (bool, string) {
 	t.Helper()
 	sources := [][]string{
+		{"cat", "/var/log/audit/audit.log"},
 		{"dmesg"},
 		{"journalctl", "--no-pager", "-k", "--since", "5 minutes ago"},
 	}
