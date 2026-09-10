@@ -49,6 +49,16 @@ func dockerLiveAvailable(t *testing.T) bool {
 	return cmd.Run() == nil
 }
 
+// repoHead returns the tested source commit when the proof binary runs from
+// a checkout, empty otherwise.
+func repoHead(t *testing.T) string {
+	t.Helper()
+	if out, err := exec.Command("git", "rev-parse", "HEAD").Output(); err == nil {
+		return strings.TrimSpace(string(out))
+	}
+	return "unknown"
+}
+
 // containsString reports whether the list contains the exact value.
 func containsString(values []string, want string) bool {
 	for _, v := range values {
@@ -218,6 +228,9 @@ func TestLiveWorkloadAppArmor(t *testing.T) {
 		t.Fatal("attributable AppArmor DENIED record not found")
 	}
 	t.Logf("attributable denial: %s", denialLine)
+	liveEvidence(t, "apparmor-denial.txt", denialLine+"\n")
+	liveEvidence(t, "apparmor-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nPROFILE=%s\nRESULT=CLOSED\n", repoHead(t), profileName))
 
 	if err := prepared.Cleanup(); err != nil {
 		t.Fatalf("production AppArmor cleanup: %v", err)
@@ -345,6 +358,9 @@ func TestLiveWorkloadSELinux(t *testing.T) {
 		t.Fatal("matching SELinux AVC not found")
 	}
 	t.Logf("attributable AVC: %s", avc)
+	liveEvidence(t, "selinux-avc.txt", avc+"\n")
+	liveEvidence(t, "selinux-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nRESULT=CLOSED\n", repoHead(t)))
 
 	if err := prepared.Cleanup(); err != nil {
 		t.Fatalf("production SELinux cleanup: %v", err)
@@ -442,7 +458,8 @@ func TestLiveWorkloadMCSConcurrentRWRO(t *testing.T) {
 		t.Fatal("read-only container write through the projection must be denied")
 	}
 	t.Logf("denied read-only write output: %v", roErr)
-	if avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write"); avc == "" {
+	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write")
+	if avc == "" {
 		t.Fatal("matching SELinux AVC not found")
 	}
 
@@ -456,6 +473,9 @@ func TestLiveWorkloadMCSConcurrentRWRO(t *testing.T) {
 	if rwLabel == roLabel {
 		t.Fatalf("Docker-assigned MCS categories must differ: rw=%q ro=%q", rwLabel, roLabel)
 	}
+	liveEvidence(t, "mcs-summary.txt", fmt.Sprintf(
+		"TESTED_SOURCE=%s\nRW_LABEL=%s\nRO_LABEL=%s\nRESULT=CLOSED\n",
+		repoHead(t), rwLabel, roLabel))
 
 	if after := inodeContextOf(source); after != labelsBefore {
 		t.Fatalf("backing labels must be unchanged: before=%q after=%q", labelsBefore, after)
@@ -481,4 +501,18 @@ func containerProcessLabel(t *testing.T, securityOpts []string, bind string) str
 		t.Fatalf("cannot observe container process label: %v: %s", err, strings.TrimSpace(out.String()))
 	}
 	return strings.TrimSpace(out.String())
+}
+
+// liveEvidence writes a proof artifact into WORKLOAD_EVIDENCE_DIR when set,
+// mirroring how the M0 live workflows archive their evidence.
+func liveEvidence(t *testing.T, name, content string) {
+	t.Helper()
+	dir := os.Getenv("WORKLOAD_EVIDENCE_DIR")
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
 }
