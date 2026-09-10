@@ -107,6 +107,7 @@ func TestPrincipalHTTPAddAccessPresence(t *testing.T) {
 		{name: "omitted access is the read_write grant", body: `{"path":"` + inner + `"}`, wantCode: http.StatusOK, wantAccess: AllowedRootAccessReadWrite, wantChanged: true},
 		{name: "explicit read_only is persisted", body: `{"path":"` + inner + `","access":"read_only"}`, wantCode: http.StatusOK, wantAccess: AllowedRootAccessReadOnly, wantChanged: true},
 		{name: "explicit empty access is a refusal", body: `{"path":"` + inner + `","access":""}`, wantCode: http.StatusBadRequest, wantErrCode: "invalid_allowed_root_access"},
+		{name: "null access is a refusal, never a read_write default", body: `{"path":"` + inner + `","access":null}`, wantCode: http.StatusBadRequest, wantErrCode: "invalid_allowed_root_access"},
 		{name: "unknown access spelling is a refusal", body: `{"path":"` + inner + `","access":"ro"}`, wantCode: http.StatusBadRequest, wantErrCode: "invalid_allowed_root_access"},
 	}
 	for _, tc := range tests {
@@ -528,6 +529,24 @@ func TestLauncherHTTPAddAccessPresence(t *testing.T) {
 			t.Errorf("body = %s, want invalid_allowed_root_access", w.Body.String())
 		}
 	})
+
+	t.Run("null access is a refusal, never a read_write default", func(t *testing.T) {
+		// Reset to inherit so the refused add has nothing to be idempotent
+		// against: the only observable fail-open outcome would be a stored
+		// entry created by the refused request.
+		launcherRequest(t, app, http.MethodPut, "/principals/"+username+"/launchers/default/allowed-roots", testAdminToken, `{"scope":"inherit"}`)
+		w := launcherRequest(t, app, http.MethodPost, launcherPath, testAdminToken, `{"path":"`+inner+`","access":null}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "invalid_allowed_root_access") {
+			t.Errorf("body = %s, want invalid_allowed_root_access", w.Body.String())
+		}
+		l := decodeLauncher(t, launcherRequest(t, app, http.MethodGet, "/principals/"+username+"/launchers/default", testAdminToken, ""))
+		if len(l.AllowedRootEntries) != 0 {
+			t.Errorf("refused add must not mutate, stored = %+v", l.AllowedRootEntries)
+		}
+	})
 }
 
 // =============================================================================
@@ -662,6 +681,200 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 		}
 		if !strings.Contains(w.Body.String(), "invalid_json") {
 			t.Errorf("body = %s, want invalid_json", w.Body.String())
+		}
+	})
+}
+
+// TestLauncherHTTPReplaceNullPresenceForms proves the frozen dual-form rule:
+// any occurrence of allowed_roots or allowed_root_entries — an empty array,
+// JSON null, or a non-empty array — is the supplied form, so presence and
+// semantic emptiness are never conflated. The legacy field's JSON null keeps
+// its 2.1 value semantics when it is the only supplied form, while the rich
+// field's JSON null has no compatibility reason and is refused as an invalid
+// rich form.
+func TestLauncherHTTPReplaceNullPresenceForms(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	username := "lnullreplaceuser"
+	home := setupPrincipalWithRoots(t, app, username)
+	launcherPath := "/principals/" + username + "/launchers/default/allowed-roots"
+
+	a := filepath.Join(home, "a")
+	if err := os.MkdirAll(a, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("null allowed_roots alone stays the valid legacy inherit input", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, `{"scope":"inherit","allowed_roots":null}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if got := readLauncherScopeMode2(t, app, decodeLauncher(t, w).ID); got != LauncherScopeInherit {
+			t.Errorf("scope = %q, want inherit", got)
+		}
+	})
+
+	t.Run("null allowed_roots alone with restricted is refused", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, `{"scope":"restricted","allowed_roots":null}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "invalid_allowed_roots") {
+			t.Errorf("body = %s, want invalid_allowed_roots", w.Body.String())
+		}
+	})
+
+	t.Run("null allowed_root_entries with inherit is an invalid rich form", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, `{"scope":"inherit","allowed_root_entries":null}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "invalid_allowed_roots") {
+			t.Errorf("body = %s, want invalid_allowed_roots", w.Body.String())
+		}
+	})
+
+	t.Run("null allowed_root_entries with restricted is an invalid rich form", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, `{"scope":"restricted","allowed_root_entries":null}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "invalid_allowed_roots") {
+			t.Errorf("body = %s, want invalid_allowed_roots", w.Body.String())
+		}
+	})
+
+	t.Run("null allowed_roots plus supplied rich entries is the dual form", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
+			`{"scope":"restricted","allowed_roots":null,"allowed_root_entries":[{"path":`+quoteJSON(t, a)+`,"access":"read_only"}]}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "provide either allowed_roots or allowed_root_entries, not both") {
+			t.Errorf("body = %s, want the dual-form refusal", w.Body.String())
+		}
+	})
+
+	t.Run("empty allowed_roots plus supplied rich entries is the dual form", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
+			`{"scope":"restricted","allowed_roots":[],"allowed_root_entries":[{"path":`+quoteJSON(t, a)+`,"access":"read_only"}]}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "provide either allowed_roots or allowed_root_entries, not both") {
+			t.Errorf("body = %s, want the dual-form refusal", w.Body.String())
+		}
+	})
+
+	t.Run("supplied allowed_roots plus null allowed_root_entries is the dual form", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
+			`{"scope":"restricted","allowed_roots":[`+quoteJSON(t, a)+`],"allowed_root_entries":null}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "provide either allowed_roots or allowed_root_entries, not both") {
+			t.Errorf("body = %s, want the dual-form refusal", w.Body.String())
+		}
+	})
+
+	t.Run("null both forms is the dual form", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
+			`{"scope":"inherit","allowed_roots":null,"allowed_root_entries":null}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "provide either allowed_roots or allowed_root_entries, not both") {
+			t.Errorf("body = %s, want the dual-form refusal", w.Body.String())
+		}
+	})
+}
+
+// TestLauncherHTTPReplaceRichEntryStrictNested proves the rich entry array is
+// decoded strictly inside the custom UnmarshalJSON: an unknown nested field is
+// refused through the real route (the outer DisallowUnknownFields never
+// reaches inside a custom UnmarshalJSON), and the refused replacement never
+// mutates the stored scope.
+func TestLauncherHTTPReplaceRichEntryStrictNested(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	username := "lstrictreplace"
+	_, root, l := setupLauncherWithStoredRoot(t, app, username)
+	launcherPath := "/principals/" + username + "/launchers/default/allowed-roots"
+
+	w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
+		`{"scope":"restricted","allowed_root_entries":[{"path":`+quoteJSON(t, root)+`,"access":"read_only","typo":true}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_json") {
+		t.Errorf("body = %s, want invalid_json (strict nested decode)", w.Body.String())
+	}
+	// Prove the refusal reached the replace route with an intact
+	// pre-mutation state: the stored scope is untouched.
+	stored := mustStoredLauncherEntries(t, app, l.ID)
+	if len(stored) != 1 || stored[0].Path != root {
+		t.Errorf("refused replacement must not mutate, stored = %+v", stored)
+	}
+}
+
+// TestAllowedRootReplaceFieldDecoders proves the presence and strictness
+// rules of the two scope-replacement roots decoders directly, so the nested
+// strictness is attributed to the custom decoders and not to an outer layer:
+//
+//   - any occurrence, including JSON null, marks the field present (the
+//     frozen contract: a present key is the supplied form regardless of its
+//     value);
+//   - the rich array is decoded with unknown fields, malformed types, and
+//     trailing JSON rejected.
+func TestAllowedRootReplaceFieldDecoders(t *testing.T) {
+	t.Run("legacy slice is present on null", func(t *testing.T) {
+		var s optionalLauncherRootsSlice
+		if err := json.Unmarshal([]byte(`null`), &s); err != nil {
+			t.Fatal(err)
+		}
+		if !s.present || s.value != nil {
+			t.Errorf("legacy null form = present=%v value=%v, want present with no roots", s.present, s.value)
+		}
+	})
+
+	t.Run("legacy slice is present on an empty array", func(t *testing.T) {
+		var s optionalLauncherRootsSlice
+		if err := json.Unmarshal([]byte(`[]`), &s); err != nil {
+			t.Fatal(err)
+		}
+		if !s.present || len(s.value) != 0 {
+			t.Errorf("legacy empty form = present=%v value=%v, want present with an empty array", s.present, s.value)
+		}
+	})
+
+	t.Run("rich slice is present on null", func(t *testing.T) {
+		var s allowedRootEntryInputSlice
+		if err := json.Unmarshal([]byte(`null`), &s); err != nil {
+			t.Fatal(err)
+		}
+		if !s.present || s.value != nil {
+			t.Errorf("rich null form = present=%v value=%v, want present with no entries", s.present, s.value)
+		}
+	})
+
+	t.Run("rich slice rejects an unknown nested field", func(t *testing.T) {
+		var s allowedRootEntryInputSlice
+		err := json.Unmarshal([]byte(`[{"path":"/x","access":"read_only","typo":true}]`), &s)
+		if err == nil {
+			t.Fatal("unknown nested field must be rejected by the strict nested decode")
+		}
+	})
+
+	t.Run("rich slice rejects a malformed entry type", func(t *testing.T) {
+		var s allowedRootEntryInputSlice
+		if err := json.Unmarshal([]byte(`["/x"]`), &s); err == nil {
+			t.Fatal("a bare path string is not a rich entry object")
+		}
+	})
+
+	t.Run("rich slice rejects trailing JSON after the array", func(t *testing.T) {
+		var s allowedRootEntryInputSlice
+		err := s.UnmarshalJSON([]byte(`[{"path":"/x","access":"read_only"}] {"x":1}`))
+		if err == nil {
+			t.Fatal("trailing JSON after the array must be rejected by the nested decode")
 		}
 	})
 }
@@ -847,27 +1060,41 @@ func TestConfigAllowedRootSetAccessCLI(t *testing.T) {
 		}
 	})
 
-	t.Run("not found mirrors the remove contract", func(t *testing.T) {
+	t.Run("missing stored root is a user error", func(t *testing.T) {
 		root := testAllowedRootDir(t)
 		data, _ := json.Marshal(map[string]any{"allowed_roots": []string{root}, "session_ttl": "12h"})
 		configPath := setupConfigTestWithData(t, data)
 
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root + "-missing", "read_only"}, &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+		if code == 0 {
+			t.Fatalf("exit = 0, want a user-facing failure: stdout=%q stderr=%q", stdout.String(), stderr.String())
 		}
-		if !strings.Contains(stdout.String(), "not found") {
-			t.Errorf("stdout = %q", stdout.String())
+		if stdout.Len() != 0 {
+			t.Errorf("failed mutation must not write stdout, got %q", stdout.String())
 		}
-		raw := readConfigJSON(t, configPath)
-		var entries []AllowedRootEntry
-		if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
-			t.Fatal(err)
+		if !strings.Contains(stderr.String(), "not found") {
+			t.Errorf("stderr = %q, want the not-found failure", stderr.String())
 		}
-		if len(entries) != 1 {
-			t.Errorf("stored entries = %+v, want untouched", entries)
+		verifyConfigUnchanged(t, configPath, data)
+	})
+
+	t.Run("missing stored root abandons a pending legacy migration", func(t *testing.T) {
+		root := testAllowedRootDir(t)
+		data, _ := json.Marshal(map[string]any{"allowed_root": root, "session_ttl": "12h"})
+		configPath := setupConfigTestWithData(t, data)
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root + "-missing", "read_only"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("exit = 0, want a user-facing failure: stdout=%q stderr=%q", stdout.String(), stderr.String())
 		}
+		if stdout.Len() != 0 {
+			t.Errorf("failed mutation must not write stdout, got %q", stdout.String())
+		}
+		// The failed targeted mutation must not persist the legacy migration
+		// prepared inside the transaction as its side effect.
+		verifyConfigUnchanged(t, configPath, data)
 	})
 
 	t.Run("invalid access is a user error before the transaction", func(t *testing.T) {
@@ -955,6 +1182,149 @@ func TestConfigAllowedRootInvalidAddAccessIsUserError(t *testing.T) {
 	}
 	verifyConfigUnchanged(t, configPath, data)
 }
+
+// =============================================================================
+// Canonical stored-root identity resolution
+// =============================================================================
+
+// TestResolveAllowedRootIdentity proves the shared identity owner's rules:
+// an existing symlink alias resolves to the same canonical stored identity as
+// its target, a path that does not exist keeps the cleaned absolute lexical
+// identity, and any other resolution failure (a symlink loop, a permission
+// error) fails closed instead of demoting to a lexical lookup.
+func TestResolveAllowedRootIdentity(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(alias) })
+
+	// A symlink loop: a -> b and b -> a.
+	loopA := filepath.Join(base, "loopA")
+	loopB := filepath.Join(base, "loopB")
+	if err := os.Symlink(loopB, loopA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(loopA, loopB); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(loopA); os.Remove(loopB) })
+
+	tests := []struct {
+		name    string
+		path    string
+		want    string
+		wantErr bool
+	}{
+		{name: "existing path resolves to its canonical form", path: target, want: canonical},
+		{name: "existing symlink alias names the target's canonical identity", path: alias, want: canonical},
+		{name: "missing path keeps the cleaned absolute lexical identity", path: filepath.Join(base, "missing"), want: filepath.Join(base, "missing")},
+		{name: "symlink loop fails closed", path: loopA, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			identity, err := resolveAllowedRootIdentity(tc.path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("identity = %q, want a fail-closed resolution error", identity)
+				}
+				if !isErrInvalidAllowedRoot(err) {
+					t.Errorf("resolution error %v must classify as invalid_allowed_root", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("identity(%s): %v", tc.path, err)
+			}
+			if identity != tc.want {
+				t.Errorf("identity = %q, want %q", identity, tc.want)
+			}
+		})
+	}
+}
+
+// TestConfigAllowedRootRemoveIdentityResolution proves the config remove
+// resolves identities through the shared owner: a symlink alias names the
+// same stored entry as its target, a missing path keeps its lexical stored
+// identity, and a non-ENOENT resolution failure refuses the mutation with no
+// config change.
+func TestConfigAllowedRootRemoveIdentity(t *testing.T) {
+	t.Run("symlink alias removes the same canonical stored entry", func(t *testing.T) {
+		root := testAllowedRootDir(t)
+		other := testAllowedRootDir(t)
+		data, _ := json.Marshal(map[string]any{"allowed_roots": []string{root, other}, "session_ttl": "12h"})
+		configPath := setupConfigTestWithData(t, data)
+
+		alias := root + "-alias"
+		if err := os.Symlink(root, alias); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Remove(alias) })
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "remove", alias}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "removed") {
+			t.Errorf("stdout = %q", stdout.String())
+		}
+		raw := readConfigJSON(t, configPath)
+		var entries []AllowedRootEntry
+		if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
+			t.Fatal(err)
+		}
+		roots := allowedRootPaths(entries)
+		if len(roots) != 1 || roots[0] != other {
+			t.Errorf("stored entries = %v, want exactly the alias's canonical entry %q removed", roots, root)
+		}
+	})
+
+	t.Run("symlink loop refuses the mutation with no config change", func(t *testing.T) {
+		root := testAllowedRootDir(t)
+		extra := testAllowedRootDir(t)
+		data, _ := json.Marshal(map[string]any{"allowed_roots": []string{root, extra}, "session_ttl": "12h"})
+		configPath := setupConfigTestWithData(t, data)
+
+		loopA := filepath.Join(root, "loopA")
+		loopB := filepath.Join(root, "loopB")
+		if err := os.Symlink(loopB, loopA); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(loopA, loopB); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Remove(loopA); os.Remove(loopB) })
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "remove", loopA}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("exit = 0, want a fail-closed refusal: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("failed resolution must not write stdout, got %q", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "cannot resolve allowed-root identity") {
+			t.Errorf("stderr = %q, want the resolution-failure refusal", stderr.String())
+		}
+		verifyConfigUnchanged(t, configPath, data)
+	})
+}
+
+// TestConfigAllowedRootRemoveIdentity proves the config remove resolves
+// identities through the shared owner above; the config set-access identity
+// behavior is covered by TestConfigAllowedRootSetAccessCLI and the
+// resolveAllowedRootIdentity table.
 
 // =============================================================================
 // Audit mode facts
@@ -1099,9 +1469,11 @@ func TestLauncherSetAccessAuditRequestedAndStored(t *testing.T) {
 	}
 }
 
-// TestAllowedRootRefusalAuditHasNoAccessFields proves failed set-access
-// requests never carry requested/stored access facts: a refusal has nothing
-// stored to report, so the audit record carries only the refusal result.
+// TestAllowedRootRefusalAuditHasNoAccessFields proves failed control-plane
+// requests whose access value was never a canonical vocabulary value never
+// carry requested/stored access facts: a refusal has nothing stored to
+// report, and an arbitrary spelling is never logged as a canonical access
+// mode, so the audit record carries only the refusal result.
 func TestAllowedRootRefusalAuditHasNoAccessFields(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
@@ -1127,4 +1499,205 @@ func TestAllowedRootRefusalAuditHasNoAccessFields(t *testing.T) {
 	if _, ok := m["stored_access"]; ok {
 		t.Error("refusal audit must not carry stored_access")
 	}
+
+	// The add's explicitly supplied unknown access is the same invariant:
+	// the parsed canonical access does not exist, so the audit records the
+	// stable invalid_access refusal without any access fact.
+	w = launcherRequest(t, app, http.MethodPost, "/principals/"+username+"/allowed-roots", testAdminToken,
+		`{"path":"/tmp/whatever","access":"ro"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("add status = %d, body=%s", w.Code, w.Body.String())
+	}
+	raw = findAuditLine(auditBuf, "principal.allowed_root_add")
+	if raw == "" {
+		t.Fatalf("missing add audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["result"] != "invalid_access" {
+		t.Errorf("add result = %v, want invalid_access", m["result"])
+	}
+	if _, ok := m["requested_access"]; ok {
+		t.Error("invalid-access add refusal audit must not carry requested_access")
+	}
+	if _, ok := m["stored_access"]; ok {
+		t.Error("invalid-access add refusal audit must not carry stored_access")
+	}
+	assertNoSecrets(t, raw, m, testAdminToken, testAdminToken)
+}
+
+// TestPrincipalSetAccessNotFoundAuditCarriesRequestedAccess proves the
+// set-access refusal for a missing stored root keeps the facts the request
+// had already established: the canonical requested access is present, the
+// stored access is absent (nothing is stored), the result is the stable
+// allowed_root_not_found refusal, and the audit names the resolved canonical
+// identity that was targeted.
+func TestPrincipalSetAccessNotFoundAuditCarriesRequestedAccess(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAdminToken(t)
+	username := "notfoundaudit"
+	home := setupPrincipalWithRoots(t, app, username)
+	missing := filepath.Join(home, "not-stored")
+	if err := os.MkdirAll(missing, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	w := launcherRequest(t, app, http.MethodPatch, "/principals/"+username+"/allowed-roots", testAdminToken,
+		`{"path":"`+missing+`","access":"read_only"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	raw := findAuditLine(auditBuf, "principal.allowed_root_set_access")
+	if raw == "" {
+		t.Fatalf("missing set-access audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["result"] != "allowed_root_not_found" {
+		t.Errorf("result = %v, want allowed_root_not_found", m["result"])
+	}
+	if m["requested_access"] != "read_only" {
+		t.Errorf("requested_access = %v, want read_only (the parsed canonical mode)", m["requested_access"])
+	}
+	if _, ok := m["stored_access"]; ok {
+		t.Error("not-found refusal must not carry stored_access")
+	}
+	if m["principal_path"] != missing {
+		t.Errorf("principal_path = %v, want the resolved identity %s", m["principal_path"], missing)
+	}
+	assertNoSecrets(t, raw, m, testAdminToken, testAdminToken)
+}
+
+// TestLauncherSetAccessNotFoundAuditCarriesRequestedAccess mirrors the
+// Principal not-found audit contract on the Launcher family and proves the
+// refusal keeps the target provenance of the resolved Launcher.
+func TestLauncherSetAccessNotFoundAuditCarriesRequestedAccess(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAdminToken(t)
+	username := "lnotfoundaudit"
+	home, _, l := setupLauncherWithStoredRoot(t, app, username)
+	_ = home
+	launcherPath := "/principals/" + username + "/launchers/default/allowed-roots"
+	missing := filepath.Join(app.Config.AllowedRoots[0].Path, "notfoundaudit-missing")
+	if err := os.MkdirAll(missing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(missing) })
+
+	w := launcherRequest(t, app, http.MethodPatch, launcherPath, testAdminToken,
+		`{"path":"`+missing+`","access":"read_only"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	raw := findAuditLine(auditBuf, "launcher.allowed_root_set_access")
+	if raw == "" {
+		t.Fatalf("missing set-access audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["result"] != "allowed_root_not_found" {
+		t.Errorf("result = %v, want allowed_root_not_found", m["result"])
+	}
+	if m["requested_access"] != "read_only" {
+		t.Errorf("requested_access = %v, want read_only (the parsed canonical mode)", m["requested_access"])
+	}
+	if _, ok := m["stored_access"]; ok {
+		t.Error("not-found refusal must not carry stored_access")
+	}
+	if m["launcher_path"] != missing {
+		t.Errorf("launcher_path = %v, want the resolved identity %s", m["launcher_path"], missing)
+	}
+	// The target provenance of the resolved Launcher is retained.
+	if m["launcher_id"] != l.ID {
+		t.Errorf("launcher_id = %v, want %s", m["launcher_id"], l.ID)
+	}
+	assertNoSecrets(t, raw, m, testAdminToken, testAdminToken)
+}
+
+// TestReservedAddAuditCarriesRequestedAccess proves a refused mutation of the
+// reserved user-mode daemon-owner chain keeps the parsed requested access in
+// its audit record together with the stable reserved-owner refusal result.
+func TestReservedAddAuditCarriesRequestedAccess(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAdminToken(t)
+	owner := app.userModeDefault.username
+	root := app.Config.AllowedRoots[0].Path
+
+	w := launcherRequest(t, app, http.MethodPost, "/principals/"+owner+"/allowed-roots", testAdminToken,
+		`{"path":"`+root+`","access":"read_only"}`)
+	expectReservedResponse(t, w, "principal allowed-root add (audit)")
+
+	raw := findAuditLine(auditBuf, "principal.allowed_root_add")
+	if raw == "" {
+		t.Fatalf("missing add audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["result"] != "user_mode_owner_reserved" {
+		t.Errorf("result = %v, want user_mode_owner_reserved", m["result"])
+	}
+	if m["requested_access"] != "read_only" {
+		t.Errorf("requested_access = %v, want read_only (the parsed canonical mode)", m["requested_access"])
+	}
+	if _, ok := m["stored_access"]; ok {
+		t.Error("reserved refusal must not carry stored_access")
+	}
+	if m["principal_name"] != owner {
+		t.Errorf("principal_name = %v, want the target owner %q", m["principal_name"], owner)
+	}
+	assertNoSecrets(t, raw, m, testAdminToken, testAdminToken)
+}
+
+// TestLauncherAddRefusalAuditRetainsTargetProvenance proves a Launcher
+// allowed-root add refused after the target Launcher was resolved retains the
+// target provenance (principal_name, launcher identity) and the stable
+// outside_principal_root refusal together with the canonical requested
+// access.
+func TestLauncherAddRefusalAuditRetainsTargetProvenance(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAdminToken(t)
+	username := "lrefaudit"
+	home := setupPrincipalWithRoots(t, app, username)
+	launcherPath := "/principals/" + username + "/launchers/default/allowed-roots"
+
+	// A directory directly under the global ceiling but outside the
+	// Principal's effective root, so the daemon refuses the add after
+	// resolving the target Launcher.
+	outside := filepath.Join(app.Config.AllowedRoots[0].Path, "outside-principal-root-target")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(outside) })
+	_ = home
+
+	w := launcherRequest(t, app, http.MethodPost, launcherPath, testAdminToken,
+		`{"path":"`+outside+`","access":"read_only"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "outside_principal_root") {
+		t.Errorf("body = %s, want outside_principal_root", w.Body.String())
+	}
+	raw := findAuditLine(auditBuf, "launcher.allowed_root_add")
+	if raw == "" {
+		t.Fatalf("missing add audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["result"] != "outside_principal_root" {
+		t.Errorf("result = %v, want outside_principal_root", m["result"])
+	}
+	if m["requested_access"] != "read_only" {
+		t.Errorf("requested_access = %v, want read_only (the parsed canonical mode)", m["requested_access"])
+	}
+	if _, ok := m["stored_access"]; ok {
+		t.Error("refusal audit must not carry stored_access")
+	}
+	// The target provenance of the resolved Launcher is retained: the target
+	// owner's Principal name and the Launcher identity are present.
+	if m["principal_name"] != username {
+		t.Errorf("principal_name = %v, want the target owner %q", m["principal_name"], username)
+	}
+	if m["launcher_name"] != defaultLauncherName {
+		t.Errorf("launcher_name = %v, want %q", m["launcher_name"], defaultLauncherName)
+	}
+	if m["launcher_id"] == "" {
+		t.Error("refusal audit must retain the resolved launcher_id")
+	}
+	assertNoSecrets(t, raw, m, testAdminToken, testAdminToken)
 }

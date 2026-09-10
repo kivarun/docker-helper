@@ -530,7 +530,7 @@ var launcherAllowedRootCommand = &Command{
 var launcherAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root to a launcher",
-	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH",
+	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [LAUNCHER] PATH",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

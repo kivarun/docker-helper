@@ -1066,7 +1066,7 @@ docker-helper launcher set [--system] [--endpoint ENDPOINT]
 docker-helper launcher delete [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER]
 docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER] PATH
+    [--token-file PATH] [--principal USER] [--access ACCESS] [LAUNCHER] PATH
 docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER]
 docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
@@ -1341,11 +1341,15 @@ its default. `allowed_roots` and `session_ttl` are required and cannot be
 unset. Reports `unset` or `unchanged`. The same transactional rollback
 semantics apply.
 
-`docker-helper config allowed-root <list|add|remove> [PATH]` — manages the
-global allowed_roots array. `add` canonicalizes and validates the path;
-authorization-only, does NOT prepare MAC state.
+`docker-helper config allowed-root <list|add|set-access|remove> [PATH]` —
+manages the global allowed_roots array. `add` canonicalizes and validates the
+path; authorization-only, does NOT prepare MAC state.
+`set-access` changes the access mode of exactly one stored root, matched by
+the stored canonical identity; a root that is not stored is a user-facing
+error, never an idempotent no-op.
 `remove` resolves and matches the stored canonical form; rejects removal of
-the final global root. `list` prints one canonical root per line.
+the final global root. `list` prints the PATH/ACCESS table, so the access
+mode of every global root is visible.
 
 `http_address` is configurable in system mode only and requires a daemon
 restart to take effect. It is not included in the reloadable field list.

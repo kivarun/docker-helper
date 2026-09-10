@@ -193,6 +193,9 @@ a running daemon or authentication token.
 .TP
 .B docker-helper config show [FIELD]
 Show configuration values. Without FIELD, prints complete effective config as JSON.
+\fBallowed_roots\fR is the 2.x path-only projection of the global allowed
+roots and \fBallowed_root_entries\fR is the authoritative rich projection of
+the same stored entries; both derive from one canonical policy value.
 .TP
 .B docker-helper config set FIELD VALUE
 Set a configuration value. Writable fields: session_ttl, log_level,
@@ -206,7 +209,7 @@ shutdown_timeout, operation_retention_ttl, operation_max_completed,
 operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 .TP
 .B docker-helper config allowed-root list
-List global allowed roots (authorization ceiling).
+List global allowed roots as a PATH/ACCESS table (authorization ceiling).
 .TP
 .B docker-helper config allowed-root add [--access ACCESS] PATH
 Add a global allowed root. Changes the authorization ceiling only;

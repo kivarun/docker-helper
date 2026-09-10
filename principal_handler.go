@@ -16,16 +16,25 @@ type setPrincipalRequest struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
-// allowedRootRequest is the per-root control-plane request for the Principal
-// allowed-root add and remove. Path is required. Access is the presence-aware
-// optional access vocabulary for the add: an omitted field selects the
-// canonical read_write grant (the 2.1 path-only semantics), while an
-// explicitly supplied value — including the empty string — is parsed and
-// must be exactly one of read_write/read_only, so it is never reinterpreted
-// as omission. The remove never carries an access value.
+// allowedRootRequest is the per-root remove request (and the CLI wire form of
+// the add): Path is required and the remove never carries an access value.
+// The daemon decode form of the add is allowedRootAddRequest, whose
+// presence-aware access input distinguishes an omitted field from JSON null.
 type allowedRootRequest struct {
 	Path   string  `json:"path"`
 	Access *string `json:"access,omitempty"`
+}
+
+// allowedRootAddRequest is the presence-aware decode form of the per-root
+// allowed-root add request (Principal and Launcher). Path is required. Access
+// occurrence and value are distinct: an omitted field selects the canonical
+// read_write grant (the 2.1 path-only semantics), while any occurrence —
+// including JSON null and the empty string — is an explicitly supplied value
+// that must parse as exactly read_write or read_only, so JSON null is
+// rejected instead of silently widening the grant to read_write.
+type allowedRootAddRequest struct {
+	Path   string                 `json:"path"`
+	Access allowedRootAccessInput `json:"access"`
 }
 
 // allowedRootSetAccessRequest is the targeted set-access request: both the
@@ -399,7 +408,7 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var req allowedRootRequest
+	var req allowedRootAddRequest
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeRequestContextAudit(ctx, auditRecord{
@@ -425,12 +434,14 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Parse the presence-aware optional access: an omitted field is the
-	// canonical read_write grant (the 2.1 path-only semantics); an explicitly
-	// supplied value — including the empty string — must parse, so an empty
-	// or unknown spelling is never silently reinterpreted as omission.
+	// canonical read_write grant (the 2.1 path-only semantics); any
+	// occurrence — including JSON null and the empty string — must parse, so
+	// an empty, null, or unknown spelling is never silently reinterpreted as
+	// omission. The refusal audit carries no requested_access: the value was
+	// never a canonical access mode.
 	requestedAccess := AllowedRootAccessReadWrite
-	if req.Access != nil {
-		parsed, aerr := parseAllowedRootAccess(*req.Access)
+	if req.Access.present {
+		parsed, aerr := parseAllowedRootAccess(req.Access.value)
 		if aerr != nil {
 			duration := time.Since(started).Round(time.Millisecond).String()
 			writeRequestContextAudit(ctx, auditRecord{
@@ -457,15 +468,16 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
-		}
+		// The refusal audit keeps the facts the request had already
+		// established: the canonical requested access (the value parsed
+		// successfully) and the stable refusal result. There is no stored
+		// access to report: nothing was read or mutated.
 		writeRequestContextAudit(ctx, auditRecord{
-			Event:         "principal.allowed_root_add",
-			PrincipalName: username,
-			Result:        result,
-			Duration:      duration,
+			Event:           "principal.allowed_root_add",
+			PrincipalName:   username,
+			RequestedAccess: string(requestedAccess),
+			Result:          principalAllowedRootAuditResult(err),
+			Duration:        duration,
 		})
 
 		switch {
@@ -569,14 +581,10 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
-		}
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.allowed_root_remove",
 			PrincipalName: username,
-			Result:        result,
+			Result:        principalAllowedRootAuditResult(err),
 			Duration:      duration,
 		})
 
@@ -702,16 +710,23 @@ func (a *App) handleSetPrincipalAllowedRootAccess(w http.ResponseWriter, r *http
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
+		// The refusal keeps the facts the request had already established:
+		// the canonical requested access and the stable refusal result. The
+		// stored access is never reported for a refusal (nothing was stored),
+		// and the canonical targeted identity is carried by the typed
+		// not-found refusal when the resolution had already succeeded.
+		rec := auditRecord{
+			Event:           "principal.allowed_root_set_access",
+			PrincipalName:   username,
+			RequestedAccess: string(requestedAccess),
+			Result:          principalAllowedRootAuditResult(err),
+			Duration:        duration,
 		}
-		writeRequestContextAudit(ctx, auditRecord{
-			Event:         "principal.allowed_root_set_access",
-			PrincipalName: username,
-			Result:        result,
-			Duration:      duration,
-		})
+		var nf allowedRootNotFoundError
+		if errors.As(err, &nf) {
+			rec.PrincipalAllowedRoot = nf.path
+		}
+		writeRequestContextAudit(ctx, rec)
 
 		switch {
 		case isErrPrincipalNotFound(err):
@@ -758,6 +773,28 @@ func (a *App) handleSetPrincipalAllowedRootAccess(w http.ResponseWriter, r *http
 	})
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
+}
+
+// principalAllowedRootAuditResult maps a Principal allowed-root mutation
+// refusal to its stable audit result vocabulary: the same stable refusal
+// names the public API reports, so an operator can explain every refused
+// policy mutation. Unclassified internal failures keep the generic error
+// result.
+func principalAllowedRootAuditResult(err error) string {
+	switch {
+	case isErrPrincipalNotFound(err):
+		return "principal_not_found"
+	case isErrUserModeOwnerReserved(err):
+		return "user_mode_owner_reserved"
+	case isErrInvalidAllowedRoot(err):
+		return "invalid_allowed_root"
+	case errors.Is(err, ErrAllowedRootNotFound):
+		return "allowed_root_not_found"
+	case errors.Is(err, ErrPrincipalRootOutsideGlobal):
+		return "outside_global_root"
+	default:
+		return "error"
+	}
 }
 
 func isErrPrincipalNotFound(err error) bool {

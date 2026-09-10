@@ -378,7 +378,7 @@ var principalAllowedRootListCommand = &Command{
 var principalAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root for a principal",
-	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH",
+	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

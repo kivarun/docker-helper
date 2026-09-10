@@ -260,10 +260,15 @@ not be hidden by claiming that canonical path resolution handles hard links.
 Existing commands remain and existing invocations default to `read_write`:
 
 ```text
-docker-helper config allowed-root add PATH [--access read_write|read_only]
-docker-helper principal allowed-root add USER PATH [--access read_write|read_only]
-docker-helper launcher allowed-root add [LAUNCHER] PATH [--access read_write|read_only]
+docker-helper config allowed-root add [--access read_write|read_only] PATH
+docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access read_write|read_only] USER PATH
+docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access read_write|read_only] [LAUNCHER] PATH
 ```
+
+The project CLI parser requires flags to precede positional arguments, so the
+optional `--access` flag is always written before the positional PATH; an
+option-like token after a positional is rejected with
+`flags must precede positional arguments`.
 
 Changing the mode of an existing exact root is explicit:
 
@@ -290,11 +295,21 @@ Per-root mutation requests extend the existing body compatibly:
 }
 ```
 
-Omitted `access` means `read_write`.
+Omitted `access` means `read_write`. The field is presence-aware: any
+occurrence — including JSON null and the empty string — is an explicitly
+supplied value that must be exactly `read_write` or `read_only`, so JSON null
+is rejected instead of silently widening the grant to `read_write`.
 
 Complete Launcher restricted-scope replacement accepts rich entries in a new
 field while retaining the 2.1 path-only form for compatibility. A request must
-not provide both forms in one mutation.
+not provide both forms in one mutation. Any occurrence of either key — an
+empty array, JSON null, or a non-empty array — is the supplied form of that
+key: presence and semantic emptiness are distinct, and JSON null keeps the
+2.1 value semantics of the supplied legacy form (the nil slice the 2.1 Go
+client serializes). The rich field has no null compatibility; a supplied
+empty rich form is refused by the scope rules. Rich entries are decoded
+strictly: an unknown nested field, a malformed entry type, or trailing JSON
+inside the field value is refused.
 
 The 2.1 JSON `allowed_roots: []string` projection remains available throughout
 the 2.x line so existing clients do not break. Release 2.2 adds the canonical
@@ -346,6 +361,15 @@ Allowed-root mutations audit:
 - owner scope (global, Principal, Launcher);
 - existing ownership provenance;
 - success or stable refusal code.
+
+Refusals keep the policy facts the request had already established: once an
+access value parsed as the canonical vocabulary, the refusal carries
+`requested_access`; the `stored_access` fact appears only when a stored entry
+was actually known (never for a refusal that stored or read nothing), and a
+value that was never a canonical access mode is never logged as one. Stable
+refusal results use the existing family vocabulary (`allowed_root_not_found`,
+`user_mode_owner_reserved`, `outside_global_root`, `outside_principal_root`,
+`invalid_allowed_root`, ...) instead of a generic error result.
 
 Operation audit continues to record caller-requested mount paths/modes without
 credentials, environment values, or workload output. A `read_only_root`

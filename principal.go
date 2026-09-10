@@ -599,7 +599,7 @@ func setPrincipalAllowedRootAccess(db *sql.DB, username string, rootPath string,
 	stored, err := storedPrincipalAllowedRootAccess(db, principalID, resolved)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, AllowedRootEntry{}, fmt.Errorf("allowed root %q: %w", resolved, ErrAllowedRootNotFound)
+			return false, AllowedRootEntry{}, allowedRootNotFoundError{path: resolved}
 		}
 		return false, AllowedRootEntry{}, err
 	}
@@ -621,7 +621,7 @@ func setPrincipalAllowedRootAccess(db *sql.DB, username string, rootPath string,
 		return false, AllowedRootEntry{}, fmt.Errorf("cannot check update result: %w", err)
 	}
 	if affected == 0 {
-		return false, AllowedRootEntry{}, fmt.Errorf("allowed root %q: %w", resolved, ErrAllowedRootNotFound)
+		return false, AllowedRootEntry{}, allowedRootNotFoundError{path: resolved}
 	}
 	return true, AllowedRootEntry{Path: resolved, Access: access}, nil
 }

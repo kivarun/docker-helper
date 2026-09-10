@@ -116,24 +116,25 @@ type patchLauncherRequest struct {
 }
 
 // optionalLauncherRootsSlice is the presence-aware legacy path-only roots
-// field of the Launcher scope-replace request. A field absent from the JSON
-// object (or JSON null, which the 2.1 Go client emits for an inherit
-// replacement) selects the legacy-absent form; an explicitly supplied array —
-// including the empty array — is the supplied legacy form. This distinction
-// is what keeps the legacy form and the rich form unambiguous.
+// field of the Launcher scope-replace request. Occurrence and value are
+// distinct facts: any occurrence — an empty array, JSON null, or a non-empty
+// array — is the supplied legacy form, so dual-form detection counts a
+// present key regardless of its value (presence and semantic emptiness are
+// never conflated). JSON null keeps the 2.1 value semantics of the supplied
+// legacy form: the nil slice the 2.1 Go client serializes, meaning no roots.
 type optionalLauncherRootsSlice struct {
 	present bool
 	value   []string
 }
 
-// UnmarshalJSON marks the field present on any array occurrence and treats
-// JSON null as absent, preserving the exact 2.1 wire semantics where a nil
-// slice serializes as null and means no roots.
+// UnmarshalJSON marks the field present on any occurrence, including JSON
+// null, which decodes as the supplied legacy form with no roots (the exact
+// 2.1 wire semantics where a nil slice serializes as null).
 func (s *optionalLauncherRootsSlice) UnmarshalJSON(data []byte) error {
+	s.present = true
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil
 	}
-	s.present = true
 	return json.Unmarshal(data, &s.value)
 }
 
@@ -148,19 +149,40 @@ type allowedRootEntryInput struct {
 }
 
 // allowedRootEntryInputSlice is the presence-aware rich roots field of the
-// Launcher scope-replace request, with the same null-means-absent rule as the
-// legacy field.
+// Launcher scope-replace request. Any occurrence — an empty array, JSON
+// null, or a non-empty array — is the supplied rich form, so dual-form
+// detection counts a present key regardless of its value; there is no 2.1
+// compatibility reason to treat the rich field's null as absent, and a
+// supplied empty rich form is refused by the scope rules. The occurrence
+// marks the form; the value semantics stay with the handler.
 type allowedRootEntryInputSlice struct {
 	present bool
 	value   []allowedRootEntryInput
 }
 
+// UnmarshalJSON marks the field present on any occurrence, including JSON
+// null, and strictly decodes the array with its own decoder: the outer
+// DisallowUnknownFields never reaches inside a custom UnmarshalJSON, so the
+// nested rich entries are decoded with unknown fields rejected, malformed
+// types rejected, and trailing JSON rejected. The entry access values remain
+// unparsed here; the canonical parseAllowedRootAccess owner parses them at
+// the handler boundary.
 func (s *allowedRootEntryInputSlice) UnmarshalJSON(data []byte) error {
+	s.present = true
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil
 	}
-	s.present = true
-	return json.Unmarshal(data, &s.value)
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var value []allowedRootEntryInput
+	if err := dec.Decode(&value); err != nil {
+		return err
+	}
+	if dec.More() {
+		return fmt.Errorf("trailing data after allowed_root_entries")
+	}
+	s.value = value
+	return nil
 }
 
 // allowedRootsReplaceRequest is the complete-replacement request of the
@@ -249,6 +271,52 @@ func isErrLauncherCredentialNotFound(err error) bool {
 }
 func isErrLauncherCredentialExists(err error) bool {
 	return errors.Is(err, ErrLauncherCredentialExists)
+}
+
+// launcherAllowedRootAuditResult maps a Launcher allowed-root mutation
+// refusal to its stable audit result vocabulary: the same stable refusal
+// names the public API reports, so an operator can explain every refused
+// policy mutation. Unclassified internal failures keep the generic error
+// result.
+func launcherAllowedRootAuditResult(err error) string {
+	switch {
+	case isErrLauncherNotFound(err):
+		return "launcher_not_found"
+	case isErrUserModeOwnerReserved(err):
+		return "user_mode_owner_reserved"
+	case isErrInvalidAllowedRoot(err):
+		return "invalid_allowed_root"
+	case errors.Is(err, ErrAllowedRootNotFound):
+		return "allowed_root_not_found"
+	case errors.Is(err, ErrInvalidAllowedRootAccess):
+		return "invalid_allowed_root_access"
+	case isErrLauncherRootOutsidePrincipal(err):
+		return "outside_principal_root"
+	default:
+		return "error"
+	}
+}
+
+// launcherScopeReplaceAuditResult is the scope-replacement sibling of
+// launcherAllowedRootAuditResult: the stable refusal vocabulary of the
+// complete-scope mutation.
+func launcherScopeReplaceAuditResult(err error) string {
+	switch {
+	case isErrLauncherNotFound(err):
+		return "launcher_not_found"
+	case isErrUserModeOwnerReserved(err):
+		return "user_mode_owner_reserved"
+	case isErrInvalidScope(err):
+		return "invalid_scope"
+	case isErrInvalidAllowedRoots(err):
+		return "invalid_allowed_roots"
+	case errors.Is(err, ErrInvalidAllowedRootAccess):
+		return "invalid_allowed_root_access"
+	case isErrLauncherRootOutsidePrincipal(err):
+		return "outside_principal_root"
+	default:
+		return "error"
+	}
 }
 
 // resolveControlPrincipal resolves the target Principal for a nested
@@ -678,9 +746,11 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 
 	// The two roots wire forms are mutually exclusive: the 2.1 path-only
 	// form (allowed_roots) and the canonical rich form (allowed_root_entries)
-	// must never be combined, even when one of them is empty, so the
-	// requested policy is never ambiguous. JSON null is the absent form for
-	// both fields (the 2.1 Go client serializes a nil slice as null).
+	// must never be combined — any occurrence of either key, including JSON
+	// null and the empty array, is the supplied form, so the requested
+	// policy is never ambiguous (the 2.1 Go client serializes a nil slice
+	// as null, which keeps its legacy value semantics in the legacy form
+	// alone).
 	if req.AllowedRoots.present && req.AllowedRootEntries.present {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.scope_replace",
@@ -788,16 +858,14 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 	updated, err := a.replaceLauncherScopeWithLifecycle(l.ID, scopeMode, requestedEntries)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
-		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
-		}
+		// The refusal audit keeps the target provenance of the resolved
+		// Launcher and the stable refusal result.
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.scope_replace",
 			LauncherID: l.ID,
-			Result:     result,
+			Result:     launcherScopeReplaceAuditResult(err),
 			Duration:   duration,
-		}, auth, nil)
+		}, auth, l)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -889,14 +957,14 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req allowedRootRequest
+	var req allowedRootAddRequest
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.allowed_root_add",
 			LauncherID: l.ID,
 			Result:     "invalid_json",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
@@ -906,25 +974,27 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 			LauncherID: l.ID,
 			Result:     "missing_path",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "missing_path", "path is required")
 		return
 	}
 
 	// Parse the presence-aware optional access: an omitted field is the
-	// canonical read_write grant (the 2.1 path-only semantics); an explicitly
-	// supplied value — including the empty string — must parse, so an empty
-	// or unknown spelling is never silently reinterpreted as omission.
+	// canonical read_write grant (the 2.1 path-only semantics); any
+	// occurrence — including JSON null and the empty string — must parse, so
+	// an empty, null, or unknown spelling is never silently reinterpreted as
+	// omission. The refusal audit carries no requested_access: the value was
+	// never a canonical access mode.
 	requestedAccess := AllowedRootAccessReadWrite
-	if req.Access != nil {
-		parsed, aerr := parseAllowedRootAccess(*req.Access)
+	if req.Access.present {
+		parsed, aerr := parseAllowedRootAccess(req.Access.value)
 		if aerr != nil {
 			writeLauncherControlAudit(ctx, auditRecord{
 				Event:      "launcher.allowed_root_add",
 				LauncherID: l.ID,
 				Result:     "invalid_access",
 				Duration:   time.Since(started).Round(time.Millisecond).String(),
-			}, auth, nil)
+			}, auth, l)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root_access", "access must be read_write or read_only")
 			return
 		}
@@ -938,16 +1008,17 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 	committed, changed, entry, err := a.addLauncherAllowedRootWithLifecycle(l.ID, req.Path, requestedAccess)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
-		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
-		}
+		// The refusal audit keeps the facts the request had already
+		// established: the canonical requested access, the stable refusal
+		// result, and the target provenance of the resolved Launcher (the
+		// mutation committed nothing).
 		writeLauncherControlAudit(ctx, auditRecord{
-			Event:      "launcher.allowed_root_add",
-			LauncherID: l.ID,
-			Result:     result,
-			Duration:   duration,
-		}, auth, nil)
+			Event:           "launcher.allowed_root_add",
+			LauncherID:      l.ID,
+			RequestedAccess: string(requestedAccess),
+			Result:          launcherAllowedRootAuditResult(err),
+			Duration:        duration,
+		}, auth, l)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -1011,7 +1082,7 @@ func (a *App) handleRemoveLauncherAllowedRoot(w http.ResponseWriter, r *http.Req
 			LauncherID: l.ID,
 			Result:     "invalid_json",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
@@ -1021,7 +1092,7 @@ func (a *App) handleRemoveLauncherAllowedRoot(w http.ResponseWriter, r *http.Req
 			LauncherID: l.ID,
 			Result:     "missing_path",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "missing_path", "path is required")
 		return
 	}
@@ -1031,16 +1102,14 @@ func (a *App) handleRemoveLauncherAllowedRoot(w http.ResponseWriter, r *http.Req
 	changed, canonicalPath, err := a.removeLauncherAllowedRootWithLifecycle(l.ID, req.Path)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
-		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
-		}
+		// The refusal audit keeps the target provenance of the resolved
+		// Launcher and the stable refusal result.
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.allowed_root_remove",
 			LauncherID: l.ID,
-			Result:     result,
+			Result:     launcherAllowedRootAuditResult(err),
 			Duration:   duration,
-		}, auth, nil)
+		}, auth, l)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -1102,7 +1171,7 @@ func (a *App) handleSetLauncherAllowedRootAccess(w http.ResponseWriter, r *http.
 			LauncherID: l.ID,
 			Result:     "invalid_json",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
@@ -1112,14 +1181,16 @@ func (a *App) handleSetLauncherAllowedRootAccess(w http.ResponseWriter, r *http.
 			LauncherID: l.ID,
 			Result:     "missing_path",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, "missing_path", "path is required")
 		return
 	}
 	requestedAccess, aerr := parseAllowedRootAccess(req.Access)
 	if aerr != nil {
 		// The HTTP code distinguishes the two refusals; the audit result
-		// vocabulary is missing_access/invalid_access.
+		// vocabulary is missing_access/invalid_access, and the refusal audit
+		// carries no requested_access: the value was never a canonical
+		// access mode.
 		code := "missing_access"
 		result := "missing_access"
 		if req.Access != "" {
@@ -1131,7 +1202,7 @@ func (a *App) handleSetLauncherAllowedRootAccess(w http.ResponseWriter, r *http.
 			LauncherID: l.ID,
 			Result:     result,
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, nil)
+		}, auth, l)
 		writeError(ctx, w, http.StatusBadRequest, code, "access must be read_write or read_only")
 		return
 	}
@@ -1141,16 +1212,24 @@ func (a *App) handleSetLauncherAllowedRootAccess(w http.ResponseWriter, r *http.
 	changed, entry, err := a.setLauncherAllowedRootAccessWithLifecycle(l.ID, req.Path, requestedAccess)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
-		result := "error"
-		if isErrUserModeOwnerReserved(err) {
-			result = "user_mode_owner_reserved"
+		// The refusal keeps the facts the request had already established:
+		// the canonical requested access, the stable refusal result, and the
+		// target provenance of the resolved Launcher. The stored access is
+		// never reported for a refusal (nothing was stored), and the
+		// canonical targeted identity is carried by the typed not-found
+		// refusal when the resolution had already succeeded.
+		rec := auditRecord{
+			Event:           "launcher.allowed_root_set_access",
+			LauncherID:      l.ID,
+			RequestedAccess: string(requestedAccess),
+			Result:          launcherAllowedRootAuditResult(err),
+			Duration:        duration,
 		}
-		writeLauncherControlAudit(ctx, auditRecord{
-			Event:      "launcher.allowed_root_set_access",
-			LauncherID: l.ID,
-			Result:     result,
-			Duration:   duration,
-		}, auth, nil)
+		var nf allowedRootNotFoundError
+		if errors.As(err, &nf) {
+			rec.LauncherAllowedRoot = nf.path
+		}
+		writeLauncherControlAudit(ctx, rec, auth, l)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")

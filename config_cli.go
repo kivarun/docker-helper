@@ -103,13 +103,19 @@ var configShowCommand = &Command{
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	Help: `Without FIELD, prints the complete effective configuration as JSON.
-With FIELD, prints only that field's scalar value followed by a newline.
+With FIELD, prints only that field's value followed by a newline.
 
 The general JSON output redacts admin_token.
 "config show admin_token" intentionally prints the complete real token.
 
+allowed_roots is the 2.x path-only projection of the global allowed roots
+(a JSON array of canonical paths) and allowed_root_entries is the
+authoritative rich projection of the same stored entries; both derive from
+one canonical policy value.
+
 Fields:
   allowed_roots
+  allowed_root_entries
   session_ttl
   log_level
   audit_enabled
@@ -267,7 +273,7 @@ var configAllowedRootListCommand = &Command{
 	Usage:      "docker-helper config allowed-root list",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
-	Help:       `List all allowed roots, one canonical root per line.`,
+	Help:       `List all allowed roots as the PATH/ACCESS table, so the access mode of every global root is visible.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -432,8 +438,8 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 			return configMutationResult{}, err
 		}
 
-		// Build the stored roots with the same identity resolution as
-		// remove, so a symlink alias names the same stored entry.
+		// Build the stored roots with the shared identity-resolution owner,
+		// so a symlink alias names the same stored entry.
 		storedRoots := fc.AllowedRoots
 		if len(storedRoots) == 0 {
 			return configMutationResult{}, fmt.Errorf("allowed_roots must contain at least one entry")
@@ -443,17 +449,9 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 			if r.Path == "" || !filepath.IsAbs(r.Path) {
 				return configMutationResult{}, fmt.Errorf("invalid stored root %q", r.Path)
 			}
-			abs, err := filepath.Abs(r.Path)
+			identity, err := resolveAllowedRootIdentity(r.Path)
 			if err != nil {
 				return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r.Path, err)
-			}
-			identity, err := filepath.EvalSymlinks(abs)
-			if err != nil {
-				if os.IsNotExist(err) {
-					identity = filepath.Clean(abs)
-				} else {
-					return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r.Path, err)
-				}
 			}
 			roots = append(roots, removableRoot{Stored: r, Identity: identity})
 		}
@@ -483,12 +481,12 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 			return configMutationResult{Message: fmt.Sprintf("changed %s to access %s\n", rr.Stored.Path, requestedAccess)}, nil
 		}
 
-		// Mirror the remove family contract for a missing stored root: the
-		// goal state is not satisfiable, reported without a write.
-		if migrated {
-			return configMutationResult{Message: fmt.Sprintf("not found %s\n", requestedIdentity)}, nil
-		}
-		return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("not found %s\n", requestedIdentity)}, nil
+		// Unlike remove, a missing stored root is a user-facing failure of
+		// the targeted access mutation: the goal state is not satisfiable,
+		// reported without a write. The failure also abandons any pending
+		// legacy migration prepared by the transaction: a failed targeted
+		// mutation must never persist a migration as its side effect.
+		return configMutationResult{}, configUserError{fmt.Sprintf("not found %s", requestedIdentity)}
 	})
 }
 
@@ -503,20 +501,13 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// Resolve the requested removal path identity.
-	requestedAbs, err := filepath.Abs(path)
+	// Resolve the requested removal path identity through the shared
+	// allowed-root identity owner (fail-closed on non-ENOENT resolution
+	// errors).
+	requestedIdentity, err := resolveAllowedRootIdentity(path)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: cannot resolve path: %v\n", err)
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 2
-	}
-	requestedIdentity, err := filepath.EvalSymlinks(requestedAbs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			requestedIdentity = filepath.Clean(requestedAbs)
-		} else {
-			fmt.Fprintf(stderr, "error: cannot resolve path: %v\n", err)
-			return 2
-		}
 	}
 
 	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
@@ -529,23 +520,15 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 			return configMutationResult{}, fmt.Errorf("allowed_roots must contain at least one entry")
 		}
 
-		// Build removable roots with identity resolution.
+		// Build removable roots with the shared allowed-root identity owner.
 		roots := make([]removableRoot, 0, len(storedRoots))
 		for _, r := range storedRoots {
 			if r.Path == "" || !filepath.IsAbs(r.Path) {
 				return configMutationResult{}, fmt.Errorf("invalid stored root %q", r.Path)
 			}
-			abs, err := filepath.Abs(r.Path)
+			identity, err := resolveAllowedRootIdentity(r.Path)
 			if err != nil {
 				return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r.Path, err)
-			}
-			identity, err := filepath.EvalSymlinks(abs)
-			if err != nil {
-				if os.IsNotExist(err) {
-					identity = filepath.Clean(abs)
-				} else {
-					return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r.Path, err)
-				}
 			}
 			roots = append(roots, removableRoot{Stored: r, Identity: identity})
 		}
@@ -681,12 +664,15 @@ func configShowAll(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Resolve effective allowed_roots (handles legacy migration).
+	// Resolve effective allowed_roots (handles legacy migration). The
+	// resolved entries are the one canonical policy value both public show
+	// projections derive from.
 	requestedRoots, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	roots, entries := allowedRootShowProjections(requestedRoots)
 
 	ec := resolveEffectiveConfig(*fc)
 
@@ -703,7 +689,8 @@ func configShowAll(stdout, stderr io.Writer) int {
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
 	result := map[string]any{
-		"allowed_roots":           requestedRoots,
+		"allowed_roots":           roots,
+		"allowed_root_entries":    entries,
 		"session_ttl":             fc.SessionTTL,
 		"log_level":               ec.LogLevel,
 		"audit_enabled":           ec.AuditEnabled,
@@ -735,6 +722,23 @@ func configShowAll(stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// allowedRootShowProjections derives both public `config show` projections
+// from the one canonical resolved entries value: allowed_roots is the 2.x
+// path-only projection ([]string, the frozen compatibility shape) and
+// allowed_root_entries is the authoritative rich projection. Both are always
+// serialized as JSON arrays — an empty policy projects the empty array,
+// never null — and neither projection is an independent owner.
+func allowedRootShowProjections(entries []AllowedRootEntry) ([]string, []AllowedRootEntry) {
+	roots := allowedRootPaths(entries)
+	if roots == nil {
+		roots = []string{}
+	}
+	if entries == nil {
+		entries = []AllowedRootEntry{}
+	}
+	return roots, entries
 }
 
 // resolveHTTPAddress returns the effective HTTP address.
@@ -844,12 +848,15 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Resolve effective allowed_roots (handles legacy migration).
+	// Resolve effective allowed_roots (handles legacy migration). The
+	// resolved entries are the one canonical policy value both public show
+	// projections derive from.
 	requestedRoots, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	roots, entries := allowedRootShowProjections(requestedRoots)
 
 	ec := resolveEffectiveConfig(*fc)
 
@@ -857,7 +864,10 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 
 	switch field {
 	case "allowed_roots":
-		data, _ := json.MarshalIndent(requestedRoots, "", "  ")
+		data, _ := json.MarshalIndent(roots, "", "  ")
+		fmt.Fprintln(stdout, string(data))
+	case "allowed_root_entries":
+		data, _ := json.MarshalIndent(entries, "", "  ")
 		fmt.Fprintln(stdout, string(data))
 	case "session_ttl":
 		fmt.Fprintln(stdout, fc.SessionTTL)

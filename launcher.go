@@ -867,7 +867,7 @@ func setLauncherAllowedRootAccess(db *sql.DB, launcherID string, rootPath string
 		launcherID, resolved,
 	).Scan(&stored); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, AllowedRootEntry{}, fmt.Errorf("allowed root %q: %w", resolved, ErrAllowedRootNotFound)
+			return false, AllowedRootEntry{}, allowedRootNotFoundError{path: resolved}
 		}
 		return false, AllowedRootEntry{}, fmt.Errorf("cannot read stored launcher allowed root: %w", err)
 	}
@@ -888,7 +888,7 @@ func setLauncherAllowedRootAccess(db *sql.DB, launcherID string, rootPath string
 		return false, AllowedRootEntry{}, fmt.Errorf("cannot check update result: %w", err)
 	}
 	if affected == 0 {
-		return false, AllowedRootEntry{}, fmt.Errorf("allowed root %q: %w", resolved, ErrAllowedRootNotFound)
+		return false, AllowedRootEntry{}, allowedRootNotFoundError{path: resolved}
 	}
 	return true, AllowedRootEntry{Path: resolved, Access: access}, nil
 }

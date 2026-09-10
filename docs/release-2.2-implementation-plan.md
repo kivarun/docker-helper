@@ -322,10 +322,13 @@ Extend existing allowed-root commands/routes; do not create a second ACL API.
 Support optional access on add:
 
 ```text
-config allowed-root add PATH --access ACCESS
-principal allowed-root add USER PATH --access ACCESS
-launcher allowed-root add [LAUNCHER] PATH --access ACCESS
+config allowed-root add [--access ACCESS] PATH
+principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] USER PATH
+launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [LAUNCHER] PATH
 ```
+
+The project CLI parser requires flags to precede positional arguments, so the
+optional `--access` flag is always written before the positional PATH.
 
 Omission preserves old behavior: `read_write`.
 
