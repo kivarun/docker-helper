@@ -11,6 +11,46 @@ reproducible evidence are recorded below. This closes mechanism feasibility
 only; the production implementation and its full system-mode UAT remain release
 gates.
 
+**Production status (Phase 2.2.6, 2026-09-10).** The accepted mechanisms are
+implemented on `feature/2.2.6-mac-workload-projection` (base
+`release/2.2@d4257406e8802964e6a9056d46d6826bf9490618`, the merge of accepted
+Phase 2.2.5 / PR #14), awaiting architectural acceptance:
+
+- `workloadMACCoordinator` (workload_mac.go) is the single operation-lifetime
+  owner; it never reads allowed-root tables, Session snapshots,
+  `LookupAccess`, or `CanExposeWritable`, and only materializes the accepted
+  `sessionFilesystemExposure` plan. Session workspace coverage stays with
+  `sessionMACCoordinator`.
+- Workload RO/RW follows the caller-requested mode (`RequestedReadOnly`), not
+  only `exposure.Access`; snapshot read_write + caller read_only still yields
+  a protected RO exposure.
+- AppArmor backend (workload_apparmor.go): generated profile
+  `docker-helper-workload-<op.ID>` rendered from the Moby docker-default
+  baseline with `audit deny "<literal>/{,**}" wkl,` per accepted RO target,
+  byte-safe literal encoding (`appArmorPathLiteral`), loaded through
+  `apparmor_parser --replace` and verified via the kernel profile inventory
+  before Docker starts; Docker receives
+  `--security-opt label=disable` plus `--security-opt apparmor=<profile>`.
+- SELinux backend (workload_selinux.go): one bindfs passthrough projection
+  per RO exposure built strictly from the pinned source, mount context
+  `system_u:object_r:docker_helper_ro_projection_t:s0`, worker-alive +
+  mountpoint + effective-type proofs, regular-file projections through a
+  lower-item bind, and no source relabel.
+- Durable ownership state lives under
+  `<StateDir>/workload-mac/<operation-id>/` (ownership record committed
+  before the first kernel resource; generated AppArmor profile source) and
+  `<RuntimeDir>/workload-mac/<operation-id>/` (transient projection state);
+  state roots are 0700 helper-owned. Reserved correlation label
+  `com.dockerhelper.operation.id` joins the existing runtime label schema.
+- One unified run cleanup owner (`run_cleanup.go`) releases container
+  (proven absent) → workload MAC → pins → workspace lease → cidfile from
+  every terminal path, and startup reconciliation cleans only positively
+  identified helper-owned state (foreign/ambiguous state is retained).
+- Static SELinux policy adds `docker_helper_ro_projection_t` and
+  `docker_helper_bindfs_exec_t` to the shipped module with read/execute-only
+  workload semantics and minimal daemon/FUSE mount mechanics; bindfs is an
+  explicit rpm dependency and the backend fails closed when it is missing.
+
 The application-policy contract is owned by
 [`release-2.2-allowed-root-access-modes.md`](release-2.2-allowed-root-access-modes.md).
 This document does not create a second policy hierarchy. AppArmor and SELinux

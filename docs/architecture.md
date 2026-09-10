@@ -1798,6 +1798,42 @@ Pinning requires Linux kernel support for `openat2`, `open_tree`, and
 fail, the operation fails closed with no pathname fallback. Pinned mounts
 are cleaned up as part of the operation lifecycle.
 
+After the pins and before admission, the workload MAC coordinator
+(`workloadMACCoordinator`, Phase 2.2.6) materializes the accepted
+`sessionFilesystemExposure` plan as an additional mandatory-access-control
+layer. The workload RO/RW mode is the caller-requested mode
+(`RequestedReadOnly`); the coordinator never reads allowed-root tables,
+snapshots, or `LookupAccess`/`CanExposeWritable`, and never narrows an
+accepted writable exposure. Under the AppArmor backend it renders one
+generated profile `docker-helper-workload-<operation-id>` from the Moby
+docker-default baseline with `audit deny "<encoded-literal>/{,**}" wkl,`
+rules per read-only container target, loads it through `apparmor_parser`,
+verifies the load through the kernel profile inventory, and passes
+`--security-opt label=disable` plus `--security-opt apparmor=<profile>` to
+Docker. Under the SELinux backend it builds one bindfs passthrough
+projection per read-only exposure from the pinned source with mount context
+`system_u:object_r:docker_helper_ro_projection_t:s0` (read-write exposures
+bind the pinned source directly), verifies mountpoint + FUSE worker +
+effective SELinux type, and keeps `--security-opt
+label=type:docker_helper_container_t` so Docker retains MCS ownership;
+accepted read-write exposures still bind the pinned source directly. The
+backend-neutral prepared result carries only Docker security options and
+per-mount bind sources; build inputs receive no workload MAC material.
+
+Run resources are released by one unified cleanup owner through a frozen
+order — container proven absent, workload MAC state, source pins,
+workspace-use lease, cidfile — from every terminal path, including
+pre-start failures (no container by construction) and post-start paths
+with one canonical container-absence proof. A failed proof or failed MAC
+cleanup retains dependent state (fail closed) for startup reconciliation,
+which runs before the daemon accepts HTTP requests and cleans only
+positively identified helper-owned state. Durable ownership records live
+under `<StateDir>/workload-mac/<operation-id>/` and are committed before
+any kernel-side resource; transient projection state lives under
+`<RuntimeDir>/workload-mac/<operation-id>/`. Container correlation uses the
+reserved server-owned runtime labels (schema, `com.dockerhelper.operation.id`,
+Session ID), never a PID.
+
 #### User-mode run mounts
 
 In user mode, the resolved mount source must equal the canonical
