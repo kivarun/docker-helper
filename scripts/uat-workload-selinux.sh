@@ -247,10 +247,35 @@ candidate_installed_ok() {
     && rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$VERSION" \
     && semodule -l 2>/dev/null | awk '$1 == "docker_helper" { found=1 } END { exit !found }'
 }
+# wls_install_evidence dumps the complete bounded failure context for a
+# candidate install that did not verify: the FULL non-trivial scriptlet log,
+# each candidate_installed_ok member separately, the unit state, leftover
+# containers from earlier guest stages, and the systemd journal window. A
+# tail fragment of one error line is not enough to separate a scriptlet
+# defect from a systemd-state artifact of the preceding guest stage.
+wls_install_evidence() {
+  echo "  --- install log (full, non-trivial) ---" >&2
+  grep -v '^[[:space:]]*$' /tmp/uat-wls-install.log 2>/dev/null | redact | tail -30 >&2 || true
+  echo "  --- erase log (tail) ---" >&2
+  redact </tmp/uat-wls-erase.log 2>/dev/null | tail -5 >&2 || true
+  echo "  --- verifier members: version / rpm -q / semodule ---" >&2
+  echo "  version: $(docker-helper version 2>&1 || true)" >&2
+  echo "  rpm -q: $(rpm -q docker-helper 2>&1 || true)" >&2
+  echo "  semodule: $(semodule -l 2>&1 | grep -w docker_helper || echo '(module not listed)')" >&2
+  echo "  --- unit state ---" >&2
+  systemctl status docker-helper.service --no-pager 2>&1 | head -15 >&2 || true
+  echo "  --- leftover containers ---" >&2
+  docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null | tail -5 >&2 || true
+  echo "  --- guest journal window (transient/scope/job/docker-helper) ---" >&2
+  journalctl --since '-5 min' --no-pager 2>/dev/null \
+    | grep -iE 'docker-helper|transient|scope|failed to start|Bad message' \
+    | tail -40 | redact >&2 || true
+}
 if rpm -i "$RPM_PATH_IN" >/tmp/uat-wls-install.log 2>&1 && candidate_installed_ok; then
   acc_ok "exact candidate RPM installed (sha256 verified: $ACTUAL_SHA)"
 else
-  echo "  install attempt 1 evidence: $(redact </tmp/uat-wls-install.log | tail -8)" >&2
+  wls_install_evidence
+  echo "  install attempt 1 evidence above" >&2
   # One bounded settle + retry for the known-flaky category: after heavy
   # package churn a systemd job-queue race can surface inside the RPM
   # scriptlet ("Failed to start transient service unit"). A healthy system
@@ -269,7 +294,8 @@ else
   if candidate_installed_ok; then
     acc_ok "exact candidate RPM installed (sha256 verified: $ACTUAL_SHA; transient systemd scriptlet hiccup recovered)"
   else
-    echo "error: candidate RPM install/version check failed: $(redact </tmp/uat-wls-install.log | tail -12)" >&2
+    echo "error: candidate RPM install/version check failed after settle + retry:" >&2
+    wls_install_evidence
     echo "error: systemd state: $(systemctl is-system-running 2>&1 || true)" >&2
     exit 1
   fi

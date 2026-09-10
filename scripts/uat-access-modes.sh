@@ -403,10 +403,10 @@ fi
 # widen: a Launcher read_write grant on the Principal read_only region
 # (point 7 policy owner: stored wider mode is ordinary state; the meet keeps
 # the read_only).
-WIDEN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" '{"name":"widen","scope":"restricted"}')"
+WIDEN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
+  '{"name":"widen","scope":"restricted","allowed_roots":["'"$TREE"'"]}')"
 WIDEN_L_ID="$(printf '%s' "$WIDEN_L_JSON" | json_field id)"
 [ -n "$WIDEN_L_ID" ] || { echo "error: launcher 'widen' create failed: $WIDEN_L_JSON" >&2; exit 1; }
-dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WIDEN_L_ID" "$TREE" >/dev/null 2>&1 || true
 if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
     "$WIDEN_L_ID" "$TREE/pipeline-inputs" >/dev/null 2>&1; then
   acc_ok "P7 setup: launcher stored a read_write grant on the Principal read_only region"
@@ -415,22 +415,26 @@ else
 fi
 
 # sub: most-specific RW->RO->RW transitions (point 8 policy owner).
-SUB_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" '{"name":"sub","scope":"restricted"}')"
+SUB_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
+  '{"name":"sub","scope":"restricted","allowed_roots":["'"$TREE"'"]}')"
 SUB_L_ID="$(printf '%s' "$SUB_L_JSON" | json_field id)"
 [ -n "$SUB_L_ID" ] || { echo "error: launcher 'sub' create failed: $SUB_L_JSON" >&2; exit 1; }
-dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SUB_L_ID" "$TREE" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
   "$SUB_L_ID" "$TREE/pipeline-inputs" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
   "$SUB_L_ID" "$TREE/pipeline-inputs/sub" >/dev/null 2>&1 || true
 acc_ok "P8 setup: launcher sub carries RW -> RO -> RW transitions"
 
-# buildro: the read-only build policy owner (snapshot with only RO).
-BUILD_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" '{"name":"buildro","scope":"restricted"}')"
+# buildro: the read-only build policy owner (snapshot with only RO). A
+# restricted launcher create requires at least one root and the create
+# request carries the legacy path-only (read_write) form, so the stored root
+# is flipped to read_only through the narrow set-access mutation.
+BUILD_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
+  '{"name":"buildro","scope":"restricted","allowed_roots":["'"$BUILDROOT"'"]}')"
 BUILD_L_ID="$(printf '%s' "$BUILD_L_JSON" | json_field id)"
 [ -n "$BUILD_L_ID" ] || { echo "error: launcher 'buildro' create failed: $BUILD_L_JSON" >&2; exit 1; }
-if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
-    "$BUILD_L_ID" "$BUILDROOT" >/dev/null 2>&1; then
+if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
+    "$BUILD_L_ID" "$BUILDROOT" read_only >/dev/null 2>&1; then
   acc_ok "build-RO setup: launcher buildro carries a single read_only root"
 else
   acc_fail "build-RO setup failed"

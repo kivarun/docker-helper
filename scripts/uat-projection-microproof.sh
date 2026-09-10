@@ -35,7 +35,18 @@ restore_dontaudit() {
   echo "MICROPROOF restoring dontaudit: semodule -B"
   semodule -B 2>&1 || echo "warning: semodule -B failed (dontaudit may remain disabled)"
 }
-trap restore_dontaudit EXIT
+redact() {
+  sed -E \
+    -e 's/dht_[A-Za-z0-9_-]+/<redacted-token>/g' \
+    -e 's/dhc_[A-Za-z0-9_-]+/<redacted-token>/g'
+}
+A3_DIR="$(mktemp -d /tmp/uat-a3-microproof.XXXXXX)"
+# One EXIT trap only: a second trap assignment would replace the dontaudit
+# restore, and this diagnostic must always leave dontaudit enabled state as
+# it found it.
+# An EXIT trap that completes normally preserves the original exit status,
+# so the cleanup needs no explicit rc capture.
+trap 'rm -rf "$A3_DIR" 2>/dev/null; restore_dontaudit' EXIT
 
 echo "===== READ-ONLY PROJECTION MICRO-PROOF ====="
 
@@ -66,7 +77,17 @@ if ! docker-helper config allowed-root add --access read_only /opt/uat-a3-ro >/d
   echo "error: cannot add read-only global root /opt/uat-a3-ro" >&2
   exit 1
 fi
-docker-helper principal allowed-root add --system opc /opt/uat-a3-ro --access read_only >/dev/null 2>&1 || true
+# Global flags precede positionals; trailing flags are rejected by the CLI and
+# a silently skipped principal root would make the session create fail with
+# invalid_workspace and hide the projection mount evidence this proof exists
+# to collect.
+docker-helper principal allowed-root add --system --access read_only opc /opt/uat-a3-ro \
+  >"$A3_DIR/principal-add.out" 2>&1
+if docker-helper principal allowed-root list --system opc 2>/dev/null | grep -qx '/opt/uat-a3-ro'; then
+  echo "MICROPROOF_PRINCIPAL_ROOT=yes"
+else
+  echo "MICROPROOF_PRINCIPAL_ROOT=no (principal add: $(redact <"$A3_DIR/principal-add.out" | tail -2))"
+fi
 
 ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 SESSION_JSON=""

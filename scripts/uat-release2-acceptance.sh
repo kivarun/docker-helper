@@ -1481,7 +1481,11 @@ db.commit()
   # postinstall did not start it; the deliberate start must fail closed. The
   # shipped unit carries Restart=on-failure, so the refusal may repeat until
   # the start limit; the evidence is the serve_startup ERROR in the journal,
-  # and the unit must never reach the active state.
+  # and the unit must never reach the active state. With Type=exec the start
+  # job completes the moment the binary is exec'd, BEFORE the serve itself
+  # refuses, so a transient active window is not proof of success: wait for
+  # the refusal journal line or the terminal failed state, never for
+  # is-active.
   systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
   systemctl start docker-helper.service >/dev/null 2>&1 || true
   MF_REFUSAL=""
@@ -1490,7 +1494,7 @@ db.commit()
       | grep '"operation":"serve_startup"' \
       | grep 'unsupported session_filesystem_snapshot_entries schema' | tail -1 || true)"
     [ -n "$MF_REFUSAL" ] && break
-    systemctl is-active --quiet docker-helper.service 2>/dev/null && break
+    systemctl is-failed --quiet docker-helper.service 2>/dev/null && break
     sleep 1
   done
   if [ -n "$MF_REFUSAL" ] && ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then

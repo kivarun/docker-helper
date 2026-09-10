@@ -93,7 +93,7 @@ acc_fail_ctx() { # msg diagfile...
   shift
   local f
   for f in "$@"; do
-    [ -s "$f" ] && sed -n '1,2p' "$f" | redact | sed 's/^/      | /' >&2
+    [ -s "$f" ] && sed -n '1,4p' "$f" | redact | sed 's/^/      | /' >&2
   done
 }
 scenario() { say "scenario $1"; }
@@ -160,6 +160,10 @@ wait_health || acc_fail "v2.1.1 daemon not healthy (migration gate)"
 # R2: seed real pre-upgrade state through the v2.1.1 CLI
 # ==============================================================================
 scenario "R2: v2.1.1 pre-upgrade state"
+# Fresh-window anchor for the self-diagnosing journal capture below: the
+# daemon journal also holds session-create failures from earlier guest
+# stages, so the capture must be scoped to this scenario's own window.
+M_R2_T0="$(date +%s)"
 # The migration principal is scenario-owned: v2.1.1 requires the principal's
 # OS home to sit under a global allowed root at creation (outside_global_root),
 # and the guest's opc SSH user (cloud-init home /home/opc) must not be moved.
@@ -244,8 +248,11 @@ else
   # the generic 500 internal_error, but names the internal cause in its
   # operational log ("session creation error"); the loaded policy module and
   # the workspace labels pin down which MAC path the baseline exercised.
-  journalctl -u docker-helper.service -n 200 --no-pager -o cat 2>"$M_DIAG/journal.err" \
-    | grep -E 'session creation' | tail -4 >"$M_DIAG/daemon-journal.txt" || true
+  # Scoped to this scenario's fresh window (M_R2_T0) so stale entries from
+  # earlier guest stages cannot shadow the actual R2 failure lines.
+  journalctl -u docker-helper.service --no-pager -o cat --since "@$M_R2_T0" \
+    2>"$M_DIAG/journal.err" | grep -E 'session creation' | tail -4 \
+    >"$M_DIAG/daemon-journal.txt" || true
   {
     semodule -l 2>&1 | grep -w docker_helper || echo "(docker_helper module not loaded)"
     getenforce 2>&1 || true

@@ -88,7 +88,9 @@ fi
 if [ -z "$SESSION_JSON" ]; then
   SESSION_JSON="$(docker-helper session create --system --workspace /home/opc/uat-workspace --json 2>&1 || true)"
 fi
-TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
+# Tolerant of both pretty ("token": "...") and compact ("token":"...")
+# JSON, so a successful session create is never mistaken for a failure.
+TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": ?"\K[^"]+' | head -1)"
 if [ -z "$TOKEN" ]; then
   echo "MICROPROOF_SESSION_CREATED=no"
   printf '%s\n' "$SESSION_JSON" | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g'
