@@ -258,33 +258,16 @@ func loadSessionOwnershipSnapshot(q txQuerier, launcherID string) (*sessionOwner
 // is disabled or otherwise not admissible for a new Session.
 var ErrLauncherUnavailable = errors.New("launcher unavailable")
 
-// computeLauncherEffectiveRoots is the single authoritative three-level
-// Session-creation root policy. It consumes the global allowed roots (the
-// config owner), the Principal's current roots, and the Launcher scope. The
-// Principal-level ceiling is the canonical effective-Principal-root policy
-// owner (computeEffectivePrincipalRoots): the user-mode daemon-owner
-// Principal with zero stored roots collapses onto the global roots, every
-// other Principal intersects with them.
-//
-//   - inherit Launcher scope adds no narrowing: the effective roots equal the
-//     effective Principal ceiling.
-//   - restricted Launcher scope first revalidates the Launcher's stored roots
-//     against the current effective Principal ceiling (rejecting stale or
-//     directly-injected out-of-ceiling roots), then intersects.
+// computeLauncherEffectiveRoots is the 2.1 path-only projection wrapper of
+// the canonical three-level effective policy
+// (effectiveLauncherAllowedRoots): the hierarchy algorithm has one
+// production owner, and this wrapper projects its result back to paths.
 func computeLauncherEffectiveRoots(globalAllowedRoots []string, snap *sessionOwnershipSnapshot, daemonOwnerPrincipalID int64, userMode bool) ([]string, error) {
-	principalCeiling := computeEffectivePrincipalRoots(globalAllowedRoots, allowedRootPaths(snap.principalRoots), snap.principalID, daemonOwnerPrincipalID, userMode)
-
-	if snap.launcherScope == LauncherScopeRestricted {
-		// Revalidate stored roots against the current ceiling; fail closed on
-		// stale or injected out-of-ceiling roots.
-		for _, stored := range allowedRootPaths(snap.launcherRoots) {
-			if !isWithinAnyAllowedRoot(stored, principalCeiling) {
-				return nil, ErrLauncherUnavailable
-			}
-		}
-		return intersectAllowedRootScopes(principalCeiling, allowedRootPaths(snap.launcherRoots)), nil
+	effective, err := effectiveLauncherAllowedRoots(allowedRootEntriesForPaths(globalAllowedRoots), snap, daemonOwnerPrincipalID, userMode)
+	if err != nil {
+		return nil, err
 	}
-	return principalCeiling, nil
+	return allowedRootPaths(effective), nil
 }
 
 var (
@@ -441,7 +424,7 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 		return nil, ErrLauncherUnavailable
 	}
 
-	globalRoots, err := a.appResolvedGlobalRoots()
+	globalEntries, err := a.appResolvedGlobalRootEntries()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSystem, err)
 	}
@@ -450,14 +433,14 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 	if userMode && a.userModeDefault != nil {
 		daemonID = a.userModeDefault.principalID
 	}
-	effective, err := computeLauncherEffectiveRoots(globalRoots, snap, daemonID, userMode)
+	effectiveEntries, err := effectiveLauncherAllowedRoots(globalEntries, snap, daemonID, userMode)
 	if err != nil {
 		return nil, err
 	}
 
 	return &sessionCreatePolicy{
 		Workspace:             workspace,
-		EffectiveAllowedRoots: effective,
+		EffectiveAllowedRoots: allowedRootPaths(effectiveEntries),
 		LauncherID:            snap.launcherID,
 		LauncherName:          snap.launcherName,
 		PrincipalName:         snap.principalName,

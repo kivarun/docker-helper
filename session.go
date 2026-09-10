@@ -68,32 +68,15 @@ type CreatedSession struct {
 //   - disjoint roots contribute nothing.
 //
 // Results are deduplicated and deterministic.
+//
+// This is the 2.1 path-only projection wrapper of the canonical effective
+// policy composition (composeAllowedRootScopes): the hierarchy algorithm has
+// one production owner, and this wrapper projects its result back to paths.
 func intersectAllowedRootScopes(globalAllowedRoots, principalAllowedRoots []string) []string {
-	seen := make(map[string]bool)
-	var effectiveAllowedRoots []string
-	for _, pRoot := range principalAllowedRoots {
-		for _, gRoot := range globalAllowedRoots {
-			if pRoot == gRoot {
-				if !seen[pRoot] {
-					seen[pRoot] = true
-					effectiveAllowedRoots = append(effectiveAllowedRoots, pRoot)
-				}
-			} else if pathWithin(gRoot, pRoot) {
-				// principal root inside global root -> principal root is effective
-				if !seen[pRoot] {
-					seen[pRoot] = true
-					effectiveAllowedRoots = append(effectiveAllowedRoots, pRoot)
-				}
-			} else if pathWithin(pRoot, gRoot) {
-				// global root inside principal root -> global root is effective
-				if !seen[gRoot] {
-					seen[gRoot] = true
-					effectiveAllowedRoots = append(effectiveAllowedRoots, gRoot)
-				}
-			}
-		}
-	}
-	return effectiveAllowedRoots
+	return allowedRootPaths(composeAllowedRootScopes(
+		allowedRootEntriesForPaths(globalAllowedRoots),
+		allowedRootEntriesForPaths(principalAllowedRoots),
+	))
 }
 
 // scanSessionWithOwnership scans the final Launcher-owned session projection
