@@ -17,8 +17,11 @@ Do not base Release 2.2 production work on `main`: `main` already contains
 Release 3 D0 production changes. Release 2.2 must not accidentally ship any
 Release 3 Engine/lifecycle/runtime work.
 
-After 2.2 is released, the normal release-to-main merge reconciles the completed
-2.2 policy capability back into the Release 3 development line.
+After 2.2 is released, the completed capability is deliberately
+forward-ported and reconciled into the Release 3 development line
+(`main`) against the Release 3 architecture. A whole-branch
+`release/2.2` → `main` merge is not the contract: Release 3 owns the
+reconciliation decision and the vocabulary mapping.
 
 The design owners are:
 
@@ -533,10 +536,29 @@ values, registry secrets, and workload output.
 
 ## Phase 2.2.6 — MAC workload projection
 
-**Status: implemented, awaiting architectural acceptance.** Implemented on
+**Status: CLOSED (2026-09-10).** Implemented on
 `feature/2.2.6-mac-workload-projection` (base
 `release/2.2@d4257406e8802964e6a9056d46d6826bf9490618`, the merge of accepted
-Phase 2.2.5 / PR #14).
+Phase 2.2.5 / PR #14), merged to `release/2.2` as
+`2e25cf60d76e079177287dfd0da15229eb0065cf` (PR #15) after architectural
+acceptance.
+
+Implementation head: `fe9638d460111fde94877979bf7a54175696d4bd`
+(the final commit of the PR branch; the merge carries the same content).
+Gate evidence on that head, all success:
+
+- normal CI (pull_request): run `34509320349`;
+- AppArmor live workload proof: run `34509315214`;
+- SELinux enforcing live workload proof: run `34509315152`.
+
+The accepted production shape is recorded in the
+[`release-2.2-mac-enforcement.md`](release-2.2-mac-enforcement.md)
+closure record: the single `workloadMACCoordinator` operation-lifetime
+owner materializing the accepted `sessionFilesystemExposure` plan, the
+AppArmor generated per-workload profile, the SELinux per-read-only-exposure
+bindfs projection with preserved `docker_helper_container_t`/MCS, the
+durable workload ownership record/state with canonical-identity validation
+and startup reconciliation, and the unified ordered run cleanup owner.
 
 Dependencies: M0 CLOSED and 2.2.5 common exposure plan implemented.
 
@@ -573,6 +595,12 @@ Cleanup/reconciliation follows proven backend ownership. Never delete ambiguous
 foreign policy state.
 
 ## Phase 2.2.7 — documentation, packaging, UAT, and release integration
+
+**Status: IN PROGRESS.** The documentation/release-closure increment
+(`feature/2.2.7a-docs-release-closure`) performs the current-state
+documentation pass below on `release/2.2` after the Phase 2.2.6 merge.
+The migration/upgrade UAT, functional UAT, backend-specific UAT, and
+exact-artifact gate remain open.
 
 ### Current-state docs
 

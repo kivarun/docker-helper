@@ -12,8 +12,9 @@ new networking, resource limits, durable Operations, remote execution, or any
 other Release 3 runtime feature.
 
 Release 2.2 starts from the `v2.1.1` product line, not from the current Release 3
-`main` implementation line. Release 3 inherits the completed 2.2 contract after
-the release line is merged back into `main`.
+`main` implementation line. After release, Release 3 inherits the completed
+2.2 contract through a deliberate forward-port and reconciliation against the
+Release 3 architecture; a whole-branch merge is not the contract.
 
 The motivating use case is a delegated orchestrator that owns one run tree with
 separate data planes:
