@@ -103,8 +103,9 @@ DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_LAUNCHER_CRED_SOURCE="$CRED_TOK
     CHILD_TOKEN=$(printf "%s" "$CHILD_JSON" | sed -n "s/.*\"token\": \"\([^\"]*\)\".*/\1/p")
     printf "%s" "$CHILD_ID" > /workspace/reg17-child-id
 
-    # Authorized child-Session operation through the injected socket.
-    DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock \
+    # Authorized child-Session operation through the injected socket: the
+    # locator is consumed from the daemon-injected
+    # DOCKER_HELPER_SOCKET_PATH (the workload never assigns it manually).
     DOCKER_HELPER_SESSION_TOKEN="$CHILD_TOKEN" \
       "$DH" run --image alpine:3.24 -- true
 

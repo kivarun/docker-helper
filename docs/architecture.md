@@ -1577,7 +1577,16 @@ against the workspace and checks for duplicate targets.
 user mode the request is rejected (`invalid_helper_socket`) before any
 lease, pin, or operation state exists. In system mode the capability is
 accepted and a user mount may not use the injected mount point itself
-(`invalid_mount`).
+(`invalid_mount`). The capability also owns the socket locator: the daemon
+injects the server-owned `DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock`
+when the caller omitted it, accepts a caller-supplied exactly-canonical
+value as one docker argv entry (remaining part of the caller env-key
+audit), and refuses a conflicting value fail-closed
+(`invalid_helper_socket`) before any lease, pin, operation, or Docker
+state exists. The locator is transport reachability only — the Session
+bearer is never injected by the daemon; without `helper_socket` the
+locator is an ordinary caller environment variable with unchanged
+behavior.
 
 Container lifecycle:
 
@@ -1874,6 +1883,18 @@ a caller-owned mount must not be able to shadow, replace, or partially
 cover the server-owned projection (same exact + ancestor + descendant
 principle as trusted-CA injection). Without `helper_socket` the 2.1.0
 mount contract is unchanged.
+
+The projection also carries one server-owned socket locator: with
+`helper_socket` the daemon injects
+`DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock` into the
+docker argv when the caller omitted it, accepts a caller-supplied
+exactly-canonical value (kept as one argv entry and still part of the
+caller env-key audit), and refuses a conflicting value as
+`invalid_helper_socket` before any lease, pin, operation, or Docker state
+exists. The locator describes transport reachability only; the Session
+bearer is never injected (the caller passes `DOCKER_HELPER_SESSION_TOKEN`
+explicitly when the workload needs authority), and without
+`helper_socket` the variable is an ordinary caller environment variable.
 
 The projection binds the runtime DIRECTORY, not the socket inode. The
 systemd unit preserves the runtime directory
