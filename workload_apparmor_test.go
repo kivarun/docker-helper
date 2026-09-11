@@ -686,7 +686,7 @@ func hexByteVal(c byte) int {
 	}
 }
 
-// appArmorExclusionFromRule extracts the {EXCL} fragment of one subtree
+// appArmorExclusionFromRule extracts the exclusion fragment of one subtree
 // rule rendered by the workload renderer: the balanced-brace group that
 // opens right after the base's `/{`.
 func appArmorExclusionFromRule(rule string) string {
@@ -711,7 +711,9 @@ func appArmorExclusionFromRule(rule string) string {
 
 // appArmorHoleExclusion extracts the widest exclusion fragment rendered
 // for the base path of one read-only target: the longest `{EXCL}` group
-// among that base's rules.
+// among that base's rules. The extracted alternation body is normalized
+// back into its fragment form (a leading brace group) so the matcher sees
+// the same fragment shape the renderer emits.
 func appArmorHoleExclusion(profile, base string) string {
 	excl := ""
 	for _, line := range strings.Split(profile, "\n") {
@@ -721,6 +723,9 @@ func appArmorHoleExclusion(profile, base string) string {
 		if inner := appArmorExclusionFromRule(line); len(inner) > len(excl) {
 			excl = inner
 		}
+	}
+	if excl != "" && !strings.HasPrefix(excl, "{") {
+		excl = "{" + excl + "}"
 	}
 	return excl
 }
@@ -775,9 +780,6 @@ func TestRenderWorkloadAppArmorProfileRegularFileDeniesFileShape(t *testing.T) {
 	}
 }
 
-// TestRenderWorkloadAppArmorProfileNestedRWStaysWritable proves F3 case A:
-// RO /work plus RW /work/output renders hole rules whose exclusion keeps
-// /work/output writable while every other name under /work is denied.
 func TestRenderWorkloadAppArmorProfileNestedRWStaysWritable(t *testing.T) {
 	profile := renderWorkloadAppArmorProfile("n", workloadAppArmorTargetPlan{
 		RO: []appArmorROTarget{{Target: "/work"}},
@@ -800,6 +802,34 @@ func TestRenderWorkloadAppArmorProfileNestedRWStaysWritable(t *testing.T) {
 	}
 	if strings.Count(profile, `audit deny "`) != 3 {
 		t.Errorf("single-hole target renders exactly entry, file, and subtree rules:\n%s", profile)
+	}
+	// apparmor_parser rejects a single-element alternation group ("Invalid
+	// number of items between {}"), and the renderer's fragment is already
+	// a multi-item group: an extra brace wrapper would make every hole rule
+	// unloadable. Every deny rule's pattern body must therefore be
+	// brace-balanced and must never contain a doubled opening brace.
+	for _, line := range strings.Split(profile, "\n") {
+		if !strings.Contains(line, `audit deny "`) {
+			continue
+		}
+		start := strings.Index(line, `"`) + 1
+		end := strings.LastIndex(line, `"`)
+		body := line[start:end]
+		if strings.Contains(body, "{{") {
+			t.Errorf("deny rule must never nest a brace group directly inside another group's opening:\n%s", line)
+		}
+		depth := 0
+		for i := 0; i < len(body); i++ {
+			switch body[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+		}
+		if depth != 0 {
+			t.Errorf("deny rule pattern body must be brace-balanced:\n%s", line)
+		}
 	}
 }
 

@@ -695,11 +695,15 @@ func appArmorHoleContains(a, b []string) bool {
 // Per visited node (the region root itself, then each segment-aligned
 // ancestor of a continuing hole):
 //
-//	<base>/{,}           the node directory entry itself
-//	<base>/{EXCL}        non-hole file children
-//	<base>/{EXCL}/{,**}  non-hole directory children and their subtrees
+//	<base>/{,}               the node directory entry itself
+//	<base>/<EXCL>            non-hole file children
+//	<base>/<EXCL>/{,**}      non-hole directory children and their subtrees
 //
-// EXCL is the byte-level segment exclusion of the node's hole child names.
+// EXCL is the segment exclusion of the node's hole child names — the
+// fragment's own brace group, always preceded by exactly one `/`. The
+// fragment is never wrapped in an extra brace layer: apparmor_parser
+// rejects a single-element alternation group ("Invalid number of items
+// between {}"), and the fragment root is already a multi-item group.
 // Nodes at or below a maximal hole end are never visited: the hole subtree
 // is the accepted read-write transition and stays writable.
 func appArmorEmitHoleWalk(sb *strings.Builder, emitted map[string]bool, rootLit string, trie *appArmorHoleNode) {
@@ -716,8 +720,8 @@ func appArmorEmitHoleWalk(sb *strings.Builder, emitted map[string]bool, rootLit 
 			}
 			sort.Strings(names)
 			excl := appArmorSegmentExclusion(names)
-			appArmorEmit(sb, emitted, `audit deny "`+base+`/{`+excl+`}" wkl,`)
-			appArmorEmit(sb, emitted, `audit deny "`+base+`/{`+excl+`}/{,**}" wkl,`)
+			appArmorEmit(sb, emitted, `audit deny "`+base+`/`+excl+`" wkl,`)
+			appArmorEmit(sb, emitted, `audit deny "`+base+`/`+excl+`/{,**}" wkl,`)
 		}
 		for _, name := range sortedHoleChildNames(node) {
 			walk(node.children[name], base+"/"+appArmorPathLiteral(name))
