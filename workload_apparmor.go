@@ -111,7 +111,10 @@ func (n *appArmorSegmentTrieNode) insertSegment(segments []string) {
 // byte trie of the excluded names and emits, at every node, the diverging
 // character class and the descent alternatives; continuations past an
 // excluded name must consume at least one more byte so the exact name is
-// never matched.
+// never matched. Every alternative is bounded to one segment: the diverging
+// class explicitly excludes '/' and its run wildcard is the single `*`
+// (which never matches '/'), so the fragment can never match across a path
+// separator.
 //
 // The fragment is written from the already-resolved exposure plan's RW
 // target paths; it is not a policy resolver.
@@ -138,8 +141,10 @@ func appArmorSegmentExclusion(names []string) string {
 //
 //   - stop: the empty continuation, allowed only when no excluded name
 //     ends at the consumed prefix and no minimum continuation is pending;
-//   - diverge: one byte outside the node's edges followed by anything
-//     (`[^<class>]**`), which can never re-enter the trie;
+//   - diverge: one byte outside the node's edges and outside the path
+//     separator, then an unconstrained non-separator run
+//     (`[^<class>/]*`), which can never re-enter the trie nor cross a
+//     separator;
 //   - descent: one edge byte followed by the child fragment, where a leaf
 //     child demands a non-empty continuation so the excluded name itself
 //     never matches.
@@ -153,10 +158,19 @@ func appArmorExclusionFragment(node *appArmorSegmentTrieNode, minContinuation bo
 		// name. The empty alternative anchors the rule between slashes.
 		alts = append(alts, "")
 	}
-	// Byte-order-independent diverge alternative: the next byte differs
-	// from every edge, so the rest of the segment can be anything.
+	// Byte-order-independent diverge alternative: exactly one byte outside
+	// the node's edges and outside the path separator, followed by an
+	// unconstrained run of non-separator bytes (`[^<class>/]*`). AARE
+	// negated character classes match the path separator and `**` continues
+	// across separators, so the unbounded `[^class]**` form could consume
+	// whole following segments and mis-match accepted hole paths — denying
+	// valid nested read-write subtrees. The explicit '/' class exclusion
+	// keeps the leading byte separator-free and the single `*` keeps the
+	// run inside one segment, so the alternative can never cross a
+	// separator.
 	if len(node.children) > 0 {
-		alts = append(alts, appArmorNegatedClass(childrenBytes(node))+"**")
+		edges := append(childrenBytes(node), '/')
+		alts = append(alts, appArmorNegatedClass(edges)+"*")
 	}
 	// Edge bytes are emitted in byte order for determinism.
 	for _, b := range childrenBytes(node) {

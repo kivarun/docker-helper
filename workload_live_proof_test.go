@@ -923,6 +923,109 @@ func TestLiveWorkloadAppArmorNestedRW(t *testing.T) {
 			repoHead(t), profileName, islandName))
 }
 
+// TestLiveWorkloadAppArmorPrefixCollisionRW proves the prefix-collision
+// renderer semantics with live kernel behavior: with RO /work plus the
+// prefix-collision RW holes /work/a and /work/ab, writes inside both
+// accepted RW subtrees succeed while sibling and continued-prefix names
+// beneath the RO parent are denied. The pre-fix renderer emitted a
+// `[^class]**` diverge alternative whose negated class matches '/' and
+// whose `**` crosses separators, so the generated deny rule matched
+// /work/a/file and the accepted RW subtree was wrongly denied.
+func TestLiveWorkloadAppArmorPrefixCollisionRW(t *testing.T) {
+	requireLiveProof(t)
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	requireLiveProofDependency(t, fileExists(appArmorParserPath), "apparmor_parser unavailable")
+	active, lsmErr := appArmorLSMActive()
+	requireLiveProofDependency(t, lsmErr == nil && active,
+		fmt.Sprintf("AppArmor is not the active LSM: active=%v err=%v", active, lsmErr))
+	dir, err := os.MkdirTemp("", "docker-helper-live-aapc-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	// Region tree, deliberately world-writable everywhere.
+	work := filepath.Join(dir, "work")
+	holeA := filepath.Join(work, "a")
+	holeAB := filepath.Join(work, "ab")
+	for _, d := range []string{work, holeA, holeAB} {
+		if err := os.Mkdir(d, 0777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(holeA, "existing"), []byte("rw\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "inputs.txt"), []byte("ro\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newWorkloadAppArmorBackend()
+	prep := workloadPreparation{
+		OperationID: "op_livaapc1",
+		SessionID:   "live",
+		StateDir:    filepath.Join(dir, "state", "op_livaapc1"),
+		RuntimeDir:  filepath.Join(dir, "runtime", "op_livaapc1"),
+		Exposures: []sessionFilesystemExposure{
+			{Target: "/work", RequestedReadOnly: true},
+			{Target: "/work/a", RequestedReadOnly: false},
+			{Target: "/work/ab", RequestedReadOnly: false},
+		},
+		PinnedSources: []string{work, holeA, holeAB},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepErr := b.prepare(prep)
+	if prepErr != nil {
+		t.Fatalf("production AppArmor prepare: %v", prepErr)
+	}
+	profileName := workloadAppArmorProfileName(prep.OperationID)
+	defer prepared.Cleanup()
+	binds := []string{
+		fmt.Sprintf("%s:/work:rw", work),
+		fmt.Sprintf("%s:/work/a:rw", holeA),
+		fmt.Sprintf("%s:/work/ab:rw", holeAB),
+	}
+
+	// Files inside both accepted prefix-collision RW subtrees must stay
+	// writable: creating a new file and mutating an existing one.
+	if err := runInContainerWithBinds(t, prepared.SecurityOpts, binds,
+		"echo rw-hole-a > /work/a/file && echo rw-hole-ab > /work/ab/file && echo rw-again > /work/a/existing",
+	); err != nil {
+		t.Fatalf("accepted prefix-collision RW subtrees must stay writable: %v", err)
+	}
+
+	// The RO region around the holes must be denied: the sibling name aX,
+	// the continued prefix abc, and a plain non-hole file.
+	for _, denied := range []struct{ name, path string }{
+		{"sibling aX", "/work/aX"},
+		{"continued prefix abc", "/work/abc"},
+		{"plain RO file", "/work/inputs.txt"},
+	} {
+		writeErr := runInContainerWithBinds(t, prepared.SecurityOpts, binds,
+			"echo outside > "+denied.path)
+		if writeErr == nil {
+			t.Fatalf("AppArmor must deny writes to the %s path %s", denied.name, denied.path)
+		}
+		t.Logf("denied %s write output: %v", denied.name, writeErr)
+	}
+
+	denied, denialLine := appArmorDenialLogged(t, profileName)
+	if !denied {
+		t.Fatal("attributable AppArmor DENIED record not found for the prefix-collision RO-region writes")
+	}
+	if !strings.Contains(denialLine, "aX") && !strings.Contains(denialLine, "abc") && !strings.Contains(denialLine, "inputs") {
+		t.Fatalf("denial must reference one of the denied RO paths: %s", denialLine)
+	}
+	t.Logf("attributable denial: %s", denialLine)
+	liveEvidence(t, "apparmor-prefix-collision-denial.txt", denialLine+"\n")
+	liveEvidence(t, "apparmor-prefix-collision-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nPROFILE=%s\nRESULT=CLOSED\n", repoHead(t), profileName))
+}
+
 // TestRequiredLiveProofMissingPrerequisiteFailsClosed proves F9 at the
 // required-mode entry: with DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 an unmet
 // mandatory prerequisite (here: the proof must run as root) fails the proof
