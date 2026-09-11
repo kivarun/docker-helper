@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -7725,6 +7726,15 @@ func runBashScriptIn(t *testing.T, dir, scriptPath string) (string, error) {
 	return string(out), err
 }
 
+// writeStub installs an executable stub command into dir.
+func writeStub(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // extractShellFunction returns the source of a top-level function named name
 // from a shell script. The function must have its body indented and close with
 // a "}" at column 0.
@@ -8339,6 +8349,312 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("migration cleanup proof is missing a required step (%s)", must)
+		}
+	}
+}
+
+// TestRelease2AcceptanceMFFailClosedObservation pins the MF fail-closed
+// migration contract: the acceptance verdict must be decided by a bounded
+// fail-closed observation (the serve_startup refusal appears in the journal
+// and daemon readiness never becomes available in the whole window), never by
+// the systemd unit state. With Type=exec the start job completes at exec,
+// before the serve refuses, and Restart=on-failure re-executes the unit, so
+// the unit passes through transient active windows while the refusal repeats:
+// an is-active gate misjudges a correct refusal.
+func TestRelease2AcceptanceMFFailClosedObservation(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if strings.Contains(content, `[ -n "$MF_REFUSAL" ] && ! systemctl is-active`) {
+		t.Error("MF verdict must not gate on the systemd active state (Type=exec transient active window)")
+	}
+	if !strings.Contains(content, `[ "$MF_HEALTH_AVAILABLE" = 0 ]`) {
+		t.Error("MF verdict must require that daemon readiness never became available in the observation window")
+	}
+
+	fn := extractShellFunction(t, "scripts/uat-release2-acceptance.sh", "observe_mf_failclosed")
+
+	work := t.TempDir()
+	stub := filepath.Join(work, "stub")
+	if err := os.MkdirAll(stub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The real daemon socket file must exist so the observation's
+	// `[ -S "$SOCK" ]` guard passes and the health probe actually reaches the
+	// stub curl on every iteration.
+	listener, err := net.Listen("unix", filepath.Join(work, "daemon.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	refusalLine := `Sep 11 12:00:00 uat docker-helper[1234]: {"level":"ERROR","operation":"serve_startup",` +
+		`"error":"unsupported session_filesystem_snapshot_entries schema: snapshot integrity metadata table is absent after the cutover"}`
+	writeStub(t, stub, "journalctl", `#!/bin/sh
+n=$(cat "$STATE/jcalls" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/jcalls"
+if [ "$n" -ge "$REFUSAL_FROM" ]; then
+  printf '%s\n' "$REFUSAL_LINE"
+fi
+`)
+	writeStub(t, stub, "curl", `#!/bin/sh
+n=$(cat "$STATE/curl" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/curl"
+[ "$n" -ge "$HEALTH_UP_FROM" ] && exit 0
+exit 7
+`)
+	writeStub(t, stub, "systemctl", `#!/bin/sh
+case "$1" in
+  is-failed)
+    n=$(cat "$STATE/isfailed" 2>/dev/null || echo 0)
+    n=$((n+1))
+    echo "$n" > "$STATE/isfailed"
+    [ "$n" -ge "$IS_FAILED_FROM" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 0
+`)
+	writeStub(t, stub, "sleep", `#!/bin/sh
+n=$(cat "$STATE/sleeps" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/sleeps"
+`)
+
+	// Each case exports its stub world, resets the stub state, observes the
+	// refused startup and prints the MF verdict exactly as the acceptance
+	// scenario decides it.
+	never := 1000000
+	cases := []struct {
+		name          string
+		refusalFrom   int
+		healthUpFrom  int
+		isFailedFrom  int
+		wantRefusal   string
+		wantHealth    string
+		wantVerdict   string
+		wantEndSleeps string
+		wantProbes    string
+	}{
+		{
+			// Terminal failed state with the refusal observed and health never
+			// available: the transient-active world must PASS.
+			name:        "refusal observed, health never available, unit reaches failed state",
+			refusalFrom: 2, healthUpFrom: never, isFailedFrom: 3,
+			wantRefusal: "yes", wantHealth: "0", wantVerdict: "pass", wantEndSleeps: "2", wantProbes: "3",
+		},
+		{
+			name:        "refusal observed, health became available",
+			refusalFrom: 1, healthUpFrom: 3, isFailedFrom: never,
+			wantRefusal: "yes", wantHealth: "1", wantVerdict: "fail", wantEndSleeps: "2", wantProbes: "3",
+		},
+		{
+			name:        "no refusal, health never available",
+			refusalFrom: never, healthUpFrom: never, isFailedFrom: never,
+			wantRefusal: "no", wantHealth: "0", wantVerdict: "fail", wantEndSleeps: "40", wantProbes: "40",
+		},
+	}
+	var b strings.Builder
+	b.WriteString("set -uo pipefail\n")
+	fmt.Fprintf(&b, "PATH=%q:$PATH; export PATH\n", stub)
+	fmt.Fprintf(&b, "SOCK=%q\n", filepath.Join(work, "daemon.sock"))
+	b.WriteString(fn)
+	b.WriteString("\n")
+	for i, tc := range cases {
+		state := filepath.Join(work, fmt.Sprintf("state%d", i))
+		fmt.Fprintf(&b, `
+STATE=%q
+export STATE REFUSAL_FROM=%d HEALTH_UP_FROM=%d IS_FAILED_FROM=%d
+REFUSAL_LINE=%q
+export REFUSAL_LINE
+rm -rf "$STATE"; mkdir -p "$STATE"
+observe_mf_failclosed
+printf '%%s REFUSAL=%%s HEALTH=%%s VERDICT=%%s SLEEPS=%%s CURL=%%s\n' \
+  %q \
+  "$([ -n "$MF_REFUSAL" ] && echo yes || echo no)" \
+  "$MF_HEALTH_AVAILABLE" \
+  "$([ -n "$MF_REFUSAL" ] && [ "$MF_HEALTH_AVAILABLE" = 0 ] && echo pass || echo fail)" \
+  "$(cat "$STATE/sleeps" 2>/dev/null || echo 0)" \
+  "$(cat "$STATE/curl" 2>/dev/null || echo 0)"
+`, state, tc.refusalFrom, tc.healthUpFrom, tc.isFailedFrom, refusalLine, tc.name)
+	}
+	script := filepath.Join(work, "mf-observe.sh")
+	if err := os.WriteFile(script, []byte(b.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runBashScriptIn(t, work, script)
+	if err != nil {
+		t.Fatalf("MF observation harness run failed: %v\n%s", err, out)
+	}
+	for _, tc := range cases {
+		fields := map[string]string{}
+		for _, l := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(l, tc.name+" ") {
+				continue
+			}
+			for _, f := range strings.Fields(strings.TrimPrefix(l, tc.name+" ")) {
+				if k, v, ok := strings.Cut(f, "="); ok {
+					fields[k] = v
+				}
+			}
+			break
+		}
+		if fields["REFUSAL"] != tc.wantRefusal {
+			t.Errorf("case %q: refusal observed = %q, want %q", tc.name, fields["REFUSAL"], tc.wantRefusal)
+		}
+		if fields["HEALTH"] != tc.wantHealth {
+			t.Errorf("case %q: health became available = %q, want %q", tc.name, fields["HEALTH"], tc.wantHealth)
+		}
+		if fields["VERDICT"] != tc.wantVerdict {
+			t.Errorf("case %q: MF verdict = %q, want %q", tc.name, fields["VERDICT"], tc.wantVerdict)
+		}
+		if fields["SLEEPS"] != tc.wantEndSleeps {
+			t.Errorf("case %q: observation did not end where the contract requires (sleeps=%q, want %q)", tc.name, fields["SLEEPS"], tc.wantEndSleeps)
+		}
+		if fields["CURL"] != tc.wantProbes {
+			t.Errorf("case %q: health probe count = %q, want %q (readiness must be probed on every observation iteration)", tc.name, fields["CURL"], tc.wantProbes)
+		}
+	}
+}
+
+// TestRegressionGroup16CrashRestartReadiness pins the group-16
+// helper-socket regression readiness boundary: after a daemon crash-restart,
+// the orphan-cleanup assertions may be judged only once the daemon is
+// actually ready (GET /health serving over the API socket), never on the
+// systemd unit state alone — with Type=exec the unit reports active as soon
+// as the binary is exec'd, while startup reconciliation only completes and
+// serves /health before the listener is bound.
+func TestRegressionGroup16CrashRestartReadiness(t *testing.T) {
+	path := "scripts/uat-regression-helper-socket.sh"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The orphan-cleanup assertions must follow the daemon-readiness gate:
+	// startup reconciliation runs before the listener is bound, so judging
+	// the cleanup on the systemd unit state alone races the startup sequence.
+	iWait := strings.Index(content, "if wait_service_health; then")
+	iOrphanOk := strings.Index(content, `reg_ok "startup reconciliation force-removed`)
+	iMAC := strings.Index(content, "/var/lib/docker-helper/workload-mac")
+	if iWait < 0 || iOrphanOk < 0 || iMAC < 0 || !(iWait < iOrphanOk && iWait < iMAC) {
+		t.Errorf("orphan-cleanup assertions must be gated behind the bounded daemon readiness wait (wait=%d orphan-ok=%d workload-mac=%d)", iWait, iOrphanOk, iMAC)
+	}
+	if !strings.Contains(content, `reg_fail "daemon did not become ready`) {
+		t.Error("bounded readiness failure path missing: daemon never ready must FAIL the regression")
+	}
+	if !strings.Contains(content, "reg_require_cmd curl") {
+		t.Error("group 16 must require curl for the daemon readiness probing")
+	}
+
+	fn := extractShellFunction(t, "scripts/uat-regression-helper-socket.sh", "wait_service_health")
+
+	work := t.TempDir()
+	stub := filepath.Join(work, "stub")
+	if err := os.MkdirAll(stub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The real daemon socket file must exist so the readiness probe's
+	// `[ -S "$SOCK" ]` guard passes and the probe reaches the stub curl.
+	listener, err := net.Listen("unix", filepath.Join(work, "daemon.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	writeStub(t, stub, "curl", `#!/bin/sh
+n=$(cat "$STATE/curl" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/curl"
+[ "$n" -ge "$HEALTH_UP_FROM" ] && exit 0
+exit 7
+`)
+	writeStub(t, stub, "systemctl", `#!/bin/sh
+case "$1" in
+  is-active)
+    n=$(cat "$STATE/isactive" 2>/dev/null || echo 0)
+    n=$((n+1))
+    echo "$n" > "$STATE/isactive"
+    [ "$n" -ge "$ACTIVE_FROM" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 0
+`)
+	writeStub(t, stub, "sleep", `#!/bin/sh
+n=$(cat "$STATE/sleeps" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/sleeps"
+`)
+
+	// Both worlds report the systemd unit active from the first probe
+	// (Type=exec): a unit-state-only readiness would return immediately, so
+	// the probe counts discriminate the health readiness boundary.
+	never := 1000000
+	cases := []struct {
+		name         string
+		healthUpFrom int
+		wantRC       string
+		wantProbes   string
+	}{
+		{"unit active while /health not serving yet, health answers at probe 3", 3, "0", "3"},
+		{"unit active but /health never serves within the bounded window", never, "1", "60"},
+	}
+	var b strings.Builder
+	b.WriteString("set -uo pipefail\n")
+	fmt.Fprintf(&b, "PATH=%q:$PATH; export PATH\n", stub)
+	fmt.Fprintf(&b, "SOCK=%q\n", filepath.Join(work, "daemon.sock"))
+	b.WriteString(fn)
+	b.WriteString("\n")
+	for i, tc := range cases {
+		state := filepath.Join(work, fmt.Sprintf("state%d", i))
+		fmt.Fprintf(&b, `
+STATE=%q
+export STATE ACTIVE_FROM=1 HEALTH_UP_FROM=%d
+rm -rf "$STATE"; mkdir -p "$STATE"
+wait_service_health; RC=$?
+printf '%%s RC=%%s PROBES=%%s SLEEPS=%%s ISACTIVE=%%s\n' \
+  %q \
+  "$RC" \
+  "$(cat "$STATE/curl" 2>/dev/null || echo 0)" \
+  "$(cat "$STATE/sleeps" 2>/dev/null || echo 0)" \
+  "$(cat "$STATE/isactive" 2>/dev/null || echo 0)"
+`, state, tc.healthUpFrom, tc.name)
+	}
+	script := filepath.Join(work, "reg16-readiness.sh")
+	if err := os.WriteFile(script, []byte(b.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runBashScriptIn(t, work, script)
+	if err != nil {
+		t.Fatalf("group 16 readiness harness run failed: %v\n%s", err, out)
+	}
+	for _, tc := range cases {
+		fields := map[string]string{}
+		for _, l := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(l, tc.name+" ") {
+				continue
+			}
+			for _, f := range strings.Fields(strings.TrimPrefix(l, tc.name+" ")) {
+				if k, v, ok := strings.Cut(f, "="); ok {
+					fields[k] = v
+				}
+			}
+			break
+		}
+		if fields["RC"] != tc.wantRC {
+			t.Errorf("case %q: readiness rc = %q, want %q", tc.name, fields["RC"], tc.wantRC)
+		}
+		if fields["PROBES"] != tc.wantProbes {
+			t.Errorf("case %q: readiness probes = %q, want %q (the wait must poll health, never accept the unit state alone)", tc.name, fields["PROBES"], tc.wantProbes)
+		}
+		if fields["ISACTIVE"] != fields["PROBES"] {
+			t.Errorf("case %q: the unit was reported active on every probe (%s vs %s) yet readiness required health", tc.name, fields["ISACTIVE"], fields["PROBES"])
 		}
 	}
 }

@@ -126,6 +126,43 @@ wait_health() {
   return 1
 }
 
+# observe_mf_failclosed: bounded fail-closed observation of the refused
+# candidate startup (MF decoy in place). With Type=exec the start job
+# completes the moment the binary is exec'd, BEFORE the serve refuses, and
+# Restart=on-failure then re-executes the unit, so systemd passes through
+# transient active windows while the refusal repeats until the start limit
+# stops it. Transient systemd active is therefore never treated as evidence
+# here. The fail-closed contract is observed directly:
+#   * the expected serve_startup refusal must appear in the journal, and
+#   * daemon readiness must NEVER become available at any point of the whole
+#     observation window (GET /health over the unix socket) — the refusal
+#     must not degenerate into a serving daemon.
+# The observation ends when the unit reaches its terminal failed state
+# (restarts exhausted: nothing further can start) or the bounded window
+# expires. Sets:
+#   MF_REFUSAL           the last observed serve_startup refusal journal line
+#                        ("" when none appeared)
+#   MF_HEALTH_AVAILABLE  1 when daemon readiness became available at ANY point
+#                        of the window, else 0
+observe_mf_failclosed() {
+  MF_REFUSAL=""
+  MF_HEALTH_AVAILABLE=0
+  local _i=0
+  for _i in $(seq 1 40); do
+    if [ -S "$SOCK" ] && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
+      MF_HEALTH_AVAILABLE=1
+      break
+    fi
+    if [ -z "$MF_REFUSAL" ]; then
+      MF_REFUSAL="$(journalctl --utc -u docker-helper.service --since '-3 min' --no-pager 2>/dev/null \
+        | grep '"operation":"serve_startup"' \
+        | grep 'unsupported session_filesystem_snapshot_entries schema' | tail -1 || true)"
+    fi
+    systemctl is-failed --quiet docker-helper.service 2>/dev/null && break
+    sleep 1
+  done
+}
+
 # json_field extracts a string field from a JSON document read on stdin.
 json_field() { # field
   grep -oP "\"$1\": \"\K[^\"]+" | head -1
@@ -1322,7 +1359,8 @@ fi
 #       principal-owned)
 #   MF  fail-closed migration: a pre-existing wrong-shaped
 #       session_filesystem_snapshot_entries table makes the candidate refuse
-#       startup; the refusal leaves no half-migrated state (config.json bytes
+#       startup with daemon readiness never becoming available; the refusal
+#       leaves no half-migrated state (config.json bytes
 #       unchanged, sessions schema unchanged, decoy table untouched and
 #       empty); dropping the decoy recovers into the successful migration on
 #       the same database
@@ -1477,30 +1515,25 @@ db.commit()
     acc_fail "candidate upgrade failed (see /tmp/r2ac-m-upgrade.log)"
   fi
 
-  # The service was inactive at upgrade time (stopped above), so the package
-  # postinstall did not start it; the deliberate start must fail closed. The
-  # shipped unit carries Restart=on-failure, so the refusal may repeat until
-  # the start limit; the evidence is the serve_startup ERROR in the journal,
-  # and the unit must never reach the active state. With Type=exec the start
-  # job completes the moment the binary is exec'd, BEFORE the serve itself
-  # refuses, so a transient active window is not proof of success: wait for
-  # the refusal journal line or the terminal failed state, never for
-  # is-active.
+  # Fail-closed observation (bounded, deterministic — see
+  # observe_mf_failclosed): the expected serve_startup refusal must appear,
+  # daemon readiness must never become available in the window, and transient
+  # systemd active windows are never evidence (Type=exec completes the start
+  # job at exec, before the serve refuses; Restart=on-failure re-executes the
+  # unit until the start limit stops it).
   systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
   systemctl start docker-helper.service >/dev/null 2>&1 || true
-  MF_REFUSAL=""
-  for _ in $(seq 1 30); do
-    MF_REFUSAL="$(journalctl --utc -u docker-helper.service --since '-3 min' --no-pager 2>/dev/null \
-      | grep '"operation":"serve_startup"' \
-      | grep 'unsupported session_filesystem_snapshot_entries schema' | tail -1 || true)"
-    [ -n "$MF_REFUSAL" ] && break
-    systemctl is-failed --quiet docker-helper.service 2>/dev/null && break
-    sleep 1
-  done
-  if [ -n "$MF_REFUSAL" ] && ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then
-    acc_ok "MF startup refused closed: unsupported snapshot schema (serve_startup ERROR), unit not active"
+  observe_mf_failclosed
+
+  # Quiesce deterministically before the invariant checks: stop cancels any
+  # remaining auto-restart and reset-failed clears the terminal failed state.
+  systemctl stop docker-helper.service >/dev/null 2>&1 || true
+  systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
+
+  if [ -n "$MF_REFUSAL" ] && [ "$MF_HEALTH_AVAILABLE" = 0 ]; then
+    acc_ok "MF startup refused closed: serve_startup refusal observed and daemon readiness never became available (transient active windows ignored)"
   else
-    acc_fail "MF startup refusal evidence missing or the unit started (refusal: ${MF_REFUSAL:-absent})"
+    acc_fail "MF startup not proven fail-closed (refusal: ${MF_REFUSAL:-absent}, health became available: $MF_HEALTH_AVAILABLE)"
   fi
 
   # No half-migrated state: config bytes unchanged, sessions schema unchanged,

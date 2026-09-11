@@ -18,13 +18,14 @@
 #     be created or removed by the workload;
 #   * helper-private runtime state (builds/, mounts/, sessions/, the socket
 #     lock) stays unreadable for the Principal-UID workload;
-#   * a REAL service restart terminates the running workload (the 2.1.0
-#     run lifecycle intentionally leaves no orphan containers), preserves
-#     the /run/docker-helper directory inode, and recreates the socket
-#     inside it; a fresh --helper-socket workload sees the new socket;
-#   * the pre-existing directory projection of a surviving orphaned
-#     workload sees the recreated socket after a daemon crash-restart and
-#     performs an authorized launcher operation through it.
+#   * the 2.1.0 run lifecycle intentionally leaves no orphan containers and
+#     a real service restart terminates the running workload, preserves the
+#     /run/docker-helper directory inode, and recreates the socket inside
+#     it; a fresh --helper-socket workload sees the new socket;
+#   * across a daemon crash-restart, startup reconciliation force-removes
+#     the orphaned helper-owned workload and its workload MAC state; the
+#     cleanup is judged only after the daemon is actually ready (GET
+#     /health serving), never on the systemd unit state alone.
 #
 # The script never prints a real credential token.
 #
@@ -46,6 +47,27 @@ reg_require_cmd systemctl "restart semantics drive the real service lifecycle"
 
 IMAGE="alpine:3.24"
 USER="uatreg16"
+SOCK="/run/docker-helper/docker-helper.sock"
+
+reg_require_cmd curl "health probing of the system daemon readiness boundary"
+
+# wait_service_health: bounded wait for an active daemon + host /health (the
+# same readiness contract as the runtime-dir/socket-replacement regression).
+# The oracle matters after a daemon restart: with Type=exec the unit reports
+# active as soon as the binary is exec'd, but the startup sequence (snapshot
+# integrity, startup reconciliation, session cleanup) only completes and
+# serves /health once the listener is bound, so `systemctl is-active` alone
+# is never a readiness oracle.
+wait_service_health() {
+  for _ in $(seq 1 60); do
+    if systemctl is-active --quiet docker-helper.service 2>/dev/null \
+        && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
 
 home="$(reg_setup_principal "$USER")" || { reg_fail "setup principal failed"; reg_result; }
 ws="$home/ws"; mkdir -p "$ws"
@@ -290,6 +312,20 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 systemctl is-active --quiet docker-helper.service || { reg_fail "service did not auto-restart after the crash"; kill -9 "$ORPHAN_CLI_PID" 2>/dev/null || true; reg_result; }
+
+# Readiness boundary: startup reconciliation (the stale-workload cleanup under
+# test) runs BEFORE the daemon binds its listener, so the cleanup may be judged
+# only once the daemon is actually ready and serving GET /health — never on
+# the systemd unit state alone. Bounded poll; no blind sleep. If the daemon
+# never becomes ready the regression FAILs (a missing readiness is not a
+# missing prerequisite).
+if wait_service_health; then
+  reg_ok "daemon became ready after the crash auto-restart (GET /health serving)"
+else
+  reg_fail "daemon did not become ready within the bounded window after the crash-restart"
+  kill -9 "$ORPHAN_CLI_PID" 2>/dev/null || true
+  reg_result
+fi
 
 ORPHAN_ALIVE=""
 for cid in $ORPHAN_CIDS; do
