@@ -9717,6 +9717,72 @@ func TestAccessModesHarnessInventoryFailClosed(t *testing.T) {
 	}
 }
 
+// TestAccessModesHarnessIssuanceNarrowing pins the canonical Launcher
+// per-Session issuance-time narrowing scenario in the access-mode UAT: the
+// dynamic run workspace is created by the harness before the Session, the
+// narrowed create uses the repeatable --filesystem-entry CLI grammar under a
+// Launcher credential, the issued snapshot is verified through effective
+// semantics (not redundant storage), the omitted-entry inherited behavior is
+// proven on the same run workspace, and the widening refusal is the stable
+// invalid_filesystem_policy contract with no issued state or residue.
+func TestAccessModesHarnessIssuanceNarrowing(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-access-modes.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The motivating dynamic-run create: Launcher credential, dynamically
+	// named run workspace created by the harness, per-Session narrowing
+	// through the canonical CLI grammar (flags before positionals; session
+	// create has none).
+	for _, must := range []string{
+		`RUNDIR="$TREE/run-uat-$(date +%s)-$$"`,
+		`mkdir -p "$RUNDIR/project" "$RUNDIR/pipeline-inputs" "$RUNDIR/pipeline-outputs"`,
+		`--token-file /tmp/uat-am-cred-main`,
+		`--filesystem-entry .=read_only`,
+		`--filesystem-entry project=read_write`,
+		`--filesystem-entry pipeline-inputs=read_only`,
+		`--filesystem-entry pipeline-outputs=read_write`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("issuance-narrowing scenario must carry the motivating Launcher create (%s)", must)
+		}
+	}
+
+	// The UAT verifies effective semantics, not redundant storage: the
+	// redundant pipeline-inputs read_only entry may be normalized away while
+	// the runtime proof still exercises its read-only protection.
+	if !strings.Contains(content, `snapshot_lacks "$SN_ID" "$RUNDIR/pipeline-inputs"`) {
+		t.Error("the narrowed snapshot proof must accept normalization of the redundant read-only entry")
+	}
+	for _, must := range []string{
+		`acc_ok "13 narrowed pipeline-inputs RW exposure refused with read_only_root before workload"`,
+		`acc_ok "13 writable narrowed workspace parent spanning the RO input refused (read_only_root)"`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("the narrowed runtime proof must exercise the read-only protection (%s)", must)
+		}
+	}
+
+	// Omitted filesystem_entries keeps the inherited behavior on the same run
+	// workspace.
+	if !strings.Contains(content, `acc_ok "13 omitted filesystem_entries keeps the inherited read-write behavior"`) {
+		t.Error("the omitted-entry inherited behavior must be proven on the same run workspace")
+	}
+
+	// The widening refusal is the stable issuance-time contract: no Session
+	// issued, no new state, no residue.
+	for _, must := range []string{
+		`acc_ok "14 issuance-time widening refused with invalid_filesystem_policy, no Session issued"`,
+		`acc_ok "14 refused create left no Session and no container/pin/workload-MAC residue"`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("the widening refusal proof is incomplete (%s)", must)
+		}
+	}
+}
+
 // TestMigrationAndAcceptanceListHarnessContracts pins the harness contracts
 // of the RPM and DEB migration gates: mode-aware assertions parse the rich
 // --json projection structurally, the default human list keeps its own 2.1
