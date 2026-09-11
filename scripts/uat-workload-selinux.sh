@@ -250,6 +250,19 @@ candidate_installed_ok() {
     && rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$RPM_VERSION" \
     && semodule -l 2>/dev/null | awk '$1 == "docker_helper" { found=1 } END { exit !found }'
 }
+# verifier_member_results reports each member's boolean state at the moment
+# it is called (runs 7-9 showed the members passing in the evidence dump
+# seconds AFTER the verifier had already failed, which cannot distinguish a
+# flaky member from a verifier-context defect).
+verifier_member_results() {
+  local raw
+  raw="$(docker-helper version 2>/dev/null || true)"
+  printf '  verifier members now: version=%s rpm-record=%s policy-module=%s raw=[%s]\n' \
+    "$([ "$raw" = "$VERSION" ] && echo yes || echo NO)" \
+    "$(rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$RPM_VERSION" && echo yes || echo NO)" \
+    "$(semodule -l 2>/dev/null | awk '$1 == "docker_helper" { found=1 } END { exit !found }' && echo yes || echo NO)" \
+    "$raw"
+}
 # wls_install_evidence dumps the complete bounded failure context for a
 # candidate install that did not verify: the FULL non-trivial scriptlet log,
 # each candidate_installed_ok member separately, the unit state, leftover
@@ -290,6 +303,7 @@ else
     sleep 1
   done
   if ! candidate_installed_ok; then
+    verifier_member_results >&2
     rpm -e docker-helper >/dev/null 2>&1 || true
     rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
     rpm -i "$RPM_PATH_IN" >/tmp/uat-wls-install.log 2>&1 || true
@@ -306,6 +320,7 @@ else
       candidate_verified=yes
       break
     fi
+    verifier_member_results >&2
     sleep 2
   done
   if [ -n "$candidate_verified" ]; then

@@ -211,6 +211,14 @@ snapshot_has() {
   printf '%s\n' "$line" | grep -Eq "[[:space:]]$3\$"
 }
 
+# snapshot_lacks asserts the entry is absent from the issued snapshot. The
+# 2.2 normalization drops entries whose access equals their containing
+# region, so redundant read_write children of a read_write region must not
+# appear even though they were granted.
+snapshot_lacks() {
+  ! printf '%s' "$(show_snapshot "$1")" | grep -Fq "$2"
+}
+
 # expect_read_only_root TOKEN SOURCE TARGET SNIPPET [BASE_RESIDUE] — runs a
 # writable exposure request and asserts the stable read_only_root refusal,
 # then (when a residue base is supplied) asserts no residue was created.
@@ -499,9 +507,15 @@ SD_ID="$(create_session /tmp/uat-am-cred-build "$BUILD_WS")" \
   || { echo "error: session SD creation failed" >&2; exit 1; }
 acc_ok "sessions created: main=$SA_ID widen=$SB_ID sub=$SC_ID legacy=$SL_ID build=$SD_ID"
 
-if snapshot_has "$SA_ID" "$WS/project" read_write \
+# Issued snapshots carry the normalized mode-transition representation: a
+# read_write child of a read_write region is redundant and dropped
+# (normalizeAllowedRootEntries), so SA shows the TREE read_write region and
+# the pipeline-inputs transition only; SC additionally shows the RW->RO->RW
+# sub transition that both scopes granted.
+if snapshot_has "$SA_ID" "$WS" read_write \
     && snapshot_has "$SA_ID" "$WS/pipeline-inputs" read_only \
-    && snapshot_has "$SA_ID" "$WS/pipeline-outputs" read_write \
+    && snapshot_lacks "$SA_ID" "$WS/project" \
+    && snapshot_lacks "$SA_ID" "$WS/pipeline-outputs" \
     && snapshot_has "$SB_ID" "$WS/pipeline-inputs" read_only \
     && snapshot_has "$SC_ID" "$WS/pipeline-inputs" read_only \
     && snapshot_has "$SC_ID" "$WS/pipeline-inputs/sub" read_write \

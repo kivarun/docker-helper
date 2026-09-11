@@ -132,6 +132,41 @@ echo "MICROPROOF_RUN_RC=$RUN_RC"
 #   probe 3: production options inside the daemon's systemd sandbox
 #            (NoNewPrivileges, RestrictNamespaces, MemoryDenyWriteExecute,
 #            docker_helper_t) via a bounded transient unit.
+probe_bindfs_sandbox() { # label nnp restrictns mdwe selinuxctx
+  local label="$1" nnp="$2" rns="$3" mdwe="$4" sctx="$5"
+  local src mp ctx out rc unit
+  src=/opt/uat-a3-probe-src; mp=/run/docker-helper/a3probe-mp
+  ctx=system_u:object_r:docker_helper_ro_projection_t:s0
+  rm -rf "$src" "$mp" /tmp/uat-a3-bindfs-probe.out
+  mkdir -p "$src" "$mp"
+  echo probe > "$src/f"
+  unit="uat-a3bindfs-${label}"
+  out=/tmp/uat-a3-bindfs-probe.out
+  local sprops=()
+  [ "$nnp" = yes ] && sprops+=(--property=NoNewPrivileges=true)
+  [ "$rns" = yes ] && sprops+=(--property=RestrictNamespaces=true)
+  [ "$mdwe" = yes ] && sprops+=(--property=MemoryDenyWriteExecute=true)
+  [ "$sctx" = yes ] && sprops+=(--property=SELinuxContext=system_u:system_r:docker_helper_t:s0)
+  echo "PROBE $label: systemd-run ${sprops[*]} bindfs -f -o allow_other -o context=$ctx $src $mp"
+  systemd-run --collect --unit="$unit" \
+    "${sprops[@]}" \
+    bindfs -f -o allow_other -o "context=$ctx" "$src" "$mp" >"$out" 2>&1
+  rc=$?
+  echo "PROBE $label: systemd-run rc=$rc"
+  sleep 2
+  if mount | grep -F "$mp" >/dev/null 2>&1; then
+    echo "PROBE $label: MOUNTED=yes"
+  else
+    echo "PROBE $label: MOUNTED=no"
+    echo "PROBE $label: unit journal:"
+    journalctl -u "$unit.service" --no-pager --no-hostname -n 8 2>/dev/null \
+      | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
+  fi
+  systemctl stop "$unit.service" >/dev/null 2>&1 || true
+  fusermount3 -u "$mp" >/dev/null 2>&1 || true
+  rm -rf "$src" "$mp"
+}
+
 probe_bindfs() { # label use_context use_sandbox
   local label="$1" use_ctx="$2" use_sb="$3"
   local src mp ctx out rc pid
@@ -184,7 +219,14 @@ grep -n 'user_allow_other' /etc/fuse.conf 2>/dev/null || echo "(no user_allow_ot
 fusermount3 --version 2>&1 || true
 probe_bindfs "1-plain-unconfined" no no
 probe_bindfs "2-context-unconfined" yes no
-probe_bindfs "3-context-daemon-sandbox" yes yes
+# One daemon-sandbox property per probe: run 8's probes showed the FUSE mount
+# succeeding unconfined (plain and with context=) and failing only inside the
+# daemon-equivalent sandbox, so the discriminator must be per-property.
+probe_bindfs_sandbox "3a-nnp" yes no no no
+probe_bindfs_sandbox "3b-restrictns" no yes no no
+probe_bindfs_sandbox "3c-mdwe" no no yes no
+probe_bindfs_sandbox "3d-selinuxctx" no no no yes
+probe_bindfs_sandbox "3e-daemon-sandbox" yes yes yes yes
 echo "PROBES_DONE"
 
 # --- 5. capture the complete evidence ------------------------------------------
