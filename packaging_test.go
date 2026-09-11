@@ -10169,18 +10169,19 @@ func TestAccessModesHarnessAuthoritySymmetry(t *testing.T) {
 	}
 
 	// Each authority proves the no-new-Session contract around its own
-	// widening attempt with the fail-closed session inventory and deletes
-	// the Session it created.
+	// widening attempt with the fail-closed session inventory; the created
+	// Session's removal is owned by the scenario Z cleanup (the single
+	// Session-cleanup owner of the suite), so the SYM block must not delete
+	// inline — a second delete of an already-removed Session is a spurious
+	// cleanup failure, not a proof.
 	for _, must := range []string{
 		`SYM_ADMIN_BEFORE="$(session_list_count)"`,
 		`[ "$SYM_ADMIN_AFTER" = "$SYM_ADMIN_BEFORE" ]`,
-		`dh session delete --system --id "$SYM_ADMIN_ID"`,
 		`SYM_PRIN_BEFORE="$(session_list_count)"`,
 		`[ "$SYM_PRIN_AFTER" = "$SYM_PRIN_BEFORE" ]`,
-		`dh session delete --system --id "$SYM_PRIN_ID"`,
 	} {
 		if !strings.Contains(content, must) {
-			t.Errorf("the authority symmetry proof must prove and clean its own state (%s)", must)
+			t.Errorf("the authority symmetry proof must prove its own no-new-Session contract (%s)", must)
 		}
 	}
 
@@ -10188,6 +10189,24 @@ func TestAccessModesHarnessAuthoritySymmetry(t *testing.T) {
 	// captured before its attempt and the inventory comparison happens
 	// after it.
 	lines := strings.Split(content, "\n")
+	symStart, symEnd := -1, -1
+	for i, line := range lines {
+		if symStart < 0 && strings.Contains(line, `scenario "SYM: Admin and Principal credential narrowing symmetry"`) {
+			symStart = i
+		}
+		if symStart >= 0 && symEnd < 0 && strings.Contains(line, `scenario "B: build over a read-only snapshot"`) {
+			symEnd = i
+		}
+	}
+	if symStart < 0 || symEnd < 0 {
+		t.Fatal("the authority symmetry scenario block is missing")
+	}
+	for i := symStart; i < symEnd && i < len(lines); i++ {
+		if strings.Contains(lines[i], "dh session delete") {
+			t.Error("the SYM block must not own Session deletion (the scenario Z cleanup owns it); an inline delete makes the Z cleanup re-delete and fail spuriously")
+		}
+	}
+
 	pairs := []struct {
 		before, create, after string
 	}{
