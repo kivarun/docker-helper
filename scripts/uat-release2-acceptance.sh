@@ -1619,7 +1619,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   fi
 
   # --- M3/M4: Principal and Launcher roots migrated read_write -----------------
-  M_PLIST_JSON="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+  M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
   M_RW_P_ROOT="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$ALLOWED_ROOT")"
   M_RW_P_POLICY="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$M_POLICY")"
   if [ "$M_RW_P_ROOT" = read_write ] && [ "$M_RW_P_POLICY" = read_write ]; then
@@ -1627,7 +1627,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   else
     acc_fail "M3 Principal root migration wrong (rich projection: $M_PLIST_JSON)"
   fi
-  M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" --json 2>/dev/null || true)"
+  M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
   M_RW_L_SUB="$(printf '%s' "$M_LLIST_JSON" | allowed_root_json_access "$M_POLICY/sub")"
   if [ "$M_RW_L_SUB" = read_write ]; then
     acc_ok "M4 Launcher root migrated as read_write (--json rich projection)"
@@ -1688,7 +1688,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   # projection of the migrated policy (config and Principal roots). The
   # post-restart check compares this projection, never formatted output.
   M8_CONFIG_PROJ_BEFORE="$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_projection)"
-  M8_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null | allowed_root_json_projection)"
+  M8_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null | allowed_root_json_projection)"
 
   # --- M8: restart idempotency --------------------------------------------------
   systemctl restart docker-helper.service >/dev/null 2>&1 || true
@@ -1704,7 +1704,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
       acc_fail "M8 snapshot changed after restart"
     fi
     M8_CONFIG_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"
-    M8_PRINCIPAL_JSON="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+    M8_PRINCIPAL_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
     M8_CONFIG_RW="$(printf '%s' "$M8_CONFIG_JSON" | allowed_root_json_access "$M_POLICY")"
     M8_PRINCIPAL_RW="$(printf '%s' "$M8_PRINCIPAL_JSON" | allowed_root_json_access "$M_POLICY")"
     if [ "$(printf '%s' "$M8_CONFIG_JSON" | allowed_root_json_projection)" = "$M8_CONFIG_PROJ_BEFORE" ] \

@@ -353,7 +353,7 @@ dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
 
 # P3: principal allowed-root add with omitted --access -> read_write.
 if dh principal allowed-root add --system "$PRINCIPAL" "$TREE" >/dev/null 2>&1 \
-    && [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$TREE")" = read_write ]; then
+    && [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE")" = read_write ]; then
   acc_ok "P3 principal allowed-root add with omitted --access -> read_write (rich projection)"
 else
   acc_fail "P3 principal allowed-root add (omitted --access) failed"
@@ -361,7 +361,7 @@ fi
 
 # P4: principal allowed-root add --access read_only for the RO region.
 if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$WS/pipeline-inputs" >/dev/null 2>&1 \
-    && [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
+    && [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
   acc_ok "P4 principal allowed-root add --access read_only (rich projection shows read_only)"
 else
   acc_fail "P4 principal allowed-root add --access read_only failed"
@@ -372,7 +372,7 @@ fi
 # existing root; it cannot reach into the parent TREE entry).
 if dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
     "$WS/project" >/dev/null 2>&1 \
-    && [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/project")" = read_write ]; then
+    && [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/project")" = read_write ]; then
   acc_ok "P4b principal owns the project root (read_write, rich projection)"
 else
   acc_fail "P4b principal project-root add failed"
@@ -388,7 +388,7 @@ if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inpu
 else
   acc_fail "P5 set-access to read_write failed"
 fi
-if [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_write ]; then
+if [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_write ]; then
   acc_ok "P5 rich projection shows read_write after the flip"
 else
   acc_fail "P5 read_write verification failed"
@@ -398,7 +398,7 @@ if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inpu
 else
   acc_fail "P5 set-access back to read_only failed"
 fi
-if [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
+if [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
   acc_ok "P5 rich projection shows read_only after the flip back"
 else
   acc_fail "P5 read_only verification failed"

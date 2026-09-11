@@ -335,7 +335,7 @@ else
   acc_fail "R4 config.json legacy path-only form not preserved"
 fi
 
-M_PLIST_JSON="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
 M_RW_P_GLOBAL="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$ALLOWED_ROOT")"
 M_RW_P_POLICY="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$M_POLICY")"
 if [ "$M_RW_P_GLOBAL" = read_write ] && [ "$M_RW_P_POLICY" = read_write ]; then
@@ -343,7 +343,7 @@ if [ "$M_RW_P_GLOBAL" = read_write ] && [ "$M_RW_P_POLICY" = read_write ]; then
 else
   acc_fail "R5 Principal root migration wrong (rich projection: $M_PLIST_JSON)"
 fi
-M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" --json 2>/dev/null || true)"
+M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
 M_RW_L_SUB="$(printf '%s' "$M_LLIST_JSON" | allowed_root_json_access "$M_POLICY/sub")"
 if [ "$M_RW_L_SUB" = read_write ]; then
   acc_ok "R5 Launcher root migrated as read_write (rich projection)"
@@ -401,7 +401,7 @@ fi
 # projection of the migrated policy (config and Principal roots). The
 # post-restart check compares this projection, never formatted output.
 M_R9_CONFIG_PROJ_BEFORE="$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_projection)"
-M_R9_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null | allowed_root_json_projection)"
+M_R9_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null | allowed_root_json_projection)"
 
 systemctl restart docker-helper.service >/dev/null 2>&1 || true
 wait_service_active || acc_fail "R9 daemon not active after restart"
@@ -413,7 +413,7 @@ if wait_health; then
     acc_fail "R9 snapshot changed after restart"
   fi
   M_R9_CONFIG_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"
-  M_R9_PRINCIPAL_JSON="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+  M_R9_PRINCIPAL_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
   M_R9_CONFIG_RW="$(printf '%s' "$M_R9_CONFIG_JSON" | allowed_root_json_access "$M_POLICY")"
   M_R9_PRINCIPAL_RW="$(printf '%s' "$M_R9_PRINCIPAL_JSON" | allowed_root_json_access "$M_POLICY")"
   if [ "$(printf '%s' "$M_R9_CONFIG_JSON" | allowed_root_json_projection)" = "$M_R9_CONFIG_PROJ_BEFORE" ] \
