@@ -454,13 +454,16 @@ docker-helper serve
     ├── runs the Session ownership migration (idempotent;
     │   see Ownership migration)
     ├── runs the default-Launcher migration (idempotent)
-    ├── deletes expired session rows (expires_at <= now)
     ├── runs the Session filesystem snapshot migration/integrity gate
     │   (compatibility backfill or fail-closed validation)
-    ├── creates the Session MAC coordinator (nil in user mode) and
-    │   reconciles live sessions' MAC state (ReconcileLiveSessions)
     ├── creates the workload MAC coordinator and reconciles
     │   helper-owned workload MAC state (ReconcileStartup)
+    ├── creates the Session MAC coordinator (nil in user mode), wires
+    │   the pending-workload coverage gate, and reconciles live
+    │   sessions' MAC state (ReconcileLiveSessions)
+    ├── deletes expired session rows (expires_at <= now) — after both
+    │   reconciliations, so the coverage gate could still resolve the
+    │   workspaces of expired sessions with pending workload state
     ├── removes stale session runtime directories
     └── starts HTTP server on the configured transports
 ```
@@ -562,12 +565,23 @@ return session + one-time token
 
 The persisted snapshot is immutable Session child state
 (`session_filesystem_snapshot_entries`, ordered `position` entries with
-`UNIQUE(session_id, path)` and `ON DELETE CASCADE` from `sessions`). Later
+`UNIQUE(session_id, path)` and `ON DELETE CASCADE` from `sessions`), and
+carries single-owner integrity metadata (`session_filesystem_snapshot_meta`,
+one `entry_count` and digest of the canonical entry representation per
+Session, also `ON DELETE CASCADE`). Every load through the single canonical
+loader (`loadSessionFilesystemSnapshot`) verifies the metadata against the
+entries before constructing the snapshot: a missing, extra, reordered, or
+mutated entry — including a deleted trailing row — fails closed on startup
+and on the data plane; there is no repair or default. Later
 parent-policy mutations never mutate an issued snapshot: the snapshot is
-loaded through the single canonical loader (`loadSessionFilesystemSnapshot`)
+loaded through the single canonical loader
+(`loadSessionFilesystemSnapshot`)
 and is cleaned up only by Session deletion (FK `ON DELETE CASCADE`).
-Startup runs the snapshot migration/owner after `cleanupExpiredSessions`
-and before MAC reconciliation: a table-absent (pre-cutover) database gets
+The compatibility backfill creates both tables and the metadata rows
+atomically with the compatibility snapshot.
+Startup runs the snapshot migration/owner before any MAC consumer
+(the workload `ReconcileStartup` and `ReconcileLiveSessions`) and
+before the expired-Session cleanup, which is last: a table-absent (pre-cutover) database gets
 one compatibility backfill of `position=0, path=sessions.workspace,
 access=read_write` for every remaining Session; a table-present database is
 post-cutover and missing/partial/corrupt snapshot state fails startup closed.
@@ -891,7 +905,7 @@ parent-policy mutations (see
   parent-policy mutations affect only Sessions created afterwards.
 
 `effective Principal roots` is the Principal ceiling owned by
-`computeEffectivePrincipalRoots`: the meet of the global roots and the
+`effectivePrincipalAllowedRoots`: the meet of the global roots and the
 stored Principal roots — path intersection with `read_only`-dominant
 access meet — with one documented exception: in user mode the
 daemon-owner Principal with zero stored roots collapses onto the global
@@ -1074,7 +1088,16 @@ MAC state follows the concrete Session lifecycle, not the policy ceilings:
   after persistence fails the creation closed (`mac_preparation_failed`);
 - a deleted, expired, invalidated, or migrated-away session releases its
   MAC boundary through the existing release paths (including startup
-  reconciliation of stale boundaries);
+  reconciliation of stale boundaries). The release is gated on pending
+  helper-owned workload state: while a workload ownership record for a
+  session's workspace is still unresolved at startup (its container
+  cannot be proven absent, e.g. Docker is temporarily unavailable), the
+  session MAC coordinator defers releasing that workspace's coverage so
+  the unproven workload state keeps the MAC world it needs to finish
+  safely; the release happens after workload reconciliation proves the
+  cleanup done. An expired or deleted Session stops authorizing new
+  operations immediately; only its host MAC coverage may outlive it
+  until the dependent workload state is proven gone.
 - managed boundaries are helper-owned MAC state (AppArmor's dynamic
   boundary state file), never authorization roots and never config.json
   state.
@@ -1363,7 +1386,11 @@ failed selector query never removes the PATH candidates, and a word
 containing a slash — which a Launcher name can never contain — is the
 unambiguous PATH and completes filesystem candidates without a selector
 query. Once the first positional is typed, the next position is generic
-filesystem completion. The daemon remains the final policy boundary and
+filesystem completion. `launcher allowed-root set-access` shares the same
+grammar-aware first-positional handling for its `[LAUNCHER] PATH ACCESS`
+union, and the final ACCESS word of every `set-access` family (config,
+principal, launcher) completes the canonical `read_only`/`read_write`
+vocabulary. The daemon remains the final policy boundary and
 rejects a root outside the effective Principal ceiling at execution time.
 `config allowed-root add` and `principal allowed-root add` remain generic
 filesystem completion, as do all other path-valued flags.
@@ -1372,7 +1399,8 @@ Positional completion of `principal show USER [FIELD]`: USER completes
 from the same selector-introspection owner as the `--principal` selector
 (above, with the `principal show` command context), and FIELD completes
 the canonical show-field vocabulary (`username uid gid home enabled
-allowed_roots`) that `extractPrincipalField` owns — one shared vocabulary,
+allowed_roots allowed_root_entries`) that `extractPrincipalField` owns
+— one shared vocabulary,
 so completion can never offer a field the command rejects. The FIELD word
 is a local static vocabulary (no daemon exchange), a typed prefix filters
 it, a complete USER+FIELD pair offers nothing further, and the operator
@@ -1432,7 +1460,8 @@ Requires a subcommand: `show`, `set`, `unset`, `allowed-root`.
 
 `docker-helper config show [FIELD]` — without FIELD, prints the complete
 effective configuration as JSON (admin_token redacted). With FIELD, prints
-only that field's scalar value.
+only that field's value followed by a newline; most fields are scalar, and
+`allowed_roots` and `allowed_root_entries` print their JSON arrays.
 
 `docker-helper config set FIELD VALUE` — sets a writable field.
 Reports `updated` or `unchanged`. If the daemon is running, the change is
@@ -1639,6 +1668,10 @@ Mount resolution (canonical source identity)
     │
 Filesystem exposure resolution against the persisted snapshot
     │
+Source pinning + workload MAC preparation (system mode; in the
+    accepted order with fail-closed rollback, see
+    [System-mode run mounts](#system-mode-run-mounts))
+    │
 Operation registration (supervisor admission — atomic with shutdown gate)
     │
 Async docker run process start (cmd.Start under op.mu)
@@ -1647,7 +1680,9 @@ Incremental bounded log capture (cmd.Stdout/stderr → boundedBuffer)
     │
 Completion goroutine (cmd.Wait → status transition)
     │
-Retention cleanup
+Unified terminal-path cleanup (one ordered owner: proven container
+    absence, workload MAC state, source pins, ownership record,
+    workspace-use lease, cidfile/residue)
 ```
 
 Request validation checks that the image field is non-empty. Workdir
@@ -1846,7 +1881,10 @@ state surgery or filesystem-level damage) is an internal integrity failure:
 the request fails closed with `500 internal_error` and the operational log
 carries the session ID and the integrity cause. It is never answered as
 unauthorized, `invalid_mount`, or `read_only_root`, and it is never repaired
-at request time.
+at request time. The failure is audited as exactly one
+`<kind>.rejected` event with `result=internal_error` and the session's
+ownership provenance (run and build symmetrical; no bearer or secret
+values).
 
 The shared decision adapter between the persisted snapshot and the
 data-plane consumers is `resolveSessionFilesystemExposure`: it resolves one
@@ -1881,8 +1919,16 @@ layer. The workload RO/RW mode is the caller-requested mode
 snapshots, or `LookupAccess`/`CanExposeWritable`, and never narrows an
 accepted writable exposure. Under the AppArmor backend it renders one
 generated profile `docker-helper-workload-<operation-id>` from the Moby
-docker-default baseline with `audit deny "<encoded-literal>/{,**}" wkl,`
-rules per read-only container target, loads it through `apparmor_parser`,
+docker-default baseline. Read-only container targets are distinguished by
+their pinned node kind: a regular file receives an exact-path
+`audit deny "<encoded-literal>" wkl,` rule protecting the file's own
+write/delete/link semantics, and a directory receives a recursive
+`audit deny "<encoded-literal>/{,**}" wkl,` rule whose recursion is
+scoped around the accepted read-write transitions inside it (a nested
+RW target carves a writable subtree out of the RO region; a nested RO
+target inside that RW subtree re-scopes protection) — the renderer
+consumes only the accepted exposure plan and never resolves policy
+itself. The profile is loaded through `apparmor_parser`,
 verifies the load through the kernel profile inventory, and passes
 `--security-opt label=disable` plus `--security-opt apparmor=<profile>` to
 Docker. Under the SELinux backend it builds one bindfs passthrough
@@ -2867,7 +2913,7 @@ Examples (ownership provenance fields reflect the documented schema):
 Successful build:
 
 ```json
-{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
+{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","build_context_resolved":"/home/alice/project","build_context_access":"read_only","build_dockerfile_resolved":"/home/alice/project/Dockerfile","build_dockerfile_access":"read_only","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
 {"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"5s"}
 ```
 
@@ -2886,8 +2932,8 @@ Authorization failure:
 Container run:
 
 ```json
-{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
-{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"1s"}
+{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true,"resolved_source":"/home/alice/project","access":"read_only","writable_allowed":false}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default"}
+{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d","operation_id":"op_abcdef1234567890abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true,"resolved_source":"/home/alice/project","access":"read_only","writable_allowed":false}],"env_keys":["APP_MODE"],"principal_name":"alice","launcher_id":"dhl_0f1e2d3c4b5a69788796a5b4c3d2e1f0","launcher_name":"default","result":"succeeded","duration":"1s"}
 ```
 
 ### Operational logging
