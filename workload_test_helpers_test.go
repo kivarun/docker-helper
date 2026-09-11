@@ -39,6 +39,9 @@ func testPinnedSources(t *testing.T, dir string, count int) []string {
 	paths := make([]string, count)
 	for i := range paths {
 		paths[i] = filepath.Join(dir, fmt.Sprintf("pin-%d", i))
+		if err := os.MkdirAll(filepath.Dir(paths[i]), 0700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Mkdir(paths[i], 0700); err != nil {
 			t.Fatal(err)
 		}

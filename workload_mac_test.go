@@ -628,3 +628,174 @@ func TestCoordinatorStalePinLayoutAdversarial(t *testing.T) {
 		}
 	})
 }
+
+// TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage proves the
+// F6 startup ordering invariant end to end: a crashed workload's pending
+// ownership state (Docker temporarily unavailable) keeps the expired
+// session's workspace coverage intact; once Docker answers and the
+// reconciliation proves/removes the workload state, the stale coverage is
+// removed by the next session reconciliation pass.
+func TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	workspace := "/data/pending-workload"
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	mac := newSessionMACCoordinator(db, driver)
+
+	// Bind the workspace coverage to a live session so the boundary is
+	// helper-owned; the session row carries the workspace for the gate.
+	if _, err := mac.CreateSessionBinding(workspace, testWorkloadSessionID, func(cov workspaceMACCoverage) error {
+		return insertTestSessionTx(db, testMACLauncherID(t, db), testWorkloadSessionID, workspace)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Crashed workload: durable ownership record for the same session,
+	// Docker unavailable (inspect error -> container presence
+	// unclassifiable -> retained).
+	stateRoot := filepath.Join(dir, "workload-state")
+	runtimeRoot := filepath.Join(dir, "workload-runtime")
+	dockerDown := true
+	dockerInspect := func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+		if dockerDown {
+			return nil, errors.New("docker daemon unavailable")
+		}
+		return nil, nil
+	}
+	workload := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	workload.docker.inspect = dockerInspect
+	pins := testPinnedSources(t, runtimeRoot, 1)
+	if _, err := workload.Prepare(workloadPreparation{
+		OperationID:   testOperationID(61),
+		SessionID:     testWorkloadSessionID,
+		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
+		PinnedSources: pins,
+	}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	// Startup pass one: workload reconciliation retains (Docker down), the
+	// gate then keeps the coverage; the boundary must survive.
+	workload.ReconcileStartup(context.Background())
+	mac.pendingWorkloadSessions = workload.PendingWorkloadSessions
+	if err := mac.ReconcileLiveSessions(); err != nil {
+		t.Fatalf("ReconcileLiveSessions (docker down): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateRoot, testOperationID(61))); err != nil {
+		t.Fatalf("pending ownership record must be retained while Docker is unavailable: %v", err)
+	}
+	if _, err := driver.verifyCoverage(workspace); err != nil {
+		t.Fatal("workspace coverage must not be removed while the workload state is pending (Docker unavailable)")
+	}
+
+	// Startup pass two: Docker answers, the reconciliation completes the
+	// workload cleanup; the stale coverage is then removable.
+	dockerDown = false
+	workload.ReconcileStartup(context.Background())
+	if _, err := os.Stat(filepath.Join(stateRoot, testOperationID(61))); !os.IsNotExist(err) {
+		t.Fatalf("completed reconciliation must remove the ownership record, got %v", err)
+	}
+	// A fresh coordinator instance models the next daemon pass.
+	mac2 := newSessionMACCoordinator(db, driver)
+	mac2.pendingWorkloadSessions = workload.PendingWorkloadSessions
+	if err := mac2.ReconcileLiveSessions(); err != nil {
+		t.Fatalf("ReconcileLiveSessions (docker up): %v", err)
+	}
+	mac2.ReleaseSessionBinding(testWorkloadSessionID)
+	if _, err := driver.verifyCoverage(workspace); err == nil {
+		t.Fatal("stale coverage must be removed after the workload state is proven removed")
+	}
+}
+
+// TestStaleBoundaryCleanupDeferredForPendingWorkload proves the coverage
+// gate inside cleanupStaleBoundaries at the session coordinator level,
+// including the fail-closed deferral when a pending session cannot be
+// resolved to a workspace.
+func TestStaleBoundaryCleanupDeferredForPendingWorkload(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	// A live parent binding keeps its own boundary; a disjoint orphaned
+	// boundary (owned, no consumers) is the stale target under test.
+	parentWS := "/data/gated-parent"
+	childWS := "/data/gated-other"
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	mac := newSessionMACCoordinator(db, driver)
+	if _, err := mac.CreateSessionBinding(parentWS, testWorkloadSessionID, func(cov workspaceMACCoverage) error {
+		return insertTestSessionTx(db, testMACLauncherID(t, db), testWorkloadSessionID, parentWS)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO mac_boundaries (backend, boundary) VALUES (?, ?)`,
+		driver.backend(), childWS); err != nil {
+		t.Fatalf("insert child boundary: %v", err)
+	}
+	// A session row whose workspace is the orphaned boundary's own path,
+	// with pending workload state for that session.
+	pendingSessionID := "dhs_" + strings.Repeat("a", 32)
+	if err := insertTestSessionTx(db, testMACLauncherID(t, db), pendingSessionID, childWS); err != nil {
+		t.Fatalf("insert pending session row: %v", err)
+	}
+
+	// A manually inserted boundary is only tracked in the durable ownership
+	// metadata; retention/removal is asserted through that metadata.
+	boundaryOwned := func() bool {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM mac_boundaries WHERE boundary = ?`, childWS).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count > 0
+	}
+
+	// Gate with a resolvable pending session: the boundary stays.
+	mac.pendingWorkloadSessions = func() map[string]bool {
+		return map[string]bool{pendingSessionID: true}
+	}
+	if err := mac.cleanupStaleBoundaries(); err != nil {
+		t.Fatalf("cleanupStaleBoundaries: %v", err)
+	}
+	if !boundaryOwned() {
+		t.Fatal("coverage ownership must be retained while the pending workload resolves to its workspace")
+	}
+
+	// Gate with an unresolvable pending session: fail closed, nothing is
+	// removed.
+	mac.pendingWorkloadSessions = func() map[string]bool {
+		return map[string]bool{"\x00unknown-session": true}
+	}
+	if err := mac.cleanupStaleBoundaries(); err != nil {
+		t.Fatalf("cleanupStaleBoundaries (unresolvable): %v", err)
+	}
+	if !boundaryOwned() {
+		t.Fatal("coverage ownership must be retained when a pending workload session cannot be resolved")
+	}
+
+	// Gate vacuous (no pending workload): the stale coverage is removed.
+	mac.pendingWorkloadSessions = func() map[string]bool { return map[string]bool{} }
+	if err := mac.cleanupStaleBoundaries(); err != nil {
+		t.Fatalf("cleanupStaleBoundaries (vacuous): %v", err)
+	}
+	if boundaryOwned() {
+		t.Fatal("stale coverage ownership must be removed when no pending workload covers it")
+	}
+	if _, err := driver.verifyCoverage(parentWS); err != nil {
+		t.Fatal("the live parent binding's coverage must never be removed")
+	}
+}

@@ -379,6 +379,46 @@ func (c *workloadMACCoordinator) removeWorkloadMACState(operationID string) erro
 // with an actionable diagnostic; nothing is deleted on a guess.
 //
 // It must run before the daemon accepts new HTTP requests.
+// PendingWorkloadSessions reports the session IDs of every helper-owned
+// workload ownership record still pending on disk, including entries that
+// cannot be positively classified (fail closed: an unowned-but-unreadable
+// entry may still be pending workload state). The session MAC coordinator
+// consumes this set as the startup coverage gate: a workspace boundary
+// whose Session still has pending workload state must not be removed
+// before the workload reconciliation has proven or removed that state.
+func (c *workloadMACCoordinator) PendingWorkloadSessions() map[string]bool {
+	entries, err := os.ReadDir(c.stateRoot)
+	if err != nil {
+		// A missing state root has no pending state; an unreadable state
+		// root fails closed with a synthetic entry so stale-boundary
+		// cleanup defers its removals.
+		if os.IsNotExist(err) {
+			return map[string]bool{}
+		}
+		opLog(context.Background()).Warn("cannot scan workload MAC state for the coverage gate",
+			slog.String("operation", "workload_mac_reconcile"),
+			slog.String("error", err.Error()))
+		return map[string]bool{workloadPendingUnknownSession: true}
+	}
+	pending := map[string]bool{}
+	for _, entry := range entries {
+		rec, err := c.parseReconcileEntry(entry.Name())
+		if err != nil {
+			// Fail closed: an unclassifiable entry may be pending
+			// helper-owned workload state for an unknown session.
+			pending[workloadPendingUnknownSession] = true
+			continue
+		}
+		pending[rec.SessionID] = true
+	}
+	return pending
+}
+
+// workloadPendingUnknownSession marks pending-but-unclassifiable workload
+// state whose session cannot be resolved; any boundary must stay covered
+// while this marker is present.
+const workloadPendingUnknownSession = "\x00unknown-session"
+
 func (c *workloadMACCoordinator) ReconcileStartup(ctx context.Context) error {
 	entries, err := os.ReadDir(c.stateRoot)
 	if err != nil {
