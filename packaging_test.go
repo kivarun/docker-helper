@@ -1927,6 +1927,14 @@ log_file="%s"
 echo "$0 $@" >> "$log_file"
 exit 0
 `, logFile))
+	// Standard bindfs: log and succeed (required only on the SELinux path).
+	if err := os.WriteFile(filepath.Join(e.fakeBinDir, "bindfs"), []byte(fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
 	// Standard AppArmor LSM status: active; SELinux: not enforcing. The
 	// backend-selection tests override these files as needed.
 	aaDir := filepath.Join(e.destDir, "sys", "module", "apparmor", "parameters")
@@ -2775,6 +2783,100 @@ exit 0
 	// The policy artifact must be copied to the stable path.
 	if _, err := os.Stat(env.dest("usr/share/selinux/docker_helper.pp")); err != nil {
 		t.Error("SELinux policy artifact must be installed to the stable path")
+	}
+}
+
+// TestInstallSystemSelinuxMissingBindfs verifies a SELinux host without
+// bindfs fails the preflight before any installation mutation: the SELinux
+// read-only workload projection requires bindfs (a declared RPM dependency),
+// and an inactive AppArmor host must not require it.
+func TestInstallSystemSelinuxMissingBindfs(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "N", "1")
+	env.writeBundledSELinuxPP(t)
+	env.fakeSemodule(t, `#!/bin/bash
+exit 0
+`)
+	env.fakeRestorecon(t, `#!/bin/bash
+exit 0
+`)
+	if err := os.Remove(filepath.Join(env.fakeBinDir, "bindfs")); err != nil {
+		t.Fatal(err)
+	}
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatal("install should fail on a SELinux host without bindfs")
+	}
+	if !strings.Contains(out, "bindfs") || !strings.Contains(out, "read-only workload projection") {
+		t.Errorf("the bindfs preflight failure must name bindfs and the SELinux read-only workload projection, got: %s", out)
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary must not be installed when the bindfs preflight fails")
+	}
+	if _, err := os.Stat(env.dest("etc/systemd/system/docker-helper.service")); !os.IsNotExist(err) {
+		t.Error("unit must not be installed when the bindfs preflight fails")
+	}
+	if _, err := os.Stat(env.dest("usr/share/selinux/docker_helper.pp")); !os.IsNotExist(err) {
+		t.Error("SELinux policy must not be loaded when the bindfs preflight fails")
+	}
+	if _, err := os.Stat(env.dest("etc/docker-helper/config.json")); !os.IsNotExist(err) {
+		t.Error("config must not be initialized when the bindfs preflight fails")
+	}
+}
+
+// TestInstallSystemSelinuxWithBindfsProceeds verifies the SELinux path
+// proceeds when bindfs is present: the preflight passes and the installation
+// mutates as usual.
+func TestInstallSystemSelinuxWithBindfsProceeds(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "N", "1")
+	env.writeBundledSELinuxPP(t)
+	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+	env.fakeRestorecon(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err != nil {
+		t.Fatalf("SELinux install with bindfs present must proceed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); err != nil {
+		t.Errorf("binary must be installed when bindfs is present: %v", err)
+	}
+	if _, err := os.Stat(env.dest("usr/share/selinux/docker_helper.pp")); err != nil {
+		t.Errorf("SELinux policy artifact must be installed when bindfs is present: %v", err)
+	}
+}
+
+// TestInstallSystemAppArmorWithoutBindfsUnaffected verifies an AppArmor host
+// never requires bindfs: the AppArmor path installs normally with no bindfs
+// in PATH.
+func TestInstallSystemAppArmorWithoutBindfsUnaffected(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "Y", "0")
+	if err := os.Remove(filepath.Join(env.fakeBinDir, "bindfs")); err != nil {
+		t.Fatal(err)
+	}
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err != nil {
+		t.Fatalf("AppArmor install must not require bindfs: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "bindfs") {
+		t.Errorf("the AppArmor path must not mention bindfs, got: %s", out)
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); err != nil {
+		t.Errorf("binary must be installed on the AppArmor path without bindfs: %v", err)
 	}
 }
 

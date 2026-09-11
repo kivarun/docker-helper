@@ -308,6 +308,13 @@ For system mode from a tarball:
 sudo ./install-system.sh --yes --allowed-root /srv/workspaces
 ```
 
+`install-system.sh` requires the runtime tooling of the active MAC backend:
+the AppArmor parser on an AppArmor host, and `semodule`, `restorecon`, and
+`bindfs` on an enforcing SELinux host (`bindfs` implements the SELinux
+read-only workload projection; the DEB/RPM packages declare it as a package
+dependency, while a tarball system install must have it present before the
+installer mutates the system).
+
 Unlike native packages, extracting or running the normal tarball installer does
 not provision system mode. `install-system.sh` is the explicit manual
 system-install path.
