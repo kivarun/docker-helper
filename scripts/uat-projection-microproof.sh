@@ -132,16 +132,16 @@ echo "MICROPROOF_RUN_RC=$RUN_RC"
 #   probe 3: production options inside the daemon's systemd sandbox
 #            (NoNewPrivileges, RestrictNamespaces, MemoryDenyWriteExecute,
 #            docker_helper_t) via a bounded transient unit.
-probe_bindfs_sandbox() { # label nnp restrictns mdwe selinuxctx
-  local label="$1" nnp="$2" rns="$3" mdwe="$4" sctx="$5"
-  local src mp ctx rc unit props
+probe_bindfs_sandbox() { # label selinuxctx
+  local label="$1" sctx="$2"
+  local src mp ctx rc unit
   src=/opt/uat-a3-probe-src; mp=/run/docker-helper/a3probe-mp
   ctx=system_u:object_r:docker_helper_ro_projection_t:s0
   rm -rf "$src" "$mp" /tmp/uat-a3-unit.ctx
   mkdir -p "$src" "$mp"
   echo probe > "$src/f"
   unit="uat-a3bindfs-${label}"
-  echo "PROBE $label: static unit bindfs -f -o allow_other -o context=$ctx $src $mp (nnp=$nnp rns=$rns mdwe=$mdwe sctx=$sctx)"
+  echo "PROBE $label: static unit bindfs -f -o allow_other -o context=$ctx $src $mp (sctx=$sctx)"
   rm -f "/etc/systemd/system/${unit}.service"
   {
     echo "[Unit]"
@@ -149,11 +149,8 @@ probe_bindfs_sandbox() { # label nnp restrictns mdwe selinuxctx
     echo "[Service]"
     echo "Type=simple"
     echo "ExecStart=/usr/bin/bindfs -f -o allow_other -o context=$ctx $src $mp"
-    echo "ExecStartPost=/bin/sh -c 'sleep 1; id -Z > /tmp/uat-a3-unit.ctx; cat /proc/self/status | grep CapEff >> /tmp/uat-a3-unit.ctx; grep fuse /proc/self/mounts >> /tmp/uat-a3-unit.ctx || echo no-fuse-mount-in-ns >> /tmp/uat-a3-unit.ctx'"
-    [ "$nnp" = yes ] && echo "NoNewPrivileges=true"
-    [ "$rns" = yes ] && echo "RestrictNamespaces=true"
-    [ "$mdwe" = yes ] && echo "MemoryDenyWriteExecute=true"
-    [ "$sctx" = yes ] && echo "SELinuxContext=system_u:system_r:docker_helper_t:s0"
+    echo "ExecStartPost=/bin/sh -c 'sleep 1; id -Z > /tmp/uat-a3-unit.ctx; grep fuse /proc/self/mounts >> /tmp/uat-a3-unit.ctx || echo no-fuse-mount-in-ns >> /tmp/uat-a3-unit.ctx'"
+    [ -n "$sctx" ] && echo "SELinuxContext=$sctx"
   } >"/etc/systemd/system/${unit}.service"
   systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl start "$unit.service"
@@ -164,10 +161,10 @@ probe_bindfs_sandbox() { # label nnp restrictns mdwe selinuxctx
     echo "PROBE $label: MOUNTED=yes"
   else
     echo "PROBE $label: MOUNTED=no"
-    echo "PROBE $label: unit namespace view (ctx + caps + fuse mounts after sleep 1):"
+    echo "PROBE $label: unit namespace view (ctx + fuse mounts after sleep 1):"
     cat /tmp/uat-a3-unit.ctx 2>/dev/null | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
-    echo "PROBE $label: unit journal (last 8):"
-    journalctl -u "$unit.service" --no-pager --no-hostname -n 8 2>/dev/null \
+    echo "PROBE $label: unit journal (last 10):"
+    journalctl -u "$unit.service" --no-pager --no-hostname -n 10 2>/dev/null \
       | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
   fi
   systemctl stop "$unit.service" >/dev/null 2>&1 || true
@@ -230,25 +227,23 @@ grep -n 'user_allow_other' /etc/fuse.conf 2>/dev/null || echo "(no user_allow_ot
 fusermount3 --version 2>&1 || true
 probe_bindfs "1-plain-unconfined" no no
 probe_bindfs "2-context-unconfined" yes no
-# Run 9's probes failed for EVERY transient unit, including single-property
-# ones, so the discriminator starts with a bare transient unit (no
-# properties): if even that cannot project a visible mount, the isolation is
-# the unit's own mount namespace, not any sandbox property.
-probe_bindfs_sandbox "0-bare-transient" no no no no
-# One daemon-sandbox property per probe: run 8's probes showed the FUSE mount
-# succeeding unconfined (plain and with context=) and failing only inside the
-# daemon-equivalent sandbox, so the discriminator must be per-property.
-probe_bindfs_sandbox "3a-nnp" yes no no no
-probe_bindfs_sandbox "3b-restrictns" no yes no no
-probe_bindfs_sandbox "3c-mdwe" no no yes no
-probe_bindfs_sandbox "3d-selinuxctx" no no no yes
-probe_bindfs_sandbox "3e-daemon-sandbox" yes yes yes yes
+# Probe the service-execution domains against the packaged bindfs binary:
+#   4-unconfined-shell-equivalent: the caller's own domain (works: probes 1-2);
+#   5-service-default-domain: a systemd service without an explicit context
+#     (the run-13 static probe failed at EXEC: initrc_t cannot execute bindfs);
+#   6-daemon-domain: docker_helper_t, the exact production daemon domain (the
+#     daemon execs bindfs fine; its mount fails with EACCES and no AVC).
+probe_bindfs_sandbox "5-service-default" ""
+probe_bindfs_sandbox "6-daemon-domain" "system_u:system_r:docker_helper_t:s0"
+echo "auditd state: $(systemctl is-active auditd 2>&1 || true)"
 echo "PROBES_DONE"
 
 # --- 5. capture the complete evidence ------------------------------------------
 echo "MICROPROOF AVC capture (ausearch last 5 minutes, complete bounded):"
 AVC_START="$(date +'%m/%d/%Y %H:%M:%S' -d '-5 min')"
 ausearch -m AVC -m USER_AVC --start "$AVC_START" 2>/dev/null | tail -60 || true
+echo "--- kernel AVC view (journalctl -k) ---"
+journalctl -k --no-pager --no-hostname -n 200 2>/dev/null | grep -iE 'avc|selinux' | tail -30 || true
 echo "--- dmesg AVC fallback view ---"
 dmesg 2>/dev/null | grep -i 'avc' | tail -20 || true
 echo "--- daemon operational log (projection context) ---"
