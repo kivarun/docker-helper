@@ -355,17 +355,36 @@ func isCleanRelativeWorkspacePath(path string) bool {
 
 // canonicalizeSessionFilesystemRequest converts caller-supplied
 // workspace-relative filesystem_entries into canonical absolute
-// AllowedRootEntry values, ready for narrowSessionFilesystemPolicy. Each
-// entry is joined with the canonical workspace, resolved through symlinks,
-// and proven to remain inside the workspace; the resolved path becomes the
-// canonical entry and is validated by the existing canonical allowed-root
-// entry validation (canonical absolute form, canonical access vocabulary,
-// duplicate canonical paths refused). The orchestrator creates the run
-// directories before creating the Session, so an unresolvable entry — whose
-// canonical identity cannot be proven — is a refusal, never a guess.
+// AllowedRootEntry values, ready for narrowSessionFilesystemPolicy.
+//
+// The request-shape invariant is proven before any canonicalization: an
+// explicit request must contain the raw literal workspace entry ".". This is
+// a caller-supplied-shape rule, not a canonical-path rule — an entry whose
+// symlink alias resolves to the workspace (rootlink -> .) never satisfies
+// it, and a request without the literal "." is refused before the Session
+// exists. narrowSessionFilesystemPolicy re-proves the workspace authority
+// over the canonical entries as the second, domain-level invariant.
+//
+// Each entry is then joined with the canonical workspace, resolved through
+// symlinks, and proven to remain inside the workspace; the resolved path
+// becomes the canonical entry and is validated by the existing canonical
+// allowed-root entry validation (canonical absolute form, canonical access
+// vocabulary, duplicate canonical paths refused). The orchestrator creates
+// the run directories before creating the Session, so an unresolvable entry
+// — whose canonical identity cannot be proven — is a refusal, never a guess.
 // Every failure wraps ErrInvalidSessionFilesystemPolicy: one refusal family
 // governs the whole Session filesystem request.
 func canonicalizeSessionFilesystemRequest(workspace string, entries []sessionFilesystemRequestEntry) ([]AllowedRootEntry, error) {
+	hasWorkspaceRootEntry := false
+	for _, e := range entries {
+		if e.Path == "." {
+			hasWorkspaceRootEntry = true
+			break
+		}
+	}
+	if !hasWorkspaceRootEntry {
+		return nil, fmt.Errorf("session filesystem request must include the literal workspace entry %q: %w", ".", ErrInvalidSessionFilesystemPolicy)
+	}
 	canonical := make([]AllowedRootEntry, 0, len(entries))
 	for _, e := range entries {
 		if !isCleanRelativeWorkspacePath(e.Path) {

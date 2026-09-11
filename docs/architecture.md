@@ -593,8 +593,11 @@ ceiling — even an Admin receives no bypass semantics through this field.
 A malformed or widening request is the typed
 `ErrInvalidSessionFilesystemPolicy` refusal family, answered before the
 Session exists as `400 invalid_filesystem_policy` with the audit result
-`invalid_filesystem_policy`; no Session, bearer, container, pin, or
-workload-MAC state is created by a refused request.
+`invalid_filesystem_policy` and the bounded non-disclosing response message
+("invalid session filesystem policy"): the internal diagnostic (the
+canonical requested path, which may name a resolved symlink target) stays
+in the operational log and never reaches the client; no Session, bearer,
+container, pin, or workload-MAC state is created by a refused request.
 
 The persisted snapshot is immutable Session child state
 (`session_filesystem_snapshot_entries`, ordered `position` entries with
@@ -2644,6 +2647,7 @@ Result codes:
 | `launcher_not_found` | the selected launcher does not exist under the resolved principal (404) |
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
+| `invalid_filesystem_policy` | `filesystem_entries` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
 | `mac_preparation_failed` | MAC boundary preparation failed after persistence |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |

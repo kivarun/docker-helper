@@ -274,8 +274,11 @@ A malformed or widening request is refused with the stable issuance-time code:
 
 `read_only_root` is not used here: it is the data-plane refusal of an
 already-issued Session, and at issuance time no Session exists. The refusal
-may name the caller-supplied offending entry path but does not disclose
-parent-policy detail beyond that.
+carries no policy detail at all: the response message is the bounded
+non-disclosing contract ("invalid session filesystem policy"), because the
+internal diagnostic can name a canonical requested path — which may disclose
+a resolved symlink target or upstream policy shape — and stays in the
+operational log only.
 
 ## Operation enforcement
 
@@ -544,20 +547,20 @@ At minimum Release 2.2 must prove:
     supported system-mode UAT;
 13. no rejected workload/container, Session snapshot, mount pin, generated MAC
     policy, or runtime residue remains;
-12. audit exposes paths/modes but no bearer, environment value, or workload
+14. audit exposes paths/modes but no bearer, environment value, or workload
     output;
-13. `session create` without `filesystem_entries` preserves the inherited
+15. `session create` without `filesystem_entries` preserves the inherited
     derived snapshot byte-for-byte, and an omitted request is
     indistinguishable from the pre-narrowing create path;
-14. a Launcher credential can create a dynamically named run workspace and
+16. a Launcher credential can create a dynamically named run workspace and
     narrow its Session at issuance time (`.` read-only with explicit
     read-write exceptions), and the issued snapshot enforces exactly those
     effective semantics;
-15. a Session filesystem request that widens — `read_write` under an
+17. a Session filesystem request that widens — `read_write` under an
     effective `read_only` region, or any path outside the effective
     Launcher ceiling — is refused `400 invalid_filesystem_policy` before the
     Session exists, creating no Session, bearer, container, pin, or
     workload-MAC residue;
-16. the accepted Admin/Principal/Launcher narrowing requests are
+18. the accepted Admin/Principal/Launcher narrowing requests are
     authorization-symmetric: every authority narrows only against the
     resolved target Launcher ceiling and none receives bypass semantics.

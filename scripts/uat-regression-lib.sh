@@ -195,6 +195,41 @@ for entry in entries:
 ' 2>/dev/null
 }
 
+# session_list_count prints the authoritative number of active Sessions from
+# `dh session list --system --json`. Fail-closed: the list command must
+# succeed and the document must be exactly the canonical session-list shape
+# (`{"ok":true,"sessions":[{"id","workspace"},...]}` with well-formed session
+# objects); a command failure, malformed JSON, an unexpected shape, or a
+# malformed session entry exits 1 — never a silent 0. "Cannot inspect" is
+# never "zero sessions": the no-state-on-refusal proofs must distinguish a
+# positively empty inventory from an unavailable one.
+session_list_count() {
+  local out rc
+  out="$(dh session list --system --json 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '  session list inventory unavailable (session list failed)\n' >&2
+    return 1
+  fi
+  printf '%s' "$out" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not (isinstance(doc, dict) and doc.get("ok") is True):
+    sys.exit(1)
+sessions = doc.get("sessions")
+if not isinstance(sessions, list):
+    sys.exit(1)
+for session in sessions:
+    if not (isinstance(session, dict) and isinstance(session.get("id"), str) and session["id"]
+            and isinstance(session.get("workspace"), str) and session["workspace"]):
+        sys.exit(1)
+print(len(sessions))
+' 2>/dev/null
+}
+
 # dh is the docker-helper CLI used by the regressions (system mode).
 dh() { /usr/bin/docker-helper "$@"; }
 

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -218,6 +219,62 @@ func TestHTTPSessionFilesystemCanonicalizationRefusals(t *testing.T) {
 	rec := postSessionThroughMux(t, app, launcherToken, narrowingRequestBody(workspace,
 		`[{"path":".","access":"read_only"},{"path":"escape-link","access":"read_write"}]`))
 	assertRefusal(t, rec)
+
+	// The literal "." workspace entry is a raw request-shape invariant: a
+	// symlink alias that resolves to the workspace itself (rootlink -> .)
+	// never satisfies it. A request carrying only the alias is refused even
+	// though its canonical entry equals the workspace root.
+	rootlink := filepath.Join(workspace, "rootlink")
+	if err := os.Symlink(".", rootlink); err != nil {
+		t.Fatal(err)
+	}
+	rec = postSessionThroughMux(t, app, launcherToken, narrowingRequestBody(workspace,
+		`[{"path":"rootlink","access":"read_only"},{"path":"project","access":"read_write"}]`))
+	assertRefusal(t, rec)
+	if after := countLiveSessions(t, app); after != 0 {
+		t.Errorf("refused rootlink-only create left %d sessions, want 0", after)
+	}
+}
+
+// TestHTTPSessionFilesystemRefusalDoesNotDiscloseCanonicalPath proves the
+// non-disclosing refusal contract: the HTTP refusal carries the stable code
+// and the bounded message only — never the resolved canonical symlink target
+// or any upstream policy path. The internal diagnostic (which does carry the
+// canonical requested path) stays in the operational log.
+func TestHTTPSessionFilesystemRefusalDoesNotDiscloseCanonicalPath(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
+
+	// A symlink alias inside the workspace resolving into the protected
+	// read-only region: the canonicalized entry names the canonical target
+	// path in the internal diagnostic, and the widening request is refused.
+	alias := filepath.Join(workspace, "alias")
+	if err := os.Symlink(filepath.Join(workspace, "pipeline-inputs"), alias); err != nil {
+		t.Fatal(err)
+	}
+	rec := postSessionThroughMux(t, app, launcherToken, narrowingRequestBody(workspace,
+		`[{"path":".","access":"read_only"},{"path":"alias","access":"read_write"}]`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var resp response
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot decode error response: %v", err)
+	}
+	if resp.Code != "invalid_filesystem_policy" {
+		t.Errorf("error code = %q, want invalid_filesystem_policy", resp.Code)
+	}
+	if resp.Message != sessionFilesystemPolicyMessage {
+		t.Errorf("message = %q, want the bounded non-disclosing message %q", resp.Message, sessionFilesystemPolicyMessage)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "pipeline-inputs") || strings.Contains(body, filepath.Join(workspace, "pipeline-inputs")) {
+		t.Errorf("refusal discloses the resolved canonical target: %s", body)
+	}
+	if strings.Contains(body, "/") && strings.Contains(body, app.Config.AllowedRoots[0].Path) {
+		t.Errorf("refusal discloses a host path: %s", body)
+	}
 }
 
 // TestHTTPLauncherCredentialNarrowing proves the motivating capability under

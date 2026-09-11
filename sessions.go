@@ -298,21 +298,15 @@ func workspaceErrorMessage(err error) string {
 	return "invalid workspace"
 }
 
-// sessionFilesystemPolicyErrorMessage extracts a user-actionable message for
-// an issuance-time Session filesystem refusal. The internal
-// ErrInvalidSessionFilesystemPolicy wrapping suffix is removed so the client
-// sees the specific actionable cause (for example the offending requested
-// entry) while preserving the invalid_filesystem_policy code. The refusal
-// names at most the caller-supplied requested path; it never discloses
-// parent-policy detail beyond that.
-func sessionFilesystemPolicyErrorMessage(err error) string {
-	msg := err.Error()
-	suffix := ": " + ErrInvalidSessionFilesystemPolicy.Error()
-	if strings.HasSuffix(msg, suffix) {
-		return strings.TrimSuffix(msg, suffix)
-	}
-	return "invalid session filesystem policy"
-}
+// sessionFilesystemPolicyMessage is the bounded HTTP message of an
+// issuance-time Session filesystem refusal: the refusal names no policy
+// detail at all, because the domain refusal's internal diagnostic (which
+// carries the canonical requested path) may disclose a resolved symlink
+// target or upstream policy shape and stays in the operational log only.
+// The stable code `invalid_filesystem_policy` carries the meaning; the
+// client learns only that its request was refused before the Session
+// existed.
+const sessionFilesystemPolicyMessage = "invalid session filesystem policy"
 
 // classifier for a create target relates a create error to its HTTP contract.
 type createTargetError struct {
@@ -449,15 +443,16 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", workspaceErrorMessage(cerr))
 		} else if errors.Is(cerr, ErrInvalidSessionFilesystemPolicy) {
 			// Issuance-time filesystem refusal: the request is malformed or
-			// is not a narrowing of the effective Launcher ceiling. The
-			// client receives the actionable cause (the caller-supplied
-			// offending entry) with the same invalid_filesystem_policy code;
-			// no parent-policy detail beyond that.
+			// is not a narrowing of the effective Launcher ceiling. The HTTP
+			// message is the bounded non-disclosing contract — the internal
+			// diagnostic (canonical requested path, which may name a resolved
+			// symlink target or upstream policy shape) stays in the
+			// operational log and never reaches the client.
 			opLog(ctx).Warn("session creation rejected",
 				slog.String("operation", "session_create"),
 				slog.String("error", cerr.Error()),
 			)
-			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", sessionFilesystemPolicyErrorMessage(cerr))
+			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", sessionFilesystemPolicyMessage)
 		} else {
 			opLog(ctx).Error("session creation error",
 				slog.String("operation", "session_create"),

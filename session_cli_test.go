@@ -331,3 +331,29 @@ func TestSessionCreateFsEntryHelp(t *testing.T) {
 		t.Errorf("help does not document --filesystem-entry: %s", stdout.String())
 	}
 }
+
+// TestSessionCreateEqualsInPathWire proves the PATH=ACCESS split is on the
+// LAST '=' — the same grammar the completion consumes: a PATH containing '='
+// parses as one workspace-relative path with the canonical ACCESS.
+func TestSessionCreateEqualsInPathWire(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+	_ = configPath
+
+	var captured string
+	startSessionCreateCapture(t, socketPath, &captured)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"session", "create",
+		"--workspace", "/state/runs/run-1",
+		"--filesystem-entry", "foo=bar=read_only",
+		"--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("session create failed: code %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(captured, `"path":"foo=bar","access":"read_only"`) {
+		t.Errorf("wire body does not carry the last-'=' split: %s", captured)
+	}
+}

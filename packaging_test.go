@@ -9772,13 +9772,115 @@ func TestAccessModesHarnessIssuanceNarrowing(t *testing.T) {
 	}
 
 	// The widening refusal is the stable issuance-time contract: no Session
-	// issued, no new state, no residue.
+	// issued, no new state, no residue. The residue and Session-count
+	// baselines are captured BEFORE the single tested attempt, so state
+	// created by the attempt itself can never end up inside its own
+	// baseline, and the Session inventory is the fail-closed
+	// session_list_count owner (never a grepped count that can silently
+	// equalize on an inspection failure).
+	if !strings.Contains(content, `acc_ok "14 issuance-time widening refused with invalid_filesystem_policy: no Session, no container/pin/workload-MAC residue"`) {
+		t.Error("the widening refusal proof is incomplete (refusal + no-state contract)")
+	}
 	for _, must := range []string{
-		`acc_ok "14 issuance-time widening refused with invalid_filesystem_policy, no Session issued"`,
-		`acc_ok "14 refused create left no Session and no container/pin/workload-MAC residue"`,
+		`if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then`,
+		`N_AFTER="$(session_list_count)"`,
+		`[ "$N_AFTER" = "$N_BEFORE" ]`,
+		`residue_unchanged "$N_BASE"`,
+		`acc_fail "14 baseline capture failed before the widening attempt (fail-closed inventory)"`,
 	} {
 		if !strings.Contains(content, must) {
-			t.Errorf("the widening refusal proof is incomplete (%s)", must)
+			t.Errorf("the widening refusal proof must use pre-attempt fail-closed baselines (%s)", must)
+		}
+	}
+	if strings.Contains(content, `grep -o '"id": *"dhs_'`) {
+		t.Error("the Session inventory must use the fail-closed session_list_count owner, not a grepped count")
+	}
+
+	// Ordering semantics: the residue baseline and the session-count baseline
+	// must both occur before the tested widening session create, and there
+	// must be exactly one tested widening attempt (no redundant duplicate
+	// calls).
+	lines := strings.Split(content, "\n")
+	baseLine, beforeLine, createLine := -1, -1, -1
+	createCount := 0
+	for i, line := range lines {
+		if strings.Contains(line, `N_BASE="$(residue_state)"`) && baseLine < 0 {
+			baseLine = i
+		}
+		if strings.Contains(line, `N_BEFORE="$(session_list_count)"`) && beforeLine < 0 {
+			beforeLine = i
+		}
+		if strings.Contains(line, `--filesystem-entry .=read_write`) {
+			createCount++
+			if createLine < 0 {
+				createLine = i
+			}
+		}
+	}
+	if baseLine < 0 || beforeLine < 0 || createLine < 0 {
+		t.Fatalf("widening refusal proof is missing a required statement (baseline=%d before=%d create=%d)", baseLine, beforeLine, createLine)
+	}
+	if baseLine > createLine || beforeLine > createLine {
+		t.Errorf("residue/session baselines must be captured before the tested widening create (baseline=%d before=%d create=%d)", baseLine, beforeLine, createLine)
+	}
+	if createCount != 1 {
+		t.Errorf("the refusal proof must contain exactly one tested widening attempt, got %d", createCount)
+	}
+}
+
+// TestUATLibSessionListCountFailClosed pins the fail-closed Session-list
+// inventory contract of the shared UAT lib: the count is authoritative only
+// when the list command succeeds and the document is exactly the canonical
+// session-list shape; a command failure, malformed JSON, an unexpected
+// shape, or a malformed session entry is an inventory failure (exit 1),
+// never a silent zero, and a valid empty list is a positively zero count.
+func TestUATLibSessionListCountFailClosed(t *testing.T) {
+	shim := t.TempDir()
+	writeStub(t, shim, "stub-dh", `#!/bin/sh
+case "$STUB_DH_MODE" in
+  fail) exit 3 ;;
+  stderr-only) echo "error: daemon not running" >&2; exit 1 ;;
+  malformed) echo "not json" ;;
+  wrong-shape) echo '{"ok":true}' ;;
+  missing-sessions) echo '{"ok":true,"sessions":null}' ;;
+  bad-entry) echo '{"ok":true,"sessions":[{"id":5,"workspace":"/w"}]}' ;;
+  missing-workspace) echo '{"ok":true,"sessions":[{"id":"dhs_abc"}]}' ;;
+  empty) echo '{"ok":true,"sessions":[]}' ;;
+  one) echo '{"ok":true,"sessions":[{"id":"dhs_abc","workspace":"/w"}]}' ;;
+  two) echo '{"ok":true,"sessions":[{"id":"dhs_abc","workspace":"/w"},{"id":"dhs_def","workspace":"/w2"}]}' ;;
+  *) exit 9 ;;
+esac
+`)
+
+	var sb strings.Builder
+	sb.WriteString("set -uo pipefail\n")
+	fmt.Fprintf(&sb, "export PATH=%q:$PATH\n", shim)
+	sb.WriteString("source scripts/uat-regression-lib.sh\n")
+	// The lib's dh owner is overridden to the deterministic stub: the count
+	// contract under test is the inventory helper, not the CLI resolution.
+	fmt.Fprintf(&sb, "dh() { %q \"$@\"; }\n", filepath.Join(shim, "stub-dh"))
+	for _, mode := range []string{"fail", "stderr-only", "malformed", "wrong-shape", "missing-sessions", "bad-entry", "missing-workspace", "empty", "one", "two"} {
+		// The mode is exported explicitly: a temp-env assignment prefix does
+		// not reach the command substitution subshell that runs the helper.
+		fmt.Fprintf(&sb, "STUB_DH_MODE=%s\nexport STUB_DH_MODE\n", mode)
+		fmt.Fprintf(&sb, "c=$(session_list_count) || printf '%s:bad\\n'\n", mode)
+		fmt.Fprintf(&sb, "printf '%s:%%s\\n' \"$c\"\n", mode)
+	}
+	out, err := runBashIn(t, ".", sb.String())
+	if err != nil {
+		t.Fatalf("harness run failed: %v\n%s", err, out)
+	}
+
+	// Fail-closed modes: exit 1 with no count printed.
+	for _, mode := range []string{"fail", "stderr-only", "malformed", "wrong-shape", "missing-sessions", "bad-entry", "missing-workspace"} {
+		if !strings.Contains(out, mode+":bad\n") {
+			t.Errorf("mode %s must fail closed (inventory failure), output:\n%s", mode, out)
+		}
+	}
+	// Valid shapes: authoritative counts, a positively empty list is zero.
+	for _, want := range []string{"empty:0\n", "one:1\n", "two:2\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("valid list shape must produce its authoritative count (%s), output:\n%s", want, out)
 		}
 	}
 }

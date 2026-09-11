@@ -851,32 +851,30 @@ fi
 # N-refusal: an attempted issuance-time widening — read_write under the
 # parent read_only ceiling — is refused 400 invalid_filesystem_policy before
 # the Session exists: no Session, no bearer, no container, no pin, no
-# workload-MAC residue.
-WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
-  --workspace "$WS" --json \
-  --filesystem-entry .=read_write \
-  --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
-if printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
-    && ! printf '%s\n' "$WIDEN_OUT" | grep -q '"id"'; then
-  acc_ok "14 issuance-time widening refused with invalid_filesystem_policy, no Session issued"
-else
-  acc_fail "14 widening create not refused correctly: $(printf '%s\n' "$WIDEN_OUT" | redact | tail -3)"
-fi
-N_BEFORE="$(dh session list --system --json 2>/dev/null | grep -o '"id": *"dhs_' | wc -l)"
-WIDEN_OUT2="$(dh session create --system --token-file /tmp/uat-am-cred-main \
-  --workspace "$WS" --json \
-  --filesystem-entry .=read_write \
-  --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
-N_AFTER="$(dh session list --system --json 2>/dev/null | grep -o '"id": *"dhs_' | wc -l)"
-if [ "$N_BEFORE" = "$N_AFTER" ] && printf '%s\n' "$WIDEN_OUT2" | grep -q 'invalid_filesystem_policy'; then
-  RESIDUE_BASE="$(residue_state)"
-  if residue_unchanged "$RESIDUE_BASE"; then
-    acc_ok "14 refused create left no Session and no container/pin/workload-MAC residue"
+# workload-MAC residue. The residue and Session-count baselines are captured
+# BEFORE the single tested attempt, so state created by the attempt itself
+# can never end up inside its own baseline, and both inventories are the
+# fail-closed owners: an unavailable inventory is a failed proof, never a
+# silently-equal count.
+if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then
+  WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
+    --workspace "$WS" --json \
+    --filesystem-entry .=read_write \
+    --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
+  if printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
+      && ! printf '%s\n' "$WIDEN_OUT" | grep -q '"id"'; then
+    if N_AFTER="$(session_list_count)" \
+        && [ "$N_AFTER" = "$N_BEFORE" ] \
+        && residue_unchanged "$N_BASE"; then
+      acc_ok "14 issuance-time widening refused with invalid_filesystem_policy: no Session, no container/pin/workload-MAC residue"
+    else
+      acc_fail "14 refused create left state (sessions $N_BEFORE -> ${N_AFTER:-inventory-unavailable}, residue drift against the pre-attempt baseline)"
+    fi
   else
-    acc_fail "14 refused create left residue (base: $RESIDUE_BASE)"
+    acc_fail "14 widening create not refused correctly: $(printf '%s\n' "$WIDEN_OUT" | redact | tail -3)"
   fi
 else
-  acc_fail "14 refusal created state: sessions before=$N_BEFORE after=$N_AFTER out=$(printf '%s\n' "$WIDEN_OUT2" | redact | tail -3)"
+  acc_fail "14 baseline capture failed before the widening attempt (fail-closed inventory)"
 fi
 
 # ==============================================================================
