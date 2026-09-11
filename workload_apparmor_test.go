@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1011,6 +1012,53 @@ func TestRenderWorkloadAppArmorProfileHoleDeterminism(t *testing.T) {
 	profile := renderWorkloadAppArmorProfile("n", plan, false)
 	if !strings.Contains(profile, `audit deny "/work/aux/{,}" wkl,`) {
 		t.Errorf("intermediate hole nodes must render their own entry rule:\n%s", profile)
+	}
+}
+
+// TestWorkloadAppArmorProfileParserValidation validates the generated
+// workload profiles through the real apparmor_parser grammar when the
+// parser is available locally (the required live proofs prove the kernel
+// semantics; this catches grammar regressions cheaply on parser hosts).
+// The prefix-collision plans are the exact shapes of the renderer bug this
+// release fixes: the nested brace groups, negated classes containing '/',
+// and segment-bounded fragments must all parse.
+func TestWorkloadAppArmorProfileParserValidation(t *testing.T) {
+	if _, err := exec.LookPath("apparmor_parser"); err != nil {
+		t.Skip("apparmor_parser not available")
+	}
+	plans := map[string]workloadAppArmorTargetPlan{
+		"single-hole": {
+			RO: []appArmorROTarget{{Target: "/work"}},
+			RW: []string{"/work/output"},
+		},
+		"nested-island": {
+			RO: []appArmorROTarget{{Target: "/work"}, {Target: "/work/output/protected"}},
+			RW: []string{"/work/output"},
+		},
+		"prefix-collision": {
+			RO: []appArmorROTarget{{Target: "/work"}},
+			RW: []string{"/work/a", "/work/ab"},
+		},
+		"prefix-collision-island": {
+			RO: []appArmorROTarget{{Target: "/work"}, {Target: "/work/a/protected"}},
+			RW: []string{"/work/a", "/work/ab"},
+		},
+		"multi-segment-hole": {
+			RO: []appArmorROTarget{{Target: "/work"}},
+			RW: []string{"/work/output", "/work/aux/data"},
+		},
+	}
+	for name, plan := range plans {
+		profile := renderWorkloadAppArmorProfile("docker-helper-workload-op_parserval", plan, false)
+		dir := t.TempDir()
+		profilePath := filepath.Join(dir, "profile")
+		if err := os.WriteFile(profilePath, []byte(profile), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", profilePath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s workload profile parser validation failed: %v\n%s\n%s", name, err, out, profile)
+		}
 	}
 }
 

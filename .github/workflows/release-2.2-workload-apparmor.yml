@@ -68,7 +68,8 @@ jobs:
             --evidence "$RUNNER_TEMP/release-2.2-workload-apparmor-evidence" \
             apparmor-denial.txt apparmor-summary.txt \
             apparmor-regular-file-denial.txt apparmor-regular-file-summary.txt \
-            apparmor-nested-rw-denial.txt apparmor-nested-rw-summary.txt
+            apparmor-nested-rw-denial.txt apparmor-nested-rw-summary.txt \
+            apparmor-prefix-collision-denial.txt apparmor-prefix-collision-summary.txt
 
       - name: Upload live proof evidence
         if: always()
