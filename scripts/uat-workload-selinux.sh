@@ -59,6 +59,9 @@
 set -uo pipefail
 
 VERSION="${UAT_VERSION:-2.2.0-uat}"
+# RPM version field uses "~" for the UAT suffix ("-" separates version from
+# release), so the rpm record check must match the transformed string.
+RPM_VERSION="${VERSION//-/~}"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/opt}"
 PRINCIPAL="${UAT_PRINCIPAL:-opc}"
 RPM_PATH_IN="${UAT_RPM:-}"
@@ -244,7 +247,7 @@ rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 # state that this verifier does not silently accept.
 candidate_installed_ok() {
   [ "$(docker-helper version)" = "$VERSION" ] \
-    && rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$VERSION" \
+    && rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$RPM_VERSION" \
     && semodule -l 2>/dev/null | awk '$1 == "docker_helper" { found=1 } END { exit !found }'
 }
 # wls_install_evidence dumps the complete bounded failure context for a

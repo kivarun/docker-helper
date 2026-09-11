@@ -296,7 +296,7 @@ mkdir -p "$WS/project" "$WS/pipeline-inputs/sub" "$WS/pipeline-outputs" \
 printf 'project-file\n' > "$WS/project/keep.txt"
 printf 'ro-input\n' > "$WS/pipeline-inputs/input.txt"
 printf 'sub-write\n' > "$WS/pipeline-inputs/sub/sub.txt"
-printf 'build-input\n' > "$BUILD_WS/Dockerfile"
+printf 'FROM scratch\nCOPY app/main.c /main.c\n' > "$BUILD_WS/Dockerfile"
 mkdir -p "$BUILD_WS/app"
 printf 'app-src\n' > "$BUILD_WS/app/main.c"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$TREE" "$LEGACY" "$BUILDROOT"
@@ -342,6 +342,18 @@ if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$WS/p
   acc_ok "P4 principal allowed-root add --access read_only"
 else
   acc_fail "P4 principal allowed-root add --access read_only failed"
+fi
+
+# P4b: the Principal owns the project path itself (read_write) so scenario 10
+# can narrow exactly this root with set-access (set-access requires an
+# existing root; it cannot reach into the parent TREE entry).
+if dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
+    "$WS/project" >/dev/null 2>&1 \
+    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
+      | grep -F "$WS/project" | grep -q 'read_write'; then
+  acc_ok "P4b principal owns the project root (read_write)"
+else
+  acc_fail "P4b principal project-root add failed"
 fi
 
 # P5: principal allowed-root set-access (flip and flip back, exact contract).
@@ -424,11 +436,19 @@ else
   acc_fail "P7 setup: launcher could not store the read_write grant"
 fi
 
-# sub: most-specific RW->RO->RW transitions (point 8 policy owner).
+# sub: most-specific RW->RO->RW transitions (point 8 policy owner). The
+# 2.2 composition meets the launcher mode against the Principal mode at each
+# candidate path, so a launcher RW under a Principal read_only ancestor would
+# compose to read_only. The Principal therefore carries its own read_write
+# entry at the sub path (within its read_write ceiling): the region composes
+# to read_write, the parent region stays read_only, and the RO-over-nested-RW
+# refusals in the widen scenario remain intact.
 SUB_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
   '{"name":"sub","scope":"restricted","allowed_roots":["'"$TREE"'"]}')"
 SUB_L_ID="$(printf '%s' "$SUB_L_JSON" | json_field id)"
 [ -n "$SUB_L_ID" ] || { echo "error: launcher 'sub' create failed: $SUB_L_JSON" >&2; exit 1; }
+dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
+  "$WS/pipeline-inputs/sub" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
   "$SUB_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
@@ -617,7 +637,7 @@ LEGACY_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SL_TOKEN" \
   sh -ec 'echo legacy-write > /mnt/legacy/written.txt && echo LEGACY-RW-OK')" \
   || acc_fail "9 legacy path-only writable mount failed: $LEGACY_OUT"
 printf '%s\n' "$LEGACY_OUT" | grep -q 'LEGACY-RW-OK' \
-  && [ -f "$LEGACY/written.txt" ] \
+  && [ -f "$LEGACY_WS/written.txt" ] \
   && acc_ok "9 legacy path-only root remained read_write" \
   || acc_fail "9 legacy path-only write did not persist"
 
