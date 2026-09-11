@@ -255,8 +255,9 @@ candidate_installed_ok() {
 # seconds AFTER the verifier had already failed, which cannot distinguish a
 # flaky member from a verifier-context defect).
 verifier_member_results() {
-  local raw qrc prc
+  local raw qrc prc rpm_out
   raw="$(docker-helper version 2>/dev/null || true)"
+  rpm_out="$(rpm -q docker-helper 2>/dev/null || true)"
   rpm -q docker-helper >/dev/null 2>&1
   qrc=$?
   rpm -q docker-helper 2>/dev/null | grep -q "docker-helper-$RPM_VERSION"
@@ -268,6 +269,7 @@ verifier_member_results() {
     "$(semodule -l 2>/dev/null | awk '$1 == "docker_helper" { found=1 } END { exit !found }' && echo yes || echo NO)" \
     "$raw" \
     "$prc"
+  printf '  verifier rpm detail: RPM_VERSION=[%s] rpm-out=[%s]\n' "$RPM_VERSION" "$rpm_out"
 }
 # wls_install_evidence dumps the complete bounded failure context for a
 # candidate install that did not verify: the FULL non-trivial scriptlet log,
