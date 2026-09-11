@@ -8718,7 +8718,8 @@ func TestUatWorkloadSelinuxProjectionAvcClassifier(t *testing.T) {
 	wrongTarget := `type=AVC msg=audit(1736800000.126:459): avc:  denied  { write } for  pid=1237 comm="cat" name="data" dev="sda1" ino=1237 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_workspace_t:s0 tclass=file permissive=0`
 	wrongSource := `type=AVC msg=audit(1736800000.127:460): avc:  denied  { write } for  pid=1238 comm="cat" name="data" dev="sda1" ino=1238 scontext=system_u:system_r:docker_helper_t:s0 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=file permissive=0`
 	permissive := `type=AVC msg=audit(1736800000.128:461): avc:  denied  { write } for  pid=1239 comm="cat" name="data" dev="sda1" ino=1239 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=dir permissive=1`
-	unrelated := `type=AVC msg=audit(1736800000.129:462): avc:  denied  { getattr } for  pid=1240 comm="cat" name="data" dev="sda1" ino=1240 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_workspace_t:s0 tclass=file permissive=0`
+	wrongClass := `type=AVC msg=audit(1736800000.128:462): avc:  denied  { write } for  pid=1240 comm="cat" name="data" dev="sda1" ino=1240 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=sock_file permissive=0`
+	unrelated := `type=AVC msg=audit(1736800000.129:463): avc:  denied  { getattr } for  pid=1241 comm="cat" name="data" dev="sda1" ino=1241 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_workspace_t:s0 tclass=file permissive=0`
 
 	// Lines carry no single quotes, so wrapping each in a bash single-quoted
 	// literal (which may span lines for the multi-line windows) is safe.
@@ -8735,6 +8736,7 @@ func TestUatWorkloadSelinuxProjectionAvcClassifier(t *testing.T) {
 		{"READ", readLine, "reject"},
 		{"WRONG_TARGET", wrongTarget, "reject"},
 		{"WRONG_SOURCE", wrongSource, "reject"},
+		{"WRONG_CLASS", wrongClass, "reject"},
 		{"PERMISSIVE", permissive, "reject"},
 	}
 	for _, tc := range predCases {

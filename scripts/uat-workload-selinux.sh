@@ -647,12 +647,14 @@ is_expected_projection_denial() {
 }
 
 # count_unexpected_helper_avcs WINDOW — counts, within a window of raw AVC
-# records, the denials in the docker_helper scope that are neither the expected
-# enforcing projection write denial (is_expected_projection_denial) nor the
-# daemon's own policy-tool fifo artifact. This is the single decision point
-# behind the S13 "no unexpected docker_helper AVC" gate; it prints the count on
-# stdout and routes its per-record diagnostics to stderr so the count stays
-# machine-readable under command substitution.
+# records, the denials in the docker_helper scope that are not the expected
+# enforcing projection write denial (is_expected_projection_denial). This is
+# the single decision point behind the S13 "no unexpected docker_helper AVC"
+# gate; it prints the count on stdout and routes its per-record diagnostics to
+# stderr so the count stays machine-readable under command substitution. Only
+# AVCs whose source context is in the docker_helper* scope are considered;
+# every in-scope denial that is not an expected projection write denial is
+# unexpected.
 count_unexpected_helper_avcs() {
   local window="$1" line count=0
   while IFS= read -r line; do
@@ -660,13 +662,6 @@ count_unexpected_helper_avcs() {
     printf '%s\n' "$line" | grep -q 'scontext.*docker_helper' || continue
     if is_expected_projection_denial "$line"; then
       printf '  expected projection write denial: %s\n' "$line" >&2
-    elif printf '%s\n' "$line" | grep -qE 'scontext=system_u:system_r:(setfiles|load_policy)_t' \
-        && printf '%s\n' "$line" | grep -q 'tclass=fifo_file'; then
-      # The daemon's own restorecon/semodule plumbing: the policy-tool child
-      # cannot write back through the daemon's fifo under enforcing policy.
-      # This is an operational artifact of the helper itself, not a workload
-      # denial, and the tool result still propagates via exit status.
-      printf '  expected policy-tool fifo artifact: %s\n' "$line" >&2
     else
       printf '  UNEXPECTED AVC: %s\n' "$line" >&2
       count=$((count + 1))
