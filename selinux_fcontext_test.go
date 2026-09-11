@@ -1957,7 +1957,8 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 	for _, rule := range []string{
 		"allow docker_helper_t docker_helper_bindfs_exec_t:file { getattr open read execute execute_no_trans map };",
 		"allow docker_helper_t fuse_device_t:chr_file { getattr open read write ioctl };",
-		"allow docker_helper_t fusefs_t:filesystem { mount unmount getattr };",
+		"allow docker_helper_t fusefs_t:filesystem { mount unmount getattr relabelfrom };",
+		"class filesystem { mount remount unmount getattr associate mounton relabelfrom };",
 		"allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr };",
 		"allow docker_helper_ro_projection_t fusefs_t:filesystem associate;",
 		"allow docker_helper_t docker_helper_runtime_t:dir { mounton };",

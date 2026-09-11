@@ -107,7 +107,7 @@ module docker_helper 1.0;
 		class chr_file { append create getattr ioctl read watch open write };
 		class blk_file { append create getattr ioctl read };
 		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock relabelfrom relabelto };
-		class filesystem { mount remount unmount getattr associate mounton };
+		class filesystem { mount remount unmount getattr associate mounton relabelfrom };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
@@ -648,7 +648,7 @@ allow docker_helper_t fuse_device_t:chr_file { getattr open read write ioctl };
 # projection with the fixed projection mount context, and the helper unmounts
 # the projection (fusermount, then kernel umount fallback) during run cleanup
 # and startup reconciliation.
-allow docker_helper_t fusefs_t:filesystem { mount unmount getattr };
+allow docker_helper_t fusefs_t:filesystem { mount unmount getattr relabelfrom };
 
 # With the fixed context= mount option the mounted superblock carries the
 # projection context itself, so the mount/unmount/getattr checks name
