@@ -134,6 +134,25 @@ json_field() { # field
 # dh is the docker-helper CLI used by the regressions (system mode).
 dh() { /usr/bin/docker-helper "$@"; }
 
+# wait_service_health: the single shared readiness owner for the regression
+# family. Returns 0 only when the docker-helper system service is active AND
+# GET /health succeeds over its unix API socket, within a bounded poll (no
+# blind sleeps). Callers set $SERVICE (systemd unit name) and $SOCK (API
+# socket path). systemd active alone is never a readiness oracle: with
+# Type=exec the unit reports active as soon as the binary is exec'd, before
+# the startup sequence (snapshot integrity, startup reconciliation, session
+# cleanup) completes and the listener serves /health.
+wait_service_health() {
+  for _ in $(seq 1 60); do
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null \
+        && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 # --- shared ubuntu/deb/apparmor setup helpers --------------------------------
 # Used by the Ubuntu-hosted regression groups. The collect-all runner inits the
 # system service with global allowed root /home, so every /home/* home below is

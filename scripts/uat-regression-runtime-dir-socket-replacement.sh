@@ -178,18 +178,6 @@ inode_where() {
   printf '%s' "$out"
 }
 
-# wait_service_health: bounded wait for an active daemon + host /health.
-wait_service_health() {
-  for _ in $(seq 1 60); do
-    if systemctl is-active --quiet "$SERVICE" 2>/dev/null \
-        && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
-
 # record_evidence LABEL: one evidence line for the observable daemon/socket
 # state (never a verdict).
 record_evidence() {

@@ -619,6 +619,62 @@ else
   acc_fail "S12 restart left confinement or workload residue broken"
 fi
 
+# is_expected_projection_denial LINE — the single canonical predicate deciding
+# whether a raw audit AVC record is the expected enforcing write denial by a
+# docker_helper_container_t workload against the docker_helper_ro_projection_t
+# projection. It is used BOTH to select the mandatory attributable S13 evidence
+# and to exclude those same expected records from UNEXPECTED, so the two never
+# drift into different definitions of "expected projection AVC". Requires (at
+# minimum):
+#   avc:  denied
+#   scontext contains docker_helper_container_t
+#   tcontext contains docker_helper_ro_projection_t
+#   tclass=dir OR tclass=file
+#   write present in the actual raw AVC permission set (denied { write })
+#   permissive=0
+# A raw AVC record reports its permission set in braces ("denied { write }"),
+# NOT as "perm=write", so the write test is anchored to the brace-delimited
+# permission set. An unrelated permission, target type, source domain, class,
+# or permissive AVC is never accepted as the required enforcing write denial.
+is_expected_projection_denial() {
+  local line="$1"
+  printf '%s\n' "$line" | grep -q 'avc:  *denied' \
+    && printf '%s\n' "$line" | grep -q 'scontext=.*docker_helper_container_t' \
+    && printf '%s\n' "$line" | grep -q 'tcontext=.*docker_helper_ro_projection_t' \
+    && printf '%s\n' "$line" | grep -Eq 'tclass=(dir|file)\b' \
+    && printf '%s\n' "$line" | grep -Eq '\{[^}]*\bwrite\b[^}]*\}' \
+    && printf '%s\n' "$line" | grep -Eq 'permissive=0'
+}
+
+# count_unexpected_helper_avcs WINDOW — counts, within a window of raw AVC
+# records, the denials in the docker_helper scope that are neither the expected
+# enforcing projection write denial (is_expected_projection_denial) nor the
+# daemon's own policy-tool fifo artifact. This is the single decision point
+# behind the S13 "no unexpected docker_helper AVC" gate; it prints the count on
+# stdout and routes its per-record diagnostics to stderr so the count stays
+# machine-readable under command substitution.
+count_unexpected_helper_avcs() {
+  local window="$1" line count=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$line" | grep -q 'scontext.*docker_helper' || continue
+    if is_expected_projection_denial "$line"; then
+      printf '  expected projection write denial: %s\n' "$line" >&2
+    elif printf '%s\n' "$line" | grep -qE 'scontext=system_u:system_r:(setfiles|load_policy)_t' \
+        && printf '%s\n' "$line" | grep -q 'tclass=fifo_file'; then
+      # The daemon's own restorecon/semodule plumbing: the policy-tool child
+      # cannot write back through the daemon's fifo under enforcing policy.
+      # This is an operational artifact of the helper itself, not a workload
+      # denial, and the tool result still propagates via exit status.
+      printf '  expected policy-tool fifo artifact: %s\n' "$line" >&2
+    else
+      printf '  UNEXPECTED AVC: %s\n' "$line" >&2
+      count=$((count + 1))
+    fi
+  done <<< "$window"
+  printf '%s' "$count"
+}
+
 # ==============================================================================
 # scenario S13: harness proof + bounded audit window evidence
 # ==============================================================================
@@ -642,37 +698,19 @@ if [ -z "$AVC_WINDOW" ] && [ -f /var/log/audit/audit.log ]; then
     match($0, /audit\(([0-9]+)\./, m) { if (m[1] + 0 >= start + 0) print }
   ' /var/log/audit/audit.log 2>/dev/null || true)"
 fi
-RO_AVC="$(printf '%s\n' "$AVC_WINDOW" | grep 'avc:  denied' \
-  | grep 'docker_helper_ro_projection_t' | grep 'tclass=dir' | head -1 || true)"
+RO_AVC="$(printf '%s\n' "$AVC_WINDOW" | while IFS= read -r _line; do
+  is_expected_projection_denial "$_line" && printf '%s\n' "$_line"
+done | head -1 || true)"
 if [ -n "$RO_AVC" ]; then
-  acc_ok "S13 attributable projection-type AVC present: $RO_AVC"
+  acc_ok "S13 attributable enforcing projection write-denial AVC present: $RO_AVC"
 else
-  acc_blocked "S13 no attributable docker_helper_ro_projection_t AVC in the window (independent MAC denial evidence impossible)"
+  acc_blocked "S13 no attributable docker_helper_ro_projection_t enforcing write-denial AVC in the window (independent MAC denial evidence impossible)"
 fi
 
 # No unexpected AVCs in the docker-helper policy scope: any denied AVC whose
 # source context involves docker_helper_* must be the expected projection
-# write denials.
-UNEXPECTED=0
-while IFS= read -r line; do
-  [ -n "$line" ] || continue
-  printf '%s\n' "$line" | grep -q 'scontext.*docker_helper' || continue
-  if printf '%s\n' "$line" | grep -q 'docker_helper_ro_projection_t' \
-      && printf '%s\n' "$line" | grep -Eq 'tclass=(dir|file)' \
-      && printf '%s\n' "$line" | grep -q 'perm=write'; then
-    info "expected projection write denial: $line"
-  elif printf '%s\n' "$line" | grep -qE 'scontext=system_u:system_r:(setfiles|load_policy)_t' \
-      && printf '%s\n' "$line" | grep -q 'tclass=fifo_file'; then
-    # The daemon's own restorecon/semodule plumbing: the policy-tool child
-    # cannot write back through the daemon's fifo under enforcing policy.
-    # This is an operational artifact of the helper itself, not a workload
-    # denial, and the tool result still propagates via exit status.
-    info "expected policy-tool fifo artifact: $line"
-  else
-    printf '  UNEXPECTED AVC: %s\n' "$line" >&2
-    UNEXPECTED=$((UNEXPECTED + 1))
-  fi
-done <<< "$AVC_WINDOW"
+# write denials (or the daemon's own policy-tool fifo artifact).
+UNEXPECTED="$(count_unexpected_helper_avcs "$AVC_WINDOW")"
 if [ "$UNEXPECTED" -eq 0 ]; then
   acc_ok "S13 no unexpected docker_helper AVC outside the expected negative subcases"
 else

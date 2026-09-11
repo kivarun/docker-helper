@@ -8552,7 +8552,27 @@ func TestRegressionGroup16CrashRestartReadiness(t *testing.T) {
 		t.Error("group 16 must require curl for the daemon readiness probing")
 	}
 
-	fn := extractShellFunction(t, "scripts/uat-regression-helper-socket.sh", "wait_service_health")
+	// The readiness primitive is owned once, in the shared regression lib;
+	// neither consumer may re-define it locally (no duplicate owners).
+	if strings.Contains(content, "wait_service_health() {") {
+		t.Error("uat-regression-helper-socket.sh must not define wait_service_health locally; the shared lib is the single owner")
+	}
+	if !strings.Contains(content, "wait_service_health") {
+		t.Error("uat-regression-helper-socket.sh must call the shared wait_service_health readiness helper")
+	}
+	rtDirData, err := os.ReadFile("scripts/uat-regression-runtime-dir-socket-replacement.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtDirContent := string(rtDirData)
+	if strings.Contains(rtDirContent, "wait_service_health() {") {
+		t.Error("uat-regression-runtime-dir-socket-replacement.sh must not define wait_service_health locally; the shared lib is the single owner")
+	}
+	if !strings.Contains(rtDirContent, "wait_service_health") {
+		t.Error("uat-regression-runtime-dir-socket-replacement.sh must call the shared wait_service_health readiness helper")
+	}
+
+	fn := extractShellFunction(t, "scripts/uat-regression-lib.sh", "wait_service_health")
 
 	work := t.TempDir()
 	stub := filepath.Join(work, "stub")
@@ -8609,6 +8629,7 @@ echo "$n" > "$STATE/sleeps"
 	b.WriteString("set -uo pipefail\n")
 	fmt.Fprintf(&b, "PATH=%q:$PATH; export PATH\n", stub)
 	fmt.Fprintf(&b, "SOCK=%q\n", filepath.Join(work, "daemon.sock"))
+	fmt.Fprintf(&b, "SERVICE=docker-helper.service\n")
 	b.WriteString(fn)
 	b.WriteString("\n")
 	for i, tc := range cases {
@@ -8656,6 +8677,109 @@ printf '%%s RC=%%s PROBES=%%s SLEEPS=%%s ISACTIVE=%%s\n' \
 		if fields["ISACTIVE"] != fields["PROBES"] {
 			t.Errorf("case %q: the unit was reported active on every probe (%s vs %s) yet readiness required health", tc.name, fields["ISACTIVE"], fields["PROBES"])
 		}
+	}
+}
+
+// TestUatWorkloadSelinuxProjectionAvcClassifier pins the S13 AVC
+// classification contract: the single canonical predicate for the expected
+// enforcing projection write denial (docker_helper_container_t writing to
+// docker_helper_ro_projection_t) must recognize raw ausearch AVC records —
+// which report the permission set in braces ("denied { write }"), never as
+// "perm=write" — and must reject any unrelated permission, target type,
+// source domain, class, or permissive AVC. The same predicate drives the
+// unexpected-AVC counter, so expected projection denials never trip it.
+func TestUatWorkloadSelinuxProjectionAvcClassifier(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-workload-selinux.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "is_expected_projection_denial") {
+		t.Error("S13 must own one canonical expected-projection-denial predicate")
+	}
+
+	pred := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "is_expected_projection_denial")
+	counter := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "count_unexpected_helper_avcs")
+	// The classifier must match the brace-delimited raw AVC permission set,
+	// not the non-raw "perm=write" representation (raw ausearch AVC records
+	// never carry perm=write).
+	if strings.Contains(pred, "perm=write") {
+		t.Error("the expected-projection predicate must classify via the raw brace permission set, not perm=write")
+	}
+	if !strings.Contains(pred, `\{[^}]*\bwrite\b[^}]*\}`) {
+		t.Error("the expected-projection predicate must anchor write to the raw brace-delimited permission set")
+	}
+
+	// Representative raw AVC records. The directory line mirrors the real
+	// attributable AVC produced by run 34590162433.
+	dirLine := `type=AVC msg=audit(1736800000.123:456): avc:  denied  { write } for  pid=1234 comm="cat" name="data" dev="sda1" ino=1234 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=dir permissive=0`
+	fileLine := `type=AVC msg=audit(1736800000.124:457): avc:  denied  { write } for  pid=1235 comm="cat" name="file.txt" dev="sda1" ino=1235 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=file permissive=0`
+	readLine := `type=AVC msg=audit(1736800000.125:458): avc:  denied  { read } for  pid=1236 comm="cat" name="data" dev="sda1" ino=1236 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=dir permissive=0`
+	wrongTarget := `type=AVC msg=audit(1736800000.126:459): avc:  denied  { write } for  pid=1237 comm="cat" name="data" dev="sda1" ino=1237 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_workspace_t:s0 tclass=file permissive=0`
+	wrongSource := `type=AVC msg=audit(1736800000.127:460): avc:  denied  { write } for  pid=1238 comm="cat" name="data" dev="sda1" ino=1238 scontext=system_u:system_r:docker_helper_t:s0 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=file permissive=0`
+	permissive := `type=AVC msg=audit(1736800000.128:461): avc:  denied  { write } for  pid=1239 comm="cat" name="data" dev="sda1" ino=1239 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=dir permissive=1`
+	unrelated := `type=AVC msg=audit(1736800000.129:462): avc:  denied  { getattr } for  pid=1240 comm="cat" name="data" dev="sda1" ino=1240 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_workspace_t:s0 tclass=file permissive=0`
+
+	// Lines carry no single quotes, so wrapping each in a bash single-quoted
+	// literal (which may span lines for the multi-line windows) is safe.
+	var b strings.Builder
+	b.WriteString("set -uo pipefail\n")
+	b.WriteString(pred)
+	b.WriteString("\n")
+	b.WriteString(counter)
+	b.WriteString("\n")
+
+	predCases := []struct{ name, line, want string }{
+		{"DIR", dirLine, "accept"},
+		{"FILE", fileLine, "accept"},
+		{"READ", readLine, "reject"},
+		{"WRONG_TARGET", wrongTarget, "reject"},
+		{"WRONG_SOURCE", wrongSource, "reject"},
+		{"PERMISSIVE", permissive, "reject"},
+	}
+	for _, tc := range predCases {
+		fmt.Fprintf(&b, "printf 'PRED_%s=%%s\\n' \"$(is_expected_projection_denial '%s' && echo accept || echo reject)\"\n",
+			tc.name, tc.line)
+	}
+	// Item 7: an expected projection AVC must not increment the unexpected
+	// counter. Item 8: an unrelated docker_helper AVC must still increment it.
+	fmt.Fprintf(&b, "W7='%s'\n", dirLine)
+	fmt.Fprintf(&b, "printf 'COUNT7=%%s\\n' \"$(count_unexpected_helper_avcs \"$W7\")\"\n")
+	fmt.Fprintf(&b, "W8='%s'\n", unrelated)
+	fmt.Fprintf(&b, "printf 'COUNT8=%%s\\n' \"$(count_unexpected_helper_avcs \"$W8\")\"\n")
+	fmt.Fprintf(&b, "W78='%s\n%s'\n", dirLine, unrelated)
+	fmt.Fprintf(&b, "printf 'COUNT78=%%s\\n' \"$(count_unexpected_helper_avcs \"$W78\")\"\n")
+
+	script := filepath.Join(t.TempDir(), "s13-avc.sh")
+	if err := os.WriteFile(script, []byte(b.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runBashScriptIn(t, t.TempDir(), script)
+	if err != nil {
+		t.Fatalf("S13 AVC classifier harness run failed: %v\n%s", err, out)
+	}
+	got := map[string]string{}
+	for _, l := range strings.Split(out, "\n") {
+		if k, v, ok := strings.Cut(l, "="); ok && strings.HasPrefix(k, "PRED_") {
+			got[k] = v
+		} else if k, v, ok := strings.Cut(l, "="); ok && strings.HasPrefix(k, "COUNT") {
+			got[k] = v
+		}
+	}
+	for _, tc := range predCases {
+		key := "PRED_" + tc.name
+		if got[key] != tc.want {
+			t.Errorf("predicate(%s) = %q, want %q", tc.name, got[key], tc.want)
+		}
+	}
+	if got["COUNT7"] != "0" {
+		t.Errorf("expected projection AVC must not increment the unexpected counter, got %q", got["COUNT7"])
+	}
+	if got["COUNT8"] != "1" {
+		t.Errorf("unrelated docker_helper AVC must increment the unexpected counter, got %q", got["COUNT8"])
+	}
+	if got["COUNT78"] != "1" {
+		t.Errorf("mixed window must count only the unrelated AVC as unexpected, got %q", got["COUNT78"])
 	}
 }
 

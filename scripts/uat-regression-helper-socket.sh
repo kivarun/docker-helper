@@ -48,26 +48,9 @@ reg_require_cmd systemctl "restart semantics drive the real service lifecycle"
 IMAGE="alpine:3.24"
 USER="uatreg16"
 SOCK="/run/docker-helper/docker-helper.sock"
+SERVICE="docker-helper.service"
 
 reg_require_cmd curl "health probing of the system daemon readiness boundary"
-
-# wait_service_health: bounded wait for an active daemon + host /health (the
-# same readiness contract as the runtime-dir/socket-replacement regression).
-# The oracle matters after a daemon restart: with Type=exec the unit reports
-# active as soon as the binary is exec'd, but the startup sequence (snapshot
-# integrity, startup reconciliation, session cleanup) only completes and
-# serves /health once the listener is bound, so `systemctl is-active` alone
-# is never a readiness oracle.
-wait_service_health() {
-  for _ in $(seq 1 60); do
-    if systemctl is-active --quiet docker-helper.service 2>/dev/null \
-        && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
 
 home="$(reg_setup_principal "$USER")" || { reg_fail "setup principal failed"; reg_result; }
 ws="$home/ws"; mkdir -p "$ws"
