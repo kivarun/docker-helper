@@ -347,7 +347,9 @@ allow docker_helper_t docker_helper_workspace_t:lnk_file { read };
 # fcontext/relabel of /usr/bin/python3.* keyed to the interpreter version
 # (python3.13 vs python3.14), which is distro/version coupling and worse than
 # the bounded bin_t file-permission grant below (exec only, no process
-# transition/entrypoint, no generic policy-store access).
+# transition/entrypoint, no generic policy-store access). Same-domain generic
+# execution remains forbidden: there is deliberately no execute_no_trans on
+# bin_t.
 #
 # NoNewPrivileges=true in docker-helper.service means the transition requires
 # process2:nnp_transition (mirrors the existing init_t -> docker_helper_t rule).
@@ -356,12 +358,7 @@ allow docker_helper_t semanage_t:process { transition siginh noatsecure rlimitin
 allow docker_helper_t semanage_t:process2 { nnp_transition };
 allow docker_helper_t semanage_exec_t:file { execute read open getattr map };
 allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };
-# Generic bin_t exec support (from live AVC evidence). execute_no_trans is
-# required to complete a same-domain exec (no process transition): the
-# confined daemon could not fork/exec /usr/bin/bindfs while it still carried
-# the generic bin_t label, and a libfuse fusermount helper exec has the same
-# shape. Exec only, no process transition.
-allow docker_helper_t bin_t:file { execute read open getattr map execute_no_trans };
+allow docker_helper_t bin_t:file { execute read open getattr map };
 
 # --- SELinux workspace serialization lock (/run/lock/docker-helper-selinux.lock) ---
 # ensureWorkspaceFcontext acquires this global lock before listing/adding
@@ -371,7 +368,8 @@ allow docker_helper_t bin_t:file { execute read open getattr map execute_no_tran
 allow docker_helper_t var_lock_t:dir { write add_name };
 allow docker_helper_t var_lock_t:file { create open read write getattr lock };
 
-# Capabilities for workspace access and mount-pin (proven in enforcing UAT)
+# Capabilities for workspace access, mount-pin, and helper-owned projection
+# mount/unmount mechanics (proven in enforcing UAT).
 allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };
 
 # bindfs (the projection worker) reads the libmount utab under /run/mount on
@@ -382,7 +380,6 @@ allow docker_helper_t self:capability { dac_read_search dac_override sys_admin }
 #     tclass=capability (user-owned backing files read through projections)
 allow docker_helper_t mount_var_run_t:dir { search };
 allow docker_helper_t mount_var_run_t:file { getattr read open };
-allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };
 
 # Mount-pin: unmount filesystem (proven in enforcing UAT)
 allow docker_helper_t fs_t:filesystem { unmount };
@@ -656,9 +653,9 @@ allow docker_helper_t docker_helper_bindfs_exec_t:file {
 allow docker_helper_t fuse_device_t:chr_file { getattr open read write ioctl };
 
 # The bindfs worker (docker_helper_t process) performs the FUSE mount of the
-# projection with the fixed projection mount context, and the helper unmounts
-# the projection (fusermount, then kernel umount fallback) during run cleanup
-# and startup reconciliation.
+# projection with the fixed projection mount context. Projection cleanup uses
+# the kernel unmount API directly (normal unmount, then lazy-detach fallback),
+# and startup reconciliation uses the same production mount owner.
 allow docker_helper_t fusefs_t:filesystem { mount unmount getattr relabelfrom };
 
 # With the fixed context= mount option the mounted superblock carries the

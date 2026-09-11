@@ -64,9 +64,9 @@ type workloadMountOps interface {
 	isMountpoint(path string) (bool, error)
 	// mountBind creates a bind mount of source at target.
 	mountBind(source, target string) error
-	// unmountPath unmounts one helper-owned projection path, preferring the
-	// FUSE userspace helper and falling back to the kernel umount with a
-	// lazy last resort.
+	// unmountPath unmounts one helper-owned projection path through the kernel,
+	// with a lazy detach fallback. The caller positively proves mount absence
+	// after the call before releasing dependent state.
 	unmountPath(path string) error
 	// selinuxTypeOf returns the SELinux type component of the effective
 	// security.selinux xattr of path.
@@ -702,35 +702,23 @@ func parseProjectionDirName(name string) (int, error) {
 	return index, nil
 }
 
-// unmountPath unmounts one helper-owned projection path, preferring the
-// FUSE userspace helper exactly like the accepted mechanism and falling
-// back to the kernel umount with a lazy last resort.
+// unmountPath releases one helper-owned projection mount through the kernel.
+// The SELinux workload backend is system-mode/root-only and already owns
+// CAP_SYS_ADMIN; executing a userspace fusermount helper would only widen the
+// daemon executable surface. The cleanup owner positively inventories the
+// mount before this call and proves absence afterwards. A normal unmount is
+// preferred, with lazy detach as the bounded fallback.
 func (productionMountOps) unmountPath(path string) error {
-	if err := runFusermountUnmount(path); err == nil {
-		return nil
-	}
 	if err := unix.Unmount(path, 0); err != nil {
+		if errno, ok := err.(syscall.Errno); ok && errno == syscall.EINVAL {
+			return nil
+		}
 		if err := unix.Unmount(path, unix.MNT_DETACH); err != nil {
+			if errno, ok := err.(syscall.Errno); ok && errno == syscall.EINVAL {
+				return nil
+			}
 			return fmt.Errorf("unmount %s: %w", path, err)
 		}
-	}
-	return nil
-}
-
-// runFusermountUnmount runs fusermount3 (or fusermount) -u on path.
-func runFusermountUnmount(path string) error {
-	helper, err := exec.LookPath("fusermount3")
-	if err != nil {
-		helper, err = exec.LookPath("fusermount")
-		if err != nil {
-			return fmt.Errorf("fusermount is unavailable: %w", err)
-		}
-	}
-	cmd := exec.Command(helper, "-u", path)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("fusermount -u %s: %w", path, err)
 	}
 	return nil
 }
