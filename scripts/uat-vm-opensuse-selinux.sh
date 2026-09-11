@@ -29,20 +29,19 @@
 #
 # This file owns the RPM-specific stages ONLY — the exact RPM transfer, and the
 # RPM SELinux stage set (black-box UAT, SELinux mount-pin / RPM postinstall
-# regression, the Phase-A2 docker socket micro-proof, the Release-2 SELinux
-# targeted regression groups 1-6, the RPM/SELinux lifecycle, the
-# RuntimeDirectory socket replacement regression, the Release-2 SELinux
-# workload-MAC acceptance matrix, and the 2.1.1 -> candidate RPM migration
-# gate). All VM mechanics live in the harness; all
+# regression, the Release-2 SELinux targeted regression groups 1-6, the
+# RPM/SELinux lifecycle, the RuntimeDirectory socket replacement regression,
+# the Release-2 SELinux workload-MAC acceptance matrix, and the 2.1.1 ->
+# candidate RPM migration gate). All VM mechanics live in the harness; all
 # SELinux host construction lives in the shared lib; the guest-side UAT is the
 # existing scripts/uat-blackbox.sh with its uat-platform-opensuse.sh (platform
 # owner) and uat-mac-selinux.sh (MAC owner) adapters, which remain the owners of
 # their concerns.
 #
 # Collect-all: a failure in the common black-box UAT or the mount-pin
-# regression never prevents the remaining stages (socket micro-proof, Release-2
-# regressions 1-6) from executing; the final summary records every stage and
-# the job exits nonzero only when a gating stage failed.
+# regression never prevents the remaining gating stages from executing; the
+# final summary records every stage and the job exits nonzero when any gating
+# stage failed.
 #
 # Flow:
 #   create/start Tumbleweed VM through the common harness (shared lib)
@@ -69,7 +68,6 @@
 #       -> existing black-box UAT (UAT_PLATFORM=opensuse UAT_INSTALL=rpm
 #          UAT_MAC=selinux, prebuilt RPM)            [result recorded, collect-all]
 #       -> SELinux mount-pin / RPM postinstall regression  [result recorded]
-#       -> A2 docker socket micro-proof (dontaudit off, bounded evidence)
 #       -> Release-2 SELinux targeted regression groups 1-6 (collect-all runner)
 #       -> RPM/SELinux lifecycle                  [result recorded, collect-all]
 #       -> RuntimeDirectory socket replacement regression
@@ -268,32 +266,6 @@ else
   fi
 fi
 record_stage "SELinux mount-pin regression" "$MP_RESULT"
-
-# ---------------------------------------------------------------------------
-# 8b. A2 bounded socket micro-proof (evidence collection; not a gate)
-# ---------------------------------------------------------------------------
-log "== 8b. A2 docker socket micro-proof (dontaudit off, bounded) =="
-MICRO_RESULT=FAIL
-if run_guest_capture "A2 socket micro-proof inside the guest" \
-  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin scripts/uat-socket-microproof.sh"; then
-  MICRO_RESULT=PASS
-else
-  log "A2 socket micro-proof did not complete (recorded; evidence may be partial)"
-fi
-record_stage "A2 socket micro-proof" "$MICRO_RESULT"
-
-# ---------------------------------------------------------------------------
-# 8b2. A3 bounded projection micro-proof (evidence collection; not a gate)
-# ---------------------------------------------------------------------------
-log "== 8b2. A3 projection micro-proof (dontaudit off, bounded) =="
-A3MICRO_RESULT=FAIL
-if run_guest_capture "A3 projection micro-proof inside the guest" \
-  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin scripts/uat-projection-microproof.sh"; then
-  A3MICRO_RESULT=PASS
-else
-  log "A3 projection micro-proof did not complete (recorded; evidence may be partial)"
-fi
-record_stage "A3 projection micro-proof" "$A3MICRO_RESULT"
 
 # ---------------------------------------------------------------------------
 # 8c. Release-2 SELinux targeted regression groups 1-6 (collect-all)
