@@ -233,6 +233,53 @@ print(len(sessions))
 # dh is the docker-helper CLI used by the regressions (system mode).
 dh() { /usr/bin/docker-helper "$@"; }
 
+# durable_session_snapshot_counts DB_PATH prints the durable Session/snapshot
+# row counts of the authoritative system database as
+# "<sessions>\t<snapshot_entries>\t<snapshot_meta>" (one line, tab-separated).
+# The required table set comes from the schema owner
+# (session_snapshot_store.go): the sessions table plus the immutable snapshot
+# child tables session_filesystem_snapshot_entries and
+# session_filesystem_snapshot_meta. Fail-closed: the helper opens the
+# database read-only through the python3 stdlib sqlite3 module and never
+# mutates it; a missing database file, an unopenable database, an SQL error,
+# a parse failure, or an unexpected schema (any required table absent) exits
+# 1 with no counts printed — an unavailable inventory is never a zero count.
+durable_session_snapshot_counts() {
+  local db="$1"
+  if [ -z "$db" ]; then
+    printf '  durable DB inventory unavailable (no database path)\n' >&2
+    return 1
+  fi
+  if [ ! -f "$db" ]; then
+    printf '  durable DB inventory unavailable (database file absent: %s)\n' "$db" >&2
+    return 1
+  fi
+  python3 - "$db" 2>/dev/null <<'UAT_DB_PY'
+import sqlite3, sys
+path = sys.argv[1]
+required = (
+    "sessions",
+    "session_filesystem_snapshot_entries",
+    "session_filesystem_snapshot_meta",
+)
+try:
+    con = sqlite3.connect("file:" + path + "?mode=ro", uri=True)
+    tables = {row[0] for row in con.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if not set(required) <= tables:
+        raise LookupError("unexpected schema: missing snapshot tables")
+    counts = []
+    for table in required:
+        row = con.execute('SELECT COUNT(*) FROM "%s"' % table).fetchone()
+        if row is None:
+            raise ValueError("unreadable count")
+        counts.append(str(row[0]))
+except Exception:
+    sys.exit(1)
+print("\t".join(counts))
+UAT_DB_PY
+}
+
 # wait_service_health: the single shared readiness owner for the regression
 # family. Returns 0 only when the docker-helper system service is active AND
 # GET /health succeeds over its unix API socket, within a bounded poll (no

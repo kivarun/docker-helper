@@ -6,8 +6,9 @@
 #
 # This is the ONE full functional matrix of the Release 2.2 issued
 # filesystem-snapshot policy (the issue-#8 orchestrator-shaped tree). The
-# common black-box UAT only carries a short access-mode smoke; the complete
-# 12-point Phase 2.2.7 matrix runs once here on the exact candidate bytes:
+# common black-box UAT only carries a short access-mode smoke; the canonical
+# full Release 2.2 functional access-mode matrix runs once here on the exact
+# candidate bytes, with the explicit scenario inventory below:
 #
 #   1  project mounts read_write and a write persists;
 #   2  pipeline-inputs mounts read_only and a read succeeds;
@@ -32,7 +33,10 @@
 #   11 audit records carry canonical path/access facts and ownership
 #      provenance, and never carry bearer/env/credential secrets;
 #   12 no container/mount-pin/workload-MAC/runtime residue remains after the
-#      scenarios;
+#      scenarios, no active Session remains (fail-closed session-list
+#      inventory), and the durable database carries no Session or snapshot
+#      rows (sessions, session_filesystem_snapshot_entries,
+#      session_filesystem_snapshot_meta all structurally empty, fail closed);
 #   13 a Launcher credential creates a dynamically named run workspace and
 #      narrows the Session at issuance time through --filesystem-entry
 #      ('.' read-only, project/pipeline-outputs read-write,
@@ -44,7 +48,20 @@
 #   14 an attempted issuance-time widening (read_write under the parent
 #      read_only ceiling) is refused 400 invalid_filesystem_policy before
 #      the Session exists, leaving no Session, container, pin, or
-#      workload-MAC residue.
+#      workload-MAC residue, with the bounded non-disclosing public message,
+#      no bearer/Session material in the response, and the matching
+#      session.create invalid_filesystem_policy audit record of a bounded
+#      window opened before the attempt (no session_id, no bearer);
+#   15 a global read_only ceiling cannot be widened downstream by Principal
+#      and Launcher read_write grants (global -> Principal -> Launcher
+#      composition on a really issued Session: effective read_only snapshot,
+#      read-only exposure succeeds, writable exposure refused read_only_root
+#      before workload, no residue);
+#   16 Admin and Principal credential authorities get the same issuance-time
+#      narrowing symmetry the Launcher credential proves in scenario N: a
+#      valid narrowing issues the same effective snapshot and a widening
+#      request is refused 400 invalid_filesystem_policy with no new Session
+#      (no authority's refusal is taken as another authority's proof);
 #
 # Plus the Release 2.2 build-side read-only policy proof:
 #   B1 a Session whose issued snapshot carries the build context read_only
@@ -855,18 +872,40 @@ fi
 # BEFORE the single tested attempt, so state created by the attempt itself
 # can never end up inside its own baseline, and both inventories are the
 # fail-closed owners: an unavailable inventory is a failed proof, never a
-# silently-equal count.
+# silently-equal count. The public response must be the bounded
+# non-disclosing contract (stable code, bounded message, no Session ID, no
+# bearer/credential material; credential IDs are not secrets and are not
+# asserted), and the bounded audit window opens immediately before the same
+# single attempt so the required session.create audit record below is
+# provably the record of this refusal — a missing record is a failed proof,
+# never an accepted silence.
 if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then
+  N_AUDIT_SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
   WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
     --workspace "$WS" --json \
     --filesystem-entry .=read_write \
     --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
   if printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
-      && ! printf '%s\n' "$WIDEN_OUT" | grep -q '"id"'; then
+      && printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid session filesystem policy' \
+      && ! printf '%s\n' "$WIDEN_OUT" | grep -q '"id"' \
+      && ! printf '%s\n' "$WIDEN_OUT" | grep -q 'dhs_' \
+      && ! printf '%s\n' "$WIDEN_OUT" | grep -q 'dht_' \
+      && ! printf '%s\n' "$WIDEN_OUT" | grep -q 'dhc_'; then
     if N_AFTER="$(session_list_count)" \
         && [ "$N_AFTER" = "$N_BEFORE" ] \
         && residue_unchanged "$N_BASE"; then
-      acc_ok "14 issuance-time widening refused with invalid_filesystem_policy: no Session, no container/pin/workload-MAC residue"
+      N_AUDIT_JSON="$(journalctl --utc -u docker-helper.service --since "$N_AUDIT_SINCE" --no-pager 2>/dev/null \
+        | grep '"stream":"audit"' || true)"
+      N_REJECT_LINE="$(printf '%s\n' "$N_AUDIT_JSON" \
+        | grep '"event":"session.create"' | grep '"result":"invalid_filesystem_policy"' | tail -1 || true)"
+      if [ -n "$N_REJECT_LINE" ] \
+          && ! printf '%s\n' "$N_REJECT_LINE" | grep -q '"session_id"' \
+          && ! printf '%s\n' "$N_REJECT_LINE" | grep -q 'dht_' \
+          && ! printf '%s\n' "$N_REJECT_LINE" | grep -q 'dhc_'; then
+        acc_ok "14 issuance-time widening refused with invalid_filesystem_policy: bounded message, no Session/bearer, matching audit record, no container/pin/workload-MAC residue"
+      else
+        acc_fail "14 refused create lacks the matching session.create invalid_filesystem_policy audit record (or it carries Session/bearer state): $(printf '%s\n' "$N_REJECT_LINE" | redact | head -2)"
+      fi
     else
       acc_fail "14 refused create left state (sessions $N_BEFORE -> ${N_AFTER:-inventory-unavailable}, residue drift against the pre-attempt baseline)"
     fi
@@ -875,6 +914,202 @@ if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then
   fi
 else
   acc_fail "14 baseline capture failed before the widening attempt (fail-closed inventory)"
+fi
+
+# ==============================================================================
+# scenario G: a global read_only ceiling cannot be widened downstream
+# (global -> Principal -> Launcher live proof). Scenario 7 proves the
+# Principal-ceiling meet against a Launcher grant; this scenario proves the
+# upstream dimension of the same contract on a really issued Session: the
+# global ceiling of a dedicated subtree is narrowed to read_only while BOTH
+# the Principal and the Launcher carry stored read_write grants on the same
+# subtree. Stored wider modes are ordinary state; the meet decides at
+# issuance time. A dedicated nested fixture (its own subtree, launcher and
+# credential) keeps the other scenarios' fixture state intact.
+# ==============================================================================
+scenario "G: global read_only cannot be widened downstream (live proof)"
+
+G_WS="$TREE/global-ro/work"
+mkdir -p "$G_WS"
+printf 'global-ro-input\n' > "$G_WS/input.txt"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$TREE/global-ro"
+chmod -R u+rwX,go+rX "$TREE/global-ro"
+
+# G-setup: the three policy levels. The global ceiling is narrowed to
+# read_only through the packaged config CLI (verified through the rich
+# projection); the Principal and the Launcher store read_write on the same
+# subtree (each verified through its rich projection).
+if dh config allowed-root set-access "$TREE/global-ro" read_only >/dev/null 2>&1 \
+    && [ "$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_access "$TREE/global-ro")" = read_only ]; then
+  acc_ok "G global ceiling narrowed to read_only (rich projection)"
+else
+  acc_fail "G global ceiling set-access to read_only failed"
+fi
+if dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$TREE/global-ro" >/dev/null 2>&1 \
+    && [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE/global-ro")" = read_write ]; then
+  acc_ok "G Principal carries read_write on the global read_only subtree"
+else
+  acc_fail "G Principal read_write add failed"
+fi
+G_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
+  '{"name":"globalro","scope":"restricted","allowed_roots":["'"$TREE"'/global-ro"]}')"
+G_L_ID="$(printf '%s' "$G_L_JSON" | json_field id)"
+[ -n "$G_L_ID" ] || { echo "error: launcher 'globalro' create failed: $G_L_JSON" >&2; exit 1; }
+if dh launcher show --system --principal "$PRINCIPAL" "$G_L_ID" 2>/dev/null \
+    | grep -A1 -F "\"path\": \"$TREE/global-ro\"" | grep -q '"access": "read_write"'; then
+  acc_ok "G Launcher carries read_write on the same subtree (rich projection)"
+else
+  acc_fail "G Launcher read_write grant failed"
+fi
+issue_launcher_credential "$PRINCIPAL" "$G_L_ID" /tmp/uat-am-cred-globalro \
+  || { echo "error: globalro launcher credential issuance failed" >&2; exit 1; }
+
+# G-live: the Session is issued on the standard authority path (Launcher
+# credential, inherited policy — no filesystem_entries) and composes the
+# three read_write grants down to read_only.
+G_ID="$(create_session /tmp/uat-am-cred-globalro "$G_WS")" \
+  || { echo "error: session G creation failed" >&2; exit 1; }
+if snapshot_has "$G_ID" "$G_WS" read_only; then
+  acc_ok "G issued effective snapshot is read_only (global RO dominates the downstream read_write grants)"
+else
+  acc_fail "G issued snapshot is not read_only: $(show_snapshot "$G_ID" | tr '\n' '; ')"
+fi
+G_TOKEN="$(cat "/tmp/uat-am-tok-$G_ID")"
+G_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$G_TOKEN" \
+  dh run --image alpine:3.24 --mount .:/mnt/g:ro -- \
+  sh -ec 'test "$(cat /mnt/g/input.txt)" = "global-ro-input" && echo GLOBAL-RO-OK')" \
+  || acc_fail "G read-only exposure failed: $G_RO_OUT"
+printf '%s\n' "$G_RO_OUT" | grep -q 'GLOBAL-RO-OK' \
+  && acc_ok "G read-only exposure succeeded" \
+  || acc_fail "G read-only exposure check failed"
+G_RESIDUE_BASE="$(residue_state)"
+if expect_read_only_root "$G_TOKEN" . /mnt/g 'echo x > /mnt/g/forbidden.txt' "$G_RESIDUE_BASE"; then
+  acc_ok "G writable exposure refused with read_only_root before workload creation (no residue)"
+else
+  acc_fail "G writable exposure was not refused (base: $G_RESIDUE_BASE)"
+fi
+[ ! -e "$G_WS/forbidden.txt" ] \
+  || acc_fail "G forbidden host-side file was created"
+
+# G-restore: the global ceiling returns to the P2 state (read_write) so the
+# nested fixture leaves no durable global-policy drift behind.
+if dh config allowed-root set-access "$TREE/global-ro" read_write >/dev/null 2>&1; then
+  acc_ok "G global ceiling restored to read_write"
+else
+  acc_fail "G global ceiling restore failed"
+fi
+
+# ==============================================================================
+# scenario SYM: Admin and Principal credential narrowing symmetry. Scenario N
+# proves the Launcher credential authority; the same issuance-time narrowing
+# contract binds every authority that may create Sessions, and each authority
+# is proven on its own (one authority's refusal is never another's proof).
+# Admin selects the main Launcher explicitly through the public CLI with the
+# system admin token; the Principal credential resolves its inherit-scope
+# default Launcher. Each authority: a valid narrowing request on the main
+# workspace, the issued effective semantics through session show, one
+# widening attempt against the read_only pipeline-inputs ceiling, the
+# stable refusal, and no new Session (fail-closed session-list inventory
+# around the attempt); the created Session is deleted afterwards.
+# ==============================================================================
+scenario "SYM: Admin and Principal credential narrowing symmetry"
+
+# Admin authority: same valid narrowing as scenario N, on the main workspace.
+SYM_ADMIN_OUT="$(dh session create --system --token-file /etc/docker-helper/admin.token \
+  --launcher "$MAIN_L_ID" --workspace "$WS" --json \
+  --filesystem-entry .=read_only \
+  --filesystem-entry project=read_write \
+  --filesystem-entry pipeline-inputs=read_only \
+  --filesystem-entry pipeline-outputs=read_write 2>&1 || true)"
+SYM_ADMIN_ID="$(printf '%s' "$SYM_ADMIN_OUT" | json_field id)"
+if [ -n "$SYM_ADMIN_ID" ]; then
+  printf '%s' "$SYM_ADMIN_OUT" | json_field token > "/tmp/uat-am-tok-$SYM_ADMIN_ID"; chmod 600 "/tmp/uat-am-tok-$SYM_ADMIN_ID"
+  acc_ok "16 Admin created the narrowed Session through the public CLI (explicit launcher selector)"
+else
+  acc_fail "16 Admin narrowed session create failed: $(printf '%s\n' "$SYM_ADMIN_OUT" | redact | tail -3)"
+fi
+if [ -n "${SYM_ADMIN_ID:-}" ] \
+    && snapshot_has "$SYM_ADMIN_ID" "$WS" read_only \
+    && snapshot_has "$SYM_ADMIN_ID" "$WS/project" read_write \
+    && snapshot_has "$SYM_ADMIN_ID" "$WS/pipeline-outputs" read_write \
+    && snapshot_lacks "$SYM_ADMIN_ID" "$WS/pipeline-inputs"; then
+  acc_ok "16 Admin issued snapshot matches the Launcher narrowing semantics (effective, redundant RO normalized away)"
+else
+  acc_fail "16 Admin issued snapshot wrong: $(show_snapshot "${SYM_ADMIN_ID:-}" 2>/dev/null | tr '\n' '; ')"
+fi
+if SYM_ADMIN_BEFORE="$(session_list_count)"; then
+  SYM_ADMIN_WIDEN_OUT="$(dh session create --system --token-file /etc/docker-helper/admin.token \
+    --launcher "$MAIN_L_ID" --workspace "$WS" --json \
+    --filesystem-entry .=read_only \
+    --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
+  if printf '%s\n' "$SYM_ADMIN_WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
+      && ! printf '%s\n' "$SYM_ADMIN_WIDEN_OUT" | grep -q '"id"'; then
+    if SYM_ADMIN_AFTER="$(session_list_count)" && [ "$SYM_ADMIN_AFTER" = "$SYM_ADMIN_BEFORE" ]; then
+      acc_ok "16 Admin widening request refused with invalid_filesystem_policy: no new Session"
+    else
+      acc_fail "16 refused Admin create changed the Session inventory ($SYM_ADMIN_BEFORE -> ${SYM_ADMIN_AFTER:-inventory-unavailable})"
+    fi
+  else
+    acc_fail "16 Admin widening create not refused correctly: $(printf '%s\n' "$SYM_ADMIN_WIDEN_OUT" | redact | tail -3)"
+  fi
+else
+  acc_fail "16 Admin widening baseline capture failed (fail-closed session inventory)"
+fi
+if [ -n "${SYM_ADMIN_ID:-}" ]; then
+  dh session delete --system --id "$SYM_ADMIN_ID" >/dev/null 2>&1 \
+    || acc_fail "16 Admin narrowed session delete failed"
+fi
+
+# Principal credential authority: a real Principal bearer through the
+# packaged CLI, no selector (resolves the inherit-scope default Launcher).
+if reg_principal_credential "$PRINCIPAL" /tmp/uat-am-cred-principal; then
+  acc_ok "16 Principal credential issued through the packaged CLI"
+else
+  acc_fail "16 Principal credential issuance failed"
+fi
+SYM_PRIN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-principal \
+  --workspace "$WS" --json \
+  --filesystem-entry .=read_only \
+  --filesystem-entry project=read_write \
+  --filesystem-entry pipeline-inputs=read_only \
+  --filesystem-entry pipeline-outputs=read_write 2>&1 || true)"
+SYM_PRIN_ID="$(printf '%s' "$SYM_PRIN_OUT" | json_field id)"
+if [ -n "$SYM_PRIN_ID" ]; then
+  printf '%s' "$SYM_PRIN_OUT" | json_field token > "/tmp/uat-am-tok-$SYM_PRIN_ID"; chmod 600 "/tmp/uat-am-tok-$SYM_PRIN_ID"
+  acc_ok "16 Principal credential created the narrowed Session (no selector, default Launcher)"
+else
+  acc_fail "16 Principal narrowed session create failed: $(printf '%s\n' "$SYM_PRIN_OUT" | redact | tail -3)"
+fi
+if [ -n "${SYM_PRIN_ID:-}" ] \
+    && snapshot_has "$SYM_PRIN_ID" "$WS" read_only \
+    && snapshot_has "$SYM_PRIN_ID" "$WS/project" read_write \
+    && snapshot_has "$SYM_PRIN_ID" "$WS/pipeline-outputs" read_write \
+    && snapshot_lacks "$SYM_PRIN_ID" "$WS/pipeline-inputs"; then
+  acc_ok "16 Principal issued snapshot matches the Launcher narrowing semantics (effective, redundant RO normalized away)"
+else
+  acc_fail "16 Principal issued snapshot wrong: $(show_snapshot "${SYM_PRIN_ID:-}" 2>/dev/null | tr '\n' '; ')"
+fi
+if SYM_PRIN_BEFORE="$(session_list_count)"; then
+  SYM_PRIN_WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-principal \
+    --workspace "$WS" --json \
+    --filesystem-entry .=read_only \
+    --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
+  if printf '%s\n' "$SYM_PRIN_WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
+      && ! printf '%s\n' "$SYM_PRIN_WIDEN_OUT" | grep -q '"id"'; then
+    if SYM_PRIN_AFTER="$(session_list_count)" && [ "$SYM_PRIN_AFTER" = "$SYM_PRIN_BEFORE" ]; then
+      acc_ok "16 Principal widening request refused with invalid_filesystem_policy: no new Session"
+    else
+      acc_fail "16 refused Principal create changed the Session inventory ($SYM_PRIN_BEFORE -> ${SYM_PRIN_AFTER:-inventory-unavailable})"
+    fi
+  else
+    acc_fail "16 Principal widening create not refused correctly: $(printf '%s\n' "$SYM_PRIN_WIDEN_OUT" | redact | tail -3)"
+  fi
+else
+  acc_fail "16 Principal widening baseline capture failed (fail-closed session inventory)"
+fi
+if [ -n "${SYM_PRIN_ID:-}" ]; then
+  dh session delete --system --id "$SYM_PRIN_ID" >/dev/null 2>&1 \
+    || acc_fail "16 Principal narrowed session delete failed"
 fi
 
 # ==============================================================================
@@ -955,7 +1190,7 @@ fi
 # inventory failure blocks the gate instead of reporting zero residue)
 # ==============================================================================
 scenario "Z: no container/mount-pin/workload-MAC/runtime residue"
-for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}" "${SN_ID:-}" "${SN2_ID:-}"; do
+for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}" "${SN_ID:-}" "${SN2_ID:-}" "${G_ID:-}" "${SYM_ADMIN_ID:-}" "${SYM_PRIN_ID:-}"; do
   [ -n "$sid" ] || continue
   dh session delete --system --id "$sid" >/dev/null 2>&1 || acc_fail "Z session $sid delete failed"
 done
@@ -1009,6 +1244,32 @@ if [ "$Z_PROFILES_RC" -eq 0 ]; then
     || acc_fail "Z generated workload profiles still loaded"
 else
   acc_blocked "Z workload profile inventory unavailable"
+fi
+
+# Z-final: Release 2.2 also promises no remaining Session/snapshot state.
+# After every known Session is deleted, the active Session inventory must be
+# positively empty through the fail-closed canonical session-list helper,
+# and the durable database must carry no Session or snapshot rows. The DB
+# inventory is the shared fail-closed owner (python3 stdlib sqlite3,
+# read-only): a missing/unopenable database, an SQL error, a parse failure,
+# or an unexpected schema is an unavailable inventory (blocked gate), never
+# a silent zero. The database is inspected in place — it is never deleted
+# before this check.
+if Z_LIST_COUNT="$(session_list_count)"; then
+  [ "$Z_LIST_COUNT" = "0" ] \
+    && acc_ok "Z no active Sessions remain (fail-closed session-list inventory)" \
+    || acc_fail "Z active Sessions remain after the cleanup: $Z_LIST_COUNT"
+else
+  acc_blocked "Z session-list inventory unavailable after the cleanup"
+fi
+Z_DB_COUNTS="$(durable_session_snapshot_counts /var/lib/docker-helper/docker-helper.db)"
+Z_DB_RC=$?
+if [ "$Z_DB_RC" -eq 0 ]; then
+  [ "$Z_DB_COUNTS" = "$(printf '0\t0\t0')" ] \
+    && acc_ok "Z durable DB carries no Session/snapshot rows (sessions, snapshot entries, snapshot meta)" \
+    || acc_fail "Z durable Session/snapshot rows remain: $Z_DB_COUNTS"
+else
+  acc_blocked "Z durable DB inventory unavailable (cannot inspect the Session/snapshot tables)"
 fi
 
 # ==============================================================================
