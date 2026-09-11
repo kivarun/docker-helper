@@ -30,7 +30,6 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -236,9 +235,15 @@ type containerProvenance struct {
 	remove  func(ctx context.Context, containerID string) error
 }
 
+// dockerCommandFactory constructs one Docker CLI command. It is the only
+// legitimate variation between the Docker provenance wirings: the run path
+// injects the App-owned construction (which honors the ExecCommandContext
+// test seam), startup reconciliation injects direct exec construction.
+type dockerCommandFactory func(ctx context.Context, name string, args ...string) *exec.Cmd
+
 // runContainerProvenance is the App-wired Docker provenance: it honors the
 // InspectOperationContainers test seam and the ExecCommandContext-wrapped
-// force removal.
+// command construction.
 func (a *App) runContainerProvenance() containerProvenance {
 	return containerProvenance{
 		inspect: a.inspectOperationContainers,
@@ -247,12 +252,16 @@ func (a *App) runContainerProvenance() containerProvenance {
 }
 
 // cliContainerProvenance is the startup-reconciliation Docker provenance.
-// It runs without an App instance (before the HTTP server exists) and
-// shells out to the Docker CLI directly.
+// It runs without an App instance (before the HTTP server exists) and uses
+// the direct-exec command construction of the same single mechanism owners.
 func cliContainerProvenance() containerProvenance {
 	return containerProvenance{
-		inspect: inspectCorrelatedRunContainers,
-		remove:  forceRemoveCorrelatedContainerByCLI,
+		inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+			return inspectCorrelatedContainers(ctx, exec.CommandContext, operationID, sessionID)
+		},
+		remove: func(ctx context.Context, containerID string) error {
+			return forceRemoveCorrelatedContainer(ctx, exec.CommandContext, containerID)
+		},
 	}
 }
 
@@ -294,18 +303,26 @@ func proveOperationContainerAbsent(ctx context.Context, prov containerProvenance
 	return nil
 }
 
-// InspectOperationContainers, when set, overrides the Docker-based
-// correlated-run container inspection used by the container-absence proof.
-// It is a narrow test seam; production shells out to the Docker CLI with
-// the reserved label set.
-
 // inspectOperationContainers lists helper-owned containers correlated with
 // one run operation by the reserved label set (schema, operation, session).
+// The InspectOperationContainers test seam overrides the Docker-based
+// inspection; otherwise the single inspectCorrelatedContainers mechanism
+// owner runs with the App-owned command construction.
 func (a *App) inspectOperationContainers(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
 	if a.InspectOperationContainers != nil {
 		return a.InspectOperationContainers(ctx, operationID, sessionID)
 	}
-	cmd := a.newDockerCommand(ctx, "docker", "ps", "-a",
+	return inspectCorrelatedContainers(ctx, a.newDockerCommand, operationID, sessionID)
+}
+
+// inspectCorrelatedContainers is the single Docker CLI mechanism owner of the
+// correlated-run container inspection: one docker ps filter set, one output
+// format, one parse, one error wrap. Only the command construction is
+// injected (dockerCommandFactory): the run path supplies the App-owned
+// construction (honoring the ExecCommandContext test seam), startup
+// reconciliation supplies direct exec construction.
+func inspectCorrelatedContainers(ctx context.Context, newCommand dockerCommandFactory, operationID, sessionID string) ([]helperContainer, error) {
+	cmd := newCommand(ctx, "docker", "ps", "-a",
 		"--filter", "label="+runtimeLabelSchema+"="+runtimeLabelSchemaValue,
 		"--filter", "label="+runtimeLabelOperationID+"="+operationID,
 		"--filter", "label="+runtimeLabelSessionID+"="+sessionID,
@@ -319,40 +336,19 @@ func (a *App) inspectOperationContainers(ctx context.Context, operationID, sessi
 	return parseHelperContainerList(string(out))
 }
 
-// inspectCorrelatedRunContainers is the startup-reconciliation default
-// correlated-container inspection. It runs without an App instance (before
-// the HTTP server exists) and shells out to the Docker CLI directly.
-func inspectCorrelatedRunContainers(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
-	cmd := exec.CommandContext(ctx, "docker", "ps", "-a",
-		"--filter", "label="+runtimeLabelSchema+"="+runtimeLabelSchemaValue,
-		"--filter", "label="+runtimeLabelOperationID+"="+operationID,
-		"--filter", "label="+runtimeLabelSessionID+"="+sessionID,
-		"--format", "{{.ID}} {{.State}}")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("cannot inspect correlated run containers: %w", err)
-	}
-	return parseHelperContainerList(string(out))
-}
-
-// forceRemoveCorrelatedContainerByCLI force-removes one proven-owned
-// correlated container through the Docker CLI. Used by startup
-// reconciliation, where no App request context exists.
-func forceRemoveCorrelatedContainerByCLI(ctx context.Context, containerID string) error {
-	cmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("cannot remove correlated container: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
-}
-
 // forceRemoveRunContainer is the App-wired force removal used by the
-// container-absence proof; it honors the ExecCommandContext test seam.
+// container-absence proof; the ExecCommandContext test seam is honored by the
+// App command construction. It delegates to the single mechanism owner.
 func (a *App) forceRemoveRunContainer(ctx context.Context, containerID string) error {
-	cmd := a.newDockerCommand(ctx, "docker", "rm", "-f", containerID)
-	var stderr syncBuffer
+	return forceRemoveCorrelatedContainer(ctx, a.newDockerCommand, containerID)
+}
+
+// forceRemoveCorrelatedContainer is the single Docker CLI mechanism owner of
+// the force removal of one proven-owned correlated container. Only the
+// command construction is injected (dockerCommandFactory).
+func forceRemoveCorrelatedContainer(ctx context.Context, newCommand dockerCommandFactory, containerID string) error {
+	cmd := newCommand(ctx, "docker", "rm", "-f", containerID)
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("cannot remove correlated container: %w: %s", err, strings.TrimSpace(stderr.String()))
@@ -379,22 +375,4 @@ func parseHelperContainerList(out string) ([]helperContainer, error) {
 		containers = append(containers, helperContainer{ID: parts[0], State: parts[1]})
 	}
 	return containers, nil
-}
-
-// syncBuffer is a minimal concurrent-safe byte buffer for command stderr.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }

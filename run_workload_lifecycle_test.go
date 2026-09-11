@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -569,5 +570,121 @@ func TestRunWorkloadSELinuxPartialProjectionRetainsDependencies(t *testing.T) {
 	opStateDir := filepath.Join(app.Config.StateDir, workloadMACStateRootName, entries[0].Name())
 	if _, statErr := os.Stat(opStateDir); statErr != nil {
 		t.Fatalf("durable workload state must be retained after a failed prepare, got %v", statErr)
+	}
+}
+
+// TestContainerProvenanceWiringsShareOneMechanism proves the run path and the
+// startup-reconciliation path drive ONE Docker CLI mechanism: the same docker
+// ps argv, the same parsed correlated-container result, the same docker rm -f
+// argv — only the command construction differs (App-owned vs direct exec).
+// The App-owned test seams (InspectOperationContainers, ExecCommandContext)
+// must keep overriding the App wiring. The consolidation pins also forbid the
+// old parallel per-wiring implementations from silently returning.
+func TestContainerProvenanceWiringsShareOneMechanism(t *testing.T) {
+	cleanupSrc, err := os.ReadFile("run_cleanup.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(cleanupSrc)
+	for _, owner := range []string{
+		"func inspectCorrelatedContainers(",
+		"func forceRemoveCorrelatedContainer(",
+	} {
+		if !strings.Contains(src, owner) {
+			t.Errorf("the single Docker CLI mechanism owner is missing: %s", owner)
+		}
+	}
+	for _, duplicate := range []string{
+		"func inspectCorrelatedRunContainers(",
+		"func forceRemoveCorrelatedContainerByCLI(",
+		"type syncBuffer struct",
+	} {
+		if strings.Contains(src, duplicate) {
+			t.Errorf("the parallel Docker CLI implementation must stay deleted: %s", duplicate)
+		}
+	}
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "calls")
+	// The stub records each invocation's argv (space-joined) and answers
+	// docker ps with one correlated running container.
+	stub := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + calls + "\"\n" +
+		"if [ \"$1\" = ps ]; then printf '%s\\n' \"cid123 running\"; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx := context.Background()
+	app := &App{}
+
+	// Both provenance wirings must inspect and remove identically.
+	appProv := app.runContainerProvenance()
+	cliProv := cliContainerProvenance()
+
+	appSeen, appInspectErr := appProv.inspect(ctx, "opA", "sessA")
+	cliSeen, cliInspectErr := cliProv.inspect(ctx, "opA", "sessA")
+	if appInspectErr != nil || cliInspectErr != nil {
+		t.Fatalf("inspect failed: app=%v cli=%v", appInspectErr, cliInspectErr)
+	}
+	if len(appSeen) != 1 || len(cliSeen) != 1 ||
+		appSeen[0] != (helperContainer{ID: "cid123", State: "running"}) ||
+		cliSeen[0] != (helperContainer{ID: "cid123", State: "running"}) {
+		t.Fatalf("both wirings must parse the same correlated container, got app=%v cli=%v", appSeen, cliSeen)
+	}
+	if appProv.remove(ctx, "cidX") != nil || cliProv.remove(ctx, "cidX") != nil {
+		t.Fatal("both wirings must force-remove the proven-owned container successfully")
+	}
+
+	// The recorded argv must be exactly: two identical docker ps calls
+	// (App path, then startup path) followed by two identical docker rm -f
+	// calls. The ps argv carries the reserved label correlation and format.
+	raw, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatalf("read recorded docker argv: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	wantPS := strings.Join([]string{
+		"ps", "-a",
+		"--filter", "label=" + runtimeLabelSchema + "=" + runtimeLabelSchemaValue,
+		"--filter", "label=" + runtimeLabelOperationID + "=opA",
+		"--filter", "label=" + runtimeLabelSessionID + "=sessA",
+		"--format", "{{.ID}} {{.State}}",
+	}, " ")
+	wantRM := "rm -f cidX"
+	if len(lines) != 4 {
+		t.Fatalf("expected exactly 4 docker invocations, got %d: %v", len(lines), lines)
+	}
+	if lines[0] != wantPS || lines[1] != wantPS {
+		t.Errorf("both inspect wirings must issue identical argv:\napp:  %s\ncli:  %s\nwant: %s", lines[0], lines[1], wantPS)
+	}
+	if lines[2] != wantRM || lines[3] != wantRM {
+		t.Errorf("both remove wirings must issue identical argv:\napp:  %s\ncli:  %s\nwant: %s", lines[2], lines[3], wantRM)
+	}
+
+	// The App-owned seams keep overriding the App wiring only.
+	app.InspectOperationContainers = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+		return []helperContainer{{ID: "seam-inspect", State: "exited"}}, nil
+	}
+	seamSeen, err := app.runContainerProvenance().inspect(ctx, "opS", "sessS")
+	if err != nil || len(seamSeen) != 1 || seamSeen[0].ID != "seam-inspect" {
+		t.Fatalf("InspectOperationContainers seam must override the App inspect wiring, got %v (%v)", seamSeen, err)
+	}
+	var seamArgv []string
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		seamArgv = append([]string{name}, args...)
+		return exec.Command("true")
+	}
+	if err := app.runContainerProvenance().remove(ctx, "cidSeam"); err != nil {
+		t.Fatalf("ExecCommandContext seam remove: %v", err)
+	}
+	if strings.Join(seamArgv, " ") != "docker rm -f cidSeam" {
+		t.Errorf("ExecCommandContext seam must construct the remove command, got %v", seamArgv)
 	}
 }
