@@ -68,6 +68,12 @@ type sessionMACCoordinator struct {
 
 	// workspaceUseLeases maps unique lease key to workspace.
 	workspaceUseLeases map[string]string
+
+	// pendingWorkloadSessions reports the session IDs with pending
+	// helper-owned workload state (the workload MAC coordinator's startup
+	// coverage gate source). Nil in deployments without workload MAC; the
+	// gate is then vacuously satisfied.
+	pendingWorkloadSessions func() map[string]bool
 }
 
 func newSessionMACCoordinator(db *sql.DB, driver workspaceMACDriver) *sessionMACCoordinator {
@@ -333,13 +339,20 @@ func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, help
 // now that a consumer has disappeared.
 // Must be called with c.mu held.
 func (c *sessionMACCoordinator) retryDeferredBoundaries() {
+	pendingWorkspaces, deferAll := c.pendingWorkloadCoverage()
 	for boundary := range c.deferredBoundaries {
-		if c.boundaryConsumerCounts[boundary] > 0 {
-			// Still has direct consumers, skip.
+		if deferAll || c.boundaryConsumerCounts[boundary] > 0 {
+			// Still has direct consumers or the pending-workload resolution
+			// failed closed, skip.
 			continue
 		}
 		if c.isBoundaryStillNeeded(boundary) {
 			// Still needed by other bindings/leases, keep deferred.
+			continue
+		}
+		if c.boundaryCoversPendingWorkload(boundary, pendingWorkspaces) {
+			// Pending helper-owned workload state still relies on this
+			// coverage; keep deferred.
 			continue
 		}
 
@@ -389,22 +402,60 @@ func (c *sessionMACCoordinator) isBoundaryStillNeeded(boundary string) bool {
 	return false
 }
 
+// pendingWorkloadCoverage resolves the pending helper-owned workload
+// sessions to their workspaces. The second result reports whether the pass
+// must defer every removal (a pending session could not be resolved to a
+// workspace, so any boundary might be needed).
+func (c *sessionMACCoordinator) pendingWorkloadCoverage() (map[string]bool, bool) {
+	pendingWorkspaces := map[string]bool{}
+	deferAll := false
+	if c.pendingWorkloadSessions == nil {
+		return pendingWorkspaces, false
+	}
+	for sessionID := range c.pendingWorkloadSessions() {
+		workspace, err := c.sessionWorkspace(sessionID)
+		if err != nil {
+			opLog(context.Background()).Warn("pending workload session cannot be resolved; deferring stale boundary cleanup",
+				slog.String("session_id", sessionID),
+				slog.String("error", err.Error()))
+			deferAll = true
+			continue
+		}
+		pendingWorkspaces[workspace] = true
+	}
+	return pendingWorkspaces, deferAll
+}
+
 // cleanupStaleBoundaries attempts to remove docker-helper-owned boundaries
 // that no longer have any consumers.
 // Must be called with c.mu held.
+//
+// Startup coverage gate: a boundary is retained (deferred) while any
+// session with pending helper-owned workload state resolves to a workspace
+// the boundary covers, and the whole removal pass defers when a pending
+// session cannot be resolved to a workspace. This keeps the host/MAC state
+// a crashed-but-pending workload relies on intact until the workload
+// reconciliation has proven or removed that state.
 func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 	boundaries, err := c.listOwnedBoundaries()
 	if err != nil {
 		return err
 	}
 
+	// Resolve pending workload sessions to their workspaces once per pass.
+	pendingWorkspaces, deferAll := c.pendingWorkloadCoverage()
+
 	for _, boundary := range boundaries {
 		if c.boundaryConsumerCounts[boundary] > 0 {
 			continue
 		}
-		if c.isBoundaryStillNeeded(boundary) {
+		if deferAll || c.isBoundaryStillNeeded(boundary) {
 			// No direct consumers but an overlapping binding/lease blocks removal.
 			// Register as deferred so it is retried when the intersecting consumer disappears.
+			c.deferredBoundaries[boundary] = true
+			continue
+		}
+		if c.boundaryCoversPendingWorkload(boundary, pendingWorkspaces) {
 			c.deferredBoundaries[boundary] = true
 			continue
 		}
@@ -419,6 +470,30 @@ func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 	}
 
 	return nil
+}
+
+// boundaryCoversPendingWorkload reports whether the boundary covers any
+// workspace that still has pending helper-owned workload state.
+func (c *sessionMACCoordinator) boundaryCoversPendingWorkload(boundary string, pendingWorkspaces map[string]bool) bool {
+	for workspace := range pendingWorkspaces {
+		if boundaryCoversWorkspace(boundary, workspace) {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionWorkspace resolves the workspace of one session row. Expired rows
+// still resolve: startup expires Sessions after the workload
+// reconciliation, so a pending workload's coverage dependency stays
+// provable for the whole startup sequence.
+func (c *sessionMACCoordinator) sessionWorkspace(sessionID string) (string, error) {
+	var workspace string
+	err := c.db.QueryRow(`SELECT workspace FROM sessions WHERE id = ?`, sessionID).Scan(&workspace)
+	if err != nil {
+		return "", fmt.Errorf("session row for pending workload state cannot be resolved: %w", err)
+	}
+	return workspace, nil
 }
 
 // sessionExistsExact checks if a specific session is still live.

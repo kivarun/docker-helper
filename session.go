@@ -72,26 +72,6 @@ type CreatedSession struct {
 	FilesystemSnapshot *sessionFilesystemSnapshot
 }
 
-// intersectAllowedRootScopes returns the effective allowed-root scope: the
-// mathematical intersection of the global and principal allowed-root scopes.
-// For each overlapping pair:
-//   - equal roots contribute that root;
-//   - principal inside global contributes the principal root;
-//   - global inside principal contributes the global root;
-//   - disjoint roots contribute nothing.
-//
-// Results are deduplicated and deterministic.
-//
-// This is the 2.1 path-only projection wrapper of the canonical effective
-// policy composition (composeAllowedRootScopes): the hierarchy algorithm has
-// one production owner, and this wrapper projects its result back to paths.
-func intersectAllowedRootScopes(globalAllowedRoots, principalAllowedRoots []string) []string {
-	return allowedRootPaths(composeAllowedRootScopes(
-		allowedRootEntriesForPaths(globalAllowedRoots),
-		allowedRootEntriesForPaths(principalAllowedRoots),
-	))
-}
-
 // scanSessionWithOwnership scans the final Launcher-owned session projection
 // joined with its owning Launcher and that Launcher's Principal. Columns:
 // id, workspace, created_at, expires_at, launcher_id, launcher_name,

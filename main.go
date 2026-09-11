@@ -323,22 +323,36 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
-		if _, err := cleanupExpiredSessions(db); err != nil {
+		// Session filesystem snapshot migration/integrity gate. Runs after the
+		// ownership cutover, and before any MAC consumer so MAC never
+		// reconciles a live Session whose issued filesystem authority is not
+		// proven. The snapshot table's presence is the cutover marker: absent
+		// -> one atomic compatibility backfill from sessions.workspace alone;
+		// present -> post-cutover validation that fails closed on any
+		// missing/partial/corrupt snapshot. It runs before the expired-Session
+		// cleanup, so the coverage gate below can still resolve the
+		// workspaces of expired-but-pending workload sessions.
+		if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
 			serveStartupError(err, "")
 			return err
 		}
 
-		// Session filesystem snapshot migration/integrity gate. Runs after the
-		// ownership cutover and expired-Session cleanup, so the legacy cutover
-		// backfill covers exactly the remaining live Sessions, and before any
-		// MAC consumer so MAC never reconciles a live Session whose issued
-		// filesystem authority is not proven. The snapshot table's presence is
-		// the cutover marker: absent -> one atomic compatibility backfill from
-		// sessions.workspace alone; present -> post-cutover validation that
-		// fails closed on any missing/partial/corrupt snapshot.
-		if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
+		// Workload MAC coordinator (2.2.6): operation/container-lifetime
+		// workload MAC state, separate from the session MAC coordinator.
+		// Startup reconciliation of helper-owned workload state happens
+		// before the session MAC reconciliation, so workspace coverage a
+		// pending workload relies on is never removed while that workload
+		// state is still unproven.
+		workloadMAC, err := newWorkloadMACCoordinatorForMode(cfg, detectLSM)
+		if err != nil {
 			serveStartupError(err, "")
 			return err
+		}
+		if workloadMAC != nil {
+			if err := workloadMAC.ReconcileStartup(context.Background()); err != nil {
+				serveStartupError(err, "workload MAC state cannot be reconciled")
+				return err
+			}
 		}
 
 		// Create MAC coordinator and reconcile live sessions.
@@ -351,6 +365,13 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
+		// Startup coverage gate source: the session MAC coordinator must not
+		// release workspace coverage while a workload ownership record is
+		// still pending for that workspace's Session.
+		if macCoordinator != nil && workloadMAC != nil {
+			macCoordinator.pendingWorkloadSessions = workloadMAC.PendingWorkloadSessions
+		}
+
 		// Reconcile: ensure all live sessions have valid MAC state.
 		if macCoordinator != nil {
 			if err := macCoordinator.ReconcileLiveSessions(); err != nil {
@@ -359,20 +380,13 @@ func runDaemon(stdout, stderr io.Writer) error {
 			}
 		}
 
-		// Workload MAC coordinator (2.2.6): operation/container-lifetime
-		// workload MAC state, separate from the session MAC coordinator.
-		// Startup reconciliation of helper-owned workload state happens
-		// before the daemon accepts new HTTP requests.
-		workloadMAC, err := newWorkloadMACCoordinatorForMode(cfg, detectLSM)
-		if err != nil {
+		// Expire Sessions last: the coverage gate above must still resolve
+		// the workspaces of Sessions with pending helper-owned workload
+		// state, so expired rows are deleted only after both reconciliations
+		// had their first chance to prove or retain them.
+		if _, err := cleanupExpiredSessions(db); err != nil {
 			serveStartupError(err, "")
 			return err
-		}
-		if workloadMAC != nil {
-			if err := workloadMAC.ReconcileStartup(context.Background()); err != nil {
-				serveStartupError(err, "workload MAC state cannot be reconciled")
-				return err
-			}
 		}
 
 		// Clean up stale session runtime directories that no longer

@@ -258,18 +258,6 @@ func loadSessionOwnershipSnapshot(q txQuerier, launcherID string) (*sessionOwner
 // is disabled or otherwise not admissible for a new Session.
 var ErrLauncherUnavailable = errors.New("launcher unavailable")
 
-// computeLauncherEffectiveRoots is the 2.1 path-only projection wrapper of
-// the canonical three-level effective policy
-// (effectiveLauncherAllowedRoots): the hierarchy algorithm has one
-// production owner, and this wrapper projects its result back to paths.
-func computeLauncherEffectiveRoots(globalAllowedRoots []string, snap *sessionOwnershipSnapshot, daemonOwnerPrincipalID int64, userMode bool) ([]string, error) {
-	effective, err := effectiveLauncherAllowedRoots(allowedRootEntriesForPaths(globalAllowedRoots), snap, daemonOwnerPrincipalID, userMode)
-	if err != nil {
-		return nil, err
-	}
-	return allowedRootPaths(effective), nil
-}
-
 var (
 	// ErrConflictingSelectors is returned when a Session create request supplies
 	// both launcher_id and principal selectors.

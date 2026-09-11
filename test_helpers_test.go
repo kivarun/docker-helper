@@ -254,6 +254,10 @@ func insertTestSessionSnapshotEntries(t *testing.T, db *sql.DB, sessionID string
 		tx.Rollback()
 		t.Fatalf("clear snapshot for seeded session %s: %v", sessionID, err)
 	}
+	if _, err := tx.Exec(`DELETE FROM session_filesystem_snapshot_meta WHERE session_id = ?`, sessionID); err != nil {
+		tx.Rollback()
+		t.Fatalf("clear snapshot metadata for seeded session %s: %v", sessionID, err)
+	}
 	if err := insertSessionFilesystemSnapshot(tx, sessionID, entries); err != nil {
 		tx.Rollback()
 		t.Fatalf("insert snapshot for seeded session %s: %v", sessionID, err)

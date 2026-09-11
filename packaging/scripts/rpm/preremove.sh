@@ -38,6 +38,23 @@ if [ -r /sys/kernel/security/apparmor/profiles ] && \
   }
 fi
 
+# Remove helper-owned local fcontext customizations BEFORE removing the
+# module. The confined daemon registers local fcontext rules for non-home
+# workspace boundaries (docker_helper_workspace_t); those local rules
+# reference types that only the module defines, so an uncleaned rule makes
+# `semodule -r` fail its store validation and leaves the module loaded after
+# erase — stale durable state that then also breaks later package actions in
+# the same environment. Only rules whose context references a docker_helper
+# type are touched; foreign local customizations stay untouched. Absence of
+# semanage is a normal idempotent no-op.
+if command -v semanage >/dev/null 2>&1; then
+  semanage fcontext -l -C -n 2>/dev/null \
+    | awk '/object_r:docker_helper_/ {print $1}' \
+    | while IFS= read -r fcrule; do
+        semanage fcontext -d "$fcrule" >/dev/null 2>&1 || true
+      done
+fi
+
 # Remove the SELinux policy module ONLY if it is actually installed. Absence is
 # a normal idempotent success: an AppArmor-only host never installed our module
 # and must not emit a bogus "failed to remove" warning. Only a real failure

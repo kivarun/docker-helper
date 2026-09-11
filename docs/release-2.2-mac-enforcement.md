@@ -32,8 +32,11 @@ matrices remain Phase 2.2.7 release gates. The accepted production shape:
   a protected RO exposure.
 - AppArmor backend (workload_apparmor.go): generated profile
   `docker-helper-workload-<op.ID>` rendered from the Moby docker-default
-  baseline with `audit deny "<literal>/{,**}" wkl,` per accepted RO target,
-  byte-safe literal encoding (`appArmorPathLiteral`), loaded through
+  baseline; accepted RO targets are distinguished by their pinned node kind
+  (a regular file gets an exact-path `audit deny "<literal>" wkl,` rule, a
+  directory gets `audit deny "<literal>/{,**}" wkl,` with its recursion
+  scoped around accepted nested RW transitions), byte-safe literal encoding
+  (`appArmorPathLiteral`), loaded through
   `apparmor_parser --replace` and verified via the kernel profile inventory
   before Docker starts; Docker receives
   `--security-opt label=disable` plus `--security-opt apparmor=<profile>`.

@@ -42,8 +42,8 @@ const (
 	selinuxROProjectionContext = "system_u:object_r:" + selinuxROProjectionType + ":s0"
 	// bindfsBinary is the explicit SELinux system-mode runtime dependency.
 	bindfsBinary = "bindfs"
-	// selinuxSELinuxXattr carries the effective SELinux label.
-	selinuxSELinuxXattr = "security.selinux"
+	// selinuxXattrName carries the effective SELinux label.
+	selinuxXattrName = "security.selinux"
 	// selinuxDevFusePath is the FUSE device the projection worker needs.
 	selinuxDevFusePath = "/dev/fuse"
 )
@@ -64,13 +64,9 @@ type workloadMountOps interface {
 	isMountpoint(path string) (bool, error)
 	// mountBind creates a bind mount of source at target.
 	mountBind(source, target string) error
-	// unmount removes the mount at path.
-	unmount(path string) error
-	// unmountLazy detaches the mount at path lazily.
-	unmountLazy(path string) error
-	// unmountPath unmounts one helper-owned projection path, preferring the
-	// FUSE userspace helper and falling back to the kernel umount with a
-	// lazy last resort.
+	// unmountPath unmounts one helper-owned projection path through the kernel,
+	// with a lazy detach fallback. The caller positively proves mount absence
+	// after the call before releasing dependent state.
 	unmountPath(path string) error
 	// selinuxTypeOf returns the SELinux type component of the effective
 	// security.selinux xattr of path.
@@ -145,20 +141,6 @@ func (productionMountOps) mountBind(source, target string) error {
 	return nil
 }
 
-func (productionMountOps) unmount(path string) error {
-	if err := unix.Unmount(path, 0); err != nil {
-		return fmt.Errorf("unmount %s: %w", path, err)
-	}
-	return nil
-}
-
-func (productionMountOps) unmountLazy(path string) error {
-	if err := unix.Unmount(path, unix.MNT_DETACH); err != nil {
-		return fmt.Errorf("lazy unmount %s: %w", path, err)
-	}
-	return nil
-}
-
 func (productionMountOps) selinuxTypeOf(path string) (string, error) {
 	value, err := getxattrSELinux(path)
 	if err != nil {
@@ -192,7 +174,7 @@ func unmountOwnedStalePin(path string) error {
 
 func getxattrSELinux(path string) (string, error) {
 	buf := make([]byte, 256)
-	size, err := unix.Getxattr(path, selinuxSELinuxXattr, buf)
+	size, err := unix.Getxattr(path, selinuxXattrName, buf)
 	if err != nil {
 		return "", fmt.Errorf("cannot read SELinux context of %s: %w", path, err)
 	}
@@ -334,7 +316,15 @@ func (b *workloadSELinuxBackend) prepare(p workloadPreparation) (*preparedWorklo
 		}
 		entry, err := b.prepareProjection(p, i)
 		if err != nil {
-			b.cleanupOwnedProjections(projections)
+			// Earlier projections are independent of the failed one; roll
+			// them back while their live worker handles still exist. A
+			// failure here — or a rollback already reported incomplete by
+			// prepareProjection — is the typed retained outcome: the
+			// coordinator must not run a second, handle-free cleanup pass.
+			if cleanupErr := b.cleanupOwnedProjections(projections); cleanupErr != nil {
+				return nil, &workloadMACRollbackRetainedError{err: fmt.Errorf(
+					"%w (earlier-projection rollback retained: %v)", err, cleanupErr)}
+			}
 			return nil, err
 		}
 		projections = append(projections, entry)
@@ -418,13 +408,19 @@ func (b *workloadSELinuxBackend) prepareProjection(p workloadPreparation, index 
 	}
 	worker, err := b.startWorker(b.lookPath, backing, mountDir, selinuxROProjectionContext)
 	if err != nil {
-		b.cleanupOwnedProjections([]*projectionEntry{entry})
+		if cleanupErr := b.cleanupOwnedProjectionEntry(entry); cleanupErr != nil {
+			return nil, &workloadMACRollbackRetainedError{err: fmt.Errorf(
+				"%w (projection rollback retained: %v)", err, cleanupErr)}
+		}
 		return nil, err
 	}
 	entry.worker = worker
 
 	if err := b.awaitProjectionReady(entry); err != nil {
-		b.cleanupOwnedProjections([]*projectionEntry{entry})
+		if cleanupErr := b.cleanupOwnedProjectionEntry(entry); cleanupErr != nil {
+			return nil, &workloadMACRollbackRetainedError{err: fmt.Errorf(
+				"%w (projection rollback retained: %v)", err, cleanupErr)}
+		}
 		return nil, err
 	}
 	if entry.kind == selinuxProjectionDirectory {
@@ -448,7 +444,14 @@ func (b *workloadSELinuxBackend) awaitProjectionReady(entry *projectionEntry) er
 			return fmt.Errorf("bindfs projection did not mount in time")
 		}
 		if entry.worker != nil && !entry.worker.alive() {
-			return fmt.Errorf("bindfs projection worker exited before the projection mounted")
+			// The worker died before the projection mounted; surface its
+			// exit error (including captured stderr) so the failure names
+			// the actual cause instead of a bare worker-exit fact.
+			detail := ""
+			if waitErr := entry.worker.waitExit(workloadMountReadyTimeout); waitErr != nil {
+				detail = fmt.Sprintf(": %v", waitErr)
+			}
+			return fmt.Errorf("bindfs projection worker exited before the projection mounted%s", detail)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -485,23 +488,32 @@ func (b *workloadSELinuxBackend) awaitProjectionReady(entry *projectionEntry) er
 // exit wait and releases the same owned paths in the same order.
 func (b *workloadSELinuxBackend) cleanupOwnedProjections(projections []*projectionEntry) error {
 	for i := len(projections) - 1; i >= 0; i-- {
-		entry := projections[i]
-		if err := b.proveUnmountOwnedMount(entry.mountDir); err != nil {
+		if err := b.cleanupOwnedProjectionEntry(projections[i]); err != nil {
 			return err
 		}
-		if entry.worker != nil {
-			if err := entry.worker.waitExit(workloadWorkerExitTimeout); err != nil {
-				return err
-			}
+	}
+	return nil
+}
+
+// cleanupOwnedProjectionEntry releases one owned projection in the frozen
+// dependency order and returns the first failure so the caller retains the
+// dependent state.
+func (b *workloadSELinuxBackend) cleanupOwnedProjectionEntry(entry *projectionEntry) error {
+	if err := b.proveUnmountOwnedMount(entry.mountDir); err != nil {
+		return err
+	}
+	if entry.worker != nil {
+		if err := entry.worker.waitExit(workloadWorkerExitTimeout); err != nil {
+			return err
 		}
-		if entry.lowerItem != "" {
-			if err := b.proveUnmountOwnedMount(entry.lowerItem); err != nil {
-				return err
-			}
+	}
+	if entry.lowerItem != "" {
+		if err := b.proveUnmountOwnedMount(entry.lowerItem); err != nil {
+			return err
 		}
-		if err := os.RemoveAll(entry.stateDir); err != nil {
-			return fmt.Errorf("cannot remove projection state %s: %w", entry.stateDir, err)
-		}
+	}
+	if err := os.RemoveAll(entry.stateDir); err != nil {
+		return fmt.Errorf("cannot remove projection state %s: %w", entry.stateDir, err)
 	}
 	return nil
 }
@@ -690,35 +702,23 @@ func parseProjectionDirName(name string) (int, error) {
 	return index, nil
 }
 
-// unmountPath unmounts one helper-owned projection path, preferring the
-// FUSE userspace helper exactly like the accepted mechanism and falling
-// back to the kernel umount with a lazy last resort.
+// unmountPath releases one helper-owned projection mount through the kernel.
+// The SELinux workload backend is system-mode/root-only and already owns
+// CAP_SYS_ADMIN; executing a userspace fusermount helper would only widen the
+// daemon executable surface. The cleanup owner positively inventories the
+// mount before this call and proves absence afterwards. A normal unmount is
+// preferred, with lazy detach as the bounded fallback.
 func (productionMountOps) unmountPath(path string) error {
-	if err := runFusermountUnmount(path); err == nil {
-		return nil
-	}
 	if err := unix.Unmount(path, 0); err != nil {
+		if errno, ok := err.(syscall.Errno); ok && errno == syscall.EINVAL {
+			return nil
+		}
 		if err := unix.Unmount(path, unix.MNT_DETACH); err != nil {
+			if errno, ok := err.(syscall.Errno); ok && errno == syscall.EINVAL {
+				return nil
+			}
 			return fmt.Errorf("unmount %s: %w", path, err)
 		}
-	}
-	return nil
-}
-
-// runFusermountUnmount runs fusermount3 (or fusermount) -u on path.
-func runFusermountUnmount(path string) error {
-	helper, err := exec.LookPath("fusermount3")
-	if err != nil {
-		helper, err = exec.LookPath("fusermount")
-		if err != nil {
-			return fmt.Errorf("fusermount is unavailable: %w", err)
-		}
-	}
-	cmd := exec.Command(helper, "-u", path)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("fusermount -u %s: %w", path, err)
 	}
 	return nil
 }

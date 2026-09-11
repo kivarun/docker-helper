@@ -377,7 +377,7 @@ func printSessionShow(w io.Writer, result *sessionShowJSON) {
 	if result.Principal != nil {
 		principal = *result.Principal
 	}
-	fmt.Fprintf(w, "LAUNCHER:  %s\n", principalLabel(result.Launcher))
+	fmt.Fprintf(w, "LAUNCHER:  %s\n", ownershipName(result.Launcher))
 	fmt.Fprintf(w, "PRINCIPAL: %s\n", principal)
 	fmt.Fprintf(w, "CREATED:   %s\n", result.CreatedAt)
 	fmt.Fprintf(w, "EXPIRES:   %s\n", result.ExpiresAt)
@@ -391,9 +391,9 @@ func printSessionShow(w io.Writer, result *sessionShowJSON) {
 	tw.Flush()
 }
 
-// principalLabel renders an optional ownership name for the human session
+// ownershipName renders an optional ownership name for the human session
 // output: "-" when the Session projection carries no name.
-func principalLabel(name *string) string {
+func ownershipName(name *string) string {
 	if name == nil {
 		return "-"
 	}

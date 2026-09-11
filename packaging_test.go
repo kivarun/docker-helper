@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3640,6 +3641,24 @@ func TestRPMPostinstallNoRecursiveRuntimeRestorecon(t *testing.T) {
 	}
 }
 
+// TestRPMPostinstallBindfsRestorecon verifies the RPM postinstall applies the
+// shipped docker_helper_bindfs_exec_t file context to /usr/bin/bindfs. bindfs
+// is an explicit RPM Requires (the SELinux read-only projection backend) and
+// zypper installs it with the generic binary label; without the relabel the
+// confined daemon fails the projection worker exec with "fork/exec
+// /usr/bin/bindfs: permission denied" (observed on the exact-candidate UAT).
+func TestRPMPostinstallBindfsRestorecon(t *testing.T) {
+	data, err := os.ReadFile("packaging/scripts/rpm/postinstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "restorecon /usr/bin/bindfs") {
+		t.Error("rpm postinstall must restorecon /usr/bin/bindfs (shipped docker_helper_bindfs_exec_t file context)")
+	}
+}
+
 // TestRPMSelinuxDependencies verifies that the RPM depends on packages
 // providing semodule and restorecon (policycoreutils on openSUSE).
 func TestRPMSelinuxDependencies(t *testing.T) {
@@ -4234,6 +4253,30 @@ case "$*" in
 esac
 `, logFile, failInstallStr, failRemoveStr)
 	if err := os.WriteFile(filepath.Join(fakeDir, "semodule"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFakeSemanage creates a semanage script that logs calls and, for the
+// local-customization listing (fcontext -l -C -n), prints the given fixture
+// rules. All other semanage invocations log and succeed.
+func writeFakeSemanage(t *testing.T, fakeDir, logFile string, localRules string) {
+	t.Helper()
+	rulesPath := filepath.Join(fakeDir, "semanage-fcontext-rules.txt")
+	if err := os.WriteFile(rulesPath, []byte(localRules), 0644); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+case "$*" in
+  *"fcontext -l -C -n"*)
+    cat "%s"
+    exit 0
+    ;;
+esac
+exit 0
+`, logFile, rulesPath)
+	if err := os.WriteFile(filepath.Join(fakeDir, "semanage"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -5577,6 +5620,105 @@ func TestRpmPreremoveFinalEraseSELinux(t *testing.T) {
 	}
 	if !found {
 		t.Error("must call semodule -r docker_helper on final erase")
+	}
+}
+
+// TestRpmPreremoveFinalEraseSELinuxFcontextCleanup verifies erase-time
+// cleanup of helper-owned local fcontext customizations on an enforcing
+// SELinux host. The confined daemon registers local fcontext rules for
+// non-home workspace boundaries (docker_helper_workspace_t); those local
+// rules reference types only the docker_helper module defines, so an
+// uncleaned rule fails `semodule -r` store validation and leaves the module
+// loaded after erase — stale durable state that then also breaks later
+// package actions in the same environment. The preremove must delete exactly
+// the rules whose context references a docker_helper type, leave foreign
+// local customizations untouched, and do all of it BEFORE removing the
+// module.
+func TestRpmPreremoveFinalEraseSELinuxFcontextCleanup(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeSemanage(t, fakeDir, logFile,
+		"/opt/uat-a3-ro/ws(/.*)?  all files  system_u:object_r:docker_helper_workspace_t:s0\n"+
+			"/opt/foreign-tree  all files  system_u:object_r:usr_t:s0\n")
+
+	// SELinux enforcing, AppArmor disabled.
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+		})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+	firstList := -1
+	firstDelete := -1
+	firstRemove := -1
+	for i, c := range calls {
+		switch {
+		case strings.Contains(c, "semanage") && strings.Contains(c, "fcontext -l"):
+			if firstList < 0 {
+				firstList = i
+			}
+		case strings.Contains(c, "semanage") && strings.Contains(c, "fcontext -d"):
+			if firstDelete < 0 {
+				firstDelete = i
+			}
+		case strings.Contains(c, "semodule") && strings.Contains(c, "-r"):
+			if firstRemove < 0 {
+				firstRemove = i
+			}
+		}
+	}
+	if firstList < 0 {
+		t.Fatal("preremove must list local fcontext customizations on final erase")
+	}
+	if firstDelete < 0 {
+		t.Fatal("preremove must delete helper-owned local fcontext rules on final erase")
+	}
+	if firstRemove < 0 {
+		t.Fatal("preremove must call semodule -r docker_helper on final erase")
+	}
+	if firstList > firstDelete || firstDelete > firstRemove {
+		t.Fatalf("fcontext cleanup must precede semodule -r: list=%d delete=%d remove=%d (%v)",
+			firstList, firstDelete, firstRemove, calls)
+	}
+	deletedForeign := false
+	deletedHelper := false
+	for _, c := range calls {
+		if strings.Contains(c, "fcontext -d") {
+			if strings.Contains(c, "foreign-tree") {
+				deletedForeign = true
+			}
+			if strings.Contains(c, "uat-a3-ro") {
+				deletedHelper = true
+			}
+		}
+	}
+	if deletedForeign {
+		t.Error("preremove must not delete foreign local fcontext customizations")
+	}
+	if !deletedHelper {
+		t.Error("preremove must delete the docker_helper-context rule")
 	}
 }
 
@@ -7552,107 +7694,6 @@ func TestSyncReleaseToMainDisabled(t *testing.T) {
 	}
 }
 
-// seedSyncRepo creates a bare origin with a linear main history and a release
-// branch commit on top; it returns the origin path and the release commit SHA.
-func seedSyncRepo(t *testing.T) (string, string) {
-	t.Helper()
-	dir := t.TempDir()
-	origin := filepath.Join(dir, "origin.git")
-	gitAt(t, dir, "init", "--bare", origin)
-	work := filepath.Join(dir, "seed")
-	gitAt(t, dir, "init", work)
-	gitAt(t, work, "config", "user.name", "test")
-	gitAt(t, work, "config", "user.email", "test@example.com")
-	if err := os.WriteFile(filepath.Join(work, "base.txt"), []byte("base\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitAt(t, work, "add", ".")
-	gitAt(t, work, "commit", "-m", "base")
-	gitAt(t, work, "branch", "-M", "main")
-	gitAt(t, work, "remote", "add", "origin", origin)
-	gitAt(t, work, "push", "-u", "origin", "main")
-	gitAt(t, work, "checkout", "-b", "release/1")
-	if err := os.WriteFile(filepath.Join(work, "release.txt"), []byte("release\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitAt(t, work, "add", ".")
-	gitAt(t, work, "commit", "-m", "release change")
-	gitAt(t, work, "push", "-u", "origin", "release/1")
-	release := strings.TrimSpace(gitAt(t, work, "rev-parse", "HEAD"))
-	return origin, release
-}
-
-// simulateSyncValidation mirrors the validation job's prepare step: it checks
-// out origin/main, records the exact main SHA, merges the release commit with
-// --no-ff, and records the exact resulting tree SHA.
-func simulateSyncValidation(t *testing.T, origin, release string) (string, string) {
-	t.Helper()
-	wc := t.TempDir()
-	cloneSyncRepo(t, wc, origin)
-	gitAt(t, wc, "fetch", "origin", "main")
-	gitAt(t, wc, "switch", "-C", "main", "origin/main")
-	mainSHA := strings.TrimSpace(gitAt(t, wc, "rev-parse", "HEAD"))
-	gitAt(t, wc, "merge", "--no-ff", release, "-m", "merge release commit "+release)
-	treeSHA := strings.TrimSpace(gitAt(t, wc, "rev-parse", "HEAD^{tree}"))
-	return mainSHA, treeSHA
-}
-
-// advanceSyncMain simulates origin/main advancing after validation.
-func advanceSyncMain(t *testing.T, origin string) {
-	t.Helper()
-	wc := t.TempDir()
-	gitAt(t, wc, "init")
-	gitAt(t, wc, "remote", "add", "origin", origin)
-	gitAt(t, wc, "config", "user.name", "test")
-	gitAt(t, wc, "config", "user.email", "test@example.com")
-	gitAt(t, wc, "fetch", "origin", "main")
-	gitAt(t, wc, "switch", "-C", "main", "origin/main")
-	if err := os.WriteFile(filepath.Join(wc, "advance.txt"), []byte("advance\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitAt(t, wc, "add", ".")
-	gitAt(t, wc, "commit", "-m", "advance main")
-	gitAt(t, wc, "push", "origin", "main")
-}
-
-// cloneSyncRepo clones origin into the existing empty directory dst and sets a
-// git identity for later merge commits.
-func cloneSyncRepo(t *testing.T, dst, origin string) {
-	t.Helper()
-	gitAt(t, filepath.Dir(dst), "clone", "-q", origin, dst)
-	gitAt(t, dst, "config", "user.name", "test")
-	gitAt(t, dst, "config", "user.email", "test@example.com")
-}
-
-// syncWriteShell returns the merge-push job's shell sequence as a bash script.
-// checkoutRef "MAIN_SHA" mirrors the workflow (check out the validated main);
-// "origin/main" simulates the regression where the job merges against a
-// refetched newer main. withGuard false removes the main-advance guard.
-func syncWriteShell(mainSHA, treeSHA, release, checkoutRef string, withGuard bool) string {
-	var guard string
-	if withGuard {
-		guard = `
-current_main="$(git rev-parse origin/main)"
-if [ "$current_main" != "MAIN_SHA" ]; then
-  echo "origin/main advanced after validation: expected MAIN_SHA, got $current_main" >&2
-  exit 1
-fi
-`
-	}
-	script := fmt.Sprintf(`set -e
-git fetch origin main
-%sgit switch -C main "%s"
-git merge --no-ff "%s" -m "merge release commit %s"
-tree_sha="$(git rev-parse HEAD^{tree})"
-if [ "$tree_sha" != "%s" ]; then
-  echo "reconstructed tree $tree_sha differs from validated tree %s" >&2
-  exit 1
-fi
-git push origin main
-`, guard, checkoutRef, release, release, treeSHA, treeSHA)
-	return strings.ReplaceAll(script, "MAIN_SHA", mainSHA)
-}
-
 // gitAt runs git with the given working directory and returns combined output.
 func gitAt(t *testing.T, dir string, args ...string) string {
 	t.Helper()
@@ -7683,6 +7724,15 @@ func runBashScriptIn(t *testing.T, dir, scriptPath string) (string, error) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// writeStub installs an executable stub command into dir.
+func writeStub(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // extractShellFunction returns the source of a top-level function named name
@@ -7950,7 +8000,10 @@ func TestRelease2AcceptanceClassifierMarkerExactMatch(t *testing.T) {
 
 // TestArtifactGateConsumersNoRebuild verifies every consumer of the artifact
 // gate downloads the candidate set, resolves its artifact from the producer
-// SHA256SUMS and never builds locally (no setup-go, no build scripts).
+// SHA256SUMS and never builds the candidate locally (no build scripts, no
+// nfpm). setup-go is allowed only in the two jobs that compile the test-only
+// live-workload harness (production has no force-writable bypass); those jobs
+// must bind the harness to the candidate source SHA and manifest.
 func TestArtifactGateConsumersNoRebuild(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/artifact-gate.yml")
 	if err != nil {
@@ -7958,32 +8011,42 @@ func TestArtifactGateConsumersNoRebuild(t *testing.T) {
 	}
 	content := string(data)
 
-	consumers := []string{
-		"uat-blackbox-ubuntu",
-		"uat-blackbox-ubuntu-tarball",
-		"uat-regressions-ubuntu",
-		"uat-blackbox-opensuse-apparmor",
-		"uat-blackbox-opensuse-selinux",
-		"uat-blackbox-opensuse-tarball-selinux",
+	// allowSetupGo marks the jobs whose setup-go exists solely to compile the
+	// test-only live-workload harness (never a candidate artifact).
+	consumers := []struct {
+		name         string
+		allowSetupGo bool
+	}{
+		{"uat-blackbox-ubuntu", false},
+		{"uat-blackbox-ubuntu-tarball", false},
+		{"uat-regressions-ubuntu", false},
+		{"uat-access-modes-ubuntu", false},
+		{"uat-workload-apparmor-ubuntu", true},
+		{"uat-blackbox-opensuse-apparmor", false},
+		{"uat-blackbox-opensuse-selinux", true},
+		{"uat-blackbox-opensuse-tarball-selinux", false},
 	}
 	for _, c := range consumers {
-		job := findJobSection(content, c)
+		job := findJobSection(content, c.name)
 		if job == "" {
-			t.Fatalf("artifact-gate.yml must contain consumer job %s", c)
+			t.Fatalf("artifact-gate.yml must contain consumer job %s", c.name)
 		}
 		if !strings.Contains(job, "needs: producer") {
-			t.Errorf("consumer job %s must depend on the producer", c)
+			t.Errorf("consumer job %s must depend on the producer", c.name)
 		}
-		for _, banned := range []string{"setup-go", "build-bundle.sh", "build-packages.sh", "build-static.sh", "nfpm"} {
+		for _, banned := range []string{"build-bundle.sh", "build-packages.sh", "build-static.sh", "nfpm"} {
 			if strings.Contains(job, banned) {
-				t.Errorf("consumer job %s must not contain %s (no local rebuild)", c, banned)
+				t.Errorf("consumer job %s must not contain %s (no local rebuild)", c.name, banned)
 			}
 		}
+		if !c.allowSetupGo && strings.Contains(job, "setup-go") {
+			t.Errorf("consumer job %s must not contain setup-go (no local rebuild)", c.name)
+		}
 		if !strings.Contains(job, "release-candidate-artifact.sh") {
-			t.Errorf("consumer job %s must resolve its artifact via release-candidate-artifact.sh", c)
+			t.Errorf("consumer job %s must resolve its artifact via release-candidate-artifact.sh", c.name)
 		}
 		if !strings.Contains(job, "download-artifact") {
-			t.Errorf("consumer job %s must download the candidate artifact", c)
+			t.Errorf("consumer job %s must download the candidate artifact", c.name)
 		}
 	}
 
@@ -7992,6 +8055,18 @@ func TestArtifactGateConsumersNoRebuild(t *testing.T) {
 	reg := findJobSection(content, "uat-regressions-ubuntu")
 	if !strings.Contains(reg, "UAT_ARTIFACT_PATH") || !strings.Contains(reg, "UAT_ARTIFACT_SHA256") {
 		t.Error("uat-regressions-ubuntu must consume the exact candidate DEB")
+	}
+
+	// The live-workload harness consumers must bind the harness to the same
+	// candidate source SHA/manifest; without that binding a source-only
+	// workflow could stand in for the release gate.
+	wla := findJobSection(content, "uat-workload-apparmor-ubuntu")
+	if !strings.Contains(wla, "UAT_SOURCE_SHA") || !strings.Contains(wla, "UAT_MANIFEST_PATH") {
+		t.Error("uat-workload-apparmor-ubuntu must bind the live harness to the candidate source SHA/manifest")
+	}
+	sel := findJobSection(content, "uat-blackbox-opensuse-selinux")
+	if !strings.Contains(sel, "UAT_SOURCE_SHA") || !strings.Contains(sel, "UAT_MANIFEST") {
+		t.Error("uat-blackbox-opensuse-selinux must bind the live harness to the candidate source SHA/manifest")
 	}
 }
 
@@ -8278,6 +8353,438 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	}
 }
 
+// TestRelease2AcceptanceMFFailClosedObservation pins the MF fail-closed
+// migration contract: the acceptance verdict must be decided by a bounded
+// fail-closed observation (the serve_startup refusal appears in the journal
+// and daemon readiness never becomes available in the whole window), never by
+// the systemd unit state. With Type=exec the start job completes at exec,
+// before the serve refuses, and Restart=on-failure re-executes the unit, so
+// the unit passes through transient active windows while the refusal repeats:
+// an is-active gate misjudges a correct refusal.
+func TestRelease2AcceptanceMFFailClosedObservation(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if strings.Contains(content, `[ -n "$MF_REFUSAL" ] && ! systemctl is-active`) {
+		t.Error("MF verdict must not gate on the systemd active state (Type=exec transient active window)")
+	}
+	if !strings.Contains(content, `[ "$MF_HEALTH_AVAILABLE" = 0 ]`) {
+		t.Error("MF verdict must require that daemon readiness never became available in the observation window")
+	}
+
+	fn := extractShellFunction(t, "scripts/uat-release2-acceptance.sh", "observe_mf_failclosed")
+
+	work := t.TempDir()
+	stub := filepath.Join(work, "stub")
+	if err := os.MkdirAll(stub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The real daemon socket file must exist so the observation's
+	// `[ -S "$SOCK" ]` guard passes and the health probe actually reaches the
+	// stub curl on every iteration.
+	listener, err := net.Listen("unix", filepath.Join(work, "daemon.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	refusalLine := `Sep 11 12:00:00 uat docker-helper[1234]: {"level":"ERROR","operation":"serve_startup",` +
+		`"error":"unsupported session_filesystem_snapshot_entries schema: snapshot integrity metadata table is absent after the cutover"}`
+	writeStub(t, stub, "journalctl", `#!/bin/sh
+n=$(cat "$STATE/jcalls" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/jcalls"
+if [ "$n" -ge "$REFUSAL_FROM" ]; then
+  printf '%s\n' "$REFUSAL_LINE"
+fi
+`)
+	writeStub(t, stub, "curl", `#!/bin/sh
+n=$(cat "$STATE/curl" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/curl"
+[ "$n" -ge "$HEALTH_UP_FROM" ] && exit 0
+exit 7
+`)
+	writeStub(t, stub, "systemctl", `#!/bin/sh
+case "$1" in
+  is-failed)
+    n=$(cat "$STATE/isfailed" 2>/dev/null || echo 0)
+    n=$((n+1))
+    echo "$n" > "$STATE/isfailed"
+    [ "$n" -ge "$IS_FAILED_FROM" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 0
+`)
+	writeStub(t, stub, "sleep", `#!/bin/sh
+n=$(cat "$STATE/sleeps" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/sleeps"
+`)
+
+	// Each case exports its stub world, resets the stub state, observes the
+	// refused startup and prints the MF verdict exactly as the acceptance
+	// scenario decides it.
+	never := 1000000
+	cases := []struct {
+		name          string
+		refusalFrom   int
+		healthUpFrom  int
+		isFailedFrom  int
+		wantRefusal   string
+		wantHealth    string
+		wantVerdict   string
+		wantEndSleeps string
+		wantProbes    string
+	}{
+		{
+			// Terminal failed state with the refusal observed and health never
+			// available: the transient-active world must PASS.
+			name:        "refusal observed, health never available, unit reaches failed state",
+			refusalFrom: 2, healthUpFrom: never, isFailedFrom: 3,
+			wantRefusal: "yes", wantHealth: "0", wantVerdict: "pass", wantEndSleeps: "2", wantProbes: "3",
+		},
+		{
+			name:        "refusal observed, health became available",
+			refusalFrom: 1, healthUpFrom: 3, isFailedFrom: never,
+			wantRefusal: "yes", wantHealth: "1", wantVerdict: "fail", wantEndSleeps: "2", wantProbes: "3",
+		},
+		{
+			name:        "no refusal, health never available",
+			refusalFrom: never, healthUpFrom: never, isFailedFrom: never,
+			wantRefusal: "no", wantHealth: "0", wantVerdict: "fail", wantEndSleeps: "40", wantProbes: "40",
+		},
+	}
+	var b strings.Builder
+	b.WriteString("set -uo pipefail\n")
+	fmt.Fprintf(&b, "PATH=%q:$PATH; export PATH\n", stub)
+	fmt.Fprintf(&b, "SOCK=%q\n", filepath.Join(work, "daemon.sock"))
+	b.WriteString(fn)
+	b.WriteString("\n")
+	for i, tc := range cases {
+		state := filepath.Join(work, fmt.Sprintf("state%d", i))
+		fmt.Fprintf(&b, `
+STATE=%q
+export STATE REFUSAL_FROM=%d HEALTH_UP_FROM=%d IS_FAILED_FROM=%d
+REFUSAL_LINE=%q
+export REFUSAL_LINE
+rm -rf "$STATE"; mkdir -p "$STATE"
+observe_mf_failclosed
+printf '%%s REFUSAL=%%s HEALTH=%%s VERDICT=%%s SLEEPS=%%s CURL=%%s\n' \
+  %q \
+  "$([ -n "$MF_REFUSAL" ] && echo yes || echo no)" \
+  "$MF_HEALTH_AVAILABLE" \
+  "$([ -n "$MF_REFUSAL" ] && [ "$MF_HEALTH_AVAILABLE" = 0 ] && echo pass || echo fail)" \
+  "$(cat "$STATE/sleeps" 2>/dev/null || echo 0)" \
+  "$(cat "$STATE/curl" 2>/dev/null || echo 0)"
+`, state, tc.refusalFrom, tc.healthUpFrom, tc.isFailedFrom, refusalLine, tc.name)
+	}
+	script := filepath.Join(work, "mf-observe.sh")
+	if err := os.WriteFile(script, []byte(b.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runBashScriptIn(t, work, script)
+	if err != nil {
+		t.Fatalf("MF observation harness run failed: %v\n%s", err, out)
+	}
+	for _, tc := range cases {
+		fields := map[string]string{}
+		for _, l := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(l, tc.name+" ") {
+				continue
+			}
+			for _, f := range strings.Fields(strings.TrimPrefix(l, tc.name+" ")) {
+				if k, v, ok := strings.Cut(f, "="); ok {
+					fields[k] = v
+				}
+			}
+			break
+		}
+		if fields["REFUSAL"] != tc.wantRefusal {
+			t.Errorf("case %q: refusal observed = %q, want %q", tc.name, fields["REFUSAL"], tc.wantRefusal)
+		}
+		if fields["HEALTH"] != tc.wantHealth {
+			t.Errorf("case %q: health became available = %q, want %q", tc.name, fields["HEALTH"], tc.wantHealth)
+		}
+		if fields["VERDICT"] != tc.wantVerdict {
+			t.Errorf("case %q: MF verdict = %q, want %q", tc.name, fields["VERDICT"], tc.wantVerdict)
+		}
+		if fields["SLEEPS"] != tc.wantEndSleeps {
+			t.Errorf("case %q: observation did not end where the contract requires (sleeps=%q, want %q)", tc.name, fields["SLEEPS"], tc.wantEndSleeps)
+		}
+		if fields["CURL"] != tc.wantProbes {
+			t.Errorf("case %q: health probe count = %q, want %q (readiness must be probed on every observation iteration)", tc.name, fields["CURL"], tc.wantProbes)
+		}
+	}
+}
+
+// TestRegressionGroup16CrashRestartReadiness pins the group-16
+// helper-socket regression readiness boundary: after a daemon crash-restart,
+// the orphan-cleanup assertions may be judged only once the daemon is
+// actually ready (GET /health serving over the API socket), never on the
+// systemd unit state alone — with Type=exec the unit reports active as soon
+// as the binary is exec'd, while startup reconciliation only completes and
+// serves /health before the listener is bound.
+func TestRegressionGroup16CrashRestartReadiness(t *testing.T) {
+	path := "scripts/uat-regression-helper-socket.sh"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The orphan-cleanup assertions must follow the daemon-readiness gate:
+	// startup reconciliation runs before the listener is bound, so judging
+	// the cleanup on the systemd unit state alone races the startup sequence.
+	iWait := strings.Index(content, "if wait_service_health; then")
+	iOrphanOk := strings.Index(content, `reg_ok "startup reconciliation force-removed`)
+	iMAC := strings.Index(content, "/var/lib/docker-helper/workload-mac")
+	if iWait < 0 || iOrphanOk < 0 || iMAC < 0 || !(iWait < iOrphanOk && iWait < iMAC) {
+		t.Errorf("orphan-cleanup assertions must be gated behind the bounded daemon readiness wait (wait=%d orphan-ok=%d workload-mac=%d)", iWait, iOrphanOk, iMAC)
+	}
+	if !strings.Contains(content, `reg_fail "daemon did not become ready`) {
+		t.Error("bounded readiness failure path missing: daemon never ready must FAIL the regression")
+	}
+	if !strings.Contains(content, "reg_require_cmd curl") {
+		t.Error("group 16 must require curl for the daemon readiness probing")
+	}
+
+	// The readiness primitive is owned once, in the shared regression lib;
+	// neither consumer may re-define it locally (no duplicate owners).
+	if strings.Contains(content, "wait_service_health() {") {
+		t.Error("uat-regression-helper-socket.sh must not define wait_service_health locally; the shared lib is the single owner")
+	}
+	if !strings.Contains(content, "wait_service_health") {
+		t.Error("uat-regression-helper-socket.sh must call the shared wait_service_health readiness helper")
+	}
+	rtDirData, err := os.ReadFile("scripts/uat-regression-runtime-dir-socket-replacement.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtDirContent := string(rtDirData)
+	if strings.Contains(rtDirContent, "wait_service_health() {") {
+		t.Error("uat-regression-runtime-dir-socket-replacement.sh must not define wait_service_health locally; the shared lib is the single owner")
+	}
+	if !strings.Contains(rtDirContent, "wait_service_health") {
+		t.Error("uat-regression-runtime-dir-socket-replacement.sh must call the shared wait_service_health readiness helper")
+	}
+
+	fn := extractShellFunction(t, "scripts/uat-regression-lib.sh", "wait_service_health")
+
+	work := t.TempDir()
+	stub := filepath.Join(work, "stub")
+	if err := os.MkdirAll(stub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The real daemon socket file must exist so the readiness probe's
+	// `[ -S "$SOCK" ]` guard passes and the probe reaches the stub curl.
+	listener, err := net.Listen("unix", filepath.Join(work, "daemon.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	writeStub(t, stub, "curl", `#!/bin/sh
+n=$(cat "$STATE/curl" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/curl"
+[ "$n" -ge "$HEALTH_UP_FROM" ] && exit 0
+exit 7
+`)
+	writeStub(t, stub, "systemctl", `#!/bin/sh
+case "$1" in
+  is-active)
+    n=$(cat "$STATE/isactive" 2>/dev/null || echo 0)
+    n=$((n+1))
+    echo "$n" > "$STATE/isactive"
+    [ "$n" -ge "$ACTIVE_FROM" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 0
+`)
+	writeStub(t, stub, "sleep", `#!/bin/sh
+n=$(cat "$STATE/sleeps" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$STATE/sleeps"
+`)
+
+	// Both worlds report the systemd unit active from the first probe
+	// (Type=exec): a unit-state-only readiness would return immediately, so
+	// the probe counts discriminate the health readiness boundary.
+	never := 1000000
+	cases := []struct {
+		name         string
+		healthUpFrom int
+		wantRC       string
+		wantProbes   string
+	}{
+		{"unit active while /health not serving yet, health answers at probe 3", 3, "0", "3"},
+		{"unit active but /health never serves within the bounded window", never, "1", "60"},
+	}
+	var b strings.Builder
+	b.WriteString("set -uo pipefail\n")
+	fmt.Fprintf(&b, "PATH=%q:$PATH; export PATH\n", stub)
+	fmt.Fprintf(&b, "SOCK=%q\n", filepath.Join(work, "daemon.sock"))
+	fmt.Fprintf(&b, "SERVICE=docker-helper.service\n")
+	b.WriteString(fn)
+	b.WriteString("\n")
+	for i, tc := range cases {
+		state := filepath.Join(work, fmt.Sprintf("state%d", i))
+		fmt.Fprintf(&b, `
+STATE=%q
+export STATE ACTIVE_FROM=1 HEALTH_UP_FROM=%d
+rm -rf "$STATE"; mkdir -p "$STATE"
+wait_service_health; RC=$?
+printf '%%s RC=%%s PROBES=%%s SLEEPS=%%s ISACTIVE=%%s\n' \
+  %q \
+  "$RC" \
+  "$(cat "$STATE/curl" 2>/dev/null || echo 0)" \
+  "$(cat "$STATE/sleeps" 2>/dev/null || echo 0)" \
+  "$(cat "$STATE/isactive" 2>/dev/null || echo 0)"
+`, state, tc.healthUpFrom, tc.name)
+	}
+	script := filepath.Join(work, "reg16-readiness.sh")
+	if err := os.WriteFile(script, []byte(b.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runBashScriptIn(t, work, script)
+	if err != nil {
+		t.Fatalf("group 16 readiness harness run failed: %v\n%s", err, out)
+	}
+	for _, tc := range cases {
+		fields := map[string]string{}
+		for _, l := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(l, tc.name+" ") {
+				continue
+			}
+			for _, f := range strings.Fields(strings.TrimPrefix(l, tc.name+" ")) {
+				if k, v, ok := strings.Cut(f, "="); ok {
+					fields[k] = v
+				}
+			}
+			break
+		}
+		if fields["RC"] != tc.wantRC {
+			t.Errorf("case %q: readiness rc = %q, want %q", tc.name, fields["RC"], tc.wantRC)
+		}
+		if fields["PROBES"] != tc.wantProbes {
+			t.Errorf("case %q: readiness probes = %q, want %q (the wait must poll health, never accept the unit state alone)", tc.name, fields["PROBES"], tc.wantProbes)
+		}
+		if fields["ISACTIVE"] != fields["PROBES"] {
+			t.Errorf("case %q: the unit was reported active on every probe (%s vs %s) yet readiness required health", tc.name, fields["ISACTIVE"], fields["PROBES"])
+		}
+	}
+}
+
+// TestUatWorkloadSelinuxProjectionAvcClassifier pins the S13 AVC
+// classification contract: the single canonical predicate for the expected
+// enforcing projection write denial (docker_helper_container_t writing to
+// docker_helper_ro_projection_t) must recognize raw ausearch AVC records —
+// which report the permission set in braces ("denied { write }"), never as
+// "perm=write" — and must reject any unrelated permission, target type,
+// source domain, class, or permissive AVC. The same predicate drives the
+// unexpected-AVC counter, so expected projection denials never trip it.
+func TestUatWorkloadSelinuxProjectionAvcClassifier(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-workload-selinux.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "is_expected_projection_denial") {
+		t.Error("S13 must own one canonical expected-projection-denial predicate")
+	}
+
+	pred := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "is_expected_projection_denial")
+	counter := extractShellFunction(t, "scripts/uat-workload-selinux.sh", "count_unexpected_helper_avcs")
+	// The classifier must match the brace-delimited raw AVC permission set,
+	// not the non-raw "perm=write" representation (raw ausearch AVC records
+	// never carry perm=write).
+	if strings.Contains(pred, "perm=write") {
+		t.Error("the expected-projection predicate must classify via the raw brace permission set, not perm=write")
+	}
+	if !strings.Contains(pred, `\{[^}]*\bwrite\b[^}]*\}`) {
+		t.Error("the expected-projection predicate must anchor write to the raw brace-delimited permission set")
+	}
+
+	// Representative raw AVC records. The directory line mirrors the real
+	// attributable AVC produced by run 34590162433.
+	dirLine := `type=AVC msg=audit(1736800000.123:456): avc:  denied  { write } for  pid=1234 comm="cat" name="data" dev="sda1" ino=1234 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=dir permissive=0`
+	fileLine := `type=AVC msg=audit(1736800000.124:457): avc:  denied  { write } for  pid=1235 comm="cat" name="file.txt" dev="sda1" ino=1235 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=file permissive=0`
+	readLine := `type=AVC msg=audit(1736800000.125:458): avc:  denied  { read } for  pid=1236 comm="cat" name="data" dev="sda1" ino=1236 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=dir permissive=0`
+	wrongTarget := `type=AVC msg=audit(1736800000.126:459): avc:  denied  { write } for  pid=1237 comm="cat" name="data" dev="sda1" ino=1237 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_workspace_t:s0 tclass=file permissive=0`
+	wrongSource := `type=AVC msg=audit(1736800000.127:460): avc:  denied  { write } for  pid=1238 comm="cat" name="data" dev="sda1" ino=1238 scontext=system_u:system_r:docker_helper_t:s0 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=file permissive=0`
+	permissive := `type=AVC msg=audit(1736800000.128:461): avc:  denied  { write } for  pid=1239 comm="cat" name="data" dev="sda1" ino=1239 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=dir permissive=1`
+	wrongClass := `type=AVC msg=audit(1736800000.128:462): avc:  denied  { write } for  pid=1240 comm="cat" name="data" dev="sda1" ino=1240 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_ro_projection_t:s0 tclass=sock_file permissive=0`
+	unrelated := `type=AVC msg=audit(1736800000.129:463): avc:  denied  { getattr } for  pid=1241 comm="cat" name="data" dev="sda1" ino=1241 scontext=system_u:system_r:docker_helper_container_t:s0:c10,c20 tcontext=system_u:object_r:docker_helper_workspace_t:s0 tclass=file permissive=0`
+
+	// Lines carry no single quotes, so wrapping each in a bash single-quoted
+	// literal (which may span lines for the multi-line windows) is safe.
+	var b strings.Builder
+	b.WriteString("set -uo pipefail\n")
+	b.WriteString(pred)
+	b.WriteString("\n")
+	b.WriteString(counter)
+	b.WriteString("\n")
+
+	predCases := []struct{ name, line, want string }{
+		{"DIR", dirLine, "accept"},
+		{"FILE", fileLine, "accept"},
+		{"READ", readLine, "reject"},
+		{"WRONG_TARGET", wrongTarget, "reject"},
+		{"WRONG_SOURCE", wrongSource, "reject"},
+		{"WRONG_CLASS", wrongClass, "reject"},
+		{"PERMISSIVE", permissive, "reject"},
+	}
+	for _, tc := range predCases {
+		fmt.Fprintf(&b, "printf 'PRED_%s=%%s\\n' \"$(is_expected_projection_denial '%s' && echo accept || echo reject)\"\n",
+			tc.name, tc.line)
+	}
+	// Item 7: an expected projection AVC must not increment the unexpected
+	// counter. Item 8: an unrelated docker_helper AVC must still increment it.
+	fmt.Fprintf(&b, "W7='%s'\n", dirLine)
+	fmt.Fprintf(&b, "printf 'COUNT7=%%s\\n' \"$(count_unexpected_helper_avcs \"$W7\")\"\n")
+	fmt.Fprintf(&b, "W8='%s'\n", unrelated)
+	fmt.Fprintf(&b, "printf 'COUNT8=%%s\\n' \"$(count_unexpected_helper_avcs \"$W8\")\"\n")
+	fmt.Fprintf(&b, "W78='%s\n%s'\n", dirLine, unrelated)
+	fmt.Fprintf(&b, "printf 'COUNT78=%%s\\n' \"$(count_unexpected_helper_avcs \"$W78\")\"\n")
+
+	script := filepath.Join(t.TempDir(), "s13-avc.sh")
+	if err := os.WriteFile(script, []byte(b.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runBashScriptIn(t, t.TempDir(), script)
+	if err != nil {
+		t.Fatalf("S13 AVC classifier harness run failed: %v\n%s", err, out)
+	}
+	got := map[string]string{}
+	for _, l := range strings.Split(out, "\n") {
+		if k, v, ok := strings.Cut(l, "="); ok && strings.HasPrefix(k, "PRED_") {
+			got[k] = v
+		} else if k, v, ok := strings.Cut(l, "="); ok && strings.HasPrefix(k, "COUNT") {
+			got[k] = v
+		}
+	}
+	for _, tc := range predCases {
+		key := "PRED_" + tc.name
+		if got[key] != tc.want {
+			t.Errorf("predicate(%s) = %q, want %q", tc.name, got[key], tc.want)
+		}
+	}
+	if got["COUNT7"] != "0" {
+		t.Errorf("expected projection AVC must not increment the unexpected counter, got %q", got["COUNT7"])
+	}
+	if got["COUNT8"] != "1" {
+		t.Errorf("unrelated docker_helper AVC must increment the unexpected counter, got %q", got["COUNT8"])
+	}
+	if got["COUNT78"] != "1" {
+		t.Errorf("mixed window must count only the unrelated AVC as unexpected, got %q", got["COUNT78"])
+	}
+}
+
 // =============================================================================
 // Upgrade-baseline fixture invariants (Stage 0.1)
 // =============================================================================
@@ -8375,15 +8882,15 @@ func TestUpgradeBaselineGenericVocabulary(t *testing.T) {
 // TestUpgradeBaselineLifecycleSemantics verifies the DEB and RPM lifecycle
 // scripts consume the source-owned stable v2.0.0 baseline identity from the
 // single fixture owner (never as caller-controlled env inputs) and expect a
-// 2.1.x UAT candidate (a real forward upgrade).
+// 2.2.x UAT candidate (a real forward upgrade).
 func TestUpgradeBaselineLifecycleSemantics(t *testing.T) {
 	deb, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	debContent := string(deb)
-	if !strings.Contains(debContent, "UAT_VERSION:-2.1.0-uat") {
-		t.Error("DEB acceptance must default the candidate to 2.1.0-uat")
+	if !strings.Contains(debContent, "UAT_VERSION:-2.2.0-uat") {
+		t.Error("DEB acceptance must default the candidate to 2.2.0-uat")
 	}
 	if !strings.Contains(debContent, "UPGRADE_BASELINE_VERSION") {
 		t.Error("DEB acceptance must consume the fixture baseline version")
@@ -8397,8 +8904,8 @@ func TestUpgradeBaselineLifecycleSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	rpmContent := string(rpm)
-	if !strings.Contains(rpmContent, "UAT_VERSION:-2.1.0-uat") {
-		t.Error("RPM lifecycle must default the candidate to 2.1.0-uat")
+	if !strings.Contains(rpmContent, "UAT_VERSION:-2.2.0-uat") {
+		t.Error("RPM lifecycle must default the candidate to 2.2.0-uat")
 	}
 	if !strings.Contains(rpmContent, "uat-upgrade-baseline-fixture.sh") {
 		t.Error("RPM lifecycle must source the upgrade-baseline fixture owner")

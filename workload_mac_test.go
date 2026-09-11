@@ -15,12 +15,14 @@ import (
 func newTestWorkloadCoordinator(t *testing.T, backendImpl workloadMACBackend, stateRoot, runtimeRoot string) *workloadMACCoordinator {
 	t.Helper()
 	c := &workloadMACCoordinator{
-		backend:           backendImpl,
-		stateRoot:         stateRoot,
-		runtimeRoot:       runtimeRoot,
-		inspectContainers: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) { return nil, nil },
-		removeContainer:   func(ctx context.Context, containerID string) error { return nil },
-		cleanupStalePins:  func(operationID string) error { return nil },
+		backend:     backendImpl,
+		stateRoot:   stateRoot,
+		runtimeRoot: runtimeRoot,
+		docker: containerProvenance{
+			inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) { return nil, nil },
+			remove:  func(ctx context.Context, containerID string) error { return nil },
+		},
+		cleanupStalePins: func(operationID string) error { return nil },
 	}
 	return c
 }
@@ -147,7 +149,7 @@ func TestWorkloadOwnershipRecordOperationIDMustMatchDirectory(t *testing.T) {
 	}
 	c := newTestWorkloadCoordinator(t, newWorkloadAppArmorBackend(), stateRoot, runtimeRoot)
 	queries := 0
-	c.inspectContainers = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+	c.docker.inspect = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
 		queries++
 		return nil, nil
 	}
@@ -174,11 +176,12 @@ func TestCoordinatorRoundTripAppArmorReconcilesProducedState(t *testing.T) {
 	opID := testOperationID(21)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	pins := testPinnedSources(t, dir, 1)
 	if _, err := first.Prepare(workloadPreparation{
 		OperationID:   opID,
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
-		PinnedSources: []string{"/runtime/pinned/0"},
+		PinnedSources: pins,
 	}); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -270,11 +273,12 @@ func TestCoordinatorReconcileRetainsLoadedProfileWithoutSource(t *testing.T) {
 	// the crash window: record committed, profile source gone, profile
 	// still loaded in the kernel inventory.
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	pins := testPinnedSources(t, runtimeRoot, 1)
 	if _, err := first.Prepare(workloadPreparation{
 		OperationID:   opID,
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
-		PinnedSources: []string{"/runtime/pinned/0"},
+		PinnedSources: pins,
 	}); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -311,11 +315,12 @@ func TestCoordinatorReconcileClassifiesCrashBeforeProfileSource(t *testing.T) {
 	opID := testOperationID(24)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	pins := testPinnedSources(t, runtimeRoot, 1)
 	if _, err := first.Prepare(workloadPreparation{
 		OperationID:   opID,
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
-		PinnedSources: []string{"/runtime/pinned/0"},
+		PinnedSources: pins,
 	}); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -394,8 +399,11 @@ func TestCoordinatorPrepareFailureClassifiesRetainedOutcome(t *testing.T) {
 }
 
 // TestCoordinatorPrepareFailureRolledBackIsNotRetained proves the contrast
-// classification: when the partial MAC state rolls back completely, the
-// returned error is not a retained error and no durable state survives.
+// classification and the ownership-record dependency contract: when the
+// partial MAC state rolls back completely, the returned error is not a
+// retained error, and the durable ownership record stays as the ownership
+// proof of the still-live dependent pins until the caller's rollback owner
+// releases the pins and removes the record last.
 func TestCoordinatorPrepareFailureFullyRolledBack(t *testing.T) {
 	dir := t.TempDir()
 	stateRoot := filepath.Join(dir, "state")
@@ -423,8 +431,70 @@ func TestCoordinatorPrepareFailureFullyRolledBack(t *testing.T) {
 	if errors.As(err, &retained) {
 		t.Fatalf("a fully rolled-back failure must not classify as retained, got %v", err)
 	}
+	// The ownership record is the caller's rollback dependency: it binds the
+	// dependent pins until the rollback owner releases them, so a crash or
+	// pin-cleanup failure after the MAC rollback leaves a complete retry
+	// marker instead of anonymous pins.
+	if _, statErr := os.Stat(filepath.Join(stateRoot, "op_ret2", "ownership")); statErr != nil {
+		t.Fatalf("fully rolled-back preparation must keep the ownership record for the caller's rollback: %v", statErr)
+	}
+	// The caller's rollback owner releases the pins and removes the record
+	// last; after it, no owned state survives.
+	if err := c.cleanupStalePinsIn("op_ret2"); err != nil {
+		t.Fatalf("caller pin release: %v", err)
+	}
+	if err := c.removeWorkloadMACState("op_ret2"); err != nil {
+		t.Fatalf("caller ownership removal: %v", err)
+	}
 	if _, statErr := os.Stat(filepath.Join(stateRoot, "op_ret2")); !os.IsNotExist(statErr) {
-		t.Errorf("fully rolled-back preparation must leave no durable state, got %v", statErr)
+		t.Errorf("the rollback owner must leave no durable state after the pins, got %v", statErr)
+	}
+}
+
+// TestCoordinatorSELinuxRollbackRetainsLiveWorkerState is the regression for
+// the prepare-rollback live-worker contract: when an owned projection worker
+// exists and its exit cannot be proven, the prepare failure must be the
+// typed retained outcome, the durable ownership record must survive, the
+// partial projection runtime state must remain for reconciliation, and the
+// coordinator must not run a second, handle-free cleanup pass.
+func TestCoordinatorSELinuxRollbackRetainsLiveWorkerState(t *testing.T) {
+	dir := t.TempDir()
+	stateRoot := filepath.Join(dir, "state")
+	runtimeRoot := filepath.Join(dir, "runtime")
+	pinned := filepath.Join(dir, "pinned")
+	if err := os.MkdirAll(pinned, 0700); err != nil {
+		t.Fatal(err)
+	}
+	b, seam := newTestSELinuxBackend(t)
+	c := newTestWorkloadCoordinator(t, b, stateRoot, runtimeRoot)
+	// The worker starts, its projection mounts, the effective-type proof
+	// then fails, and the rollback's exit wait cannot prove the worker
+	// exited: the projection cannot be proven released while its live
+	// worker handle still exists.
+	seam.typeErr = errors.New("xattr proof unavailable")
+	seam.dieAfterFirstAlive = true
+	seam.waitExitErr = errors.New("worker did not exit after unmount")
+	prep := workloadPreparation{
+		OperationID:   "op_ret3",
+		SessionID:     testWorkloadSessionID,
+		Exposures:     []sessionFilesystemExposure{{Target: "/data", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned},
+	}
+	_, err := c.Prepare(prep)
+	if err == nil {
+		t.Fatal("a projection whose rollback cannot prove worker exit must fail Prepare")
+	}
+	var retained *workloadMACRetainedError
+	if !errors.As(err, &retained) {
+		t.Fatalf("a rollback that cannot prove the live worker exited must classify as retained, got %v", err)
+	}
+	// The durable ownership record stays so startup reconciliation can
+	// classify and finish the cleanup without the worker handle.
+	if _, statErr := os.Stat(filepath.Join(stateRoot, "op_ret3", "ownership")); statErr != nil {
+		t.Errorf("the ownership record must be retained for reconciliation, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(runtimeRoot, "op_ret3", "mount-0")); statErr != nil {
+		t.Errorf("the partial projection runtime state must be retained, got %v", statErr)
 	}
 }
 
@@ -451,11 +521,12 @@ func TestCoordinatorReconcileRetriesAfterPinCleanupFailure(t *testing.T) {
 	opID := testOperationID(31)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	pins := testPinnedSources(t, runtimeRoot, 1)
 	if _, err := first.Prepare(workloadPreparation{
 		OperationID:   opID,
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
-		PinnedSources: []string{"/runtime/pinned/0"},
+		PinnedSources: pins,
 	}); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -556,4 +627,175 @@ func TestCoordinatorStalePinLayoutAdversarial(t *testing.T) {
 			t.Fatal("a non-directory pin layout must fail the cleanup")
 		}
 	})
+}
+
+// TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage proves the
+// F6 startup ordering invariant end to end: a crashed workload's pending
+// ownership state (Docker temporarily unavailable) keeps the expired
+// session's workspace coverage intact; once Docker answers and the
+// reconciliation proves/removes the workload state, the stale coverage is
+// removed by the next session reconciliation pass.
+func TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	workspace := "/data/pending-workload"
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	mac := newSessionMACCoordinator(db, driver)
+
+	// Bind the workspace coverage to a live session so the boundary is
+	// helper-owned; the session row carries the workspace for the gate.
+	if _, err := mac.CreateSessionBinding(workspace, testWorkloadSessionID, func(cov workspaceMACCoverage) error {
+		return insertTestSessionTx(db, testMACLauncherID(t, db), testWorkloadSessionID, workspace)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Crashed workload: durable ownership record for the same session,
+	// Docker unavailable (inspect error -> container presence
+	// unclassifiable -> retained).
+	stateRoot := filepath.Join(dir, "workload-state")
+	runtimeRoot := filepath.Join(dir, "workload-runtime")
+	dockerDown := true
+	dockerInspect := func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+		if dockerDown {
+			return nil, errors.New("docker daemon unavailable")
+		}
+		return nil, nil
+	}
+	workload := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	workload.docker.inspect = dockerInspect
+	pins := testPinnedSources(t, runtimeRoot, 1)
+	if _, err := workload.Prepare(workloadPreparation{
+		OperationID:   testOperationID(61),
+		SessionID:     testWorkloadSessionID,
+		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
+		PinnedSources: pins,
+	}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	// Startup pass one: workload reconciliation retains (Docker down), the
+	// gate then keeps the coverage; the boundary must survive.
+	workload.ReconcileStartup(context.Background())
+	mac.pendingWorkloadSessions = workload.PendingWorkloadSessions
+	if err := mac.ReconcileLiveSessions(); err != nil {
+		t.Fatalf("ReconcileLiveSessions (docker down): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateRoot, testOperationID(61))); err != nil {
+		t.Fatalf("pending ownership record must be retained while Docker is unavailable: %v", err)
+	}
+	if _, err := driver.verifyCoverage(workspace); err != nil {
+		t.Fatal("workspace coverage must not be removed while the workload state is pending (Docker unavailable)")
+	}
+
+	// Startup pass two: Docker answers, the reconciliation completes the
+	// workload cleanup; the stale coverage is then removable.
+	dockerDown = false
+	workload.ReconcileStartup(context.Background())
+	if _, err := os.Stat(filepath.Join(stateRoot, testOperationID(61))); !os.IsNotExist(err) {
+		t.Fatalf("completed reconciliation must remove the ownership record, got %v", err)
+	}
+	// A fresh coordinator instance models the next daemon pass.
+	mac2 := newSessionMACCoordinator(db, driver)
+	mac2.pendingWorkloadSessions = workload.PendingWorkloadSessions
+	if err := mac2.ReconcileLiveSessions(); err != nil {
+		t.Fatalf("ReconcileLiveSessions (docker up): %v", err)
+	}
+	mac2.ReleaseSessionBinding(testWorkloadSessionID)
+	if _, err := driver.verifyCoverage(workspace); err == nil {
+		t.Fatal("stale coverage must be removed after the workload state is proven removed")
+	}
+}
+
+// TestStaleBoundaryCleanupDeferredForPendingWorkload proves the coverage
+// gate inside cleanupStaleBoundaries at the session coordinator level,
+// including the fail-closed deferral when a pending session cannot be
+// resolved to a workspace.
+func TestStaleBoundaryCleanupDeferredForPendingWorkload(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	// A live parent binding keeps its own boundary; a disjoint orphaned
+	// boundary (owned, no consumers) is the stale target under test.
+	parentWS := "/data/gated-parent"
+	childWS := "/data/gated-other"
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	mac := newSessionMACCoordinator(db, driver)
+	if _, err := mac.CreateSessionBinding(parentWS, testWorkloadSessionID, func(cov workspaceMACCoverage) error {
+		return insertTestSessionTx(db, testMACLauncherID(t, db), testWorkloadSessionID, parentWS)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO mac_boundaries (backend, boundary) VALUES (?, ?)`,
+		driver.backend(), childWS); err != nil {
+		t.Fatalf("insert child boundary: %v", err)
+	}
+	// A session row whose workspace is the orphaned boundary's own path,
+	// with pending workload state for that session.
+	pendingSessionID := "dhs_" + strings.Repeat("a", 32)
+	if err := insertTestSessionTx(db, testMACLauncherID(t, db), pendingSessionID, childWS); err != nil {
+		t.Fatalf("insert pending session row: %v", err)
+	}
+
+	// A manually inserted boundary is only tracked in the durable ownership
+	// metadata; retention/removal is asserted through that metadata.
+	boundaryOwned := func() bool {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM mac_boundaries WHERE boundary = ?`, childWS).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count > 0
+	}
+
+	// Gate with a resolvable pending session: the boundary stays.
+	mac.pendingWorkloadSessions = func() map[string]bool {
+		return map[string]bool{pendingSessionID: true}
+	}
+	if err := mac.cleanupStaleBoundaries(); err != nil {
+		t.Fatalf("cleanupStaleBoundaries: %v", err)
+	}
+	if !boundaryOwned() {
+		t.Fatal("coverage ownership must be retained while the pending workload resolves to its workspace")
+	}
+
+	// Gate with an unresolvable pending session: fail closed, nothing is
+	// removed.
+	mac.pendingWorkloadSessions = func() map[string]bool {
+		return map[string]bool{"\x00unknown-session": true}
+	}
+	if err := mac.cleanupStaleBoundaries(); err != nil {
+		t.Fatalf("cleanupStaleBoundaries (unresolvable): %v", err)
+	}
+	if !boundaryOwned() {
+		t.Fatal("coverage ownership must be retained when a pending workload session cannot be resolved")
+	}
+
+	// Gate vacuous (no pending workload): the stale coverage is removed.
+	mac.pendingWorkloadSessions = func() map[string]bool { return map[string]bool{} }
+	if err := mac.cleanupStaleBoundaries(); err != nil {
+		t.Fatalf("cleanupStaleBoundaries (vacuous): %v", err)
+	}
+	if boundaryOwned() {
+		t.Fatal("stale coverage ownership must be removed when no pending workload covers it")
+	}
+	if _, err := driver.verifyCoverage(parentWS); err != nil {
+		t.Fatal("the live parent binding's coverage must never be removed")
+	}
 }

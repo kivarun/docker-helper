@@ -248,8 +248,9 @@ type sessionFilesystemAuthority struct {
 
 // requireSessionFilesystemCapability is the filesystem-capability variant of
 // requireSessionCapability for the data-plane requests that consume a
-// Session-controlled host filesystem source (run mounts, build
-// context/Dockerfile). It reads the Session bearer authentication and the
+// Session-controlled host filesystem source. kind names the consuming
+// operation family ("run" or "build") for the symmetric rejection/audit
+// contract below. It reads the Session bearer authentication and the
 // persisted filesystem snapshot in one short read transaction, so the two
 // reads cannot observe different database generations: a Session deletion or
 // invalidation that commits concurrently either linearizes before the read
@@ -266,7 +267,7 @@ type sessionFilesystemAuthority struct {
 // data-plane actions (pull, registry login, operation status/logs/cancel)
 // keep using requireSessionCapability because they consume no
 // Session-controlled host filesystem source.
-func (a *App) requireSessionFilesystemCapability(w http.ResponseWriter, r *http.Request) (*sessionFilesystemAuthority, bool) {
+func (a *App) requireSessionFilesystemCapability(w http.ResponseWriter, r *http.Request, kind string) (*sessionFilesystemAuthority, bool) {
 	ctx := r.Context()
 	token, ok := parseBearerToken(r)
 	if !ok {
@@ -311,13 +312,9 @@ func (a *App) requireSessionFilesystemCapability(w http.ResponseWriter, r *http.
 		tx.Rollback()
 		// A corrupted issued snapshot is an internal integrity failure, not
 		// an authentication or mount-policy outcome, and is never repaired at
-		// request time.
-		opLog(ctx).Error("cannot load session filesystem snapshot",
-			slog.String("operation", "session_lookup"),
-			slog.String("session_id", session.ID),
-			slog.String("error", err.Error()),
-		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		// request time. The audit keeps exactly one <kind>.rejected record
+		// with the session provenance so the failure does not vanish.
+		writeSessionFilesystemAuthorityRejected(ctx, w, kind, session, err)
 		return nil, false
 	}
 

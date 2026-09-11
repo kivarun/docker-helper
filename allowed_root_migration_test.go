@@ -19,11 +19,11 @@ import (
 func assertAllowedRootsAccessSchema(t *testing.T, db *sql.DB, table, ownerCol, ownerTable string, withID bool) {
 	t.Helper()
 
-	cols, err := readAllowedRootsColumns(db, table)
+	cols, err := readTableColumns(db, table)
 	if err != nil {
 		t.Fatalf("read %s columns: %v", table, err)
 	}
-	colSet := make(map[string]allowedRootsColumn, len(cols))
+	colSet := make(map[string]tableColumn, len(cols))
 	for _, c := range cols {
 		colSet[c.name] = c
 	}
@@ -50,11 +50,11 @@ func assertAllowedRootsAccessSchema(t *testing.T, db *sql.DB, table, ownerCol, o
 		t.Errorf("%s root_path must be NOT NULL", table)
 	}
 
-	fks, err := readAllowedRootsForeignKeys(db, table)
+	fks, err := readTableForeignKeys(db, table)
 	if err != nil {
 		t.Fatalf("read %s foreign keys: %v", table, err)
 	}
-	if len(fks) != 1 || fks[0] != (allowedRootsFK{table: ownerTable, from: ownerCol, to: "id", onDelete: "CASCADE"}) {
+	if len(fks) != 1 || fks[0] != (tableForeignKey{table: ownerTable, from: ownerCol, to: "id", onDelete: "CASCADE"}) {
 		t.Errorf("%s foreign keys = %+v, want the canonical %s -> %s(id) CASCADE", table, fks, ownerCol, ownerTable)
 	}
 
@@ -101,12 +101,12 @@ func assertAllowedRootsAccessSchema(t *testing.T, db *sql.DB, table, ownerCol, o
 	}
 }
 
-// allowedRootsColumnSignatures builds one comparable semantic signature per
+// tableColumnSignatures builds one comparable semantic signature per
 // column of an allowed-roots table: declared name, type, nullability,
 // primary-key position, and any declared default.
-func allowedRootsColumnSignatures(t *testing.T, db *sql.DB, table string) []string {
+func tableColumnSignatures(t *testing.T, db *sql.DB, table string) []string {
 	t.Helper()
-	cols, err := readAllowedRootsColumns(db, table)
+	cols, err := readTableColumns(db, table)
 	if err != nil {
 		t.Fatalf("read %s columns: %v", table, err)
 	}
@@ -136,8 +136,8 @@ func TestInitializeDatabaseCreatesAllowedRootsAccessSchema(t *testing.T) {
 
 	assertAllowedRootsAccessSchema(t, db, "principal_allowed_roots", "principal_id", "principals", true)
 	assertAllowedRootsAccessSchema(t, db, "launcher_allowed_roots", "launcher_id", "launchers", false)
-	principalBefore := allowedRootsColumnSignatures(t, db, "principal_allowed_roots")
-	launcherBefore := allowedRootsColumnSignatures(t, db, "launcher_allowed_roots")
+	principalBefore := tableColumnSignatures(t, db, "principal_allowed_roots")
+	launcherBefore := tableColumnSignatures(t, db, "launcher_allowed_roots")
 
 	// Idempotency: a second real initialization must succeed and must not
 	// change the schema.
@@ -146,10 +146,10 @@ func TestInitializeDatabaseCreatesAllowedRootsAccessSchema(t *testing.T) {
 	}
 	assertAllowedRootsAccessSchema(t, db, "principal_allowed_roots", "principal_id", "principals", true)
 	assertAllowedRootsAccessSchema(t, db, "launcher_allowed_roots", "launcher_id", "launchers", false)
-	if got := allowedRootsColumnSignatures(t, db, "principal_allowed_roots"); !slices.Equal(got, principalBefore) {
+	if got := tableColumnSignatures(t, db, "principal_allowed_roots"); !slices.Equal(got, principalBefore) {
 		t.Errorf("principal signatures changed after second initialize: %v -> %v", principalBefore, got)
 	}
-	if got := allowedRootsColumnSignatures(t, db, "launcher_allowed_roots"); !slices.Equal(got, launcherBefore) {
+	if got := tableColumnSignatures(t, db, "launcher_allowed_roots"); !slices.Equal(got, launcherBefore) {
 		t.Errorf("launcher signatures changed after second initialize: %v -> %v", launcherBefore, got)
 	}
 }
@@ -535,8 +535,8 @@ func TestMigrateV211AllowedRootsSchemaMatchesFresh(t *testing.T) {
 		{"principal_allowed_roots", true},
 		{"launcher_allowed_roots", false},
 	} {
-		want := allowedRootsColumnSignatures(t, fresh, spec.table)
-		got := allowedRootsColumnSignatures(t, db, spec.table)
+		want := tableColumnSignatures(t, fresh, spec.table)
+		got := tableColumnSignatures(t, db, spec.table)
 		if !slices.Equal(got, want) {
 			t.Errorf("%s migrated signatures %v != fresh signatures %v", spec.table, got, want)
 		}
@@ -544,7 +544,7 @@ func TestMigrateV211AllowedRootsSchemaMatchesFresh(t *testing.T) {
 
 	// Explicit declared types: the owner column types differ between the two
 	// tables and must survive the rebuild.
-	principal := allowedRootsColumnSignatures(t, db, "principal_allowed_roots")
+	principal := tableColumnSignatures(t, db, "principal_allowed_roots")
 	wantPrincipal := []string{
 		"id INTEGER PK=1",
 		"principal_id INTEGER NOT NULL",
@@ -554,7 +554,7 @@ func TestMigrateV211AllowedRootsSchemaMatchesFresh(t *testing.T) {
 	if !slices.Equal(principal, wantPrincipal) {
 		t.Errorf("principal declared schema = %v, want %v", principal, wantPrincipal)
 	}
-	launcher := allowedRootsColumnSignatures(t, db, "launcher_allowed_roots")
+	launcher := tableColumnSignatures(t, db, "launcher_allowed_roots")
 	wantLauncher := []string{
 		"launcher_id TEXT NOT NULL",
 		"root_path TEXT NOT NULL",

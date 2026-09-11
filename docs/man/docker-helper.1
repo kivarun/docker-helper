@@ -228,7 +228,7 @@ never prepares MAC state. In system mode, MAC coverage for a concrete
 workspace is handled by the session lifecycle at session creation.
 Omitted \fB\-\-access\fR is the canonical read_write grant.
 .TP
-.B docker-helper config allowed-root set-access PATH ACCESS
+.B docker-helper config allowed-root set-access PATH read_only|read_write
 Change the access mode (read_write or read_only) of one stored global
 allowed root, matched by the stored canonical identity.
 .TP
@@ -266,7 +266,7 @@ runtime, then removes the principal (launchers via FK cascade).
 Add an allowed root for a principal. Omitted \fB\-\-access\fR is the
 canonical read_write grant.
 .TP
-.B docker-helper principal allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH ACCESS
+.B docker-helper principal allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH read_only|read_write
 Change the access mode (read_write or read_only) of one stored principal
 allowed root, matched by the stored canonical identity.
 .TP
@@ -365,7 +365,7 @@ default launcher is targeted. An add on an inherit launcher narrows it
 to restricted scope atomically with the insert. Omitted \fB\-\-access\fR
 is the canonical read_write grant.
 .TP
-.B docker-helper launcher allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER] PATH ACCESS
+.B docker-helper launcher allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER] PATH read_only|read_write
 Change the access mode (read_write or read_only) of one stored launcher
 allowed root, matched by the stored canonical identity. The scope mode
 is never changed.

@@ -423,7 +423,7 @@ var principalAllowedRootAddCommand = &Command{
 var principalAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of a principal allowed root",
-	Usage:      "docker-helper principal allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH ACCESS",
+	Usage:      "docker-helper principal allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH read_only|read_write",
 	MinPosArgs: 3,
 	MaxPosArgs: 3,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

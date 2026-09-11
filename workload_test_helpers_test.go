@@ -29,6 +29,29 @@ func testOperationID(n int) string {
 	return fmt.Sprintf("op_%032x", n)
 }
 
+// testPinnedSources creates real pinned directory sources (the node kind a
+// completed mount-pin stage leaves for a directory exposure) and returns
+// their paths, so backend preparation can inspect the pinned kernel
+// materialization fail-closed. Regular-file pins are created explicitly by
+// the tests that exercise file-kind exposure.
+func testPinnedSources(t *testing.T, dir string, count int) []string {
+	t.Helper()
+	paths := make([]string, count)
+	for i := range paths {
+		paths[i] = filepath.Join(dir, fmt.Sprintf("pin-%d", i))
+		if err := os.MkdirAll(filepath.Dir(paths[i]), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(paths[i], 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(paths[i], "node"), []byte("pin"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return paths
+}
+
 // profileNameFromSource extracts the declared profile name from a generated
 // profile source, mirroring how the kernel inventory names loaded profiles.
 func profileNameFromSource(source string) string {
@@ -118,15 +141,31 @@ type testProjectionWorker struct {
 	isAlive    bool
 	seam       *testSELinuxWorkloadSeam
 	mountpoint string
+	// dieAfterFirstAlive reproduces a worker whose first liveness probe
+	// succeeds and whose later probe reports it gone while the exit wait
+	// still fails — the live-worker-handle rollback reproduction.
+	dieAfterFirstAlive bool
+	aliveCalled        bool
+	// waitExitErr makes the exit wait fail (the worker cannot be proven
+	// exited), which the backend must report as a retained rollback.
+	waitExitErr error
 }
 
-func (w *testProjectionWorker) alive() bool { return w.isAlive }
+func (w *testProjectionWorker) alive() bool {
+	if w.dieAfterFirstAlive {
+		if w.aliveCalled {
+			return false
+		}
+		w.aliveCalled = true
+	}
+	return w.isAlive
+}
 
 func (w *testProjectionWorker) waitExit(timeout time.Duration) error {
 	if w.seam != nil {
 		w.seam.events = append(w.seam.events, "worker-exit "+w.mountpoint)
 	}
-	return nil
+	return w.waitExitErr
 }
 
 // testWorkerCall records one bindfs worker invocation.
@@ -165,6 +204,13 @@ type testSELinuxWorkloadSeam struct {
 	// events records the release-mechanics call order (unmounts and worker
 	// exits) so tests can prove dependency ordering.
 	events []string
+	// dieAfterFirstAlive makes every created worker's second liveness
+	// probe report it gone (live-handle rollback reproduction).
+	dieAfterFirstAlive bool
+	// waitExitErr makes every worker's exit wait fail (the worker cannot
+	// be proven exited), which the backend must report as a retained
+	// rollback.
+	waitExitErr error
 }
 
 // testMountOps is the fake workloadMountOps bound to the seam.
@@ -186,18 +232,6 @@ func (m *testMountOps) isMountpoint(path string) (bool, error) {
 func (m *testMountOps) mountBind(source, target string) error {
 	m.seam.binds = append(m.seam.binds, [2]string{source, target})
 	m.seam.mounted[target] = true
-	return nil
-}
-
-func (m *testMountOps) unmount(path string) error {
-	m.seam.unmountCalls = append(m.seam.unmountCalls, path)
-	delete(m.seam.mounted, path)
-	return nil
-}
-
-func (m *testMountOps) unmountLazy(path string) error {
-	m.seam.unmountCalls = append(m.seam.unmountCalls, path+" lazy")
-	delete(m.seam.mounted, path)
 	return nil
 }
 
@@ -242,7 +276,13 @@ func newTestSELinuxBackend(t *testing.T) (*workloadSELinuxBackend, *testSELinuxW
 		if seam.startErr != nil {
 			return nil, seam.startErr
 		}
-		worker := &testProjectionWorker{isAlive: true, seam: seam, mountpoint: mountpoint}
+		worker := &testProjectionWorker{
+			isAlive:            true,
+			seam:               seam,
+			mountpoint:         mountpoint,
+			dieAfterFirstAlive: seam.dieAfterFirstAlive,
+			waitExitErr:        seam.waitExitErr,
+		}
 		seam.workers = append(seam.workers, worker)
 		seam.mounted[mountpoint] = true
 		seam.mountCalls = append(seam.mountCalls, testWorkerCall{backing: backing, mountpoint: mountpoint, context: context})
@@ -273,10 +313,12 @@ func installTestWorkloadMACForTest(t *testing.T, app *App, backend LSMBackend) *
 		backend:     backendImpl,
 		stateRoot:   filepath.Join(app.Config.StateDir, workloadMACStateRootName),
 		runtimeRoot: filepath.Join(app.Config.RuntimeDir, workloadMACStateRootName),
-		inspectContainers: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
-			return nil, nil
+		docker: containerProvenance{
+			inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+				return nil, nil
+			},
+			remove: func(ctx context.Context, containerID string) error { return nil },
 		},
-		removeContainer:  func(ctx context.Context, containerID string) error { return nil },
 		cleanupStalePins: func(operationID string) error { return nil },
 	}
 	app.WorkloadMAC = c

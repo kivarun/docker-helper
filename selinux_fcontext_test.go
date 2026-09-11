@@ -259,11 +259,18 @@ func TestSELinuxPolicySemanageTransition(t *testing.T) {
 		"allow docker_helper_t semanage_t:process2 { nnp_transition };",
 		"allow docker_helper_t semanage_exec_t:file { execute read open getattr map };",
 		"allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };",
+		// bin_t execution is only the source-domain interpreter permission
+		// required by the semanage transition. Same-domain generic execution
+		// stays forbidden; bindfs uses its dedicated exec type and projection
+		// cleanup uses the kernel unmount API directly.
 		"allow docker_helper_t bin_t:file { execute read open getattr map };",
 	} {
 		if !strings.Contains(content, rule) {
 			t.Errorf("policy must grant: %s", rule)
 		}
+	}
+	if strings.Contains(content, "allow docker_helper_t bin_t:file { execute read open getattr map execute_no_trans };") {
+		t.Error("policy must not grant generic bin_t execute_no_trans")
 	}
 }
 
@@ -748,7 +755,7 @@ func TestOverlapEscapedPathSibling(t *testing.T) {
 	}
 	created, err := mgr.ensureWorkspaceFcontext("/data.test")
 	if err != nil {
-		t.Fatalf("sibling /data.test2 should not conflict with /data.test, got: %v", err)
+		t.Fatalf("sibling /data.test2 should not conflict, got: %v", err)
 	}
 	if !created {
 		t.Error("expected newly created mapping")
@@ -1911,6 +1918,63 @@ func TestSELinuxRootSlashEquivalenceSourceOverlap(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "overlaps") {
 		t.Errorf("expected overlap error, got: %v", err)
+	}
+}
+
+// TestSELinuxPolicyWorkloadMACStateAccess verifies the SELinux policy grants
+// the confined daemon the durable workload-MAC state lifecycle on
+// /var/lib/docker-helper (docker_helper_state_t): directory create/rmdir for
+// the workload-mac state root and per-operation directories, and file rename
+// for the crash-safe ownership-record commit. Without the dir create grant
+// the daemon fails startup on the enforcing guest with
+// "mkdir /var/lib/docker-helper/workload-mac: permission denied".
+func TestSELinuxPolicyWorkloadMACStateAccess(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name create rmdir };") {
+		t.Error("SELinux policy must grant dir create/rmdir on docker_helper_state_t for the durable workload-MAC state lifecycle")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink rename };") {
+		t.Error("SELinux policy must grant file rename on docker_helper_state_t for the crash-safe ownership-record commit")
+	}
+}
+
+// TestSELinuxPolicyBindfsProjectionMount proves the shipped SELinux mount
+// mechanics of the bindfs read-only projection backend. With the fixed
+// context= mount option the mounted superblock carries the projection
+// context itself (docker_helper_ro_projection_t), so mount/unmount/getattr
+// must be granted for that type in addition to the fuse filesystem type;
+// without it the FUSE mount fails closed with EACCES under enforcing
+// SELinux and the read-only projection backend is unreachable.
+func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Join(strings.Fields(string(data)), " ")
+	for _, rule := range []string{
+		"allow docker_helper_t docker_helper_bindfs_exec_t:file { getattr open read execute execute_no_trans map };",
+		"allow docker_helper_t fuse_device_t:chr_file { getattr open read write ioctl };",
+		"allow docker_helper_t fusefs_t:filesystem { mount unmount getattr relabelfrom };",
+		"allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr relabelto relabelfrom };",
+		"class filesystem { mount remount unmount getattr associate mounton relabelfrom relabelto };",
+		"allow docker_helper_ro_projection_t fusefs_t:filesystem associate;",
+		"allow docker_helper_t docker_helper_runtime_t:dir { mounton };",
+		"allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };",
+		"allow docker_helper_t mount_var_run_t:dir { search };",
+		"allow docker_helper_t mount_var_run_t:file { getattr read open };",
+		"class capability { dac_read_search dac_override sys_admin };",
+	} {
+		if !strings.Contains(content, rule) {
+			t.Errorf("SELinux policy must grant: %s", rule)
+		}
+	}
+	if strings.Contains(content, "domain_auto_trans docker_helper_t docker_helper_bindfs_exec_t") ||
+		strings.Contains(content, "type_transition docker_helper_t docker_helper_bindfs_exec_t") {
+		t.Error("bindfs must stay in the daemon domain (execute_no_trans), not transition to its own domain")
 	}
 }
 

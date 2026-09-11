@@ -622,6 +622,7 @@ config.json. If present, configuration validation and daemon startup fail:
 | `database_path` | SQLite database path |
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
+| `allowed_root_entries` | Rich `{path, access}` projection of the canonical global allowed roots (show-only; a config.json carrying it fails validation) |
 | `mode` | `"user"` or `"system"` |
 
 ### 3. Start the daemon

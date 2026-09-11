@@ -40,7 +40,9 @@ IMAGE="alpine:3.24"
 
 # --- ensure /opt is an authorized global root (authorization, not MAC) ----------
 dh config allowed-root add /opt >/dev/null 2>&1 || true
-if ! dh config allowed-root list 2>/dev/null | grep -qx '/opt'; then
+# 2.2 list output is the human PATH/ACCESS table: match the /opt data row,
+# not the legacy exact line.
+if ! dh config allowed-root list 2>/dev/null | awk 'NF && $1 ~ /^\// {print $1}' | grep -qx '/opt'; then
   reg_fail "cannot add /opt to global allowed roots (authorization prerequisite)"
 fi
 dh reload --system >/dev/null 2>&1 || reg_fail "config reload failed after adding /opt root"
