@@ -40,7 +40,7 @@
 #   UAT_RPM_SHA256          expected SHA-256 of the candidate RPM (required)
 #   UAT_BASELINE211_RPM     guest path of the pinned v2.1.1 baseline RPM (required)
 #   UAT_BASELINE211_SHA256  expected SHA-256 of the baseline RPM (required)
-#   UAT_ALLOWED_ROOT        global allowed root (default /opt)
+#   UAT_ALLOWED_ROOT        global allowed root (default /home/opc/uat-mig211-roots)
 #
 # Requires: root, systemd, Docker, rpm. Exits as above.
 
@@ -48,7 +48,17 @@ set -uo pipefail
 
 VERSION="${UAT_VERSION:-2.2.0-uat}"
 BASELINE_VERSION="2.1.1"
-ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/opt}"
+# The migration guest's global allowed root lives under /home. Location does
+# not affect the migration semantics under test (path-only policy, ownership,
+# credentials, snapshots), but it decides which MAC machinery the v2.1.1
+# baseline itself can serve: on an enforcing SELinux host the v2.1.1 policy
+# cannot run restorecon for its own non-home fcontext path (captured on
+# run 6: "restorecon failed for /opt/...: exit status 255"), so /opt-hosted
+# workspaces would make the pre-upgrade session seeding fail for baseline
+# limitations unrelated to 2.2 migration behavior. Home workspaces are the
+# pre-upgrade state the baseline actually serves on both MAC backends
+# (v2.1.1 skips fcontext for /home paths).
+ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home/opc/uat-mig211-roots}"
 RPM_PATH_IN="${UAT_RPM:-}"
 RPM_SHA256_IN="${UAT_RPM_SHA256:-}"
 BASELINE_RPM_IN="${UAT_BASELINE211_RPM:-}"

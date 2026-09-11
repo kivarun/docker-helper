@@ -185,9 +185,13 @@ issue_launcher_credential() {
 # prints the session ID on success (the bearer is stored in /tmp/uat-am-<id>).
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json 2>/dev/null || true)"
+  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json 2>&1 || true)"
   id="$(printf '%s' "$out" | json_field id)"
-  [ -n "$id" ] || return 1
+  if [ -z "$id" ]; then
+    printf 'session create failed (workspace %s): %s\n' \
+      "$ws" "$(printf '%s\n' "$out" | redact | tail -3)" >&2
+    return 1
+  fi
   printf '%s' "$out" | json_field token > "/tmp/uat-am-tok-$id"; chmod 600 "/tmp/uat-am-tok-$id"
   printf '%s' "$id"
 }

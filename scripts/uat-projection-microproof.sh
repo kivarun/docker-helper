@@ -83,7 +83,7 @@ fi
 # to collect.
 docker-helper principal allowed-root add --system --access read_only opc /opt/uat-a3-ro \
   >"$A3_DIR/principal-add.out" 2>&1
-if docker-helper principal allowed-root list --system opc 2>/dev/null | grep -qx '/opt/uat-a3-ro'; then
+if docker-helper principal allowed-root list --system opc 2>/dev/null | grep -F '/opt/uat-a3-ro'; then
   echo "MICROPROOF_PRINCIPAL_ROOT=yes"
 else
   echo "MICROPROOF_PRINCIPAL_ROOT=no (principal add: $(redact <"$A3_DIR/principal-add.out" | tail -2))"
@@ -101,7 +101,9 @@ fi
 if [ -z "$SESSION_JSON" ]; then
   SESSION_JSON="$(docker-helper session create --system --workspace /opt/uat-a3-ro/ws --json 2>&1 || true)"
 fi
-TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
+# Tolerant of both pretty and compact JSON token forms (run 5/6 proved the
+# daemon answers compact JSON; the spaced form alone misses it).
+TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": ?"\K[^"]+' | head -1)"
 if [ -z "$TOKEN" ]; then
   echo "MICROPROOF_SESSION_CREATED=no"
   printf '%s\n' "$SESSION_JSON" | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g'

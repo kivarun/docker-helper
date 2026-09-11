@@ -4256,6 +4256,30 @@ esac
 	}
 }
 
+// writeFakeSemanage creates a semanage script that logs calls and, for the
+// local-customization listing (fcontext -l -C -n), prints the given fixture
+// rules. All other semanage invocations log and succeed.
+func writeFakeSemanage(t *testing.T, fakeDir, logFile string, localRules string) {
+	t.Helper()
+	rulesPath := filepath.Join(fakeDir, "semanage-fcontext-rules.txt")
+	if err := os.WriteFile(rulesPath, []byte(localRules), 0644); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+case "$*" in
+  *"fcontext -l -C -n"*)
+    cat "%s"
+    exit 0
+    ;;
+esac
+exit 0
+`, logFile, rulesPath)
+	if err := os.WriteFile(filepath.Join(fakeDir, "semanage"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // writeFakeRestorecon creates a restorecon script that logs calls.
 func writeFakeRestorecon(t *testing.T, fakeDir, logFile string) {
 	t.Helper()
@@ -5595,6 +5619,105 @@ func TestRpmPreremoveFinalEraseSELinux(t *testing.T) {
 	}
 	if !found {
 		t.Error("must call semodule -r docker_helper on final erase")
+	}
+}
+
+// TestRpmPreremoveFinalEraseSELinuxFcontextCleanup verifies erase-time
+// cleanup of helper-owned local fcontext customizations on an enforcing
+// SELinux host. The confined daemon registers local fcontext rules for
+// non-home workspace boundaries (docker_helper_workspace_t); those local
+// rules reference types only the docker_helper module defines, so an
+// uncleaned rule fails `semodule -r` store validation and leaves the module
+// loaded after erase — stale durable state that then also breaks later
+// package actions in the same environment. The preremove must delete exactly
+// the rules whose context references a docker_helper type, leave foreign
+// local customizations untouched, and do all of it BEFORE removing the
+// module.
+func TestRpmPreremoveFinalEraseSELinuxFcontextCleanup(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeSemanage(t, fakeDir, logFile,
+		"/opt/uat-a3-ro/ws(/.*)?  all files  system_u:object_r:docker_helper_workspace_t:s0\n"+
+			"/opt/foreign-tree  all files  system_u:object_r:usr_t:s0\n")
+
+	// SELinux enforcing, AppArmor disabled.
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+		})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+	firstList := -1
+	firstDelete := -1
+	firstRemove := -1
+	for i, c := range calls {
+		switch {
+		case strings.Contains(c, "semanage") && strings.Contains(c, "fcontext -l"):
+			if firstList < 0 {
+				firstList = i
+			}
+		case strings.Contains(c, "semanage") && strings.Contains(c, "fcontext -d"):
+			if firstDelete < 0 {
+				firstDelete = i
+			}
+		case strings.Contains(c, "semodule") && strings.Contains(c, "-r"):
+			if firstRemove < 0 {
+				firstRemove = i
+			}
+		}
+	}
+	if firstList < 0 {
+		t.Fatal("preremove must list local fcontext customizations on final erase")
+	}
+	if firstDelete < 0 {
+		t.Fatal("preremove must delete helper-owned local fcontext rules on final erase")
+	}
+	if firstRemove < 0 {
+		t.Fatal("preremove must call semodule -r docker_helper on final erase")
+	}
+	if firstList > firstDelete || firstDelete > firstRemove {
+		t.Fatalf("fcontext cleanup must precede semodule -r: list=%d delete=%d remove=%d (%v)",
+			firstList, firstDelete, firstRemove, calls)
+	}
+	deletedForeign := false
+	deletedHelper := false
+	for _, c := range calls {
+		if strings.Contains(c, "fcontext -d") {
+			if strings.Contains(c, "foreign-tree") {
+				deletedForeign = true
+			}
+			if strings.Contains(c, "uat-a3-ro") {
+				deletedHelper = true
+			}
+		}
+	}
+	if deletedForeign {
+		t.Error("preremove must not delete foreign local fcontext customizations")
+	}
+	if !deletedHelper {
+		t.Error("preremove must delete the docker_helper-context rule")
 	}
 }
 
