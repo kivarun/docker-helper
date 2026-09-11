@@ -134,42 +134,47 @@ echo "MICROPROOF_RUN_RC=$RUN_RC"
 #            docker_helper_t) via a bounded transient unit.
 probe_bindfs_sandbox() { # label nnp restrictns mdwe selinuxctx
   local label="$1" nnp="$2" rns="$3" mdwe="$4" sctx="$5"
-  local src mp ctx out rc unit
+  local src mp ctx rc unit props
   src=/opt/uat-a3-probe-src; mp=/run/docker-helper/a3probe-mp
   ctx=system_u:object_r:docker_helper_ro_projection_t:s0
-  rm -rf "$src" "$mp" /tmp/uat-a3-bindfs-probe.out
+  rm -rf "$src" "$mp" /tmp/uat-a3-unit.ctx
   mkdir -p "$src" "$mp"
   echo probe > "$src/f"
   unit="uat-a3bindfs-${label}"
-  out=/tmp/uat-a3-bindfs-probe.out
-  local sprops=()
-  [ "$nnp" = yes ] && sprops+=(--property=NoNewPrivileges=true)
-  [ "$rns" = yes ] && sprops+=(--property=RestrictNamespaces=true)
-  [ "$mdwe" = yes ] && sprops+=(--property=MemoryDenyWriteExecute=true)
-  [ "$sctx" = yes ] && sprops+=(--property=SELinuxContext=system_u:system_r:docker_helper_t:s0)
-  echo "PROBE $label: systemd-run ${sprops[*]} bindfs -f -o allow_other -o context=$ctx $src $mp"
-  rm -f /tmp/uat-a3-unit.out /tmp/uat-a3-unit.err /tmp/uat-a3-unit.ctx
-  systemd-run --collect --unit="$unit" \
-    "${sprops[@]}" \
-    --property=StandardOutput=append:/tmp/uat-a3-unit.out \
-    --property=StandardError=append:/tmp/uat-a3-unit.err \
-    --property=ExecStartPost=/bin/sh\ -c\ '"id -Z > /tmp/uat-a3-unit.ctx 2>&1; grep fuse /proc/self/mounts >> /tmp/uat-a3-unit.ctx 2>&1 || echo no-fuse-mount-in-ns >> /tmp/uat-a3-unit.ctx"' \
-    bindfs -f -o allow_other -o "context=$ctx" "$src" "$mp" >"$out" 2>&1
+  echo "PROBE $label: static unit bindfs -f -o allow_other -o context=$ctx $src $mp (nnp=$nnp rns=$rns mdwe=$mdwe sctx=$sctx)"
+  rm -f "/etc/systemd/system/${unit}.service"
+  {
+    echo "[Unit]"
+    echo "Description=uat-a3 bindfs probe $label"
+    echo "[Service]"
+    echo "Type=simple"
+    echo "ExecStart=/usr/bin/bindfs -f -o allow_other -o context=$ctx $src $mp"
+    echo "ExecStartPost=/bin/sh -c 'sleep 1; id -Z > /tmp/uat-a3-unit.ctx; cat /proc/self/status | grep CapEff >> /tmp/uat-a3-unit.ctx; grep fuse /proc/self/mounts >> /tmp/uat-a3-unit.ctx || echo no-fuse-mount-in-ns >> /tmp/uat-a3-unit.ctx'"
+    [ "$nnp" = yes ] && echo "NoNewPrivileges=true"
+    [ "$rns" = yes ] && echo "RestrictNamespaces=true"
+    [ "$mdwe" = yes ] && echo "MemoryDenyWriteExecute=true"
+    [ "$sctx" = yes ] && echo "SELinuxContext=system_u:system_r:docker_helper_t:s0"
+  } >"/etc/systemd/system/${unit}.service"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl start "$unit.service"
   rc=$?
-  echo "PROBE $label: systemd-run rc=$rc"
+  echo "PROBE $label: systemctl start rc=$rc"
   sleep 2
   if mount | grep -F "$mp" >/dev/null 2>&1; then
     echo "PROBE $label: MOUNTED=yes"
   else
     echo "PROBE $label: MOUNTED=no"
-    echo "PROBE $label: unit out/err files:"
-    cat /tmp/uat-a3-unit.out /tmp/uat-a3-unit.err 2>/dev/null | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
-    echo "PROBE $label: unit namespace view (ctx + fuse mounts):"
+    echo "PROBE $label: unit namespace view (ctx + caps + fuse mounts after sleep 1):"
     cat /tmp/uat-a3-unit.ctx 2>/dev/null | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
-    systemctl status "$unit.service" --no-pager 2>&1 | head -10 || true
+    echo "PROBE $label: unit journal (last 8):"
+    journalctl -u "$unit.service" --no-pager --no-hostname -n 8 2>/dev/null \
+      | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
   fi
   systemctl stop "$unit.service" >/dev/null 2>&1 || true
+  systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
   fusermount3 -u "$mp" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${unit}.service"
+  systemctl daemon-reload >/dev/null 2>&1 || true
   rm -rf "$src" "$mp"
 }
 
