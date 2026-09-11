@@ -147,9 +147,12 @@ probe_bindfs_sandbox() { # label selinuxctx
     echo "[Unit]"
     echo "Description=uat-a3 bindfs probe $label"
     echo "[Service]"
-    echo "Type=simple"
-    echo "ExecStart=/usr/bin/bindfs -f -o allow_other -o context=$ctx $src $mp"
-    echo "ExecStartPost=/bin/sh -c 'sleep 1; id -Z > /tmp/uat-a3-unit.ctx; grep fuse /proc/self/mounts >> /tmp/uat-a3-unit.ctx || echo no-fuse-mount-in-ns >> /tmp/uat-a3-unit.ctx'"
+    echo "Type=oneshot"
+    case "$label" in
+      7-anyexec) echo "ExecStart=/bin/true" ;;
+      8-sh-main) echo "ExecStart=/bin/sh -c 'id -Z > /tmp/uat-a3-unit.ctx; bindfs -f -o allow_other -o context=$ctx $src $mp & sleep 1; grep fuse /proc/self/mounts >> /tmp/uat-a3-unit.ctx; kill %1'" ;;
+      *) echo "ExecStart=/usr/bin/bindfs -f -o allow_other -o context=$ctx $src $mp" ;;
+    esac
     [ -n "$sctx" ] && echo "SELinuxContext=$sctx"
   } >"/etc/systemd/system/${unit}.service"
   systemctl daemon-reload >/dev/null 2>&1 || true
@@ -228,13 +231,17 @@ fusermount3 --version 2>&1 || true
 probe_bindfs "1-plain-unconfined" no no
 probe_bindfs "2-context-unconfined" yes no
 # Probe the service-execution domains against the packaged bindfs binary:
-#   4-unconfined-shell-equivalent: the caller's own domain (works: probes 1-2);
 #   5-service-default-domain: a systemd service without an explicit context
-#     (the run-13 static probe failed at EXEC: initrc_t cannot execute bindfs);
-#   6-daemon-domain: docker_helper_t, the exact production daemon domain (the
-#     daemon execs bindfs fine; its mount fails with EACCES and no AVC).
+#     (runs 13-14 failed at EXEC: the service domain cannot execute bindfs);
+#   6-daemon-domain: docker_helper_t, the exact production daemon domain;
+#   7-anyexec: ExecStart=/bin/true — if even this fails, the service exec
+#     path itself is broken for ANY binary (not bindfs-specific);
+#   8-sh-main: /bin/sh as the main process that then execs bindfs — if sh
+#     starts but bindfs fails, the bindfs file type is the issue.
 probe_bindfs_sandbox "5-service-default" ""
 probe_bindfs_sandbox "6-daemon-domain" "system_u:system_r:docker_helper_t:s0"
+probe_bindfs_sandbox "7-anyexec" ""
+probe_bindfs_sandbox "8-sh-main" ""
 echo "auditd state: $(systemctl is-active auditd 2>&1 || true)"
 echo "PROBES_DONE"
 
@@ -242,6 +249,10 @@ echo "PROBES_DONE"
 echo "MICROPROOF AVC capture (ausearch last 5 minutes, complete bounded):"
 AVC_START="$(date +'%m/%d/%Y %H:%M:%S' -d '-5 min')"
 ausearch -m AVC -m USER_AVC --start "$AVC_START" 2>/dev/null | tail -60 || true
+  echo "--- raw audit log tail (audit.log) ---"
+  tail -200 /var/log/audit/audit.log 2>/dev/null | grep -iE 'avc|denied' | tail -25 || echo "(audit.log absent or no avc lines)"
+  echo "--- labels of the exec paths ---"
+  ls -Z /usr/bin/bindfs /bin/sh /bin/true 2>&1 || true
 echo "--- kernel AVC view (journalctl -k) ---"
 journalctl -k --no-pager --no-hostname -n 200 2>/dev/null | grep -iE 'avc|selinux' | tail -30 || true
 echo "--- dmesg AVC fallback view ---"
