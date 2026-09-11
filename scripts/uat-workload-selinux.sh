@@ -49,7 +49,6 @@
 #   UAT_PROOF_BIN      guest path of the host-compiled live harness (required)
 #   UAT_SOURCE_SHA     the gate source SHA bound into candidate.manifest (required)
 #   UAT_MANIFEST       guest path of candidate.manifest (required)
-#   UAT_ALLOWED_ROOT   global allowed root (default /opt)
 #   UAT_PRINCIPAL      OS user mapped to the principal (default opc)
 #   UAT_EVIDENCE_DIR   guest evidence dir for the harness (default /tmp/uat-wls-evidence)
 #
@@ -64,7 +63,6 @@ VERSION="${UAT_VERSION:-2.2.0-uat}"
 # tilde-expands a bare "~" replacement in ${var//pat/rep} ($HOME), so the
 # transform goes through tr.
 RPM_VERSION="$(printf '%s' "$VERSION" | tr '-' '~')"
-ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/opt}"
 PRINCIPAL="${UAT_PRINCIPAL:-opc}"
 RPM_PATH_IN="${UAT_RPM:-}"
 RPM_SHA256_IN="${UAT_RPM_SHA256:-}"
@@ -347,9 +345,9 @@ else
   fi
 fi
 
-# The principal's home must sit under a global allowed root (2.2 contract),
-# so the ceiling carries both the SELinux fcontext scenario tree (/opt) and
-# the guest user's home.
+# The principal's home must sit under the global allowed root (2.2 contract),
+# so this acceptance tree lives under /home/opc. Non-home fcontext lifecycle
+# remains owned by the targeted SELinux regression groups.
 if dh init --allowed-root /home/opc >/tmp/uat-wls-init.log 2>&1; then
   acc_ok "system init (global ceiling: /home/opc)"
   dh config allowed-root list 2>/dev/null | sed 's/^/  config-roots: /' >&2 || true
@@ -383,8 +381,7 @@ docker pull alpine:3.19 >/dev/null 2>&1 || true
 # ---- fixture: policy tree with one RO region ---------------------------------
 # One global ceiling (dh init takes a single --allowed-root): it must contain
 # the principal's home (2.2 principal-home contract), so the tree lives under
-# /home/opc. The non-home fcontext lifecycle is exercised by the A3
-# micro-proof and the targeted regression groups instead.
+# /home/opc. Non-home fcontext lifecycle stays with the targeted regressions.
 TREE="/home/opc/uat-wl-tree"
 rm -rf "$TREE"
 mkdir -p "$TREE/work" "$TREE/work/project" "$TREE/work/pipeline-inputs"
@@ -487,7 +484,8 @@ fi
 # scenario S7: bindfs projection really used on the packaged RPM path
 # ==============================================================================
 say "S7: bindfs projection used on the packaged RPM path"
-dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
   sh -ec 'sleep 12; cat /mnt/inputs/input.txt' >/tmp/uat-wls-s7.log 2>&1 &
 BG_PID=$!
 PROJ_EVIDENCE="$(wait_bindfs_projection "$BG_PID" || true)"
