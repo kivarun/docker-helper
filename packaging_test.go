@@ -9778,7 +9778,7 @@ func TestAccessModesHarnessIssuanceNarrowing(t *testing.T) {
 	// baseline, and the Session inventory is the fail-closed
 	// session_list_count owner (never a grepped count that can silently
 	// equalize on an inspection failure).
-	if !strings.Contains(content, `acc_ok "14 issuance-time widening refused with invalid_filesystem_policy: no Session, no container/pin/workload-MAC residue"`) {
+	if !strings.Contains(content, `acc_ok "14 issuance-time widening refused with invalid_filesystem_policy: bounded message, no Session/bearer, matching audit record, no container/pin/workload-MAC residue"`) {
 		t.Error("the widening refusal proof is incomplete (refusal + no-state contract)")
 	}
 	for _, must := range []string{
@@ -9825,6 +9825,48 @@ func TestAccessModesHarnessIssuanceNarrowing(t *testing.T) {
 	}
 	if createCount != 1 {
 		t.Errorf("the refusal proof must contain exactly one tested widening attempt, got %d", createCount)
+	}
+
+	// The refusal evidence is the full stable contract: the bounded
+	// non-disclosing public message, no Session and no bearer/credential
+	// material in the response (credential IDs are not secrets and are
+	// deliberately not asserted), and the mandatory matching session.create
+	// invalid_filesystem_policy audit record of the bounded window — a
+	// missing record is a failed proof, never an accepted silence.
+	for _, must := range []string{
+		`printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid session filesystem policy'`,
+		`! printf '%s\n' "$WIDEN_OUT" | grep -q 'dhs_'`,
+		`! printf '%s\n' "$WIDEN_OUT" | grep -q 'dht_'`,
+		`! printf '%s\n' "$WIDEN_OUT" | grep -q 'dhc_'`,
+		`grep '"event":"session.create"' | grep '"result":"invalid_filesystem_policy"'`,
+		`! printf '%s\n' "$N_REJECT_LINE" | grep -q '"session_id"'`,
+		`! printf '%s\n' "$N_REJECT_LINE" | grep -q 'dht_'`,
+		`! printf '%s\n' "$N_REJECT_LINE" | grep -q 'dhc_'`,
+		`acc_fail "14 refused create lacks the matching session.create invalid_filesystem_policy audit record (or it carries Session/bearer state)`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("the widening refusal evidence must carry the full stable contract (%s)", must)
+		}
+	}
+	if strings.Contains(content, `grep -q 'dhcr_'`) {
+		t.Error("the refusal evidence must not assert the absence of credential IDs (dhcr_ is not a secret)")
+	}
+
+	// Ordering semantics: the bounded audit window opens before the tested
+	// widening create, so the required audit record is provably the record of
+	// this refusal and cannot be an older one.
+	auditLine := -1
+	for i, line := range lines {
+		if strings.Contains(line, `N_AUDIT_SINCE="$(date -u`) {
+			auditLine = i
+			break
+		}
+	}
+	if auditLine < 0 {
+		t.Fatal("the widening refusal proof is missing the bounded audit window")
+	}
+	if auditLine > createLine {
+		t.Errorf("the audit window must open before the tested widening create (audit=%d create=%d)", auditLine, createLine)
 	}
 }
 
@@ -9882,6 +9924,350 @@ esac
 		if !strings.Contains(out, want) {
 			t.Errorf("valid list shape must produce its authoritative count (%s), output:\n%s", want, out)
 		}
+	}
+}
+
+// TestUATLibDurableSessionSnapshotCountsFailClosed pins the fail-closed
+// durable DB inventory contract of the shared UAT lib: the counts are
+// authoritative only when the database opens read-only and carries exactly
+// the canonical Session/snapshot table set (sessions,
+// session_filesystem_snapshot_entries, session_filesystem_snapshot_meta);
+// a missing file, an unopenable database, an unexpected schema, or an SQL
+// error is an inventory failure (exit 1), never a silent zero, and a
+// positively empty table set is the authoritative zero count.
+func TestUATLibDurableSessionSnapshotCountsFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "docker-helper.db")
+
+	var sb strings.Builder
+	sb.WriteString("set -uo pipefail\n")
+	sb.WriteString("source scripts/uat-regression-lib.sh\n")
+	sb.WriteString(`mkdb() {
+  python3 - "$@" <<'UAT_MKDB_PY'
+import sqlite3, sys
+path = sys.argv[1]
+ns, ne, nm = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+con = sqlite3.connect(path)
+con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, workspace TEXT)")
+con.execute("CREATE TABLE session_filesystem_snapshot_entries (session_id TEXT, position INTEGER, path TEXT, access TEXT)")
+con.execute("CREATE TABLE session_filesystem_snapshot_meta (session_id TEXT, entry_count INTEGER, digest TEXT)")
+for i in range(ns):
+    con.execute("INSERT INTO sessions (id, workspace) VALUES (?, ?)", ("dhs_%d" % i, "/w%d" % i))
+for i in range(ne):
+    con.execute("INSERT INTO session_filesystem_snapshot_entries (session_id, position, path, access) VALUES ('dhs_0', ?, '/w', 'read_write')", (i,))
+for i in range(nm):
+    con.execute("INSERT INTO session_filesystem_snapshot_meta (session_id, entry_count, digest) VALUES ('dhs_0', ?, 'd')", (ne,))
+con.commit()
+UAT_MKDB_PY
+}
+`)
+	// populated: one Session with two snapshot entries and meta.
+	fmt.Fprintf(&sb, "mkdb %q 1 2 1\n", db)
+	// empty: canonical tables, positively zero rows.
+	fmt.Fprintf(&sb, "mkdb %q.empty 0 0 0\n", db)
+	// missing-entries / missing-meta / missing-sessions: unexpected schema.
+	fmt.Fprintf(&sb, `python3 - <<'UAT_PART_PY'
+import sqlite3
+con = sqlite3.connect(%q)
+con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY)")
+con.commit()
+UAT_PART_PY
+`, db+".missing-entries")
+	fmt.Fprintf(&sb, `python3 - <<'UAT_PART_PY'
+import sqlite3
+con = sqlite3.connect(%q)
+con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY)")
+con.execute("CREATE TABLE session_filesystem_snapshot_entries (session_id TEXT)")
+con.commit()
+UAT_PART_PY
+`, db+".missing-meta")
+	fmt.Fprintf(&sb, `python3 - <<'UAT_PART_PY'
+import sqlite3
+con = sqlite3.connect(%q)
+con.execute("CREATE TABLE session_filesystem_snapshot_entries (session_id TEXT)")
+con.execute("CREATE TABLE session_filesystem_snapshot_meta (session_id TEXT)")
+con.commit()
+UAT_PART_PY
+`, db+".missing-sessions")
+	// malformed: a regular file that is not a SQLite database.
+	fmt.Fprintf(&sb, "printf 'not a database\\n' > %q\n", db+".malformed")
+	// Every probe uses its own fixture and label; a helper failure prints
+	// the label:bad marker and no counts.
+	probes := []struct{ label, suffix string }{
+		{"populated", ""},
+		{"empty", ".empty"},
+		{"missing-entries", ".missing-entries"},
+		{"missing-meta", ".missing-meta"},
+		{"missing-sessions", ".missing-sessions"},
+		{"malformed", ".malformed"},
+		{"absent", ".absent"},
+	}
+	for _, p := range probes {
+		fmt.Fprintf(&sb, "c=$(durable_session_snapshot_counts %q%s) || printf '%s:bad\\n'\n", db, p.suffix, p.label)
+		fmt.Fprintf(&sb, "printf '%s:%%s\\n' \"$c\"\n", p.label)
+	}
+
+	out, err := runBashIn(t, ".", sb.String())
+	if err != nil {
+		t.Fatalf("harness run failed: %v\n%s", err, out)
+	}
+
+	// Valid inventories: authoritative tab-separated counts.
+	if !strings.Contains(out, "populated:1\t2\t1\n") {
+		t.Errorf("populated database must report its authoritative counts (1 session, 2 entries, 1 meta), output:\n%s", out)
+	}
+	if !strings.Contains(out, "empty:0\t0\t0\n") {
+		t.Errorf("positively empty database must report the authoritative zero counts, output:\n%s", out)
+	}
+	// Fail-closed modes: exit 1 with no counts printed.
+	for _, mode := range []string{"missing-entries", "missing-meta", "missing-sessions", "malformed", "absent"} {
+		if !strings.Contains(out, mode+":bad\n") {
+			t.Errorf("mode %s must fail closed (inventory failure), output:\n%s", mode, out)
+		}
+	}
+}
+
+// TestAccessModesHarnessGlobalROProof pins the global read_only
+// non-widening live proof in the access-mode UAT: the scenario narrows a
+// dedicated global ceiling to read_only while BOTH the Principal and the
+// Launcher store read_write on the same subtree, issues a real Session on
+// the standard Launcher-credential authority path (no issuance-time
+// narrowing), proves the effective read_only snapshot and both exposure
+// directions against a pre-attempt residue baseline, and restores the
+// global ceiling afterwards.
+func TestAccessModesHarnessGlobalROProof(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-access-modes.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	for _, must := range []string{
+		`G_WS="$TREE/global-ro/work"`,
+		`dh config allowed-root set-access "$TREE/global-ro" read_only`,
+		`dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$TREE/global-ro"`,
+		`grep -A1 -F "\"path\": \"$TREE/global-ro\"" | grep -q '"access": "read_write"'`,
+		`issue_launcher_credential "$PRINCIPAL" "$G_L_ID" /tmp/uat-am-cred-globalro`,
+		`G_ID="$(create_session /tmp/uat-am-cred-globalro "$G_WS")"`,
+		`snapshot_has "$G_ID" "$G_WS" read_only`,
+		`G_RESIDUE_BASE="$(residue_state)"`,
+		`expect_read_only_root "$G_TOKEN" . /mnt/g 'echo x > /mnt/g/forbidden.txt' "$G_RESIDUE_BASE"`,
+		`[ ! -e "$G_WS/forbidden.txt" ]`,
+		`dh config allowed-root set-access "$TREE/global-ro" read_write`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("the global read_only proof must carry its composition and runtime assertions (%s)", must)
+		}
+	}
+
+	// Ordering semantics: global narrowing -> Principal grant -> Launcher
+	// grant/credential -> issued Session -> writable refusal -> restore. The
+	// Session is created without filesystem_entries (the standard authority
+	// path), which the create_session marker proves. The ordering search is
+	// scoped to the scenario G block: the P2 control-plane proof runs the
+	// same set-access mutation earlier in the file.
+	lines := strings.Split(content, "\n")
+	gStart, gEnd := -1, -1
+	for i, line := range lines {
+		if gStart < 0 && strings.Contains(line, `scenario "G: global read_only cannot be widened downstream (live proof)"`) {
+			gStart = i
+		}
+		if gStart >= 0 && gEnd < 0 && strings.Contains(line, `scenario "SYM: Admin and Principal credential narrowing symmetry"`) {
+			gEnd = i
+		}
+	}
+	if gStart < 0 || gEnd < 0 {
+		t.Fatal("the global read_only proof scenario block is missing")
+	}
+	order := []struct {
+		name  string
+		mark  string
+		index int
+	}{
+		{"global RO narrowing", `dh config allowed-root set-access "$TREE/global-ro" read_only`, -1},
+		{"Principal read_write grant", `dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$TREE/global-ro"`, -1},
+		{"Launcher credential", `issue_launcher_credential "$PRINCIPAL" "$G_L_ID" /tmp/uat-am-cred-globalro`, -1},
+		{"issued Session", `G_ID="$(create_session /tmp/uat-am-cred-globalro "$G_WS")"`, -1},
+		{"writable refusal", `expect_read_only_root "$G_TOKEN" . /mnt/g 'echo x > /mnt/g/forbidden.txt' "$G_RESIDUE_BASE"`, -1},
+		{"global restore", `dh config allowed-root set-access "$TREE/global-ro" read_write`, -1},
+	}
+	for i := gStart; i < gEnd && i < len(lines); i++ {
+		for oi := range order {
+			if order[oi].index < 0 && strings.Contains(lines[i], order[oi].mark) {
+				order[oi].index = i
+			}
+		}
+	}
+	for _, o := range order {
+		if o.index < 0 {
+			t.Fatalf("the global read_only proof is missing a required statement (%s)", o.name)
+		}
+	}
+	for i := 1; i < len(order); i++ {
+		if order[i].index < order[i-1].index {
+			t.Errorf("the global read_only proof steps must run in contract order: %s (%d) before %s (%d)",
+				order[i-1].name, order[i-1].index, order[i].name, order[i].index)
+		}
+	}
+}
+
+// TestAccessModesHarnessAuthoritySymmetry pins the Admin and Principal
+// credential narrowing symmetry proofs in the access-mode UAT: each
+// authority is proven on its own with the same valid narrowing request the
+// Launcher scenario uses, the issued effective semantics are asserted
+// through session show, each authority makes its own widening attempt
+// against the read_only ceiling with a fail-closed session inventory around
+// it, and the created Session is deleted.
+func TestAccessModesHarnessAuthoritySymmetry(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-access-modes.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The two packaged-candidate authorities are distinct and real: Admin
+	// through the public CLI with the system admin token and an explicit
+	// launcher selector, Principal through a real principal credential
+	// bearer with no selector.
+	for _, must := range []string{
+		`dh session create --system --token-file /etc/docker-helper/admin.token`,
+		`--launcher "$MAIN_L_ID" --workspace "$WS" --json`,
+		`reg_principal_credential "$PRINCIPAL" /tmp/uat-am-cred-principal`,
+		`dh session create --system --token-file /tmp/uat-am-cred-principal`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("the authority symmetry proof must carry distinct real authorities (%s)", must)
+		}
+	}
+
+	// Both new authorities use the same valid narrowing request vocabulary
+	// as the Launcher scenario (three issued creates) and make their own
+	// widening attempt against the read_only ceiling (three attempts total).
+	if got := strings.Count(content, "--filesystem-entry pipeline-outputs=read_write"); got != 3 {
+		t.Errorf("the same narrowing request must be issued per authority (launcher, admin, principal), got %d creates", got)
+	}
+	if got := strings.Count(content, "--filesystem-entry pipeline-inputs=read_write"); got != 3 {
+		t.Errorf("each authority must make its own widening attempt, got %d attempts", got)
+	}
+
+	// Each authority proves the effective snapshot semantics the Launcher
+	// scenario proves (root read_only, project/pipeline-outputs read_write,
+	// redundant pipeline-inputs read_only normalized away).
+	for _, must := range []string{
+		`snapshot_has "$SYM_ADMIN_ID" "$WS" read_only`,
+		`snapshot_has "$SYM_ADMIN_ID" "$WS/project" read_write`,
+		`snapshot_has "$SYM_ADMIN_ID" "$WS/pipeline-outputs" read_write`,
+		`snapshot_lacks "$SYM_ADMIN_ID" "$WS/pipeline-inputs"`,
+		`snapshot_has "$SYM_PRIN_ID" "$WS" read_only`,
+		`snapshot_has "$SYM_PRIN_ID" "$WS/project" read_write`,
+		`snapshot_has "$SYM_PRIN_ID" "$WS/pipeline-outputs" read_write`,
+		`snapshot_lacks "$SYM_PRIN_ID" "$WS/pipeline-inputs"`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("the authority symmetry proof must assert the effective snapshot semantics (%s)", must)
+		}
+	}
+
+	// Each authority proves the no-new-Session contract around its own
+	// widening attempt with the fail-closed session inventory and deletes
+	// the Session it created.
+	for _, must := range []string{
+		`SYM_ADMIN_BEFORE="$(session_list_count)"`,
+		`[ "$SYM_ADMIN_AFTER" = "$SYM_ADMIN_BEFORE" ]`,
+		`dh session delete --system --id "$SYM_ADMIN_ID"`,
+		`SYM_PRIN_BEFORE="$(session_list_count)"`,
+		`[ "$SYM_PRIN_AFTER" = "$SYM_PRIN_BEFORE" ]`,
+		`dh session delete --system --id "$SYM_PRIN_ID"`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("the authority symmetry proof must prove and clean its own state (%s)", must)
+		}
+	}
+
+	// Ordering semantics: for each authority the widening baseline is
+	// captured before its attempt and the inventory comparison happens
+	// after it.
+	lines := strings.Split(content, "\n")
+	pairs := []struct {
+		before, create, after string
+	}{
+		{`SYM_ADMIN_BEFORE="$(session_list_count)"`, `--token-file /etc/docker-helper/admin.token`, `SYM_ADMIN_AFTER="$(session_list_count)"`},
+		{`SYM_PRIN_BEFORE="$(session_list_count)"`, `--token-file /tmp/uat-am-cred-principal`, `SYM_PRIN_AFTER="$(session_list_count)"`},
+	}
+	for _, p := range pairs {
+		beforeLine, createLine, afterLine := -1, -1, -1
+		for i, line := range lines {
+			if beforeLine < 0 && strings.Contains(line, p.before) {
+				beforeLine = i
+			}
+			if beforeLine >= 0 && createLine < 0 && strings.Contains(line, p.create) {
+				createLine = i
+			}
+			if createLine >= 0 && afterLine < 0 && strings.Contains(line, p.after) {
+				afterLine = i
+			}
+		}
+		if beforeLine < 0 || createLine < 0 || afterLine < 0 {
+			t.Fatalf("authority widening proof is missing a required statement (%d/%d/%d)", beforeLine, createLine, afterLine)
+		}
+		if beforeLine > createLine || afterLine < createLine {
+			t.Errorf("the widening baseline/comparison must surround the tested attempt (before=%d create=%d after=%d)", beforeLine, createLine, afterLine)
+		}
+	}
+}
+
+// TestAccessModesHarnessFinalStateProof pins the final Session/snapshot
+// state proof of the access-mode UAT: after every known Session is deleted,
+// the active Session inventory is proven positively empty through the
+// fail-closed canonical session-list helper, and the durable database is
+// proven structurally empty (sessions, snapshot entries, snapshot meta)
+// through the shared fail-closed DB inventory owner; an unavailable
+// inventory blocks the gate instead of reporting zero.
+func TestAccessModesHarnessFinalStateProof(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-access-modes.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	for _, must := range []string{
+		`if Z_LIST_COUNT="$(session_list_count)"; then`,
+		`[ "$Z_LIST_COUNT" = "0" ]`,
+		`acc_fail "Z active Sessions remain after the cleanup: $Z_LIST_COUNT"`,
+		`acc_blocked "Z session-list inventory unavailable after the cleanup"`,
+		`Z_DB_COUNTS="$(durable_session_snapshot_counts /var/lib/docker-helper/docker-helper.db)"`,
+		`[ "$Z_DB_COUNTS" = "$(printf '0\t0\t0')" ]`,
+		`acc_fail "Z durable Session/snapshot rows remain: $Z_DB_COUNTS"`,
+		`acc_blocked "Z durable DB inventory unavailable (cannot inspect the Session/snapshot tables)"`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("the final state proof must be fail-closed on both inventories (%s)", must)
+		}
+	}
+
+	// The scenario-created sessions are part of the Z cleanup, and the final
+	// inventories run after the cleanup loop.
+	if !strings.Contains(content, `"${G_ID:-}" "${SYM_ADMIN_ID:-}" "${SYM_PRIN_ID:-}"`) {
+		t.Error("the Z cleanup must cover the scenario-created sessions (global RO, admin, principal)")
+	}
+	lines := strings.Split(content, "\n")
+	deleteLoopLine, listLine, dbLine := -1, -1, -1
+	for i, line := range lines {
+		if deleteLoopLine < 0 && strings.Contains(line, `for sid in "$SA_ID"`) {
+			deleteLoopLine = i
+		}
+		if listLine < 0 && strings.Contains(line, `Z_LIST_COUNT="$(session_list_count)"`) {
+			listLine = i
+		}
+		if dbLine < 0 && strings.Contains(line, `Z_DB_COUNTS="$(durable_session_snapshot_counts`) {
+			dbLine = i
+		}
+	}
+	if deleteLoopLine < 0 || listLine < 0 || dbLine < 0 {
+		t.Fatalf("final state proof is missing a required statement (delete=%d list=%d db=%d)", deleteLoopLine, listLine, dbLine)
+	}
+	if listLine < deleteLoopLine || dbLine < listLine {
+		t.Errorf("the final inventories must run after the Session cleanup (delete=%d list=%d db=%d)", deleteLoopLine, listLine, dbLine)
 	}
 }
 
