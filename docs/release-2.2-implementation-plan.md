@@ -698,9 +698,20 @@ the existing release pipeline. Source-only success is not sufficient.
 
 ## Phase 2.2.8 — issuance-time Session filesystem narrowing
 
-**Status: IN PROGRESS.** Implemented on
-`feature/2.2.10-session-filesystem-narrowing` (base
-`release/2.2@802ecc4f`).
+**Status: IMPLEMENTED, awaiting architectural acceptance and the full UAT
+gate.** Implemented on `feature/2.2.10-session-filesystem-narrowing` (base
+`release/2.2@802ecc4f`), opened as a PR against `release/2.2`. The
+implementation extends the existing owners only:
+`narrowSessionFilesystemPolicy` in `allowed_root_policy.go` (the single
+domain owner) proves and composes the narrowing; the Session-create
+lifecycle canonicalizes the workspace-relative entries and consumes the
+composition inside the existing `lifecycleMu` boundary;
+`POST /sessions`/`session create --filesystem-entry` carry the wire
+contract; the typed `ErrInvalidSessionFilesystemPolicy` family answers
+`400 invalid_filesystem_policy` with the audit result
+`invalid_filesystem_policy`; no new persistence schema and no MAC/runtime
+change. Domain/HTTP/CLI/race regressions and the canonical access-mode UAT
+scenario N pin the contract.
 
 Release 2.2 underdelivered the original orchestrator capability: a Session
 received an immutable filesystem snapshot automatically derived from

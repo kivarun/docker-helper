@@ -1436,6 +1436,30 @@ snapshot at creation time (visible through `docker-helper session
 show`). Later allowed-root changes affect only new Sessions; an issued
 Session keeps its issued snapshot for its whole lifetime.
 
+The authority creating a Session can also narrow it at issuance time:
+`session create` accepts a repeatable `--filesystem-entry PATH=ACCESS`
+flag where PATH is relative to the Session workspace (`.` for the
+workspace root, which is required when the flag is used) and ACCESS is
+`read_write` or `read_only`:
+
+```bash
+docker-helper session create --system \
+  --workspace /srv/pipeline-runs/run-123 \
+  --filesystem-entry .=read_only \
+  --filesystem-entry project=read_write \
+  --filesystem-entry pipeline-inputs=read_only \
+  --filesystem-entry pipeline-outputs=read_write \
+  --json
+```
+
+The request may only narrow the target Launcher's effective ceiling; a
+`read_write` entry under an effective `read_only` region, or a path
+outside the ceiling, is refused with `invalid_filesystem_policy` before
+the Session exists. Omitting the flag keeps the inherited behavior. A
+Launcher credential can narrow its own Session at creation this way and
+can never widen Launcher/Principal/global authority; there is no
+post-create Session filesystem mutation.
+
 A practical example — one run tree with separate data planes:
 
 ```text
@@ -1509,6 +1533,10 @@ The allowed-root narrowing model (global → principal → launcher → session)
 - **Project workspace** — selected only at session creation time via
   `session create --workspace PATH`; must be under the global and principal
   allowed roots (and, for restricted launchers, the launcher's roots).
+  The create request may further narrow the issued snapshot per Session
+  through `filesystem_entries` (issuance-time narrowing only; see
+  [Allowed-root access modes](#allowed-root-access-modes)); it is never a
+  post-create mutation surface.
 
 Individual projects are not registered persistently. The operator adds
 global roots and principal roots, then creates sessions for specific

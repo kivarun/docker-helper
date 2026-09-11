@@ -46,6 +46,22 @@ docker-helper session create --workspace .
 and use the returned session token for Docker operations exactly as
 described below.
 
+When the Launcher's effective policy permits finer per-Session control,
+the creating authority may narrow the Session at issuance time with a
+repeatable `--filesystem-entry PATH=ACCESS` flag (PATH relative to the
+workspace, `.` for the root; ACCESS `read_write` or `read_only`):
+
+```bash
+docker-helper session create --workspace . \
+  --filesystem-entry .=read_only \
+  --filesystem-entry outputs=read_write
+```
+
+The request may only narrow the target Launcher's ceiling; a widening
+request is refused `invalid_filesystem_policy` before the Session exists.
+Omitting the flag keeps the inherited behavior. There is no post-create
+Session filesystem mutation.
+
 `GET /auth` (HTTP, with the installed credential as the Bearer token)
 reports the authority: the response is `{"authority":"launcher",...}` or
 `{"authority":"principal",...}`. The credential is consumed by the existing
