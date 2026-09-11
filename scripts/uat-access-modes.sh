@@ -1008,9 +1008,12 @@ fi
 # system admin token; the Principal credential resolves its inherit-scope
 # default Launcher. Each authority: a valid narrowing request on the main
 # workspace, the issued effective semantics through session show, one
-# widening attempt against the read_only pipeline-inputs ceiling, the
-# stable refusal, and no new Session (fail-closed session-list inventory
-# around the attempt); the created Session is deleted afterwards.
+# widening attempt against the read_only pipeline-inputs ceiling, and the
+# stable refusal with no new Session (fail-closed session-list inventory
+# around the attempt). The created Session is removed by the scenario Z
+# cleanup — the single Session-cleanup owner of the suite, shared with every
+# other scenario; an inline delete here would make the Z cleanup re-delete
+# and fail spuriously.
 # ==============================================================================
 scenario "SYM: Admin and Principal credential narrowing symmetry"
 
@@ -1054,10 +1057,6 @@ if SYM_ADMIN_BEFORE="$(session_list_count)"; then
   fi
 else
   acc_fail "16 Admin widening baseline capture failed (fail-closed session inventory)"
-fi
-if [ -n "${SYM_ADMIN_ID:-}" ]; then
-  dh session delete --system --id "$SYM_ADMIN_ID" >/dev/null 2>&1 \
-    || acc_fail "16 Admin narrowed session delete failed"
 fi
 
 # Principal credential authority: a real Principal bearer through the
@@ -1106,10 +1105,6 @@ if SYM_PRIN_BEFORE="$(session_list_count)"; then
   fi
 else
   acc_fail "16 Principal widening baseline capture failed (fail-closed session inventory)"
-fi
-if [ -n "${SYM_PRIN_ID:-}" ]; then
-  dh session delete --system --id "$SYM_PRIN_ID" >/dev/null 2>&1 \
-    || acc_fail "16 Principal narrowed session delete failed"
 fi
 
 # ==============================================================================
