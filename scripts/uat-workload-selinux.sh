@@ -361,6 +361,7 @@ systemctl is-active --quiet docker-helper.service || { echo "error: service not 
 DH_PID="$(systemctl show -p MainPID --value docker-helper.service)"
 DH_LABEL="$(tr -d '\0' < "/proc/$DH_PID/attr/current" 2>/dev/null || true)"
 case "$DH_LABEL" in
+  *:docker_helper_t:*) acc_ok "candidate daemon confined (docker_helper_t)" ;;
   docker_helper_t:*) acc_ok "candidate daemon confined (docker_helper_t)" ;;
   *) echo "error: daemon process label is not docker_helper_t: '$DH_LABEL'" >&2; exit 1 ;;
 esac
