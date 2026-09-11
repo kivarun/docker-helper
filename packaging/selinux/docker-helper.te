@@ -97,6 +97,7 @@ module docker_helper 1.0;
 		type var_lock_t;
 		type fusefs_t;
 		type fuse_device_t;
+		type mount_var_run_t;
 
 		role system_r;
 
@@ -111,7 +112,7 @@ module docker_helper 1.0;
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
-		class capability { dac_read_search sys_admin };
+		class capability { dac_read_search dac_override sys_admin };
 		class process { transition siginh noatsecure rlimitinh };
 		class process2 { nnp_transition };
 	}
@@ -371,7 +372,17 @@ allow docker_helper_t var_lock_t:dir { write add_name };
 allow docker_helper_t var_lock_t:file { create open read write getattr lock };
 
 # Capabilities for workspace access and mount-pin (proven in enforcing UAT)
-allow docker_helper_t self:capability { dac_read_search sys_admin };
+allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };
+
+# bindfs (the projection worker) reads the libmount utab under /run/mount on
+# every FUSE mount.
+#   avc: denied { search } scontext=docker_helper_t tcontext=mount_var_run_t
+#     name=mount tclass=dir
+#   avc: denied { dac_override } scontext=docker_helper_t comm=bindfs
+#     tclass=capability (user-owned backing files read through projections)
+allow docker_helper_t mount_var_run_t:dir { search };
+allow docker_helper_t mount_var_run_t:file { getattr read open };
+allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };
 
 # Mount-pin: unmount filesystem (proven in enforcing UAT)
 allow docker_helper_t fs_t:filesystem { unmount };

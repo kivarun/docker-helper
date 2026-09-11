@@ -1962,7 +1962,10 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		"class filesystem { mount remount unmount getattr associate mounton relabelfrom relabelto };",
 		"allow docker_helper_ro_projection_t fusefs_t:filesystem associate;",
 		"allow docker_helper_t docker_helper_runtime_t:dir { mounton };",
-		"allow docker_helper_t self:capability { dac_read_search sys_admin };",
+		"allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };",
+		"allow docker_helper_t mount_var_run_t:dir { search };",
+		"allow docker_helper_t mount_var_run_t:file { getattr read open };",
+		"class capability { dac_read_search dac_override sys_admin };",
 	} {
 		if !strings.Contains(content, rule) {
 			t.Errorf("SELinux policy must grant: %s", rule)

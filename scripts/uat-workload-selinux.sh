@@ -501,6 +501,8 @@ if [ -n "$PROJ_EVIDENCE" ]; then
   fi
 else
   acc_fail "S7 no bindfs projection observed during the live RO exposure"
+  echo "  S7 detail: run-log=$(cat /tmp/uat-wls-s7.log 2>/dev/null | redact | tail -2)" >&2
+  grep 'fuse.bindfs' /proc/mounts 2>/dev/null | sed 's/^/  S7 mounts: /' >&2 || echo "  S7 mounts: none" >&2
 fi
 if journalctl --utc -u docker-helper.service --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null \
     | grep '"event":"run.start"' | grep -q '"workload_mac_backend":"selinux"'; then
@@ -517,10 +519,10 @@ S6_L1="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
   dh run --image alpine:3.24 --mount project:/mnt/project -- /bin/cat /proc/self/attr/current 2>/dev/null || true)"
 S6_L2="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
   dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- /bin/cat /proc/self/attr/current 2>/dev/null || true)"
-case "$S6_L1" in docker_helper_container_t:*) ;; *)
+case "$S6_L1" in *docker_helper_container_t:*) ;; *)
   acc_fail "S6 RW workload process label wrong: '$S6_L1'" ;;
 esac
-case "$S6_L2" in docker_helper_container_t:*) ;; *)
+case "$S6_L2" in *docker_helper_container_t:*) ;; *)
   acc_fail "S6 RO workload process label wrong: '$S6_L2'" ;;
 esac
 if [ "$S6_L1" != "$S6_L2" ]; then
@@ -610,10 +612,12 @@ for _ in $(seq 1 30); do
 done
 DH_PID2="$(systemctl show -p MainPID --value docker-helper.service)"
 DH_LABEL2="$(tr -d '\0' < "/proc/$DH_PID2/attr/current" 2>/dev/null || true)"
-if wait_health && case "$DH_LABEL2" in docker_helper_t:*) true ;; *) false ;; esac \
+if wait_health \
+    && case "$DH_LABEL2" in *docker_helper_t:*) true ;; *) false ;; esac \
     && workload_residue_clean; then
   acc_ok "S12 restart/reconciliation: daemon confined again, no stale workload state"
 else
+  echo "  S12 restart detail: health=$(wait_health && echo ok || echo FAIL) label='$DH_LABEL2' residue=$(workload_residue_clean && echo clean || echo DIRTY)" >&2
   acc_fail "S12 restart left confinement or workload residue broken"
 fi
 
