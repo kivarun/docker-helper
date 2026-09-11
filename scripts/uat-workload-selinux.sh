@@ -385,10 +385,13 @@ chown -R "$PRINCIPAL:$PRINCIPAL" "$TREE"
 chmod -R u+rwX,go+rX "$TREE"
 TREE_CTX_BEFORE="$(tree_context_snapshot)"
 
-dh principal create --system --no-credential "$PRINCIPAL" 2>/tmp/uat-wls-setup.err || true
+dh principal create --system --no-credential "$PRINCIPAL" 2>/tmp/uat-wls-setup.err || {
+  echo "error: principal create failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
 dh principal set --system "$PRINCIPAL" enabled true 2>>/tmp/uat-wls-setup.err || true
-dh principal allowed-root add --system "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setup.err || true
-dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || true
+dh principal allowed-root add --system "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setup.err || {
+  echo "error: principal TREE root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
+dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || {
+  echo "error: principal pipeline-inputs root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
 MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential 2>>/tmp/uat-wls-setup.err || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON ($(redact </tmp/uat-wls-setup.err | tail -10))" >&2; exit 1; }
