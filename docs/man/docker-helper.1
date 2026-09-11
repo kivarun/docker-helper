@@ -630,6 +630,12 @@ uses the \fBdocker-helper-system\fR profile. SELinux requires the daemon in
 \fBdocker_helper_t\fR and runs containers as
 \fBdocker_helper_container_t\fR with MCS confinement.
 .IP \(bu 4
+Filesystem policy is pathname-based: canonical resolution handles
+symlinks, but two authorized pathnames can still name the same inode
+through a hard link. A write through a read-write alias is also observed
+through a read-only alias; docker-helper does not promise inode-level
+immutability or confidentiality between hard-link aliases.
+.IP \(bu 4
 No remote or non-loopback network access in Release 2
 .SH SEE ALSO
 .BR docker-helper-config (5),
