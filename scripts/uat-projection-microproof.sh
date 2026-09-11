@@ -161,6 +161,16 @@ probe_bindfs_sandbox() { # label nnp restrictns mdwe selinuxctx
     echo "PROBE $label: unit journal:"
     journalctl -u "$unit.service" --no-pager --no-hostname -n 8 2>/dev/null \
       | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
+    # If the unit's own mount namespace isolated the projection, the caller
+    # cannot see the mount even though the unit mounted it. Read the mount
+    # table from inside the unit's namespace via its main process.
+    local mp_ns=""
+    mp_ns="$(systemctl show -p MainPID --value "$unit.service" 2>/dev/null || true)"
+    if [ -n "$mp_ns" ] && [ "$mp_ns" != 0 ]; then
+      echo "PROBE $label: unit-namespace mounts (fuse lines):"
+      nsenter -t "$mp_ns" -m sh -c "grep fuse /proc/self/mounts || echo '(no fuse mounts inside the unit namespace)'" 2>&1 \
+        | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
+    fi
   fi
   systemctl stop "$unit.service" >/dev/null 2>&1 || true
   fusermount3 -u "$mp" >/dev/null 2>&1 || true
@@ -219,6 +229,11 @@ grep -n 'user_allow_other' /etc/fuse.conf 2>/dev/null || echo "(no user_allow_ot
 fusermount3 --version 2>&1 || true
 probe_bindfs "1-plain-unconfined" no no
 probe_bindfs "2-context-unconfined" yes no
+# Run 9's probes failed for EVERY transient unit, including single-property
+# ones, so the discriminator starts with a bare transient unit (no
+# properties): if even that cannot project a visible mount, the isolation is
+# the unit's own mount namespace, not any sandbox property.
+probe_bindfs_sandbox "0-bare-transient" no no no no
 # One daemon-sandbox property per probe: run 8's probes showed the FUSE mount
 # succeeding unconfined (plain and with context=) and failing only inside the
 # daemon-equivalent sandbox, so the discriminator must be per-property.
