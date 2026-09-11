@@ -219,8 +219,9 @@ Unset a configuration value. Unsettable fields: log_level, audit_enabled,
 shutdown_timeout, operation_retention_ttl, operation_max_completed,
 operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 .TP
-.B docker-helper config allowed-root list
-List global allowed roots as a PATH/ACCESS table (authorization ceiling).
+.B docker-helper config allowed-root list [\-\-json]
+List global allowed roots, one canonical root per line (authorization
+ceiling); \-\-json prints the canonical rich entries with access modes.
 .TP
 .B docker-helper config allowed-root add [--access ACCESS] PATH
 Add a global allowed root. Changes the authorization ceiling only;
@@ -273,8 +274,9 @@ allowed root, matched by the stored canonical identity.
 .B docker-helper principal allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Remove an allowed root from a principal.
 .TP
-.B docker-helper principal allowed-root list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
-List a principal's stored allowed roots as a PATH/ACCESS table. The read
+.B docker-helper principal allowed-root list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json] USER
+List a principal's stored allowed roots, one canonical root per line;
+\-\-json prints the canonical rich entries with access modes. The read
 follows the principal show contract: an admin token lists any Principal,
 a principal credential lists exactly its own.
 .TP
@@ -370,8 +372,9 @@ Change the access mode (read_write or read_only) of one stored launcher
 allowed root, matched by the stored canonical identity. The scope mode
 is never changed.
 .TP
-.B docker-helper launcher allowed-root list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
-List a launcher's stored allowed roots as a PATH/ACCESS table.
+.B docker-helper launcher allowed-root list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
+List a launcher's stored allowed roots, one canonical root per line;
+\-\-json prints the canonical rich entries with access modes.
 .TP
 .B docker-helper launcher allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER] PATH
 Remove one allowed root from a launcher. Removing the last root leaves

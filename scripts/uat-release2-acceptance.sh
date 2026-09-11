@@ -1364,8 +1364,9 @@ fi
 #       unchanged, sessions schema unchanged, decoy table untouched and
 #       empty); dropping the decoy recovers into the successful migration on
 #       the same database
-#   M2  legacy path-only config keeps read_write authority (PATH/ACCESS list)
-#       while config.json itself keeps the legacy path-only string form —
+#   M2  legacy path-only config keeps read_write authority (the --json rich
+#       list projection; the default list is the 2.1-compatible one path per
+#       line) while config.json itself keeps the legacy path-only string form —
 #       equivalent RW authority, never an object-form rewrite requirement
 #   M3  Principal roots migrated as read_write
 #   M4  Launcher roots migrated as read_write
@@ -1583,10 +1584,12 @@ db.commit()
   fi
 
   # --- M2: legacy config keeps read_write authority in the legacy form ---------
-  M_LIST="$(dh config allowed-root list 2>/dev/null || true)"
+  # The default list is the 2.1-compatible one path per line; the access
+  # authority is proven through the explicit --json rich projection.
+  M_LIST="$(dh config allowed-root list --json 2>/dev/null || true)"
   if printf '%s\n' "$M_LIST" | grep -F "$ALLOWED_ROOT" | grep -q 'read_write' \
       && printf '%s\n' "$M_LIST" | grep -F "$M_POLICY" | grep -q 'read_write'; then
-    acc_ok "M2 migrated path-only global roots carry read_write authority (PATH/ACCESS list)"
+    acc_ok "M2 migrated path-only global roots carry read_write authority (--json rich list)"
   else
     acc_fail "M2 global root access semantics wrong: $M_LIST"
   fi

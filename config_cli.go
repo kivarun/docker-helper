@@ -270,14 +270,15 @@ remove does not invalidate already-issued sessions.`,
 var configAllowedRootListCommand = &Command{
 	Name:       "list",
 	Summary:    "List all allowed roots",
-	Usage:      "docker-helper config allowed-root list",
+	Usage:      "docker-helper config allowed-root list [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
-	Help:       `List all allowed roots as the PATH/ACCESS table, so the access mode of every global root is visible.`,
+	Help:       `List all allowed roots, one canonical root per line; --json prints the canonical rich entries with their access modes.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return configAllowedRootList(stdout, stderr)
+				return configAllowedRootList(*jsonOut, stdout, stderr)
 			},
 		}
 	},
@@ -327,9 +328,10 @@ Does not invalidate already-issued sessions.`,
 	},
 }
 
-// configAllowedRootList prints all allowed roots as the PATH/ACCESS table,
-// so the access mode of every global root is visible in the human surface.
-func configAllowedRootList(stdout, stderr io.Writer) int {
+// configAllowedRootList prints all allowed roots, one canonical root per
+// line; --json prints the canonical rich entries so the access mode of
+// every global root is visible to access-aware tooling.
+func configAllowedRootList(jsonOut bool, stdout, stderr io.Writer) int {
 	raw, _, err := loadRawConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -350,7 +352,10 @@ func configAllowedRootList(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	printAllowedRootAccessTable(stdout, requestedRoots)
+	if err := printAllowedRootList(stdout, requestedRoots, jsonOut); err != nil {
+		fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+		return 1
+	}
 	return 0
 }
 

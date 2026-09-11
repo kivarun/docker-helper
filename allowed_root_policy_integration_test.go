@@ -26,14 +26,23 @@ func TestAllowedRootListHappyPath(t *testing.T) {
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	configPath := setupConfigTestWithData(t, data)
 
-	// Verify list output: the PATH/ACCESS table carries the root and its
-	// canonical read_write access.
+	// Verify list output: the default human surface is the 2.1-compatible
+	// one canonical root per line, with no header.
 	stdout, _ := runConfigCLI(t, 0, "config", "allowed-root", "list")
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	if len(lines) != 2 ||
-		!strings.HasPrefix(lines[0], "PATH") || !strings.HasSuffix(lines[0], "ACCESS") ||
-		!strings.Contains(lines[1], allowedRoot) || !strings.HasSuffix(lines[1], "read_write") {
-		t.Errorf("expected PATH/ACCESS table with %s, got %v", allowedRoot, lines)
+	if len(lines) != 1 || lines[0] != allowedRoot {
+		t.Errorf("expected one canonical root per line with %s, got %v", allowedRoot, lines)
+	}
+
+	// The explicit --json opt-in is the canonical rich projection carrying
+	// the stored access mode.
+	jsonOut, _ := runConfigCLI(t, 0, "config", "allowed-root", "list", "--json")
+	var entries []AllowedRootEntry
+	if err := json.Unmarshal([]byte(jsonOut), &entries); err != nil {
+		t.Fatalf("--json list must decode as the canonical rich entries: %v (%s)", err, jsonOut)
+	}
+	if len(entries) != 1 || entries[0].Path != allowedRoot || entries[0].Access != AllowedRootAccessReadWrite {
+		t.Errorf("--json list must carry the canonical entry, got %+v", entries)
 	}
 
 	// Verify list matches config show
@@ -44,6 +53,45 @@ func TestAllowedRootListHappyPath(t *testing.T) {
 
 	// Verify config file unchanged
 	verifyConfigUnchanged(t, configPath, data)
+}
+
+// TestAllowedRootListOutputShapes proves the restored list contract with
+// genuinely multi-value state: the default human output is one canonical
+// root per line in stored order with no header or access column, and the
+// explicit --json opt-in is the canonical rich entry array whose access
+// modes are exactly the stored ones (read_write and read_only).
+func TestAllowedRootListOutputShapes(t *testing.T) {
+	rwRoot := testAllowedRootDir(t)
+	roRoot := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []any{
+			rwRoot,
+			map[string]any{"path": roRoot, "access": "read_only"},
+		},
+		"session_ttl": "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	setupConfigTestWithData(t, data)
+
+	stdout, _ := runConfigCLI(t, 0, "config", "allowed-root", "list")
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 2 || lines[0] != rwRoot || lines[1] != roRoot {
+		t.Errorf("default list must be one canonical root per line in stored order, got %v", lines)
+	}
+	if strings.Contains(stdout, "read_write") || strings.Contains(stdout, "read_only") || strings.Contains(stdout, "ACCESS") {
+		t.Errorf("default list must not carry an access column, got: %q", stdout)
+	}
+
+	jsonOut, _ := runConfigCLI(t, 0, "config", "allowed-root", "list", "--json")
+	var entries []AllowedRootEntry
+	if err := json.Unmarshal([]byte(jsonOut), &entries); err != nil {
+		t.Fatalf("--json list must decode as the canonical rich entries: %v (%s)", err, jsonOut)
+	}
+	if len(entries) != 2 ||
+		entries[0].Path != rwRoot || entries[0].Access != AllowedRootAccessReadWrite ||
+		entries[1].Path != roRoot || entries[1].Access != AllowedRootAccessReadOnly {
+		t.Errorf("--json list must carry the stored entries in order with exact access, got %+v", entries)
+	}
 }
 
 func TestAllowedRootAddHappyPath(t *testing.T) {
