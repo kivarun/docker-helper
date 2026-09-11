@@ -114,9 +114,14 @@ vm_selinux_transfer_artifact 'workload-live-proof.test' "$PROOF_BINARY" \
 
 log 'run bounded live workload SELinux proof in the guest'
 if vm_ssh "sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 \
     WORKLOAD_EVIDENCE_DIR='$GUEST_EVIDENCE_DIR' \
-    '/opt/uat-import/workload-live-proof.test' -test.run 'TestLiveWorkloadSELinux|TestLiveWorkloadMCSConcurrentRWRO' -test.v"; then
+    /opt/uat/scripts/release-2.2-live-proof-runner.sh \
+    --binary '/opt/uat-import/workload-live-proof.test' \
+    -run 'TestLiveWorkloadSELinux|TestLiveWorkloadMCSConcurrentRWRO' \
+    --evidence '$GUEST_EVIDENCE_DIR' \
+    selinux-avc.txt selinux-summary.txt \
+    selinux-regular-file-avc.txt selinux-regular-file-summary.txt \
+    mcs-summary.txt"; then
   PROOF_RESULT='PASS'
 else
   PROOF_RC=$?

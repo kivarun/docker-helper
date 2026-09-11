@@ -60,12 +60,15 @@ jobs:
           sudo -E env "PATH=$PATH" \
             DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 \
             WORKLOAD_EVIDENCE_DIR="$RUNNER_TEMP/release-2.2-workload-apparmor-evidence" \
-            go test -c -o "$RUNNER_TEMP/workload-live-proof.test" . && \
+            go test -c -o "$RUNNER_TEMP/workload-live-proof.test" .
           sudo -E env "PATH=$PATH" \
-            DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 \
-            WORKLOAD_EVIDENCE_DIR="$RUNNER_TEMP/release-2.2-workload-apparmor-evidence" \
-            "$RUNNER_TEMP/workload-live-proof.test" \
-            -test.run 'TestLiveWorkloadAppArmor' -test.v
+            scripts/release-2.2-live-proof-runner.sh \
+            --binary "$RUNNER_TEMP/workload-live-proof.test" \
+            -run 'TestLiveWorkloadAppArmor' \
+            --evidence "$RUNNER_TEMP/release-2.2-workload-apparmor-evidence" \
+            apparmor-denial.txt apparmor-summary.txt \
+            apparmor-regular-file-denial.txt apparmor-regular-file-summary.txt \
+            apparmor-nested-rw-denial.txt apparmor-nested-rw-summary.txt
 
       - name: Upload live proof evidence
         if: always()

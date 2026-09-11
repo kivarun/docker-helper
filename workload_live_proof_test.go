@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -30,13 +31,38 @@ import (
 
 const liveProofEnv = "DOCKER_HELPER_LIVE_WORKLOAD_PROOF"
 
+// requiredLiveProof reports whether the caller requested the bounded live
+// evidence proof. In required mode every missing mandatory prerequisite is a
+// FAIL (non-zero exit), never a Skip: a required proof must not close through
+// the skip exit path.
+func requiredLiveProof() bool {
+	return os.Getenv(liveProofEnv) == "1"
+}
+
 func requireLiveProof(t *testing.T) {
 	t.Helper()
-	if os.Getenv(liveProofEnv) != "1" {
+	if !requiredLiveProof() {
 		t.Skip("live workload proof requires " + liveProofEnv + "=1")
 	}
 	if os.Getuid() != 0 {
-		t.Skip("live workload proof requires root")
+		t.Fatalf("required live workload proof must run as root")
+	}
+}
+
+// requireLiveProofDependency gates one live-proof prerequisite. In required
+// mode an unmet prerequisite is a hard failure with non-zero exit; in
+// developer/default mode (live proof not requested) it skips so ordinary
+// test runs stay green without the live backends.
+func requireLiveProofDependency(t *testing.T, ready bool, reason string) {
+	t.Helper()
+	if requiredLiveProof() {
+		if !ready {
+			t.Fatalf("required live workload proof prerequisite failed: %s", reason)
+		}
+		return
+	}
+	if !ready {
+		t.Skip(reason)
 	}
 }
 
@@ -196,15 +222,11 @@ func liveContainerProcessLabel(t *testing.T, securityOpts []string) (string, err
 // plus the unload/state cleanup.
 func TestLiveWorkloadAppArmor(t *testing.T) {
 	requireLiveProof(t)
-	if !dockerLiveAvailable(t) {
-		t.Skip("docker daemon unavailable")
-	}
-	if !fileExists(appArmorParserPath) {
-		t.Skip("apparmor_parser unavailable")
-	}
-	if active, err := appArmorLSMActive(); err != nil || !active {
-		t.Skipf("AppArmor is not the active LSM: %v", err)
-	}
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	requireLiveProofDependency(t, fileExists(appArmorParserPath), "apparmor_parser unavailable")
+	active, lsmErr := appArmorLSMActive()
+	requireLiveProofDependency(t, lsmErr == nil && active,
+		fmt.Sprintf("AppArmor is not the active LSM: active=%v err=%v", active, lsmErr))
 	dir, err := os.MkdirTemp("", "docker-helper-live-aa-*")
 	if err != nil {
 		t.Fatal(err)
@@ -331,18 +353,14 @@ func selinuxAVCMatched(t *testing.T, targetType, access, tclass string) string {
 // relabel, and cleanup of the owned projection state.
 func TestLiveWorkloadSELinux(t *testing.T) {
 	requireLiveProof(t)
-	if !dockerLiveAvailable(t) {
-		t.Skip("docker daemon unavailable")
-	}
-	if _, err := os.Stat(selinuxDevFusePath); err != nil {
-		t.Skip("/dev/fuse unavailable")
-	}
-	if _, err := exec.LookPath("bindfs"); err != nil {
-		t.Skip("bindfs unavailable")
-	}
-	if state, err := getenforceLive(); err != nil || state != "Enforcing" {
-		t.Skipf("SELinux is not enforcing: %v", state)
-	}
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	_, fuseErr := os.Stat(selinuxDevFusePath)
+	requireLiveProofDependency(t, fuseErr == nil, fmt.Sprintf("/dev/fuse unavailable: %v", fuseErr))
+	_, bindfsErr := exec.LookPath("bindfs")
+	requireLiveProofDependency(t, bindfsErr == nil, fmt.Sprintf("bindfs unavailable: %v", bindfsErr))
+	state, enforceErr := getenforceLive()
+	requireLiveProofDependency(t, enforceErr == nil && state == "Enforcing",
+		fmt.Sprintf("SELinux is not enforcing: state=%q err=%v", state, enforceErr))
 	dir, err := os.MkdirTemp("", "docker-helper-live-selinux-*")
 	if err != nil {
 		t.Fatal(err)
@@ -440,18 +458,14 @@ func TestLiveWorkloadSELinux(t *testing.T) {
 // AVC, and a cleanup that leaves the backing inode and context unchanged.
 func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 	requireLiveProof(t)
-	if !dockerLiveAvailable(t) {
-		t.Skip("docker daemon unavailable")
-	}
-	if _, err := os.Stat(selinuxDevFusePath); err != nil {
-		t.Skip("/dev/fuse unavailable")
-	}
-	if _, err := exec.LookPath("bindfs"); err != nil {
-		t.Skip("bindfs unavailable")
-	}
-	if state, err := getenforceLive(); err != nil || state != "Enforcing" {
-		t.Skipf("SELinux is not enforcing: %v", state)
-	}
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	_, fuseErr := os.Stat(selinuxDevFusePath)
+	requireLiveProofDependency(t, fuseErr == nil, fmt.Sprintf("/dev/fuse unavailable: %v", fuseErr))
+	_, bindfsErr := exec.LookPath("bindfs")
+	requireLiveProofDependency(t, bindfsErr == nil, fmt.Sprintf("bindfs unavailable: %v", bindfsErr))
+	state, enforceErr := getenforceLive()
+	requireLiveProofDependency(t, enforceErr == nil && state == "Enforcing",
+		fmt.Sprintf("SELinux is not enforcing: state=%q err=%v", state, enforceErr))
 	dir, err := os.MkdirTemp("", "docker-helper-live-selfile-*")
 	if err != nil {
 		t.Fatal(err)
@@ -575,18 +589,14 @@ func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 // denied, and the backing labels never change.
 func TestLiveWorkloadMCSConcurrentRWRO(t *testing.T) {
 	requireLiveProof(t)
-	if !dockerLiveAvailable(t) {
-		t.Skip("docker daemon unavailable")
-	}
-	if _, err := os.Stat(selinuxDevFusePath); err != nil {
-		t.Skip("/dev/fuse unavailable")
-	}
-	if _, err := exec.LookPath("bindfs"); err != nil {
-		t.Skip("bindfs unavailable")
-	}
-	if state, err := getenforceLive(); err != nil || state != "Enforcing" {
-		t.Skipf("SELinux is not enforcing: %v", state)
-	}
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	_, fuseErr := os.Stat(selinuxDevFusePath)
+	requireLiveProofDependency(t, fuseErr == nil, fmt.Sprintf("/dev/fuse unavailable: %v", fuseErr))
+	_, bindfsErr := exec.LookPath("bindfs")
+	requireLiveProofDependency(t, bindfsErr == nil, fmt.Sprintf("bindfs unavailable: %v", bindfsErr))
+	state, enforceErr := getenforceLive()
+	requireLiveProofDependency(t, enforceErr == nil && state == "Enforcing",
+		fmt.Sprintf("SELinux is not enforcing: state=%q err=%v", state, enforceErr))
 	dir, err := os.MkdirTemp("", "docker-helper-live-mcs-*")
 	if err != nil {
 		t.Fatal(err)
@@ -718,15 +728,11 @@ func liveEvidence(t *testing.T, name, content string) {
 // the same file stays deliberately writable.
 func TestLiveWorkloadAppArmorRegularFile(t *testing.T) {
 	requireLiveProof(t)
-	if !dockerLiveAvailable(t) {
-		t.Skip("docker daemon unavailable")
-	}
-	if !fileExists(appArmorParserPath) {
-		t.Skip("apparmor_parser unavailable")
-	}
-	if active, err := appArmorLSMActive(); err != nil || !active {
-		t.Skipf("AppArmor is not the active LSM: %v", err)
-	}
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	requireLiveProofDependency(t, fileExists(appArmorParserPath), "apparmor_parser unavailable")
+	active, lsmErr := appArmorLSMActive()
+	requireLiveProofDependency(t, lsmErr == nil && active,
+		fmt.Sprintf("AppArmor is not the active LSM: active=%v err=%v", active, lsmErr))
 	dir, err := os.MkdirTemp("", "docker-helper-live-aafile-*")
 	if err != nil {
 		t.Fatal(err)
@@ -799,15 +805,11 @@ func TestLiveWorkloadAppArmorRegularFile(t *testing.T) {
 // transition around it.
 func TestLiveWorkloadAppArmorNestedRW(t *testing.T) {
 	requireLiveProof(t)
-	if !dockerLiveAvailable(t) {
-		t.Skip("docker daemon unavailable")
-	}
-	if !fileExists(appArmorParserPath) {
-		t.Skip("apparmor_parser unavailable")
-	}
-	if active, err := appArmorLSMActive(); err != nil || !active {
-		t.Skipf("AppArmor is not the active LSM: %v", err)
-	}
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	requireLiveProofDependency(t, fileExists(appArmorParserPath), "apparmor_parser unavailable")
+	active, lsmErr := appArmorLSMActive()
+	requireLiveProofDependency(t, lsmErr == nil && active,
+		fmt.Sprintf("AppArmor is not the active LSM: active=%v err=%v", active, lsmErr))
 	dir, err := os.MkdirTemp("", "docker-helper-live-aanest-*")
 	if err != nil {
 		t.Fatal(err)
@@ -919,4 +921,35 @@ func TestLiveWorkloadAppArmorNestedRW(t *testing.T) {
 	liveEvidence(t, "apparmor-nested-rw-summary.txt",
 		fmt.Sprintf("TESTED_SOURCE=%s\nPROFILE=%s\nISLAND_PROFILE=%s\nRESULT=CLOSED\n",
 			repoHead(t), profileName, islandName))
+}
+
+// TestRequiredLiveProofMissingPrerequisiteFailsClosed proves F9 at the
+// required-mode entry: with DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 an unmet
+// mandatory prerequisite (here: the proof must run as root) fails the proof
+// run with a non-zero exit instead of closing through the skip path.
+func TestRequiredLiveProofMissingPrerequisiteFailsClosed(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("unit-level required-mode proof expects a non-root test runner")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, goBinary(t), "test", "-count=1", "-run", "^TestLiveWorkloadAppArmor$", ".")
+	cmd.Env = append(os.Environ(), liveProofEnv+"=1")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("required live proof with an unmet prerequisite must exit non-zero, output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "required live workload proof") {
+		t.Fatalf("failure must name the required live proof contract, output:\n%s", out.String())
+	}
+}
+
+// goBinary returns the go toolchain binary for subprocess tests.
+func goBinary(t *testing.T) string {
+	t.Helper()
+	goroot := runtime.GOROOT()
+	return filepath.Join(goroot, "bin", "go")
 }
