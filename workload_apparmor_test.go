@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -557,6 +558,17 @@ func matchAAREFragment(pattern, segment string) bool {
 	return matchAARESub(pattern, 0, segment, 0)
 }
 
+// matchAAREPath evaluates the same AARE subset against a full container
+// path with the real kernel separator semantics the live proofs pin: a
+// literal matches '/', a negated character class matches '/', '?' does
+// not match '/', '*' never crosses '/', and '**' crosses separators.
+// Those are exactly the semantics that let the pre-fix `[^class]**`
+// diverge alternative consume whole following segments and mis-match
+// accepted read-write hole paths.
+func matchAAREPath(pattern, path string) bool {
+	return matchAARESub(pattern, 0, path, 0)
+}
+
 func matchAARESub(pattern string, pi int, segment string, si int) bool {
 	for pi < len(pattern) {
 		switch pattern[pi] {
@@ -592,16 +604,26 @@ func matchAARESub(pattern string, pi int, segment string, si int) bool {
 			pi += 4
 			si++
 		case '?':
-			if si >= len(segment) {
+			if si >= len(segment) || segment[si] == '/' {
 				return false
 			}
 			pi++
 			si++
 		case '*':
 			if pi+1 < len(pattern) && pattern[pi+1] == '*' {
-				return true
+				// '**': any run, including path separators.
+				for k := si; k <= len(segment); k++ {
+					if matchAARESub(pattern, pi+2, segment, k) {
+						return true
+					}
+				}
+				return false
 			}
+			// '*': any run that stays inside one path segment.
 			for k := si; k <= len(segment); k++ {
+				if k > si && segment[k-1] == '/' {
+					break
+				}
 				if matchAARESub(pattern, pi+1, segment, k) {
 					return true
 				}
@@ -853,6 +875,104 @@ func TestRenderWorkloadAppArmorProfileNestedRWWithInnerRO(t *testing.T) {
 	}
 }
 
+// appArmorDenyPatterns extracts the pattern body of every audit-deny rule
+// rendered in one workload profile.
+func appArmorDenyPatterns(profile string) []string {
+	var patterns []string
+	for _, line := range strings.Split(profile, "\n") {
+		idx := strings.Index(line, `audit deny "`)
+		if idx < 0 {
+			continue
+		}
+		rest := line[idx+len(`audit deny "`):]
+		end := strings.Index(rest, `"`)
+		if end < 0 {
+			continue
+		}
+		patterns = append(patterns, rest[:end])
+	}
+	return patterns
+}
+
+// appArmorAssertDenied proves every given container path is matched by at
+// least one rendered deny rule under real AARE path semantics.
+func appArmorAssertDenied(t *testing.T, profile string, paths []string) {
+	t.Helper()
+	patterns := appArmorDenyPatterns(profile)
+	if len(patterns) == 0 {
+		t.Fatalf("profile renders no deny rules:\n%s", profile)
+	}
+	for _, path := range paths {
+		matched := false
+		for _, pattern := range patterns {
+			if matchAAREPath(pattern, path) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("path %q must be denied by the rendered rules %q", path, patterns)
+		}
+	}
+}
+
+// appArmorAssertWritable proves no rendered deny rule matches the given
+// container paths under real AARE path semantics.
+func appArmorAssertWritable(t *testing.T, profile string, paths []string) {
+	t.Helper()
+	for _, path := range paths {
+		for _, pattern := range appArmorDenyPatterns(profile) {
+			if matchAAREPath(pattern, path) {
+				t.Errorf("accepted RW path %q must stay writable, but deny rule %q matches it", path, pattern)
+			}
+		}
+	}
+}
+
+// TestRenderWorkloadAppArmorProfilePrefixCollisionRWPaths proves the
+// renderer keeps accepted prefix-collision RW subtrees writable under
+// real AARE path semantics: with RO /work and RW holes /work/a and
+// /work/ab, files inside both hole subtrees stay writable while sibling
+// and continued-prefix names remain denied. This is the deterministic
+// half of the prefix-collision regression; the pre-fix `[^class]**`
+// diverge alternative crossed the separator inside rule bodies and
+// matched /work/a/file, which this test forbids.
+func TestRenderWorkloadAppArmorProfilePrefixCollisionRWPaths(t *testing.T) {
+	profile := renderWorkloadAppArmorProfile("n", workloadAppArmorTargetPlan{
+		RO: []appArmorROTarget{{Target: "/work"}},
+		RW: []string{"/work/a", "/work/ab"},
+	}, false)
+	appArmorAssertWritable(t, profile, []string{
+		"/work/a", "/work/ab",
+		"/work/a/file", "/work/ab/file",
+		"/work/a/sub/file", "/work/ab/sub",
+	})
+	appArmorAssertDenied(t, profile, []string{
+		"/work/aX", "/work/abc", "/work/abd", "/work/b",
+		"/work/inputs/file", "/work/aX/file", "/work/abc/file",
+	})
+}
+
+// TestRenderWorkloadAppArmorProfilePrefixCollisionNestedIsland proves a
+// nested read-only island below an accepted prefix-collision RW subtree
+// stays independently denied while the rest of the RW subtree stays
+// writable.
+func TestRenderWorkloadAppArmorProfilePrefixCollisionNestedIsland(t *testing.T) {
+	profile := renderWorkloadAppArmorProfile("n", workloadAppArmorTargetPlan{
+		RO: []appArmorROTarget{{Target: "/work"}, {Target: "/work/a/protected"}},
+		RW: []string{"/work/a", "/work/ab"},
+	}, false)
+	appArmorAssertWritable(t, profile, []string{
+		"/work/a", "/work/ab", "/work/a/file", "/work/ab/file",
+	})
+	appArmorAssertDenied(t, profile, []string{
+		// The island's mediated write forms: the directory-with-trailing-
+		// slash entry write and every descendant path.
+		"/work/a/protected/", "/work/a/protected/guarded",
+		"/work/aX", "/work/abc",
+	})
+}
+
 // TestRenderWorkloadAppArmorProfileExoticHoleBytes proves the hole-path
 // renderer keeps bytes outside the AppArmor class set literal-safe: the
 // exclusion class escapes them as hex and never emits raw continuation
@@ -892,6 +1012,53 @@ func TestRenderWorkloadAppArmorProfileHoleDeterminism(t *testing.T) {
 	profile := renderWorkloadAppArmorProfile("n", plan, false)
 	if !strings.Contains(profile, `audit deny "/work/aux/{,}" wkl,`) {
 		t.Errorf("intermediate hole nodes must render their own entry rule:\n%s", profile)
+	}
+}
+
+// TestWorkloadAppArmorProfileParserValidation validates the generated
+// workload profiles through the real apparmor_parser grammar when the
+// parser is available locally (the required live proofs prove the kernel
+// semantics; this catches grammar regressions cheaply on parser hosts).
+// The prefix-collision plans are the exact shapes of the renderer bug this
+// release fixes: the nested brace groups, negated classes containing '/',
+// and segment-bounded fragments must all parse.
+func TestWorkloadAppArmorProfileParserValidation(t *testing.T) {
+	if _, err := exec.LookPath("apparmor_parser"); err != nil {
+		t.Skip("apparmor_parser not available")
+	}
+	plans := map[string]workloadAppArmorTargetPlan{
+		"single-hole": {
+			RO: []appArmorROTarget{{Target: "/work"}},
+			RW: []string{"/work/output"},
+		},
+		"nested-island": {
+			RO: []appArmorROTarget{{Target: "/work"}, {Target: "/work/output/protected"}},
+			RW: []string{"/work/output"},
+		},
+		"prefix-collision": {
+			RO: []appArmorROTarget{{Target: "/work"}},
+			RW: []string{"/work/a", "/work/ab"},
+		},
+		"prefix-collision-island": {
+			RO: []appArmorROTarget{{Target: "/work"}, {Target: "/work/a/protected"}},
+			RW: []string{"/work/a", "/work/ab"},
+		},
+		"multi-segment-hole": {
+			RO: []appArmorROTarget{{Target: "/work"}},
+			RW: []string{"/work/output", "/work/aux/data"},
+		},
+	}
+	for name, plan := range plans {
+		profile := renderWorkloadAppArmorProfile("docker-helper-workload-op_parserval", plan, false)
+		dir := t.TempDir()
+		profilePath := filepath.Join(dir, "profile")
+		if err := os.WriteFile(profilePath, []byte(profile), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", profilePath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s workload profile parser validation failed: %v\n%s\n%s", name, err, out, profile)
+		}
 	}
 }
 

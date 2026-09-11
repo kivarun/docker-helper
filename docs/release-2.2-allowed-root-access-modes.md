@@ -279,8 +279,20 @@ docker-helper principal allowed-root set-access USER PATH ACCESS
 docker-helper launcher allowed-root set-access [LAUNCHER] PATH ACCESS
 ```
 
-`remove`, `list`, and Launcher `inherit` keep their existing meanings. `list`
-shows at least `PATH` and `ACCESS`; human output never hides the mode.
+```text
+docker-helper config allowed-root list [--json]
+docker-helper principal allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER
+docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
+```
+
+`remove`, `list`, and Launcher `inherit` keep their existing meanings.
+Existing 2.1 `allowed-root list` invocations keep their 2.1 human output:
+one canonical path per line, without an access column. The access mode of
+every stored root is available on the same commands through the explicit
+`--json` opt-in, which prints the canonical rich entries (`path` and
+`access`). The canonical mode-bearing representations remain the rich
+HTTP/JSON projections, and `session show` separately displays the issued
+immutable filesystem snapshot with each entry's access mode.
 
 Completion treats `read_write` and `read_only` as one canonical vocabulary and
 completes them only where an access value is accepted.

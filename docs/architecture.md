@@ -1138,7 +1138,9 @@ the show endpoint (`GET /principals/{username}`), not a separate HTTP
 list route. The show response carries the canonical rich
 `allowed_root_entries` projection beside the 2.x path-only
 `allowed_roots` compatibility projection, and `principal allowed-root
-list` renders it as the PATH/ACCESS table.
+list` prints the 2.1-compatible one canonical root per line by default,
+with the explicit `--json` opt-in carrying the canonical rich entries
+for access-aware tooling.
 
 ### Launcher
 
@@ -1200,7 +1202,7 @@ docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
 docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER] PATH ACCESS
 docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER] PATH
 docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT]
@@ -1498,8 +1500,10 @@ path; authorization-only, does NOT prepare MAC state.
 the stored canonical identity; a root that is not stored is a user-facing
 error, never an idempotent no-op.
 `remove` resolves and matches the stored canonical form; rejects removal of
-the final global root. `list` prints the PATH/ACCESS table, so the access
-mode of every global root is visible.
+the final global root. `list` prints the 2.1-compatible one canonical root
+per line by default; the explicit `--json` opt-in prints the canonical rich
+entries, so the access mode of every global root is visible to access-aware
+tooling.
 
 `http_address` is configurable in system mode only and requires a daemon
 restart to take effect. It is not included in the reloadable field list.

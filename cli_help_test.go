@@ -336,21 +336,24 @@ func TestAllowedRootAddAccessFlagSyntax(t *testing.T) {
 	})
 }
 
-// TestConfigAllowedRootListHelpDescribesTable proves the list help describes
-// the actual PATH/ACCESS table output instead of the retired one-root-per-line
-// format.
-func TestConfigAllowedRootListHelpDescribesTable(t *testing.T) {
+// TestConfigAllowedRootListHelpDescribesOutput proves the list help describes
+// the actual default one-root-per-line output and the explicit --json rich
+// projection, not the retired PATH/ACCESS table.
+func TestConfigAllowedRootListHelpDescribesOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "allowed-root", "list", "--help"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("help exit = %d, stderr=%s", code, stderr.String())
 	}
 	help := stdout.String() + stderr.String()
-	if strings.Contains(help, "one canonical root per line") {
-		t.Errorf("list help = %q, must not claim the retired one-root-per-line format", help)
+	if strings.Contains(help, "PATH/ACCESS") {
+		t.Errorf("list help = %q, must not claim the retired PATH/ACCESS table", help)
 	}
-	if !strings.Contains(help, "PATH/ACCESS") {
-		t.Errorf("list help = %q, must describe the PATH/ACCESS table", help)
+	if !strings.Contains(help, "one canonical root per line") {
+		t.Errorf("list help = %q, must describe the one-root-per-line default", help)
+	}
+	if !strings.Contains(help, "--json") {
+		t.Errorf("list help = %q, must describe the --json rich projection", help)
 	}
 }
 

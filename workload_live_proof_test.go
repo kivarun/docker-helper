@@ -173,7 +173,48 @@ func runInContainerWithBinds(t *testing.T, securityOpts []string, binds []string
 // checked first: while auditd drains the kernel audit netlink queue, records
 // reach only audit.log, whereas the printk fallback (dmesg, journalctl -k)
 // rate-limits and can silently drop the attributable record.
+//
+// The lookup is a bounded poll, not a single-shot read: the audit sinks may
+// lag the denied operation (auditd/journald flush, printk fallback), and a
+// required proof must wait for the attributable record. A failure dumps the
+// sink diagnostics so the run log identifies the exact transport behavior
+// (absent source, rate-limited fallback, or unattributable records).
 func appArmorDenialLogged(t *testing.T, profileName string) (bool, string) {
+	t.Helper()
+	deadline := time.Now().Add(45 * time.Second)
+	var found bool
+	var denialLine string
+	for {
+		found, denialLine = appArmorDenialLoggedOnce(t, profileName)
+		if found || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !found {
+		appArmorDenialDiagnostics(t, profileName)
+	}
+	return found, denialLine
+}
+
+// appArmorAttributableRecord polls the audit sinks for an attributable
+// DENIED record within the given budget (the sinks may lag the denied
+// operation or drop records under the rate-limited printk fallback; a
+// required proof waits for the observable record instead of guessing).
+func appArmorAttributableRecord(t *testing.T, profileName string, budget time.Duration) (bool, string) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for {
+		found, line := appArmorDenialLoggedOnce(t, profileName)
+		if found || !time.Now().Before(deadline) {
+			return found, line
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// appArmorDenialLoggedOnce performs one scan pass over the audit sinks.
+func appArmorDenialLoggedOnce(t *testing.T, profileName string) (bool, string) {
 	t.Helper()
 	sources := [][]string{
 		{"cat", "/var/log/audit/audit.log"},
@@ -192,6 +233,52 @@ func appArmorDenialLogged(t *testing.T, profileName string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// appArmorDenialDiagnostics dumps the attributable-record lookup state so a
+// required-proof failure identifies the sink behavior from the run log:
+// which sources were readable, how many DENIED lines each carries, how many
+// name the profile, and any audit transport rate-limit/backlog markers.
+func appArmorDenialDiagnostics(t *testing.T, profileName string) {
+	t.Helper()
+	sources := []struct {
+		name string
+		argv []string
+	}{
+		{"audit.log", []string{"cat", "/var/log/audit/audit.log"}},
+		{"dmesg", []string{"dmesg"}},
+		{"journalctl", []string{"journalctl", "--no-pager", "-k", "--since", "5 minutes ago"}},
+	}
+	for _, src := range sources {
+		out, err := exec.Command(src.argv[0], src.argv[1:]...).Output()
+		if err != nil {
+			t.Logf("denial lookup diagnostic: %s unavailable: %v", src.name, err)
+			continue
+		}
+		var denied, matching int
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.Contains(line, `apparmor="DENIED"`) {
+				continue
+			}
+			denied++
+			if strings.Contains(line, profileName) {
+				matching++
+			}
+		}
+		t.Logf("denial lookup diagnostic: %s: %d DENIED lines, %d attributable to %s",
+			src.name, denied, matching, profileName)
+	}
+	for _, argv := range [][]string{{"dmesg"}, {"journalctl", "--no-pager", "-k", "--since", "5 minutes ago"}} {
+		out, err := exec.Command(argv[0], argv[1:]...).Output()
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.Contains(line, "rate limit") || strings.Contains(line, "backlog") {
+				t.Logf("denial lookup diagnostic: audit transport: %s", strings.TrimSpace(line))
+			}
+		}
+	}
 }
 
 // liveContainerProcessLabel runs one container carrying the given security
@@ -921,6 +1008,133 @@ func TestLiveWorkloadAppArmorNestedRW(t *testing.T) {
 	liveEvidence(t, "apparmor-nested-rw-summary.txt",
 		fmt.Sprintf("TESTED_SOURCE=%s\nPROFILE=%s\nISLAND_PROFILE=%s\nRESULT=CLOSED\n",
 			repoHead(t), profileName, islandName))
+}
+
+// TestLiveWorkloadAppArmorPrefixCollisionRW proves the prefix-collision
+// renderer semantics with live kernel behavior: with RO /work plus the
+// prefix-collision RW holes /work/a and /work/ab, writes inside both
+// accepted RW subtrees succeed while sibling and continued-prefix names
+// beneath the RO parent are denied. The pre-fix renderer emitted a
+// `[^class]**` diverge alternative whose negated class matches '/' and
+// whose `**` crosses separators, so the generated deny rule matched
+// /work/a/file and the accepted RW subtree was wrongly denied.
+func TestLiveWorkloadAppArmorPrefixCollisionRW(t *testing.T) {
+	requireLiveProof(t)
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	requireLiveProofDependency(t, fileExists(appArmorParserPath), "apparmor_parser unavailable")
+	active, lsmErr := appArmorLSMActive()
+	requireLiveProofDependency(t, lsmErr == nil && active,
+		fmt.Sprintf("AppArmor is not the active LSM: active=%v err=%v", active, lsmErr))
+	dir, err := os.MkdirTemp("", "docker-helper-live-aapc-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	// Region tree, deliberately world-writable everywhere.
+	work := filepath.Join(dir, "work")
+	holeA := filepath.Join(work, "a")
+	holeAB := filepath.Join(work, "ab")
+	for _, d := range []string{work, holeA, holeAB} {
+		if err := os.Mkdir(d, 0777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(holeA, "existing"), []byte("rw\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "inputs.txt"), []byte("ro\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newWorkloadAppArmorBackend()
+	prep := workloadPreparation{
+		OperationID: "op_livaapc1",
+		SessionID:   "live",
+		StateDir:    filepath.Join(dir, "state", "op_livaapc1"),
+		RuntimeDir:  filepath.Join(dir, "runtime", "op_livaapc1"),
+		Exposures: []sessionFilesystemExposure{
+			{Target: "/work", RequestedReadOnly: true},
+			{Target: "/work/a", RequestedReadOnly: false},
+			{Target: "/work/ab", RequestedReadOnly: false},
+		},
+		PinnedSources: []string{work, holeA, holeAB},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepErr := b.prepare(prep)
+	if prepErr != nil {
+		t.Fatalf("production AppArmor prepare: %v", prepErr)
+	}
+	profileName := workloadAppArmorProfileName(prep.OperationID)
+	defer prepared.Cleanup()
+	binds := []string{
+		fmt.Sprintf("%s:/work:rw", work),
+		fmt.Sprintf("%s:/work/a:rw", holeA),
+		fmt.Sprintf("%s:/work/ab:rw", holeAB),
+	}
+
+	// Files inside both accepted prefix-collision RW subtrees must stay
+	// writable: creating a new file and mutating an existing one.
+	if err := runInContainerWithBinds(t, prepared.SecurityOpts, binds,
+		"echo rw-hole-a > /work/a/file && echo rw-hole-ab > /work/ab/file && echo rw-again > /work/a/existing",
+	); err != nil {
+		t.Fatalf("accepted prefix-collision RW subtrees must stay writable: %v", err)
+	}
+
+	// The kernel printk fallback drops audit records under rate limiting
+	// when no auditd consumer runs (observed on the runner: only a subset
+	// of the denial records survives in the ring buffer). The denial
+	// behavior itself is proven on every attempt; the attributable record
+	// is obtained by retrying the denial until the kernel log observes it,
+	// within a bounded attempt budget.
+	deniedWrites := []struct{ name, path string }{
+		{"sibling aX", "/work/aX"},
+		{"continued prefix abc", "/work/abc"},
+		{"plain RO file", "/work/inputs.txt"},
+	}
+	var denialLine string
+	attributable := false
+	for _, denied := range deniedWrites {
+		writeErr := runInContainerWithBinds(t, prepared.SecurityOpts, binds,
+			"echo outside > "+denied.path)
+		if writeErr == nil {
+			t.Fatalf("AppArmor must deny writes to the %s path %s", denied.name, denied.path)
+		}
+		t.Logf("denied %s write output: %v", denied.name, writeErr)
+		if found, line := appArmorAttributableRecord(t, profileName, 4*time.Second); found {
+			denialLine = line
+			attributable = true
+			break
+		}
+	}
+	for attempt := 0; !attributable && attempt < 8; attempt++ {
+		path := fmt.Sprintf("/work/aY%d", attempt)
+		writeErr := runInContainerWithBinds(t, prepared.SecurityOpts, binds,
+			"echo outside > "+path)
+		if writeErr == nil {
+			t.Fatalf("AppArmor must deny writes to the retry path %s", path)
+		}
+		t.Logf("denied attribution-retry write output: %v", writeErr)
+		if found, line := appArmorAttributableRecord(t, profileName, 4*time.Second); found {
+			denialLine = line
+			attributable = true
+		}
+	}
+	if !attributable {
+		appArmorDenialDiagnostics(t, profileName)
+		t.Fatal("attributable AppArmor DENIED record not found for the prefix-collision RO-region writes")
+	}
+	if !strings.Contains(denialLine, "/work/") {
+		t.Fatalf("denial must reference a denied RO path beneath /work: %s", denialLine)
+	}
+	t.Logf("attributable denial: %s", denialLine)
+	liveEvidence(t, "apparmor-prefix-collision-denial.txt", denialLine+"\n")
+	liveEvidence(t, "apparmor-prefix-collision-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nPROFILE=%s\nRESULT=CLOSED\n", repoHead(t), profileName))
 }
 
 // TestRequiredLiveProofMissingPrerequisiteFailsClosed proves F9 at the

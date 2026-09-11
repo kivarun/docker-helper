@@ -302,7 +302,8 @@ unchanged no-op, and the reserved user-mode daemon-owner Principal is refused
 like every other mutation); the rich `allowed_root_entries` projection beside
 the preserved 2.1 `allowed_roots` path-only form on Principal show, Launcher
 show/list, effective-roots introspection, Session create-policy, and `config
-show`, with human allowed-root lists as PATH/ACCESS tables and CLI field
+show`, with the initially shipped human allowed-root lists as PATH/ACCESS
+tables (see the final compatibility correction below) and CLI field
 extraction (`allowed_root_entries` on `principal show`) and completion sharing
 the same owners; the Launcher complete-scope PUT extended with the strict rich
 entry form while the 2.1 path-only form keeps mapping to `read_write` and the
@@ -315,6 +316,16 @@ Principal credential and Session bearer retain no allowed-root mutation
 authority. Not implemented by design here: snapshot persistence (2.2.4) and
 runtime enforcement (2.2.5); README/architecture prose rework is deferred to
 the 2.2.7 documentation pass.
+
+Final compatibility correction (Release 2.2): the initial 2.2.3
+implementation emitted human `allowed-root list` output as PATH/ACCESS
+tables. Before the final Release 2.2 compatibility review, the default
+human output was restored to the 2.1 contract — one canonical path per
+line — and the canonical access-aware CLI projection is now the explicit
+`--json` opt-in on the same commands. The HTTP rich projections and
+`session show` (the issued immutable filesystem snapshot) remain
+mode-bearing. This is a compatibility correction of the CLI output
+contract only; the allowed-root semantic model is unchanged.
 
 Dependencies: 2.2.1 and 2.2.2.
 
@@ -365,8 +376,11 @@ Update:
 - config show/list;
 - human allowed-root list output.
 
-The rich projection is authoritative for access modes. Human output always
-shows access.
+The rich projection is authoritative for access modes. Under the final
+compatibility correction above, the default human `allowed-root list`
+output is the 2.1 one-path-per-line form; the explicit `--json` opt-in
+carries the canonical rich entries. HTTP rich projections and
+`session show` remain mode-bearing.
 
 ### Completion
 

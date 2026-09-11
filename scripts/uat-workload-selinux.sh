@@ -57,6 +57,12 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared measurement primitives (fail-closed residue inventory) come from the
+# canonical lib owner; the script's own helpers below win.
+# shellcheck source=scripts/uat-regression-lib.sh
+source "$SCRIPT_DIR/uat-regression-lib.sh"
+
 VERSION="${UAT_VERSION:-2.2.0-uat}"
 # RPM version field uses "~" for the UAT suffix ("-" separates version from
 # release), so the rpm record check must match the transformed string. Bash
@@ -122,35 +128,33 @@ wait_health() {
   return 1
 }
 
-helper_container_count() {
-  docker ps -a --filter 'label=com.dockerhelper.schema=1' -q | wc -l
-}
-
-wait_no_helper_containers() {
-  local _i=0
-  for _i in $(seq 1 40); do
-    [ "$(helper_container_count)" = "0" ] && return 0
-    sleep 0.25
-  done
-  return 1
-}
+# Fail-closed residue inventory: the three-state ABSENT/PRESENT/UNKNOWN
+# contract is owned by the shared primitives in uat-regression-lib.sh
+# (helper_container_count, wait_no_helper_containers, inventory_count).
+# "Cannot inspect" is never "clean".
 
 residue_state() {
-  printf 'containers=%s pins=%s wlmac=%s\n' \
-    "$(helper_container_count)" \
-    "$(ls /run/docker-helper/mounts 2>/dev/null | wc -l)" \
-    "$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)"
+  local containers pins wlmac
+  containers="$(helper_container_count)" || return 1
+  pins="$(inventory_count /run/docker-helper/mounts)" || return 1
+  wlmac="$(inventory_count /run/docker-helper/workload-mac)" || return 1
+  printf 'containers=%s pins=%s wlmac=%s\n' "$containers" "$pins" "$wlmac"
 }
 
 residue_unchanged() {
   local base="$1" now
-  now="$(residue_state)"
+  now="$(residue_state)" || { printf '  residue inventory unavailable for the drift check\n' >&2; return 1; }
   [ "$now" = "$base" ] || { printf '  residue drift: before %s after %s\n' "$base" "$now" >&2; return 1; }
 }
 
+# workload_residue_clean asserts no transient/durable workload-MAC state
+# remains. Exit status: 0 = clean, 1 = residue, 2 = inventory unavailable
+# (never clean).
 workload_residue_clean() {
-  [ "$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)" = "0" ] \
-    && [ "$(ls /var/lib/docker-helper/workload-mac 2>/dev/null | wc -l)" = "0" ]
+  local runtime durable
+  runtime="$(inventory_count /run/docker-helper/workload-mac)" || return 2
+  durable="$(inventory_count /var/lib/docker-helper/workload-mac)" || return 2
+  [ "$runtime" = "0" ] && [ "$durable" = "0" ]
 }
 
 create_session() {
@@ -390,6 +394,14 @@ printf 'ro-input\n' > "$TREE/work/pipeline-inputs/input.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$TREE"
 chmod -R u+rwX,go+rX "$TREE"
 TREE_CTX_BEFORE="$(tree_context_snapshot)"
+# Fail-closed inventory contract: the no-relabel baseline must be a
+# positively observed context snapshot; an unavailable context inventory
+# (stat/find failure) collapses before and after to equal empties and must
+# never read as "unchanged".
+if [ -z "$TREE_CTX_BEFORE" ]; then
+  echo "error: acceptance-tree context inventory is empty (stat/find failed); S11 no-relabel evidence is unavailable" >&2
+  exit 2
+fi
 
 dh principal create --system --no-credential "$PRINCIPAL" 2>/tmp/uat-wls-setup.err || {
   echo "error: principal create failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
@@ -473,11 +485,14 @@ fi
 # scenario S5: writable parent over nested RO refused before workload creation
 # ==============================================================================
 say "S5: writable parent over nested RO refused before workload creation"
-S5_BASE="$(residue_state)"
-if expect_read_only_root "$WSA_TOKEN" . /mnt/tree 'echo x > /mnt/tree/pipeline-inputs/x.txt' "$S5_BASE"; then
-  acc_ok "S5 writable parent refused with read_only_root before MAC/container creation"
+if S5_BASE="$(residue_state)"; then
+  if expect_read_only_root "$WSA_TOKEN" . /mnt/tree 'echo x > /mnt/tree/pipeline-inputs/x.txt' "$S5_BASE"; then
+    acc_ok "S5 writable parent refused with read_only_root before MAC/container creation"
+  else
+    acc_fail "S5 writable parent refusal wrong (base: $S5_BASE)"
+  fi
 else
-  acc_fail "S5 writable parent refusal wrong (base: $S5_BASE)"
+  acc_blocked "S5 residue inventory unavailable for the no-state baseline"
 fi
 
 # ==============================================================================
@@ -585,9 +600,19 @@ fi
 # scenario S12: cleanup after success/failure + restart/reconciliation
 # ==============================================================================
 say "S12: cleanup after success and failure, restart/reconciliation"
-wait_no_helper_containers || acc_fail "S12 helper containers remain after the scenarios"
-if workload_residue_clean; then
+wait_no_helper_containers
+S12_WAIT_RC=$?
+if [ "$S12_WAIT_RC" -eq 2 ]; then
+  acc_blocked "S12 helper container inventory unavailable after the scenarios"
+elif [ "$S12_WAIT_RC" -ne 0 ]; then
+  acc_fail "S12 helper containers remain after the scenarios"
+fi
+workload_residue_clean
+S12_CLEAN_RC=$?
+if [ "$S12_CLEAN_RC" -eq 0 ]; then
   acc_ok "S12 no generated workload state remains after the positive scenarios"
+elif [ "$S12_CLEAN_RC" -eq 2 ]; then
+  acc_blocked "S12 workload residue inventory unavailable after the positive scenarios"
 else
   acc_fail "S12 workload residue after the positive scenarios"
 fi
@@ -597,9 +622,19 @@ S12_FAIL_EC=$?
 [ "$S12_FAIL_EC" -ne 0 ] \
   && acc_ok "S12 failing workload propagates the container failure (ec=$S12_FAIL_EC)" \
   || acc_fail "S12 failing workload unexpectedly succeeded"
-wait_no_helper_containers || acc_fail "S12 helper containers remain after the failing run"
-if workload_residue_clean; then
+wait_no_helper_containers
+S12_WAIT2_RC=$?
+if [ "$S12_WAIT2_RC" -eq 2 ]; then
+  acc_blocked "S12 helper container inventory unavailable after the failing run"
+elif [ "$S12_WAIT2_RC" -ne 0 ]; then
+  acc_fail "S12 helper containers remain after the failing run"
+fi
+workload_residue_clean
+S12_CLEAN2_RC=$?
+if [ "$S12_CLEAN2_RC" -eq 0 ]; then
   acc_ok "S12 no generated workload state remains after the failing run"
+elif [ "$S12_CLEAN2_RC" -eq 2 ]; then
+  acc_blocked "S12 workload residue inventory unavailable after the failing run"
 else
   acc_fail "S12 workload residue after the failing run"
 fi
@@ -611,11 +646,20 @@ done
 DH_PID2="$(systemctl show -p MainPID --value docker-helper.service)"
 DH_LABEL2="$(tr -d '\0' < "/proc/$DH_PID2/attr/current" 2>/dev/null || true)"
 if wait_health \
-    && case "$DH_LABEL2" in *docker_helper_t:*) true ;; *) false ;; esac \
-    && workload_residue_clean; then
-  acc_ok "S12 restart/reconciliation: daemon confined again, no stale workload state"
+    && case "$DH_LABEL2" in *docker_helper_t:*) true ;; *) false ;; esac; then
+  workload_residue_clean
+  S12_CLEAN3_RC=$?
+  if [ "$S12_CLEAN3_RC" -eq 0 ]; then
+    acc_ok "S12 restart/reconciliation: daemon confined again, no stale workload state"
+  elif [ "$S12_CLEAN3_RC" -eq 2 ]; then
+    acc_blocked "S12 restart left the daemon confined but the workload residue inventory is unavailable"
+  else
+    acc_fail "S12 restart left stale workload state"
+  fi
 else
-  echo "  S12 restart detail: health=$(wait_health && echo ok || echo FAIL) label='$DH_LABEL2' residue=$(workload_residue_clean && echo clean || echo DIRTY)" >&2
+  workload_residue_clean
+  S12_CLEAN4_RC=$?
+  echo "  S12 restart detail: health=$(wait_health && echo ok || echo FAIL) label='$DH_LABEL2' residue=$( [ "$S12_CLEAN4_RC" -eq 0 ] && echo clean || { [ "$S12_CLEAN4_RC" -eq 2 ] && echo unavail || echo dirty; })" >&2
   acc_fail "S12 restart left confinement or workload residue broken"
 fi
 

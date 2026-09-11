@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 
 	"golang.org/x/term"
 )
@@ -564,17 +563,19 @@ func optionalAccessFromFlag(f *accessFlag) *AllowedRootAccess {
 	return &f.access
 }
 
-// printAllowedRootAccessTable prints the human allowed-root listing shared by
-// the config, Principal, and Launcher allowed-root list commands: a
-// PATH/ACCESS table in the canonical stored-entry order, so the access mode
-// of every root is always visible in the human surface.
-func printAllowedRootAccessTable(w io.Writer, entries []AllowedRootEntry) {
-	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
-	fmt.Fprintln(tw, "PATH\tACCESS")
-	for _, e := range entries {
-		fmt.Fprintf(tw, "%s\t%s\n", e.Path, e.Access)
+// printAllowedRootList prints the human allowed-root listing shared by the
+// config, Principal, and Launcher allowed-root list commands. The default
+// output is the 2.1-compatible one canonical root per line in stored-entry
+// order; --json prints the canonical rich entries ([{"path","access"}, ...])
+// in the same order for access-aware tooling.
+func printAllowedRootList(w io.Writer, entries []AllowedRootEntry, jsonOut bool) error {
+	if jsonOut {
+		return encodeJSONOut(w, entries)
 	}
-	tw.Flush()
+	for _, e := range entries {
+		fmt.Fprintln(w, e.Path)
+	}
+	return nil
 }
 
 var versionCommand = &Command{

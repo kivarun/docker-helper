@@ -569,12 +569,13 @@ var launcherAllowedRootAddCommand = &Command{
 var launcherAllowedRootListCommand = &Command{
 	Name:       "list",
 	Summary:    "List a launcher's allowed roots",
-	Usage:      "docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -592,7 +593,10 @@ var launcherAllowedRootListCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				printAllowedRootAccessTable(stdout, l.AllowedRootEntries)
+				if err := printAllowedRootList(stdout, l.AllowedRootEntries, *jsonOut); err != nil {
+					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+					return 1
+				}
 				return 0
 			},
 		}

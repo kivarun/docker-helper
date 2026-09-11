@@ -18,7 +18,8 @@
 #                    is absent. Sets the initial allowed_root for init.
 #
 # Requires: bash 4+, root (effective UID 0), Docker, and the runtime tooling
-# for the single active MAC backend (AppArmor parser, or semodule+restorecon).
+# for the single active MAC backend (AppArmor parser, or semodule+restorecon
+# and bindfs — the SELinux read-only workload projection dependency).
 
 set -euo pipefail
 
@@ -37,6 +38,7 @@ SELINUX_PP_SRC="${SELINUX_PP_SRC:-selinux/docker_helper.pp}"
 SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
 SEMODULE="${SEMODULE:-semodule}"
 RESTORECON="${RESTORECON:-restorecon}"
+BINDFS="${BINDFS:-bindfs}"
 # Kernel truth for MAC backend selection (the same sources the RPM postinstall
 # and the MAC UAT adapters use).
 AA_ENABLED_PATH="${AA_ENABLED_PATH:-/sys/module/apparmor/parameters/enabled}"
@@ -208,6 +210,11 @@ check_selected_mac_tools() {
 		if ! command -v "$RESTORECON" >/dev/null 2>&1; then
 			error "restorecon not found in PATH"
 			error "SELinux runtime tooling (restorecon) is required for system mode on a SELinux host."
+			exit 1
+		fi
+		if ! command -v "$BINDFS" >/dev/null 2>&1; then
+			error "bindfs not found in PATH"
+			error "bindfs is required for SELinux read-only workload projection; install the bindfs package first."
 			exit 1
 		fi
 		if [[ ! -f "$script_dir/$SELINUX_PP_SRC" ]]; then

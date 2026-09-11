@@ -46,6 +46,12 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared measurement primitives only (structural rich allowed-root JSON parse,
+# fail-closed residue inventory); the script's own helpers below win.
+# shellcheck source=scripts/uat-regression-lib.sh
+source "$SCRIPT_DIR/uat-regression-lib.sh"
+
 VERSION="${UAT_VERSION:-2.2.0-uat}"
 BASELINE_VERSION="2.1.1"
 # The migration guest's global allowed root lives under /home. Location does
@@ -300,12 +306,23 @@ acc_ok "R3 packaged restart path completed (service active, healthy)"
 # ==============================================================================
 # R4-R9: post-migration proofs
 # ==============================================================================
-M_LIST="$(dh config allowed-root list 2>/dev/null || true)"
-if printf '%s\n' "$M_LIST" | grep -F "$ALLOWED_ROOT" | grep -q 'read_write' \
-    && printf '%s\n' "$M_LIST" | grep -F "$M_POLICY" | grep -q 'read_write'; then
-  acc_ok "R4 migrated path-only global roots carry read_write authority"
+# R4: the migrated roots' read_write authority is proven through the rich
+# --json projection, parsed structurally (the default human list is the
+# 2.1-compatible one path per line surface and carries no ACCESS column).
+M_LIST_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"
+M_RW_GLOBAL="$(printf '%s' "$M_LIST_JSON" | allowed_root_json_access "$ALLOWED_ROOT")"
+M_RW_POLICY="$(printf '%s' "$M_LIST_JSON" | allowed_root_json_access "$M_POLICY")"
+if [ "$M_RW_GLOBAL" = read_write ] && [ "$M_RW_POLICY" = read_write ]; then
+  acc_ok "R4 migrated path-only global roots carry read_write authority (rich projection)"
 else
-  acc_fail "R4 global root access semantics wrong: $M_LIST"
+  acc_fail "R4 global root access semantics wrong (rich projection: $M_LIST_JSON)"
+fi
+M_HUMAN_LIST="$(dh config allowed-root list 2>/dev/null || true)"
+if printf '%s\n' "$M_HUMAN_LIST" | grep -qx "$ALLOWED_ROOT" \
+    && printf '%s\n' "$M_HUMAN_LIST" | grep -qx "$M_POLICY"; then
+  acc_ok "R4 default human list keeps the 2.1 one-path-per-line contract (no ACCESS column)"
+else
+  acc_fail "R4 default human list lost the 2.1 one-path-per-line contract: $M_HUMAN_LIST"
 fi
 if python3 -c '
 import json, sys
@@ -318,18 +335,20 @@ else
   acc_fail "R4 config.json legacy path-only form not preserved"
 fi
 
-M_PLIST="$(dh principal allowed-root list --system "$M_USER" 2>/dev/null || true)"
-if printf '%s\n' "$M_PLIST" | grep -F "$ALLOWED_ROOT" | grep -q 'read_write' \
-    && printf '%s\n' "$M_PLIST" | grep -F "$M_POLICY" | grep -q 'read_write'; then
-  acc_ok "R5 Principal roots migrated as read_write"
+M_PLIST_JSON="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+M_RW_P_GLOBAL="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$ALLOWED_ROOT")"
+M_RW_P_POLICY="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$M_POLICY")"
+if [ "$M_RW_P_GLOBAL" = read_write ] && [ "$M_RW_P_POLICY" = read_write ]; then
+  acc_ok "R5 Principal roots migrated as read_write (rich projection)"
 else
-  acc_fail "R5 Principal root migration wrong: $M_PLIST"
+  acc_fail "R5 Principal root migration wrong (rich projection: $M_PLIST_JSON)"
 fi
-M_LLIST="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
-if printf '%s\n' "$M_LLIST" | grep -F "$M_POLICY/sub" | grep -q 'read_write'; then
-  acc_ok "R5 Launcher root migrated as read_write"
+M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" --json 2>/dev/null || true)"
+M_RW_L_SUB="$(printf '%s' "$M_LLIST_JSON" | allowed_root_json_access "$M_POLICY/sub")"
+if [ "$M_RW_L_SUB" = read_write ]; then
+  acc_ok "R5 Launcher root migrated as read_write (rich projection)"
 else
-  acc_fail "R5 Launcher root migration wrong: $M_LLIST"
+  acc_fail "R5 Launcher root migration wrong (rich projection: $M_LLIST_JSON)"
 fi
 
 M_S1_SHOW="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
@@ -378,6 +397,12 @@ else
   acc_fail "R8 old Session bearer unavailable (seed failed earlier)"
 fi
 
+# R9 pre-restart baseline: the canonical, formatting-independent rich
+# projection of the migrated policy (config and Principal roots). The
+# post-restart check compares this projection, never formatted output.
+M_R9_CONFIG_PROJ_BEFORE="$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_projection)"
+M_R9_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null | allowed_root_json_projection)"
+
 systemctl restart docker-helper.service >/dev/null 2>&1 || true
 wait_service_active || acc_fail "R9 daemon not active after restart"
 if wait_health; then
@@ -387,11 +412,16 @@ if wait_health; then
   else
     acc_fail "R9 snapshot changed after restart"
   fi
-  if dh config allowed-root list 2>/dev/null | grep -F "$M_POLICY" | grep -q 'read_write' \
-      && dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -F "$M_POLICY" | grep -q 'read_write'; then
-    acc_ok "R9 migrated policy stable across restart"
+  M_R9_CONFIG_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"
+  M_R9_PRINCIPAL_JSON="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+  M_R9_CONFIG_RW="$(printf '%s' "$M_R9_CONFIG_JSON" | allowed_root_json_access "$M_POLICY")"
+  M_R9_PRINCIPAL_RW="$(printf '%s' "$M_R9_PRINCIPAL_JSON" | allowed_root_json_access "$M_POLICY")"
+  if [ "$(printf '%s' "$M_R9_CONFIG_JSON" | allowed_root_json_projection)" = "$M_R9_CONFIG_PROJ_BEFORE" ] \
+      && [ "$(printf '%s' "$M_R9_PRINCIPAL_JSON" | allowed_root_json_projection)" = "$M_R9_PRINCIPAL_PROJ_BEFORE" ] \
+      && [ "$M_R9_CONFIG_RW" = read_write ] && [ "$M_R9_PRINCIPAL_RW" = read_write ]; then
+    acc_ok "R9 migrated policy stable across restart (canonical rich projection identical, read_write kept)"
   else
-    acc_fail "R9 migrated policy changed after restart"
+    acc_fail "R9 migrated policy changed after restart (projection before: config=[$M_R9_CONFIG_PROJ_BEFORE] principal=[$M_R9_PRINCIPAL_PROJ_BEFORE])"
   fi
   if [ "$(sha256sum /etc/docker-helper/config.json | awk '{print $1}')" = "$M_CONFIG_SHA" ]; then
     acc_ok "R9 config.json unchanged across upgrade and restart"

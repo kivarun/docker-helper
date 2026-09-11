@@ -70,6 +70,12 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared measurement primitives only (structural rich allowed-root JSON parse,
+# fail-closed residue inventory); the script's own helpers below win.
+# shellcheck source=scripts/uat-regression-lib.sh
+source "$SCRIPT_DIR/uat-regression-lib.sh"
+
 VERSION="${UAT_VERSION:-2.2.0-uat}"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home/runner}"
 PRINCIPAL="${UAT_PRINCIPAL:-runner}"
@@ -119,44 +125,44 @@ wait_health() {
   return 1
 }
 
-# helper_container_count counts helper-owned containers (including exited --
-# --rm removes them on exit, and a pre-admission refusal never creates one).
-helper_container_count() {
-  docker ps -a --filter 'label=com.dockerhelper.schema=1' -q | wc -l
-}
-
-# wait_no_helper_containers polls until no helper container is visible
-# (bounded), so a finished --rm container's brief exit window cannot flake
-# the final residue assertions.
-wait_no_helper_containers() {
-  local _i=0
-  for _i in $(seq 1 40); do
-    [ "$(helper_container_count)" = "0" ] && return 0
-    sleep 0.25
-  done
-  return 1
-}
-
-# residue_state prints the observable workload residue so refusal and cleanup
-# assertions compare the same fields.
+# Residue inventory: the shared fail-closed primitives from
+# uat-regression-lib.sh (helper_container_count, wait_no_helper_containers,
+# inventory_count) own the three-state ABSENT/PRESENT/UNKNOWN contract;
+# "cannot inspect" is never "clean". residue_state composes this scenario's
+# inventories (it additionally tracks build staging) and inherits the
+# fail-closed contract: any inventory failure exits 1, never reports clean.
 residue_state() {
+  local containers pins wlmac builds
+  containers="$(helper_container_count)" || return 1
+  pins="$(inventory_count /run/docker-helper/mounts)" || return 1
+  wlmac="$(inventory_count /run/docker-helper/workload-mac)" || return 1
+  builds="$(inventory_count /run/docker-helper/builds)" || return 1
   printf 'containers=%s pins=%s wlmac=%s builds=%s\n' \
-    "$(helper_container_count)" \
-    "$(ls /run/docker-helper/mounts 2>/dev/null | wc -l)" \
-    "$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)" \
-    "$(ls /run/docker-helper/builds 2>/dev/null | wc -l)"
+    "$containers" "$pins" "$wlmac" "$builds"
 }
 
 # residue_unchanged BASE asserts the current residue equals the recorded base.
+# Fail-closed: an unavailable inventory is never an unchanged policy.
 residue_unchanged() {
   local base="$1" now
-  now="$(residue_state)"
+  now="$(residue_state)" || { printf '  residue inventory unavailable for the drift check\n' >&2; return 1; }
   [ "$now" = "$base" ] || { printf '  residue drift: before %s after %s\n' "$base" "$now" >&2; return 1; }
 }
 
-# workload_profile_count counts loaded generated workload profiles.
+# workload_profile_count prints the number of loaded generated workload
+# profiles. Fail-closed: a profiles inventory read failure is an inventory
+# error (exit 1), never a zero count. grep -c reports the authoritative count
+# for both exit 0 (matches) and exit 1 (no matches); only a read error (exit
+# 2) means the count is unknown.
 workload_profile_count() {
-  grep -c 'docker-helper-workload-' /sys/kernel/security/apparmor/profiles 2>/dev/null || true
+  local out rc
+  out="$(grep -c 'docker-helper-workload-' /sys/kernel/security/apparmor/profiles 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    printf '  workload profile inventory unavailable (cannot read the loaded profiles)\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 # api METHOD PATH [BODY] — raw control-plane API call under the admin token
@@ -315,19 +321,30 @@ chmod -R u+rwX,go+rX "$TREE" "$LEGACY" "$BUILDROOT"
 # ==============================================================================
 scenario "P: packaged control-plane surface"
 
-# P1: config allowed-root add --access read_only (rich config entry).
+# P1: config allowed-root add --access read_only (rich config entry). The
+# access is verified through the rich --json projection, parsed structurally.
 if dh config allowed-root add --access read_only "$TREE/global-ro" >/dev/null 2>&1 \
-    && dh config allowed-root list 2>/dev/null | grep -F "$TREE/global-ro" | grep -q 'read_only'; then
-  acc_ok "P1 config allowed-root add --access read_only (list shows read_only)"
+    && [ "$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_access "$TREE/global-ro")" = read_only ]; then
+  acc_ok "P1 config allowed-root add --access read_only (rich projection shows read_only)"
 else
   acc_fail "P1 config allowed-root add --access read_only failed"
 fi
 # P2: config allowed-root set-access back to read_write.
 if dh config allowed-root set-access "$TREE/global-ro" read_write >/dev/null 2>&1 \
-    && dh config allowed-root list 2>/dev/null | grep -F "$TREE/global-ro" | grep -q 'read_write'; then
-  acc_ok "P2 config allowed-root set-access (list shows read_write)"
+    && [ "$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_access "$TREE/global-ro")" = read_write ]; then
+  acc_ok "P2 config allowed-root set-access (rich projection shows read_write)"
 else
   acc_fail "P2 config allowed-root set-access failed"
+fi
+# The default human list is separately proven as the 2.1-compatible surface:
+# exactly one canonical path per line, no ACCESS column (the access lives in
+# the rich --json projection above).
+AM_HUMAN_LIST="$(dh config allowed-root list 2>/dev/null || true)"
+if printf '%s\n' "$AM_HUMAN_LIST" | grep -qx "$ALLOWED_ROOT" \
+    && printf '%s\n' "$AM_HUMAN_LIST" | grep -qx "$TREE/global-ro"; then
+  acc_ok "P1/P2 default human list keeps the 2.1 one-path-per-line contract (no ACCESS column)"
+else
+  acc_fail "P1/P2 default human list lost the 2.1 one-path-per-line contract: $AM_HUMAN_LIST"
 fi
 
 # Principal with the 2.2 tree policy.
@@ -336,18 +353,16 @@ dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
 
 # P3: principal allowed-root add with omitted --access -> read_write.
 if dh principal allowed-root add --system "$PRINCIPAL" "$TREE" >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$TREE" | grep -q 'read_write'; then
-  acc_ok "P3 principal allowed-root add with omitted --access -> read_write"
+    && [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$TREE")" = read_write ]; then
+  acc_ok "P3 principal allowed-root add with omitted --access -> read_write (rich projection)"
 else
   acc_fail "P3 principal allowed-root add (omitted --access) failed"
 fi
 
 # P4: principal allowed-root add --access read_only for the RO region.
 if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$WS/pipeline-inputs" >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$WS/pipeline-inputs" | grep -q 'read_only'; then
-  acc_ok "P4 principal allowed-root add --access read_only"
+    && [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
+  acc_ok "P4 principal allowed-root add --access read_only (rich projection shows read_only)"
 else
   acc_fail "P4 principal allowed-root add --access read_only failed"
 fi
@@ -357,23 +372,36 @@ fi
 # existing root; it cannot reach into the parent TREE entry).
 if dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
     "$WS/project" >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$WS/project" | grep -q 'read_write'; then
-  acc_ok "P4b principal owns the project root (read_write)"
+    && [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/project")" = read_write ]; then
+  acc_ok "P4b principal owns the project root (read_write, rich projection)"
 else
   acc_fail "P4b principal project-root add failed"
 fi
 
 # P5: principal allowed-root set-access (flip and flip back, exact contract).
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_write >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$WS/pipeline-inputs" | grep -q 'read_write' \
-    && dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$WS/pipeline-inputs" | grep -q 'read_only'; then
-  acc_ok "P5 principal allowed-root set-access (read_write -> read_only -> read_only)"
+# The mutations run unconditionally and each verification is its own
+# collect-all step: a failed verification must never skip the flip-back
+# mutation and leave the fixture (pipeline-inputs = read_write) corrupted for
+# the downstream read_only scenarios.
+if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_write >/dev/null 2>&1; then
+  acc_ok "P5 set-access to read_write accepted"
 else
-  acc_fail "P5 principal allowed-root set-access failed"
+  acc_fail "P5 set-access to read_write failed"
+fi
+if [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_write ]; then
+  acc_ok "P5 rich projection shows read_write after the flip"
+else
+  acc_fail "P5 read_write verification failed"
+fi
+if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1; then
+  acc_ok "P5 set-access back to read_only accepted"
+else
+  acc_fail "P5 set-access back to read_only failed"
+fi
+if [ "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
+  acc_ok "P5 rich projection shows read_only after the flip back"
+else
+  acc_fail "P5 read_only verification failed"
 fi
 
 # P6: rich Launcher scope replacement through PUT allowed_root_entries.
@@ -772,36 +800,66 @@ else
 fi
 
 # ==============================================================================
-# scenario Z: residue and cleanup
+# scenario Z: residue and cleanup (fail-closed three-state inventory:
+# ABSENT / PRESENT / UNKNOWN — "cannot inspect" is never "clean", an
+# inventory failure blocks the gate instead of reporting zero residue)
 # ==============================================================================
 scenario "Z: no container/mount-pin/workload-MAC/runtime residue"
 for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}"; do
   [ -n "$sid" ] || continue
   dh session delete --system --id "$sid" >/dev/null 2>&1 || acc_fail "Z session $sid delete failed"
 done
-if wait_no_helper_containers; then
-  acc_ok "Z no helper-owned containers remain"
-else
+wait_no_helper_containers
+Z_WAIT_RC=$?
+if [ "$Z_WAIT_RC" -eq 2 ]; then
+  acc_blocked "Z helper container inventory unavailable after the scenarios"
+elif [ "$Z_WAIT_RC" -ne 0 ]; then
   acc_fail "Z helper-owned containers remain ($(docker ps -a --filter 'label=com.dockerhelper.schema=1' --format '{{.ID}} {{.Status}}' | head -3))"
+else
+  acc_ok "Z no helper-owned containers remain"
 fi
-[ "$(ls /run/docker-helper/mounts 2>/dev/null | wc -l)" = "0" ] \
-  && acc_ok "Z no mount pins remain" \
-  || acc_fail "Z mount pins remain: $(ls /run/docker-helper/mounts 2>/dev/null | head -3)"
-[ "$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)" = "0" ] \
-  && acc_ok "Z no workload-MAC runtime state remains" \
-  || acc_fail "Z workload-MAC runtime state remains"
-[ "$(ls /run/docker-helper/builds 2>/dev/null | wc -l)" = "0" ] \
-  && acc_ok "Z no build staging remains" \
-  || acc_fail "Z build staging remains"
-[ "$(ls /run/docker-helper/sessions 2>/dev/null | wc -l)" = "0" ] \
-  && acc_ok "Z no session runtime directories remain" \
-  || acc_fail "Z session runtime directories remain"
-[ "$(ls /var/lib/docker-helper/workload-mac 2>/dev/null | wc -l)" = "0" ] \
-  && acc_ok "Z no durable workload-MAC records remain" \
-  || acc_fail "Z durable workload-MAC records remain"
-[ "$(workload_profile_count)" = "0" ] \
-  && acc_ok "Z no generated workload profiles remain loaded" \
-  || acc_fail "Z generated workload profiles still loaded"
+Z_PINS="$(inventory_count /run/docker-helper/mounts)"; Z_PINS_RC=$?
+if [ "$Z_PINS_RC" -eq 0 ]; then
+  [ "$Z_PINS" = "0" ] && acc_ok "Z no mount pins remain" \
+    || acc_fail "Z mount pins remain: $(ls /run/docker-helper/mounts 2>/dev/null | head -3)"
+else
+  acc_blocked "Z mount-pin inventory unavailable"
+fi
+Z_WLMAC="$(inventory_count /run/docker-helper/workload-mac)"; Z_WLMAC_RC=$?
+if [ "$Z_WLMAC_RC" -eq 0 ]; then
+  [ "$Z_WLMAC" = "0" ] && acc_ok "Z no workload-MAC runtime state remains" \
+    || acc_fail "Z workload-MAC runtime state remains"
+else
+  acc_blocked "Z workload-MAC runtime inventory unavailable"
+fi
+Z_BUILDS="$(inventory_count /run/docker-helper/builds)"; Z_BUILDS_RC=$?
+if [ "$Z_BUILDS_RC" -eq 0 ]; then
+  [ "$Z_BUILDS" = "0" ] && acc_ok "Z no build staging remains" \
+    || acc_fail "Z build staging remains"
+else
+  acc_blocked "Z build staging inventory unavailable"
+fi
+Z_SESSIONS="$(inventory_count /run/docker-helper/sessions)"; Z_SESSIONS_RC=$?
+if [ "$Z_SESSIONS_RC" -eq 0 ]; then
+  [ "$Z_SESSIONS" = "0" ] && acc_ok "Z no session runtime directories remain" \
+    || acc_fail "Z session runtime directories remain"
+else
+  acc_blocked "Z session runtime inventory unavailable"
+fi
+Z_DURABLE="$(inventory_count /var/lib/docker-helper/workload-mac)"; Z_DURABLE_RC=$?
+if [ "$Z_DURABLE_RC" -eq 0 ]; then
+  [ "$Z_DURABLE" = "0" ] && acc_ok "Z no durable workload-MAC records remain" \
+    || acc_fail "Z durable workload-MAC records remain"
+else
+  acc_blocked "Z durable workload-MAC inventory unavailable"
+fi
+Z_PROFILES="$(workload_profile_count)"; Z_PROFILES_RC=$?
+if [ "$Z_PROFILES_RC" -eq 0 ]; then
+  [ "$Z_PROFILES" = "0" ] && acc_ok "Z no generated workload profiles remain loaded" \
+    || acc_fail "Z generated workload profiles still loaded"
+else
+  acc_blocked "Z workload profile inventory unavailable"
+fi
 
 # ==============================================================================
 # summary

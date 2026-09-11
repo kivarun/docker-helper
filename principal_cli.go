@@ -343,11 +343,12 @@ var principalAllowedRootCommand = &Command{
 var principalAllowedRootListCommand = &Command{
 	Name:       "list",
 	Summary:    "List a principal's allowed roots",
-	Usage:      "docker-helper principal allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] USER",
+	Usage:      "docker-helper principal allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				username := fs.Args()[0]
@@ -368,7 +369,10 @@ var principalAllowedRootListCommand = &Command{
 					return 1
 				}
 
-				printAllowedRootAccessTable(stdout, result.AllowedRootEntries)
+				if err := printAllowedRootList(stdout, result.AllowedRootEntries, *jsonOut); err != nil {
+					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+					return 1
+				}
 				return 0
 			},
 		}

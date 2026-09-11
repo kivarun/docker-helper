@@ -308,6 +308,15 @@ For system mode from a tarball:
 sudo ./install-system.sh --yes --allowed-root /srv/workspaces
 ```
 
+`install-system.sh` requires the runtime tooling of the active MAC backend:
+the AppArmor parser on an AppArmor host, and `semodule`, `restorecon`, and
+`bindfs` on an enforcing SELinux host (`bindfs` implements the SELinux
+read-only workload projection). The RPM package declares `bindfs` as a
+dependency for the SELinux backend; a tarball system install on an
+enforcing SELinux host requires `bindfs`, and `install-system.sh` fails
+before mutating the system when it is absent. The DEB/AppArmor packaging
+path does not require `bindfs`.
+
 Unlike native packages, extracting or running the normal tarball installer does
 not provision system mode. `install-system.sh` is the explicit manual
 system-install path.
@@ -1134,6 +1143,13 @@ Note: `docker-helper config show` (without a field) displays
   access to the host filesystem.
 - In user mode, bind-mount sources are restricted to the workspace root.
   Subdirectory and file mounts are not available.
+- Filesystem policy is pathname-based: policy resolution canonicalizes
+  paths (including symlinks), but two authorized pathnames can still
+  reference the same inode through a hard link. If one alias lies under a
+  `read_write` root and the other under a `read_only` root, a write
+  through the read-write alias is also visible through the read-only
+  alias. Release 2.2 does not promise inode-level immutability or
+  confidentiality between hard-link aliases.
 - Builds and containers use Docker's default networking; docker-helper
   does not provide network isolation.
 - docker-helper is a highly trusted component because it has access to

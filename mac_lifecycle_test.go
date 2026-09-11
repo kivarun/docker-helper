@@ -1066,6 +1066,179 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 }
 
 // =============================================================================
+// Pending-workload coverage gate on Session deletion (canonical removal owner)
+// =============================================================================
+
+// TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven drives the real
+// production Session deletion path (deleteSessionScoped) with pending
+// helper-owned workload state still referencing the Session (container
+// absence not yet provable — the startup reconciliation retains the workload
+// state), and proves the deletion cannot drop the Session's MAC coverage
+// before that state is proven gone. After the workload state is proven
+// cleaned, the canonical retry path removes the boundary.
+func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const sessionID = "sess-pending-workload"
+	_, err = mac.CreateSessionBinding(workspace, sessionID, func(cov workspaceMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Wire the workload MAC coordinator's pending-workload coverage gate to
+	// report this Session: its helper-owned workload state is retained for
+	// reconciliation and its container absence is not yet proven.
+	mac.pendingWorkloadSessions = func() map[string]bool {
+		return map[string]bool{sessionID: true}
+	}
+
+	// The canonical removal owner classifies the boundary as covering the
+	// pending session's workspace while the row still resolves.
+	mac.mu.Lock()
+	classified := mac.boundaryMayBeRemoved(workspace, map[string]bool{workspace: true}, false)
+	mac.mu.Unlock()
+	if classified {
+		t.Fatal("canonical removal owner must classify the boundary as pending-workload covered before deletion")
+	}
+
+	// Delete the Session through the real production deletion path.
+	session, err := app.deleteSessionScoped(sessionID, sessionControlScope{admin: true})
+	if err != nil {
+		t.Fatalf("deleteSessionScoped: %v", err)
+	}
+	if session == nil || session.ID != sessionID {
+		t.Fatalf("deleted session mismatch: %+v", session)
+	}
+
+	// Session deletion semantics remain what the product contract requires:
+	// the row is gone, so the session no longer exists in the database.
+	var rowCount int
+	if err := app.DB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, sessionID).Scan(&rowCount); err != nil {
+		t.Fatalf("count session rows: %v", err)
+	}
+	if rowCount != 0 {
+		t.Fatalf("session row must be deleted by deleteSessionScoped, found %d", rowCount)
+	}
+
+	// The MAC coverage must remain while the pending workload state is
+	// unproven: the boundary stays in the driver, ownership metadata stays,
+	// and the boundary is registered for the retry path.
+	if _, err := driver.verifyCoverage(workspace); err != nil {
+		t.Fatalf("boundary coverage must remain while pending workload is unproven: %v", err)
+	}
+	mac.mu.Lock()
+	owned, oerr := mac.isBoundaryOwnedByHelper(workspace)
+	deferred := mac.deferredBoundaries[workspace]
+	mac.mu.Unlock()
+	if oerr != nil {
+		t.Fatalf("isBoundaryOwnedByHelper: %v", oerr)
+	}
+	if !owned {
+		t.Error("boundary ownership metadata must remain while pending workload is unproven")
+	}
+	if !deferred {
+		t.Error("boundary must be registered deferred for the retry path while pending workload is unproven")
+	}
+
+	// The pending workload dependency stays classifiable/reconcilable: the
+	// workload coordinator still reports the pending session, and after the
+	// row deletion the coverage pass classifies it fail-closed (the workspace
+	// can no longer be resolved), so the canonical owner keeps blocking.
+	mac.mu.Lock()
+	pendingWorkspaces, deferAll := mac.pendingWorkloadCoverage()
+	removable := mac.boundaryMayBeRemoved(workspace, pendingWorkspaces, deferAll)
+	reported := mac.pendingWorkloadSessions()
+	mac.mu.Unlock()
+	if !reported[sessionID] {
+		t.Error("pending workload state must remain reported for reconciliation after the Session row is deleted")
+	}
+	if !deferAll {
+		t.Errorf("coverage pass must fail closed when the deleted session row cannot be resolved (deferAll=%v, pending=%v)", deferAll, pendingWorkspaces)
+	}
+	if removable {
+		t.Error("canonical removal owner must still block the boundary while pending workload is unproven")
+	}
+
+	// After the pending workload state is proven cleaned, the canonical retry
+	// path may remove the boundary.
+	mac.pendingWorkloadSessions = func() map[string]bool { return nil }
+	mac.mu.Lock()
+	mac.retryDeferredBoundaries()
+	ownedAfter, oerrAfter := mac.isBoundaryOwnedByHelper(workspace)
+	mac.mu.Unlock()
+	if oerrAfter != nil {
+		t.Fatalf("isBoundaryOwnedByHelper after retry: %v", oerrAfter)
+	}
+	if ownedAfter {
+		t.Error("boundary ownership metadata must be removed after the pending workload is proven cleaned")
+	}
+	if _, err := driver.verifyCoverage(workspace); err == nil {
+		t.Error("boundary must be removed from the driver after the pending workload is proven cleaned")
+	}
+}
+
+// TestSessionDeleteKeepsBoundaryWhenPendingWorkloadUnresolvable proves the
+// fail-closed branch of the canonical removal owner: a pending workload
+// session ID exists but its workspace cannot be resolved (no session row),
+// so the whole removal pass defers and the deleted Session's boundary MUST
+// NOT be removed.
+func TestSessionDeleteKeepsBoundaryWhenPendingWorkloadUnresolvable(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const sessionID = "sess-real-session"
+	_, err = mac.CreateSessionBinding(workspace, sessionID, func(cov workspaceMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// The pending workload references a session ID whose row cannot be
+	// resolved: the pending-workload coverage resolution fails closed.
+	mac.pendingWorkloadSessions = func() map[string]bool {
+		return map[string]bool{"dhs_unresolvable0000000000000000000000": true}
+	}
+
+	if _, err := app.deleteSessionScoped(sessionID, sessionControlScope{admin: true}); err != nil {
+		t.Fatalf("deleteSessionScoped: %v", err)
+	}
+
+	// The boundary MUST NOT be removed: coverage and ownership remain and the
+	// boundary is deferred until the pending workload state resolves or is
+	// proven cleaned.
+	if _, err := driver.verifyCoverage(workspace); err != nil {
+		t.Fatalf("boundary coverage must remain when pending workload workspace is unresolvable: %v", err)
+	}
+	mac.mu.Lock()
+	owned, oerr := mac.isBoundaryOwnedByHelper(workspace)
+	deferred := mac.deferredBoundaries[workspace]
+	mac.mu.Unlock()
+	if oerr != nil {
+		t.Fatalf("isBoundaryOwnedByHelper: %v", oerr)
+	}
+	if !owned {
+		t.Error("boundary ownership metadata must remain when pending workload workspace is unresolvable")
+	}
+	if !deferred {
+		t.Error("boundary must be deferred when pending workload workspace is unresolvable")
+	}
+}
+
+// =============================================================================
 // Backend-safe ownership key
 // =============================================================================
 
