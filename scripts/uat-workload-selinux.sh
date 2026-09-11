@@ -343,7 +343,10 @@ else
   fi
 fi
 
-if dh init --allowed-root "$ALLOWED_ROOT" >/tmp/uat-wls-init.log 2>&1; then
+# The principal's home must sit under a global allowed root (2.2 contract),
+# so the ceiling carries both the SELinux fcontext scenario tree (/opt) and
+# the guest user's home.
+if dh init --allowed-root "$ALLOWED_ROOT" --allowed-root /home/opc >/tmp/uat-wls-init.log 2>&1; then
   acc_ok "system init (global ceiling: $ALLOWED_ROOT)"
 else
   printf '  init output: %s\n' "$(redact </tmp/uat-wls-init.log)" >&2
