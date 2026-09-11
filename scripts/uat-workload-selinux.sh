@@ -382,13 +382,13 @@ chown -R "$PRINCIPAL:$PRINCIPAL" "$TREE"
 chmod -R u+rwX,go+rX "$TREE"
 TREE_CTX_BEFORE="$(tree_context_snapshot)"
 
-dh principal create --system --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
-dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
-dh principal allowed-root add --system "$PRINCIPAL" "$TREE" >/dev/null 2>&1 || true
-dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" >/dev/null 2>&1 || true
-MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential 2>/dev/null || true)"
+dh principal create --system --no-credential "$PRINCIPAL" 2>/tmp/uat-wls-setup.err || true
+dh principal set --system "$PRINCIPAL" enabled true 2>>/tmp/uat-wls-setup.err || true
+dh principal allowed-root add --system "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setup.err || true
+dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || true
+MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential 2>>/tmp/uat-wls-setup.err || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
-[ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON" >&2; exit 1; }
+[ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON ($(redact </tmp/uat-wls-setup.err | tail -3))" >&2; exit 1; }
 MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null || true)"
 MAIN_LC_TOKEN="$(printf '%s' "$MAIN_LC_OUT" | json_field token)"
 [ -n "$MAIN_LC_TOKEN" ] || { echo "error: launcher credential create failed" >&2; exit 1; }
