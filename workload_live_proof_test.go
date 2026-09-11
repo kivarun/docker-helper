@@ -116,6 +116,32 @@ func runInContainerWithOpts(t *testing.T, securityOpts []string, bind, snippet s
 	return nil
 }
 
+// runInContainerWithBinds runs one container with several bind mounts and
+// the given security options (nonzero exit = the denial surfaced inside
+// the container).
+func runInContainerWithBinds(t *testing.T, securityOpts []string, binds []string, snippet string) error {
+	t.Helper()
+	args := []string{"run", "--rm"}
+	for _, opt := range securityOpts {
+		args = append(args, "--security-opt", opt)
+	}
+	for _, bind := range binds {
+		args = append(args, "-v", bind)
+	}
+	args = append(args, "alpine:3.19", "/bin/sh", "-c", snippet)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("container output: %s %s: %w",
+			strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), err)
+	}
+	return nil
+}
+
 // appArmorDenialLogged scans the kernel log for an AppArmor DENIED record
 // attributable to the generated workload profile. The audit.log sink is
 // checked first: while auditd drains the kernel audit netlink queue, records
@@ -683,4 +709,214 @@ func liveEvidence(t *testing.T, name, content string) {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
+}
+
+// TestLiveWorkloadAppArmorRegularFile proves F2 with live kernel behavior:
+// a read-only exposure whose pinned source is a regular file keeps the
+// file readable but denies every mutation semantics (write, delete) of
+// the file itself through the generated profile, while the VFS view of
+// the same file stays deliberately writable.
+func TestLiveWorkloadAppArmorRegularFile(t *testing.T) {
+	requireLiveProof(t)
+	if !dockerLiveAvailable(t) {
+		t.Skip("docker daemon unavailable")
+	}
+	if !fileExists(appArmorParserPath) {
+		t.Skip("apparmor_parser unavailable")
+	}
+	if active, err := appArmorLSMActive(); err != nil || !active {
+		t.Skipf("AppArmor is not the active LSM: %v", err)
+	}
+	dir, err := os.MkdirTemp("", "docker-helper-live-aafile-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	// Deliberately world-writable regular file: the denial observed below
+	// is attributable to AppArmor, not the VFS.
+	source := filepath.Join(dir, "config.txt")
+	if err := os.WriteFile(source, []byte("payload\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newWorkloadAppArmorBackend()
+	prep := workloadPreparation{
+		OperationID:   "op_liveaafile1",
+		SessionID:     "live",
+		StateDir:      filepath.Join(dir, "state", "op_liveaafile1"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_liveaafile1"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/config.txt", RequestedReadOnly: true}},
+		PinnedSources: []string{source},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepErr := b.prepare(prep)
+	if prepErr != nil {
+		t.Fatalf("production AppArmor prepare: %v", prepErr)
+	}
+	profileName := workloadAppArmorProfileName(prep.OperationID)
+	defer prepared.Cleanup()
+
+	readOut, readErr := liveContainerOutput(t, prepared.SecurityOpts,
+		fmt.Sprintf("%s:/config.txt:rw", source), "cat /config.txt")
+	if readErr != nil {
+		t.Fatalf("read through the RO file bind must succeed: %v (%s)", readErr, readOut)
+	}
+	if !strings.Contains(readOut, "payload") {
+		t.Fatalf("unexpected read content %q", readOut)
+	}
+
+	writeErr := runInContainerWithOpts(t, prepared.SecurityOpts,
+		fmt.Sprintf("%s:/config.txt:rw", source),
+		"echo corrupt > /config.txt",
+	)
+	if writeErr == nil {
+		t.Fatal("AppArmor must deny writes to the would-be-RO regular file (the VFS view is writable)")
+	}
+	t.Logf("denied file write output: %v", writeErr)
+
+	denied, denialLine := appArmorDenialLogged(t, profileName)
+	if !denied {
+		t.Fatal("attributable AppArmor DENIED record not found for the regular-file write")
+	}
+	if !strings.Contains(denialLine, "config.txt") {
+		t.Fatalf("denial must reference the mediated file path: %s", denialLine)
+	}
+	t.Logf("attributable denial: %s", denialLine)
+	liveEvidence(t, "apparmor-regular-file-denial.txt", denialLine+"\n")
+	liveEvidence(t, "apparmor-regular-file-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nPROFILE=%s\nRESULT=CLOSED\n", repoHead(t), profileName))
+}
+
+// TestLiveWorkloadAppArmorNestedRW proves F3 with live kernel behavior:
+// with RO /work plus RW /work/output, writes inside the accepted RW
+// transition succeed while writes outside it are denied, and a nested RO
+// island (RO /work/output/protected) is denied independently of the RW
+// transition around it.
+func TestLiveWorkloadAppArmorNestedRW(t *testing.T) {
+	requireLiveProof(t)
+	if !dockerLiveAvailable(t) {
+		t.Skip("docker daemon unavailable")
+	}
+	if !fileExists(appArmorParserPath) {
+		t.Skip("apparmor_parser unavailable")
+	}
+	if active, err := appArmorLSMActive(); err != nil || !active {
+		t.Skipf("AppArmor is not the active LSM: %v", err)
+	}
+	dir, err := os.MkdirTemp("", "docker-helper-live-aanest-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	// Region tree, deliberately world-writable everywhere.
+	work := filepath.Join(dir, "work")
+	output := filepath.Join(work, "output")
+	protected := filepath.Join(output, "protected")
+	for _, d := range []string{work, output, protected} {
+		if err := os.Mkdir(d, 0777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(work, "inputs.txt"), []byte("ro\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(protected, "guarded.txt"), []byte("ro\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newWorkloadAppArmorBackend()
+	prep := workloadPreparation{
+		OperationID: "op_livaanest1",
+		SessionID:   "live",
+		StateDir:    filepath.Join(dir, "state", "op_livaanest1"),
+		RuntimeDir:  filepath.Join(dir, "runtime", "op_livaanest1"),
+		Exposures: []sessionFilesystemExposure{
+			{Target: "/work", RequestedReadOnly: true},
+			{Target: "/work/output", RequestedReadOnly: false},
+		},
+		PinnedSources: []string{work, output},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepErr := b.prepare(prep)
+	if prepErr != nil {
+		t.Fatalf("production AppArmor prepare: %v", prepErr)
+	}
+	profileName := workloadAppArmorProfileName(prep.OperationID)
+	defer prepared.Cleanup()
+
+	// The accepted RW transition must stay writable.
+	if err := runInContainerWithBinds(t, prepared.SecurityOpts,
+		[]string{fmt.Sprintf("%s:/work:rw", work), fmt.Sprintf("%s:/work/output:rw", output)},
+		"echo rw-transition > /work/output/probe",
+	); err != nil {
+		t.Fatalf("accepted RW transition must stay writable: %v", err)
+	}
+	// The RO region outside the transition must be denied.
+	regionErr := runInContainerWithBinds(t, prepared.SecurityOpts,
+		[]string{fmt.Sprintf("%s:/work:rw", work), fmt.Sprintf("%s:/work/output:rw", output)},
+		"echo outside > /work/inputs.txt",
+	)
+	if regionErr == nil {
+		t.Fatal("AppArmor must deny writes in the RO region outside the RW transition")
+	}
+	t.Logf("denied RO-region write output: %v", regionErr)
+
+	// The nested RO island must be denied through its own recursive rule.
+	islandPrep := workloadPreparation{
+		OperationID: "op_livaanest2",
+		SessionID:   "live",
+		StateDir:    filepath.Join(dir, "state", "op_livaanest2"),
+		RuntimeDir:  filepath.Join(dir, "runtime", "op_livaanest2"),
+		Exposures: []sessionFilesystemExposure{
+			{Target: "/work", RequestedReadOnly: true},
+			{Target: "/work/output", RequestedReadOnly: false},
+			{Target: "/work/output/protected", RequestedReadOnly: true},
+		},
+		PinnedSources: []string{work, output, protected},
+	}
+	if err := os.MkdirAll(islandPrep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(islandPrep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	island, islandErr := b.prepare(islandPrep)
+	if islandErr != nil {
+		t.Fatalf("production AppArmor prepare (island): %v", islandErr)
+	}
+	defer island.Cleanup()
+	islandName := workloadAppArmorProfileName(islandPrep.OperationID)
+
+	islandRWErr := runInContainerWithBinds(t, island.SecurityOpts,
+		[]string{
+			fmt.Sprintf("%s:/work:rw", work),
+			fmt.Sprintf("%s:/work/output:rw", output),
+			fmt.Sprintf("%s:/work/output/protected:rw", protected),
+		},
+		"echo island > /work/output/protected/probe",
+	)
+	if islandRWErr == nil {
+		t.Fatal("AppArmor must deny writes into the nested RO island")
+	}
+	t.Logf("denied island write output: %v", islandRWErr)
+
+	denied, denialLine := appArmorDenialLogged(t, profileName)
+	if !denied {
+		t.Fatal("attributable AppArmor DENIED record not found for the RO-region write")
+	}
+	t.Logf("attributable denial: %s", denialLine)
+	liveEvidence(t, "apparmor-nested-rw-denial.txt", denialLine+"\n")
+	liveEvidence(t, "apparmor-nested-rw-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nPROFILE=%s\nISLAND_PROFILE=%s\nRESULT=CLOSED\n",
+			repoHead(t), profileName, islandName))
 }

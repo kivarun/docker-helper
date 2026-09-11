@@ -176,11 +176,12 @@ func TestCoordinatorRoundTripAppArmorReconcilesProducedState(t *testing.T) {
 	opID := testOperationID(21)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	pins := testPinnedSources(t, dir, 1)
 	if _, err := first.Prepare(workloadPreparation{
 		OperationID:   opID,
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
-		PinnedSources: []string{"/runtime/pinned/0"},
+		PinnedSources: pins,
 	}); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -272,11 +273,12 @@ func TestCoordinatorReconcileRetainsLoadedProfileWithoutSource(t *testing.T) {
 	// the crash window: record committed, profile source gone, profile
 	// still loaded in the kernel inventory.
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	pins := testPinnedSources(t, runtimeRoot, 1)
 	if _, err := first.Prepare(workloadPreparation{
 		OperationID:   opID,
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
-		PinnedSources: []string{"/runtime/pinned/0"},
+		PinnedSources: pins,
 	}); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -313,11 +315,12 @@ func TestCoordinatorReconcileClassifiesCrashBeforeProfileSource(t *testing.T) {
 	opID := testOperationID(24)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	pins := testPinnedSources(t, runtimeRoot, 1)
 	if _, err := first.Prepare(workloadPreparation{
 		OperationID:   opID,
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
-		PinnedSources: []string{"/runtime/pinned/0"},
+		PinnedSources: pins,
 	}); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -518,11 +521,12 @@ func TestCoordinatorReconcileRetriesAfterPinCleanupFailure(t *testing.T) {
 	opID := testOperationID(31)
 
 	first := newTestWorkloadCoordinator(t, mustTestAppArmorBackend(t), stateRoot, runtimeRoot)
+	pins := testPinnedSources(t, runtimeRoot, 1)
 	if _, err := first.Prepare(workloadPreparation{
 		OperationID:   opID,
 		SessionID:     testWorkloadSessionID,
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
-		PinnedSources: []string{"/runtime/pinned/0"},
+		PinnedSources: pins,
 	}); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}

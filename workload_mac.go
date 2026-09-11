@@ -689,23 +689,6 @@ func logRetainedWorkloadState(ctx context.Context, operationID, stage string, er
 	)
 }
 
-// workloadReadOnlyTargets returns the container targets of the accepted
-// exposure plan whose caller-requested mode is read-only. The
-// caller-requested mode — never the snapshot access alone — is the frozen
-// workload exposure mode: an application-level narrowing (snapshot
-// read_write requested read-only) is still read-only to the MAC layer, and
-// an accepted read-write request was already proven writable by the
-// application layer.
-func workloadReadOnlyTargets(exposures []sessionFilesystemExposure) []string {
-	var targets []string
-	for _, e := range exposures {
-		if e.RequestedReadOnly {
-			targets = append(targets, e.Target)
-		}
-	}
-	return targets
-}
-
 // fileExists reports whether the path exists as a readable file or directory.
 func fileExists(path string) bool {
 	_, err := os.Stat(path)

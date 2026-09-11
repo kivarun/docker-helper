@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -56,6 +57,162 @@ func appArmorPathLiteral(path string) string {
 	return string(out)
 }
 
+// appArmorClassSafeByte reports whether b may be written verbatim inside an
+// AppArmor character class. Class metacharacters (^, ], -, \, and the escape
+// introducer) are excluded along with every non-ASCII byte; those are always
+// hex-escaped, which the AppArmor pattern grammar accepts inside classes.
+func appArmorClassSafeByte(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') ||
+		b == '/' || b == '.' || b == '_'
+}
+
+// appArmorClassByte renders one byte for use inside a character class.
+func appArmorClassByte(b byte) string {
+	if appArmorClassSafeByte(b) {
+		return string(rune(b))
+	}
+	const hexDigits = "0123456789abcdef"
+	return string([]byte{'\\', 'x', hexDigits[b>>4], hexDigits[b&0x0f]})
+}
+
+// appArmorLiteralByte renders one byte for use as a literal pattern byte
+// outside a class, mirroring appArmorPathLiteral's per-byte encoding.
+func appArmorLiteralByte(b byte) string {
+	if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') ||
+		b == '/' || b == '.' || b == '_' || b == '-' {
+		return string(rune(b))
+	}
+	const hexDigits = "0123456789abcdef"
+	return string([]byte{'\\', 'x', hexDigits[b>>4], hexDigits[b&0x0f]})
+}
+
+// appArmorSegmentTrieNode is one byte-level node of the exclusion trie used
+// to scope a read-only subtree around the accepted read-write transitions
+// beneath it.
+type appArmorSegmentTrieNode struct {
+	children map[byte]*appArmorSegmentTrieNode
+	leaf     bool
+}
+
+func newAppArmorSegmentTrieNode() *appArmorSegmentTrieNode {
+	return &appArmorSegmentTrieNode{children: map[byte]*appArmorSegmentTrieNode{}}
+}
+
+// insertSegment inserts one excluded segment into the trie.
+func (n *appArmorSegmentTrieNode) insertSegment(segments []string) {
+	node := n
+	for _, seg := range segments {
+		for i := 0; i < len(seg); i++ {
+			b := seg[i]
+			child, ok := node.children[b]
+			if !ok {
+				child = newAppArmorSegmentTrieNode()
+				node.children[b] = child
+			}
+			node = child
+		}
+		node.leaf = true
+	}
+}
+
+// appArmorSegmentExclusion renders an AARE fragment that matches exactly
+// the single path segments (one or more bytes, never containing '/') that
+// are not equal to any of the given excluded names. It is the byte-level
+// complement of the excluded names over one segment: the fragment walks a
+// byte trie of the excluded names and emits, at every node, the diverging
+// character class and the descent alternatives; continuations past an
+// excluded name must consume at least one more byte so the exact name is
+// never matched.
+//
+// The fragment is written from the already-resolved exposure plan's RW
+// target paths; it is not a policy resolver.
+func appArmorSegmentExclusion(names []string) string {
+	root := newAppArmorSegmentTrieNode()
+	for _, name := range names {
+		if name == "" {
+			// An empty segment name cannot occur in a plan: container
+			// targets are cleaned absolute paths.
+			continue
+		}
+		root.insertSegment([]string{name})
+	}
+	return appArmorExclusionFragment(root, false)
+}
+
+// appArmorExclusionFragment renders the alternation body fragment for one
+// trie node. minContinuation reports whether the remaining string must
+// consume at least one byte: false at the fragment root (the empty match
+// is allowed while the segment is not itself an excluded name) and true
+// past a leaf (the excluded name itself must not match).
+//
+// The alternatives per node:
+//
+//   - stop: the empty continuation, allowed only when no excluded name
+//     ends at the consumed prefix and no minimum continuation is pending;
+//   - diverge: one byte outside the node's edges followed by anything
+//     (`[^<class>]**`), which can never re-enter the trie;
+//   - descent: one edge byte followed by the child fragment, where a leaf
+//     child demands a non-empty continuation so the excluded name itself
+//     never matches.
+//
+// The fragment is written from the already-resolved exposure plan's RW
+// target paths; it is not a policy resolver.
+func appArmorExclusionFragment(node *appArmorSegmentTrieNode, minContinuation bool) string {
+	var alts []string
+	if !minContinuation && !node.leaf {
+		// Stopping here is allowed: the consumed prefix is not an excluded
+		// name. The empty alternative anchors the rule between slashes.
+		alts = append(alts, "")
+	}
+	// Byte-order-independent diverge alternative: the next byte differs
+	// from every edge, so the rest of the segment can be anything.
+	if len(node.children) > 0 {
+		alts = append(alts, appArmorNegatedClass(childrenBytes(node))+"**")
+	}
+	// Edge bytes are emitted in byte order for determinism.
+	for _, b := range childrenBytes(node) {
+		child := node.children[b]
+		if child.leaf && len(child.children) == 0 {
+			// Passing the excluded name: the continuation must consume at
+			// least one more byte.
+			alts = append(alts, appArmorLiteralByte(b)+"?*")
+			continue
+		}
+		alts = append(alts, appArmorLiteralByte(b)+appArmorExclusionFragment(child, child.leaf))
+	}
+	if len(alts) == 1 && alts[0] != "" {
+		return alts[0]
+	}
+	return "{" + strings.Join(alts, ",") + "}"
+}
+
+func childrenBytes(node *appArmorSegmentTrieNode) []byte {
+	out := make([]byte, 0, len(node.children))
+	for b := range node.children {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// appArmorNegatedClass renders a negated character class matching any byte
+// except the given set. Every byte is rendered through the class-safe
+// encoder; the set is deduplicated and byte-ordered for determinism.
+func appArmorNegatedClass(bytes []byte) string {
+	seen := map[byte]bool{}
+	var rendered strings.Builder
+	rendered.WriteString("[^")
+	for _, b := range bytes {
+		if seen[b] {
+			continue
+		}
+		seen[b] = true
+		rendered.WriteString(appArmorClassByte(b))
+	}
+	rendered.WriteString("]")
+	return rendered.String()
+}
+
 // workloadAppArmorProfileName derives the deterministic internal workload
 // profile name from the server-generated Operation ID. Session, Launcher,
 // Principal, mount targets, and caller input never participate in profile
@@ -70,6 +227,67 @@ func workloadAppArmorProfileName(operationID string) string {
 // name and this source path share one correlation owner: the ownership
 // record in the same directory.
 const appArmorWorkloadProfileFileName = "profile"
+
+// workloadAppArmorTargetPlan is the renderer's projection of the accepted
+// exposure plan, prepared once by one owner (the AppArmor backend's
+// prepare): one entry per accepted read-only container target with the
+// pinned node kind, plus every accepted read-write container target path.
+// The read-write paths are used only to scope the read-only denials so a
+// more specific accepted RW transition stays writable. The renderer
+// performs no policy resolution of its own — it never reads allowed-root
+// state, snapshots, or writable-parent queries.
+type workloadAppArmorTargetPlan struct {
+	// RO carries one entry per accepted read-only container target.
+	RO []appArmorROTarget
+	// RW carries the accepted read-write container target paths.
+	RW []string
+}
+
+// appArmorROTarget is one accepted read-only container target and the node
+// kind of its pinned source.
+type appArmorROTarget struct {
+	// Target is the container-side bind target of the read-only exposure.
+	Target string
+	// RegularFile is true when the pinned source is a regular file: the
+	// container target is then a file bind whose mediated paths never
+	// carry the directory trailing slash.
+	RegularFile bool
+}
+
+// workloadAppArmorTargetPlanFromExposures is the single owner of the
+// exposure-plan projection for the AppArmor renderer. The node kind comes
+// from the pinned kernel materialization source; a pin that cannot be
+// inspected is a preparation failure (fail closed), never a guessed kind.
+// The caller-requested mode — never the snapshot access alone — is the
+// frozen workload exposure mode: an application-level narrowing (snapshot
+// read_write requested read-only) is still read-only to the MAC layer, and
+// an accepted read-write request was already proven writable by the
+// application layer.
+func workloadAppArmorTargetPlanFromExposures(exposures []sessionFilesystemExposure, pinnedSources []string) (workloadAppArmorTargetPlan, error) {
+	if len(exposures) != len(pinnedSources) {
+		return workloadAppArmorTargetPlan{}, fmt.Errorf(
+			"exposure plan and pinned sources disagree: %d exposures, %d pins", len(exposures), len(pinnedSources))
+	}
+	plan := workloadAppArmorTargetPlan{}
+	for i, exposure := range exposures {
+		if !exposure.RequestedReadOnly {
+			if exposure.Target != "" {
+				plan.RW = append(plan.RW, exposure.Target)
+			}
+			continue
+		}
+		info, err := os.Lstat(pinnedSources[i])
+		if err != nil {
+			return workloadAppArmorTargetPlan{}, fmt.Errorf(
+				"cannot inspect pinned source of read-only target %q: %w", exposure.Target, err)
+		}
+		plan.RO = append(plan.RO, appArmorROTarget{
+			Target:      exposure.Target,
+			RegularFile: !info.IsDir(),
+		})
+	}
+	return plan, nil
+}
 
 // workloadAppArmorBackend is the AppArmor backend for workload MAC
 // preparation. It owns profile rendering, loading, unloading, load
@@ -156,8 +374,11 @@ func (b *workloadAppArmorBackend) prepare(p workloadPreparation) (*preparedWorkl
 	}
 
 	profileName := workloadAppArmorProfileName(p.OperationID)
-	roTargets := workloadReadOnlyTargets(p.Exposures)
-	profile := renderWorkloadAppArmorProfile(profileName, roTargets, b.abi30Present())
+	plan, err := workloadAppArmorTargetPlanFromExposures(p.Exposures, p.PinnedSources)
+	if err != nil {
+		return nil, err
+	}
+	profile := renderWorkloadAppArmorProfile(profileName, plan, b.abi30Present())
 	profilePath := filepath.Join(p.StateDir, appArmorWorkloadProfileFileName)
 
 	if err := atomicWriteFile(profilePath, []byte(profile), 0600); err != nil {
@@ -331,12 +552,27 @@ func (b *workloadAppArmorBackend) cleanupOwnedState(record workloadMACRecord) er
 }
 
 // renderWorkloadAppArmorProfile renders the deterministic generated workload
+// renderWorkloadAppArmorProfile renders the deterministic generated workload
 // profile for one operation: the Moby docker-default compatibility baseline
-// plus one bounded audit-deny rule per accepted read-only container target.
-// The output depends only on the profile name, the read-only targets, and
-// whether the host publishes AppArmor ABI 3.0 — never on caller-controlled
-// identity beyond the target paths, which are literal-encoded.
-func renderWorkloadAppArmorProfile(profileName string, roTargets []string, abi30 bool) string {
+// plus the bounded audit-deny set for the accepted read-only container
+// targets, scoped around the accepted read-write transitions of the same
+// plan. The output depends only on the profile name, the accepted target
+// plan, and whether the host publishes AppArmor ABI 3.0 — never on
+// caller-controlled identity beyond the target paths, which are
+// literal-encoded.
+//
+// Per read-only target:
+//
+//   - a regular-file target denies the exact file path (file-mediated
+//     paths carry no directory trailing slash, so the directory-shaped
+//     "{,**}" rule alone would leave the file itself writable);
+//   - a directory target without any read-write transition beneath it
+//     keeps the M0-A proven recursive rule;
+//   - a directory target with read-write transitions beneath it walks the
+//     read-write hole paths and emits, per node, the entry rule plus
+//     subtree rules whose segment exclusion keeps every accepted RW
+//     transition writable.
+func renderWorkloadAppArmorProfile(profileName string, plan workloadAppArmorTargetPlan, abi30 bool) string {
 	var sb strings.Builder
 	sb.WriteString("# Generated by docker-helper. Do not edit.\n")
 	sb.WriteString("# Helper-owned workload profile; correlated with one run operation.\n")
@@ -371,9 +607,167 @@ func renderWorkloadAppArmorProfile(profileName string, roTargets []string, abi30
 	sb.WriteString("  deny /sys/devices/virtual/powercap/** rwklx,\n")
 	sb.WriteString("  deny /sys/kernel/security/** rwklx,\n")
 	sb.WriteString("  ptrace (trace,tracedby,read,readby) peer=\"" + profileName + "\",\n")
-	for _, target := range roTargets {
-		sb.WriteString("\n  audit deny \"" + appArmorPathLiteral(target) + "/{,**}\" wkl,\n")
+
+	// One deny-rule set per read-only target, deduplicated by rendered
+	// rule text (nested read-only targets legitimately restate the same
+	// rules) and emitted in deterministic generation order.
+	emitted := map[string]bool{}
+	for _, target := range plan.RO {
+		lit := appArmorPathLiteral(target.Target)
+		holeRoot := appArmorHoleTrie(target.Target, plan.RW)
+		switch {
+		case target.RegularFile:
+			appArmorEmit(&sb, emitted, `audit deny "`+lit+`" wkl,`)
+		case holeRoot == nil:
+			appArmorEmit(&sb, emitted, `audit deny "`+lit+`/{,**}" wkl,`)
+		default:
+			appArmorEmitHoleWalk(&sb, emitted, lit, holeRoot)
+		}
 	}
 	sb.WriteString("}\n")
 	return sb.String()
+}
+
+// appArmorEmit appends one deny rule unless an identical rule was already
+// rendered for another read-only target.
+func appArmorEmit(sb *strings.Builder, emitted map[string]bool, rule string) {
+	if emitted[rule] {
+		return
+	}
+	emitted[rule] = true
+	sb.WriteString("\n  " + rule + "\n")
+}
+
+// appArmorHoleNode is one node of the segment trie of the read-write
+// transitions strictly below a read-only target root. Children are keyed
+// by full path segment name; leaf marks that a maximal hole ends at this
+// node.
+type appArmorHoleNode struct {
+	children map[string]*appArmorHoleNode
+	leaf     bool
+}
+
+// appArmorHoleTrie builds the segment trie of the accepted read-write
+// transitions strictly below the read-only target root. It returns nil
+// when no read-write transition is strictly below the root, so the
+// renderer keeps the proven unholed rule shape.
+func appArmorHoleTrie(root string, rwTargets []string) *appArmorHoleNode {
+	holes := make([][]string, 0, len(rwTargets))
+	for _, rw := range rwTargets {
+		rel, ok := appArmorRelativeSegments(root, rw)
+		if ok {
+			holes = append(holes, rel)
+		}
+	}
+	if len(holes) == 0 {
+		return nil
+	}
+	// Deterministic, prefix-independent hole set: sort and drop any hole
+	// whose segment path is strictly below another hole (that subtree is
+	// already writable transitively).
+	sort.Slice(holes, func(i, j int) bool {
+		a, b := holes[i], holes[j]
+		for k := range a {
+			if k >= len(b) {
+				return false
+			}
+			if a[k] != b[k] {
+				return a[k] < b[k]
+			}
+		}
+		return len(a) < len(b)
+	})
+	trieRoot := &appArmorHoleNode{children: map[string]*appArmorHoleNode{}}
+	for i, hole := range holes {
+		if i > 0 && appArmorHoleContains(holes[i-1], hole) {
+			continue
+		}
+		node := trieRoot
+		for _, seg := range hole {
+			child, ok := node.children[seg]
+			if !ok {
+				child = &appArmorHoleNode{children: map[string]*appArmorHoleNode{}}
+				node.children[seg] = child
+			}
+			node = child
+		}
+		node.leaf = true
+	}
+	return trieRoot
+}
+
+// appArmorRelativeSegments reports whether target is strictly below root in
+// container-path terms and returns the relative segment path.
+func appArmorRelativeSegments(root, target string) ([]string, bool) {
+	if !strings.HasPrefix(target, root+"/") {
+		return nil, false
+	}
+	rel := strings.TrimPrefix(target, root+"/")
+	if rel == "" {
+		return nil, false
+	}
+	return strings.Split(rel, "/"), true
+}
+
+// appArmorHoleContains reports whether the segment path a strictly contains
+// the segment path b.
+func appArmorHoleContains(a, b []string) bool {
+	if len(a) >= len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// appArmorEmitHoleWalk walks the read-write hole trie of one holed
+// read-only target and emits the deny rules that deny the read-only region
+// while keeping every hole subtree writable.
+//
+// Per visited node (the region root itself, then each segment-aligned
+// ancestor of a continuing hole):
+//
+//	<base>/{,}           the node directory entry itself
+//	<base>/{EXCL}        non-hole file children
+//	<base>/{EXCL}/{,**}  non-hole directory children and their subtrees
+//
+// EXCL is the byte-level segment exclusion of the node's hole child names.
+// Nodes at or below a maximal hole end are never visited: the hole subtree
+// is the accepted read-write transition and stays writable.
+func appArmorEmitHoleWalk(sb *strings.Builder, emitted map[string]bool, rootLit string, trie *appArmorHoleNode) {
+	var walk func(node *appArmorHoleNode, base string)
+	walk = func(node *appArmorHoleNode, base string) {
+		if node != trie && node.leaf {
+			return
+		}
+		appArmorEmit(sb, emitted, `audit deny "`+base+`/{,}" wkl,`)
+		if len(node.children) > 0 {
+			names := make([]string, 0, len(node.children))
+			for name := range node.children {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			excl := appArmorSegmentExclusion(names)
+			appArmorEmit(sb, emitted, `audit deny "`+base+`/{`+excl+`}" wkl,`)
+			appArmorEmit(sb, emitted, `audit deny "`+base+`/{`+excl+`}/{,**}" wkl,`)
+		}
+		for _, name := range sortedHoleChildNames(node) {
+			walk(node.children[name], base+"/"+appArmorPathLiteral(name))
+		}
+	}
+	walk(trie, rootLit)
+}
+
+// sortedHoleChildNames returns the child segment names of one hole trie
+// node in deterministic byte order.
+func sortedHoleChildNames(node *appArmorHoleNode) []string {
+	names := make([]string, 0, len(node.children))
+	for name := range node.children {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

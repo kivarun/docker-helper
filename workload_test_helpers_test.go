@@ -29,6 +29,26 @@ func testOperationID(n int) string {
 	return fmt.Sprintf("op_%032x", n)
 }
 
+// testPinnedSources creates real pinned directory sources (the node kind a
+// completed mount-pin stage leaves for a directory exposure) and returns
+// their paths, so backend preparation can inspect the pinned kernel
+// materialization fail-closed. Regular-file pins are created explicitly by
+// the tests that exercise file-kind exposure.
+func testPinnedSources(t *testing.T, dir string, count int) []string {
+	t.Helper()
+	paths := make([]string, count)
+	for i := range paths {
+		paths[i] = filepath.Join(dir, fmt.Sprintf("pin-%d", i))
+		if err := os.Mkdir(paths[i], 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(paths[i], "node"), []byte("pin"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return paths
+}
+
 // profileNameFromSource extracts the declared profile name from a generated
 // profile source, mirroring how the kernel inventory names loaded profiles.
 func profileNameFromSource(source string) string {
