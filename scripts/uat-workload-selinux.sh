@@ -346,8 +346,8 @@ fi
 # The principal's home must sit under a global allowed root (2.2 contract),
 # so the ceiling carries both the SELinux fcontext scenario tree (/opt) and
 # the guest user's home.
-if dh init --allowed-root "$ALLOWED_ROOT" --allowed-root /home/opc >/tmp/uat-wls-init.log 2>&1; then
-  acc_ok "system init (global ceiling: $ALLOWED_ROOT)"
+if dh init --allowed-root /home/opc >/tmp/uat-wls-init.log 2>&1; then
+  acc_ok "system init (global ceiling: /home/opc)"
   dh config allowed-root list 2>/dev/null | sed 's/^/  config-roots: /' >&2 || true
 else
   printf '  init output: %s\n' "$(redact </tmp/uat-wls-init.log)" >&2
@@ -377,7 +377,11 @@ docker pull alpine:3.24 >/dev/null 2>&1 || true
 docker pull alpine:3.19 >/dev/null 2>&1 || true
 
 # ---- fixture: policy tree with one RO region ---------------------------------
-TREE="$ALLOWED_ROOT/uat-wl-tree"
+# One global ceiling (dh init takes a single --allowed-root): it must contain
+# the principal's home (2.2 principal-home contract), so the tree lives under
+# /home/opc. The non-home fcontext lifecycle is exercised by the A3
+# micro-proof and the targeted regression groups instead.
+TREE="/home/opc/uat-wl-tree"
 rm -rf "$TREE"
 mkdir -p "$TREE/work" "$TREE/project" "$TREE/pipeline-inputs"
 printf 'project-file\n' > "$TREE/project/keep.txt"
