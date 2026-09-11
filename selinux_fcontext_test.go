@@ -1960,7 +1960,6 @@ func TestSELinuxPolicyBindfsProjectionMount(t *testing.T) {
 		"allow docker_helper_t fusefs_t:filesystem { mount unmount getattr relabelfrom };",
 		"allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr relabelto };",
 		"class filesystem { mount remount unmount getattr associate mounton relabelfrom relabelto };",
-		"allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr };",
 		"allow docker_helper_ro_projection_t fusefs_t:filesystem associate;",
 		"allow docker_helper_t docker_helper_runtime_t:dir { mounton };",
 		"allow docker_helper_t self:capability { dac_read_search sys_admin };",
