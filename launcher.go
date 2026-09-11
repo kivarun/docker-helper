@@ -331,32 +331,6 @@ func readPrincipalAllowedRoots(db *sql.DB, principalID int64) ([]AllowedRootEntr
 	return roots, nil
 }
 
-// computeEffectivePrincipalRoots is the canonical Principal-level effective
-// root policy, consumed by Session creation, Launcher restricted-scope create
-// and replacement validation, and Principal effective-roots introspection
-// (and, indirectly, completion through that introspection):
-//
-//   - in user mode, the daemon-owner Principal (identified by
-//     daemonOwnerPrincipalID, the startup-resolved App.userModeDefault
-//     identity) with zero stored root rows collapses onto the global allowed
-//     roots: the transparent ownership chain defers wholly to the global
-//     ceiling. This is the ONLY Principal for which empty roots mean the
-//     global ceiling.
-//   - every other Principal (and a daemon-owner Principal with unexpected
-//     stored roots, a state the user-mode startup contract refuses) gets the
-//     plain intersection: empty or disjoint stored roots mean an empty
-//     ceiling, fail-closed.
-//
-// It is a pure policy function: callers resolve the global roots, the stored
-// Principal roots, and the daemon-owner identity, and pass them in.
-func computeEffectivePrincipalRoots(globalRoots []string, storedPrincipalRoots []string, principalID int64, daemonOwnerPrincipalID int64, userMode bool) []string {
-	return allowedRootPaths(effectivePrincipalAllowedRoots(
-		allowedRootEntriesForPaths(globalRoots),
-		allowedRootEntriesForPaths(storedPrincipalRoots),
-		principalID, daemonOwnerPrincipalID, userMode,
-	))
-}
-
 // resolveEffectivePrincipalRootEntries resolves the canonical effective
 // Principal ceiling for principalID as canonical allowed-root entries through
 // the single policy owner (effectivePrincipalAllowedRoots): the

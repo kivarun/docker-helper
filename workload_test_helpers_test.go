@@ -235,18 +235,6 @@ func (m *testMountOps) mountBind(source, target string) error {
 	return nil
 }
 
-func (m *testMountOps) unmount(path string) error {
-	m.seam.unmountCalls = append(m.seam.unmountCalls, path)
-	delete(m.seam.mounted, path)
-	return nil
-}
-
-func (m *testMountOps) unmountLazy(path string) error {
-	m.seam.unmountCalls = append(m.seam.unmountCalls, path+" lazy")
-	delete(m.seam.mounted, path)
-	return nil
-}
-
 func (m *testMountOps) unmountPath(path string) error {
 	m.seam.unmountCalls = append(m.seam.unmountCalls, "unmountPath "+path)
 	m.seam.events = append(m.seam.events, "unmount "+path)

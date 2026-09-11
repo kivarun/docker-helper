@@ -140,12 +140,13 @@ func TestLauncherAllowedRootRemoveLastStaysRestricted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionOwnershipSnapshot: %v", err)
 	}
-	effective, err := computeLauncherEffectiveRoots([]string{globalRoot}, snap, 0, false)
+	effective, err := effectiveLauncherAllowedRoots(allowedRootEntriesForPaths([]string{globalRoot}), snap, 0, false)
 	if err != nil {
-		t.Fatalf("computeLauncherEffectiveRoots: %v", err)
+		t.Fatalf("effectiveLauncherAllowedRoots: %v", err)
 	}
-	if len(effective) != 0 {
-		t.Fatalf("effective roots after removing the last root = %v, want the empty fail-closed set", effective)
+	paths := allowedRootPaths(effective)
+	if len(paths) != 0 {
+		t.Fatalf("effective roots after removing the last root = %v, want the empty fail-closed set", paths)
 	}
 }
 
@@ -173,14 +174,15 @@ func TestLauncherAllowedRootExplicitInheritRestoresCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionOwnershipSnapshot: %v", err)
 	}
-	effective, err := computeLauncherEffectiveRoots([]string{globalRoot}, snap, 0, false)
+	effective, err := effectiveLauncherAllowedRoots(allowedRootEntriesForPaths([]string{globalRoot}), snap, 0, false)
 	if err != nil {
-		t.Fatalf("computeLauncherEffectiveRoots: %v", err)
+		t.Fatalf("effectiveLauncherAllowedRoots: %v", err)
 	}
+	paths := allowedRootPaths(effective)
 	// Inherit applies the Principal ceiling unchanged: the Principal's stored
 	// root (its home) is the effective root, not the removed launcher root.
-	if !slices.Equal(effective, []string{globalRoot + "/home/owner"}) {
-		t.Fatalf("effective roots after explicit inherit = %v, want the Principal ceiling", effective)
+	if !slices.Equal(paths, []string{globalRoot + "/home/owner"}) {
+		t.Fatalf("effective roots after explicit inherit = %v, want the Principal ceiling", paths)
 	}
 }
 

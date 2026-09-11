@@ -64,10 +64,6 @@ type workloadMountOps interface {
 	isMountpoint(path string) (bool, error)
 	// mountBind creates a bind mount of source at target.
 	mountBind(source, target string) error
-	// unmount removes the mount at path.
-	unmount(path string) error
-	// unmountLazy detaches the mount at path lazily.
-	unmountLazy(path string) error
 	// unmountPath unmounts one helper-owned projection path, preferring the
 	// FUSE userspace helper and falling back to the kernel umount with a
 	// lazy last resort.
@@ -141,20 +137,6 @@ func octalDigits3(s string) (byte, bool) {
 func (productionMountOps) mountBind(source, target string) error {
 	if err := unix.Mount(source, target, "", unix.MS_BIND, ""); err != nil {
 		return fmt.Errorf("bind mount %s -> %s: %w", source, target, err)
-	}
-	return nil
-}
-
-func (productionMountOps) unmount(path string) error {
-	if err := unix.Unmount(path, 0); err != nil {
-		return fmt.Errorf("unmount %s: %w", path, err)
-	}
-	return nil
-}
-
-func (productionMountOps) unmountLazy(path string) error {
-	if err := unix.Unmount(path, unix.MNT_DETACH); err != nil {
-		return fmt.Errorf("lazy unmount %s: %w", path, err)
 	}
 	return nil
 }

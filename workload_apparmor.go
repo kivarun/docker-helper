@@ -30,17 +30,6 @@ const (
 	appArmorAbi30Path             = "/etc/apparmor.d/abi/3.0"
 )
 
-// aaPathLiteralSafe is the byte set that may appear verbatim in an AppArmor
-// quoted AARE literal. Every other byte is emitted as an AppArmor hex
-// escape, so no caller-controlled byte can become a quote, comment marker,
-// glob, brace expansion, or profile delimiter.
-const aaPathLiteralSafe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._-"
-
-// appArmorPathLiteral converts a Linux path into an AppArmor quoted AARE
-// literal. Slash and a conservative ASCII set remain readable; every other
-// UTF-8 byte is emitted as an AppArmor hex escape. In particular, no caller
-// byte can turn into `*`, `?`, `[`, `]`, `{`, `}`, `#`, `"`, `\`, or any
-// other AppArmor syntax delimiter.
 func appArmorPathLiteral(path string) string {
 	out := make([]byte, 0, len(path))
 	for i := 0; i < len(path); i++ {
@@ -329,9 +318,9 @@ func appArmorLoadedProfileNames() ([]string, error) {
 		return nil, fmt.Errorf("cannot read AppArmor profile inventory: %w", err)
 	}
 	var names []string
-	for _, line := range stringLines(string(data)) {
+	for _, line := range strings.Split(string(data), "\n") {
 		// Inventory lines look like: "profile-name (enforce)".
-		if idx := indexByte(line, ' '); idx > 0 {
+		if idx := strings.IndexByte(line, ' '); idx > 0 {
 			line = line[:idx]
 		}
 		if line != "" {
@@ -339,30 +328,6 @@ func appArmorLoadedProfileNames() ([]string, error) {
 		}
 	}
 	return names, nil
-}
-
-func stringLines(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		out = append(out, s[start:])
-	}
-	return out
-}
-
-func indexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
 }
 
 // prepare renders, loads, and verifies the generated workload profile for

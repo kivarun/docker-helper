@@ -36,7 +36,7 @@ func setupPrincipalForLauncherTest(t *testing.T, db *sql.DB, globalRoots []strin
 
 // testEffectivePrincipalRoots resolves the canonical effective Principal
 // ceiling for a system-mode test fixture through the production policy owner
-// (computeEffectivePrincipalRoots): the global roots narrowed by the
+// (effectivePrincipalAllowedRoots): the global roots narrowed by the
 // Principal's stored roots.
 func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, globalRoots []string) []string {
 	t.Helper()
@@ -44,15 +44,17 @@ func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, gl
 	if err != nil {
 		t.Fatalf("readPrincipalAllowedRoots: %v", err)
 	}
-	return computeEffectivePrincipalRoots(globalRoots, allowedRootPaths(stored), principalID, 0, false)
+	return allowedRootPaths(effectivePrincipalAllowedRoots(
+		allowedRootEntriesForPaths(globalRoots), stored, principalID, 0, false))
 }
 
 // TestComputeEffectivePrincipalRootsMatrix proves the semantic matrix of the
-// canonical Principal-level effective-root policy owner. The App-aware
-// resolver and every consuming surface (Session creation, Launcher
-// restricted-scope create and replacement, Principal effective-roots
-// introspection) delegate the Principal-level rule to this single function,
-// so the matrix pins the rule exactly once:
+// canonical Principal-level effective-root policy owner
+// (effectivePrincipalAllowedRoots). The App-aware resolver and every
+// consuming surface (Session creation, Launcher restricted-scope create and
+// replacement, Principal effective-roots introspection) delegate the
+// Principal-level rule to this single function, so the matrix pins the rule
+// exactly once:
 //
 //   - user mode + daemon-owner identity + zero stored roots => the global
 //     roots (the transparent ownership chain defers wholly to the global
@@ -64,7 +66,7 @@ func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, gl
 //   - everything else (system mode, user-mode non-owners) => the plain
 //     intersection: zero or disjoint stored roots mean an empty ceiling.
 func TestComputeEffectivePrincipalRootsMatrix(t *testing.T) {
-	global := []string{"/global"}
+	global := []AllowedRootEntry{allowedRootEntry("/global")}
 	daemonOwner := int64(7)
 	other := int64(8)
 
@@ -73,21 +75,21 @@ func TestComputeEffectivePrincipalRootsMatrix(t *testing.T) {
 		userMode    bool
 		principalID int64
 		daemonID    int64
-		stored      []string
+		stored      []AllowedRootEntry
 		want        []string
 	}{
-		{"system principal with stored roots", false, other, 0, []string{"/global/home"}, []string{"/global/home"}},
+		{"system principal with stored roots", false, other, 0, []AllowedRootEntry{allowedRootEntry("/global/home")}, []string{"/global/home"}},
 		{"system principal with zero stored roots", false, other, 0, nil, nil},
-		{"user-mode daemon-owner with zero stored roots", true, daemonOwner, daemonOwner, nil, global},
-		{"user-mode daemon-owner with stray stored roots (startup-refused state)", true, daemonOwner, daemonOwner, []string{"/elsewhere"}, nil},
+		{"user-mode daemon-owner with zero stored roots", true, daemonOwner, daemonOwner, nil, []string{"/global"}},
+		{"user-mode daemon-owner with stray stored roots (startup-refused state)", true, daemonOwner, daemonOwner, []AllowedRootEntry{allowedRootEntry("/elsewhere")}, nil},
 		{"user-mode non-owner with zero stored roots", true, other, daemonOwner, nil, nil},
-		{"user-mode non-owner with stored roots", true, other, daemonOwner, []string{"/global/home"}, []string{"/global/home"}},
+		{"user-mode non-owner with stored roots", true, other, daemonOwner, []AllowedRootEntry{allowedRootEntry("/global/home")}, []string{"/global/home"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeEffectivePrincipalRoots(global, tc.stored, tc.principalID, tc.daemonID, tc.userMode)
+			got := allowedRootPaths(effectivePrincipalAllowedRoots(global, tc.stored, tc.principalID, tc.daemonID, tc.userMode))
 			if !slices.Equal(got, tc.want) {
-				t.Errorf("computeEffectivePrincipalRoots(userMode=%v, principal=%d, owner=%d, stored=%v) = %v, want %v",
+				t.Errorf("effectivePrincipalAllowedRoots(userMode=%v, principal=%d, owner=%d, stored=%v) = %v, want %v",
 					tc.userMode, tc.principalID, tc.daemonID, tc.stored, got, tc.want)
 			}
 		})
