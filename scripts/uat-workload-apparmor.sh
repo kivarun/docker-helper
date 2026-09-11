@@ -125,44 +125,99 @@ wait_health() {
   return 1
 }
 
+# Fail-closed inventory contract for every release-critical residue proof:
+#   success + empty        -> zero residue (count 0 / empty list);
+#   success + entries      -> residue exists (count > 0 / entries);
+#   inventory unavailable  -> error status, never 0/empty.
+# "Cannot inspect" is never "clean".
+
 # helper_container_count counts helper-owned containers (including exited).
 helper_container_count() {
-  docker ps -a --filter 'label=com.dockerhelper.schema=1' -q | wc -l
+  local out rc
+  out="$(docker ps -a --filter 'label=com.dockerhelper.schema=1' -q 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '  helper container inventory unavailable (docker ps failed)\n' >&2
+    return 1
+  fi
+  if [ -z "$out" ]; then
+    printf '0'
+    return 0
+  fi
+  printf '%s\n' "$out" | wc -l | tr -d ' '
 }
 
+# wait_no_helper_containers waits until the helper-owned container inventory
+# is positively empty. Exit status: 0 = positively empty, 1 = residue/timeout,
+# 2 = inventory unavailable (never reports clean).
 wait_no_helper_containers() {
-  local _i=0
+  local _i=0 count
   for _i in $(seq 1 40); do
-    [ "$(helper_container_count)" = "0" ] && return 0
+    count="$(helper_container_count)" || return 2
+    [ "$count" = "0" ] && return 0
     sleep 0.25
   done
   return 1
 }
 
+# inventory_count DIR prints the number of entries in DIR. A positively
+# absent directory is an empty inventory (the owner creates it lazily);
+# an existing but unreadable directory is an inventory error, never 0.
+inventory_count() {
+  local dir="$1" out rc
+  out="$(ls -A -- "$dir" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ ! -e "$dir" ]; then
+      printf '0'
+      return 0
+    fi
+    printf '  inventory %s is unreadable\n' "$dir" >&2
+    return 1
+  fi
+  if [ -z "$out" ]; then
+    printf '0'
+    return 0
+  fi
+  printf '%s\n' "$out" | wc -l | tr -d ' '
+}
+
 residue_state() {
-  printf 'containers=%s pins=%s wlmac=%s\n' \
-    "$(helper_container_count)" \
-    "$(ls /run/docker-helper/mounts 2>/dev/null | wc -l)" \
-    "$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)"
+  local containers pins wlmac
+  containers="$(helper_container_count)" || return 1
+  pins="$(inventory_count /run/docker-helper/mounts)" || return 1
+  wlmac="$(inventory_count /run/docker-helper/workload-mac)" || return 1
+  printf 'containers=%s pins=%s wlmac=%s\n' "$containers" "$pins" "$wlmac"
 }
 
 residue_unchanged() {
   local base="$1" now
-  now="$(residue_state)"
+  now="$(residue_state)" || { printf '  residue inventory unavailable for the drift check\n' >&2; return 1; }
   [ "$now" = "$base" ] || { printf '  residue drift: before %s after %s\n' "$base" "$now" >&2; return 1; }
 }
 
 # generated_workload_profiles lists loaded generated workload profiles.
+# An aa-status failure is an inventory error, never an empty list.
 generated_workload_profiles() {
-  aa-status 2>/dev/null | grep -oE 'docker-helper-workload-[A-Za-z0-9_-]+' | sort -u
+  local out
+  out="$(aa-status 2>/dev/null)" || {
+    printf '  AppArmor profile inventory unavailable (aa-status failed)\n' >&2
+    return 1
+  }
+  printf '%s\n' "$out" \
+    | awk '{ if (match($0, /docker-helper-workload-[A-Za-z0-9_-]+/)) print substr($0, RSTART, RLENGTH) }' \
+    | sort -u
 }
 
 # workload_residue_clean asserts no transient/durable workload-MAC state and
-# no loaded generated workload profile remains.
+# no loaded generated workload profile remains. Exit status: 0 = clean,
+# 1 = residue, 2 = inventory unavailable (never clean).
 workload_residue_clean() {
-  [ "$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)" = "0" ] \
-    && [ "$(ls /var/lib/docker-helper/workload-mac 2>/dev/null | wc -l)" = "0" ] \
-    && [ -z "$(generated_workload_profiles)" ]
+  local runtime durable profiles
+  runtime="$(inventory_count /run/docker-helper/workload-mac)" || return 2
+  durable="$(inventory_count /var/lib/docker-helper/workload-mac)" || return 2
+  profiles="$(generated_workload_profiles)" || return 2
+  [ "$runtime" = "0" ] && [ "$durable" = "0" ] && [ -z "$profiles" ]
 }
 
 # create_session CREDFILE WORKSPACE — creates a launcher-credential session
@@ -368,22 +423,35 @@ fi
 # scenario W5: writable parent over nested RO refused before workload creation
 # ==============================================================================
 say "W5: writable parent over nested RO refused before workload creation"
-W5_BASE="$(residue_state)"
-if expect_read_only_root "$WSA_TOKEN" . /mnt/tree 'echo x > /mnt/tree/pipeline-inputs/x.txt' "$W5_BASE"; then
-  acc_ok "W5 writable parent refused with read_only_root before MAC/container creation"
+if W5_BASE="$(residue_state)"; then
+  if expect_read_only_root "$WSA_TOKEN" . /mnt/tree 'echo x > /mnt/tree/pipeline-inputs/x.txt' "$W5_BASE"; then
+    acc_ok "W5 writable parent refused with read_only_root before MAC/container creation"
+  else
+    acc_fail "W5 writable parent refusal wrong (base: $W5_BASE)"
+  fi
 else
-  acc_fail "W5 writable parent refusal wrong (base: $W5_BASE)"
+  acc_blocked "W5 residue inventory unavailable for the no-state baseline"
 fi
 
 # ==============================================================================
 # scenario W7a: cleanup after success
 # ==============================================================================
 say "W7a: cleanup after a successful workload"
-wait_no_helper_containers || acc_fail "W7a helper containers remain after a successful run"
-if workload_residue_clean; then
+wait_no_helper_containers
+W7A_WAIT_RC=$?
+if [ "$W7A_WAIT_RC" -eq 2 ]; then
+  acc_blocked "W7a helper container inventory unavailable after the successful run"
+elif [ "$W7A_WAIT_RC" -ne 0 ]; then
+  acc_fail "W7a helper containers remain after a successful run"
+fi
+workload_residue_clean
+W7A_CLEAN_RC=$?
+if [ "$W7A_CLEAN_RC" -eq 0 ]; then
   acc_ok "W7a no generated workload profile/state remains after success"
+elif [ "$W7A_CLEAN_RC" -eq 2 ]; then
+  acc_blocked "W7a workload residue inventory unavailable after success"
 else
-  acc_fail "W7a workload residue after success (profiles: $(generated_workload_profiles))"
+  acc_fail "W7a workload residue after success (profiles: $(generated_workload_profiles 2>/dev/null || true))"
 fi
 
 # ==============================================================================
@@ -396,11 +464,21 @@ W7_FAIL_EC=$?
 [ "$W7_FAIL_EC" -ne 0 ] \
   && acc_ok "W7b failing workload propagates the container failure (ec=$W7_FAIL_EC)" \
   || acc_fail "W7b failing workload unexpectedly succeeded"
-wait_no_helper_containers || acc_fail "W7b helper containers remain after the failing run"
-if workload_residue_clean; then
+wait_no_helper_containers
+W7B_WAIT_RC=$?
+if [ "$W7B_WAIT_RC" -eq 2 ]; then
+  acc_blocked "W7b helper container inventory unavailable after the failing run"
+elif [ "$W7B_WAIT_RC" -ne 0 ]; then
+  acc_fail "W7b helper containers remain after the failing run"
+fi
+workload_residue_clean
+W7B_CLEAN_RC=$?
+if [ "$W7B_CLEAN_RC" -eq 0 ]; then
   acc_ok "W7b no generated workload profile/state remains after failure"
+elif [ "$W7B_CLEAN_RC" -eq 2 ]; then
+  acc_blocked "W7b workload residue inventory unavailable after failure"
 else
-  acc_fail "W7b workload residue after failure (profiles: $(generated_workload_profiles))"
+  acc_fail "W7b workload residue after failure (profiles: $(generated_workload_profiles 2>/dev/null || true))"
 fi
 
 # ==============================================================================
@@ -430,9 +508,16 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 if wait_health \
-    && [ "$(cat "/proc/$(systemctl show -p MainPID --value docker-helper.service)/attr/current" 2>/dev/null || true)" = "docker-helper-system (enforce)" ] \
-    && workload_residue_clean; then
-  acc_ok "W8 restart/reconciliation: daemon confined again, no stale workload profile/state"
+    && [ "$(cat "/proc/$(systemctl show -p MainPID --value docker-helper.service)/attr/current" 2>/dev/null || true)" = "docker-helper-system (enforce)" ]; then
+  workload_residue_clean
+  W8_CLEAN_RC=$?
+  if [ "$W8_CLEAN_RC" -eq 0 ]; then
+    acc_ok "W8 restart/reconciliation: daemon confined again, no stale workload profile/state"
+  elif [ "$W8_CLEAN_RC" -eq 2 ]; then
+    acc_blocked "W8 restart left the daemon confined but the workload residue inventory is unavailable"
+  else
+    acc_fail "W8 restart left stale workload profile/state"
+  fi
 else
   acc_fail "W8 restart left confinement or workload residue broken"
 fi
@@ -442,11 +527,18 @@ fi
 # ==============================================================================
 say "W9: docker-helper-system profile not widened"
 if [ "$(sha256sum /etc/apparmor.d/docker-helper-system | awk '{print $1}')" = "$DAEMON_PROFILE_SHA" ] \
-    && aa-status 2>/dev/null | grep -q 'docker-helper-system' \
-    && [ -z "$(generated_workload_profiles)" ]; then
-  acc_ok "W9 packaged daemon profile unchanged; generated workload profiles are separate and unloaded"
+    && aa-status 2>/dev/null | grep -q 'docker-helper-system'; then
+  W9_PROFILES="$(generated_workload_profiles 2>/dev/null)"
+  W9_PROF_RC=$?
+  if [ "$W9_PROF_RC" -eq 0 ] && [ -z "$W9_PROFILES" ]; then
+    acc_ok "W9 packaged daemon profile unchanged; generated workload profiles are separate and unloaded"
+  elif [ "$W9_PROF_RC" -ne 0 ]; then
+    acc_blocked "W9 AppArmor profile inventory unavailable for the generated-profile check"
+  else
+    acc_fail "W9 daemon profile unchanged but generated workload profiles linger: $W9_PROFILES"
+  fi
 else
-  acc_fail "W9 daemon profile was widened or generated profiles linger"
+  acc_fail "W9 daemon profile was widened or is not loaded"
 fi
 
 # ==============================================================================

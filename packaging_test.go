@@ -8785,6 +8785,253 @@ func TestUatWorkloadSelinuxProjectionAvcClassifier(t *testing.T) {
 	}
 }
 
+// TestUatWorkloadInventoryFailClosed proves the workload acceptance scripts
+// never turn an unavailable inventory into "zero residue". Every
+// release-critical residue proof helper follows the three-state contract:
+// success + empty => clean, success + entries => residue, inventory
+// unavailable => failure (never 0/empty). The stubbed docker/ls/aa-status
+// failures discriminate the pre-fix pipe-to-wc helpers, whose failures
+// collapsed to empty output and reported clean without proving inventory
+// state.
+func TestUatWorkloadInventoryFailClosed(t *testing.T) {
+	scripts := []struct {
+		path        string
+		hasAAStatus bool
+	}{
+		{path: "scripts/uat-workload-apparmor.sh", hasAAStatus: true},
+		{path: "scripts/uat-workload-selinux.sh", hasAAStatus: false},
+	}
+	for _, script := range scripts {
+		t.Run(filepath.Base(script.path), func(t *testing.T) {
+			helpers := []string{
+				"helper_container_count", "wait_no_helper_containers",
+				"inventory_count", "residue_state", "residue_unchanged",
+				"workload_residue_clean",
+			}
+			if script.hasAAStatus {
+				helpers = append(helpers, "generated_workload_profiles")
+			}
+			for _, name := range helpers {
+				data, err := os.ReadFile(script.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(data), name+"() {") {
+					t.Fatalf("%s must own the fail-closed inventory helper %s", script.path, name)
+				}
+			}
+
+			// Deterministic command stubs: mode-controlled docker, ls, and
+			// aa-status; ls delegates to the real binary unless forced to
+			// fail so absent-directory inventories stay observable.
+			stubDir := t.TempDir()
+			stubs := map[string]string{
+				"docker": "#!/bin/sh\n" +
+					"if [ \"${STUB_DOCKER_FAIL:-}\" = \"1\" ]; then\n" +
+					"  echo 'Cannot connect to the Docker daemon' >&2\n" +
+					"  exit 1\n" +
+					"fi\n" +
+					"case \"${STUB_DOCKER_OUT:-empty}\" in\n" +
+					"  empty) exit 0 ;;\n" +
+					"  ids) printf 'id1\\nid2\\n' ;;\n" +
+					"esac\n",
+				"ls": "#!/bin/sh\n" +
+					"if [ \"${STUB_LS_FAIL:-}\" = \"1\" ]; then\n" +
+					"  echo 'ls: cannot open directory' >&2\n" +
+					"  exit 2\n" +
+					"fi\n" +
+					"exec /bin/ls \"$@\"\n",
+				"aa-status": "#!/bin/sh\n" +
+					"if [ \"${STUB_AASTATUS_FAIL:-}\" = \"1\" ]; then\n" +
+					"  echo 'aa-status: unavailable' >&2\n" +
+					"  exit 1\n" +
+					"fi\n" +
+					"case \"${STUB_AASTATUS_OUT:-empty}\" in\n" +
+					"  empty) exit 0 ;;\n" +
+					"  profiles) printf 'docker-helper-system (enforce)\\ndocker-helper-workload-op_x (enforce)\\n' ;;\n" +
+					"esac\n",
+			}
+			for name, body := range stubs {
+				if script.path != "scripts/uat-workload-apparmor.sh" && name == "aa-status" {
+					continue
+				}
+				if err := os.WriteFile(filepath.Join(stubDir, name), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Real directory fixtures for the ls-driven inventory helper.
+			entriesDir := filepath.Join(t.TempDir(), "wlmac")
+			if err := os.MkdirAll(entriesDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"op_x", "op_y"} {
+				if err := os.Mkdir(filepath.Join(entriesDir, name), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// The composition helpers (residue_state, workload_residue_clean)
+			// address the fixed UAT host paths under /run/docker-helper and
+			// /var/lib/docker-helper. Their absent-directory outcomes are
+			// observable only where those paths are positively absent; on a
+			// dev host with a leftover helper-owned runtime tree, the
+			// helper-level stub cases below still prove the fail-closed
+			// contract.
+			uatPathsAbsent := true
+			for _, p := range []string{
+				"/run/docker-helper/mounts",
+				"/run/docker-helper/workload-mac",
+				"/var/lib/docker-helper/workload-mac",
+			} {
+				if _, err := os.Stat(p); err == nil {
+					uatPathsAbsent = false
+					break
+				}
+			}
+
+			var b strings.Builder
+			b.WriteString("set -uo pipefail\n")
+			b.WriteString("PATH=" + stubDir + ":$PATH\n")
+			b.WriteString("export PATH\n")
+			for _, name := range helpers {
+				b.WriteString(extractShellFunction(t, script.path, name))
+				b.WriteString("\n")
+			}
+			b.WriteString(`case "$MODE" in
+docker_fail)
+  helper_container_count >/dev/null 2>&1; printf 'HCC_RC=%s\n' "$?"
+  wait_no_helper_containers >/dev/null 2>&1; printf 'WAIT_RC=%s\n' "$?"
+  residue_state >/dev/null 2>&1; printf 'STATE_RC=%s\n' "$?"
+  residue_unchanged base >/dev/null 2>&1; printf 'UNCHANGED_RC=%s\n' "$?"
+  ;;
+ls_fail)
+  inventory_count "$UAT_TEST_DIR" >/dev/null 2>&1; printf 'INV_RC=%s\n' "$?"
+  ;;
+aa_fail)
+  generated_workload_profiles >/dev/null 2>&1; printf 'GWP_RC=%s\n' "$?"
+  workload_residue_clean >/dev/null 2>&1; printf 'CLEAN_RC=%s\n' "$?"
+  ;;
+aa_dirty)
+  generated_workload_profiles >/dev/null 2>&1; printf 'GWP_RC=%s\n' "$?"
+  workload_residue_clean >/dev/null 2>&1; printf 'CLEAN_RC=%s\n' "$?"
+  ;;
+empty_counts)
+  out="$(helper_container_count)"; rc=$?; printf 'HCC_RC=%s\n' "$rc"; printf 'HCC_OUT=%s\n' "$out"
+  inventory_count "$UAT_TEST_ABSENT" >/dev/null 2>&1; printf 'ABSENT_INV_RC=%s\n' "$?"
+  ;;
+empty_clean)
+  out="$(residue_state)"; rc=$?; printf 'STATE_RC=%s\n' "$rc"; printf 'STATE_OUT=%s\n' "$out"
+  workload_residue_clean >/dev/null 2>&1; printf 'CLEAN_RC=%s\n' "$?"
+  ;;
+entries_dirty)
+  out="$(helper_container_count)"; rc=$?; printf 'HCC_RC=%s\n' "$rc"; printf 'HCC_OUT=%s\n' "$out"
+  out="$(inventory_count "$UAT_TEST_DIR")"; rc=$?; printf 'INV_RC=%s\n' "$rc"; printf 'INV_OUT=%s\n' "$out"
+  ;;
+esac
+`)
+			body := b.String()
+
+			cases := []struct {
+				name             string
+				env              []string
+				want             map[string]string
+				needsUATAbsentOK bool
+			}{
+				{
+					name: "docker ps failure fails the container inventory",
+					env:  []string{"MODE=docker_fail", "STUB_DOCKER_FAIL=1"},
+					want: map[string]string{"HCC_RC": "1", "WAIT_RC": "2", "STATE_RC": "1", "UNCHANGED_RC": "1"},
+				},
+				{
+					name: "unreadable existing directory fails the inventory",
+					env:  []string{"MODE=ls_fail", "STUB_LS_FAIL=1", "UAT_TEST_DIR=" + entriesDir},
+					want: map[string]string{"INV_RC": "1"},
+				},
+				{
+					name: "successful empty inventories count zero",
+					env:  []string{"MODE=empty_counts", "UAT_TEST_ABSENT=" + filepath.Join(t.TempDir(), "absent")},
+					want: map[string]string{"HCC_RC": "0", "HCC_OUT": "0", "ABSENT_INV_RC": "0"},
+				},
+				{
+					name:             "successful empty inventory is clean",
+					env:              []string{"MODE=empty_clean", "UAT_TEST_ABSENT=" + filepath.Join(t.TempDir(), "absent")},
+					want:             map[string]string{"STATE_RC": "0", "STATE_OUT": "containers=0 pins=0 wlmac=0", "CLEAN_RC": "0"},
+					needsUATAbsentOK: true,
+				},
+				{
+					name: "successful non-empty inventory is residue",
+					env:  []string{"MODE=entries_dirty", "STUB_DOCKER_OUT=ids", "UAT_TEST_DIR=" + entriesDir},
+					want: map[string]string{"HCC_RC": "0", "HCC_OUT": "2", "INV_RC": "0", "INV_OUT": "2"},
+				},
+			}
+			if script.hasAAStatus {
+				cases = append(cases,
+					struct {
+						name             string
+						env              []string
+						want             map[string]string
+						needsUATAbsentOK bool
+					}{
+						name: "aa-status failure blocks the residue proof",
+						env:  []string{"MODE=aa_fail", "STUB_AASTATUS_FAIL=1"},
+						want: map[string]string{"GWP_RC": "1", "CLEAN_RC": "2"},
+					},
+					struct {
+						name             string
+						env              []string
+						want             map[string]string
+						needsUATAbsentOK bool
+					}{
+						name:             "empty profile inventory is clean",
+						env:              []string{"MODE=aa_fail", "STUB_AASTATUS_OUT=empty"},
+						want:             map[string]string{"GWP_RC": "0", "CLEAN_RC": "0"},
+						needsUATAbsentOK: true,
+					},
+					struct {
+						name             string
+						env              []string
+						want             map[string]string
+						needsUATAbsentOK bool
+					}{
+						name:             "loaded generated workload profile is residue",
+						env:              []string{"MODE=aa_dirty", "STUB_AASTATUS_OUT=profiles"},
+						want:             map[string]string{"GWP_RC": "0", "CLEAN_RC": "1"},
+						needsUATAbsentOK: true,
+					})
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					if tc.needsUATAbsentOK && !uatPathsAbsent {
+						t.Skipf("UAT host paths are present on this host; absent-directory composition is not observable")
+					}
+					scriptPath := filepath.Join(t.TempDir(), "inv.sh")
+					if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					cmd := exec.Command("bash", scriptPath)
+					cmd.Env = append(os.Environ(), tc.env...)
+					out, err := cmd.CombinedOutput()
+					if err != nil {
+						t.Fatalf("inventory harness failed: %v\n%s", err, out)
+					}
+					got := map[string]string{}
+					for _, line := range strings.Split(string(out), "\n") {
+						if k, v, ok := strings.Cut(line, "="); ok {
+							got[k] = v
+						}
+					}
+					for key, want := range tc.want {
+						if got[key] != want {
+							t.Errorf("%s: %s = %q, want %q (output: %s)", tc.name, key, got[key], want, string(out))
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 // =============================================================================
 // Upgrade-baseline fixture invariants (Stage 0.1)
 // =============================================================================
