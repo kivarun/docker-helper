@@ -2,14 +2,19 @@
 #
 # uat-regression-lib.sh — shared helpers for the Release-2 targeted UAT
 # regression groups (scripts/uat-regression-*.sh) and their collect-all
-# runners (scripts/uat-regressions-runner-*.sh).
+# runners (scripts/uat-regressions-runner-*.sh). The standalone Release-2
+# acceptance suites (uat-release2-acceptance.sh, uat-migration-rpm-211.sh,
+# uat-access-modes.sh) source it for the shared measurement primitives only
+# and keep their own scenario accounting.
 #
 # Every regression script sources this file. The lib owns only the small amount
 # of per-regression bookkeeping (subcase ok/fail accounting, the final
-# PASS/FAIL/BLOCKED verdict and the common redaction helper). It deliberately
-# does NOT own any docker-helper operation, MAC behavior or install logic:
-# that stays in the individual regression scripts, which run against an
-# already-installed, running docker-helper system service.
+# PASS/FAIL/BLOCKED verdict, the common redaction helper), the structural
+# rich allowed-root JSON parse shared by the list-output contracts, and the
+# fail-closed residue inventory primitives. It deliberately does NOT own any
+# docker-helper operation, MAC behavior or install logic: that stays in the
+# individual scripts, which run against an already-installed, running
+# docker-helper system service.
 #
 # Contract between the collect-all runners and the individual scripts:
 #   exit 0 = PASS      (script prints REGRESSION_RESULT=PASS)
@@ -131,6 +136,65 @@ json_field() { # field
   grep -oP "\"$1\": \"\K[^\"]+" | head -1
 }
 
+# --- canonical rich allowed-root list helpers --------------------------------
+# The default human `allowed-root list` is the 2.1-compatible surface: one
+# canonical path per line, no ACCESS column. Access-aware assertions must use
+# the rich `--json` projection (the canonical [{"path","access"}, ...] list in
+# stored-entry order) and parse it structurally — never by grepping a
+# pretty-printed layout for a path and an access on the same or neighboring
+# lines. These helpers are the shared owner of that structural parse for the
+# UAT suites. Fail-closed: any inspection failure (unparsable JSON, wrong
+# shape, malformed entry, missing path) reports failure and prints nothing, so
+# an inspection error can never be mistaken for a verified value.
+
+# allowed_root_json_access PATH prints the canonical access mode
+# (read_write|read_only) of PATH from the rich allowed-root JSON list read on
+# stdin. Exit 1 when the document is not that list, PATH is absent, or any
+# entry is malformed.
+allowed_root_json_access() { # PATH
+  python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(entries, list):
+    sys.exit(1)
+for entry in entries:
+    if not (isinstance(entry, dict) and isinstance(entry.get("path"), str)
+            and entry.get("access") in ("read_write", "read_only")):
+        sys.exit(1)
+for entry in entries:
+    if entry["path"] == sys.argv[1]:
+        print(entry["access"])
+        sys.exit(0)
+sys.exit(1)
+' "$1" 2>/dev/null
+}
+
+# allowed_root_json_projection prints the canonical, formatting-independent
+# projection of the rich allowed-root JSON list read on stdin: one
+# "path<TAB>access" line per entry, in stored-entry order. Exit 1 when the
+# document is not that list, so a stability comparison can never mistake an
+# inspection failure for an unchanged policy.
+allowed_root_json_projection() {
+  python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(entries, list):
+    sys.exit(1)
+for entry in entries:
+    if not (isinstance(entry, dict) and isinstance(entry.get("path"), str)
+            and entry.get("access") in ("read_write", "read_only")):
+        sys.exit(1)
+for entry in entries:
+    print("%s\t%s" % (entry["path"], entry["access"]))
+' 2>/dev/null
+}
+
 # dh is the docker-helper CLI used by the regressions (system mode).
 dh() { /usr/bin/docker-helper "$@"; }
 
@@ -153,15 +217,77 @@ wait_service_health() {
   return 1
 }
 
+# --- fail-closed residue inventory primitives --------------------------------
+# Canonical owner of the release-critical residue inventory contract (the
+# workload AppArmor/SELinux UAT matrices and the access-mode UAT residue
+# proofs). Three observable states, never mixed:
+#   ABSENT  -> positively proven absent (count 0 / empty inventory);
+#   PRESENT -> positively proven present (count > 0 / entries);
+#   UNKNOWN -> the inspection itself failed -> error status, never 0/empty.
+# "Cannot inspect" is never "clean".
+
+# helper_container_count counts helper-owned containers (including exited —
+# --rm removes them on exit, and a pre-admission refusal never creates one).
+# A docker inventory failure is UNKNOWN (exit 1), never zero residue.
+helper_container_count() {
+  local out rc
+  out="$(docker ps -a --filter 'label=com.dockerhelper.schema=1' -q 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '  helper container inventory unavailable (docker ps failed)\n' >&2
+    return 1
+  fi
+  if [ -z "$out" ]; then
+    printf '0'
+    return 0
+  fi
+  printf '%s\n' "$out" | wc -l | tr -d ' '
+}
+
+# wait_no_helper_containers waits until the helper-owned container inventory
+# is positively empty. Exit status: 0 = positively empty, 1 = residue/timeout,
+# 2 = inventory unavailable (never reports clean).
+wait_no_helper_containers() {
+  local _i=0 count
+  for _i in $(seq 1 40); do
+    count="$(helper_container_count)" || return 2
+    [ "$count" = "0" ] && return 0
+    sleep 0.25
+  done
+  return 1
+}
+
+# inventory_count DIR prints the number of entries in DIR. A positively
+# absent directory is an empty inventory (the owner creates it lazily);
+# an existing but unreadable directory is an inventory error, never 0.
+inventory_count() {
+  local dir="$1" out rc
+  out="$(ls -A -- "$dir" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ ! -e "$dir" ]; then
+      printf '0'
+      return 0
+    fi
+    printf '  inventory %s is unreadable\n' "$dir" >&2
+    return 1
+  fi
+  if [ -z "$out" ]; then
+    printf '0'
+    return 0
+  fi
+  printf '%s\n' "$out" | wc -l | tr -d ' '
+}
+
 # --- shared ubuntu/deb/apparmor setup helpers --------------------------------
 # Used by the Ubuntu-hosted regression groups. The collect-all runner inits the
 # system service with global allowed root /home, so every /home/* home below is
 # authorized for principal/session use.
 
 # reg_config_global_roots prints the global allowed root paths from
-# `config allowed-root list`, one per line. The 2.2 list is the human
-# PATH/ACCESS table: skip the PATH header and print the first (path) field
-# of each data row; plain path-only output stays valid.
+# `config allowed-root list`, one per line. The default human list is the
+# 2.1-compatible one path per line surface, so the first field of every data
+# row is the path; a PATH/ACCESS table header (no leading slash) is skipped.
 reg_config_global_roots() {
   dh config allowed-root list 2>/dev/null | awk 'NF && $1 ~ /^\// {print $1}'
 }

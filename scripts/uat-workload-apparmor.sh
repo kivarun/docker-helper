@@ -52,6 +52,12 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared measurement primitives (fail-closed residue inventory) come from the
+# canonical lib owner; the script's own helpers below win.
+# shellcheck source=scripts/uat-regression-lib.sh
+source "$SCRIPT_DIR/uat-regression-lib.sh"
+
 VERSION="${UAT_VERSION:-2.2.0-uat}"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home/runner}"
 PRINCIPAL="${UAT_PRINCIPAL:-runner}"
@@ -125,62 +131,10 @@ wait_health() {
   return 1
 }
 
-# Fail-closed inventory contract for every release-critical residue proof:
-#   success + empty        -> zero residue (count 0 / empty list);
-#   success + entries      -> residue exists (count > 0 / entries);
-#   inventory unavailable  -> error status, never 0/empty.
+# Fail-closed residue inventory: the three-state ABSENT/PRESENT/UNKNOWN
+# contract is owned by the shared primitives in uat-regression-lib.sh
+# (helper_container_count, wait_no_helper_containers, inventory_count).
 # "Cannot inspect" is never "clean".
-
-# helper_container_count counts helper-owned containers (including exited).
-helper_container_count() {
-  local out rc
-  out="$(docker ps -a --filter 'label=com.dockerhelper.schema=1' -q 2>/dev/null)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf '  helper container inventory unavailable (docker ps failed)\n' >&2
-    return 1
-  fi
-  if [ -z "$out" ]; then
-    printf '0'
-    return 0
-  fi
-  printf '%s\n' "$out" | wc -l | tr -d ' '
-}
-
-# wait_no_helper_containers waits until the helper-owned container inventory
-# is positively empty. Exit status: 0 = positively empty, 1 = residue/timeout,
-# 2 = inventory unavailable (never reports clean).
-wait_no_helper_containers() {
-  local _i=0 count
-  for _i in $(seq 1 40); do
-    count="$(helper_container_count)" || return 2
-    [ "$count" = "0" ] && return 0
-    sleep 0.25
-  done
-  return 1
-}
-
-# inventory_count DIR prints the number of entries in DIR. A positively
-# absent directory is an empty inventory (the owner creates it lazily);
-# an existing but unreadable directory is an inventory error, never 0.
-inventory_count() {
-  local dir="$1" out rc
-  out="$(ls -A -- "$dir" 2>/dev/null)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    if [ ! -e "$dir" ]; then
-      printf '0'
-      return 0
-    fi
-    printf '  inventory %s is unreadable\n' "$dir" >&2
-    return 1
-  fi
-  if [ -z "$out" ]; then
-    printf '0'
-    return 0
-  fi
-  printf '%s\n' "$out" | wc -l | tr -d ' '
-}
 
 residue_state() {
   local containers pins wlmac
