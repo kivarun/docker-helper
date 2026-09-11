@@ -3505,3 +3505,30 @@ func runCompletionWithPreambleForWords(t *testing.T, script, endpoint, tokenPath
 	words = append(words, userPrefix)
 	return runCompletionWithPreamble(t, script, completionPATHPreamble(t), words)
 }
+
+// TestCompletionFilesystemEntryLastEqualsGrammar proves the --filesystem-entry
+// ACCESS-side completion follows the same last-'=' grammar as the CLI parser:
+// a PATH containing '=' is split at the last '=', the ACCESS vocabulary is
+// completed with prefix filtering, and the caller-typed PATH prefix is
+// preserved in every candidate.
+func TestCompletionFilesystemEntryLastEqualsGrammar(t *testing.T) {
+	script := completionScript(t)
+
+	// A PATH containing '=': the split is on the last '='.
+	results := runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-entry", "foo=bar=read_"})
+	if len(results) != 2 || !slices.Contains(results, "foo=bar=read_only") || !slices.Contains(results, "foo=bar=read_write") {
+		t.Errorf("last-'=' completion = %v, want [foo=bar=read_write foo=bar=read_only]", results)
+	}
+
+	// The ordinary single-'=' prefix keeps working.
+	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-entry", "project=read_"})
+	if len(results) != 2 || !slices.Contains(results, "project=read_only") || !slices.Contains(results, "project=read_write") {
+		t.Errorf("ordinary completion = %v, want the ACCESS vocabulary with the typed PATH prefix", results)
+	}
+
+	// A fully typed ACCESS value filters to the exact entry.
+	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-entry", "project=read_write"})
+	if len(results) != 1 || !slices.Contains(results, "project=read_write") {
+		t.Errorf("exact completion = %v, want [project=read_write]", results)
+	}
+}

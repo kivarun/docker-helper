@@ -88,7 +88,7 @@ func setupSessionListQueryFixture(t *testing.T) *sessionListQueryFixture {
 	}
 
 	create := func(sel createSelector, workspace string) string {
-		result, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, sel, workspace)
+		result, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, sel, workspace, nil)
 		if err != nil {
 			t.Fatalf("createSessionAuthorized(%+v): %v", sel, err)
 		}

@@ -418,7 +418,7 @@ func testWorkspaceDir(t *testing.T, allowedRoot string) string {
 // 'default' Launcher under the collapsed global roots). It never computes
 // effective roots or manufactures a sessionCreatePolicy.
 func createDefaultAdminSessionForTest(app *App, workspace string) (*CreatedSession, error) {
-	return app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace)
+	return app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace, nil)
 }
 
 // mockStandaloneUserInit mocks systemSocketExists and checkDockerAccess so

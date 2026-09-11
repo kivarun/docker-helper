@@ -52,9 +52,10 @@ func (s *sessionSelectorField) isInvalid() bool { return s.invalid }
 func (s *sessionSelectorField) selectorOrEmpty() string { return s.value }
 
 type sessionRequest struct {
-	Workspace  string               `json:"workspace"`
-	LauncherID sessionSelectorField `json:"launcher_id"`
-	Principal  sessionSelectorField `json:"principal"`
+	Workspace         string                   `json:"workspace"`
+	LauncherID        sessionSelectorField     `json:"launcher_id"`
+	Principal         sessionSelectorField     `json:"principal"`
+	FilesystemEntries sessionFilesystemRequest `json:"filesystem_entries"`
 }
 
 // validateCreateSelector applies the Session create-selector contract to the
@@ -77,6 +78,81 @@ func (req sessionRequest) validateCreateSelector() (createSelector, *createTarge
 		return createSelector{}, &createTargetError{status: http.StatusBadRequest, code: "invalid_selector", msg: "invalid session selector"}
 	}
 	return createSelector{launcherID: req.LauncherID.selectorOrEmpty(), principal: req.Principal.selectorOrEmpty()}, nil
+}
+
+// sessionFilesystemRequestEntry is one caller-supplied issuance-time
+// filesystem narrowing entry of a Session create request: a workspace-relative
+// path and the canonical access value. Path is resolved and converted to a
+// canonical absolute AllowedRootEntry by the Session lifecycle; this type is
+// the caller-supplied wire value only.
+type sessionFilesystemRequestEntry struct {
+	Path   string `json:"path"`
+	Access string `json:"access"`
+}
+
+// sessionFilesystemRequest is the presence-aware optional filesystem_entries
+// field of the Session create request. Occurrence and validity are distinct
+// facts: omitted preserves the inherited create behavior, while any
+// occurrence — including JSON null and the empty array — is an explicit
+// request that must be a non-empty, well-formed array of {path, access}
+// objects. Structural defects (JSON null, a non-array value, an unknown
+// nested field, a malformed entry type, trailing data inside the array) are
+// recorded as request state rather than decode errors, so every malformed
+// Session filesystem request is refused with the one issuance-time
+// invalid_filesystem_policy contract instead of the generic invalid_json
+// shape.
+type sessionFilesystemRequest struct {
+	present   bool
+	malformed bool
+	entries   []sessionFilesystemRequestEntry
+}
+
+// UnmarshalJSON marks the field present on any occurrence and captures the
+// request state leniently: JSON null and structurally invalid arrays become
+// request state refused later by the handler, never a decode failure. Each
+// array element is decoded strictly with unknown fields rejected; a
+// structurally invalid element marks the whole request malformed, because one
+// refusal code governs every malformed Session filesystem request. Trailing
+// JSON after the field value cannot reach this decoder as reachable state:
+// the outer request body is parsed as one JSON value first, and trailing
+// outer data keeps the existing invalid_json contract, matching the Launcher
+// rich-entries field.
+func (r *sessionFilesystemRequest) UnmarshalJSON(data []byte) error {
+	r.present = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		r.malformed = true
+		return nil
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		r.malformed = true
+		return nil
+	}
+	for _, rawEntry := range raw {
+		dec := json.NewDecoder(bytes.NewReader(rawEntry))
+		dec.DisallowUnknownFields()
+		var entry sessionFilesystemRequestEntry
+		if err := dec.Decode(&entry); err != nil {
+			r.malformed = true
+			return nil
+		}
+		r.entries = append(r.entries, entry)
+	}
+	return nil
+}
+
+// isPresent reports whether filesystem_entries occurred in the request.
+func (r *sessionFilesystemRequest) isPresent() bool { return r.present }
+
+// suppliedEntries returns the explicitly supplied narrowing entries, or nil
+// when the request was omitted. A supplied request is never nil-returned
+// without the caller having refused it first: the empty array is an explicit
+// empty request and is refused before creation.
+func (r *sessionFilesystemRequest) suppliedEntries() []sessionFilesystemRequestEntry {
+	if !r.isPresent() {
+		return nil
+	}
+	return r.entries
 }
 
 type sessionJSON struct {
@@ -222,6 +298,16 @@ func workspaceErrorMessage(err error) string {
 	return "invalid workspace"
 }
 
+// sessionFilesystemPolicyMessage is the bounded HTTP message of an
+// issuance-time Session filesystem refusal: the refusal names no policy
+// detail at all, because the domain refusal's internal diagnostic (which
+// carries the canonical requested path) may disclose a resolved symlink
+// target or upstream policy shape and stays in the operational log only.
+// The stable code `invalid_filesystem_policy` carries the meaning; the
+// client learns only that its request was refused before the Session
+// existed.
+const sessionFilesystemPolicyMessage = "invalid session filesystem policy"
+
 // classifier for a create target relates a create error to its HTTP contract.
 type createTargetError struct {
 	status int
@@ -288,7 +374,28 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, cerr := a.createSessionAuthorized(authCtx, sel, req.Workspace)
+	// Issuance-time Session filesystem request: presence semantics are
+	// checked before any Session state exists. Omitted preserves the
+	// inherited create behavior; an explicit occurrence must be a non-empty,
+	// structurally valid array. Every malformed shape is the one
+	// invalid_filesystem_policy refusal (not the generic invalid_json code),
+	// because one code governs malformed/unauthorized Session filesystem
+	// requests.
+	if req.FilesystemEntries.isPresent() && (req.FilesystemEntries.malformed || len(req.FilesystemEntries.entries) == 0) {
+		auditRec := auditRecord{
+			Event:     "session.create",
+			Workspace: req.Workspace,
+			Result:    "invalid_filesystem_policy",
+			Duration:  duration,
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		writeRequestContextAudit(ctx, auditRec)
+		writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy",
+			"filesystem_entries must be omitted or a non-empty array of {path, access} objects")
+		return
+	}
+
+	result, cerr := a.createSessionAuthorized(authCtx, sel, req.Workspace, req.FilesystemEntries.suppliedEntries())
 	if cerr != nil {
 		// Stale-owner/enabled rejection at final persistence carries the same
 		// deterministic typed contract as resolution-time rejection
@@ -334,6 +441,18 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", cerr.Error()),
 			)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", workspaceErrorMessage(cerr))
+		} else if errors.Is(cerr, ErrInvalidSessionFilesystemPolicy) {
+			// Issuance-time filesystem refusal: the request is malformed or
+			// is not a narrowing of the effective Launcher ceiling. The HTTP
+			// message is the bounded non-disclosing contract — the internal
+			// diagnostic (canonical requested path, which may name a resolved
+			// symlink target or upstream policy shape) stays in the
+			// operational log and never reaches the client.
+			opLog(ctx).Warn("session creation rejected",
+				slog.String("operation", "session_create"),
+				slog.String("error", cerr.Error()),
+			)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", sessionFilesystemPolicyMessage)
 		} else {
 			opLog(ctx).Error("session creation error",
 				slog.String("operation", "session_create"),

@@ -550,6 +550,19 @@ resolve effective workspace policy
     ↓
 validate workspace inside the effective roots
     ↓
+canonicalize the workspace
+    (the existing Session-create owner: absolute path + EvalSymlinks)
+    ↓
+when the request carries filesystem_entries:
+    canonicalize each requested workspace-relative entry
+    (join with the canonical workspace, resolve symlinks, prove the
+     resolved path remains inside the workspace, convert to canonical
+     AllowedRootEntry), prove the request is a narrowing-only composition
+     against the effective Launcher ceiling, and compose
+     ceiling ∩ request through the existing composition owner;
+    otherwise use the effective ceiling unchanged
+    (issuance-time narrowing; the request may only narrow, never widen)
+    ↓
 derive the immutable Session filesystem snapshot
     (deriveSessionFilesystemSnapshot(effective entries, workspace) inside
      the lifecycleMu create linearization point)
@@ -562,6 +575,29 @@ commit Session + snapshot atomically
     ↓
 return session + one-time token
 ```
+
+The whole resolution, narrowing, and snapshot issuance happens inside the
+existing `lifecycleMu` create linearization boundary, so a concurrent
+parent-policy mutation linearizes wholly before or wholly after the create:
+a request is never validated against one ceiling and committed against
+another.
+
+The Session filesystem request is **issuance-time narrowing** (see
+[`release-2.2-allowed-root-access-modes.md`](release-2.2-allowed-root-access-modes.md)):
+it is not a fourth mutable policy scope, there is no post-create Session
+filesystem mutation, and omission preserves the inherited derived snapshot
+byte-for-byte. Every authority that may create Sessions (Admin, Principal
+credential, Launcher credential) may send it, and for all of them the
+request is only a narrowing of the resolved target Launcher's effective
+ceiling — even an Admin receives no bypass semantics through this field.
+A malformed or widening request is the typed
+`ErrInvalidSessionFilesystemPolicy` refusal family, answered before the
+Session exists as `400 invalid_filesystem_policy` with the audit result
+`invalid_filesystem_policy` and the bounded non-disclosing response message
+("invalid session filesystem policy"): the internal diagnostic (the
+canonical requested path, which may name a resolved symlink target) stays
+in the operational log and never reaches the client; no Session, bearer,
+container, pin, or workload-MAC state is created by a refused request.
 
 The persisted snapshot is immutable Session child state
 (`session_filesystem_snapshot_entries`, ordered `position` entries with
@@ -591,14 +627,23 @@ Release 2.2 behavior (see
 workspace-level MAC lifecycle is unchanged.
 
 The HTTP body of `POST /sessions` accepts
-`{"workspace", "launcher_id", "principal"}`:
+`{"workspace", "launcher_id", "principal", "filesystem_entries"}`:
 
 - `launcher_id` and `principal` are mutually exclusive; both present is
   `400 conflicting_selectors`; an explicitly present but empty or malformed
   selector is `400 invalid_selector`;
 - a Launcher credential's target is forced to its own launcher; a
   conflicting explicit selector is rejected;
-- with no selectors the request body carries only the workspace.
+- with no selectors the request body carries only the workspace;
+- `filesystem_entries` is the optional issuance-time Session filesystem
+  narrowing: omitted means the inherited create behavior, and an explicit
+  occurrence must be a non-empty array of `{path, access}` objects whose
+  `path` is relative to the Session workspace (`"."` is required and the
+  workspace-relative anchor of the request) and whose `access` is exactly
+  `read_write` or `read_only`; `null` and `[]` are refused
+  `400 invalid_filesystem_policy`, as are malformed entries (absolute or
+  traversal paths, unresolvable or workspace-escaping paths, duplicate
+  canonical entries, missing/unknown access, unknown nested fields).
 
 The CLI maps its selectors onto those wire fields after authenticating
 (`GET /auth`). The two selectors are mutually exclusive on the wire: the
@@ -899,7 +944,10 @@ parent-policy mutations (see
   launcher allowed root.
 - **Session filesystem snapshot** (persisted, immutable Session child
   state) — derived from the effective entries at the creation
-  linearization point and committed atomically with the Session. It is the
+  linearization point, further narrowed when the Session-create request
+  carries `filesystem_entries` (issuance-time narrowing only; see
+  [Session creation](#session-creation)), and committed atomically with the
+  Session. It is the
   single data-plane filesystem authority of an existing Session: current
   global/Principal/Launcher policy is never read on the data plane, so
   parent-policy mutations affect only Sessions created afterwards.
@@ -1059,7 +1107,10 @@ real mutations use, and neither surface widens authority.
   non-disclosing contract for foreign, missing, or authority-illegal
   selectors. Selectorless requests keep the authority-specific default
   resolution (a system-mode admin without a resolvable Launcher receives
-  the same missing-selector contract a real create would).
+  the same missing-selector contract a real create would). Without a
+  Session filesystem request this projection is the **maximum filesystem
+  ceiling**: a real Session create may further narrow its issued snapshot
+  against it through `filesystem_entries`, but never widen beyond it.
 
 `GET /auth` is the separate identity introspection surface; it reports the
 authenticated authority class, not policy (see
@@ -1253,7 +1304,7 @@ conflict.
 CLI surface (every command accepts the common operator flags):
 
 ```
-docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--principal USER] [--launcher LAUNCHER] [--json]
+docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-entry PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
 docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
@@ -1264,7 +1315,13 @@ docker-helper session cleanup
 resolution are the canonical
 [Session creation](#session-creation) pipeline and authority subsections;
 the CLI maps `--principal`/`--launcher` onto the wire selectors after
-`GET /auth`, and both are mutually exclusive. Returns the session ID,
+`GET /auth`, and both are mutually exclusive. The repeatable
+`--filesystem-entry PATH=ACCESS` flag is the CLI form of the issuance-time
+Session filesystem narrowing: PATH is a workspace-relative path and ACCESS
+the canonical access vocabulary; the CLI validates `PATH=ACCESS` syntax
+only, and the daemon decides narrowing against the resolved Launcher
+ceiling. Omitting the flag preserves the inherited create behavior.
+Returns the session ID,
 token, workspace, creation time, and expiration time; the token is shown
 only once and cannot be retrieved later.
 
@@ -2378,6 +2435,7 @@ Current error codes (non-exhaustive):
 | `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
 | `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
+| `invalid_filesystem_policy` | `POST /sessions` | the supplied `filesystem_entries` is malformed or is not a narrowing of the effective Launcher ceiling (issuance-time refusal; no Session exists) |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `principal_not_found` | `GET /sessions?principal=` | the selected Principal does not exist (list narrowing; non-disclosing) |
 | `launcher_not_found` | `GET /sessions?launcher=` | the selected Launcher does not exist inside the narrowed scope (list narrowing; non-disclosing) |
@@ -2589,6 +2647,7 @@ Result codes:
 | `launcher_not_found` | the selected launcher does not exist under the resolved principal (404) |
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
+| `invalid_filesystem_policy` | `filesystem_entries` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
 | `mac_preparation_failed` | MAC boundary preparation failed after persistence |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |

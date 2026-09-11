@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -27,10 +28,14 @@ const (
 	sessionIDHexLength = 32
 )
 
+// classifyCreateSessionError classifies a Session-create failure into its
+// stable audit/HTTP result code.
 func classifyCreateSessionError(err error) string {
 	switch {
 	case errors.Is(err, ErrInvalidWorkspace):
 		return "invalid_workspace"
+	case errors.Is(err, ErrInvalidSessionFilesystemPolicy):
+		return "invalid_filesystem_policy"
 	case errors.Is(err, ErrDatabase):
 		return "database_error"
 	case errors.Is(err, ErrSystem):
@@ -106,11 +111,16 @@ const sessionOwnershipProjection = `
 // three-level evaluation result) in its derived 2.1 path-only form;
 // EffectiveAllowedRootEntries is the same scope as its authoritative rich
 // entries — both are projected from one canonical evaluation, never
-// computed twice.
+// computed twice. FilesystemRequest carries the caller-supplied
+// issuance-time Session filesystem narrowing (nil when the request omitted
+// filesystem_entries); it is consumed by createSessionWithPolicyLocked
+// inside the same lifecycle linearization boundary and is never applied as
+// a post-create policy change.
 type sessionCreatePolicy struct {
 	Workspace                   string
 	EffectiveAllowedRoots       []string
 	EffectiveAllowedRootEntries []AllowedRootEntry
+	FilesystemRequest           []sessionFilesystemRequestEntry
 	LauncherID                  string
 	LauncherName                string
 	PrincipalName               string
@@ -167,14 +177,38 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("workspace must be inside an allowed root: %w", ErrInvalidWorkspace)
 	}
 
+	// Issuance-time Session filesystem narrowing (Release 2.2): when the
+	// create request supplied filesystem_entries, the caller-supplied
+	// workspace-relative entries are canonicalized against the already
+	// canonicalized workspace and proven to be a narrowing-only composition
+	// of the effective Launcher ceiling before the existing composition
+	// owner composes and normalizes them. A request that widens the ceiling
+	// is refused here, before any Session state exists; an omitted request
+	// keeps the effective ceiling unchanged, byte-for-byte compatible with
+	// the pre-narrowing create path. This runs inside the lifecycleMu
+	// create linearization boundary held by createSessionAuthorized, so the
+	// ceiling the request is proven against is exactly the ceiling the
+	// snapshot is committed from.
+	effective := p.EffectiveAllowedRootEntries
+	if len(p.FilesystemRequest) > 0 {
+		requested, err := canonicalizeSessionFilesystemRequest(absWorkspace, p.FilesystemRequest)
+		if err != nil {
+			return nil, err
+		}
+		effective, err = narrowSessionFilesystemPolicy(effective, absWorkspace, requested)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Derive the immutable Session filesystem snapshot from the effective
 	// policy at the Session-create linearization point: lifecycleMu is already
 	// held by createSessionAuthorized, so the snapshot corresponds exactly to
 	// the policy state of this Session-create critical section. The effective
-	// entries from resolveCreatePolicy are the only parent-policy input; no
-	// policy is re-read after derivation. A derivation failure fails the
-	// Session creation before any persistence.
-	snapshot, err := deriveSessionFilesystemSnapshot(p.EffectiveAllowedRootEntries, absWorkspace)
+	// entries — narrowed when the request supplied filesystem_entries — are
+	// the only parent-policy input; no policy is re-read after derivation. A
+	// derivation failure fails the Session creation before any persistence.
+	snapshot, err := deriveSessionFilesystemSnapshot(effective, absWorkspace)
 	if err != nil {
 		return nil, fmt.Errorf("cannot derive session filesystem snapshot: %w", err)
 	}
@@ -293,6 +327,88 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	}, nil
 }
 
+// isCleanRelativeWorkspacePath reports whether a caller-supplied
+// filesystem_entries path is exactly "." or a clean relative subpath of the
+// Session workspace. This applies the existing canonicalization semantics to
+// the workspace-relative request grammar; it introduces no new lexical path
+// policy: absolute paths, empty paths, traversal spellings ("..", "../x",
+// "x/../y"), and non-cleaned forms ("./project", trailing separators, doubled
+// separators) are refused because they do not name one unambiguous canonical
+// identity.
+func isCleanRelativeWorkspacePath(path string) bool {
+	if path == "." {
+		return true
+	}
+	if path == "" || filepath.IsAbs(path) {
+		return false
+	}
+	if filepath.Clean(path) != path {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// canonicalizeSessionFilesystemRequest converts caller-supplied
+// workspace-relative filesystem_entries into canonical absolute
+// AllowedRootEntry values, ready for narrowSessionFilesystemPolicy.
+//
+// The request-shape invariant is proven before any canonicalization: an
+// explicit request must contain the raw literal workspace entry ".". This is
+// a caller-supplied-shape rule, not a canonical-path rule — an entry whose
+// symlink alias resolves to the workspace (rootlink -> .) never satisfies
+// it, and a request without the literal "." is refused before the Session
+// exists. narrowSessionFilesystemPolicy re-proves the workspace authority
+// over the canonical entries as the second, domain-level invariant.
+//
+// Each entry is then joined with the canonical workspace, resolved through
+// symlinks, and proven to remain inside the workspace; the resolved path
+// becomes the canonical entry and is validated by the existing canonical
+// allowed-root entry validation (canonical absolute form, canonical access
+// vocabulary, duplicate canonical paths refused). The orchestrator creates
+// the run directories before creating the Session, so an unresolvable entry
+// — whose canonical identity cannot be proven — is a refusal, never a guess.
+// Every failure wraps ErrInvalidSessionFilesystemPolicy: one refusal family
+// governs the whole Session filesystem request.
+func canonicalizeSessionFilesystemRequest(workspace string, entries []sessionFilesystemRequestEntry) ([]AllowedRootEntry, error) {
+	hasWorkspaceRootEntry := false
+	for _, e := range entries {
+		if e.Path == "." {
+			hasWorkspaceRootEntry = true
+			break
+		}
+	}
+	if !hasWorkspaceRootEntry {
+		return nil, fmt.Errorf("session filesystem request must include the literal workspace entry %q: %w", ".", ErrInvalidSessionFilesystemPolicy)
+	}
+	canonical := make([]AllowedRootEntry, 0, len(entries))
+	for _, e := range entries {
+		if !isCleanRelativeWorkspacePath(e.Path) {
+			return nil, fmt.Errorf("filesystem entry %q is not a workspace-relative path: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
+		}
+		access, err := parseAllowedRootAccess(e.Access)
+		if err != nil {
+			return nil, fmt.Errorf("filesystem entry %q: %v: %w", e.Path, err, ErrInvalidSessionFilesystemPolicy)
+		}
+		resolved, err := filepath.EvalSymlinks(filepath.Join(workspace, e.Path))
+		if err != nil {
+			return nil, fmt.Errorf("filesystem entry %q cannot be resolved inside the workspace: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
+		}
+		if !pathWithin(workspace, resolved) {
+			return nil, fmt.Errorf("filesystem entry %q resolves outside the workspace: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
+		}
+		canonical = append(canonical, AllowedRootEntry{Path: resolved, Access: access})
+	}
+	if err := validateCanonicalAllowedRootEntries(canonical); err != nil {
+		return nil, fmt.Errorf("session filesystem request: %v: %w", err, ErrInvalidSessionFilesystemPolicy)
+	}
+	return canonical, nil
+}
+
 // createSessionAuthorized is the single linearized Session-create owner for an
 // authenticated authority: it holds the lifecycle serialization across
 // current-policy resolution (resolveCreatePolicy) through final Session
@@ -301,11 +417,14 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 // enabled state, Launcher existence/ownership) that linearizes before the
 // create commits prevents that Session, and one that linearizes after leaves
 // the created Session intact. It never mutates policy; it only consumes it.
-func (a *App) createSessionAuthorized(auth *operatorAuthority, sel createSelector, workspace string) (*CreatedSession, error) {
+// filesystemEntries is the caller-supplied issuance-time Session filesystem
+// narrowing (nil when the request omitted filesystem_entries); it is proven
+// and composed inside this boundary.
+func (a *App) createSessionAuthorized(auth *operatorAuthority, sel createSelector, workspace string, filesystemEntries []sessionFilesystemRequestEntry) (*CreatedSession, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 
-	policy, err := a.resolveCreatePolicy(auth, sel, workspace)
+	policy, err := a.resolveCreatePolicy(auth, sel, workspace, filesystemEntries)
 	if err != nil {
 		return nil, err
 	}

@@ -165,7 +165,7 @@ func TestSessionShowAuthorizationMatrix(t *testing.T) {
 		t.Fatalf("authenticateCredential: %v", err)
 	}
 	principalAuth := &operatorAuthority{class: operatorAuthorityPrincipal, principal: credential.Principal}
-	created, err := app.createSessionAuthorized(principalAuth, createSelector{}, workspace)
+	created, err := app.createSessionAuthorized(principalAuth, createSelector{}, workspace, nil)
 	if err != nil {
 		t.Fatalf("createSessionAuthorized(showowner): %v", err)
 	}

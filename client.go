@@ -168,11 +168,16 @@ func (c *apiClient) listSessions(principalFilter, launcherFilter string) (*listS
 // query, so the daemon remains the selector-resolution and authorization
 // authority. Unused selector fields are omitted from the JSON object, matching
 // the server-side presence-aware selector contract (an absent key is unset; an
-// explicitly empty key is a malformed selector).
+// explicitly empty key is a malformed selector). FilesystemEntries carries the
+// caller-supplied issuance-time Session filesystem narrowing (the
+// --filesystem-entry values); when empty it is omitted from the JSON object so
+// an old-CLI-shaped request stays byte-for-byte compatible with the inherited
+// create path.
 type createSessionClientRequest struct {
-	Workspace  string `json:"workspace"`
-	LauncherID string `json:"launcher_id,omitempty"`
-	Principal  string `json:"principal,omitempty"`
+	Workspace         string                          `json:"workspace"`
+	LauncherID        string                          `json:"launcher_id,omitempty"`
+	Principal         string                          `json:"principal,omitempty"`
+	FilesystemEntries []sessionFilesystemRequestEntry `json:"filesystem_entries,omitempty"`
 }
 
 func (c *apiClient) createSession(req createSessionClientRequest) (*createSessionResponse, error) {

@@ -1059,3 +1059,141 @@ func TestSnapshotBoundaryRejectsNonCanonicalWorkspace(t *testing.T) {
 		t.Errorf("error = %v, want the workspace-boundary refusal", err)
 	}
 }
+
+// mustNarrow composes an issuance-time Session filesystem narrowing and
+// proves the composed result is canonical and authorizes the workspace.
+func mustNarrow(t *testing.T, ceiling []AllowedRootEntry, workspace string, requested []AllowedRootEntry) []AllowedRootEntry {
+	t.Helper()
+	composed, err := narrowSessionFilesystemPolicy(ceiling, workspace, requested)
+	if err != nil {
+		t.Fatalf("narrowSessionFilesystemPolicy(%v, %q, %v): %v", ceiling, workspace, requested, err)
+	}
+	if err := validateCanonicalAllowedRootEntries(composed); err != nil {
+		t.Fatalf("composed narrowing is not canonical: %v: %v", composed, err)
+	}
+	if _, ok := lookupAllowedRootAccess(composed, workspace); !ok {
+		t.Fatalf("composed narrowing lost the workspace authority: %v", composed)
+	}
+	return composed
+}
+
+// narrowRefused asserts the typed issuance-time refusal family.
+func narrowRefused(t *testing.T, ceiling []AllowedRootEntry, workspace string, requested []AllowedRootEntry) {
+	t.Helper()
+	if _, err := narrowSessionFilesystemPolicy(ceiling, workspace, requested); !errors.Is(err, ErrInvalidSessionFilesystemPolicy) {
+		t.Fatalf("narrowSessionFilesystemPolicy(%v, %q, %v) = %v, want ErrInvalidSessionFilesystemPolicy", ceiling, workspace, requested, err)
+	}
+}
+
+// TestNarrowSessionFilesystemPolicy proves the accepted issuance-time
+// narrowing shapes: the request may lower the access of the workspace root
+// and of authorized subtrees, and a re-exposed read-write exception stays
+// inside the parent ceiling. Ceiling read-only regions strictly inside the
+// workspace survive the composition even when the request re-exposes their
+// parent read-write.
+func TestNarrowSessionFilesystemPolicy(t *testing.T) {
+	workspace := "/run-root/run-1"
+
+	// Ceiling RW + request root RO: the workspace root narrows to read_only.
+	composed := mustNarrow(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
+		[]AllowedRootEntry{roP(workspace)})
+	if got := lookupAll(t, composed, workspace); !slices.Equal(got, []string{"read_only"}) {
+		t.Errorf("root narrowing lookup = %v, want [read_only]", got)
+	}
+
+	// Ceiling RW + request root RO with an explicit read-write exception
+	// (the motivating pipeline-run shape): the Session is read-only overall
+	// while the authorized read-write subtree stays no wider than the
+	// parent ceiling.
+	ceiling := []AllowedRootEntry{rwP("/run-root"), rwP(workspace + "/project")}
+	composed = mustNarrow(t, ceiling, workspace,
+		[]AllowedRootEntry{roP(workspace), rwP(workspace + "/project")})
+	if got := lookupAll(t, composed, workspace, workspace+"/project", workspace+"/project/file"); !slices.Equal(got, []string{"read_only", "read_write", "read_write"}) {
+		t.Errorf("narrowed lookups = %v, want root RO with project RW exception", got)
+	}
+
+	// The same shape under a ceiling with no project-specific rule: the
+	// request narrows against the ancestor's read_write authority.
+	ceiling = []AllowedRootEntry{rwP("/run-root")}
+	composed = mustNarrow(t, ceiling, workspace,
+		[]AllowedRootEntry{roP(workspace), rwP(workspace + "/project")})
+	if got := lookupAll(t, composed, workspace, workspace+"/project"); !slices.Equal(got, []string{"read_only", "read_write"}) {
+		t.Errorf("ancestor-authority narrowing lookups = %v, want [read_only read_write]", got)
+	}
+
+	// Ceiling RW + request nested RO: the read-only transition composes.
+	ceiling = []AllowedRootEntry{rwP("/run-root")}
+	composed = mustNarrow(t, ceiling, workspace,
+		[]AllowedRootEntry{rwP(workspace), roP(workspace + "/pipeline-inputs")})
+	if got := lookupAll(t, composed, workspace, workspace+"/pipeline-inputs"); !slices.Equal(got, []string{"read_write", "read_only"}) {
+		t.Errorf("nested RO request lookups = %v, want [read_write read_only]", got)
+	}
+
+	// Ceiling nested RO + request root RW: the parent-ceiling read-only
+	// region survives even though the request re-exposes the root
+	// read-write; only an explicit read-write request for the protected
+	// region itself would widen.
+	ceiling = []AllowedRootEntry{rwP("/run-root"), roP(workspace + "/pipeline-inputs")}
+	composed = mustNarrow(t, ceiling, workspace,
+		[]AllowedRootEntry{rwP(workspace), rwP(workspace + "/pipeline-outputs")})
+	if got := lookupAll(t, composed, workspace, workspace+"/pipeline-inputs", workspace+"/pipeline-outputs"); !slices.Equal(got, []string{"read_write", "read_only", "read_write"}) {
+		t.Errorf("ceiling RO survival lookups = %v, want [read_write read_only read_write]", got)
+	}
+
+	// Most-specific parent/child transitions inside one request.
+	ceiling = []AllowedRootEntry{rwP("/run-root")}
+	composed = mustNarrow(t, ceiling, workspace,
+		[]AllowedRootEntry{rwP(workspace), roP(workspace + "/sub"), rwP(workspace + "/sub/deep")})
+	if got := lookupAll(t, composed, workspace, workspace+"/sub", workspace+"/sub/deep"); !slices.Equal(got, []string{"read_write", "read_only", "read_write"}) {
+		t.Errorf("parent/child transition lookups = %v, want [read_write read_only read_write]", got)
+	}
+
+	// The composed narrowing terminates in the existing snapshot owner:
+	// the motivating shape derives a valid immutable snapshot.
+	snapshot, err := deriveSessionFilesystemSnapshot(composed, workspace)
+	if err != nil {
+		t.Fatalf("deriveSessionFilesystemSnapshot(narrowed): %v", err)
+	}
+	if access, ok := snapshot.LookupAccess(workspace + "/project"); !ok || access != AllowedRootAccessReadWrite {
+		t.Errorf("snapshot project access = %q (ok=%v), want read_write", access, ok)
+	}
+}
+
+// TestNarrowSessionFilesystemPolicyRefusals proves the explicit refusal
+// contract: the request may only narrow the effective Launcher ceiling, and
+// composeAllowedRootScopes alone is not the validation boundary.
+func TestNarrowSessionFilesystemPolicyRefusals(t *testing.T) {
+	workspace := "/run-root/run-1"
+
+	// read_write requested under an effective read_only region is refused;
+	// the meet alone would have silently downgraded it to read_only.
+	narrowRefused(t, []AllowedRootEntry{rwP("/run-root"), roP(workspace + "/pipeline-inputs")}, workspace,
+		[]AllowedRootEntry{rwP(workspace), rwP(workspace + "/pipeline-inputs")})
+
+	// An out-of-ceiling requested path is refused even though composition
+	// alone would simply drop it from the result.
+	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
+		[]AllowedRootEntry{roP(workspace), rwP("/elsewhere/work")})
+
+	// The workspace entry "." is required: a request that narrows only a
+	// subtree leaves the workspace unauthorized and is refused instead of
+	// producing a snapshot without a capability root.
+	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
+		[]AllowedRootEntry{rwP(workspace + "/project")})
+
+	// An empty explicit request is refused.
+	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace, nil)
+
+	// Duplicate canonical requested paths are refused: one canonical path is
+	// one entry.
+	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
+		[]AllowedRootEntry{roP(workspace), roP(workspace)})
+	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
+		[]AllowedRootEntry{roP(workspace), rwP(workspace + "/project"), rwP(workspace + "/project")})
+
+	// Non-canonical requested entries fail the canonical input boundary.
+	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
+		[]AllowedRootEntry{AllowedRootEntry{Path: "project", Access: AllowedRootAccessReadWrite}})
+	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
+		[]AllowedRootEntry{AllowedRootEntry{Path: workspace + "/project", Access: "writable"}})
+}

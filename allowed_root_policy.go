@@ -13,8 +13,9 @@ import (
 // policy scopes with access-mode meet, the effective Principal ceiling
 // (including the user-mode daemon-owner collapse), Launcher
 // inherit/restricted semantics, deterministic canonical ordering and
-// normalization, and the pure derivation of the Session filesystem snapshot
-// with its source-access and writable-parent queries.
+// normalization, the issuance-time Session filesystem narrowing, and the
+// pure derivation of the Session filesystem snapshot with its source-access
+// and writable-parent queries.
 //
 // It owns hierarchy semantics only. HTTP, CLI, Docker, MAC, Session
 // persistence, and operation admission consume these results; they never
@@ -156,6 +157,68 @@ func composeAllowedRootScopes(ceiling, narrowing []AllowedRootEntry) []AllowedRo
 		composed = append(composed, AllowedRootEntry{Path: path, Access: meetAllowedRootAccess(up, down)})
 	}
 	return normalizeAllowedRootEntries(composed)
+}
+
+// ErrInvalidSessionFilesystemPolicy is the typed issuance-time refusal family
+// for a caller-supplied Session filesystem request that is malformed or is
+// not a valid narrowing of the effective Launcher policy ceiling. The request
+// may only narrow: any attempt to obtain path authority or an access mode
+// wider than the ceiling is refused before the Session exists. It is distinct
+// from ErrReadOnlyRoot, which is the data-plane refusal of an already-issued
+// Session snapshot; at issuance time no Session exists.
+var ErrInvalidSessionFilesystemPolicy = errors.New("session filesystem request is not a valid narrowing of the effective launcher policy")
+
+// narrowSessionFilesystemPolicy is the one domain operation of the
+// issuance-time Session filesystem narrowing (Release 2.2): it composes the
+// effective Launcher filesystem ceiling with the canonical Session filesystem
+// request and returns the canonical effective entries the Session snapshot is
+// derived from.
+//
+// ceiling and requested are canonical absolute AllowedRootEntry values:
+// requested paths have already been canonicalized by the Session lifecycle
+// (workspace join, symlink resolution, containment proof) and "." has become
+// the workspace path itself. The composition happens inside the existing
+// create linearization boundary, so the ceiling and the committed snapshot
+// always describe one coherent policy generation.
+//
+// Before composing, every requested entry is proven to narrow the ceiling;
+// composeAllowedRootScopes alone is not a sufficient validation boundary,
+// because the meet could silently turn an unlawfully requested read_write
+// into read_only and an out-of-ceiling path could simply vanish from the
+// result. Each requested path must be authorized by the ceiling, and a
+// requested read_write under an effective read_only region is an explicit
+// refusal, never a silent narrowing. The requested set must also authorize
+// the workspace itself (the required "." entry), so the whole Session
+// workspace stays the capability root and no unmanaged gap can be created.
+// Duplicate canonical requested paths are refused by the canonical entry
+// validation.
+//
+// After pre-validation the composition is performed by the existing
+// composition/normalization owner: most-specific lookup and access-mode meet
+// semantics are not duplicated here. Ceiling entries strictly inside the
+// workspace survive the composition, so a narrower ceiling read_only region
+// remains protected even when the request re-exposes its parent read-write.
+func narrowSessionFilesystemPolicy(ceiling []AllowedRootEntry, workspace string, requested []AllowedRootEntry) ([]AllowedRootEntry, error) {
+	if err := validateCanonicalAllowedRootEntries(requested); err != nil {
+		return nil, fmt.Errorf("session filesystem request: %v: %w", err, ErrInvalidSessionFilesystemPolicy)
+	}
+	if _, ok := lookupAllowedRootAccess(requested, workspace); !ok {
+		return nil, fmt.Errorf("session filesystem request must include the workspace entry %q: %w", ".", ErrInvalidSessionFilesystemPolicy)
+	}
+	for _, e := range requested {
+		up, ok := lookupAllowedRootAccess(ceiling, e.Path)
+		if !ok {
+			return nil, fmt.Errorf("filesystem entry %q is outside the effective launcher policy: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
+		}
+		if e.Access == AllowedRootAccessReadWrite && up == AllowedRootAccessReadOnly {
+			return nil, fmt.Errorf("filesystem entry %q requests read_write under an effective read_only region: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
+		}
+	}
+	composed := composeAllowedRootScopes(ceiling, requested)
+	if len(composed) == 0 {
+		return nil, ErrInvalidSessionFilesystemPolicy
+	}
+	return composed, nil
 }
 
 // effectivePrincipalAllowedRoots is the canonical Principal-level effective

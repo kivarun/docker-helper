@@ -40,9 +40,11 @@ The design owners are:
 4. Overlap precedence inside one scope is most-specific canonical path.
 5. Across scopes, path authority intersects and `read_only` dominates.
 6. A writable parent may not cover any effective read-only descendant region.
-7. Session filesystem policy is an immutable snapshot taken at Session creation,
-   preserving the Release 2.1 rule that later allowed-root changes do not alter
-   already-issued Sessions.
+7. Session filesystem policy is an immutable snapshot taken at Session
+   creation, preserving the Release 2.1 rule that later allowed-root
+   changes do not alter already-issued Sessions. The Session-create
+   request may narrow the snapshot at issuance time only; it is never a
+   post-create mutation surface and never widens the effective ceiling.
 8. A caller-requested writable mount is rejected, never silently downgraded.
 9. System mode requires AppArmor/SELinux to mirror the final resolved exposure
    independently as defense in depth.
@@ -668,7 +670,16 @@ Prove through public CLI/API:
 10. existing Session keeps old snapshot after policy mutation while a new
     Session gets the new mode;
 11. audit contains mode/path facts and no secret values;
-12. no Session/container/mount/MAC/runtime residue remains.
+12. no Session/container/mount/MAC/runtime residue remains;
+13. a Launcher credential creates a dynamically named run workspace and
+    narrows the Session at issuance time through `filesystem_entries`
+    (`.` read-only, project/pipeline-outputs read-write,
+    pipeline-inputs read-only), the issued snapshot enforces exactly those
+    effective semantics (normalization may drop redundant entries), and the
+    inherited behavior without `filesystem_entries` is unchanged;
+14. an attempted issuance-time widening (`read_write` where the parent
+    ceiling is `read_only`) fails `400 invalid_filesystem_policy` and
+    creates no Session, bearer, container, pin, or workload-MAC residue.
 
 ### Backend-specific UAT
 
@@ -684,6 +695,69 @@ matrix. Do not mark a backend green by skip in a required-mode job.
 
 Final release acceptance uses the immutable candidate artifact set produced by
 the existing release pipeline. Source-only success is not sufficient.
+
+## Phase 2.2.8 — issuance-time Session filesystem narrowing
+
+**Status: IMPLEMENTED, awaiting architectural acceptance and the full UAT
+gate.** Implemented on `feature/2.2.10-session-filesystem-narrowing` (base
+`release/2.2@802ecc4f`), opened as a PR against `release/2.2`. The
+implementation extends the existing owners only:
+`narrowSessionFilesystemPolicy` in `allowed_root_policy.go` (the single
+domain owner) proves and composes the narrowing; the Session-create
+lifecycle canonicalizes the workspace-relative entries and consumes the
+composition inside the existing `lifecycleMu` boundary;
+`POST /sessions`/`session create --filesystem-entry` carry the wire
+contract; the typed `ErrInvalidSessionFilesystemPolicy` family answers
+`400 invalid_filesystem_policy` with the audit result
+`invalid_filesystem_policy`; no new persistence schema and no MAC/runtime
+change. Domain/HTTP/CLI/race regressions and the canonical access-mode UAT
+scenario N pin the contract.
+
+Release 2.2 underdelivered the original orchestrator capability: a Session
+received an immutable filesystem snapshot automatically derived from
+global ∩ Principal ∩ Launcher, but the Launcher could not state, per
+created Session, which parts of the workspace are `read_write` and which
+are `read_only`. A dynamic pipeline run
+(`pipeline-runs/<run-id>/project|pipeline-inputs|pipeline-outputs`) cannot
+mutate durable Launcher policy per run, so the capability was unreachable.
+
+The correction restores the contract without changing the architecture:
+
+- the Session filesystem request is **issuance-time narrowing**
+  (effective Launcher ceiling ∩ request = the immutable Session snapshot);
+  it is not a fourth mutable policy scope;
+- the request may only narrow; a requested path outside the effective
+  ceiling, or `read_write` under an effective `read_only` region, is
+  refused before the Session exists (`400 invalid_filesystem_policy`,
+  audit result `invalid_filesystem_policy`, no residual state). No silent
+  downgrade and no composition-only validation: every requested entry is
+  proven against the ceiling before the existing
+  `composeAllowedRootScopes` owner composes and normalizes;
+- `filesystem_entries` is optional on `POST /sessions` (CLI: repeatable
+  `--filesystem-entry PATH=ACCESS`): omitted preserves the inherited
+  2.1/2.2 create path byte-for-byte; `null`/`[]` are refused; the `.`
+  entry is required for explicit narrowing;
+- all Session-create authorities (Admin, Principal credential, Launcher
+  credential) narrow only against the resolved target Launcher ceiling;
+  no authority receives bypass semantics and no Launcher credential gains
+  durable allowed-root mutation rights;
+- no new persistence schema: the composition terminates in the existing
+  immutable Session snapshot representation and its existing transactional
+  creation; MAC/runtime continue to consume the final persisted snapshot.
+
+### Required evidence for this phase
+
+- pure domain tests for the narrowing owner (allowed/limited matrix above
+  plus refusals);
+- HTTP contract tests (omitted compatibility, presence refusals, malformed
+  and unauthorized entries, authority symmetry, no-session-on-refusal);
+- CLI contract tests (repeatable flag, canonical vocabulary, wire shape,
+  old syntax unchanged, help/completion);
+- a race test proving Session-create linearization with the narrowing
+  inside the existing `lifecycleMu` boundary;
+- the canonical Release 2.2 access-mode UAT extended with the
+  Launcher-credential dynamic-run scenario (see the Phase 2.2.7 functional
+  UAT items 13-14).
 
 ## Required checks for every implementation series
 
@@ -730,6 +804,11 @@ Release 2.2 is complete only when:
 - 2.1 path-only state upgrades compatibly to RW;
 - the policy hierarchy and most-specific rules have one implementation owner;
 - every Session has an immutable filesystem snapshot;
+- the Launcher-credential issuance-time narrowing scenario (Phase 2.2.7
+  functional UAT items 13-14) is proven: a dynamically named run workspace
+  created under a Launcher credential with a narrowed immutable snapshot,
+  the widening refusal contract, and unchanged inherited behavior without
+  `filesystem_entries`;
 - writable parent bypass is closed;
 - every applicable host source is checked against the snapshot;
 - AppArmor and SELinux independently mirror RO denial under system-mode UAT;

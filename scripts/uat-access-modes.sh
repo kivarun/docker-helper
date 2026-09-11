@@ -32,7 +32,19 @@
 #   11 audit records carry canonical path/access facts and ownership
 #      provenance, and never carry bearer/env/credential secrets;
 #   12 no container/mount-pin/workload-MAC/runtime residue remains after the
-#      scenarios.
+#      scenarios;
+#   13 a Launcher credential creates a dynamically named run workspace and
+#      narrows the Session at issuance time through --filesystem-entry
+#      ('.' read-only, project/pipeline-outputs read-write,
+#      pipeline-inputs read-only); the issued snapshot exposes exactly the
+#      effective semantics (a redundant read-only entry may be normalized
+#      away), the narrowing is enforced at runtime, and a second session on
+#      the same run workspace without filesystem_entries keeps the inherited
+#      read-write behavior;
+#   14 an attempted issuance-time widening (read_write under the parent
+#      read_only ceiling) is refused 400 invalid_filesystem_policy before
+#      the Session exists, leaving no Session, container, pin, or
+#      workload-MAC residue.
 #
 # Plus the Release 2.2 build-side read-only policy proof:
 #   B1 a Session whose issued snapshot carries the build context read_only
@@ -728,6 +740,144 @@ else
 fi
 
 # ==============================================================================
+# scenario N: issuance-time Session filesystem narrowing (Launcher credential,
+# dynamic pipeline run). The Launcher's effective ceiling is broad read_write
+# authority over the run tree; the orchestrator creates a dynamically named
+# run workspace and narrows the per-run Session at issuance time — the exact
+# Release 2.2 capability a dynamic pipeline run needs and durable per-run
+# Launcher policy mutations cannot express.
+# ==============================================================================
+scenario "N: issuance-time Session filesystem narrowing (Launcher credential)"
+
+# N-setup: the orchestrator creates the run directories BEFORE creating the
+# Session (the existence requirement makes every entry's canonical identity
+# provable). The run name is dynamic: no durable policy change was made for
+# it.
+RUNDIR="$TREE/run-uat-$(date +%s)-$$"
+mkdir -p "$RUNDIR/project" "$RUNDIR/pipeline-inputs" "$RUNDIR/pipeline-outputs"
+printf 'run-input\n' > "$RUNDIR/pipeline-inputs/task.md"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$RUNDIR"
+chmod -R u+rwX,go+rX "$RUNDIR"
+
+# N-create: Launcher credential + per-Session issuance-time narrowing.
+NARROW_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
+  --workspace "$RUNDIR" --json \
+  --filesystem-entry .=read_only \
+  --filesystem-entry project=read_write \
+  --filesystem-entry pipeline-inputs=read_only \
+  --filesystem-entry pipeline-outputs=read_write 2>&1 || true)"
+SN_ID="$(printf '%s' "$NARROW_OUT" | json_field id)"
+if [ -n "$SN_ID" ]; then
+  printf '%s' "$NARROW_OUT" | json_field token > "/tmp/uat-am-tok-$SN_ID"; chmod 600 "/tmp/uat-am-tok-$SN_ID"
+  acc_ok "13 Launcher credential created the narrowed Session on the dynamic run workspace"
+else
+  acc_fail "13 narrowed session create failed: $(printf '%s\n' "$NARROW_OUT" | redact | tail -3)"
+fi
+
+# N-show: the issued snapshot exposes exactly the effective semantics. The
+# explicit pipeline-inputs read_only entry may be normalized away because the
+# root '.' entry is already read_only — UAT verifies effective semantics, not
+# redundant storage.
+if [ -n "${SN_ID:-}" ] \
+    && snapshot_has "$SN_ID" "$RUNDIR" read_only \
+    && snapshot_has "$SN_ID" "$RUNDIR/project" read_write \
+    && snapshot_has "$SN_ID" "$RUNDIR/pipeline-outputs" read_write \
+    && snapshot_lacks "$SN_ID" "$RUNDIR/pipeline-inputs"; then
+  acc_ok "13 session show exposes the effective narrowed snapshot (root RO, project/outputs RW, redundant RO normalized away)"
+else
+  acc_fail "13 issued narrowed snapshot wrong (SN: $(show_snapshot "${SN_ID:-}" 2>/dev/null | tr '\n' '; '))"
+fi
+
+# N-runtime: the narrowed snapshot enforces exactly those semantics.
+if [ -n "${SN_ID:-}" ]; then
+  SN_TOKEN="$(cat "/tmp/uat-am-tok-$SN_ID")"
+  NP_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN_TOKEN" \
+    dh run --image alpine:3.24 --mount project:/mnt/project -- \
+    sh -ec 'echo run-write > /mnt/project/run.txt && cat /mnt/project/run.txt')" \
+    || acc_fail "13 narrowed project RW write failed: $NP_OUT"
+  if [ -f "$RUNDIR/project/run.txt" ] && [ "$(cat "$RUNDIR/project/run.txt")" = "run-write" ]; then
+    acc_ok "13 narrowed project mounted read_write and the write persisted"
+  else
+    acc_fail "13 narrowed project write did not persist to the host"
+  fi
+  NI_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN_TOKEN" \
+    dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+    sh -ec 'test "$(cat /mnt/inputs/task.md)" = "run-input" && echo RUN-INPUT-RO-OK')" \
+    || acc_fail "13 narrowed pipeline-inputs read failed: $NI_OUT"
+  printf '%s\n' "$NI_OUT" | grep -q 'RUN-INPUT-RO-OK' \
+    && acc_ok "13 narrowed pipeline-inputs read succeeded" \
+    || acc_fail "13 narrowed pipeline-inputs read check failed"
+  RESIDUE_BASE="$(residue_state)"
+  if expect_read_only_root "$SN_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden.txt' "$RESIDUE_BASE"; then
+    acc_ok "13 narrowed pipeline-inputs RW exposure refused with read_only_root before workload"
+  else
+    acc_fail "13 narrowed pipeline-inputs RW exposure was not refused (base: $RESIDUE_BASE)"
+  fi
+  NO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN_TOKEN" \
+    dh run --image alpine:3.24 --mount pipeline-outputs:/mnt/outputs -- \
+    sh -ec 'echo declared-output > /mnt/outputs/out.txt && cat /mnt/outputs/out.txt')" \
+    || acc_fail "13 narrowed pipeline-outputs RW write failed: $NO_OUT"
+  if [ -f "$RUNDIR/pipeline-outputs/out.txt" ] && [ "$(cat "$RUNDIR/pipeline-outputs/out.txt")" = "declared-output" ]; then
+    acc_ok "13 narrowed pipeline-outputs mounted read_write and the write persisted"
+  else
+    acc_fail "13 narrowed pipeline-outputs write did not persist to the host"
+  fi
+  RESIDUE_BASE="$(residue_state)"
+  if expect_read_only_root "$SN_TOKEN" . /mnt/run 'echo x > /mnt/run/pipeline-inputs/forbidden2.txt' "$RESIDUE_BASE"; then
+    acc_ok "13 writable narrowed workspace parent spanning the RO input refused (read_only_root)"
+  else
+    acc_fail "13 writable narrowed workspace parent was not refused (base: $RESIDUE_BASE)"
+  fi
+fi
+
+# N-omitted: the same dynamic run workspace WITHOUT filesystem_entries keeps
+# the inherited behavior byte-for-byte: the Session gets the existing derived
+# snapshot (workspace read_write) and a workspace-root writable write works.
+SN2_ID="$(create_session /tmp/uat-am-cred-main "$RUNDIR")" \
+  || { echo "error: inherited (omitted) session creation failed" >&2; exit 1; }
+if snapshot_has "$SN2_ID" "$RUNDIR" read_write; then
+  SN2_TOKEN="$(cat "/tmp/uat-am-tok-$SN2_ID")"
+  SN2_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN2_TOKEN" \
+    dh run --image alpine:3.24 --mount .:/mnt/runroot -- \
+    sh -ec 'echo inherited-write > /mnt/runroot/inherited.txt && echo INHERITED-RW-OK')" \
+    || acc_fail "13 inherited workspace-root write failed: $SN2_OUT"
+  printf '%s\n' "$SN2_OUT" | grep -q 'INHERITED-RW-OK' \
+    && acc_ok "13 omitted filesystem_entries keeps the inherited read-write behavior" \
+    || acc_fail "13 inherited workspace-root write did not persist"
+else
+  acc_fail "13 omitted filesystem_entries snapshot is not the inherited read_write root: $(show_snapshot "$SN2_ID" | tr '\n' '; ')"
+fi
+
+# N-refusal: an attempted issuance-time widening — read_write under the
+# parent read_only ceiling — is refused 400 invalid_filesystem_policy before
+# the Session exists: no Session, no bearer, no container, no pin, no
+# workload-MAC residue. The residue and Session-count baselines are captured
+# BEFORE the single tested attempt, so state created by the attempt itself
+# can never end up inside its own baseline, and both inventories are the
+# fail-closed owners: an unavailable inventory is a failed proof, never a
+# silently-equal count.
+if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then
+  WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
+    --workspace "$WS" --json \
+    --filesystem-entry .=read_write \
+    --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
+  if printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
+      && ! printf '%s\n' "$WIDEN_OUT" | grep -q '"id"'; then
+    if N_AFTER="$(session_list_count)" \
+        && [ "$N_AFTER" = "$N_BEFORE" ] \
+        && residue_unchanged "$N_BASE"; then
+      acc_ok "14 issuance-time widening refused with invalid_filesystem_policy: no Session, no container/pin/workload-MAC residue"
+    else
+      acc_fail "14 refused create left state (sessions $N_BEFORE -> ${N_AFTER:-inventory-unavailable}, residue drift against the pre-attempt baseline)"
+    fi
+  else
+    acc_fail "14 widening create not refused correctly: $(printf '%s\n' "$WIDEN_OUT" | redact | tail -3)"
+  fi
+else
+  acc_fail "14 baseline capture failed before the widening attempt (fail-closed inventory)"
+fi
+
+# ==============================================================================
 # scenario B: build over a read-only-only snapshot
 # ==============================================================================
 scenario "B: build over a read-only snapshot"
@@ -805,7 +955,7 @@ fi
 # inventory failure blocks the gate instead of reporting zero residue)
 # ==============================================================================
 scenario "Z: no container/mount-pin/workload-MAC/runtime residue"
-for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}"; do
+for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}" "${SN_ID:-}" "${SN2_ID:-}"; do
   [ -n "$sid" ] || continue
   dh session delete --system --id "$sid" >/dev/null 2>&1 || acc_fail "Z session $sid delete failed"
 done
