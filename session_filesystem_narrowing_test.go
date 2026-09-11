@@ -370,10 +370,21 @@ func TestHTTPSessionFilesystemAuthoritySymmetry(t *testing.T) {
 				t.Errorf("issued snapshot = %s, want %s (err=%v)", got, wantSnapshotJSON(workspace), err)
 			}
 
-			widening := fmt.Sprintf(`{"workspace":%q,"launcher_id":%q,"filesystem_entries":[{"path":"pipeline-inputs","access":"read_write"}]}`,
+			// The widening attempt is structurally and canonically valid: it
+			// carries the required literal "." entry, so it passes the raw
+			// request-shape invariant and entry canonicalization, and it is
+			// refused specifically because pipeline-inputs=read_write tries
+			// to widen the effective read_only ceiling at that path.
+			afterNarrow := countLiveSessions(t, app)
+			widening := fmt.Sprintf(`{"workspace":%q,"launcher_id":%q,"filesystem_entries":[{"path":".","access":"read_only"},{"path":"pipeline-inputs","access":"read_write"}]}`,
 				workspace, launcherID)
 			rec = postSessionThroughMux(t, app, token, widening)
 			assertRefusal(t, rec)
+			// The refused create issued no Session: the count after the
+			// refusal equals the count after the accepted narrowed create.
+			if after := countLiveSessions(t, app); after != afterNarrow {
+				t.Errorf("refused widening create left %d sessions, want %d", after, afterNarrow)
+			}
 		})
 	}
 }
