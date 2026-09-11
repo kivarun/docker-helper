@@ -39,6 +39,116 @@ import (
 // completion indefinitely.
 const containerAbsenceProofTimeout = 10 * time.Second
 
+// workloadCleanupStageName identifies one authoritative stage of the frozen
+// Release 2.2 cleanup dependency order.
+type workloadCleanupStageName string
+
+const (
+	cleanupStageContainerProof workloadCleanupStageName = "container_absence_proof"
+	cleanupStageWorkloadMAC    workloadCleanupStageName = "workload_mac_state"
+	cleanupStageSourcePins     workloadCleanupStageName = "source_pins"
+	cleanupStageOwnershipState workloadCleanupStageName = "workload_ownership_state"
+	cleanupStageWorkspaceLease workloadCleanupStageName = "workspace_use_lease"
+	cleanupStageCidfile        workloadCleanupStageName = "cidfile"
+)
+
+// canonicalWorkloadCleanupOrder is the frozen dependency order of the
+// Release 2.2 cleanup lifecycle. Every cleanup path — post-start cleanup,
+// pre-container rollback, startup reconciliation — executes a subsequence
+// of exactly this order, and runCleanupSequence refuses any stage list
+// that would reorder it.
+var canonicalWorkloadCleanupOrder = []workloadCleanupStageName{
+	cleanupStageContainerProof,
+	cleanupStageWorkloadMAC,
+	cleanupStageSourcePins,
+	cleanupStageOwnershipState,
+	cleanupStageWorkspaceLease,
+	cleanupStageCidfile,
+}
+
+// cleanupStage is one authoritative cleanup operation: a stage name from
+// the canonical order plus the operation that performs it. A nil run
+// function is a skipped stage (the path has nothing of that kind to
+// release, for example no lease in startup reconciliation).
+type cleanupStage struct {
+	name workloadCleanupStageName
+	run  func() error
+}
+
+// runCleanupOutcome classifies the terminal result of one ordered cleanup
+// execution: either every stage completed, or the named stage failed and
+// the dependent state of every later stage is retained (fail closed) for
+// startup reconciliation.
+type runCleanupOutcome struct {
+	completed     bool
+	retainedStage workloadCleanupStageName
+	err           error
+}
+
+// runCleanupSequence is the single owner of the frozen Release 2.2 cleanup
+// order and of its retained-versus-completed classification. Post-start
+// cleanup, pre-container rollback, and startup reconciliation build their
+// stage lists as subsequences of canonicalWorkloadCleanupOrder and execute
+// them here; backend-specific cleanup stays inside the backends.
+type runCleanupSequence struct {
+	stages []cleanupStage
+}
+
+// newRunCleanupSequence builds one ordered cleanup execution and proves the
+// stage list is a subsequence of the canonical order, so a caller cannot
+// silently express a reordered cleanup.
+func newRunCleanupSequence(stages ...cleanupStage) runCleanupSequence {
+	pos := map[workloadCleanupStageName]int{}
+	for i, name := range canonicalWorkloadCleanupOrder {
+		pos[name] = i
+	}
+	last := -1
+	for _, stage := range stages {
+		p, ok := pos[stage.name]
+		if !ok {
+			panic("runCleanupSequence: unknown cleanup stage " + stage.name)
+		}
+		if p <= last {
+			panic("runCleanupSequence: cleanup stages out of canonical order at " + stage.name)
+		}
+		last = p
+	}
+	return runCleanupSequence{stages: stages}
+}
+
+// run executes the stages in canonical order and stops at the first
+// failure. The returned outcome is the single classification every caller
+// logs and acts on: a completed outcome means every listed stage is
+// positively done; a retained outcome means the named stage failed and
+// every later dependent stage must be retained.
+func (s runCleanupSequence) run() runCleanupOutcome {
+	for _, stage := range s.stages {
+		if stage.run == nil {
+			continue
+		}
+		if err := stage.run(); err != nil {
+			return runCleanupOutcome{retainedStage: stage.name, err: err}
+		}
+	}
+	return runCleanupOutcome{completed: true}
+}
+
+// logRunCleanupOutcome records one ordered cleanup outcome in the
+// operational log. A completed outcome is silent; a retained outcome names
+// the failed stage, the operation correlation, and the cause, and states
+// the fail-closed dependency retention explicitly. It carries no secrets.
+func logRunCleanupOutcome(ctx context.Context, path, operationID string, outcome runCleanupOutcome) {
+	if outcome.completed {
+		return
+	}
+	opLog(ctx).Error("ordered cleanup stage failed — dependent state intentionally retained for reconciliation",
+		slog.String("operation", path),
+		slog.String("operation_id", operationID),
+		slog.String("stage", string(outcome.retainedStage)),
+		slog.String("error", outcome.err.Error()),
+	)
+}
+
 // cleanupAfterRunProcess is the post-start terminal cleanup owner. The
 // container-absence proof runs first: no workload MAC state, pin, or lease
 // may be released while a correlated container may still run. User mode has
@@ -53,65 +163,29 @@ func (a *App) cleanupAfterRunProcess(op *operation) {
 		return
 	}
 
-	// Stage 1: prove container absence. One proven-owned correlated
-	// container is force-removed through the existing Docker cleanup
-	// mechanism and its absence is verified. An ambiguous or unverifiable
-	// Docker state retains all dependent helper state, fail closed.
-	proofCtx, cancel := context.WithTimeout(ctx, containerAbsenceProofTimeout)
-	proofErr := a.proveRunContainerAbsent(proofCtx, op)
-	cancel()
-	if proofErr != nil {
-		opLog(ctx).Error("container absence could not be proven — workload MAC state, pins, and lease intentionally retained",
-			slog.String("operation", "run"),
-			slog.String("operation_id", op.ID),
-			slog.String("error", proofErr.Error()),
-		)
-		return
-	}
-
-	// Stage 2: release the workload MAC state.
-	if err := op.workloadMAC.Cleanup(); err != nil {
-		opLog(ctx).Error("workload MAC cleanup failed — dependent pins and workspace lease intentionally retained",
-			slog.String("operation", "run"),
-			slog.String("operation_id", op.ID),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-
-	// Stage 3: release the source pins only after the MAC state that may
-	// depend on them is gone.
-	cleanupErr := cleanupPinnedMounts(op)
-	if cleanupErr != nil {
-		opLog(ctx).Error("pinned mount cleanup failed — durable workload ownership record and workspace lease intentionally retained",
-			slog.String("operation", "run"),
-			slog.String("operation_id", op.ID),
-			slog.String("error", cleanupErr.Error()),
-		)
-		return
-	}
-
-	// Stage 4: the durable ownership record is removed only after the
-	// backend/kernel MAC state and the pins are positively proven gone;
-	// until then it is the reconciliation retry marker for whatever
-	// helper state remains.
-	if err := a.WorkloadMAC.removeWorkloadMACState(op.ID); err != nil {
-		opLog(ctx).Error("durable workload ownership state removal failed — workspace lease intentionally retained",
-			slog.String("operation", "run"),
-			slog.String("operation_id", op.ID),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-
-	// Stage 5: release the workspace-use lease.
-	if op.macLeaseRelease != nil {
-		op.macLeaseRelease()
-	}
-
-	// Stage 6: the cidfile is no longer needed once every owned resource is
-	// released.
-	cleanupCidfile(op)
+	outcome := newRunCleanupSequence(
+		cleanupStage{
+			name: cleanupStageContainerProof,
+			run: func() error {
+				proofCtx, cancel := context.WithTimeout(ctx, containerAbsenceProofTimeout)
+				defer cancel()
+				return a.proveRunContainerAbsent(proofCtx, op)
+			},
+		},
+		cleanupStage{name: cleanupStageWorkloadMAC, run: op.workloadMAC.Cleanup},
+		cleanupStage{name: cleanupStageSourcePins, run: func() error { return cleanupPinnedMounts(op) }},
+		cleanupStage{name: cleanupStageOwnershipState, run: func() error {
+			return a.WorkloadMAC.removeWorkloadMACState(op.ID)
+		}},
+		cleanupStage{name: cleanupStageWorkspaceLease, run: func() error {
+			if op.macLeaseRelease != nil {
+				op.macLeaseRelease()
+			}
+			return nil
+		}},
+		cleanupStage{name: cleanupStageCidfile, run: func() error { cleanupCidfile(op); return nil }},
+	).run()
+	logRunCleanupOutcome(ctx, "run", op.ID, outcome)
 }
 
 // rollbackRunPreparation reverses prepared run resources before any
@@ -119,57 +193,81 @@ func (a *App) cleanupAfterRunProcess(op *operation) {
 // record, lease, cidfile. It is used by every pre-start failure path (MAC
 // preparation failure, MAC validation failure, admission refusal, shutdown
 // gate before process start, and cmd.Start failure). No container exists by
-// construction, so no container-absence proof is needed.
+// construction, so no container-absence proof is needed; the dependency
+// order is otherwise the canonical one.
 func (a *App) rollbackRunPreparation(ctx context.Context, op *operation) {
-	if op.workloadMAC != nil {
-		if err := op.workloadMAC.Cleanup(); err != nil {
-			opLog(ctx).Error("workload MAC cleanup failed — dependent pins and workspace lease intentionally retained",
-				slog.String("operation", "run"),
-				slog.String("operation_id", op.ID),
-				slog.String("error", err.Error()),
-			)
-			return
-		}
-	}
-	cleanupErr := cleanupPinnedMounts(op)
-	if cleanupErr != nil {
-		opLog(ctx).Error("pin cleanup failed — durable workload ownership record and MAC lease intentionally retained",
-			slog.String("operation", "run"),
-			slog.String("operation_id", op.ID),
-			slog.String("error", cleanupErr.Error()),
-		)
-		return
-	}
-	if a.WorkloadMAC != nil {
-		// The durable ownership record is removed only after the MAC
-		// state and the pins are positively proven released (absence of
-		// both is success on this pre-container path).
-		if err := a.WorkloadMAC.removeWorkloadMACState(op.ID); err != nil {
-			opLog(ctx).Error("durable workload ownership state removal failed — MAC lease intentionally retained",
-				slog.String("operation", "run"),
-				slog.String("operation_id", op.ID),
-				slog.String("error", err.Error()),
-			)
-			return
-		}
-	}
-	if op.macLeaseRelease != nil {
-		op.macLeaseRelease()
-	}
-	cleanupCidfile(op)
+	outcome := newRunCleanupSequence(
+		cleanupStage{name: cleanupStageWorkloadMAC, run: func() error {
+			if op.workloadMAC == nil {
+				return nil
+			}
+			return op.workloadMAC.Cleanup()
+		}},
+		cleanupStage{name: cleanupStageSourcePins, run: func() error { return cleanupPinnedMounts(op) }},
+		cleanupStage{name: cleanupStageOwnershipState, run: func() error {
+			if a.WorkloadMAC == nil {
+				return nil
+			}
+			return a.WorkloadMAC.removeWorkloadMACState(op.ID)
+		}},
+		cleanupStage{name: cleanupStageWorkspaceLease, run: func() error {
+			if op.macLeaseRelease != nil {
+				op.macLeaseRelease()
+			}
+			return nil
+		}},
+		cleanupStage{name: cleanupStageCidfile, run: func() error { cleanupCidfile(op); return nil }},
+	).run()
+	logRunCleanupOutcome(ctx, "run", op.ID, outcome)
 }
 
-// proveRunContainerAbsent is the canonical container-absence proof owner.
-// It queries the Docker container list for the operation's reserved label
-// correlation and classifies the outcome:
+// proveRunContainerAbsent runs the canonical container-absence proof for
+// one run operation over the App-wired Docker provenance.
+func (a *App) proveRunContainerAbsent(ctx context.Context, op *operation) error {
+	return proveOperationContainerAbsent(ctx, a.runContainerProvenance(), op.ID, op.SessionID)
+}
+
+// containerProvenance abstracts the Docker mechanics of the correlated
+// container proof: how the correlated container set is inspected and how a
+// proven-owned container is force-removed. The run path and the startup
+// reconciliation share one proof algorithm and differ only in this wiring.
+type containerProvenance struct {
+	inspect func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error)
+	remove  func(ctx context.Context, containerID string) error
+}
+
+// runContainerProvenance is the App-wired Docker provenance: it honors the
+// InspectOperationContainers test seam and the ExecCommandContext-wrapped
+// force removal.
+func (a *App) runContainerProvenance() containerProvenance {
+	return containerProvenance{
+		inspect: a.inspectOperationContainers,
+		remove:  a.forceRemoveRunContainer,
+	}
+}
+
+// cliContainerProvenance is the startup-reconciliation Docker provenance.
+// It runs without an App instance (before the HTTP server exists) and
+// shells out to the Docker CLI directly.
+func cliContainerProvenance() containerProvenance {
+	return containerProvenance{
+		inspect: inspectCorrelatedRunContainers,
+		remove:  forceRemoveCorrelatedContainerByCLI,
+	}
+}
+
+// proveOperationContainerAbsent is the canonical container-absence proof
+// owner, shared by the run path and startup reconciliation. It queries the
+// Docker container list for the operation's reserved label correlation and
+// classifies the outcome:
 //
 //   - no correlated container: proven absent;
 //   - exactly one proven helper-owned correlated container: force-removed
 //     through the Docker cleanup mechanism and verified absent;
 //   - anything ambiguous (Docker unavailable, more than one claimant,
 //     unclassifiable state): an error — the caller must retain state.
-func (a *App) proveRunContainerAbsent(ctx context.Context, op *operation) error {
-	containers, err := a.inspectOperationContainers(ctx, op.ID, op.SessionID)
+func proveOperationContainerAbsent(ctx context.Context, prov containerProvenance, operationID, sessionID string) error {
+	containers, err := prov.inspect(ctx, operationID, sessionID)
 	if err != nil {
 		return fmt.Errorf("correlated container state is ambiguous: %w", err)
 	}
@@ -183,10 +281,10 @@ func (a *App) proveRunContainerAbsent(ctx context.Context, op *operation) error 
 	if classifyHelperContainerState(container.State) == helperStateUnknown {
 		return fmt.Errorf("correlated container state %q is unclassifiable; refusing removal", container.State)
 	}
-	if err := a.forceRemoveRunContainer(ctx, container.ID); err != nil {
+	if err := prov.remove(ctx, container.ID); err != nil {
 		return fmt.Errorf("cannot remove proven-owned correlated container: %w", err)
 	}
-	after, err := a.inspectOperationContainers(ctx, op.ID, op.SessionID)
+	after, err := prov.inspect(ctx, operationID, sessionID)
 	if err != nil {
 		return fmt.Errorf("cannot verify correlated container removal: %w", err)
 	}

@@ -1197,10 +1197,20 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 			continue
 		}
 		msg, _ := rec["msg"].(string)
-		if !strings.HasPrefix(msg, "pinned mount cleanup failed") {
+		if !strings.HasPrefix(msg, "ordered cleanup stage failed") {
 			continue
 		}
 		foundCleanup = true
+
+		// The failed stage is the named canonical stage of the frozen
+		// cleanup order.
+		stageField, ok := rec["stage"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing stage field")
+		}
+		if stageField != string(cleanupStageSourcePins) {
+			t.Errorf("cleanup log stage = %q, want %q", stageField, cleanupStageSourcePins)
+		}
 
 		// Assert operation == "run".
 		opField, ok := rec["operation"].(string)

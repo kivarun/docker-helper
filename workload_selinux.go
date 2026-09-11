@@ -334,7 +334,15 @@ func (b *workloadSELinuxBackend) prepare(p workloadPreparation) (*preparedWorklo
 		}
 		entry, err := b.prepareProjection(p, i)
 		if err != nil {
-			b.cleanupOwnedProjections(projections)
+			// Earlier projections are independent of the failed one; roll
+			// them back while their live worker handles still exist. A
+			// failure here — or a rollback already reported incomplete by
+			// prepareProjection — is the typed retained outcome: the
+			// coordinator must not run a second, handle-free cleanup pass.
+			if cleanupErr := b.cleanupOwnedProjections(projections); cleanupErr != nil {
+				return nil, &workloadMACRollbackRetainedError{err: fmt.Errorf(
+					"%w (earlier-projection rollback retained: %v)", err, cleanupErr)}
+			}
 			return nil, err
 		}
 		projections = append(projections, entry)
@@ -418,13 +426,19 @@ func (b *workloadSELinuxBackend) prepareProjection(p workloadPreparation, index 
 	}
 	worker, err := b.startWorker(b.lookPath, backing, mountDir, selinuxROProjectionContext)
 	if err != nil {
-		b.cleanupOwnedProjections([]*projectionEntry{entry})
+		if cleanupErr := b.cleanupOwnedProjectionEntry(entry); cleanupErr != nil {
+			return nil, &workloadMACRollbackRetainedError{err: fmt.Errorf(
+				"%w (projection rollback retained: %v)", err, cleanupErr)}
+		}
 		return nil, err
 	}
 	entry.worker = worker
 
 	if err := b.awaitProjectionReady(entry); err != nil {
-		b.cleanupOwnedProjections([]*projectionEntry{entry})
+		if cleanupErr := b.cleanupOwnedProjectionEntry(entry); cleanupErr != nil {
+			return nil, &workloadMACRollbackRetainedError{err: fmt.Errorf(
+				"%w (projection rollback retained: %v)", err, cleanupErr)}
+		}
 		return nil, err
 	}
 	if entry.kind == selinuxProjectionDirectory {
@@ -492,23 +506,32 @@ func (b *workloadSELinuxBackend) awaitProjectionReady(entry *projectionEntry) er
 // exit wait and releases the same owned paths in the same order.
 func (b *workloadSELinuxBackend) cleanupOwnedProjections(projections []*projectionEntry) error {
 	for i := len(projections) - 1; i >= 0; i-- {
-		entry := projections[i]
-		if err := b.proveUnmountOwnedMount(entry.mountDir); err != nil {
+		if err := b.cleanupOwnedProjectionEntry(projections[i]); err != nil {
 			return err
 		}
-		if entry.worker != nil {
-			if err := entry.worker.waitExit(workloadWorkerExitTimeout); err != nil {
-				return err
-			}
+	}
+	return nil
+}
+
+// cleanupOwnedProjectionEntry releases one owned projection in the frozen
+// dependency order and returns the first failure so the caller retains the
+// dependent state.
+func (b *workloadSELinuxBackend) cleanupOwnedProjectionEntry(entry *projectionEntry) error {
+	if err := b.proveUnmountOwnedMount(entry.mountDir); err != nil {
+		return err
+	}
+	if entry.worker != nil {
+		if err := entry.worker.waitExit(workloadWorkerExitTimeout); err != nil {
+			return err
 		}
-		if entry.lowerItem != "" {
-			if err := b.proveUnmountOwnedMount(entry.lowerItem); err != nil {
-				return err
-			}
+	}
+	if entry.lowerItem != "" {
+		if err := b.proveUnmountOwnedMount(entry.lowerItem); err != nil {
+			return err
 		}
-		if err := os.RemoveAll(entry.stateDir); err != nil {
-			return fmt.Errorf("cannot remove projection state %s: %w", entry.stateDir, err)
-		}
+	}
+	if err := os.RemoveAll(entry.stateDir); err != nil {
+		return fmt.Errorf("cannot remove projection state %s: %w", entry.stateDir, err)
 	}
 	return nil
 }

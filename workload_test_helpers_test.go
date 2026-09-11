@@ -118,15 +118,31 @@ type testProjectionWorker struct {
 	isAlive    bool
 	seam       *testSELinuxWorkloadSeam
 	mountpoint string
+	// dieAfterFirstAlive reproduces a worker whose first liveness probe
+	// succeeds and whose later probe reports it gone while the exit wait
+	// still fails — the live-worker-handle rollback reproduction.
+	dieAfterFirstAlive bool
+	aliveCalled        bool
+	// waitExitErr makes the exit wait fail (the worker cannot be proven
+	// exited), which the backend must report as a retained rollback.
+	waitExitErr error
 }
 
-func (w *testProjectionWorker) alive() bool { return w.isAlive }
+func (w *testProjectionWorker) alive() bool {
+	if w.dieAfterFirstAlive {
+		if w.aliveCalled {
+			return false
+		}
+		w.aliveCalled = true
+	}
+	return w.isAlive
+}
 
 func (w *testProjectionWorker) waitExit(timeout time.Duration) error {
 	if w.seam != nil {
 		w.seam.events = append(w.seam.events, "worker-exit "+w.mountpoint)
 	}
-	return nil
+	return w.waitExitErr
 }
 
 // testWorkerCall records one bindfs worker invocation.
@@ -165,6 +181,13 @@ type testSELinuxWorkloadSeam struct {
 	// events records the release-mechanics call order (unmounts and worker
 	// exits) so tests can prove dependency ordering.
 	events []string
+	// dieAfterFirstAlive makes every created worker's second liveness
+	// probe report it gone (live-handle rollback reproduction).
+	dieAfterFirstAlive bool
+	// waitExitErr makes every worker's exit wait fail (the worker cannot
+	// be proven exited), which the backend must report as a retained
+	// rollback.
+	waitExitErr error
 }
 
 // testMountOps is the fake workloadMountOps bound to the seam.
@@ -242,7 +265,13 @@ func newTestSELinuxBackend(t *testing.T) (*workloadSELinuxBackend, *testSELinuxW
 		if seam.startErr != nil {
 			return nil, seam.startErr
 		}
-		worker := &testProjectionWorker{isAlive: true, seam: seam, mountpoint: mountpoint}
+		worker := &testProjectionWorker{
+			isAlive:            true,
+			seam:               seam,
+			mountpoint:         mountpoint,
+			dieAfterFirstAlive: seam.dieAfterFirstAlive,
+			waitExitErr:        seam.waitExitErr,
+		}
 		seam.workers = append(seam.workers, worker)
 		seam.mounted[mountpoint] = true
 		seam.mountCalls = append(seam.mountCalls, testWorkerCall{backing: backing, mountpoint: mountpoint, context: context})
@@ -273,10 +302,12 @@ func installTestWorkloadMACForTest(t *testing.T, app *App, backend LSMBackend) *
 		backend:     backendImpl,
 		stateRoot:   filepath.Join(app.Config.StateDir, workloadMACStateRootName),
 		runtimeRoot: filepath.Join(app.Config.RuntimeDir, workloadMACStateRootName),
-		inspectContainers: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
-			return nil, nil
+		docker: containerProvenance{
+			inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+				return nil, nil
+			},
+			remove: func(ctx context.Context, containerID string) error { return nil },
 		},
-		removeContainer:  func(ctx context.Context, containerID string) error { return nil },
 		cleanupStalePins: func(operationID string) error { return nil },
 	}
 	app.WorkloadMAC = c

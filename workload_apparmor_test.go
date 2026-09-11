@@ -348,10 +348,12 @@ func TestCoordinatorReconcileOwnedStaleProfile(t *testing.T) {
 		backend:     b,
 		stateRoot:   stateRoot,
 		runtimeRoot: runtimeRoot,
-		inspectContainers: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
-			return nil, nil
+		docker: containerProvenance{
+			inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+				return nil, nil
+			},
+			remove: func(ctx context.Context, id string) error { return nil },
 		},
-		removeContainer:  func(ctx context.Context, id string) error { return nil },
 		cleanupStalePins: func(operationID string) error { return nil },
 	}
 	if err := c.ReconcileStartup(context.Background()); err != nil {
@@ -391,13 +393,15 @@ func TestCoordinatorReconcileRetainsForeignState(t *testing.T) {
 		backend:     b,
 		stateRoot:   stateRoot,
 		runtimeRoot: runtimeRoot,
-		inspectContainers: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
-			t.Fatal("foreign state must not trigger container queries")
-			return nil, nil
-		},
-		removeContainer: func(ctx context.Context, id string) error {
-			t.Fatal("foreign state must not remove containers")
-			return nil
+		docker: containerProvenance{
+			inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+				t.Fatal("foreign state must not trigger container queries")
+				return nil, nil
+			},
+			remove: func(ctx context.Context, id string) error {
+				t.Fatal("foreign state must not remove containers")
+				return nil
+			},
 		},
 		cleanupStalePins: func(operationID string) error { t.Fatal("foreign state must not clean pins"); return nil },
 	}
@@ -434,13 +438,15 @@ func TestCoordinatorReconcileRetainsAmbiguousContainers(t *testing.T) {
 		backend:     b,
 		stateRoot:   stateRoot,
 		runtimeRoot: runtimeRoot,
-		inspectContainers: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
-			queries++
-			return []helperContainer{{ID: "abc1", State: "running"}, {ID: "abc2", State: "running"}}, nil
-		},
-		removeContainer: func(ctx context.Context, id string) error {
-			t.Fatal("ambiguous correlation must not remove containers")
-			return nil
+		docker: containerProvenance{
+			inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+				queries++
+				return []helperContainer{{ID: "abc1", State: "running"}, {ID: "abc2", State: "running"}}, nil
+			},
+			remove: func(ctx context.Context, id string) error {
+				t.Fatal("ambiguous correlation must not remove containers")
+				return nil
+			},
 		},
 		cleanupStalePins: func(operationID string) error { t.Fatal("ambiguous state must not clean pins"); return nil },
 	}
@@ -461,7 +467,7 @@ func TestCoordinatorReconcileRetainsAmbiguousContainers(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	c.inspectContainers = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+	c.docker.inspect = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
 		return nil, errors.New("docker daemon down")
 	}
 	if err := c.ReconcileStartup(context.Background()); err != nil {
@@ -502,15 +508,17 @@ func TestCoordinatorReconcileRemovesStaleOwnedContainer(t *testing.T) {
 		backend:     b,
 		stateRoot:   stateRoot,
 		runtimeRoot: runtimeRoot,
-		inspectContainers: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
-			if len(removed) > 0 {
-				return nil, nil // absent after removal
-			}
-			return []helperContainer{{ID: "stale1", State: "running"}}, nil
-		},
-		removeContainer: func(ctx context.Context, id string) error {
-			removed = append(removed, id)
-			return nil
+		docker: containerProvenance{
+			inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+				if len(removed) > 0 {
+					return nil, nil // absent after removal
+				}
+				return []helperContainer{{ID: "stale1", State: "running"}}, nil
+			},
+			remove: func(ctx context.Context, id string) error {
+				removed = append(removed, id)
+				return nil
+			},
 		},
 		cleanupStalePins: func(operationID string) error {
 			pinsCleaned = append(pinsCleaned, operationID)

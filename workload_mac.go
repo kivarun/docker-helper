@@ -167,6 +167,25 @@ func (e *workloadMACRetainedError) Error() string {
 
 func (e *workloadMACRetainedError) Unwrap() error { return e.err }
 
+// workloadMACRollbackRetainedError marks a failed backend preparation whose
+// own rollback of the partial kernel-side state did not positively succeed.
+// The backend reports it only when live handles (an owned projection worker)
+// still exist for the unproven state: the coordinator must then retain the
+// owned state without running a second, handle-free cleanup pass, because
+// dropping the live worker handle would change the cleanup guarantees. The
+// durable ownership record, dependent pins, and lease remain until startup
+// reconciliation, which releases the same owned paths without worker
+// handles by design.
+type workloadMACRollbackRetainedError struct {
+	err error
+}
+
+func (e *workloadMACRollbackRetainedError) Error() string {
+	return "workload MAC rollback incomplete: " + e.err.Error()
+}
+
+func (e *workloadMACRollbackRetainedError) Unwrap() error { return e.err }
+
 // workloadMACBackend is the backend-specific adapter for workload MAC
 // preparation and owned-state cleanup. The backend MUST NOT query Sessions,
 // allowed roots, or snapshots, and MUST NOT re-decide any access mode.
@@ -200,12 +219,9 @@ type workloadMACCoordinator struct {
 	// runtimeRoot is <helper runtime dir>/workload-mac (transient backend
 	// runtime facts such as projection mountpoints).
 	runtimeRoot string
-	// inspectContainers classifies Docker containers correlated with one
-	// operation by the reserved label set. Production shells out to the
-	// Docker CLI; tests inject a seam.
-	inspectContainers func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error)
-	// removeContainer force-removes one proven-owned correlated container.
-	removeContainer func(ctx context.Context, containerID string) error
+	// docker is the correlated-container provenance of the canonical
+	// container-absence proof (one proof owner shared with the run path).
+	docker containerProvenance
 	// cleanupStalePins removes leftover inode pins of one proven-gone
 	// operation and returns the failure that forces the caller to retain
 	// the durable ownership record. Production uses the deterministic pin
@@ -237,8 +253,7 @@ func newWorkloadMACCoordinatorForMode(cfg *Config, detectLSM func() (LSMBackend,
 	default:
 		return nil, nil
 	}
-	c.inspectContainers = inspectCorrelatedRunContainers
-	c.removeContainer = forceRemoveCorrelatedContainerByCLI
+	c.docker = cliContainerProvenance()
 	c.cleanupStalePins = c.cleanupStalePinsIn
 	if err := ensureWorkloadStateRoot(c.stateRoot); err != nil {
 		return nil, err
@@ -320,6 +335,15 @@ func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorklo
 
 	prepared, err := c.backend.prepare(p)
 	if err != nil {
+		// A backend that could not prove its own rollback of the partial
+		// kernel-side state keeps its live handles; a second, handle-free
+		// cleanup pass would change the cleanup guarantees, so the owned
+		// state is retained directly for startup reconciliation.
+		var rollbackRetained *workloadMACRollbackRetainedError
+		if errors.As(err, &rollbackRetained) {
+			logRetainedWorkloadState(context.Background(), p.OperationID, "prepare_rollback", rollbackRetained.err)
+			return nil, &workloadMACRetainedError{err: err}
+		}
 		// Fail closed on the dependent resources: when the partial MAC
 		// state cannot be rolled back, the pins and lease that the
 		// projections depend on must remain until reconciliation.
@@ -327,10 +351,11 @@ func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorklo
 			logRetainedWorkloadState(context.Background(), p.OperationID, "prepare_rollback", cleanupErr)
 			return nil, &workloadMACRetainedError{err: err}
 		}
-		if stateErr := c.removeWorkloadMACState(p.OperationID); stateErr != nil {
-			logRetainedWorkloadState(context.Background(), p.OperationID, "prepare_rollback_state_removal", stateErr)
-			return nil, &workloadMACRetainedError{err: err}
-		}
+		// The durable ownership record is NOT removed here: it is the
+		// ownership proof that binds the still-live dependent pins until
+		// the caller's rollback owner releases them and removes the record
+		// last. A crash before that leaves startup reconciliation a
+		// complete retry marker instead of anonymous pins.
 		return nil, err
 	}
 	return prepared, nil
@@ -412,7 +437,10 @@ func (c *workloadMACCoordinator) parseReconcileEntry(name string) (*workloadMACR
 
 // reconcileOne handles one positively identified owned state directory.
 // Every outcome is container-absence-driven and fail closed: state is
-// removed only after Docker proves no correlated container remains.
+// removed only after Docker proves no correlated container remains. The
+// frozen order and the retained/completed classification belong to the one
+// canonical cleanup owner (runCleanupSequence); startup reconciliation
+// contributes its own stage wiring and carries no lease or cidfile stage.
 func (c *workloadMACCoordinator) reconcileOne(ctx context.Context, rec workloadMACRecord) error {
 	if rec.Schema != workloadMACStateSchema {
 		return fmt.Errorf("unsupported ownership record schema %d", rec.Schema)
@@ -426,46 +454,27 @@ func (c *workloadMACCoordinator) reconcileOne(ctx context.Context, rec workloadM
 
 	queryCtx, cancel := context.WithTimeout(ctx, workloadReconcileScanTimeout)
 	defer cancel()
-	containers, err := c.inspectContainers(queryCtx, rec.OperationID, rec.SessionID)
-	if err != nil {
-		return fmt.Errorf("correlated container state is ambiguous: %w", err)
-	}
-	switch {
-	case len(containers) > 1:
-		return fmt.Errorf("%d correlated containers claim one operation; refusing to guess", len(containers))
-	case len(containers) == 1:
-		container := containers[0]
-		if classifyHelperContainerState(container.State) == helperStateUnknown {
-			return fmt.Errorf("correlated container state %q is unclassifiable; refusing removal", container.State)
-		}
-		// The operation supervisor never adopts containers across a daemon
-		// restart, so one proven-owned correlated container is a stale run
-		// workload. Force-remove it through the Docker cleanup mechanism and
-		// verify absence before touching MAC state.
-		if err := c.removeContainer(queryCtx, container.ID); err != nil {
-			return fmt.Errorf("cannot remove proven-owned stale container: %w", err)
-		}
-		after, err := c.inspectContainers(queryCtx, rec.OperationID, rec.SessionID)
-		if err != nil {
-			return fmt.Errorf("cannot verify stale container removal: %w", err)
-		}
-		if len(after) != 0 {
-			return fmt.Errorf("stale container removal could not be verified")
-		}
-	}
 
-	// Container proven absent: release backend state, then dependent pin
-	// residue, then the durable record. The durable record is removed only
-	// after every earlier stage is positively proven gone; a failed stage
-	// leaves the record as the reconciliation retry marker.
-	if err := c.backend.cleanupOwnedState(rec); err != nil {
-		return fmt.Errorf("backend workload state cleanup failed: %w", err)
-	}
-	if err := c.cleanupStalePins(rec.OperationID); err != nil {
-		return fmt.Errorf("stale pin cleanup failed: %w", err)
-	}
-	if err := c.removeWorkloadMACState(rec.OperationID); err != nil {
-		return fmt.Errorf("cannot remove owned workload state: %w", err)
+	// The operation supervisor never adopts containers across a daemon
+	// restart, so one proven-owned correlated container is a stale run
+	// workload; the canonical absence proof force-removes it and verifies
+	// absence before touching MAC state.
+	outcome := newRunCleanupSequence(
+		cleanupStage{name: cleanupStageContainerProof, run: func() error {
+			return proveOperationContainerAbsent(queryCtx, c.docker, rec.OperationID, rec.SessionID)
+		}},
+		cleanupStage{name: cleanupStageWorkloadMAC, run: func() error {
+			return c.backend.cleanupOwnedState(rec)
+		}},
+		cleanupStage{name: cleanupStageSourcePins, run: func() error {
+			return c.cleanupStalePins(rec.OperationID)
+		}},
+		cleanupStage{name: cleanupStageOwnershipState, run: func() error {
+			return c.removeWorkloadMACState(rec.OperationID)
+		}},
+	).run()
+	if !outcome.completed {
+		return fmt.Errorf("workload reconciliation retained %s: %w", outcome.retainedStage, outcome.err)
 	}
 	return nil
 }

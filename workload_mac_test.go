@@ -15,12 +15,14 @@ import (
 func newTestWorkloadCoordinator(t *testing.T, backendImpl workloadMACBackend, stateRoot, runtimeRoot string) *workloadMACCoordinator {
 	t.Helper()
 	c := &workloadMACCoordinator{
-		backend:           backendImpl,
-		stateRoot:         stateRoot,
-		runtimeRoot:       runtimeRoot,
-		inspectContainers: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) { return nil, nil },
-		removeContainer:   func(ctx context.Context, containerID string) error { return nil },
-		cleanupStalePins:  func(operationID string) error { return nil },
+		backend:     backendImpl,
+		stateRoot:   stateRoot,
+		runtimeRoot: runtimeRoot,
+		docker: containerProvenance{
+			inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) { return nil, nil },
+			remove:  func(ctx context.Context, containerID string) error { return nil },
+		},
+		cleanupStalePins: func(operationID string) error { return nil },
 	}
 	return c
 }
@@ -147,7 +149,7 @@ func TestWorkloadOwnershipRecordOperationIDMustMatchDirectory(t *testing.T) {
 	}
 	c := newTestWorkloadCoordinator(t, newWorkloadAppArmorBackend(), stateRoot, runtimeRoot)
 	queries := 0
-	c.inspectContainers = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+	c.docker.inspect = func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
 		queries++
 		return nil, nil
 	}
@@ -394,8 +396,11 @@ func TestCoordinatorPrepareFailureClassifiesRetainedOutcome(t *testing.T) {
 }
 
 // TestCoordinatorPrepareFailureRolledBackIsNotRetained proves the contrast
-// classification: when the partial MAC state rolls back completely, the
-// returned error is not a retained error and no durable state survives.
+// classification and the ownership-record dependency contract: when the
+// partial MAC state rolls back completely, the returned error is not a
+// retained error, and the durable ownership record stays as the ownership
+// proof of the still-live dependent pins until the caller's rollback owner
+// releases the pins and removes the record last.
 func TestCoordinatorPrepareFailureFullyRolledBack(t *testing.T) {
 	dir := t.TempDir()
 	stateRoot := filepath.Join(dir, "state")
@@ -423,8 +428,70 @@ func TestCoordinatorPrepareFailureFullyRolledBack(t *testing.T) {
 	if errors.As(err, &retained) {
 		t.Fatalf("a fully rolled-back failure must not classify as retained, got %v", err)
 	}
+	// The ownership record is the caller's rollback dependency: it binds the
+	// dependent pins until the rollback owner releases them, so a crash or
+	// pin-cleanup failure after the MAC rollback leaves a complete retry
+	// marker instead of anonymous pins.
+	if _, statErr := os.Stat(filepath.Join(stateRoot, "op_ret2", "ownership")); statErr != nil {
+		t.Fatalf("fully rolled-back preparation must keep the ownership record for the caller's rollback: %v", statErr)
+	}
+	// The caller's rollback owner releases the pins and removes the record
+	// last; after it, no owned state survives.
+	if err := c.cleanupStalePinsIn("op_ret2"); err != nil {
+		t.Fatalf("caller pin release: %v", err)
+	}
+	if err := c.removeWorkloadMACState("op_ret2"); err != nil {
+		t.Fatalf("caller ownership removal: %v", err)
+	}
 	if _, statErr := os.Stat(filepath.Join(stateRoot, "op_ret2")); !os.IsNotExist(statErr) {
-		t.Errorf("fully rolled-back preparation must leave no durable state, got %v", statErr)
+		t.Errorf("the rollback owner must leave no durable state after the pins, got %v", statErr)
+	}
+}
+
+// TestCoordinatorSELinuxRollbackRetainsLiveWorkerState is the regression for
+// the prepare-rollback live-worker contract: when an owned projection worker
+// exists and its exit cannot be proven, the prepare failure must be the
+// typed retained outcome, the durable ownership record must survive, the
+// partial projection runtime state must remain for reconciliation, and the
+// coordinator must not run a second, handle-free cleanup pass.
+func TestCoordinatorSELinuxRollbackRetainsLiveWorkerState(t *testing.T) {
+	dir := t.TempDir()
+	stateRoot := filepath.Join(dir, "state")
+	runtimeRoot := filepath.Join(dir, "runtime")
+	pinned := filepath.Join(dir, "pinned")
+	if err := os.MkdirAll(pinned, 0700); err != nil {
+		t.Fatal(err)
+	}
+	b, seam := newTestSELinuxBackend(t)
+	c := newTestWorkloadCoordinator(t, b, stateRoot, runtimeRoot)
+	// The worker starts, its projection mounts, the effective-type proof
+	// then fails, and the rollback's exit wait cannot prove the worker
+	// exited: the projection cannot be proven released while its live
+	// worker handle still exists.
+	seam.typeErr = errors.New("xattr proof unavailable")
+	seam.dieAfterFirstAlive = true
+	seam.waitExitErr = errors.New("worker did not exit after unmount")
+	prep := workloadPreparation{
+		OperationID:   "op_ret3",
+		SessionID:     testWorkloadSessionID,
+		Exposures:     []sessionFilesystemExposure{{Target: "/data", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned},
+	}
+	_, err := c.Prepare(prep)
+	if err == nil {
+		t.Fatal("a projection whose rollback cannot prove worker exit must fail Prepare")
+	}
+	var retained *workloadMACRetainedError
+	if !errors.As(err, &retained) {
+		t.Fatalf("a rollback that cannot prove the live worker exited must classify as retained, got %v", err)
+	}
+	// The durable ownership record stays so startup reconciliation can
+	// classify and finish the cleanup without the worker handle.
+	if _, statErr := os.Stat(filepath.Join(stateRoot, "op_ret3", "ownership")); statErr != nil {
+		t.Errorf("the ownership record must be retained for reconciliation, got %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(runtimeRoot, "op_ret3", "mount-0")); statErr != nil {
+		t.Errorf("the partial projection runtime state must be retained, got %v", statErr)
 	}
 }
 

@@ -38,7 +38,9 @@ func newRunWorkloadLifecycleFixture(t *testing.T) *runWorkloadLifecycleFixture {
 	coord := app.WorkloadMAC
 	backend := coord.backend.(*workloadAppArmorBackend)
 	f := &runWorkloadLifecycleFixture{app: app, coord: coord, backend: backend}
-	coord.removeContainer = func(ctx context.Context, id string) error { return nil }
+	prov := coord.docker
+	prov.remove = func(ctx context.Context, id string) error { return nil }
+	coord.docker = prov
 	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		f.mu.Lock()
 		pinned := filepath.Join(runtimeDir, "mounts", operationID, fmt.Sprint(mountIndex))
