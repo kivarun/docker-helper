@@ -657,7 +657,7 @@ allow docker_helper_t fusefs_t:filesystem { mount unmount getattr relabelfrom };
 # read-only projection backend is unreachable (observed as
 # "fuse: mount failed: Permission denied" on the packaged RPM and tarball
 # paths of the exact-artifact UAT).
-allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr relabelto };
+allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr relabelto relabelfrom };
 
 # The projection mountpoints live under the helper-owned runtime tree.
 allow docker_helper_t docker_helper_runtime_t:dir { mounton };
