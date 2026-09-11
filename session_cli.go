@@ -98,6 +98,49 @@ func resolveLauncherIDBySelector(client *apiClient, principal, launcher string) 
 	return result.Launchers[0].ID, nil
 }
 
+// filesystemEntryFlag collects repeatable --filesystem-entry PATH=ACCESS
+// values for session create. It performs syntax validation only: the value is
+// split into PATH (workspace-relative) and ACCESS, and ACCESS is parsed by
+// the existing canonical parseAllowedRootAccess owner — never a second access
+// parser. Whether the accumulated request is a valid narrowing of the target
+// Launcher's effective ceiling is a server-side authorization/domain
+// decision; the CLI never decides it locally.
+type filesystemEntryFlag struct {
+	entries []sessionFilesystemRequestEntry
+}
+
+func (f *filesystemEntryFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(f.entries))
+	for _, e := range f.entries {
+		parts = append(parts, e.Path+"="+e.Access)
+	}
+	return strings.Join(parts, ",")
+}
+
+// Set parses one PATH=ACCESS occurrence. The separator is the last '=' so a
+// path containing '=' keeps parsing; ACCESS has no '=' (the canonical
+// vocabulary is exactly read_write or read_only). An empty PATH or an
+// unparsable ACCESS is a local syntax error.
+func (f *filesystemEntryFlag) Set(value string) error {
+	idx := strings.LastIndex(value, "=")
+	if idx < 0 {
+		return fmt.Errorf("--filesystem-entry expects PATH=ACCESS, got %q", value)
+	}
+	path, access := value[:idx], value[idx+1:]
+	if path == "" {
+		return fmt.Errorf("--filesystem-entry PATH must not be empty, got %q", value)
+	}
+	parsed, err := parseAllowedRootAccess(access)
+	if err != nil {
+		return fmt.Errorf("--filesystem-entry %q: %v", value, err)
+	}
+	f.entries = append(f.entries, sessionFilesystemRequestEntry{Path: path, Access: string(parsed)})
+	return nil
+}
+
 var sessionCommand = &Command{
 	Name:    "session",
 	Summary: "Manage sessions",
@@ -113,7 +156,7 @@ var sessionCommand = &Command{
 var sessionCreateCommand = &Command{
 	Name:    "create",
 	Summary: "Create a new session",
-	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--principal USER] [--launcher LAUNCHER] [--json]",
+	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-entry PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		workspace := fs.String("workspace", "", "Workspace directory")
@@ -121,6 +164,9 @@ var sessionCreateCommand = &Command{
 		fs.Var(principal, "principal", "Principal username (admin authentication; targets the Principal's default Launcher)")
 		launcher := &explicitStringFlag{}
 		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...) to target instead of the default Launcher")
+		var filesystemEntries filesystemEntryFlag
+		fs.Var(&filesystemEntries, "filesystem-entry",
+			"Issuance-time Session filesystem narrowing, repeatable PATH=ACCESS (PATH is workspace-relative, '.' for the workspace root; ACCESS is read_write or read_only; the daemon decides narrowing, the CLI validates syntax only)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
@@ -154,6 +200,9 @@ var sessionCreateCommand = &Command{
 				}
 
 				req := createSessionClientRequest{Workspace: absWorkspace}
+				if len(filesystemEntries.entries) > 0 {
+					req.FilesystemEntries = filesystemEntries.entries
+				}
 				if launcher.set || principal.set {
 					if err := resolveSessionCreateSelectors(client, principal.value, launcher.value, &req); err != nil {
 						fmt.Fprintf(stderr, "error: %v\n", err)

@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,5 +194,140 @@ func TestSessionCleanupOffline(t *testing.T) {
 	// Stale runtime dir should be removed.
 	if _, err := os.Stat(sessionsDir); !os.IsNotExist(err) {
 		t.Error("stale runtime dir should be removed")
+	}
+}
+
+// startSessionCreateCapture runs a fake daemon socket that captures the
+// POST /sessions wire body and answers a fixed 201 create response.
+func startSessionCreateCapture(t *testing.T, socketPath string, captured *string) {
+	t.Helper()
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" && r.Method == http.MethodPost {
+			buf := new(strings.Builder)
+			io.Copy(buf, r.Body)
+			r.Body.Close()
+			*captured = buf.String()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(createSessionResponse{
+				OK: true,
+				Session: sessionJSON{
+					ID:        "dhs_captured",
+					Workspace: "/state/runs/run-1",
+					CreatedAt: "2026-01-01T00:00:00Z",
+					ExpiresAt: "2026-01-02T00:00:00Z",
+				},
+				Token: "dht_captured",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+}
+
+// TestSessionCreateFsEntriesWire proves the repeatable
+// --filesystem-entry flag maps onto the canonical filesystem_entries wire
+// field in request order, through the real CLI command path.
+func TestSessionCreateFsEntriesWire(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+	_ = configPath
+
+	var captured string
+	startSessionCreateCapture(t, socketPath, &captured)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"session", "create",
+		"--workspace", "/state/runs/run-1",
+		"--filesystem-entry", ".=read_only",
+		"--filesystem-entry", "project=read_write",
+		"--filesystem-entry", "pipeline-inputs=read_only",
+		"--filesystem-entry", "pipeline-outputs=read_write",
+		"--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("session create failed: code %d stderr=%s", code, stderr.String())
+	}
+	want := `"filesystem_entries":[{"path":".","access":"read_only"},{"path":"project","access":"read_write"},{"path":"pipeline-inputs","access":"read_only"},{"path":"pipeline-outputs","access":"read_write"}]`
+	if !strings.Contains(captured, want) {
+		t.Errorf("wire body missing canonical filesystem_entries: %s", captured)
+	}
+	if !strings.Contains(captured, `"workspace":"/state/runs/run-1"`) {
+		t.Errorf("wire body missing workspace: %s", captured)
+	}
+}
+
+// TestSessionCreateOmittedFsEntries proves the old create
+// syntax is unchanged: a create without --filesystem-entry sends no
+// filesystem_entries key at all.
+func TestSessionCreateOmittedFsEntries(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+	_ = configPath
+
+	var captured string
+	startSessionCreateCapture(t, socketPath, &captured)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"session", "create",
+		"--workspace", "/state/runs/run-1",
+		"--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("session create failed: code %d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(captured, "filesystem_entries") {
+		t.Errorf("omitted flag must not send filesystem_entries: %s", captured)
+	}
+	if !strings.Contains(captured, `"workspace":"/state/runs/run-1"`) {
+		t.Errorf("wire body missing workspace: %s", captured)
+	}
+}
+
+// TestSessionCreateBadFsEntrySyntax proves the CLI performs
+// PATH=ACCESS syntax validation only, rejects bad values locally (exit 2)
+// before any request is sent, and parses ACCESS through the canonical access
+// vocabulary. Flag parsing rejects the value before the client resolves, so
+// no daemon socket is needed: reaching the daemon would require successful
+// flag parsing.
+func TestSessionCreateBadFsEntrySyntax(t *testing.T) {
+	for name, value := range map[string]string{
+		"missing separator":  "no-access-value",
+		"empty path":         "=read_only",
+		"empty access":       "project=",
+		"unknown access":     "project=ro",
+		"unknown access rw":  "project=rw",
+		"noncanonical value": "project=writable",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{
+				"session", "create",
+				"--workspace", "/state/runs/run-1",
+				"--filesystem-entry", value,
+			}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("bad entry accepted: %s stderr=%s", value, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "filesystem-entry") {
+				t.Errorf("expected a --filesystem-entry syntax error, got: %s", stderr.String())
+			}
+		})
+	}
+}
+
+// TestSessionCreateFsEntryHelp proves the new flag is documented
+// in the command help.
+func TestSessionCreateFsEntryHelp(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/config.json")
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "create", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("help exited %d", code)
+	}
+	if !strings.Contains(stdout.String(), "--filesystem-entry PATH=ACCESS") {
+		t.Errorf("help does not document --filesystem-entry: %s", stdout.String())
 	}
 }
