@@ -9572,6 +9572,53 @@ func TestUATLibResidueInventoryFailClosed(t *testing.T) {
 	}
 }
 
+// TestUATHarnessRichListCLIGrammar runs the rich allowed-root list forms the
+// Release-2 UAT harness uses through the REAL production CLI parser (the same
+// in-process dispatch as the binary) and proves the grammar contract directly:
+// every canonical form (all options before the positional selector) parses,
+// and the flag-after-positional form that the harness must never emit stays
+// rejected with the stable "flags must precede positional arguments" error
+// (exit 2). The runtime outcome after a successful parse (a missing token or
+// config file under an isolated XDG tree, exit 1) is acceptable evidence of
+// parsing; only the parse rejection is decisive. The content-marker tests
+// alone could not catch a grammar violation, so this test executes the
+// parser itself.
+func TestUATHarnessRichListCLIGrammar(t *testing.T) {
+	// Isolated XDG tree: after a successful parse the commands fail fast on
+	// the missing token/config (exit 1) and never touch host state.
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_STATE_HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
+	parseRejection := "flags must precede positional arguments"
+
+	// Canonical harness forms: every option precedes the positional selector.
+	canon := []struct {
+		name string
+		args []string
+	}{
+		{"config list --json has no positional", []string{"config", "allowed-root", "list", "--json"}},
+		{"principal list --json precedes USER", []string{"principal", "allowed-root", "list", "--system", "--json", "uat-parser-principal"}},
+		{"launcher list --json precedes LAUNCHER", []string{"launcher", "allowed-root", "list", "--system", "--principal", "uat-parser-principal", "--json", "uat-parser-launcher"}},
+	}
+	for _, tc := range canon {
+		var stdout, stderr strings.Builder
+		exit := runCommandWithWriters(tc.args, &stdout, &stderr)
+		if exit == 2 || strings.Contains(stderr.String(), parseRejection) {
+			t.Errorf("canonical form %q must be accepted by the real CLI parser (exit=%d, stderr=%q)", strings.Join(tc.args, " "), exit, stderr.String())
+		}
+	}
+
+	// The wrong form stays rejected: an option after the positional selector
+	// is a parse error, not a silent success.
+	var stdout, stderr strings.Builder
+	exit := runCommandWithWriters([]string{"principal", "allowed-root", "list", "--system", "uat-parser-principal", "--json"}, &stdout, &stderr)
+	if exit != 2 || !strings.Contains(stderr.String(), parseRejection) {
+		t.Errorf("flag-after-positional form must stay rejected (exit=%d, stderr=%q)", exit, stderr.String())
+	}
+}
+
 // TestAccessModesHarnessListContracts pins the harness contracts of the
 // access-mode UAT after the final allowed-root list compatibility contract:
 // mode-aware assertions read the rich --json projection structurally (never
@@ -9591,9 +9638,9 @@ func TestAccessModesHarnessListContracts(t *testing.T) {
 	// for an access mode.
 	for _, must := range []string{
 		`dh config allowed-root list --json 2>/dev/null | allowed_root_json_access "$TREE/global-ro"`,
-		`dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$TREE"`,
-		`dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs"`,
-		`dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null | allowed_root_json_access "$WS/project"`,
+		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE"`,
+		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs"`,
+		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/project"`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("access assertion must parse the rich --json projection structurally (%s)", must)
@@ -9685,8 +9732,8 @@ func TestMigrationAndAcceptanceListHarnessContracts(t *testing.T) {
 			path: "scripts/uat-migration-rpm-211.sh",
 			rich: []string{
 				`M_LIST_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"`,
-				`M_PLIST_JSON="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"`,
-				`M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" --json 2>/dev/null || true)"`,
+				`M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"`,
+				`M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
 			},
 			stage: "R9",
 		},
@@ -9694,8 +9741,8 @@ func TestMigrationAndAcceptanceListHarnessContracts(t *testing.T) {
 			path: "scripts/uat-release2-acceptance.sh",
 			rich: []string{
 				`M_LIST_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"`,
-				`M_PLIST_JSON="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"`,
-				`M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" --json 2>/dev/null || true)"`,
+				`M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"`,
+				`M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
 			},
 			stage: "M8",
 		},
