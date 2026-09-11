@@ -110,7 +110,10 @@ mkdir -p "$EVIDENCE_DIR"
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 
-if ! env DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 "$BINARY" -test.run "$FILTER" -test.v | tee "$LOG"; then
+if ! env \
+  DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 \
+  WORKLOAD_EVIDENCE_DIR="$EVIDENCE_DIR" \
+  "$BINARY" -test.run "$FILTER" -test.v | tee "$LOG"; then
   fail "required live proof binary exited non-zero: $BINARY"
 fi
 check_output "$LOG"
