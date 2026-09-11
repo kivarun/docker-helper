@@ -14,7 +14,7 @@ import (
 )
 
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
-	authority, ok := a.requireSessionFilesystemCapability(w, r)
+	authority, ok := a.requireSessionFilesystemCapability(w, r, "build")
 	if !ok {
 		return
 	}

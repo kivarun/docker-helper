@@ -325,6 +325,13 @@ func TestSnapshotSchemaNearMatchVariantsFailClosed(t *testing.T) {
 			if _, err := db.Exec(tc.ddl); err != nil {
 				t.Fatalf("create near-match variant: %v", err)
 			}
+			// The integrity metadata table is part of the canonical
+			// post-cutover state; the variants exercise the entries-table
+			// shape, so the canonical metadata must be present for the
+			// intended classification error to surface.
+			if _, err := db.Exec(sessionFilesystemSnapshotMetaDDL); err != nil {
+				t.Fatalf("create canonical metadata table: %v", err)
+			}
 
 			result, err := migrateSessionFilesystemSnapshots(db)
 			if err == nil {
@@ -487,7 +494,9 @@ func TestPostCutoverCorruptionFailsClosed(t *testing.T) {
 			buildEntries: func(t *testing.T, db *sql.DB, sessionID, workspace string) {
 				// Re-move the second entry from position 1 to 2: the
 				// persisted positions become 0,2 — the gap must fail the
-				// loader's contiguous-position proof.
+				// loader's contiguous-position proof (the metadata is kept
+				// consistent so the constructor proof, not the digest gate,
+				// is what fails).
 				if _, err := db.Exec(
 					`UPDATE session_filesystem_snapshot_entries SET position = 2
 					 WHERE session_id = ? AND position = 1`,
@@ -586,6 +595,7 @@ func TestPostCutoverCorruptionFailsClosed(t *testing.T) {
 			}
 
 			tc.buildEntries(t, app.DB, created.Session.ID, workspace)
+			alignSnapshotMetadataForTest(t, app.DB, created.Session.ID)
 
 			if err := verifySessionFilesystemSnapshotIntegrity(app.DB); err == nil {
 				t.Fatal("startup integrity validation must fail on corrupt snapshot state")
@@ -680,5 +690,92 @@ func TestOrphanSnapshotFailsStartupWithoutForeignKeys(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dhs_orphan") || !strings.Contains(err.Error(), "nonexistent session") {
 		t.Fatalf("orphan error = %v, want the orphan session ID and the orphan invariant", err)
+	}
+}
+
+// alignSnapshotMetadataForTest rewrites one session's integrity metadata row
+// from the currently persisted entries, so a corruption test exercises the
+// canonical-constructor proof under a consistent-but-noncanonical state
+// instead of the earlier digest gate. The metadata is never rewritten like
+// this in production: the loader fails closed on any mismatch.
+func alignSnapshotMetadataForTest(t *testing.T, db *sql.DB, sessionID string) {
+	t.Helper()
+	rows, err := db.Query(
+		`SELECT path, access FROM session_filesystem_snapshot_entries
+		 WHERE session_id = ? ORDER BY position`, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []AllowedRootEntry
+	for rows.Next() {
+		var path, access string
+		if err := rows.Scan(&path, &access); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		entries = append(entries, AllowedRootEntry{Path: path, Access: AllowedRootAccess(access)})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		`UPDATE session_filesystem_snapshot_meta SET entry_count = ?, digest = ? WHERE session_id = ?`,
+		len(entries), sessionFilesystemSnapshotDigest(entries), sessionID,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSnapshotTruncatedTailFailsClosed proves F7: deleting the trailing
+// snapshot row (a syntactically valid state that would widen the rights of
+// a RW workspace with a nested RO entry) is detected by both the startup
+// integrity gate and the runtime canonical loader, and never repaired.
+func TestSnapshotTruncatedTailFailsClosed(t *testing.T) {
+	app := newTestApp(t)
+	root := app.Config.AllowedRoots[0].Path
+	workspace := filepath.Join(root, "ws")
+	inputs := filepath.Join(workspace, "inputs")
+	if err := os.MkdirAll(inputs, 0755); err != nil {
+		t.Fatal(err)
+	}
+	app.Config.AllowedRoots = []AllowedRootEntry{
+		allowedRootEntry(root),
+		{Path: inputs, Access: AllowedRootAccessReadOnly},
+	}
+	created, err := createDefaultAdminSessionForTest(app, workspace)
+	if err != nil {
+		t.Fatalf("createSessionAuthorized() error: %v", err)
+	}
+	if len(created.FilesystemSnapshot.Entries) != 2 {
+		t.Fatalf("precondition: snapshot = %v, want two entries", created.FilesystemSnapshot.Entries)
+	}
+
+	// Truncate the tail: the nested RO row disappears and the remaining
+	// single-entry snapshot would widen the workspace to full read_write.
+	if _, err := app.DB.Exec(
+		`DELETE FROM session_filesystem_snapshot_entries
+		 WHERE session_id = ? AND position = 1`,
+		created.Session.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := verifySessionFilesystemSnapshotIntegrity(app.DB); err == nil {
+		t.Fatal("startup integrity validation must fail on a truncated snapshot tail")
+	} else if !strings.Contains(err.Error(), created.Session.ID) ||
+		!strings.Contains(err.Error(), "integrity metadata records") {
+		t.Fatalf("integrity error = %v, want the session ID and the metadata count mismatch", err)
+	}
+	if _, err := migrateSessionFilesystemSnapshots(app.DB); err == nil {
+		t.Fatal("startup migration must fail closed on a truncated snapshot tail")
+	}
+
+	// The runtime canonical loader detects the same corruption fail-closed.
+	if _, err := loadSessionFilesystemSnapshot(app.DB, created.Session.ID, workspace); err == nil {
+		t.Fatal("runtime loader must fail closed on a truncated snapshot tail")
+	}
+	if got := readSnapshotRows(t, app.DB, created.Session.ID); len(got) != 1 {
+		t.Fatalf("corrupt state must never be repaired, rows = %v", got)
 	}
 }

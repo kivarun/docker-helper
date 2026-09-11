@@ -1369,3 +1369,124 @@ func TestBuildStagingCleanupCorrelation(t *testing.T) {
 		t.Fatalf("cleanup log not found in operational output:\n%s", opOutput)
 	}
 }
+
+// TestRunSnapshotCorruptionAuditOutcome proves F8: after a successful
+// Session authentication, a corrupted filesystem snapshot fails closed with
+// 500 internal_error, no Docker invocation and no registered operation, and
+// exactly one run.rejected audit record with the session/ownership
+// provenance and no bearer or secret values.
+func TestRunSnapshotCorruptionAuditOutcome(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, capture := newRunEnforcementApp(t)
+	created := createRunEnforcementSession(t, app, nil)
+
+	// Corrupt the issued snapshot after issuance: truncate the snapshot
+	// tail and keep the metadata row intact — the loader's integrity
+	// verification must catch it.
+	if _, err := app.DB.Exec(
+		`DELETE FROM session_filesystem_snapshot_entries WHERE session_id = ?`,
+		created.Session.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	w, _ := postRunRequest(app, created.Token,
+		`{"image":"alpine:3.24","mounts":[{"source":".","target":"/data","read_only":true}],"command":["true"]}`)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	if code := readRootResponseCode(t, w.Body.String()); code != "internal_error" {
+		t.Fatalf("expected code internal_error, got %q", code)
+	}
+	assertNoRunPolicyResidue(t, app, nil, nil)
+	if capture() != nil {
+		t.Errorf("docker must not be invoked on a corrupted snapshot, got argv %v", capture())
+	}
+
+	records := parseAuditRecords(auditBuf)
+	filtered := filterBySession(records, created.Session.ID)
+	var rejected []auditRecord
+	for _, rec := range filtered {
+		if rec.Event == "run.rejected" {
+			rejected = append(rejected, rec)
+		}
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("expected exactly one run.rejected record for the corrupted snapshot, got %d in %v", len(rejected), filtered)
+	}
+	rec := rejected[0]
+	if rec.Result != "internal_error" {
+		t.Errorf("result = %q, want internal_error", rec.Result)
+	}
+	if rec.PrincipalName != created.Session.PrincipalName || rec.LauncherID != created.Session.LauncherID {
+		t.Errorf("audit record must carry the session ownership provenance: %+v", rec)
+	}
+	for _, line := range auditRawLinesBySession(auditBuf, created.Session.ID) {
+		if strings.Contains(line, created.Token) {
+			t.Errorf("bearer token must not appear in the audit trail: %s", line)
+		}
+	}
+}
+
+// TestBuildSnapshotCorruptionAuditOutcome proves the build side of the F8
+// symmetric contract: build.rejected with result internal_error, 500, and
+// no staged build work after a successful authentication with a corrupted
+// snapshot.
+func TestBuildSnapshotCorruptionAuditOutcome(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, capture := newRunEnforcementApp(t)
+	created := createRunEnforcementSession(t, app, nil)
+
+	if _, err := app.DB.Exec(
+		`DELETE FROM session_filesystem_snapshot_entries WHERE session_id = ?`,
+		created.Session.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+created.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	if code := readRootResponseCode(t, w.Body.String()); code != "internal_error" {
+		t.Fatalf("expected code internal_error, got %q", code)
+	}
+	if capture() != nil {
+		t.Errorf("docker must not be invoked on a corrupted snapshot, got argv %v", capture())
+	}
+
+	records := parseAuditRecords(auditBuf)
+	filtered := filterBySession(records, created.Session.ID)
+	var rejected []auditRecord
+	for _, rec := range filtered {
+		if rec.Event == "build.rejected" {
+			rejected = append(rejected, rec)
+		}
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("expected exactly one build.rejected record for the corrupted snapshot, got %d in %v", len(rejected), filtered)
+	}
+	rec := rejected[0]
+	if rec.Result != "internal_error" {
+		t.Errorf("result = %q, want internal_error", rec.Result)
+	}
+	if rec.PrincipalName != created.Session.PrincipalName {
+		t.Errorf("audit record must carry the principal provenance: %+v", rec)
+	}
+	for _, line := range auditRawLinesBySession(auditBuf, created.Session.ID) {
+		if strings.Contains(line, created.Token) {
+			t.Errorf("bearer token must not appear in the audit trail: %s", line)
+		}
+	}
+}

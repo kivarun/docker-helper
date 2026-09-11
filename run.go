@@ -261,7 +261,7 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 }
 
 func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
-	authority, ok := a.requireSessionFilesystemCapability(w, r)
+	authority, ok := a.requireSessionFilesystemCapability(w, r, "run")
 	if !ok {
 		return
 	}

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 // This file owns the persisted Session filesystem snapshot: the canonical
@@ -32,10 +35,35 @@ const sessionFilesystemSnapshotEntriesDDL = `
 	)
 `
 
+// sessionFilesystemSnapshotMetaDDL is the canonical CREATE TABLE statement
+// of the Session filesystem snapshot integrity metadata table. It is created
+// atomically with the entries table inside the cutover migration transaction
+// and owned by the same snapshot store: one meta row per Session proves the
+// completeness of the issued immutable snapshot.
+const sessionFilesystemSnapshotMetaDDL = `
+	CREATE TABLE session_filesystem_snapshot_meta (
+		session_id TEXT NOT NULL,
+		entry_count INTEGER NOT NULL,
+		digest TEXT NOT NULL,
+		PRIMARY KEY (session_id),
+		FOREIGN KEY (session_id)
+			REFERENCES sessions(id)
+			ON DELETE CASCADE
+	)
+`
+
+// sessionFilesystemSnapshotMetaColumns is the canonical column contract of
+// the snapshot integrity metadata table.
+var sessionFilesystemSnapshotMetaColumns = []allowedRootsColumnSpec{
+	{"session_id", "TEXT", true, 1},
+	{"entry_count", "INTEGER", true, 0},
+	{"digest", "TEXT", true, 0},
+}
+
 // sessionSnapshotSchemaClass identifies the persisted snapshot-table state.
-// The table's presence is the canonical legacy cutover marker: absent is the
-// pre-2.2 state where the compatibility backfill is required, canonical is
-// the post-cutover state where a missing snapshot is corruption and must
+// The entries table's presence is the canonical legacy cutover marker: absent
+// is the pre-2.2 state where the compatibility backfill is required, canonical
+// is the post-cutover state where a missing snapshot is corruption and must
 // never be repaired, and unsupported is any other schema (fail closed).
 type sessionSnapshotSchemaClass int
 
@@ -82,6 +110,23 @@ func classifySessionFilesystemSnapshotSchema(db *sql.DB) (sessionSnapshotSchemaC
 		return sessionSnapshotSchemaAbsent, nil
 	}
 
+	// The integrity metadata table is part of the canonical post-cutover
+	// state: it is created atomically with the entries table, and an
+	// entries table without it is unsupported (fail closed, never
+	// backfilled).
+	const metaTable = "session_filesystem_snapshot_meta"
+	var metaTableCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`,
+		metaTable,
+	).Scan(&metaTableCount); err != nil {
+		return sessionSnapshotSchemaUnsupported, fmt.Errorf("cannot inspect %s table presence: %w", metaTable, err)
+	}
+	if metaTableCount == 0 {
+		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+			"snapshot integrity metadata table is absent after the cutover")
+	}
+
 	cols, err := readAllowedRootsColumns(db, table)
 	if err != nil {
 		return sessionSnapshotSchemaUnsupported, err
@@ -97,6 +142,23 @@ func classifySessionFilesystemSnapshotSchema(db *sql.DB) (sessionSnapshotSchemaC
 	if len(fks) != 1 ||
 		fks[0] != (allowedRootsFK{table: "sessions", from: "session_id", to: "id", onDelete: "CASCADE"}) {
 		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+			"expected exactly one session_id -> sessions(id) foreign key with ON DELETE CASCADE")
+	}
+
+	metaCols, err := readAllowedRootsColumns(db, metaTable)
+	if err != nil {
+		return sessionSnapshotSchemaUnsupported, err
+	}
+	if err := verifyAllowedRootsColumns(metaTable, metaCols, sessionFilesystemSnapshotMetaColumns); err != nil {
+		return sessionSnapshotSchemaUnsupported, err
+	}
+	metaFKs, err := readAllowedRootsForeignKeys(db, metaTable)
+	if err != nil {
+		return sessionSnapshotSchemaUnsupported, err
+	}
+	if len(metaFKs) != 1 ||
+		metaFKs[0] != (allowedRootsFK{table: "sessions", from: "session_id", to: "id", onDelete: "CASCADE"}) {
+		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(metaTable,
 			"expected exactly one session_id -> sessions(id) foreign key with ON DELETE CASCADE")
 	}
 
@@ -167,6 +229,23 @@ func classifySessionFilesystemSnapshotSchema(db *sql.DB) (sessionSnapshotSchemaC
 	return sessionSnapshotSchemaCanonical, nil
 }
 
+// sessionFilesystemSnapshotDigest is the single owner of the canonical
+// digest over an issued immutable snapshot representation: the canonical
+// representation is the entry list in persisted position order, each entry
+// framed as position, path, access separated by NUL bytes and terminated by
+// one NUL byte. Filesystem paths cannot contain NUL, so the framing is
+// unambiguous and order-, path-, and access-sensitive: a missing entry, an
+// extra entry, a changed path, a changed access, or a changed order yields a
+// different digest.
+func sessionFilesystemSnapshotDigest(entries []AllowedRootEntry) string {
+	var sb strings.Builder
+	for i, e := range entries {
+		fmt.Fprintf(&sb, "%d\x00%s\x00%s\x00", i, e.Path, string(e.Access))
+	}
+	sum := sha256.Sum256([]byte(sb.String()))
+	return hex.EncodeToString(sum[:])
+}
+
 // sessionSnapshotBackfillFault is a narrow test-only seam that fails the
 // legacy cutover migration at a chosen point after the canonical table and
 // compatibility rows were written inside its transaction, proving the atomic
@@ -231,6 +310,9 @@ func backfillSessionFilesystemSnapshots(db *sql.DB) (*sessionSnapshotMigrationRe
 	if _, err := tx.Exec(sessionFilesystemSnapshotEntriesDDL); err != nil {
 		return nil, fmt.Errorf("cannot create session filesystem snapshot table: %w", err)
 	}
+	if _, err := tx.Exec(sessionFilesystemSnapshotMetaDDL); err != nil {
+		return nil, fmt.Errorf("cannot create session filesystem snapshot metadata table: %w", err)
+	}
 
 	// The compatibility authority comes from the already-issued 2.1 Session
 	// row alone: sessions.workspace is the stored canonical workspace and
@@ -242,6 +324,35 @@ func backfillSessionFilesystemSnapshots(db *sql.DB) (*sessionSnapshotMigrationRe
 	if err != nil {
 		return nil, fmt.Errorf("cannot backfill session filesystem snapshots: %w", err)
 	}
+
+	// The compatibility integrity metadata is written in the same
+	// transaction: one meta row per backfilled Session carrying the entry
+	// count (exactly one workspace-read_write entry) and the canonical
+	// digest of that issued snapshot.
+	rows, err := tx.Query(`SELECT id, workspace FROM sessions ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("cannot enumerate sessions for snapshot metadata backfill: %w", err)
+	}
+	for rows.Next() {
+		var id, workspace string
+		if err := rows.Scan(&id, &workspace); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("cannot scan session row for snapshot metadata backfill: %w", err)
+		}
+		digest := sessionFilesystemSnapshotDigest([]AllowedRootEntry{{Path: workspace, Access: AllowedRootAccess("read_write")}})
+		if _, err := tx.Exec(
+			`INSERT INTO session_filesystem_snapshot_meta (session_id, entry_count, digest) VALUES (?, 1, ?)`,
+			id, digest,
+		); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("cannot backfill snapshot metadata for session %s: %w", id, err)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions for snapshot metadata backfill: %w", err)
+	}
+
 	if sessionSnapshotBackfillFault != nil {
 		if err := sessionSnapshotBackfillFault(); err != nil {
 			return nil, fmt.Errorf("session filesystem snapshot migration fault: %w", err)
@@ -298,12 +409,17 @@ func verifySessionFilesystemSnapshotIntegrity(db *sql.DB) error {
 // on the connection that wrote the rows.
 func verifySessionFilesystemSnapshots(q txQuerier) error {
 	rows, err := q.Query(`
-		SELECT e.session_id FROM session_filesystem_snapshot_entries e
-		WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = e.session_id)
+		SELECT session_id FROM (
+			SELECT e.session_id FROM session_filesystem_snapshot_entries e
+			WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = e.session_id)
+			UNION
+			SELECT m.session_id FROM session_filesystem_snapshot_meta m
+			WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id)
+		)
 		LIMIT 1
 	`)
 	if err != nil {
-		return fmt.Errorf("cannot check for orphaned snapshot entries: %w", err)
+		return fmt.Errorf("cannot check for orphaned snapshot rows: %w", err)
 	}
 	orphan := ""
 	haveOrphan := false
@@ -354,6 +470,19 @@ func verifySessionFilesystemSnapshots(q txQuerier) error {
 // corrupt snapshot would invent issued authority, so any noncanonical state
 // fails closed.
 func loadSessionFilesystemSnapshot(q txQuerier, sessionID, workspace string) (*sessionFilesystemSnapshot, error) {
+	var entryCount int
+	var digest string
+	err := q.QueryRow(
+		`SELECT entry_count, digest FROM session_filesystem_snapshot_meta WHERE session_id = ?`,
+		sessionID,
+	).Scan(&entryCount, &digest)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("session %s filesystem snapshot integrity metadata is missing", sessionID)
+		}
+		return nil, fmt.Errorf("cannot load session %s filesystem snapshot integrity metadata: %w", sessionID, err)
+	}
+
 	rows, err := q.Query(
 		`SELECT position, path, access FROM session_filesystem_snapshot_entries
 		 WHERE session_id = ?
@@ -385,6 +514,19 @@ func loadSessionFilesystemSnapshot(q txQuerier, sessionID, workspace string) (*s
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("session %s has no persisted filesystem snapshot", sessionID)
 	}
+	// Integrity metadata: the issued immutable snapshot is complete only
+	// when the persisted entries match the recorded count and digest. Any
+	// mismatch — a missing or extra entry, a changed path, access, or
+	// order — fails closed and is never repaired.
+	if entryCount != len(entries) {
+		return nil, fmt.Errorf(
+			"session %s filesystem snapshot integrity metadata records %d entries, found %d",
+			sessionID, entryCount, len(entries))
+	}
+	if digest != sessionFilesystemSnapshotDigest(entries) {
+		return nil, fmt.Errorf(
+			"session %s filesystem snapshot does not match its issued integrity digest", sessionID)
+	}
 
 	snapshot, err := newSessionFilesystemSnapshot(workspace, entries)
 	if err != nil {
@@ -394,9 +536,10 @@ func loadSessionFilesystemSnapshot(q txQuerier, sessionID, workspace string) (*s
 }
 
 // insertSessionFilesystemSnapshot writes every snapshot entry with its
-// canonical position inside the caller's transaction. It runs only as part of
-// the atomic Session+snapshot creation transaction, so a failure anywhere
-// leaves no Session row behind.
+// canonical position plus the integrity metadata row (entry count and
+// canonical digest of the issued snapshot) inside the caller's transaction.
+// It runs only as part of the atomic Session+snapshot creation transaction,
+// so a failure anywhere leaves no Session row behind.
 func insertSessionFilesystemSnapshot(tx *sql.Tx, sessionID string, entries []AllowedRootEntry) error {
 	for i, e := range entries {
 		if _, err := tx.Exec(
@@ -406,6 +549,13 @@ func insertSessionFilesystemSnapshot(tx *sql.Tx, sessionID string, entries []All
 		); err != nil {
 			return err
 		}
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO session_filesystem_snapshot_meta (session_id, entry_count, digest)
+		 VALUES (?, ?, ?)`,
+		sessionID, len(entries), sessionFilesystemSnapshotDigest(entries),
+	); err != nil {
+		return err
 	}
 	return nil
 }

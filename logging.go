@@ -274,6 +274,37 @@ func writeRunReadOnlyRootRejected(
 	writeError(ctx, w, http.StatusBadRequest, "read_only_root", "writable access is not permitted for this mount source")
 }
 
+// writeSessionFilesystemAuthorityRejected is the rejection path for the
+// filesystem-authority failure that happens after a successful Session
+// authentication (a corrupted issued snapshot is the concrete case). The
+// public contract stays 500 internal_error; the audit keeps exactly one
+// <kind>.rejected outcome with the session/ownership provenance so the
+// filesystem-authority failure does not disappear from the audit trail. It
+// never masquerades as read_only_root or unauthorized, and it carries no
+// bearer, token hash, or other secret-bearing value.
+func writeSessionFilesystemAuthorityRejected(
+	ctx context.Context,
+	w http.ResponseWriter,
+	kind string, // "run" or "build"
+	session *Session,
+	cause error,
+) {
+	writeRequestContextAudit(ctx, auditRecord{
+		Event:         kind + ".rejected",
+		Result:        "internal_error",
+		SessionID:     session.ID,
+		PrincipalName: session.PrincipalName,
+		LauncherID:    session.LauncherID,
+		LauncherName:  session.LauncherName,
+	})
+	opLog(ctx).Error("cannot load session filesystem snapshot",
+		slog.String("operation", "session_lookup"),
+		slog.String("session_id", session.ID),
+		slog.String("error", cause.Error()),
+	)
+	writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+}
+
 // opLog returns the operational logger with request-scoped attributes.
 // It adds request_id and session_id when available in the context.
 func opLog(ctx context.Context) *slog.Logger {
