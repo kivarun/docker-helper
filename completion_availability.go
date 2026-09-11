@@ -126,6 +126,7 @@ func configureCompletionAvailability() {
 	setCompletionAuthorities(control,
 		sessionCreateCommand,
 		sessionListCommand,
+		sessionShowCommand,
 		sessionDeleteCommand,
 		completionRootsSessionCommand,
 	)

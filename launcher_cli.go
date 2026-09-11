@@ -607,7 +607,7 @@ var launcherAllowedRootListCommand = &Command{
 var launcherAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of a launcher allowed root",
-	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH ACCESS",
+	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH read_only|read_write",
 	MinPosArgs: 2,
 	MaxPosArgs: 3,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

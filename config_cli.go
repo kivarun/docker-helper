@@ -389,7 +389,7 @@ func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Wri
 var configAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of an allowed root",
-	Usage:      "docker-helper config allowed-root set-access PATH ACCESS",
+	Usage:      "docker-helper config allowed-root set-access PATH read_only|read_write",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	Help: `Change the access mode of one stored allowed root.
