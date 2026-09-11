@@ -348,6 +348,7 @@ fi
 # the guest user's home.
 if dh init --allowed-root "$ALLOWED_ROOT" --allowed-root /home/opc >/tmp/uat-wls-init.log 2>&1; then
   acc_ok "system init (global ceiling: $ALLOWED_ROOT)"
+  dh config allowed-root list 2>/dev/null | sed 's/^/  config-roots: /' >&2 || true
 else
   printf '  init output: %s\n' "$(redact </tmp/uat-wls-init.log)" >&2
   echo "error: docker-helper init failed" >&2
