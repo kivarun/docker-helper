@@ -60,8 +60,10 @@ set -uo pipefail
 
 VERSION="${UAT_VERSION:-2.2.0-uat}"
 # RPM version field uses "~" for the UAT suffix ("-" separates version from
-# release), so the rpm record check must match the transformed string.
-RPM_VERSION="${VERSION//-/~}"
+# release), so the rpm record check must match the transformed string. Bash
+# tilde-expands a bare "~" replacement in ${var//pat/rep} ($HOME), so the
+# transform goes through tr.
+RPM_VERSION="$(printf '%s' "$VERSION" | tr '-' '~')"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/opt}"
 PRINCIPAL="${UAT_PRINCIPAL:-opc}"
 RPM_PATH_IN="${UAT_RPM:-}"
