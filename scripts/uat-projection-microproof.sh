@@ -148,8 +148,12 @@ probe_bindfs_sandbox() { # label nnp restrictns mdwe selinuxctx
   [ "$mdwe" = yes ] && sprops+=(--property=MemoryDenyWriteExecute=true)
   [ "$sctx" = yes ] && sprops+=(--property=SELinuxContext=system_u:system_r:docker_helper_t:s0)
   echo "PROBE $label: systemd-run ${sprops[*]} bindfs -f -o allow_other -o context=$ctx $src $mp"
+  rm -f /tmp/uat-a3-unit.out /tmp/uat-a3-unit.err /tmp/uat-a3-unit.ctx
   systemd-run --collect --unit="$unit" \
     "${sprops[@]}" \
+    --property=StandardOutput=append:/tmp/uat-a3-unit.out \
+    --property=StandardError=append:/tmp/uat-a3-unit.err \
+    --property=ExecStartPost=/bin/sh\ -c\ '"id -Z > /tmp/uat-a3-unit.ctx 2>&1; grep fuse /proc/self/mounts >> /tmp/uat-a3-unit.ctx 2>&1 || echo no-fuse-mount-in-ns >> /tmp/uat-a3-unit.ctx"' \
     bindfs -f -o allow_other -o "context=$ctx" "$src" "$mp" >"$out" 2>&1
   rc=$?
   echo "PROBE $label: systemd-run rc=$rc"
@@ -158,19 +162,11 @@ probe_bindfs_sandbox() { # label nnp restrictns mdwe selinuxctx
     echo "PROBE $label: MOUNTED=yes"
   else
     echo "PROBE $label: MOUNTED=no"
-    echo "PROBE $label: unit journal:"
-    journalctl -u "$unit.service" --no-pager --no-hostname -n 8 2>/dev/null \
-      | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
-    # If the unit's own mount namespace isolated the projection, the caller
-    # cannot see the mount even though the unit mounted it. Read the mount
-    # table from inside the unit's namespace via its main process.
-    local mp_ns=""
-    mp_ns="$(systemctl show -p MainPID --value "$unit.service" 2>/dev/null || true)"
-    if [ -n "$mp_ns" ] && [ "$mp_ns" != 0 ]; then
-      echo "PROBE $label: unit-namespace mounts (fuse lines):"
-      nsenter -t "$mp_ns" -m sh -c "grep fuse /proc/self/mounts || echo '(no fuse mounts inside the unit namespace)'" 2>&1 \
-        | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
-    fi
+    echo "PROBE $label: unit out/err files:"
+    cat /tmp/uat-a3-unit.out /tmp/uat-a3-unit.err 2>/dev/null | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
+    echo "PROBE $label: unit namespace view (ctx + fuse mounts):"
+    cat /tmp/uat-a3-unit.ctx 2>/dev/null | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true
+    systemctl status "$unit.service" --no-pager 2>&1 | head -10 || true
   fi
   systemctl stop "$unit.service" >/dev/null 2>&1 || true
   fusermount3 -u "$mp" >/dev/null 2>&1 || true
@@ -245,8 +241,9 @@ probe_bindfs_sandbox "3e-daemon-sandbox" yes yes yes yes
 echo "PROBES_DONE"
 
 # --- 5. capture the complete evidence ------------------------------------------
-echo "MICROPROOF AVC capture (ausearch --start recent, complete bounded):"
-ausearch -m AVC -m USER_AVC --start recent 2>/dev/null | tail -60 || true
+echo "MICROPROOF AVC capture (ausearch last 5 minutes, complete bounded):"
+AVC_START="$(date +'%m/%d/%Y %H:%M:%S' -d '-5 min')"
+ausearch -m AVC -m USER_AVC --start "$AVC_START" 2>/dev/null | tail -60 || true
 echo "--- dmesg AVC fallback view ---"
 dmesg 2>/dev/null | grep -i 'avc' | tail -20 || true
 echo "--- daemon operational log (projection context) ---"
