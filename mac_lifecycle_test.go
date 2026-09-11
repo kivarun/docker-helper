@@ -3061,6 +3061,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 		&operatorAuthority{class: operatorAuthorityPrincipal, principal: auth.Principal},
 		createSelector{},
 		projDir,
+		nil,
 	)
 	if !errors.Is(err, ErrLauncherUnavailable) {
 		t.Fatalf("expected ErrLauncherUnavailable for stale disabled principal, got %v", err)

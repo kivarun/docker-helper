@@ -394,11 +394,17 @@ func (a *App) resolveLauncherWithinPrincipal(launcherID string, principalID int6
 // target, ownership names, and three-level effective root scope) for an
 // authenticated authority and create request. It never mutates state.
 //
+// filesystemEntries is the caller-supplied issuance-time Session filesystem
+// narrowing (nil when the request omitted filesystem_entries); it is carried
+// into the resolved policy unchanged and is proven/composed by
+// createSessionWithPolicyLocked inside the same lifecycle serialization
+// boundary.
+//
 // Callers must hold lifecycleMu when calling this, so the resolved projection
 // comes from one coherent policy snapshot: real Session creation holds the
 // boundary around resolution and persistence, and read-only create-policy
 // introspection goes through resolveCreatePolicySnapshot.
-func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
+func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, workspace string, filesystemEntries []sessionFilesystemRequestEntry) (*sessionCreatePolicy, error) {
 	launcherID, err := a.resolveCreateLauncher(auth, sel)
 	if err != nil {
 		return nil, err
@@ -430,6 +436,7 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 		Workspace:                   workspace,
 		EffectiveAllowedRoots:       allowedRootPaths(effectiveEntries),
 		EffectiveAllowedRootEntries: effectiveEntries,
+		FilesystemRequest:           filesystemEntries,
 		LauncherID:                  snap.launcherID,
 		LauncherName:                snap.launcherName,
 		PrincipalName:               snap.principalName,
@@ -442,9 +449,11 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 // lifecycle serialization boundary, so it observes the same coherent
 // ownership-policy state as createSessionAuthorized — a concurrent config
 // reload or ownership mutation linearizes wholly before or wholly after the
-// read, never between its component reads.
+// read, never between its component reads. Introspection carries no Session
+// filesystem request: the projection is the maximum filesystem ceiling a
+// real create may further narrow through filesystem_entries.
 func (a *App) resolveCreatePolicySnapshot(auth *operatorAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	return a.resolveCreatePolicy(auth, sel, workspace)
+	return a.resolveCreatePolicy(auth, sel, workspace, nil)
 }

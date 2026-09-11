@@ -890,5 +890,6 @@ func createSystemSession(t *testing.T, app *App) (*CreatedSession, error) {
 		&operatorAuthority{class: operatorAuthorityAdmin},
 		createSelector{principal: username},
 		workspace,
+		nil,
 	)
 }

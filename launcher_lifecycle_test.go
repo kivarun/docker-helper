@@ -1107,6 +1107,7 @@ func TestRaceNoNewSessionAfterCheckedDelete(t *testing.T) {
 			&operatorAuthority{class: operatorAuthorityAdmin},
 			createSelector{launcherID: laID},
 			ws,
+			nil,
 		)
 		createDone <- err
 	}()
@@ -1348,6 +1349,7 @@ func TestDisableEnableFreshSessionCanAdmit(t *testing.T) {
 		&operatorAuthority{class: operatorAuthorityAdmin},
 		createSelector{launcherID: laID},
 		ws,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("create fresh session after re-enable: %v", err)

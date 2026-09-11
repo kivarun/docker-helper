@@ -161,7 +161,7 @@ func TestParentPolicyChangeNeverMutatesIssuedSnapshot(t *testing.T) {
 	auth := &operatorAuthority{class: operatorAuthorityPrincipal, principal: credential.Principal}
 
 	// 1. Create Session S under policy A and capture its persisted snapshot.
-	created, err := app.createSessionAuthorized(auth, createSelector{}, workspace)
+	created, err := app.createSessionAuthorized(auth, createSelector{}, workspace, nil)
 	if err != nil {
 		t.Fatalf("createSessionAuthorized(S): %v", err)
 	}
@@ -207,7 +207,7 @@ func TestParentPolicyChangeNeverMutatesIssuedSnapshot(t *testing.T) {
 	// 5. A new Session observes the changed policy: inputs read_write is the
 	//    same mode as its containing region and is normalized away, so the
 	//    new snapshot has only the workspace root entry.
-	created2, err := app.createSessionAuthorized(auth, createSelector{}, workspace)
+	created2, err := app.createSessionAuthorized(auth, createSelector{}, workspace, nil)
 	if err != nil {
 		t.Fatalf("createSessionAuthorized(S2): %v", err)
 	}
@@ -285,7 +285,7 @@ func TestSnapshotCascadeLifecycle(t *testing.T) {
 			t.Fatalf("authenticateCredential: %v", err)
 		}
 		auth := &operatorAuthority{class: operatorAuthorityPrincipal, principal: credential.Principal}
-		created, err := app.createSessionAuthorized(auth, createSelector{}, workspace)
+		created, err := app.createSessionAuthorized(auth, createSelector{}, workspace, nil)
 		if err != nil {
 			t.Fatalf("createSessionAuthorized: %v", err)
 		}
@@ -458,7 +458,7 @@ func TestMACSessionBindingRollsBackWhenSnapshotPersistFails(t *testing.T) {
 		t.Fatalf("create test trigger: %v", err)
 	}
 
-	_, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace)
+	_, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace, nil)
 	if err == nil {
 		t.Fatal("createSessionAuthorized() must fail when the snapshot commit fails inside the MAC callback")
 	}
