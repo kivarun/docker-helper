@@ -157,9 +157,9 @@ workload_residue_clean() {
 
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json 2>/dev/null || true)"
+  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json 2>&1 || true)"
   id="$(printf '%s' "$out" | json_field id)"
-  [ -n "$id" ] || return 1
+  [ -n "$id" ] || { echo "session create failed for $ws: $(printf '%s' "$out" | redact | tail -2)" >&2; return 1; }
   printf '%s' "$out" | json_field token > "/tmp/uat-wls-tok-$id"; chmod 600 "/tmp/uat-wls-tok-$id"
   printf '%s' "$id"
 }
