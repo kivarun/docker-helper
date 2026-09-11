@@ -378,7 +378,7 @@ docker pull alpine:3.19 >/dev/null 2>&1 || true
 # ---- fixture: policy tree with one RO region ---------------------------------
 TREE="$ALLOWED_ROOT/uat-wl-tree"
 rm -rf "$TREE"
-mkdir -p "$TREE/project" "$TREE/pipeline-inputs"
+mkdir -p "$TREE/work" "$TREE/project" "$TREE/pipeline-inputs"
 printf 'project-file\n' > "$TREE/project/keep.txt"
 printf 'ro-input\n' > "$TREE/pipeline-inputs/input.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$TREE"
@@ -396,7 +396,7 @@ MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" "
 MAIN_LC_TOKEN="$(printf '%s' "$MAIN_LC_OUT" | json_field token)"
 [ -n "$MAIN_LC_TOKEN" ] || { echo "error: launcher credential create failed" >&2; exit 1; }
 printf '%s\n' "$MAIN_LC_TOKEN" > /tmp/uat-wls-cred-main; chmod 600 /tmp/uat-wls-cred-main
-WSA_ID="$(create_session /tmp/uat-wls-cred-main "$TREE")" \
+WSA_ID="$(create_session /tmp/uat-wls-cred-main "$TREE/work")" \
   || { echo "error: acceptance session creation failed" >&2; exit 1; }
 WSA_TOKEN="$(cat "/tmp/uat-wls-tok-$WSA_ID")"
 acc_ok "acceptance session $WSA_ID with mixed policy tree"
