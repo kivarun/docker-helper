@@ -173,7 +173,32 @@ func runInContainerWithBinds(t *testing.T, securityOpts []string, binds []string
 // checked first: while auditd drains the kernel audit netlink queue, records
 // reach only audit.log, whereas the printk fallback (dmesg, journalctl -k)
 // rate-limits and can silently drop the attributable record.
+//
+// The lookup is a bounded poll, not a single-shot read: the audit sinks may
+// lag the denied operation (auditd/journald flush, printk fallback), and a
+// required proof must wait for the attributable record. A failure dumps the
+// sink diagnostics so the run log identifies the exact transport behavior
+// (absent source, rate-limited fallback, or unattributable records).
 func appArmorDenialLogged(t *testing.T, profileName string) (bool, string) {
+	t.Helper()
+	deadline := time.Now().Add(45 * time.Second)
+	var found bool
+	var denialLine string
+	for {
+		found, denialLine = appArmorDenialLoggedOnce(t, profileName)
+		if found || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !found {
+		appArmorDenialDiagnostics(t, profileName)
+	}
+	return found, denialLine
+}
+
+// appArmorDenialLoggedOnce performs one scan pass over the audit sinks.
+func appArmorDenialLoggedOnce(t *testing.T, profileName string) (bool, string) {
 	t.Helper()
 	sources := [][]string{
 		{"cat", "/var/log/audit/audit.log"},
@@ -192,6 +217,52 @@ func appArmorDenialLogged(t *testing.T, profileName string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// appArmorDenialDiagnostics dumps the attributable-record lookup state so a
+// required-proof failure identifies the sink behavior from the run log:
+// which sources were readable, how many DENIED lines each carries, how many
+// name the profile, and any audit transport rate-limit/backlog markers.
+func appArmorDenialDiagnostics(t *testing.T, profileName string) {
+	t.Helper()
+	sources := []struct {
+		name string
+		argv []string
+	}{
+		{"audit.log", []string{"cat", "/var/log/audit/audit.log"}},
+		{"dmesg", []string{"dmesg"}},
+		{"journalctl", []string{"journalctl", "--no-pager", "-k", "--since", "5 minutes ago"}},
+	}
+	for _, src := range sources {
+		out, err := exec.Command(src.argv[0], src.argv[1:]...).Output()
+		if err != nil {
+			t.Logf("denial lookup diagnostic: %s unavailable: %v", src.name, err)
+			continue
+		}
+		var denied, matching int
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.Contains(line, `apparmor="DENIED"`) {
+				continue
+			}
+			denied++
+			if strings.Contains(line, profileName) {
+				matching++
+			}
+		}
+		t.Logf("denial lookup diagnostic: %s: %d DENIED lines, %d attributable to %s",
+			src.name, denied, matching, profileName)
+	}
+	for _, argv := range [][]string{{"dmesg"}, {"journalctl", "--no-pager", "-k", "--since", "5 minutes ago"}} {
+		out, err := exec.Command(argv[0], argv[1:]...).Output()
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.Contains(line, "rate limit") || strings.Contains(line, "backlog") {
+				t.Logf("denial lookup diagnostic: audit transport: %s", strings.TrimSpace(line))
+			}
+		}
+	}
 }
 
 // liveContainerProcessLabel runs one container carrying the given security
