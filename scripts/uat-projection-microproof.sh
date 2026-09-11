@@ -122,6 +122,71 @@ RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$TOKEN" \
 printf '%s\n' "$RUN_OUT" | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' | tail -20
 echo "MICROPROOF_RUN_RC=$RUN_RC"
 
+# --- 4b. direct bindfs probes (discriminate the mount failure) ---------------
+# The daemon run fails with EACCES and, with dontaudit disabled, produces no
+# AVC at all, so the failure is not a policy denial from the confined daemon
+# domain. These probes isolate which variable carries the EACCES:
+#   probe 1: plain allow_other, unconfined SSH session;
+#   probe 2: production options (allow_other + fixed projection context),
+#            unconfined SSH session;
+#   probe 3: production options inside the daemon's systemd sandbox
+#            (NoNewPrivileges, RestrictNamespaces, MemoryDenyWriteExecute,
+#            docker_helper_t) via a bounded transient unit.
+probe_bindfs() { # label use_context use_sandbox
+  local label="$1" use_ctx="$2" use_sb="$3"
+  local src mp ctx out rc pid
+  src=/opt/uat-a3-probe-src; mp=/run/docker-helper/a3probe-mp
+  ctx=system_u:object_r:docker_helper_ro_projection_t:s0
+  rm -rf "$src" "$mp" /tmp/uat-a3-bindfs-probe.out
+  mkdir -p "$src" "$mp"
+  echo probe > "$src/f"
+  local args=(-f -o allow_other)
+  [ "$use_ctx" = yes ] && args+=(-o "context=$ctx")
+  out=/tmp/uat-a3-bindfs-probe.out
+  echo "PROBE $label: bindfs ${args[*]} $src $mp"
+  if [ "$use_sb" = yes ]; then
+    systemd-run --collect --unit=uat-a3bindfsprobe \
+      --property=NoNewPrivileges=true --property=RestrictNamespaces=true \
+      --property=MemoryDenyWriteExecute=true \
+      --property=SELinuxContext=system_u:system_r:docker_helper_t:s0 \
+      bindfs "${args[@]}" "$src" "$mp" >"$out" 2>&1
+    rc=$?
+    echo "PROBE $label: systemd-run rc=$rc"
+    sleep 2
+    if mount | grep -F "$mp" >/dev/null 2>&1; then
+      echo "PROBE $label: MOUNTED=yes"
+    else
+      echo "PROBE $label: MOUNTED=no"
+      tail -5 "$out" 2>/dev/null | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g'
+      systemctl status uat-a3bindfsprobe.service --no-pager 2>&1 | head -12 || true
+    fi
+    systemctl stop uat-a3bindfsprobe.service >/dev/null 2>&1 || true
+    fusermount3 -u "$mp" >/dev/null 2>&1 || true
+  else
+    bindfs "${args[@]}" "$src" "$mp" >"$out" 2>&1 &
+    pid=$!
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "PROBE $label: MOUNTED=yes"
+      kill "$pid" 2>/dev/null; sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    else
+      echo "PROBE $label: MOUNTED=no"
+      wait "$pid" 2>/dev/null
+      echo "PROBE $label: bindfs rc=$?"
+      tail -5 "$out" 2>/dev/null | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g'
+    fi
+    fusermount3 -u "$mp" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$src" "$mp"
+}
+grep -n 'user_allow_other' /etc/fuse.conf 2>/dev/null || echo "(no user_allow_other line in /etc/fuse.conf)"
+fusermount3 --version 2>&1 || true
+probe_bindfs "1-plain-unconfined" no no
+probe_bindfs "2-context-unconfined" yes no
+probe_bindfs "3-context-daemon-sandbox" yes yes
+echo "PROBES_DONE"
+
 # --- 5. capture the complete evidence ------------------------------------------
 echo "MICROPROOF AVC capture (ausearch --start recent, complete bounded):"
 ausearch -m AVC -m USER_AVC --start recent 2>/dev/null | tail -60 || true

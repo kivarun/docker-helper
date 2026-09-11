@@ -157,10 +157,14 @@ else
   acc_blocked "v2.1.1 baseline RPM install/version failed (see /tmp/uat-mig211-install.log)"
 fi
 
-if docker-helper init --allowed-root "$ALLOWED_ROOT" >/dev/null 2>&1; then
+# The baseline's own init contract requires the allowed-root directory to
+# exist (it is not created implicitly); the /home-based root is created here
+# before the baseline validates it.
+mkdir -p "$ALLOWED_ROOT" || acc_blocked "cannot create the global allowed root $ALLOWED_ROOT"
+if docker-helper init --allowed-root "$ALLOWED_ROOT" >/tmp/uat-mig211-init.log 2>&1; then
   acc_ok "system init on v2.1.1 baseline (path-only global root)"
 else
-  acc_fail "system init failed on v2.1.1 baseline"
+  acc_fail_ctx "system init failed on v2.1.1 baseline" /tmp/uat-mig211-init.log
 fi
 systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
 wait_service_active || acc_fail "v2.1.1 daemon not active (migration gate)"

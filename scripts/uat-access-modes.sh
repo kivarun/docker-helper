@@ -281,18 +281,24 @@ ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 docker pull alpine:3.24 >/dev/null 2>&1 || true
 
 # ---- Release 2.2 orchestrator-shaped fixture tree ----------------------------
+# The Session workspace must be a proper subdirectory of an allowed root, not
+# the root itself (2.2 create-session contract), so every launcher root below
+# hosts a dedicated workspace directory that the scenarios run against.
 TREE="$ALLOWED_ROOT/run-root"
+WS="$TREE/work"
 LEGACY="$ALLOWED_ROOT/legacy-rw"
+LEGACY_WS="$LEGACY/work"
 BUILDROOT="$ALLOWED_ROOT/build-root"
+BUILD_WS="$BUILDROOT/work"
 rm -rf "$TREE" "$LEGACY" "$BUILDROOT"
-mkdir -p "$TREE/project" "$TREE/pipeline-inputs/sub" "$TREE/pipeline-outputs" \
-  "$TREE/global-ro" "$LEGACY" "$BUILDROOT"
-printf 'project-file\n' > "$TREE/project/keep.txt"
-printf 'ro-input\n' > "$TREE/pipeline-inputs/input.txt"
-printf 'sub-write\n' > "$TREE/pipeline-inputs/sub/sub.txt"
-printf 'build-input\n' > "$BUILDROOT/Dockerfile"
-mkdir -p "$BUILDROOT/app"
-printf 'app-src\n' > "$BUILDROOT/app/main.c"
+mkdir -p "$WS/project" "$WS/pipeline-inputs/sub" "$WS/pipeline-outputs" \
+  "$TREE/global-ro" "$LEGACY_WS" "$BUILD_WS"
+printf 'project-file\n' > "$WS/project/keep.txt"
+printf 'ro-input\n' > "$WS/pipeline-inputs/input.txt"
+printf 'sub-write\n' > "$WS/pipeline-inputs/sub/sub.txt"
+printf 'build-input\n' > "$BUILD_WS/Dockerfile"
+mkdir -p "$BUILD_WS/app"
+printf 'app-src\n' > "$BUILD_WS/app/main.c"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$TREE" "$LEGACY" "$BUILDROOT"
 chmod -R u+rwX,go+rX "$TREE" "$LEGACY" "$BUILDROOT"
 
@@ -330,21 +336,21 @@ else
 fi
 
 # P4: principal allowed-root add --access read_only for the RO region.
-if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" >/dev/null 2>&1 \
+if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$WS/pipeline-inputs" >/dev/null 2>&1 \
     && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$TREE/pipeline-inputs" | grep -q 'read_only'; then
+      | grep -F "$WS/pipeline-inputs" | grep -q 'read_only'; then
   acc_ok "P4 principal allowed-root add --access read_only"
 else
   acc_fail "P4 principal allowed-root add --access read_only failed"
 fi
 
 # P5: principal allowed-root set-access (flip and flip back, exact contract).
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$TREE/pipeline-inputs" read_write >/dev/null 2>&1 \
+if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_write >/dev/null 2>&1 \
     && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$TREE/pipeline-inputs" | grep -q 'read_write' \
-    && dh principal allowed-root set-access --system "$PRINCIPAL" "$TREE/pipeline-inputs" read_only >/dev/null 2>&1 \
+      | grep -F "$WS/pipeline-inputs" | grep -q 'read_write' \
+    && dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1 \
     && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$TREE/pipeline-inputs" | grep -q 'read_only'; then
+      | grep -F "$WS/pipeline-inputs" | grep -q 'read_only'; then
   acc_ok "P5 principal allowed-root set-access (read_write -> read_only -> read_only)"
 else
   acc_fail "P5 principal allowed-root set-access failed"
@@ -360,8 +366,8 @@ MAIN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
   '{"name":"main","scope":"restricted","allowed_roots":["'"$TREE"'"]}')"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher 'main' create failed: $MAIN_L_JSON" >&2; exit 1; }
-RICH_BODY="$(printf '{"scope":"restricted","allowed_root_entries":[{"path":"%s","access":"read_write"},{"path":"%s","access":"read_only"},{"path":"%s","access":"read_write"}]}' \
-  "$TREE" "$TREE/pipeline-inputs" "$TREE/pipeline-outputs")"
+RICH_BODY="$(printf '{"scope":"restricted","allowed_root_entries":[{"path":"%s","access":"read_write"},{"path":"%s","access":"read_write"},{"path":"%s","access":"read_only"},{"path":"%s","access":"read_write"}]}' \
+  "$TREE" "$WS/project" "$WS/pipeline-inputs" "$WS/pipeline-outputs")"
 MAIN_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put.out --write-out '%{http_code}' --max-time 5 \
   --unix-socket "$SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' -X PUT -d "$RICH_BODY" \
@@ -370,7 +376,7 @@ MAIN_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put.out --write-out '%{http_
 # is on the line following the path, hence grep -A1.
 if [ "$MAIN_PUT_HTTP" = 200 ] \
     && dh launcher show --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null \
-      | grep -A1 -F "\"path\": \"$TREE/pipeline-inputs\"" | grep -q '"access": "read_only"'; then
+      | grep -A1 -F "\"path\": \"$WS/pipeline-inputs\"" | grep -q '"access": "read_only"'; then
   acc_ok "P6 rich launcher scope replacement (PUT allowed_root_entries, access per entry)"
 else
   acc_fail "P6 rich launcher scope replacement failed (http=$MAIN_PUT_HTTP: $(redact </tmp/uat-am-put.out 2>/dev/null))"
@@ -412,7 +418,7 @@ WIDEN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
 WIDEN_L_ID="$(printf '%s' "$WIDEN_L_JSON" | json_field id)"
 [ -n "$WIDEN_L_ID" ] || { echo "error: launcher 'widen' create failed: $WIDEN_L_JSON" >&2; exit 1; }
 if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
-    "$WIDEN_L_ID" "$TREE/pipeline-inputs" >/dev/null 2>&1; then
+    "$WIDEN_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1; then
   acc_ok "P7 setup: launcher stored a read_write grant on the Principal read_only region"
 else
   acc_fail "P7 setup: launcher could not store the read_write grant"
@@ -424,9 +430,9 @@ SUB_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
 SUB_L_ID="$(printf '%s' "$SUB_L_JSON" | json_field id)"
 [ -n "$SUB_L_ID" ] || { echo "error: launcher 'sub' create failed: $SUB_L_JSON" >&2; exit 1; }
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
-  "$SUB_L_ID" "$TREE/pipeline-inputs" >/dev/null 2>&1 || true
+  "$SUB_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
-  "$SUB_L_ID" "$TREE/pipeline-inputs/sub" >/dev/null 2>&1 || true
+  "$SUB_L_ID" "$WS/pipeline-inputs/sub" >/dev/null 2>&1 || true
 acc_ok "P8 setup: launcher sub carries RW -> RO -> RW transitions"
 
 # buildro: the read-only build policy owner (snapshot with only RO). A
@@ -461,26 +467,26 @@ issue_launcher_credential "$PRINCIPAL" "$BUILD_L_ID" /tmp/uat-am-cred-build \
 # ==============================================================================
 scenario "S: issued Session snapshots (session show)"
 
-SA_ID="$(create_session /tmp/uat-am-cred-main "$TREE")" \
+SA_ID="$(create_session /tmp/uat-am-cred-main "$WS")" \
   || { echo "error: session SA creation failed" >&2; exit 1; }
-SB_ID="$(create_session /tmp/uat-am-cred-widen "$TREE")" \
+SB_ID="$(create_session /tmp/uat-am-cred-widen "$WS")" \
   || { echo "error: session SB creation failed" >&2; exit 1; }
-SC_ID="$(create_session /tmp/uat-am-cred-sub "$TREE")" \
+SC_ID="$(create_session /tmp/uat-am-cred-sub "$WS")" \
   || { echo "error: session SC creation failed" >&2; exit 1; }
-SL_ID="$(create_session /tmp/uat-am-cred-legacy "$LEGACY")" \
+SL_ID="$(create_session /tmp/uat-am-cred-legacy "$LEGACY_WS")" \
   || { echo "error: session SL creation failed" >&2; exit 1; }
-SD_ID="$(create_session /tmp/uat-am-cred-build "$BUILDROOT")" \
+SD_ID="$(create_session /tmp/uat-am-cred-build "$BUILD_WS")" \
   || { echo "error: session SD creation failed" >&2; exit 1; }
 acc_ok "sessions created: main=$SA_ID widen=$SB_ID sub=$SC_ID legacy=$SL_ID build=$SD_ID"
 
-if snapshot_has "$SA_ID" "$TREE/project" read_write \
-    && snapshot_has "$SA_ID" "$TREE/pipeline-inputs" read_only \
-    && snapshot_has "$SA_ID" "$TREE/pipeline-outputs" read_write \
-    && snapshot_has "$SB_ID" "$TREE/pipeline-inputs" read_only \
-    && snapshot_has "$SC_ID" "$TREE/pipeline-inputs" read_only \
-    && snapshot_has "$SC_ID" "$TREE/pipeline-inputs/sub" read_write \
-    && snapshot_has "$SL_ID" "$LEGACY" read_write \
-    && snapshot_has "$SD_ID" "$BUILDROOT" read_only; then
+if snapshot_has "$SA_ID" "$WS/project" read_write \
+    && snapshot_has "$SA_ID" "$WS/pipeline-inputs" read_only \
+    && snapshot_has "$SA_ID" "$WS/pipeline-outputs" read_write \
+    && snapshot_has "$SB_ID" "$WS/pipeline-inputs" read_only \
+    && snapshot_has "$SC_ID" "$WS/pipeline-inputs" read_only \
+    && snapshot_has "$SC_ID" "$WS/pipeline-inputs/sub" read_write \
+    && snapshot_has "$SL_ID" "$LEGACY_WS" read_write \
+    && snapshot_has "$SD_ID" "$BUILD_WS" read_only; then
   acc_ok "P8 issued snapshots match the 2.2 hierarchy (session show PATH/ACCESS)"
 else
   acc_fail "P8 issued snapshot content wrong (SA: $(show_snapshot "$SA_ID" | tr '\n' '; '))"
@@ -496,7 +502,7 @@ RW_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
   dh run --image alpine:3.24 --mount project:/mnt/project -- \
   sh -ec 'echo rw-write > /mnt/project/written.txt && cat /mnt/project/keep.txt')" \
   || acc_fail "1 project writable mount failed: $RW_OUT"
-if [ -f "$TREE/project/written.txt" ] && [ "$(cat "$TREE/project/written.txt")" = "rw-write" ]; then
+if [ -f "$WS/project/written.txt" ] && [ "$(cat "$WS/project/written.txt")" = "rw-write" ]; then
   acc_ok "1 project mounted read_write and the write persisted"
 else
   acc_fail "1 project write did not persist to the host"
@@ -516,7 +522,7 @@ if expect_read_only_root "$SA_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/
 else
   acc_fail "3 writable pipeline-inputs refusal wrong (base: $RESIDUE_BASE)"
 fi
-[ ! -e "$TREE/pipeline-inputs/forbidden.txt" ] \
+[ ! -e "$WS/pipeline-inputs/forbidden.txt" ] \
   || acc_fail "3 forbidden host-side file was created"
 
 # ==============================================================================
@@ -545,8 +551,8 @@ printf '%s\n' "$P5_OUT" | grep -q 'PROJECT-RW-OK' \
 # scenario 6: symlink alias cannot widen the issued mode
 # ==============================================================================
 scenario "6: symlink alias cannot widen access"
-ln -sfn pipeline-inputs "$TREE/alias-inputs"
-chown -h "$PRINCIPAL:$PRINCIPAL" "$TREE/alias-inputs"
+ln -sfn pipeline-inputs "$WS/alias-inputs"
+chown -h "$PRINCIPAL:$PRINCIPAL" "$WS/alias-inputs"
 RESIDUE_BASE="$(residue_state)"
 if expect_read_only_root "$SA_TOKEN" alias-inputs /mnt/alias 'echo x > /mnt/alias/forbidden.txt' "$RESIDUE_BASE"; then
   acc_ok "6 writable symlink alias refused with read_only_root (canonical source keeps read_only)"
@@ -582,7 +588,7 @@ SUB_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SC_TOKEN" \
   dh run --image alpine:3.24 --mount pipeline-inputs/sub:/mnt/sub -- \
   sh -ec 'echo sub-write > /mnt/sub/new.txt && cat /mnt/sub/sub.txt')" \
   || acc_fail "8 sub read_write mount failed: $SUB_OUT"
-if [ -f "$TREE/pipeline-inputs/sub/new.txt" ] && [ "$(cat "$TREE/pipeline-inputs/sub/new.txt")" = "sub-write" ]; then
+if [ -f "$WS/pipeline-inputs/sub/new.txt" ] && [ "$(cat "$WS/pipeline-inputs/sub/new.txt")" = "sub-write" ]; then
   acc_ok "8 most-specific sub read_write honored below the RO parent"
 else
   acc_fail "8 sub write did not persist (SC: $(show_snapshot "$SC_ID" | tr '\n' '; '))"
@@ -619,12 +625,12 @@ printf '%s\n' "$LEGACY_OUT" | grep -q 'LEGACY-RW-OK' \
 # scenario 10: snapshot immutability across parent policy mutations
 # ==============================================================================
 scenario "10: existing Session keeps its snapshot; new Sessions get the new mode"
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$TREE/project" read_only >/dev/null 2>&1; then
+if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/project" read_only >/dev/null 2>&1; then
   acc_ok "10 parent policy mutation: project narrowed to read_only"
 else
   acc_fail "10 principal set-access for the immutability pair failed"
 fi
-SA2_ID="$(create_session /tmp/uat-am-cred-main "$TREE")" \
+SA2_ID="$(create_session /tmp/uat-am-cred-main "$WS")" \
   || { echo "error: session SA2 creation failed" >&2; exit 1; }
 SA2_TOKEN="$(cat "/tmp/uat-am-tok-$SA2_ID")"
 IMM_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
@@ -640,13 +646,13 @@ if expect_read_only_root "$SA2_TOKEN" project /mnt/project 'echo x > /mnt/projec
 else
   acc_fail "10 new Session did not receive the narrowed mode (base: $RESIDUE_BASE)"
 fi
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$TREE/project" read_write >/dev/null 2>&1; then
-  if snapshot_has "$SA2_ID" "$TREE/project" read_only; then
+if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/project" read_write >/dev/null 2>&1; then
+  if snapshot_has "$SA2_ID" "$WS/project" read_only; then
     acc_ok "10 issued snapshot is immutable: SA2 keeps read_only after the parent was restored"
   else
     acc_fail "10 issued snapshot changed after a parent restore (immutability broken)"
   fi
-  SA3_ID="$(create_session /tmp/uat-am-cred-main "$TREE")" \
+  SA3_ID="$(create_session /tmp/uat-am-cred-main "$WS")" \
     || { echo "error: session SA3 creation failed" >&2; exit 1; }
   SA3_TOKEN="$(cat "/tmp/uat-am-tok-$SA3_ID")"
   SA3_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA3_TOKEN" \
@@ -664,17 +670,17 @@ fi
 # ==============================================================================
 scenario "B: build over a read-only snapshot"
 SD_TOKEN="$(cat "/tmp/uat-am-tok-$SD_ID")"
-SNAP_BEFORE="$(cd "$BUILDROOT" && find . -printf '%p %m %T@\n' 2>/dev/null | sort)"
+SNAP_BEFORE="$(cd "$BUILD_WS" && find . -printf '%p %m %T@\n' 2>/dev/null | sort)"
 BUILD_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SD_TOKEN" \
   dh build --context . --dockerfile Dockerfile --image uat-am-robuild:2.2 2>&1)" \
   || acc_fail "B1 build over the read-only snapshot failed: $(printf '%s\n' "$BUILD_OUT" | redact | tail -3)"
-SNAP_AFTER="$(cd "$BUILDROOT" && find . -printf '%p %m %T@\n' 2>/dev/null | sort)"
+SNAP_AFTER="$(cd "$BUILD_WS" && find . -printf '%p %m %T@\n' 2>/dev/null | sort)"
 if [ "$SNAP_BEFORE" = "$SNAP_AFTER" ]; then
   acc_ok "B2 source tree unchanged after the build (content, modes, mtimes)"
 else
   acc_fail "B2 source tree changed during the read-only build"
 fi
-if snapshot_has "$SD_ID" "$BUILDROOT" read_only \
+if snapshot_has "$SD_ID" "$BUILD_WS" read_only \
     && ! show_snapshot "$SD_ID" | grep -q read_write; then
   acc_ok "B3 build needed no read_write authority (snapshot carries only read_only)"
 else
@@ -715,7 +721,7 @@ else
     acc_fail "A run.start audit facts wrong: $START_LINE"
   fi
   REJECT_LINE="$(printf '%s\n' "$AUDIT_JSON" | grep '"event":"run.rejected"' | grep read_only_root | tail -1 || true)"
-  if printf '%s\n' "$REJECT_LINE" | grep -q "\"resolved_source\":\"$TREE/pipeline-inputs\"" \
+  if printf '%s\n' "$REJECT_LINE" | grep -q "\"resolved_source\":\"$WS/pipeline-inputs\"" \
       && printf '%s\n' "$REJECT_LINE" | grep -q '"access":"read_only"' \
       && printf '%s\n' "$REJECT_LINE" | grep -q '"writable_allowed":false'; then
     acc_ok "A run.rejected carries the offending canonical exposure facts"

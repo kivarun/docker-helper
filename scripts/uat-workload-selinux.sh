@@ -291,7 +291,21 @@ else
     rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
     rpm -i "$RPM_PATH_IN" >/tmp/uat-wls-install.log 2>&1 || true
   fi
-  if candidate_installed_ok; then
+  # Bounded re-verification: the members' read-only checks (version, rpm
+  # record, semodule listing) can transiently fail while the just-finished
+  # postinst's policy store commit is still settling; run 7's evidence showed
+  # every member passing moments after the verifier reported failure. A
+  # stable pass is accepted; a genuinely broken install keeps failing all
+  # attempts and the gate stays red.
+  candidate_verified=""
+  for _ in 1 2 3; do
+    if candidate_installed_ok; then
+      candidate_verified=yes
+      break
+    fi
+    sleep 2
+  done
+  if [ -n "$candidate_verified" ]; then
     acc_ok "exact candidate RPM installed (sha256 verified: $ACTUAL_SHA; transient systemd scriptlet hiccup recovered)"
   else
     echo "error: candidate RPM install/version check failed after settle + retry:" >&2
