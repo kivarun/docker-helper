@@ -42,8 +42,8 @@ const (
 	selinuxROProjectionContext = "system_u:object_r:" + selinuxROProjectionType + ":s0"
 	// bindfsBinary is the explicit SELinux system-mode runtime dependency.
 	bindfsBinary = "bindfs"
-	// selinuxSELinuxXattr carries the effective SELinux label.
-	selinuxSELinuxXattr = "security.selinux"
+	// selinuxXattrName carries the effective SELinux label.
+	selinuxXattrName = "security.selinux"
 	// selinuxDevFusePath is the FUSE device the projection worker needs.
 	selinuxDevFusePath = "/dev/fuse"
 )
@@ -174,7 +174,7 @@ func unmountOwnedStalePin(path string) error {
 
 func getxattrSELinux(path string) (string, error) {
 	buf := make([]byte, 256)
-	size, err := unix.Getxattr(path, selinuxSELinuxXattr, buf)
+	size, err := unix.Getxattr(path, selinuxXattrName, buf)
 	if err != nil {
 		return "", fmt.Errorf("cannot read SELinux context of %s: %w", path, err)
 	}

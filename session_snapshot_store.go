@@ -54,7 +54,7 @@ const sessionFilesystemSnapshotMetaDDL = `
 
 // sessionFilesystemSnapshotMetaColumns is the canonical column contract of
 // the snapshot integrity metadata table.
-var sessionFilesystemSnapshotMetaColumns = []allowedRootsColumnSpec{
+var sessionFilesystemSnapshotMetaColumns = []tableColumnSpec{
 	{"session_id", "TEXT", true, 1},
 	{"entry_count", "INTEGER", true, 0},
 	{"digest", "TEXT", true, 0},
@@ -76,7 +76,7 @@ const (
 // sessionSnapshotColumns is the canonical column contract of the snapshot
 // entries table: exact declared types, NOT NULL, and primary-key positions
 // (session_id, position) as SQLite reports them through pragma_table_info.
-var sessionSnapshotColumns = []allowedRootsColumnSpec{
+var sessionSnapshotColumns = []tableColumnSpec{
 	{"session_id", "TEXT", true, 1},
 	{"position", "INTEGER", true, 2},
 	{"path", "TEXT", true, 0},
@@ -123,42 +123,42 @@ func classifySessionFilesystemSnapshotSchema(db *sql.DB) (sessionSnapshotSchemaC
 		return sessionSnapshotSchemaUnsupported, fmt.Errorf("cannot inspect %s table presence: %w", metaTable, err)
 	}
 	if metaTableCount == 0 {
-		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+		return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(table,
 			"snapshot integrity metadata table is absent after the cutover")
 	}
 
-	cols, err := readAllowedRootsColumns(db, table)
+	cols, err := readTableColumns(db, table)
 	if err != nil {
 		return sessionSnapshotSchemaUnsupported, err
 	}
-	if err := verifyAllowedRootsColumns(table, cols, sessionSnapshotColumns); err != nil {
+	if err := verifyTableColumns(table, cols, sessionSnapshotColumns); err != nil {
 		return sessionSnapshotSchemaUnsupported, err
 	}
 
-	fks, err := readAllowedRootsForeignKeys(db, table)
+	fks, err := readTableForeignKeys(db, table)
 	if err != nil {
 		return sessionSnapshotSchemaUnsupported, err
 	}
 	if len(fks) != 1 ||
-		fks[0] != (allowedRootsFK{table: "sessions", from: "session_id", to: "id", onDelete: "CASCADE"}) {
-		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+		fks[0] != (tableForeignKey{table: "sessions", from: "session_id", to: "id", onDelete: "CASCADE"}) {
+		return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(table,
 			"expected exactly one session_id -> sessions(id) foreign key with ON DELETE CASCADE")
 	}
 
-	metaCols, err := readAllowedRootsColumns(db, metaTable)
+	metaCols, err := readTableColumns(db, metaTable)
 	if err != nil {
 		return sessionSnapshotSchemaUnsupported, err
 	}
-	if err := verifyAllowedRootsColumns(metaTable, metaCols, sessionFilesystemSnapshotMetaColumns); err != nil {
+	if err := verifyTableColumns(metaTable, metaCols, sessionFilesystemSnapshotMetaColumns); err != nil {
 		return sessionSnapshotSchemaUnsupported, err
 	}
-	metaFKs, err := readAllowedRootsForeignKeys(db, metaTable)
+	metaFKs, err := readTableForeignKeys(db, metaTable)
 	if err != nil {
 		return sessionSnapshotSchemaUnsupported, err
 	}
 	if len(metaFKs) != 1 ||
-		metaFKs[0] != (allowedRootsFK{table: "sessions", from: "session_id", to: "id", onDelete: "CASCADE"}) {
-		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(metaTable,
+		metaFKs[0] != (tableForeignKey{table: "sessions", from: "session_id", to: "id", onDelete: "CASCADE"}) {
+		return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(metaTable,
 			"expected exactly one session_id -> sessions(id) foreign key with ON DELETE CASCADE")
 	}
 
@@ -181,7 +181,7 @@ func classifySessionFilesystemSnapshotSchema(db *sql.DB) (sessionSnapshotSchemaC
 		}
 		if partial == 1 {
 			indexRows.Close()
-			return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table, "unexpected partial unique index")
+			return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(table, "unexpected partial unique index")
 		}
 		indexCols, err := credentialsIndexColumns(db, name)
 		if err != nil {
@@ -196,11 +196,11 @@ func classifySessionFilesystemSnapshotSchema(db *sql.DB) (sessionSnapshotSchemaC
 	}
 	indexRows.Close()
 	if len(uniqueIndexes) != 1 {
-		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+		return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(table,
 			fmt.Sprintf("expected exactly one unique (session_id, path) index, found %d", len(uniqueIndexes)))
 	}
 	if len(uniqueIndexes[0]) != 2 || uniqueIndexes[0][0] != "session_id" || uniqueIndexes[0][1] != "path" {
-		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+		return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(table,
 			"unique index is not (session_id, path)")
 	}
 
@@ -211,11 +211,11 @@ func classifySessionFilesystemSnapshotSchema(db *sql.DB) (sessionSnapshotSchemaC
 		return sessionSnapshotSchemaUnsupported, fmt.Errorf("cannot inspect %s table definition: %w", table, err)
 	}
 	if !ddl.Valid || ddl.String == "" {
-		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table, "table definition unavailable")
+		return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(table, "table definition unavailable")
 	}
 	checks := sqliteCheckExpressions(ddl.String)
 	if len(checks) != 2 {
-		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+		return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(table,
 			fmt.Sprintf("expected exactly two check constraints, found %d", len(checks)))
 	}
 	checkSet := map[string]bool{}
@@ -223,7 +223,7 @@ func classifySessionFilesystemSnapshotSchema(db *sql.DB) (sessionSnapshotSchemaC
 		checkSet[expr] = true
 	}
 	if !checkSet[sessionSnapshotPositionCheck] || !checkSet[allowedRootAccessCheck] {
-		return sessionSnapshotSchemaUnsupported, unsupportedAllowedRootsSchema(table,
+		return sessionSnapshotSchemaUnsupported, unsupportedTableSchema(table,
 			"non-canonical check constraints (want the position bound and the access vocabulary check)")
 	}
 	return sessionSnapshotSchemaCanonical, nil
