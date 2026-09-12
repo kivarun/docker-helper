@@ -615,25 +615,94 @@ fi
 # SE fcontext coverage: the external issued RW tree carries the helper-owned
 # persistent coverage while the session is live; the ceiling parent never
 # gets a rule merely by existing.
-se_fcontext_has_rule() {
-  local pattern="$1"
-  semanage fcontext -l -C 2>/dev/null | grep -F -- "$pattern" >/dev/null
+# SELinux fcontext/label inventory assertions (fail-closed tri-state). The
+# tri-state inventory primitives (PRESENT/ABSENT/ERROR) are owned by the
+# shared lib (scripts/uat-regression-lib.sh): an unavailable inventory
+# (semanage failure, malformed listing, failed context read) is a failure,
+# never evidence of absence, of no-residue, or of restoration.
+se_rules_dump() {
+  selinux_fcontext_patterns 2>/dev/null || printf '(inventory unavailable)'
 }
-if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
-  acc_ok "SE external RW tree carries helper-owned persistent fcontext coverage"
-else
-  acc_fail "SE external RW tree has no persistent fcontext coverage: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -3)"
-fi
-if se_fcontext_has_rule "$SE_OPT(/.*)?"; then
-  acc_fail "SE the ceiling parent $SE_OPT must not gain coverage merely by being authorized (only issued trees do)"
-else
-  acc_ok "SE ceiling parent has no MAC state from authorization alone"
-fi
-SE_LABEL="$(ls -Zd "$SE_CACHE" 2>/dev/null | awk '{print $1}')"
-case "$SE_LABEL" in
-  *docker_helper_workspace_t*) acc_ok "SE external RW tree actually relabeled to docker_helper_workspace_t" ;;
-  *) acc_fail "SE external RW tree label wrong: '$SE_LABEL'" ;;
-esac
+se_expect_rule_present() { # PATTERN OK_LABEL
+  local pattern="$1" label="$2" rc
+  selinux_rule_state "$pattern"; rc=$?
+  case "$rc" in
+    0) acc_ok "$label" ;;
+    1) acc_fail "$label: rule '$pattern' is ABSENT (rules: $(se_rules_dump | grep -F -- "$pattern" | head -3 || true))" ;;
+    *) acc_fail "$label: fcontext inventory unavailable (semanage failed); absence is never assumed" ;;
+  esac
+}
+se_expect_rule_absent() { # PATTERN OK_LABEL FAIL_LABEL
+  local pattern="$1" ok_label="$2" fail_label="$3" rc
+  selinux_rule_state "$pattern"; rc=$?
+  case "$rc" in
+    0) acc_fail "$fail_label (rules: $(se_rules_dump | grep -F -- "$pattern" | head -3 || true))" ;;
+    1) acc_ok "$ok_label" ;;
+    *) acc_fail "$ok_label: fcontext inventory unavailable (semanage failed); absence is never assumed" ;;
+  esac
+}
+se_expect_rule_line_equal() { # PATTERN WANT_LINE OK_LABEL FAIL_LABEL
+  local pattern="$1" want="$2" ok_label="$3" fail_label="$4" line rc
+  line="$(selinux_rule_line "$pattern")"; rc=$?
+  case "$rc" in
+    0) if [ "$line" = "$want" ]; then
+         acc_ok "$ok_label"
+       else
+         acc_fail "$fail_label (rule line changed: before '$want' after '$line')"
+       fi ;;
+    1) acc_fail "$fail_label: rule '$pattern' is ABSENT (byte-for-byte survival unprovable)" ;;
+    *) acc_fail "$ok_label: fcontext inventory unavailable (semanage failed)" ;;
+  esac
+}
+se_expect_context_type() { # PATH WANT OK_LABEL FAIL_LABEL
+  local path="$1" want="$2" ok_label="$3" fail_label="$4" type rc
+  type="$(selinux_context_type "$path")"; rc=$?
+  case "$rc" in
+    0) if [ "$type" = "$want" ]; then
+         acc_ok "$ok_label"
+       else
+         acc_fail "$fail_label (type '$type', want '$want')"
+       fi ;;
+    *) acc_fail "$fail_label: SELinux context inventory unavailable for $path (context read failed)" ;;
+  esac
+}
+se_expect_context_type_not() { # PATH UNWANTED OK_LABEL FAIL_LABEL
+  local path="$1" unwanted="$2" ok_label="$3" fail_label="$4" type rc
+  type="$(selinux_context_type "$path")"; rc=$?
+  case "$rc" in
+    0) if [ "$type" = "$unwanted" ]; then
+         acc_fail "$fail_label (type '$type')"
+       else
+         acc_ok "$ok_label (type '$type')"
+       fi ;;
+    *) acc_fail "$ok_label: SELinux context inventory unavailable for $path (context read failed)" ;;
+  esac
+}
+# se_only_rule_for asserts the inventory contains exactly one rule mentioning
+# FRAGMENT and that it equals EXPECTED_PATTERN. Inventory failure is a
+# failure, never a pass.
+se_only_rule_for() { # FRAGMENT EXPECTED_PATTERN OK_LABEL FAIL_LABEL
+  local fragment="$1" expected="$2" ok_label="$3" fail_label="$4" rules matches count rc
+  rules="$(selinux_fcontext_patterns)"; rc=$?
+  case "$rc" in
+    0) ;;
+    *) acc_fail "$ok_label: fcontext inventory unavailable (semanage failed)"; return ;;
+  esac
+  matches="$(printf '%s\n' "$rules" | grep -F -- "$fragment" || true)"
+  count="$(printf '%s\n' "$matches" | grep -c .)"
+  if [ "$count" -eq 1 ] && [ "$matches" = "$expected" ]; then
+    acc_ok "$ok_label"
+  else
+    acc_fail "$fail_label (rules mentioning '$fragment': ${matches:-none})"
+  fi
+}
+se_expect_rule_present "$SE_CACHE(/.*)?" "SE external RW tree carries helper-owned persistent fcontext coverage"
+se_expect_rule_absent "$SE_OPT(/.*)?" \
+  "SE ceiling parent has no MAC state from authorization alone" \
+  "SE the ceiling parent $SE_OPT must not gain coverage merely by being authorized (only issued trees do)"
+se_expect_context_type "$SE_CACHE" docker_helper_workspace_t \
+  "SE external RW tree actually relabeled to docker_helper_workspace_t" \
+  "SE external RW tree label wrong"
 
 # SE share: a second Session issuing the same external tree must prevent
 # early release of the coverage when the first Session is deleted.
@@ -644,11 +713,9 @@ SE2_ID="$(printf '%s' "$SE2_OUT" | json_field id)"
 if [ -n "$SE2_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE2_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE_ID" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
-    acc_ok "SE shared external tree survives the first Session deletion (second Session keeps it)"
-  else
-    acc_fail "SE external fcontext coverage was released while a second Session still issues the tree"
-  fi
+  se_expect_rule_present "$SE_CACHE(/.*)?" \
+    "SE shared external tree survives the first Session deletion (second Session keeps it)" \
+    "SE external fcontext coverage was released while a second Session still issues the tree"
   SE2_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE2_ID")" \
     dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
     sh -ec 'echo se2-write > /cache/se2.txt' >/tmp/uat-wls-se2.log 2>&1; echo $?)"
@@ -658,16 +725,12 @@ if [ -n "$SE2_ID" ]; then
     acc_fail "SE second Session lost write access to the shared tree (ec=$SE2_W)"
   fi
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE2_ID" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
-    acc_fail "SE external fcontext coverage must be relinquished after the last Session released it"
-  else
-    acc_ok "SE external fcontext coverage relinquished after the last Session deletion"
-  fi
-  SE_RELBL="$(ls -Zd "$SE_CACHE" 2>/dev/null | awk '{print $1}')"
-  case "$SE_RELBL" in
-    *docker_helper_workspace_t*) acc_fail "SE external tree label not restored after the last Session deletion: '$SE_RELBL'" ;;
-    *) acc_ok "SE external tree labels restored after the last Session deletion" ;;
-  esac
+  se_expect_rule_absent "$SE_CACHE(/.*)?" \
+    "SE external fcontext coverage relinquished after the last Session deletion" \
+    "SE external fcontext coverage must be relinquished after the last Session released it"
+  se_expect_context_type_not "$SE_CACHE" docker_helper_workspace_t \
+    "SE external tree labels restored after the last Session deletion" \
+    "SE external tree label not restored after the last Session deletion"
   rm -f "$SE_CACHE/se2.txt"
 else
   acc_fail "SE share scenario setup failed: $(printf '%s' "$SE2_OUT" | redact | tail -2)"
@@ -683,17 +746,16 @@ if [ -n "$SE3_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE3_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE3_ID"; chmod 600 "/tmp/uat-wls-tok-$SE3_ID"
   # The projection collapses the descendant into the issued ancestor: only
   # the ancestor boundary is prepared.
-  if se_fcontext_has_rule "$SE_OPT(/.*)?" && ! se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
-    acc_ok "SE nested issued roots collapse to the single ancestor MAC boundary"
-  else
-    acc_fail "SE nested issued roots did not collapse (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -3))"
-  fi
+  se_expect_rule_present "$SE_OPT(/.*)?" \
+    "SE nested issued roots collapse to the single ancestor MAC boundary" \
+    "SE nested issued roots did not collapse"
+  se_expect_rule_absent "$SE_CACHE(/.*)?" \
+    "SE the collapsed descendant carries no independent rule" \
+    "SE nested issued roots did not collapse"
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE3_ID" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_OPT(/.*)?"; then
-    acc_fail "SE ancestor boundary must be removed after the only session released it"
-  else
-    acc_ok "SE ancestor boundary removed after the only session deletion"
-  fi
+  se_expect_rule_absent "$SE_OPT(/.*)?" \
+    "SE ancestor boundary removed after the only session deletion" \
+    "SE ancestor boundary must be removed after the only session released it"
   rm -f "$SE_CACHE/written.txt" 2>/dev/null || true
 else
   acc_fail "SE overlap scenario setup failed: $(printf '%s' "$SE3_OUT" | redact | tail -2)"
@@ -713,30 +775,28 @@ if [ -n "$SE4_ID" ] && [ -n "$SE5_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE4_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE4_ID"; chmod 600 "/tmp/uat-wls-tok-$SE4_ID"
   printf '%s\n' "$(printf '%s' "$SE5_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE5_ID"; chmod 600 "/tmp/uat-wls-tok-$SE5_ID"
   # Both boundaries exist (created in reverse order: child, then parent).
-  if se_fcontext_has_rule "$SE_CACHE(/.*)?" && se_fcontext_has_rule "$SE_OPT(/.*)?"; then
-    acc_ok "SE reverse-order issuance prepares both disjoint boundaries"
-  else
-    acc_fail "SE reverse-order issuance boundaries missing (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -4))"
-  fi
+  se_expect_rule_present "$SE_CACHE(/.*)?" \
+    "SE reverse-order issuance prepares both disjoint boundaries" \
+    "SE reverse-order issuance boundaries missing"
+  se_expect_rule_present "$SE_OPT(/.*)?" \
+    "SE reverse-order issuance prepares both disjoint boundaries" \
+    "SE reverse-order issuance boundaries missing"
   # Delete the child session first: the parent boundary stays.
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE4_ID" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_OPT(/.*)?"; then
-    acc_ok "SE child deletion first keeps the parent boundary"
-  else
-    acc_fail "SE child deletion removed the parent boundary needed by the parent session"
-  fi
+  se_expect_rule_present "$SE_OPT(/.*)?" \
+    "SE child deletion first keeps the parent boundary" \
+    "SE child deletion removed the parent boundary needed by the parent session"
   # Delete the parent session: everything is released and restored.
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE5_ID" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_OPT(/.*)?" || se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
-    acc_fail "SE final deletion leaves fcontext residue (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -4))"
-  else
-    acc_ok "SE final deletion relinquishes every external boundary"
-  fi
-  SE_RELBL2="$(ls -Zd "$SE_OPT" 2>/dev/null | awk '{print $1}')"
-  case "$SE_RELBL2" in
-    *docker_helper_workspace_t*) acc_fail "SE parent tree label not restored after final deletion: '$SE_RELBL2'" ;;
-    *) acc_ok "SE parent tree labels restored after final deletion" ;;
-  esac
+  se_expect_rule_absent "$SE_OPT(/.*)?" \
+    "SE final deletion relinquishes every external boundary" \
+    "SE final deletion leaves fcontext residue"
+  se_expect_rule_absent "$SE_CACHE(/.*)?" \
+    "SE final deletion relinquishes every external boundary" \
+    "SE final deletion leaves fcontext residue"
+  se_expect_context_type_not "$SE_OPT" docker_helper_workspace_t \
+    "SE parent tree labels restored after final deletion" \
+    "SE parent tree label not restored after final deletion"
 else
   acc_fail "SE reverse overlap setup failed: $(printf '%s' "$SE4_OUT" "$SE5_OUT" | redact | tail -2)"
 fi
@@ -778,11 +838,9 @@ if [ -n "$SE6_ID" ]; then
     acc_fail "SE regular-file root lost write access after an unrelated boundary mutation (ec=$SE6_W2)"
   fi
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE6_ID" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_FILE"; then
-    acc_fail "SE regular-file boundary must be relinquished after deletion"
-  else
-    acc_ok "SE regular-file boundary relinquished after deletion"
-  fi
+  se_expect_rule_absent "$SE_FILE" \
+    "SE regular-file boundary relinquished after deletion" \
+    "SE regular-file boundary must be relinquished after deletion"
   printf 'se-file-src\n' > "$SE_FILE"
 else
   acc_fail "SE regular-file scenario setup failed: $(printf '%s' "$SE6_OUT" | redact | tail -2)"
@@ -805,14 +863,12 @@ SE8_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
 SE8_ID="$(printf '%s' "$SE8_OUT" | json_field id)"
 if [ -n "$SE8_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE8_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE8_ID"; chmod 600 "/tmp/uat-wls-tok-$SE8_ID"
-  SE8_A_LABEL="$(ls -Zd "$SE_SIB/a" 2>/dev/null | awk '{print $1}')"
-  SE8_B_LABEL="$(ls -Zd "$SE_SIB/b" 2>/dev/null | awk '{print $1}')"
-  case "$SE8_A_LABEL$SE8_B_LABEL" in
-    *docker_helper_workspace_t*docker_helper_workspace_t*)
-      acc_ok "SE both sibling issued trees relabeled under the operator covering rule" ;;
-    *)
-      acc_fail "SE sibling coverage skipped a concrete issued tree (a='$SE8_A_LABEL' b='$SE8_B_LABEL')" ;;
-  esac
+  se_expect_context_type "$SE_SIB/a" docker_helper_workspace_t \
+    "SE both sibling issued trees relabeled under the operator covering rule" \
+    "SE sibling coverage skipped the concrete issued tree $SE_SIB/a"
+  se_expect_context_type "$SE_SIB/b" docker_helper_workspace_t \
+    "SE both sibling issued trees relabeled under the operator covering rule" \
+    "SE sibling coverage skipped the concrete issued tree $SE_SIB/b"
   SE8_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE8_ID")" \
     dh run --image alpine:3.24 --mount "$SE_SIB/a:/sib_a" --mount "$SE_SIB/b:/sib_b" -- \
     sh -ec 'echo sib-a > /sib_a/a.txt && echo sib-b > /sib_b/b.txt' >/tmp/uat-wls-se8.log 2>&1; echo $?)"
@@ -822,25 +878,19 @@ if [ -n "$SE8_ID" ]; then
   else
     acc_fail "SE sibling write failed (ec=$SE8_W): $(redact </tmp/uat-wls-se8.log | tail -2)"
   fi
-  if se_fcontext_has_rule "$SE_SIB(/.*)?" && ! semanage fcontext -l -C 2>/dev/null | grep -F -- "$SE_SIB" | grep -vF "$SE_SIB(/.*)?" >/dev/null; then
-    acc_ok "SE sibling coverage uses the operator rule without claiming helper state"
-  else
-    acc_fail "SE sibling coverage created or claimed extra state (rules: $(semanage fcontext -l -C 2>/dev/null | grep -F "$SE_SIB" | head -3))"
-  fi
+  se_only_rule_for "$SE_SIB" "$SE_SIB(/.*)?" \
+    "SE sibling coverage uses the operator rule without claiming helper state" \
+    "SE sibling coverage created or claimed extra state"
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE8_ID" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_SIB(/.*)?"; then
-    acc_ok "SE operator-owned sibling coverage rule survives the session deletion"
-  else
-    acc_fail "SE helper deleted the operator-owned sibling rule"
-  fi
+  se_expect_rule_present "$SE_SIB(/.*)?" \
+    "SE operator-owned sibling coverage rule survives the session deletion" \
+    "SE helper deleted the operator-owned sibling rule"
   # The covering coverage is operator state: the helper must neither delete
   # the rule nor undo the operator's labeling. The trailing script cleanup
   # below restores the environment baseline.
-  SE8_A_AFTER="$(ls -Zd "$SE_SIB/a" 2>/dev/null | awk '{print $1}')"
-  case "$SE8_A_AFTER" in
-    *docker_helper_workspace_t*) acc_ok "SE operator label state untouched by helper cleanup" ;;
-    *) acc_fail "SE helper interfered with operator label state after deletion: '$SE8_A_AFTER'" ;;
-  esac
+  se_expect_context_type "$SE_SIB/a" docker_helper_workspace_t \
+    "SE operator label state untouched by helper cleanup" \
+    "SE helper interfered with operator label state after deletion"
   rm -f "$SE_SIB/a/a.txt" "$SE_SIB/b/b.txt" 2>/dev/null || true
 else
   acc_fail "SE sibling coverage scenario setup failed: $(printf '%s' "$SE8_OUT" | redact | tail -2)"
@@ -848,48 +898,104 @@ fi
 semanage fcontext -d "$SE_SIB(/.*)?" >/dev/null 2>&1 || true
 restorecon -R "$SE_SIB" >/dev/null 2>&1 || true
 
-# SE operator sibling rule (review A2 live proof): a helper-owned directory
-# boundary and an operator-owned compatible file rule share one stem;
-# session cleanup deletes only the helper shape and the operator rule
-# survives byte-for-byte.
+# SE operator same-stem ownership (review A2 live proof): a helper-owned rule
+# and an operator-owned rule share ONE canonical boundary stem in BOTH legal
+# rule shapes — the exact-file form (/path) and the recursive-directory form
+# (/path(/.*)?) — and the operator mutates the object kind at that stem before
+# cleanup, so cleanup cannot derive the owned shape from mutable current host
+# state. Cleanup must delete only the helper's own proven shape; the operator
+# rule survives byte-for-byte; an inventory failure is never read as absence.
+# Both directions are proven:
+#   SE9A helper recursive-directory rule  + operator exact-file rule;
+#   SE9B helper exact-file rule           + operator recursive-directory rule.
 SE_MIX="$SE_OPT/mix"
+rm -rf "$SE_MIX"
 mkdir -p "$SE_MIX"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_MIX" 2>/dev/null || true
-SE_MIX_NOTE="$SE_MIX/note.txt"
-SE9_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE9A_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
   --workspace "$SE_WS" --json \
   --filesystem-root "$SE_MIX=read_write" 2>&1 || true)"
-SE9_ID="$(printf '%s' "$SE9_OUT" | json_field id)"
-if [ -n "$SE9_ID" ]; then
-  if se_fcontext_has_rule "$SE_MIX(/.*)?"; then
-    acc_ok "SE helper owns its directory boundary rule before the operator add"
-  else
-    acc_fail "SE helper directory boundary rule missing (rules: $(semanage fcontext -l -C 2>/dev/null | grep -F "$SE_MIX" | head -3))"
-  fi
-  # Operator adds a same-stem, other-shape compatible rule.
-  semanage fcontext -a -t docker_helper_workspace_t "$SE_MIX_NOTE" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_MIX_NOTE"; then
-    acc_ok "SE operator added a same-stem file rule next to the helper directory rule"
-  else
-    acc_fail "SE operator same-stem rule setup failed"
-  fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE9_ID" >/dev/null 2>&1
-  if se_fcontext_has_rule "$SE_MIX(/.*)?"; then
-    acc_fail "SE helper directory rule must be removed after the session deletion"
-  else
-    acc_ok "SE helper-owned directory rule removed after the session deletion"
-  fi
-  if se_fcontext_has_rule "$SE_MIX_NOTE"; then
-    acc_ok "SE operator-owned same-stem file rule survives the session deletion"
-  else
-    acc_fail "SE helper deleted the operator-owned same-stem rule"
-  fi
+SE9A_ID="$(printf '%s' "$SE9A_OUT" | json_field id)"
+if [ -n "$SE9A_ID" ]; then
+  # Positively inventory the helper-owned recursive rule AND the absence of
+  # any exact-file rule at the same stem before the operator acts.
+  se_expect_rule_present "$SE_MIX(/.*)?" \
+    "SE9A helper owns the recursive-directory rule at the boundary stem"
+  se_expect_rule_absent "$SE_MIX" \
+    "SE9A no exact-file rule exists at the stem before the operator acts" \
+    "SE9A an exact-file rule already existed at the stem before the operator acted"
+  # Operator adds the exact-file rule at the SAME stem (the other legal shape).
+  semanage fcontext -a -t docker_helper_workspace_t "$SE_MIX" >/dev/null 2>&1
+  se_expect_rule_present "$SE_MIX" \
+    "SE9A operator added the exact-file rule at the same stem (both legal shapes, one stem)"
+  SE9A_OP_LINE="$(selinux_rule_line "$SE_MIX")"
+  # Operator mutates the object kind at the stem: the directory is replaced by
+  # a regular file. The fcontext rules are unaffected; only cleanup could
+  # mis-derive the helper's owned shape from the mutable kind.
+  rm -rf "$SE_MIX"
+  printf 'replaced-by-operator\n' > "$SE_MIX"
+  chown "$PRINCIPAL:$PRINCIPAL" "$SE_MIX" 2>/dev/null || true
+  se_expect_rule_present "$SE_MIX(/.*)?" \
+    "SE9A helper recursive rule still inventoried after the operator kind change"
+  se_expect_rule_present "$SE_MIX" \
+    "SE9A operator exact-file rule still inventoried after the operator kind change"
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE9A_ID" >/dev/null 2>&1
+  se_expect_rule_absent "$SE_MIX(/.*)?" \
+    "SE9A helper-owned recursive-directory rule removed after the session deletion" \
+    "SE9A helper-owned recursive-directory rule survived the session deletion"
+  se_expect_rule_line_equal "$SE_MIX" "$SE9A_OP_LINE" \
+    "SE9A operator-owned exact-file rule at the same stem survives byte-for-byte" \
+    "SE9A helper deleted or mutated the operator-owned exact-file rule"
 else
-  acc_fail "SE operator sibling rule scenario setup failed: $(printf '%s' "$SE9_OUT" | redact | tail -2)"
+  acc_fail "SE9A same-stem scenario setup failed: $(printf '%s' "$SE9A_OUT" | redact | tail -2)"
 fi
-semanage fcontext -d "$SE_MIX_NOTE" >/dev/null 2>&1 || true
-restorecon -R "$SE_MIX" >/dev/null 2>&1 || true
-rm -f "/tmp/uat-wls-tok-$SE8_ID" "/tmp/uat-wls-tok-$SE9_ID" 2>/dev/null || true
+
+SE_MIXF="$SE_OPT/mixfile"
+rm -rf "$SE_MIXF"
+printf 'mixfile-content\n' > "$SE_MIXF"
+chown "$PRINCIPAL:$PRINCIPAL" "$SE_MIXF" 2>/dev/null || true
+SE9B_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_MIXF=read_write" 2>&1 || true)"
+SE9B_ID="$(printf '%s' "$SE9B_OUT" | json_field id)"
+if [ -n "$SE9B_ID" ]; then
+  se_expect_rule_present "$SE_MIXF" \
+    "SE9B helper owns the exact-file rule at the boundary stem"
+  se_expect_rule_absent "$SE_MIXF(/.*)?" \
+    "SE9B no recursive rule exists at the stem before the operator acts" \
+    "SE9B a recursive rule already existed at the stem before the operator acted"
+  # Operator adds the recursive-directory rule at the SAME stem.
+  semanage fcontext -a -t docker_helper_workspace_t "$SE_MIXF(/.*)?" >/dev/null 2>&1
+  se_expect_rule_present "$SE_MIXF(/.*)?" \
+    "SE9B operator added the recursive-directory rule at the same stem (both legal shapes, one stem)"
+  SE9B_OP_LINE="$(selinux_rule_line "$SE_MIXF(/.*)?")"
+  # Operator mutates the object kind at the stem: the regular file is replaced
+  # by a directory — the exact ambiguity cleanup must survive.
+  rm -f "$SE_MIXF"
+  mkdir -p "$SE_MIXF"
+  chown "$PRINCIPAL:$PRINCIPAL" "$SE_MIXF" 2>/dev/null || true
+  se_expect_rule_present "$SE_MIXF" \
+    "SE9B helper exact-file rule still inventoried after the operator kind change"
+  se_expect_rule_present "$SE_MIXF(/.*)?" \
+    "SE9B operator recursive rule still inventoried after the operator kind change"
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE9B_ID" >/dev/null 2>&1
+  se_expect_rule_absent "$SE_MIXF" \
+    "SE9B helper-owned exact-file rule removed after the session deletion" \
+    "SE9B helper-owned exact-file rule survived the session deletion"
+  se_expect_rule_line_equal "$SE_MIXF(/.*)?" "$SE9B_OP_LINE" \
+    "SE9B operator-owned recursive rule at the same stem survives byte-for-byte" \
+    "SE9B helper deleted or mutated the operator-owned recursive rule"
+else
+  acc_fail "SE9B same-stem scenario setup failed: $(printf '%s' "$SE9B_OUT" | redact | tail -2)"
+fi
+# Trailing cleanup: remove both operator rules at both stems and restore the
+# baseline labels of the fixture trees.
+semanage fcontext -d "$SE_MIX" >/dev/null 2>&1 || true
+semanage fcontext -d "$SE_MIX(/.*)?" >/dev/null 2>&1 || true
+semanage fcontext -d "$SE_MIXF" >/dev/null 2>&1 || true
+semanage fcontext -d "$SE_MIXF(/.*)?" >/dev/null 2>&1 || true
+restorecon -R "$SE_MIX" "$SE_MIXF" >/dev/null 2>&1 || true
+rm -f "/tmp/uat-wls-tok-$SE8_ID" "/tmp/uat-wls-tok-$SE9A_ID" "/tmp/uat-wls-tok-$SE9B_ID" 2>/dev/null || true
 
 # SE restart: a live session's external coverage survives restart and the
 # reconciled binding keeps the write path working.
@@ -905,10 +1011,12 @@ if [ -n "$SE7_ID" ]; then
     wait_health && break
     sleep 1
   done
-  if se_fcontext_has_rule "$SE_CACHE(/.*)?" \
-      && DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE7_ID")" \
-        dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
-        sh -ec 'echo restart-write > /cache/restart.txt' >/tmp/uat-wls-se7.log 2>&1 \
+  se_expect_rule_present "$SE_CACHE(/.*)?" \
+    "SE restart/reconciliation keeps the issued external coverage" \
+    "SE restart lost the external coverage"
+  if DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE7_ID")" \
+      dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
+      sh -ec 'echo restart-write > /cache/restart.txt' >/tmp/uat-wls-se7.log 2>&1 \
       && [ "$(cat "$SE_CACHE/restart.txt" 2>/dev/null)" = "restart-write" ]; then
     acc_ok "SE restart/reconciliation restores live issued external coverage and write access"
   else
@@ -916,11 +1024,9 @@ if [ -n "$SE7_ID" ]; then
   fi
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE7_ID" >/dev/null 2>&1
   rm -f "$SE_CACHE/restart.txt"
-  if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
-    acc_fail "SE final cleanup leaves external fcontext residue (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -3))"
-  else
-    acc_ok "SE no external fcontext residue after the final cleanup"
-  fi
+  se_expect_rule_absent "$SE_CACHE(/.*)?" \
+    "SE no external fcontext residue after the final cleanup" \
+    "SE final cleanup leaves external fcontext residue"
 else
   acc_fail "SE restart scenario setup failed: $(printf '%s' "$SE7_OUT" | redact | tail -2)"
 fi

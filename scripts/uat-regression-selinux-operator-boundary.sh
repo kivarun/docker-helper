@@ -43,14 +43,23 @@ mkdir -p "$BND/ws"
 semanage fcontext -a -t docker_helper_workspace_t "$BND(/.*)?" 2>/dev/null \
   || { reg_fail "operator could not create the fcontext boundary"; reg_result; }
 restorecon -R "$BND" >/dev/null 2>&1 || { reg_fail "operator restorecon failed"; reg_result; }
-BND_TYPE="$(stat -c '%C' "$BND" 2>/dev/null | cut -d: -f3)"
-if [ "$BND_TYPE" = "docker_helper_workspace_t" ]; then
-  reg_ok "operator boundary is docker_helper_workspace_t before session creation"
-else
-  reg_fail "operator boundary type != docker_helper_workspace_t (got '$BND_TYPE')"
+reg_expect_se_context is "$BND" docker_helper_workspace_t \
+  "operator boundary is docker_helper_workspace_t before session creation"
+# Positively inventory the operator rule and the complete set of rules
+# mentioning the operator stem (fail-closed tri-state): the helper must never
+# add or remove a rule at that stem, and the operator rule must survive the
+# session lifecycle byte-for-byte. An inventory failure is never "no
+# duplicate rule" and never "rule removed".
+SE_RULES_BEFORE="$(selinux_rules_for "$BND")"; SE_RULES_BEFORE_RC=$?
+if [ "$SE_RULES_BEFORE_RC" -ne 0 ]; then
+  reg_fail "fcontext inventory unavailable before session creation (semanage failed)"
+  reg_result
 fi
-RULE_COUNT_BEFORE="$(semanage fcontext -l -C 2>/dev/null | grep -Fc "$BND")"
-reg_info "operator fcontext rules matching $BND before session: $RULE_COUNT_BEFORE"
+if printf '%s\n' "$SE_RULES_BEFORE" | grep -Fxq -- "$BND(/.*)?"; then
+  reg_ok "operator rule inventoried before session creation"
+else
+  reg_fail "operator boundary rule missing from the inventory before session creation"
+fi
 
 # --- Session owner (principal + default Launcher + credential) -----------------------
 # A Session owner is always a Launcher; create the principal Session through the
@@ -73,18 +82,18 @@ SID="$REG_SESSION_ID"
 [ -n "$SID" ] || { reg_fail "session create returned no id"; reg_result; }
 reg_ok "session created inside the operator-owned boundary"
 
-WS_TYPE="$(stat -c '%C' "$BND/ws" 2>/dev/null | cut -d: -f3)"
-if [ "$WS_TYPE" = "docker_helper_workspace_t" ]; then
-  reg_ok "session workspace carries the operator boundary type"
-else
-  reg_fail "session workspace type != docker_helper_workspace_t (got '$WS_TYPE')"
-fi
+reg_expect_se_context is "$BND/ws" docker_helper_workspace_t \
+  "session workspace carries the operator boundary type"
 
-RULE_COUNT_AFTER_CREATE="$(semanage fcontext -l -C 2>/dev/null | grep -Fc "$BND")"
-if [ "$RULE_COUNT_AFTER_CREATE" = "$RULE_COUNT_BEFORE" ]; then
-  reg_ok "helper did not add a duplicate fcontext rule (operator state not claimed)"
+SE_RULES_CREATE="$(selinux_rules_for "$BND")"; SE_RULES_CREATE_RC=$?
+if [ "$SE_RULES_CREATE_RC" -ne 0 ]; then
+  reg_fail "fcontext inventory unavailable after session creation (semanage failed)"
 else
-  reg_fail "helper added/removed fcontext rules for operator-owned boundary ($RULE_COUNT_BEFORE -> $RULE_COUNT_AFTER_CREATE)"
+  if [ "$SE_RULES_CREATE" = "$SE_RULES_BEFORE" ]; then
+    reg_ok "helper did not add or remove a rule at the operator stem (operator state not claimed)"
+  else
+    reg_fail "helper changed the fcontext rule set at the operator stem (before: $(printf '%s' "$SE_RULES_BEFORE" | tr '\n' ' ') after: $(printf '%s' "$SE_RULES_CREATE" | tr '\n' ' '))"
+  fi
 fi
 
 # --- Session cleanup must not delete the operator rule ----------------------------------
@@ -94,19 +103,19 @@ else
   reg_fail "session delete failed"
 fi
 
-RULE_COUNT_AFTER_DELETE="$(semanage fcontext -l -C 2>/dev/null | grep -Fc "$BND")"
-if [ "$RULE_COUNT_AFTER_DELETE" = "$RULE_COUNT_BEFORE" ] && [ "$RULE_COUNT_AFTER_DELETE" -ge 1 ]; then
-  reg_ok "operator fcontext rule remains after session teardown"
+SE_RULES_DELETE="$(selinux_rules_for "$BND")"; SE_RULES_DELETE_RC=$?
+if [ "$SE_RULES_DELETE_RC" -ne 0 ]; then
+  reg_fail "fcontext inventory unavailable after session deletion (semanage failed); survival cannot be assumed"
 else
-  reg_fail "operator fcontext rule was deleted by session cleanup ($RULE_COUNT_BEFORE -> $RULE_COUNT_AFTER_DELETE)"
+  if [ "$SE_RULES_DELETE" = "$SE_RULES_BEFORE" ]; then
+    reg_ok "operator fcontext rule set survives session teardown byte-for-byte"
+  else
+    reg_fail "operator fcontext rules changed across session teardown (before: $(printf '%s' "$SE_RULES_BEFORE" | tr '\n' ' ') after: $(printf '%s' "$SE_RULES_DELETE" | tr '\n' ' '))"
+  fi
 fi
 
-WS_TYPE_AFTER="$(stat -c '%C' "$BND/ws" 2>/dev/null | cut -d: -f3)"
-if [ "$WS_TYPE_AFTER" = "docker_helper_workspace_t" ]; then
-  reg_ok "resulting filesystem context remains valid (docker_helper_workspace_t)"
-else
-  reg_fail "filesystem context invalid after teardown (got '$WS_TYPE_AFTER')"
-fi
+reg_expect_se_context is "$BND/ws" docker_helper_workspace_t \
+  "resulting filesystem context remains valid (docker_helper_workspace_t)"
 
 # --- best-effort cleanup ------------------------------------------------------------------
 semanage fcontext -d "$BND(/.*)?" >/dev/null 2>&1 || true

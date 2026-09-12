@@ -32,9 +32,13 @@
 #      self_type;
 #   S7 negative authentication matrix: an unknown token, a revoked
 #      principal credential, a disabled principal, a disabled launcher, an
-#      expired session, and a wrong-scheme header each receive the
-#      non-disclosing 401 authentication contract (code=unauthorized, no
-#      identity material); the /auth contract is unchanged (a Session
+#      expired session each receive the non-disclosing 401 authentication
+#      contract (code=unauthorized, no identity material); two DISTINCT
+#      wrong-scheme headers are proven as themselves — a genuine HTTP
+#      Basic scheme (its bounded journal window carries the
+#      self.parse_failed auth.failure record, so the probe path is proven)
+#      and a malformed bearer token (a space inside the token) — both
+#      non-disclosing 401; the /auth contract is unchanged (a Session
 #      bearer still cannot authenticate there);
 #   S8 audit contract: successful self introspection records carry
 #      event=self.show, result=success, and the matching self_type; no
@@ -458,13 +462,17 @@ if [ -n "${S3_L_ID:-}" ]; then
   fi
 fi
 
+# S7_probe LABEL AUTH_HEADER probes GET /self with a COMPLETE Authorization
+# header value, so distinct schemes are proven as themselves: a real HTTP
+# Basic scheme is never rewritten into Bearer and never conflated with a
+# malformed bearer token.
 S7_probe() {
-  local label="$1" token="$2" code
+  local label="$1" auth="$2" code
   code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
-    --unix-socket "$SOCK" -H "Authorization: Bearer $token" http://localhost/self 2>/dev/null || true)"
+    --unix-socket "$SOCK" -H "Authorization: $auth" http://localhost/self 2>/dev/null || true)"
   local body
   body="$(curl --silent --max-time 5 --unix-socket "$SOCK" \
-    -H "Authorization: Bearer $token" http://localhost/self 2>/dev/null || true)"
+    -H "Authorization: $auth" http://localhost/self 2>/dev/null || true)"
   if [ "$code" = "401" ] && printf '%s\n' "$body" | grep -q '"code": *"unauthorized"' \
       && ! printf '%s\n' "$body" | grep -Eq '"(type|resource)"'; then
     ok "S7 $label: non-disclosing 401"
@@ -473,10 +481,28 @@ S7_probe() {
   fi
 }
 
-S7_probe "unknown token" "dht_unknown_self_uat_token_3m9k2"
-[ -n "$S7_REV_TOKEN" ] && S7_probe "revoked principal credential" "$S7_REV_TOKEN" \
+S7_probe "unknown token" "Bearer dht_unknown_self_uat_token_3m9k2"
+[ -n "$S7_REV_TOKEN" ] && S7_probe "revoked principal credential" "Bearer $S7_REV_TOKEN" \
   || fail "S7 revoked-credential fixture could not be issued"
-S7_probe "wrong scheme" "Basic c2VsZjppbnRyb3NwZWN0aW9u"
+
+# Distinct wrong-scheme cases, each sent as a complete Authorization header:
+#   * a genuine HTTP Basic scheme (never rewritten into Bearer) — the header
+#     is classified as unparseable on /self, and the bounded audit window
+#     must carry the parse-failure record so the probe is proven to have
+#     reached that classifier (a failed window read is a failure, never a
+#     green);
+#   * a malformed bearer token (a space inside the token) — a distinct
+#     malformed-Bearer case, not the Basic scheme.
+S7_BASIC_EPOCH="$(date +%s)"
+S7_probe "Basic scheme" "Basic c2VsZjppbnRyb3NwZWN0aW9u"
+S7_BASIC_AUDIT="$(journalctl --utc -u docker-helper.service --since "@${S7_BASIC_EPOCH}" --no-pager 2>/dev/null \
+  | grep '"event":"auth.failure"' | grep '"path":"/self"' | grep '"result":"self.parse_failed"' || true)"
+if [ -n "$S7_BASIC_AUDIT" ]; then
+  ok "S7 Basic scheme classified as a /self header parse failure (self.parse_failed)"
+else
+  fail "S7 Basic scheme: no self.parse_failed auth.failure record in the bounded journal window (probe path unproven)"
+fi
+S7_probe "malformed bearer token" "Bearer Basic c2VsZjppbnRyb3NwZWN0aW9u"
 
 # Disabled principal: disable the fixture Principal in place and probe with
 # its S1 credential (the credential itself is valid; the disabled principal

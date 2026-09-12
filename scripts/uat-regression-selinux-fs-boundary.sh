@@ -98,19 +98,10 @@ fi
 restorecon -R -m -x "$SCRATCH" >/dev/null 2>&1 \
   || { reg_fail "canonical restorecon -R -m -x failed on the scratch tree"; reg_result; }
 
-SCRATCH_TYPE="$(stat -c '%C' "$SCRATCH" 2>/dev/null | cut -d: -f3)"
-if [ "$SCRATCH_TYPE" = "docker_helper_workspace_t" ]; then
-  reg_ok "workspace tree relabeled to docker_helper_workspace_t"
-else
-  reg_fail "workspace tree type != docker_helper_workspace_t (got '$SCRATCH_TYPE')"
-fi
-
-MARKER_TYPE_AFTER="$(stat -c '%C' "$MNT/marker.txt" 2>/dev/null | cut -d: -f3)"
-if [ "$MARKER_TYPE_AFTER" != "docker_helper_workspace_t" ]; then
-  reg_ok "different-filesystem content not relabeled across the boundary ('$MARKER_TYPE_BEFORE' -> '$MARKER_TYPE_AFTER')"
-else
-  reg_fail "restorecon crossed the filesystem boundary: tmpfs marker relabeled to docker_helper_workspace_t"
-fi
+reg_expect_se_context is "$SCRATCH" docker_helper_workspace_t \
+  "workspace tree relabeled to docker_helper_workspace_t"
+reg_expect_se_context is-not "$MNT/marker.txt" docker_helper_workspace_t \
+  "different-filesystem content not relabeled across the boundary ('$MARKER_TYPE_BEFORE' -> proven by the tri-state read)"
 
 MARK="$(cat "$MNT/marker.txt" 2>/dev/null || true)"
 if [ "$MARK" = "boundary-marker" ]; then
