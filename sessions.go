@@ -52,10 +52,10 @@ func (s *sessionSelectorField) isInvalid() bool { return s.invalid }
 func (s *sessionSelectorField) selectorOrEmpty() string { return s.value }
 
 type sessionRequest struct {
-	Workspace         string                   `json:"workspace"`
-	LauncherID        sessionSelectorField     `json:"launcher_id"`
-	Principal         sessionSelectorField     `json:"principal"`
-	FilesystemRoots   sessionFilesystemRootsRequest `json:"filesystem_roots"`
+	Workspace       string                        `json:"workspace"`
+	LauncherID      sessionSelectorField          `json:"launcher_id"`
+	Principal       sessionSelectorField          `json:"principal"`
+	FilesystemRoots sessionFilesystemRootsRequest `json:"filesystem_roots"`
 }
 
 // validateCreateSelector applies the Session create-selector contract to the

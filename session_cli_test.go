@@ -292,13 +292,13 @@ func TestSessionCreateOmittedFsRoots(t *testing.T) {
 // flag parsing.
 func TestSessionCreateBadFsRootSyntax(t *testing.T) {
 	for name, value := range map[string]string{
-		"missing separator":     "no-access-value",
-		"empty path":            "=read_only",
-		"relative path":         "project=read_only",
-		"empty access":          "/home/michael/data=",
-		"unknown access":        "/home/michael/data=ro",
-		"unknown access rw":     "/home/michael/data=rw",
-		"noncanonical value":    "/home/michael/data=writable",
+		"missing separator":  "no-access-value",
+		"empty path":         "=read_only",
+		"relative path":      "project=read_only",
+		"empty access":       "/home/michael/data=",
+		"unknown access":     "/home/michael/data=ro",
+		"unknown access rw":  "/home/michael/data=rw",
+		"noncanonical value": "/home/michael/data=writable",
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

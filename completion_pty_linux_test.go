@@ -314,10 +314,11 @@ func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
 	}
 
 	// Session-create workspace completion with a typed separated selector:
-	// the forwarded --launcher killme resolves the restricted root.
+	// the forwarded --launcher killme resolves the restricted root, whose
+	// boundary completes in one TAB from the typed parent.
 	p.resetLine(t)
 	rec.snapshot() // drain prior requests
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher killme --workspace ", optDir)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher killme --workspace "+filepath.Dir(optDir), optDir)
 	if !strings.Contains(out, optDir) {
 		t.Fatalf("separated selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
 	}
@@ -329,7 +330,7 @@ func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
 	// carries the same semantics.
 	p.resetLine(t)
 	rec.snapshot()
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher=killme --workspace ", optDir)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher=killme --workspace "+filepath.Dir(optDir), optDir)
 	if !strings.Contains(out, optDir) {
 		t.Fatalf("inline selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
 	}
@@ -367,11 +368,11 @@ func TestCompletionInteractiveExplicitHTTPEndpoint(t *testing.T) {
 	assertCompletionPTYHTTPQuery(t, httpRec, "inline endpoint", "/principals", "")
 
 	// Session-create workspace completion over the explicit HTTP endpoint
-	// with a typed inline launcher selector: the restricted root, resolved by
-	// the daemon the URL names — never the generic filesystem fallback.
+	// with a typed inline launcher selector: the restricted root, resolved
+	// by the daemon the URL names — never the generic filesystem fallback.
 	p.resetLine(t)
 	httpRec.snapshot()
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+httpEndpoint+" --token-file "+adminTokenPath+" --launcher=killme --workspace ", httpOpt)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+httpEndpoint+" --token-file "+adminTokenPath+" --launcher=killme --workspace "+filepath.Dir(httpOpt), httpOpt)
 	if !strings.Contains(out, httpOpt) {
 		t.Fatalf("HTTP endpoint session workspace <TAB>: completion output missing %s:\n%s", httpOpt, out)
 	}

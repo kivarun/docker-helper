@@ -174,10 +174,10 @@ func (c *apiClient) listSessions(principalFilter, launcherFilter string) (*listS
 // an old-CLI-shaped request stays byte-for-byte compatible with the inherited
 // create path.
 type createSessionClientRequest struct {
-	Workspace         string                          `json:"workspace"`
-	LauncherID        string                          `json:"launcher_id,omitempty"`
-	Principal         string                          `json:"principal,omitempty"`
-	FilesystemRoots   []sessionFilesystemRootEntry   `json:"filesystem_roots,omitempty"`
+	Workspace       string                       `json:"workspace"`
+	LauncherID      string                       `json:"launcher_id,omitempty"`
+	Principal       string                       `json:"principal,omitempty"`
+	FilesystemRoots []sessionFilesystemRootEntry `json:"filesystem_roots,omitempty"`
 }
 
 func (c *apiClient) createSession(req createSessionClientRequest) (*createSessionResponse, error) {
