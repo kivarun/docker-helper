@@ -204,81 +204,160 @@ since changed.
 The snapshot is derived state, not a fourth mutable allowed-root scope. There is
 no Session command for adding, removing, or changing its entries.
 
-### Issuance-time Session filesystem narrowing
+### Issuance-time Session filesystem roots
 
 Release 2.2 completes the original orchestrator capability: the authority
-creating a Session (Admin, Principal credential, or Launcher credential) can
-request, per created Session, which parts of its workspace are `read_write` and
-which are `read_only`.
+creating a Session (Admin, Principal credential, or Launcher credential)
+can request, per created Session, additional absolute host filesystem
+roots and an explicit access mode for the workspace itself.
 
 The Session filesystem request is **issuance-time narrowing**:
 
 ```text
 effective Launcher filesystem ceiling
         ∩
-filesystem policy requested at Session create
+filesystem roots requested at Session create
         =
-immutable Session filesystem snapshot
+immutable multi-root Session filesystem snapshot
 ```
 
-The request may only narrow. Any attempt to obtain path authority or an access
-mode wider than the effective Launcher ceiling is refused before the Session
-exists. A requested `read_write` under an effective `read_only` region is an
-explicit refusal, never a silent downgrade, and a requested path outside the
-effective ceiling is refused even though composition alone would merely drop
-it. This pre-validation is mandatory because the composition owner alone could
-turn an unlawful `read_write` request into a quiet `read_only` outcome.
+The request may only narrow. Any attempt to obtain path authority or an
+access mode wider than the effective Launcher ceiling is refused before
+the Session exists. A requested `read_write` under an effective
+`read_only` region is an explicit refusal, never a silent downgrade, and
+a requested path outside the effective ceiling is refused even though
+composition alone would merely drop it. This pre-validation is mandatory
+because the composition owner alone could turn an unlawful `read_write`
+request into a quiet `read_only` outcome.
 
-The Session filesystem request is not a fourth mutable policy scope. It is not
-a Launcher credential right to edit durable Launcher allowed roots, and an
-Admin using it receives the same narrowing-only semantics against the resolved
-target Launcher ceiling — durable policy stays owned by the existing control
-plane. There is no post-create Session filesystem mutation: once issued, the
-snapshot is exactly as immutable as before.
+The Session filesystem request is not a fourth mutable policy scope. It
+is not a Launcher credential right to edit durable Launcher allowed
+roots, and an Admin using it receives the same narrowing-only semantics
+against the resolved target Launcher ceiling — durable policy stays owned
+by the existing control plane. There is no post-create Session filesystem
+mutation: once issued, the snapshot is exactly as immutable as before.
 
 Omission preserves inherited behavior: a `POST /sessions` without
-`filesystem_entries` produces byte-for-byte the existing 2.1/2.2 derived
+`filesystem_roots` produces byte-for-byte the existing 2.1/2.2 derived
 snapshot.
 
-The request is expressed as workspace-relative entries:
+#### Workspace grant
 
-```json
-{
-  "workspace": "/state/pipeline-runs/run-123",
-  "filesystem_entries": [
-    {"path": ".", "access": "read_only"},
-    {"path": "project", "access": "read_write"},
-    {"path": "pipeline-inputs", "access": "read_only"},
-    {"path": "pipeline-outputs", "access": "read_write"}
-  ]
-}
+The `workspace` remains the required canonical directory, the anchor for
+relative paths, and a mandatory part of every issued snapshot. With no
+explicit workspace entry the workspace receives the maximum mode the
+effective Launcher ceiling permits at that path — `read_write` in the
+ordinary case, `read_only` when the ceiling keeps the workspace region
+read-only. The Session can never widen that implicit grant.
+
+An explicit filesystem root whose canonical path equals the canonical
+workspace replaces the implicit workspace grant and must satisfy the same
+privilege rule: `read_write` requested for a workspace whose effective
+ceiling mode is `read_only` is a refusal, not a silent widening. This is
+how a caller explicitly narrows the workspace to read-only:
+
+```bash
+docker-helper session create \
+  --workspace /home/michael/work/git/BoxProbe \
+  --filesystem-root /home/michael/work/git/BoxProbe=read_only
 ```
 
-For explicit narrowing the workspace entry (`"."`) is required: the whole
-Session workspace remains the capability root and no unmanaged gap exists.
-Every requested entry path must resolve, after the workspace is canonicalized
-by the existing Session-create owner, to a canonical path inside the workspace
-(join, resolve symlinks, prove containment), and is then converted to the
-canonical `AllowedRootEntry` and validated through the existing allowed-root
-domain owners. A valid narrowing may re-expose a subtree read-write that the
-parent ceiling permits read-write even when the Session root is narrowed
-read-only — `{"path": ".", "access": "read_only"}, {"path": "project",
-"access": "read_write"}` is valid when the ceiling authorizes `project`
-read-write — because `project` stays no wider than its parent-ceiling rule.
+There is no separate `--workspace-access` flag.
 
-A malformed or widening request is refused with the stable issuance-time code:
+#### Filesystem roots
+
+Additional filesystem roots are absolute host paths inside the effective
+Launcher ceiling:
+
+```bash
+docker-helper session create \
+  --workspace /home/michael/work/git/BoxProbe \
+  --filesystem-root /home/michael/work/git/docker-helper=read_only \
+  --filesystem-root /opt/michael/cache=read_write
+```
+
+With the example ceiling
+
+```text
+/home/michael  read_write
+/opt/michael   read_write
+```
+
+the issued snapshot authorizes the workspace (implicit `read_write`) and
+both additional roots — the helper read-only, the cache read-write — as
+independent root trees of one Session.
+
+Every supplied root is canonicalized by the existing Session-create
+owner: an absolute path is required, the path is cleaned, resolved
+through symlinks, and must exist as a directory or a regular file; the
+canonical resolved identity becomes the policy identity. A symlink alias
+never creates a second authority identity: two spellings resolving to the
+same canonical path are a duplicate refusal, and an alias cannot select a
+different access mode from its canonical source. There is no
+workspace-containment requirement for a filesystem root: the root must be
+authorized by the effective Launcher ceiling, wherever that ceiling
+allows.
+
+Privilege rule per root:
+
+```text
+Launcher RW + Session RW => RW
+Launcher RW + Session RO => RO
+Launcher RO + Session RO => RO
+Launcher RO + Session RW => refuse invalid_filesystem_policy
+outside Launcher ceiling => refuse invalid_filesystem_policy
+```
+
+A malformed or widening request is refused with the stable issuance-time
+code:
 
 ```text
 400 invalid_filesystem_policy
 ```
 
 `read_only_root` is not used here: it is the data-plane refusal of an
-already-issued Session, and at issuance time no Session exists. The refusal
-carries no policy detail at all: the response message is the bounded
-non-disclosing contract ("invalid session filesystem policy"), because the
-internal diagnostic can name a canonical requested path — which may disclose
-a resolved symlink target or upstream policy shape — and stays in the
-operational log only.
+already-issued Session, and at issuance time no Session exists. The
+refusal carries no policy detail at all: the response message is the
+bounded non-disclosing contract ("invalid session filesystem policy"),
+because the internal diagnostic can name a canonical requested path —
+which may disclose a resolved symlink target or upstream policy shape —
+and stays in the operational log only.
+
+#### Issued snapshot construction
+
+The issuance reuses the existing policy owners — no second engine:
+
+1. the effective Launcher ceiling is resolved as for every Session
+   creation;
+2. the workspace is canonicalized and proven inside the ceiling by the
+   existing Session-create admission;
+3. the requested scope is built: the implicit workspace grant (effective
+   ceiling mode at the workspace) plus the canonicalized explicit roots,
+   with an explicit workspace root replacing the implicit grant;
+4. every explicit root is prevalidated against the ceiling (authorized,
+   and never wider than the effective mode at its canonical path);
+5. the composition owner (`composeAllowedRootScopes`) composes the
+   requested scope with the ceiling, preserving every parent-ceiling
+   transition inside the selected roots;
+6. the canonical normalization owner normalizes once;
+7. the immutable snapshot is committed atomically with the Session.
+
+Because the composition keeps every ceiling candidate inside a selected
+root, a narrower ceiling `read_only` region survives a wider Session
+selection:
+
+```text
+Launcher:
+  /home/michael                  read_write
+  /home/michael/secrets          read_only
+
+Session requests:
+  /home/michael                  read_write
+```
+
+The issued snapshot preserves both entries, and a writable exposure of
+`/home/michael` is still refused because it spans the nested read-only
+region.
 
 ## Operation enforcement
 
@@ -287,7 +366,10 @@ sequence:
 
 1. resolve the source through the existing canonicalization and anti-symlink
    escape machinery;
-2. prove the source is inside the Session workspace;
+2. prove the source carries issued Session snapshot authority (a relative
+   source is additionally proven to stay inside the workspace — the
+   workspace-relative grammar is a structural boundary, not an authority
+   source);
 3. resolve its effective access from the immutable Session filesystem snapshot;
 4. apply operation-specific access requirements;
 5. materialize the resulting trusted mount/build input through the existing
@@ -309,9 +391,10 @@ The stable public policy-refusal code is:
 read_only_root
 ```
 
-Malformed mount syntax and workspace escape continue to use their existing
-error contracts. `read_only_root` means the path is authorized for reading but
-the requested writable exposure exceeds its issued policy.
+Malformed mount syntax, a workspace escape through the relative grammar, and a
+source outside the issued snapshot continue to use their existing error
+contracts. `read_only_root` means the path is authorized for reading but the
+requested writable exposure exceeds its issued policy.
 
 Build contexts and other host inputs that docker-helper consumes read-only are
 valid under either access mode. Container-layer writes and image creation do
@@ -370,25 +453,31 @@ every stored root is available on the same commands through the explicit
 HTTP/JSON projections, and `session show` separately displays the issued
 immutable filesystem snapshot with each entry's access mode.
 
-Session creation exposes the issuance-time narrowing through one repeatable
-flag on the existing command:
+Session creation exposes the issuance-time filesystem roots through one
+repeatable flag on the existing command:
 
 ```text
 docker-helper session create [--system] ... --workspace PATH \
-  [--filesystem-entry PATH=ACCESS ...] [--principal USER] [--launcher LAUNCHER] [--json]
+  [--filesystem-root PATH=ACCESS ...] [--principal USER] [--launcher LAUNCHER] [--json]
 ```
 
-`--filesystem-entry` is repeatable and its value is `PATH=ACCESS` where PATH is
-a workspace-relative path (`.` or a clean relative subpath) and ACCESS is the
-canonical two-value access vocabulary parsed by the existing access parser.
-The CLI performs syntax validation of `PATH=ACCESS` only: whether the request
-is a valid narrowing of the resolved Launcher ceiling is a server-side
-authorization/domain decision, and the CLI never decides it locally. Omitting
+`--filesystem-root` is repeatable and its value is `PATH=ACCESS` where PATH is
+an absolute host path inside the target Launcher's effective allowed roots
+(a directory or a regular file) and ACCESS is the canonical two-value access
+vocabulary parsed by the existing access parser. The CLI performs syntax
+validation of `PATH=ACCESS` only: whether the request is a valid narrowing of
+the resolved Launcher ceiling is a server-side authorization/domain decision,
+and the CLI never decides it locally. `--workspace` remains mandatory and is
+the anchor for relative paths; it receives the maximum access the target
+Launcher's effective policy permits unless an explicit
+`--filesystem-root WORKSPACE=ACCESS` replaces that implicit grant. Omitting
 the flag preserves the inherited create behavior.
 
 Completion treats `read_write` and `read_only` as one canonical vocabulary and
 completes them only where an access value is accepted, including the ACCESS
-side of `--filesystem-entry`.
+side of `--filesystem-root`; the PATH side completes through the effective
+Launcher allowed-root tree with the same daemon-backed Session create-policy
+query the workspace flag uses.
 
 ## HTTP and JSON compatibility
 
@@ -417,27 +506,30 @@ empty rich form is refused by the scope rules. Rich entries are decoded
 strictly: an unknown nested field, a malformed entry type, or trailing JSON
 inside the field value is refused.
 
-`POST /sessions` accepts one new optional field, `filesystem_entries`, with
+`POST /sessions` accepts one new optional field, `filesystem_roots`, with
 the same strict `{path, access}` entry shape and the canonical access
 vocabulary. Its presence semantics differ from the mutating fields above
 because it is an issuance-time narrowing of an existing ceiling, not a grant
 form:
 
 ```text
-filesystem_entries omitted  -> existing inherited create behavior
-filesystem_entries: null    -> 400 invalid_filesystem_policy
-filesystem_entries: []      -> 400 invalid_filesystem_policy
-non-empty filesystem_entries -> explicit Session narrowing
+filesystem_roots omitted  -> workspace only (existing inherited create behavior)
+filesystem_roots: []      -> workspace only (existing inherited create behavior)
+filesystem_roots: null    -> 400 invalid_filesystem_policy
+non-empty filesystem_roots -> explicit Session filesystem roots
 ```
 
-An entry path is a workspace-relative path (`"."` or a clean relative
-subpath), not a host path: absolute paths, traversal spellings, unresolvable
-or workspace-escaping entries, duplicate canonical entries, a missing access
-or access value outside the canonical vocabulary, and unknown nested JSON
-fields are all refused with `400 invalid_filesystem_policy` before the Session
-exists. `filesystem_entries` and the Launcher scope fields above are
-unrelated surfaces: one narrows an issuance-time Session request, the other
-replaces durable Launcher policy.
+An entry path is an absolute host path: relative paths, traversal spellings,
+unresolvable paths, paths that are neither a directory nor a regular file,
+duplicate canonical paths, a missing access or access value outside the
+canonical vocabulary, and unknown nested JSON fields are all refused with
+`400 invalid_filesystem_policy` before the Session exists. Every root must be
+authorized by the effective Launcher ceiling and a `read_write` request under
+an effective `read_only` region is refused; an explicit workspace root
+replaces the implicit workspace grant under the same privilege rule.
+`filesystem_roots` and the Launcher scope fields above are unrelated
+surfaces: one narrows an issuance-time Session request, the other replaces
+durable Launcher policy.
 
 The 2.1 JSON `allowed_roots: []string` projection remains available throughout
 the 2.x line so existing clients do not break. Release 2.2 adds the canonical
@@ -549,18 +641,24 @@ At minimum Release 2.2 must prove:
     policy, or runtime residue remains;
 14. audit exposes paths/modes but no bearer, environment value, or workload
     output;
-15. `session create` without `filesystem_entries` preserves the inherited
+15. `session create` without `filesystem_roots` preserves the inherited
     derived snapshot byte-for-byte, and an omitted request is
-    indistinguishable from the pre-narrowing create path;
+    indistinguishable from the pre-filesystem-roots create path;
 16. a Launcher credential can create a dynamically named run workspace and
-    narrow its Session at issuance time (`.` read-only with explicit
-    read-write exceptions), and the issued snapshot enforces exactly those
-    effective semantics;
+    issue its Session with additional absolute filesystem roots
+    (`--filesystem-root`), the issued multi-root snapshot exposes exactly
+    the effective semantics (relative workspace mounts and absolute mounts
+    of every issued root), and the inherited behavior without
+    `filesystem_roots` is unchanged;
 17. a Session filesystem request that widens — `read_write` under an
     effective `read_only` region, or any path outside the effective
-    Launcher ceiling — is refused `400 invalid_filesystem_policy` before the
-    Session exists, creating no Session, bearer, container, pin, or
+    Launcher ceiling — is refused `400 invalid_filesystem_policy` before
+    the Session exists, creating no Session, bearer, container, pin, or
     workload-MAC residue;
-18. the accepted Admin/Principal/Launcher narrowing requests are
+18. the accepted Admin/Principal/Launcher filesystem-roots requests are
     authorization-symmetric: every authority narrows only against the
-    resolved target Launcher ceiling and none receives bypass semantics.
+    resolved target Launcher ceiling and none receives bypass semantics;
+19. a data-plane mount source outside the issued Session snapshot is
+    refused before any pin, container, or workload state exists, while
+    every issued absolute root mounts through the same exposure, pin, and
+    workload-MAC owners as the workspace itself.
