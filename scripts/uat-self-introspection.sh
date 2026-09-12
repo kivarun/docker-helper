@@ -92,6 +92,19 @@ ACTUAL_SHA="$(sha256sum "$ARTIFACT_PATH_IN" | awk '{print $1}')"
   exit 1
 }
 
+# si_wait_health waits for the system daemon to answer /health again.
+si_wait_health() {
+  local _i=0
+  for _i in $(seq 1 100); do
+    curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1 && return 0
+    if ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
 # Install the exact candidate artifact (never rebuilds it) and start the
 # confined system service, exactly like the DEB install adapter in
 # scripts/uat-install-deb.sh. The runner has no prior installation.
@@ -124,19 +137,6 @@ dh() { /usr/bin/docker-helper "$@"; }
 SOCK="/run/docker-helper/docker-helper.sock"
 
 json_field() { grep -oP "\"$1\": ?\"\K[^\"]+" | head -1; }
-
-# si_wait_health waits for the system daemon to answer /health again.
-si_wait_health() {
-  local _i=0
-  for _i in $(seq 1 100); do
-    curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1 && return 0
-    if ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then
-      return 1
-    fi
-    sleep 0.2
-  done
-  return 1
-}
 
 # si_cleanup removes everything the scenarios created, best-effort; the
 # fail-closed residue assertions live in scenario Z.

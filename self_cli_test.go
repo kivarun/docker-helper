@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -221,4 +222,56 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 		t.Fatalf("cannot marshal stub resource: %v", err)
 	}
 	return body
+}
+
+// TestSelfCLIEnvSessionBearer proves the agent-context self path: with no
+// --token-file, the CLI resolves DOCKER_HELPER_SESSION_TOKEN through the
+// agent client owner (exactly one GET /self with that bearer) and renders the
+// envelope; an embedded-whitespace env value is refused before any request.
+func TestSelfCLIEnvSessionBearer(t *testing.T) {
+	envBearer := "dht_env-session-bearer-token"
+	var gotBearer atomic.Value
+	endpoint, _, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBearer.Store(r.Header.Get("Authorization"))
+		if r.URL.Path == "/self" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(mustJSON(t, selfResponse{
+				OK:       true,
+				Type:     "session",
+				Resource: []byte(`{"id":"dhs_probe","workspace":"/tmp/ws"}`),
+			})))
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", envBearer)
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"self", "--endpoint", "http://" + strings.TrimPrefix(endpoint, "http://")}, &stdout, &stderr)
+	// The explicit endpoint is an http endpoint for agent commands: no token
+	// file is required there.
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "session") || !strings.Contains(stdout.String(), "dhs_probe") {
+		t.Errorf("stdout = %s, want the session self resource rendered", stdout.String())
+	}
+	if len(*requests) != 1 || (*requests)[0].path != "/self" {
+		t.Fatalf("requests = %+v, want exactly one GET /self", *requests)
+	}
+	if bearer, _ := gotBearer.Load().(string); bearer != "Bearer "+envBearer {
+		t.Errorf("bearer = %q, want the session env bearer", bearer)
+	}
+
+	// Whitespace-bearing env values are refused before any request.
+	before := len(*requests)
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "dht_broken value")
+	var stdout2, stderr2 bytes.Buffer
+	code2 := runCommandWithWriters([]string{"self", "--endpoint", endpoint}, &stdout2, &stderr2)
+	if code2 == 0 {
+		t.Fatal("a whitespace-bearing DOCKER_HELPER_SESSION_TOKEN must fail")
+	}
+	if len(*requests) != before {
+		t.Errorf("the refused env value must not issue any request")
+	}
 }

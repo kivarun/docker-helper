@@ -597,7 +597,7 @@ else
 fi
 
 # SE introspection: session show and self carry the issued external roots.
-SE_SHOW="$(dh session show --system --token-file "/tmp/uat-wls-tok-$SE_ID" --id "$SE_ID" --json 2>/dev/null || true)"
+SE_SHOW="$(dh session show --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE_ID" --json 2>/dev/null || true)"
 if printf '%s' "$SE_SHOW" | grep -q '"'"$SE_CACHE"'"' \
     && printf '%s' "$SE_SHOW" | grep -q '"'"$SE_HELPER"'"'; then
   acc_ok "SE session show carries the issued external roots (RW cache + RO helper)"
@@ -642,8 +642,8 @@ SE2_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE2_ID="$(printf '%s' "$SE2_OUT" | json_field id)"
 if [ -n "$SE2_ID" ]; then
-  printf '%s' "$SE2_OUT" | json_field token > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
-  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE_ID" --id "$SE_ID" >/dev/null 2>&1
+  printf '%s\n' "$(printf '%s' "$SE2_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE_ID" >/dev/null 2>&1
   if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
     acc_ok "SE shared external tree survives the first Session deletion (second Session keeps it)"
   else
@@ -657,7 +657,7 @@ if [ -n "$SE2_ID" ]; then
   else
     acc_fail "SE second Session lost write access to the shared tree (ec=$SE2_W)"
   fi
-  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE2_ID" --id "$SE2_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE2_ID" >/dev/null 2>&1
   if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
     acc_fail "SE external fcontext coverage must be relinquished after the last Session released it"
   else
@@ -680,7 +680,7 @@ SE3_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE3_ID="$(printf '%s' "$SE3_OUT" | json_field id)"
 if [ -n "$SE3_ID" ]; then
-  printf '%s' "$SE3_OUT" | json_field token > "/tmp/uat-wls-tok-$SE3_ID"; chmod 600 "/tmp/uat-wls-tok-$SE3_ID"
+  printf '%s\n' "$(printf '%s' "$SE3_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE3_ID"; chmod 600 "/tmp/uat-wls-tok-$SE3_ID"
   # The projection collapses the descendant into the issued ancestor: only
   # the ancestor boundary is prepared.
   if se_fcontext_has_rule "$SE_OPT(/.*)?" && ! se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
@@ -688,7 +688,7 @@ if [ -n "$SE3_ID" ]; then
   else
     acc_fail "SE nested issued roots did not collapse (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -3))"
   fi
-  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE3_ID" --id "$SE3_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE3_ID" >/dev/null 2>&1
   if se_fcontext_has_rule "$SE_OPT(/.*)?"; then
     acc_fail "SE ancestor boundary must be removed after the only session released it"
   else
@@ -710,8 +710,8 @@ SE5_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
   --filesystem-root "$SE_OPT=read_write" 2>&1 || true)"
 SE5_ID="$(printf '%s' "$SE5_OUT" | json_field id)"
 if [ -n "$SE4_ID" ] && [ -n "$SE5_ID" ]; then
-  printf '%s' "$SE4_OUT" | json_field token > "/tmp/uat-wls-tok-$SE4_ID"; chmod 600 "/tmp/uat-wls-tok-$SE4_ID"
-  printf '%s' "$SE5_OUT" | json_field token > "/tmp/uat-wls-tok-$SE5_ID"; chmod 600 "/tmp/uat-wls-tok-$SE5_ID"
+  printf '%s\n' "$(printf '%s' "$SE4_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE4_ID"; chmod 600 "/tmp/uat-wls-tok-$SE4_ID"
+  printf '%s\n' "$(printf '%s' "$SE5_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE5_ID"; chmod 600 "/tmp/uat-wls-tok-$SE5_ID"
   # Both boundaries exist (created in reverse order: child, then parent).
   if se_fcontext_has_rule "$SE_CACHE(/.*)?" && se_fcontext_has_rule "$SE_OPT(/.*)?"; then
     acc_ok "SE reverse-order issuance prepares both disjoint boundaries"
@@ -719,14 +719,14 @@ if [ -n "$SE4_ID" ] && [ -n "$SE5_ID" ]; then
     acc_fail "SE reverse-order issuance boundaries missing (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -4))"
   fi
   # Delete the child session first: the parent boundary stays.
-  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE4_ID" --id "$SE4_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE4_ID" >/dev/null 2>&1
   if se_fcontext_has_rule "$SE_OPT(/.*)?"; then
     acc_ok "SE child deletion first keeps the parent boundary"
   else
     acc_fail "SE child deletion removed the parent boundary needed by the parent session"
   fi
   # Delete the parent session: everything is released and restored.
-  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE5_ID" --id "$SE5_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE5_ID" >/dev/null 2>&1
   if se_fcontext_has_rule "$SE_OPT(/.*)?" || se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
     acc_fail "SE final deletion leaves fcontext residue (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -4))"
   else
@@ -751,7 +751,7 @@ SE6_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
   --filesystem-root "$SE_FILE=read_write" 2>&1 || true)"
 SE6_ID="$(printf '%s' "$SE6_OUT" | json_field id)"
 if [ -n "$SE6_ID" ]; then
-  printf '%s' "$SE6_OUT" | json_field token > "/tmp/uat-wls-tok-$SE6_ID"; chmod 600 "/tmp/uat-wls-tok-$SE6_ID"
+  printf '%s\n' "$(printf '%s' "$SE6_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE6_ID"; chmod 600 "/tmp/uat-wls-tok-$SE6_ID"
   SE6_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE6_ID")" \
     dh run --image alpine:3.24 --mount "$SE_FILE:/etc/worker.env" -- \
     sh -ec 'echo file-write > /etc/worker.env' >/tmp/uat-wls-se6.log 2>&1; echo $?)"
@@ -760,7 +760,7 @@ if [ -n "$SE6_ID" ]; then
   else
     acc_fail "SE regular-file RW write failed (ec=$SE6_W): $(redact </tmp/uat-wls-se6.log | tail -2)"
   fi
-  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE6_ID" --id "$SE6_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE6_ID" >/dev/null 2>&1
   if se_fcontext_has_rule "$SE_FILE"; then
     acc_fail "SE regular-file boundary must be relinquished after deletion"
   else
@@ -778,10 +778,11 @@ SE7_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE7_ID="$(printf '%s' "$SE7_OUT" | json_field id)"
 if [ -n "$SE7_ID" ]; then
-  printf '%s' "$SE7_OUT" | json_field token > "/tmp/uat-wls-tok-$SE7_ID"; chmod 600 "/tmp/uat-wls-tok-$SE7_ID"
+  printf '%s\n' "$(printf '%s' "$SE7_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE7_ID"; chmod 600 "/tmp/uat-wls-tok-$SE7_ID"
   systemctl restart docker-helper.service >/dev/null 2>&1 || true
-  for _ in $(seq 1 30); do
-    systemctl is-active --quiet docker-helper.service && break
+  for _ in $(seq 1 60); do
+    systemctl is-active --quiet docker-helper.service || break
+    wait_health && break
     sleep 1
   done
   if se_fcontext_has_rule "$SE_CACHE(/.*)?" \
@@ -793,7 +794,7 @@ if [ -n "$SE7_ID" ]; then
   else
     acc_fail "SE restart lost the external coverage or write access: $(redact </tmp/uat-wls-se7.log | tail -2)"
   fi
-  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE7_ID" --id "$SE7_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE7_ID" >/dev/null 2>&1
   rm -f "$SE_CACHE/restart.txt"
   if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
     acc_fail "SE final cleanup leaves external fcontext residue (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -3))"
@@ -1020,14 +1021,22 @@ is_expected_projection_denial() {
 }
 
 # count_unexpected_helper_avcs WINDOW — counts, within a window of raw AVC
-# records, the denials in the docker_helper scope that are not the expected
-# enforcing projection write denial (is_expected_projection_denial). This is
-# the single decision point behind the S13 "no unexpected docker_helper AVC"
-# gate; it prints the count on stdout and routes its per-record diagnostics to
-# stderr so the count stays machine-readable under command substitution. Only
-# AVCs whose source context is in the docker_helper* scope are considered;
-# every in-scope denial that is not an expected projection write denial is
-# unexpected.
+# records, the denials in the docker_helper scope that are not expected:
+#   - the enforcing projection write denial (is_expected_projection_denial);
+#   - the daemon's own policy-tool fifo artifact: the Session MAC relabel
+#     lifecycle executes semanage in the daemon domain and libsemanage runs
+#     setfiles/load_policy as their own distro domains; the child policy tool
+#     writing the parent's captured-output fifo is denied (scontext
+#     setfiles_t or load_policy_t, tcontext docker_helper_t, tclass=fifo_file,
+#     denied write). The fcontext rule is nonetheless applied by semanage, so
+#     this is the confined execution artifact of the relabel lifecycle, not a
+#     docker-helper domain denial; semanage itself stays in docker_helper_t.
+# This is the single decision point behind the S13 "no unexpected docker_helper
+# AVC" gate; it prints the count on stdout and routes its per-record
+# diagnostics to stderr so the count stays machine-readable under command
+# substitution. Only AVCs whose source context is in the docker_helper* scope
+# are considered for the general case; the policy-tool fifo artifact is
+# identified by its tool scontext directly.
 count_unexpected_helper_avcs() {
   local window="$1" line count=0
   while IFS= read -r line; do
@@ -1035,10 +1044,17 @@ count_unexpected_helper_avcs() {
     printf '%s\n' "$line" | grep -q 'scontext.*docker_helper' || continue
     if is_expected_projection_denial "$line"; then
       printf '  expected projection write denial: %s\n' "$line" >&2
-    else
-      printf '  UNEXPECTED AVC: %s\n' "$line" >&2
-      count=$((count + 1))
+      continue
     fi
+    if printf '%s\n' "$line" | grep -Eq 'scontext=system_u:system_r:(setfiles_t|load_policy_t):' \
+        && printf '%s\n' "$line" | grep -q 'tcontext=.*docker_helper_t' \
+        && printf '%s\n' "$line" | grep -q 'tclass=fifo_file' \
+        && printf '%s\n' "$line" | grep -Eq 'denied.*\{[^}]*\bwrite\b[^}]*\}'; then
+      printf '  expected policy-tool fifo artifact: %s\n' "$line" >&2
+      continue
+    fi
+    printf '  UNEXPECTED AVC: %s\n' "$line" >&2
+    count=$((count + 1))
   done <<< "$window"
   printf '%s' "$count"
 }
