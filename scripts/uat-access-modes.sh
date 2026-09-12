@@ -38,12 +38,12 @@
 #      rows (sessions, session_filesystem_snapshot_entries,
 #      session_filesystem_snapshot_meta all structurally empty, fail closed);
 #   13 a Launcher credential creates a dynamically named run workspace and
-#      narrows the Session at issuance time through --filesystem-entry
+#      issues additional absolute filesystem roots through --filesystem-root
 #      ('.' read-only, project/pipeline-outputs read-write,
 #      pipeline-inputs read-only); the issued snapshot exposes exactly the
 #      effective semantics (a redundant read-only entry may be normalized
 #      away), the narrowing is enforced at runtime, and a second session on
-#      the same run workspace without filesystem_entries keeps the inherited
+#      the same run workspace without filesystem_roots keeps the inherited
 #      read-write behavior;
 #   14 an attempted issuance-time widening (read_write under the parent
 #      read_only ceiling) is refused 400 invalid_filesystem_policy before
@@ -254,20 +254,25 @@ snapshot_lacks() {
   ! printf '%s' "$(show_snapshot "$1")" | grep -Fq "$2"
 }
 
-# expect_read_only_root TOKEN SOURCE TARGET SNIPPET [BASE_RESIDUE] — runs a
+# expect_read_only_root TOKEN SOURCE TARGET SNIPPET BASE_RESIDUE — runs a
 # writable exposure request and asserts the stable read_only_root refusal,
-# then (when a residue base is supplied) asserts no residue was created.
+# then asserts no residue was created against the mandatory pre-attempt
+# baseline. The baseline argument is not optional: a mandatory residue
+# proof must never be silently disabled by an empty baseline, so an empty
+# or missing BASE_RESIDUE is itself a failed proof.
 expect_read_only_root() {
-  local token="$1" source="$2" target="$3" snippet="$4" base="${5:-}" out ec
+  local token="$1" source="$2" target="$3" snippet="$4" base="$5" out ec
+  if [ -z "$base" ]; then
+    printf '  mandatory residue baseline missing for %s; the proof is disabled\n' "$source" >&2
+    return 1
+  fi
   out="$(DOCKER_HELPER_SESSION_TOKEN="$token" \
     dh run --image alpine:3.24 --mount "$source:$target" -- sh -ec "$snippet" 2>&1)"
   ec=$?
   [ "$ec" -ne 0 ] || { printf '  writable request on %s unexpectedly succeeded\n' "$source" >&2; return 1; }
   printf '%s\n' "$out" | grep -q 'read_only_root' \
     || { printf '  refusal for %s is not read_only_root: %s\n' "$source" "$(printf '%s\n' "$out" | redact)" >&2; return 1; }
-  if [ -n "$base" ]; then
-    residue_unchanged "$base" || return 1
-  fi
+  residue_unchanged "$base" || return 1
   return 0
 }
 
@@ -607,11 +612,14 @@ printf '%s\n' "$RO_OUT" | grep -q 'RO-READ-OK' \
   && acc_ok "2 pipeline-inputs mounted read_only and the read succeeded" \
   || acc_fail "2 pipeline-inputs read did not reach RO-READ-OK"
 
-RESIDUE_BASE="$(residue_state)"
-if expect_read_only_root "$SA_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden.txt' "$RESIDUE_BASE"; then
-  acc_ok "3 writable pipeline-inputs refused with read_only_root before workload creation"
+if ! RESIDUE_BASE="$(residue_state)"; then
+  acc_blocked "3 pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
-  acc_fail "3 writable pipeline-inputs refusal wrong (base: $RESIDUE_BASE)"
+  if expect_read_only_root "$SA_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden.txt' "$RESIDUE_BASE"; then
+    acc_ok "3 writable pipeline-inputs refused with read_only_root before workload creation"
+  else
+    acc_fail "3 writable pipeline-inputs refusal wrong (base: $RESIDUE_BASE)"
+  fi
 fi
 [ ! -e "$WS/pipeline-inputs/forbidden.txt" ] \
   || acc_fail "3 forbidden host-side file was created"
@@ -620,11 +628,14 @@ fi
 # scenario 4: writable parent over nested RO refused
 # ==============================================================================
 scenario "4: writable run-root parent over nested RO"
-RESIDUE_BASE="$(residue_state)"
-if expect_read_only_root "$SA_TOKEN" . /mnt/tree 'echo x > /mnt/tree/pipeline-outputs/x.txt' "$RESIDUE_BASE"; then
-  acc_ok "4 writable run-root parent refused with read_only_root before workload creation"
+if ! RESIDUE_BASE="$(residue_state)"; then
+  acc_blocked "4 pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
-  acc_fail "4 writable parent refusal wrong (base: $RESIDUE_BASE)"
+  if expect_read_only_root "$SA_TOKEN" . /mnt/tree 'echo x > /mnt/tree/pipeline-outputs/x.txt' "$RESIDUE_BASE"; then
+    acc_ok "4 writable run-root parent refused with read_only_root before workload creation"
+  else
+    acc_fail "4 writable parent refusal wrong (base: $RESIDUE_BASE)"
+  fi
 fi
 
 # ==============================================================================
@@ -644,11 +655,14 @@ printf '%s\n' "$P5_OUT" | grep -q 'PROJECT-RW-OK' \
 scenario "6: symlink alias cannot widen access"
 ln -sfn pipeline-inputs "$WS/alias-inputs"
 chown -h "$PRINCIPAL:$PRINCIPAL" "$WS/alias-inputs"
-RESIDUE_BASE="$(residue_state)"
-if expect_read_only_root "$SA_TOKEN" alias-inputs /mnt/alias 'echo x > /mnt/alias/forbidden.txt' "$RESIDUE_BASE"; then
-  acc_ok "6 writable symlink alias refused with read_only_root (canonical source keeps read_only)"
+if ! RESIDUE_BASE="$(residue_state)"; then
+  acc_blocked "6 pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
-  acc_fail "6 symlink alias widening was not refused (base: $RESIDUE_BASE)"
+  if expect_read_only_root "$SA_TOKEN" alias-inputs /mnt/alias 'echo x > /mnt/alias/forbidden.txt' "$RESIDUE_BASE"; then
+    acc_ok "6 writable symlink alias refused with read_only_root (canonical source keeps read_only)"
+  else
+    acc_fail "6 symlink alias widening was not refused (base: $RESIDUE_BASE)"
+  fi
 fi
 ALIAS_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
   dh run --image alpine:3.24 --mount alias-inputs:/mnt/alias:ro -- \
@@ -663,11 +677,14 @@ printf '%s\n' "$ALIAS_OUT" | grep -q 'ALIAS-RO-OK' \
 # ==============================================================================
 scenario "7: principal read_only cannot be widened by launcher read_write"
 SB_TOKEN="$(cat "/tmp/uat-am-tok-$SB_ID")"
-RESIDUE_BASE="$(residue_state)"
-if expect_read_only_root "$SB_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden2.txt' "$RESIDUE_BASE"; then
-  acc_ok "7 launcher RW grant did not widen the Principal read_only region (read_only_root)"
+if ! RESIDUE_BASE="$(residue_state)"; then
+  acc_blocked "7 pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
-  acc_fail "7 launcher RW grant widened the Principal read_only region (base: $RESIDUE_BASE)"
+  if expect_read_only_root "$SB_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden2.txt' "$RESIDUE_BASE"; then
+    acc_ok "7 launcher RW grant did not widen the Principal read_only region (read_only_root)"
+  else
+    acc_fail "7 launcher RW grant widened the Principal read_only region (base: $RESIDUE_BASE)"
+  fi
 fi
 
 # ==============================================================================
@@ -691,11 +708,14 @@ SC_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SC_TOKEN" \
 printf '%s\n' "$SC_RO_OUT" | grep -q 'SUB-RO-OK' \
   && acc_ok "8 RO parent honored beside the RW sub" \
   || acc_fail "8 RO parent check failed"
-RESIDUE_BASE="$(residue_state)"
-if expect_read_only_root "$SC_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden3.txt' "$RESIDUE_BASE"; then
-  acc_ok "8 writable parent (RO) still refused while its sub is RW"
+if ! RESIDUE_BASE="$(residue_state)"; then
+  acc_blocked "8 pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
-  acc_fail "8 writable RO parent was not refused (base: $RESIDUE_BASE)"
+  if expect_read_only_root "$SC_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden3.txt' "$RESIDUE_BASE"; then
+    acc_ok "8 writable parent (RO) still refused while its sub is RW"
+  else
+    acc_fail "8 writable RO parent was not refused (base: $RESIDUE_BASE)"
+  fi
 fi
 
 # ==============================================================================
@@ -731,11 +751,14 @@ IMM_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
 printf '%s\n' "$IMM_OUT" | grep -q 'OLD-SNAPSHOT-WRITES' \
   && acc_ok "10 existing Session kept its issued read_write after the mutation" \
   || acc_fail "10 old-session write did not persist"
-RESIDUE_BASE="$(residue_state)"
-if expect_read_only_root "$SA2_TOKEN" project /mnt/project 'echo x > /mnt/project/forbidden.txt' "$RESIDUE_BASE"; then
-  acc_ok "10 new Session got the new read_only mode (read_only_root)"
+if ! RESIDUE_BASE="$(residue_state)"; then
+  acc_blocked "10 pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
-  acc_fail "10 new Session did not receive the narrowed mode (base: $RESIDUE_BASE)"
+  if expect_read_only_root "$SA2_TOKEN" project /mnt/project 'echo x > /mnt/project/forbidden.txt' "$RESIDUE_BASE"; then
+    acc_ok "10 new Session got the new read_only mode (read_only_root)"
+  else
+    acc_fail "10 new Session did not receive the narrowed mode (base: $RESIDUE_BASE)"
+  fi
 fi
 if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/project" read_write >/dev/null 2>&1; then
   if snapshot_has "$SA2_ID" "$WS/project" read_only; then
@@ -779,10 +802,10 @@ chmod -R u+rwX,go+rX "$RUNDIR"
 # N-create: Launcher credential + per-Session issuance-time narrowing.
 NARROW_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
   --workspace "$RUNDIR" --json \
-  --filesystem-entry .=read_only \
-  --filesystem-entry project=read_write \
-  --filesystem-entry pipeline-inputs=read_only \
-  --filesystem-entry pipeline-outputs=read_write 2>&1 || true)"
+  --filesystem-root "$RUNDIR=read_only" \
+  --filesystem-root "$RUNDIR/project=read_write" \
+  --filesystem-root "$RUNDIR/pipeline-inputs=read_only" \
+  --filesystem-root "$RUNDIR/pipeline-outputs=read_write" 2>&1 || true)"
 SN_ID="$(printf '%s' "$NARROW_OUT" | json_field id)"
 if [ -n "$SN_ID" ]; then
   printf '%s' "$NARROW_OUT" | json_field token > "/tmp/uat-am-tok-$SN_ID"; chmod 600 "/tmp/uat-am-tok-$SN_ID"
@@ -824,11 +847,14 @@ if [ -n "${SN_ID:-}" ]; then
   printf '%s\n' "$NI_OUT" | grep -q 'RUN-INPUT-RO-OK' \
     && acc_ok "13 narrowed pipeline-inputs read succeeded" \
     || acc_fail "13 narrowed pipeline-inputs read check failed"
-  RESIDUE_BASE="$(residue_state)"
-  if expect_read_only_root "$SN_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden.txt' "$RESIDUE_BASE"; then
-    acc_ok "13 narrowed pipeline-inputs RW exposure refused with read_only_root before workload"
+  if ! RESIDUE_BASE="$(residue_state)"; then
+    acc_blocked "13 pre-attempt residue baseline inventory unavailable (fail-closed)"
   else
-    acc_fail "13 narrowed pipeline-inputs RW exposure was not refused (base: $RESIDUE_BASE)"
+    if expect_read_only_root "$SN_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden.txt' "$RESIDUE_BASE"; then
+      acc_ok "13 narrowed pipeline-inputs RW exposure refused with read_only_root before workload"
+    else
+      acc_fail "13 narrowed pipeline-inputs RW exposure was not refused (base: $RESIDUE_BASE)"
+    fi
   fi
   NO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN_TOKEN" \
     dh run --image alpine:3.24 --mount pipeline-outputs:/mnt/outputs -- \
@@ -839,15 +865,18 @@ if [ -n "${SN_ID:-}" ]; then
   else
     acc_fail "13 narrowed pipeline-outputs write did not persist to the host"
   fi
-  RESIDUE_BASE="$(residue_state)"
-  if expect_read_only_root "$SN_TOKEN" . /mnt/run 'echo x > /mnt/run/pipeline-inputs/forbidden2.txt' "$RESIDUE_BASE"; then
-    acc_ok "13 writable narrowed workspace parent spanning the RO input refused (read_only_root)"
+  if ! RESIDUE_BASE="$(residue_state)"; then
+    acc_blocked "13 pre-attempt residue baseline inventory unavailable (fail-closed)"
   else
-    acc_fail "13 writable narrowed workspace parent was not refused (base: $RESIDUE_BASE)"
+    if expect_read_only_root "$SN_TOKEN" . /mnt/run 'echo x > /mnt/run/pipeline-inputs/forbidden2.txt' "$RESIDUE_BASE"; then
+      acc_ok "13 writable narrowed workspace parent spanning the RO input refused (read_only_root)"
+    else
+      acc_fail "13 writable narrowed workspace parent was not refused (base: $RESIDUE_BASE)"
+    fi
   fi
 fi
 
-# N-omitted: the same dynamic run workspace WITHOUT filesystem_entries keeps
+# N-omitted: the same dynamic run workspace WITHOUT filesystem_roots keeps
 # the inherited behavior byte-for-byte: the Session gets the existing derived
 # snapshot (workspace read_write) and a workspace-root writable write works.
 SN2_ID="$(create_session /tmp/uat-am-cred-main "$RUNDIR")" \
@@ -859,10 +888,10 @@ if snapshot_has "$SN2_ID" "$RUNDIR" read_write; then
     sh -ec 'echo inherited-write > /mnt/runroot/inherited.txt && echo INHERITED-RW-OK')" \
     || acc_fail "13 inherited workspace-root write failed: $SN2_OUT"
   printf '%s\n' "$SN2_OUT" | grep -q 'INHERITED-RW-OK' \
-    && acc_ok "13 omitted filesystem_entries keeps the inherited read-write behavior" \
+    && acc_ok "13 omitted filesystem_roots keeps the inherited read-write behavior" \
     || acc_fail "13 inherited workspace-root write did not persist"
 else
-  acc_fail "13 omitted filesystem_entries snapshot is not the inherited read_write root: $(show_snapshot "$SN2_ID" | tr '\n' '; ')"
+  acc_fail "13 omitted filesystem_roots snapshot is not the inherited read_write root: $(show_snapshot "$SN2_ID" | tr '\n' '; ')"
 fi
 
 # N-refusal: an attempted issuance-time widening — read_write under the
@@ -883,8 +912,8 @@ if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then
   N_AUDIT_SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
   WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
     --workspace "$WS" --json \
-    --filesystem-entry .=read_write \
-    --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
+    --filesystem-root "$RUNDIR=read_write" \
+    --filesystem-root "$RUNDIR/pipeline-inputs=read_write" 2>&1 || true)"
   if printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
       && printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid session filesystem policy' \
       && ! printf '%s\n' "$WIDEN_OUT" | grep -q '"id"' \
@@ -965,7 +994,7 @@ issue_launcher_credential "$PRINCIPAL" "$G_L_ID" /tmp/uat-am-cred-globalro \
   || { echo "error: globalro launcher credential issuance failed" >&2; exit 1; }
 
 # G-live: the Session is issued on the standard authority path (Launcher
-# credential, inherited policy — no filesystem_entries) and composes the
+# credential, inherited policy — no filesystem_roots) and composes the
 # three read_write grants down to read_only.
 G_ID="$(create_session /tmp/uat-am-cred-globalro "$G_WS")" \
   || { echo "error: session G creation failed" >&2; exit 1; }
@@ -982,11 +1011,14 @@ G_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$G_TOKEN" \
 printf '%s\n' "$G_RO_OUT" | grep -q 'GLOBAL-RO-OK' \
   && acc_ok "G read-only exposure succeeded" \
   || acc_fail "G read-only exposure check failed"
-G_RESIDUE_BASE="$(residue_state)"
-if expect_read_only_root "$G_TOKEN" . /mnt/g 'echo x > /mnt/g/forbidden.txt' "$G_RESIDUE_BASE"; then
-  acc_ok "G writable exposure refused with read_only_root before workload creation (no residue)"
+if ! G_RESIDUE_BASE="$(residue_state)"; then
+  acc_blocked "G pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
-  acc_fail "G writable exposure was not refused (base: $G_RESIDUE_BASE)"
+  if expect_read_only_root "$G_TOKEN" . /mnt/g 'echo x > /mnt/g/forbidden.txt' "$G_RESIDUE_BASE"; then
+    acc_ok "G writable exposure refused with read_only_root before workload creation (no residue)"
+  else
+    acc_fail "G writable exposure was not refused (base: $G_RESIDUE_BASE)"
+  fi
 fi
 [ ! -e "$G_WS/forbidden.txt" ] \
   || acc_fail "G forbidden host-side file was created"
@@ -1020,10 +1052,10 @@ scenario "SYM: Admin and Principal credential narrowing symmetry"
 # Admin authority: same valid narrowing as scenario N, on the main workspace.
 SYM_ADMIN_OUT="$(dh session create --system --token-file /etc/docker-helper/admin.token \
   --launcher "$MAIN_L_ID" --workspace "$WS" --json \
-  --filesystem-entry .=read_only \
-  --filesystem-entry project=read_write \
-  --filesystem-entry pipeline-inputs=read_only \
-  --filesystem-entry pipeline-outputs=read_write 2>&1 || true)"
+  --filesystem-root "$WS=read_only" \
+  --filesystem-root "$WS/project=read_write" \
+  --filesystem-root "$WS/pipeline-inputs=read_only" \
+  --filesystem-root "$WS/pipeline-outputs=read_write" 2>&1 || true)"
 SYM_ADMIN_ID="$(printf '%s' "$SYM_ADMIN_OUT" | json_field id)"
 if [ -n "$SYM_ADMIN_ID" ]; then
   printf '%s' "$SYM_ADMIN_OUT" | json_field token > "/tmp/uat-am-tok-$SYM_ADMIN_ID"; chmod 600 "/tmp/uat-am-tok-$SYM_ADMIN_ID"
@@ -1043,8 +1075,8 @@ fi
 if SYM_ADMIN_BEFORE="$(session_list_count)"; then
   SYM_ADMIN_WIDEN_OUT="$(dh session create --system --token-file /etc/docker-helper/admin.token \
     --launcher "$MAIN_L_ID" --workspace "$WS" --json \
-    --filesystem-entry .=read_only \
-    --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
+    --filesystem-root "$WS=read_only" \
+    --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
   if printf '%s\n' "$SYM_ADMIN_WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
       && ! printf '%s\n' "$SYM_ADMIN_WIDEN_OUT" | grep -q '"id"'; then
     if SYM_ADMIN_AFTER="$(session_list_count)" && [ "$SYM_ADMIN_AFTER" = "$SYM_ADMIN_BEFORE" ]; then
@@ -1068,10 +1100,10 @@ else
 fi
 SYM_PRIN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-principal \
   --workspace "$WS" --json \
-  --filesystem-entry .=read_only \
-  --filesystem-entry project=read_write \
-  --filesystem-entry pipeline-inputs=read_only \
-  --filesystem-entry pipeline-outputs=read_write 2>&1 || true)"
+  --filesystem-root "$WS=read_only" \
+  --filesystem-root "$WS/project=read_write" \
+  --filesystem-root "$WS/pipeline-inputs=read_only" \
+  --filesystem-root "$WS/pipeline-outputs=read_write" 2>&1 || true)"
 SYM_PRIN_ID="$(printf '%s' "$SYM_PRIN_OUT" | json_field id)"
 if [ -n "$SYM_PRIN_ID" ]; then
   printf '%s' "$SYM_PRIN_OUT" | json_field token > "/tmp/uat-am-tok-$SYM_PRIN_ID"; chmod 600 "/tmp/uat-am-tok-$SYM_PRIN_ID"
@@ -1091,8 +1123,8 @@ fi
 if SYM_PRIN_BEFORE="$(session_list_count)"; then
   SYM_PRIN_WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-principal \
     --workspace "$WS" --json \
-    --filesystem-entry .=read_only \
-    --filesystem-entry pipeline-inputs=read_write 2>&1 || true)"
+    --filesystem-root "$WS=read_only" \
+    --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
   if printf '%s\n' "$SYM_PRIN_WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
       && ! printf '%s\n' "$SYM_PRIN_WIDEN_OUT" | grep -q '"id"'; then
     if SYM_PRIN_AFTER="$(session_list_count)" && [ "$SYM_PRIN_AFTER" = "$SYM_PRIN_BEFORE" ]; then
@@ -1128,11 +1160,14 @@ if snapshot_has "$SD_ID" "$BUILD_WS" read_only \
 else
   acc_fail "B3 build snapshot carries read_write authority"
 fi
-RESIDUE_BASE="$(residue_state)"
-if expect_read_only_root "$SD_TOKEN" . /mnt/buildroot 'echo x > /mnt/buildroot/forbidden.txt' "$RESIDUE_BASE"; then
-  acc_ok "B3 writable run exposure of the same Session is refused (read_only_root)"
+if ! RESIDUE_BASE="$(residue_state)"; then
+  acc_blocked "RESIDUE_BASE pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
-  acc_fail "B3 writable run exposure of the RO build Session was not refused"
+  if expect_read_only_root "$SD_TOKEN" . /mnt/buildroot 'echo x > /mnt/buildroot/forbidden.txt' "$RESIDUE_BASE"; then
+    acc_ok "B3 writable run exposure of the same Session is refused (read_only_root)"
+  else
+    acc_fail "B3 writable run exposure of the RO build Session was not refused"
+  fi
 fi
 
 # ==============================================================================
@@ -1141,12 +1176,15 @@ fi
 scenario "A: audit carries canonical path/access facts and no secrets"
 AUDIT_SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
 # One positive and one negative operation inside a fresh bounded window.
-AUD_NEG_BASE="$(residue_state)"
+if ! AUD_NEG_BASE="$(residue_state)"; then
+  acc_blocked "A negative-audit residue baseline inventory unavailable (fail-closed)"
+else
 expect_read_only_root "$SA_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden4.txt' "$AUD_NEG_BASE" \
   || acc_fail "A negative audit precondition failed"
 AUD_POS_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
   dh run --image alpine:3.24 --mount project:/mnt/project -- sh -ec 'echo AUDIT-WINDOW-OK')" \
   || acc_fail "A positive audit precondition failed: $AUD_POS_OUT"
+fi
 sleep 1
 AUDIT_JSON="$(journalctl --utc -u docker-helper.service --since "$AUDIT_SINCE" --no-pager 2>/dev/null \
   | grep '"stream":"audit"' || true)"
@@ -1178,6 +1216,289 @@ else
   fi
   acc_ok "A audit contains no bearer material"
 fi
+
+# ==============================================================================
+# scenario MR: multi-root Session filesystem roots (the canonical motivating
+# shape) — effective Launcher roots analogous to /home/<user> RW and
+# /opt/<user> RW; the Session issues an external read-only root and an
+# external read-write root and mounts them through the absolute spelling,
+# while every widening/out-of-ceiling/out-of-snapshot attempt is refused
+# before any Session/pin/container/residue state exists.
+# ==============================================================================
+scenario "MR: multi-root Session filesystem roots"
+
+MR_HOME="$ALLOWED_ROOT"
+MR_OPT="/opt/$PRINCIPAL"
+MR_WS="$MR_HOME/runs/run-123"
+MR_HELPER="$MR_OPT/repos/helper"
+MR_CACHE="$MR_OPT/cache"
+MR_EXTRA="$MR_OPT/extra"
+rm -rf "$MR_WS" "$MR_OPT"
+mkdir -p "$MR_WS" "$MR_HELPER" "$MR_CACHE" "$MR_EXTRA"
+printf 'helper-src\n' > "$MR_HELPER/main.go"
+printf 'seed\n' > "$MR_CACHE/seed.txt"
+printf 'extra-file\n' > "$MR_EXTRA/keep.txt"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$MR_OPT"
+chmod -R u+rwX,go+rX "$MR_OPT"
+
+# The second effective Launcher root: a second global allowed root plus the
+# matching Principal entries, so the restricted multiroot Launcher carries
+# exactly the /home/<user> RW + /opt/<user> RW ceiling.
+if dh config allowed-root add --access read_write "$MR_OPT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$MR_OPT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$MR_HOME" >/dev/null 2>&1 \
+    && [ "$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_access "$MR_OPT")" = read_write ]; then
+  acc_ok "MR setup: second effective root $MR_OPT (global RW + Principal RW)"
+else
+  acc_fail "MR setup: second effective root setup failed"
+fi
+MR_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name multiroot --no-credential 2>/dev/null || true)"
+MR_L_ID="$(printf '%s' "$MR_L_JSON" | json_field id)"
+if [ -n "$MR_L_ID" ] \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_L_ID" "$MR_HOME" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_L_ID" "$MR_OPT" >/dev/null 2>&1; then
+  acc_ok "MR setup: multiroot Launcher carries $MR_HOME + $MR_OPT"
+else
+  acc_fail "MR setup: multiroot Launcher setup failed: $MR_L_JSON"
+fi
+issue_launcher_credential "$PRINCIPAL" "$MR_L_ID" /tmp/uat-am-cred-multiroot \
+  || { echo "error: multiroot launcher credential issuance failed" >&2; exit 1; }
+
+# MR1: workspace implicit grant + two external roots through the public CLI.
+MR1_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+  --workspace "$MR_WS" --json \
+  --filesystem-root "$MR_HELPER=read_only" \
+  --filesystem-root "$MR_CACHE=read_write" 2>&1 || true)"
+MR1_ID="$(printf '%s' "$MR1_OUT" | json_field id)"
+if [ -n "$MR1_ID" ]; then
+  printf '%s' "$MR1_OUT" | json_field token > "/tmp/uat-am-tok-$MR1_ID"; chmod 600 "/tmp/uat-am-tok-$MR1_ID"
+  MR1_TOKEN="$(cat "/tmp/uat-am-tok-$MR1_ID")"
+  acc_ok "MR1 Launcher credential created the multi-root Session (workspace + helper RO + cache RW)"
+else
+  acc_fail "MR1 multi-root session create failed: $(printf '%s\n' "$MR1_OUT" | redact | tail -3)"
+fi
+if [ -n "${MR1_ID:-}" ] \
+    && snapshot_has "$MR1_ID" "$MR_WS" read_write \
+    && snapshot_has "$MR1_ID" "$MR_HELPER" read_only \
+    && snapshot_has "$MR1_ID" "$MR_CACHE" read_write \
+    && snapshot_lacks "$MR1_ID" "$MR_EXTRA"; then
+  acc_ok "MR1 issued snapshot carries the correct effective multi-root semantics (session show)"
+else
+  acc_fail "MR1 issued snapshot wrong: $(show_snapshot "${MR1_ID:-}" 2>/dev/null | tr '\n' '; ')"
+fi
+
+# MR1a: the workspace relative RW mount still works.
+MR1A_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
+  dh run --image alpine:3.24 --mount .:/work -- \
+  sh -ec 'echo ws-write > /work/written.txt && echo MR1A-OK')" \
+  || acc_fail "MR1a workspace relative RW mount failed: $MR1A_OUT"
+if [ -f "$MR_WS/written.txt" ] && [ "$(cat "$MR_WS/written.txt")" = "ws-write" ]; then
+  acc_ok "MR1a workspace relative RW mount succeeded and persisted"
+else
+  acc_fail "MR1a workspace write did not persist to the host"
+fi
+
+# MR1b: the external helper root mounts read-only through the absolute
+# spelling and the read succeeds.
+MR1B_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
+  dh run --image alpine:3.24 --mount "$MR_HELPER:/helper:ro" -- \
+  sh -ec 'test "$(cat /helper/main.go)" = "helper-src" && echo MR1B-RO-OK')" \
+  || acc_fail "MR1b external RO absolute mount failed: $MR1B_OUT"
+printf '%s\n' "$MR1B_OUT" | grep -q 'MR1B-RO-OK' \
+  && acc_ok "MR1b external RO root read succeeded through the absolute spelling" \
+  || acc_fail "MR1b external RO read did not reach MR1B-RO-OK"
+
+# MR1c: a writable request for the external RO root is refused
+# read_only_root before any pin/container/workload state exists, proven
+# against a mandatory fail-closed residue baseline.
+if ! MR1C_BASE="$(residue_state)"; then
+  acc_blocked "MR1c pre-attempt residue baseline inventory unavailable (fail-closed)"
+else
+  if expect_read_only_root "$MR1_TOKEN" "$MR_HELPER" /helper 'echo x > /helper/forbidden.txt' "$MR1C_BASE"; then
+    acc_ok "MR1c external RO root writable request refused (read_only_root, no residue)"
+  else
+    acc_fail "MR1c external RO writable request was not refused (base: $MR1C_BASE)"
+  fi
+fi
+
+# MR1d: the external cache root mounts writable through the absolute
+# spelling and the write persists to the host.
+MR1D_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
+  dh run --image alpine:3.24 --mount "$MR_CACHE:/cache" -- \
+  sh -ec 'echo cache-write > /cache/written.txt && cat /cache/seed.txt')" \
+  || acc_fail "MR1d external RW absolute mount failed: $MR1D_OUT"
+if [ -f "$MR_CACHE/written.txt" ] && [ "$(cat "$MR_CACHE/written.txt")" = "cache-write" ]; then
+  acc_ok "MR1d external RW root write succeeded and persisted"
+else
+  acc_fail "MR1d external RW write did not persist to the host"
+fi
+
+# MR1e: a Launcher-allowed directory NOT issued to this Session is refused
+# (invalid_mount) before any pin/container/residue state exists, proven
+# against a mandatory fail-closed residue baseline.
+if ! MR1E_BASE="$(residue_state)"; then
+  acc_blocked "MR1e pre-attempt residue baseline inventory unavailable (fail-closed)"
+else
+  MR1E_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
+    dh run --image alpine:3.24 --mount "$MR_EXTRA:/extra" -- \
+    sh -ec 'echo x > /extra/forbidden.txt' 2>&1 || true)"
+  if printf '%s\n' "$MR1E_OUT" | grep -q 'invalid_mount' \
+      && residue_unchanged "$MR1E_BASE"; then
+    acc_ok "MR1e unissued Launcher path refused (invalid_mount, no pin/container/residue)"
+  else
+    acc_fail "MR1e unissued path was not refused cleanly (base: $MR1E_BASE)"
+  fi
+fi
+
+# MR2: an explicit workspace root at read_only replaces the implicit grant:
+# the relative workspace writable mount is refused read_only_root.
+MR2_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+  --workspace "$MR_WS" --json \
+  --filesystem-root "$MR_WS=read_only" \
+  --filesystem-root "$MR_CACHE=read_write" 2>&1 || true)"
+MR2_ID="$(printf '%s' "$MR2_OUT" | json_field id)"
+if [ -n "$MR2_ID" ]; then
+  printf '%s' "$MR2_OUT" | json_field token > "/tmp/uat-am-tok-$MR2_ID"; chmod 600 "/tmp/uat-am-tok-$MR2_ID"
+  MR2_TOKEN="$(cat "/tmp/uat-am-tok-$MR2_ID")"
+  acc_ok "MR2 explicitly narrowed workspace Session created"
+else
+  acc_fail "MR2 workspace-RO session create failed: $(printf '%s\n' "$MR2_OUT" | redact | tail -3)"
+fi
+if ! MR2_BASE="$(residue_state)"; then
+  acc_blocked "MR2 pre-attempt residue baseline inventory unavailable (fail-closed)"
+else
+  if expect_read_only_root "$MR2_TOKEN" . /work 'echo x > /work/forbidden.txt' "$MR2_BASE"; then
+    acc_ok "MR2 relative workspace writable mount refused after the explicit RO narrowing"
+  else
+    acc_fail "MR2 workspace writable exposure was not refused (base: $MR2_BASE)"
+  fi
+fi
+
+# MR3: a filesystem root outside the Launcher ceiling is refused
+# invalid_filesystem_policy before the Session exists: no Session, no
+# bearer, no residue. The inventories are the fail-closed owners.
+if ! MR3_BASE="$(residue_state)" || ! MR3_BEFORE="$(session_list_count)"; then
+  acc_blocked "MR3 pre-attempt inventory unavailable (fail-closed residue/session)"
+else
+  MR3_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+    --workspace "$MR_WS" --json \
+    --filesystem-root /srv/outside-ceiling=read_write 2>&1 || true)"
+  if printf '%s\n' "$MR3_OUT" | grep -q 'invalid_filesystem_policy' \
+      && ! printf '%s\n' "$MR3_OUT" | grep -q '"id"' \
+      && MR3_AFTER="$(session_list_count)" \
+      && [ "$MR3_AFTER" = "$MR3_BEFORE" ] \
+      && residue_unchanged "$MR3_BASE"; then
+    acc_ok "MR3 outside-ceiling root refused (invalid_filesystem_policy, no Session/residue)"
+  else
+    acc_fail "MR3 outside-ceiling root was not refused cleanly (base: $MR3_BASE)"
+  fi
+fi
+
+# MR4/MR5: nested Launcher RO transition under a selected RW root. The
+# launcher carries a read_only repos root under the read_write MR_OPT; a
+# requested read_write there is refused, while a selected MR_OPT RW root
+# preserves the protected transition inside the issued snapshot and a
+# writable parent exposure of it is refused.
+if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
+    "$MR_L_ID" "$MR_OPT/repos" >/dev/null 2>&1; then
+  acc_ok "MR4 setup: launcher carries the nested read_only repos root"
+else
+  acc_fail "MR4 setup: nested read_only launcher root failed"
+fi
+MR4_BEFORE="$(session_list_count)"
+MR4_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+  --workspace "$MR_WS" --json \
+  --filesystem-root "$MR_HELPER=read_write" 2>&1 || true)"
+if printf '%s\n' "$MR4_OUT" | grep -q 'invalid_filesystem_policy' \
+    && MR4_AFTER="$(session_list_count)" \
+    && [ "$MR4_AFTER" = "$MR4_BEFORE" ]; then
+  acc_ok "MR4 Launcher RO + requested Session RW refused (invalid_filesystem_policy)"
+else
+  acc_fail "MR4 widening under the nested launcher RO was not refused"
+fi
+MR5_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+  --workspace "$MR_WS" --json \
+  --filesystem-root "$MR_OPT=read_write" 2>&1 || true)"
+MR5_ID="$(printf '%s' "$MR5_OUT" | json_field id)"
+if [ -n "$MR5_ID" ]; then
+  printf '%s' "$MR5_OUT" | json_field token > "/tmp/uat-am-tok-$MR5_ID"; chmod 600 "/tmp/uat-am-tok-$MR5_ID"
+  MR5_TOKEN="$(cat "/tmp/uat-am-tok-$MR5_ID")"
+  acc_ok "MR5 selected parent RW root Session created"
+else
+  acc_fail "MR5 parent-root session create failed: $(printf '%s\n' "$MR5_OUT" | redact | tail -3)"
+fi
+if [ -n "${MR5_ID:-}" ] \
+    && snapshot_has "$MR5_ID" "$MR_OPT" read_write \
+    && snapshot_has "$MR5_ID" "$MR_OPT/repos" read_only; then
+  acc_ok "MR5 nested Launcher RO transition survives inside the selected RW root snapshot"
+else
+  acc_fail "MR5 nested RO transition lost: $(show_snapshot "${MR5_ID:-}" 2>/dev/null | tr '\n' '; ')"
+fi
+if ! MR5_BASE="$(residue_state)"; then
+  acc_blocked "MR5 pre-attempt residue baseline inventory unavailable (fail-closed)"
+else
+  if expect_read_only_root "$MR5_TOKEN" "$MR_OPT" /opt-tree 'echo x > /opt-tree/repos/forbidden.txt' "$MR5_BASE"; then
+    acc_ok "MR5 writable parent exposure spanning the nested RO refused (read_only_root)"
+  else
+    acc_fail "MR5 writable parent exposure was not refused (base: $MR5_BASE)"
+  fi
+fi
+MR5_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR5_TOKEN" \
+  dh run --image alpine:3.24 --mount "$MR_HELPER:/helper:ro" -- \
+  sh -ec 'test "$(cat /helper/main.go)" = "helper-src" && echo MR5-RO-OK')" \
+  || acc_fail "MR5 nested RO read failed: $MR5_RO_OUT"
+printf '%s\n' "$MR5_RO_OUT" | grep -q 'MR5-RO-OK' \
+  && acc_ok "MR5 nested RO region readable through the issued snapshot" \
+  || acc_fail "MR5 nested RO read check failed"
+
+# MR6: an issued Session keeps its snapshot after the parent policy changes
+# (flip MR_OPT to read_only, verify, flip back). The snapshot is immutable
+# and the issued RW cache stays writable.
+if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
+    "$MR_L_ID" "$MR_OPT" read_only >/dev/null 2>&1 \
+    && [ -n "${MR1_ID:-}" ] \
+    && snapshot_has "$MR1_ID" "$MR_CACHE" read_write \
+    && snapshot_has "$MR1_ID" "$MR_WS" read_write; then
+  MR6_W="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
+    dh run --image alpine:3.24 --mount "$MR_CACHE:/cache" -- \
+    sh -ec 'echo after-policy > /cache/after.txt' >/dev/null 2>&1 \
+    && [ "$(cat "$MR_CACHE/after.txt" 2>/dev/null)" = "after-policy" ] && echo MR6-OK)"
+  if [ "$(printf '%s' "$MR6_W")" = "MR6-OK" ]; then
+    acc_ok "MR6 issued Session snapshot immutable after the parent-policy change (cache still RW)"
+  else
+    acc_fail "MR6 issued cache write failed after the parent-policy change"
+  fi
+else
+  acc_fail "MR6 parent-policy change or snapshot verification failed"
+fi
+dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
+  "$MR_L_ID" "$MR_OPT" read_write >/dev/null 2>&1 || true
+
+# MR7: packaged completion smoke — the candidate's generated Bash completion,
+# sourced in a fresh shell, renders the two sibling root boundaries
+# (home/ and opt/) at the / level and never two identical basenames.
+MR_CRED_SCRIPT="$(mktemp /tmp/uat-am-completion-XXXXXX)"
+dh completion bash > "$MR_CRED_SCRIPT" 2>/dev/null
+MR_CMP_OUT="$(bash --noprofile --norc -ec '
+  source "$1" >/dev/null 2>&1
+  COMP_WORDS=(docker-helper session create --system --workspace /)
+  COMP_CWORD=4
+  COMP_LINE="docker-helper session create --system --workspace /"
+  COMP_POINT=${#COMP_LINE}
+  COMPREPLY=()
+  _docker_helper_completion
+  printf "%s\n" "${COMPREPLY[@]}"
+' _ "$MR_CRED_SCRIPT" 2>/dev/null || true)"
+MR_CMP_LINES="$(printf '%s\n' "$MR_CMP_OUT" | grep -v '^$' | sort -u | tr '\n' ' ')"
+if printf '%s' "$MR_CMP_LINES" | grep -q '/home' \
+    && printf '%s' "$MR_CMP_LINES" | grep -q '/opt' \
+    && [ "$(printf '%s\n' "$MR_CMP_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 2 ] \
+    && ! printf '%s\n' "$MR_CMP_OUT" | grep -v '^$' | sort -u | grep -q 'runner'; then
+  acc_ok "MR7 packaged completion smoke: '/' renders the distinguishable home/ and opt/ boundaries"
+else
+  acc_fail "MR7 packaged completion smoke wrong: [$MR_CMP_LINES]"
+fi
+rm -f "$MR_CRED_SCRIPT"
 
 # ==============================================================================
 # scenario Z: residue and cleanup (fail-closed three-state inventory:

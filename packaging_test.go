@@ -9715,15 +9715,82 @@ func TestAccessModesHarnessInventoryFailClosed(t *testing.T) {
 	if strings.Contains(content, "grep -c 'docker-helper-workload-' /sys/kernel/security/apparmor/profiles 2>/dev/null || true") {
 		t.Error("the workload profile inventory must not swallow an inspection failure as a count")
 	}
+
+	// The mandatory residue baseline is fail-closed at every proof: the
+	// capture is inside a successful-branch check (an unavailable inventory
+	// is an acc_blocked, never a silently-empty baseline), and the helper
+	// treats an empty baseline as a failed proof.
+	if !strings.Contains(content, `if ! RESIDUE_BASE="$(residue_state)"; then`) {
+		t.Error("the residue baseline capture must be inside a fail-closed conditional")
+	}
+	if !strings.Contains(content, `pre-attempt residue baseline inventory unavailable (fail-closed)"`) {
+		t.Error("an unavailable residue baseline must block, never disable the proof")
+	}
+	if !strings.Contains(content, `if [ -z "$base" ]; then`) {
+		t.Error("expect_read_only_root must refuse an empty mandatory residue baseline")
+	}
+}
+
+// TestAccessModesHarnessMultiRootRoots pins the canonical multi-root UAT
+// scenario: the effective Launcher roots analogous to /home/<user> RW and
+// /opt/<user> RW, the multi-root Session through the absolute
+// --filesystem-root grammar, the external RO/RW data-plane proofs with
+// fail-closed residue baselines, the unissued-path refusal, the
+// outside-ceiling create refusal, the nested Launcher RO transition
+// survival, the parent-policy immutability of an issued Session, and the
+// packaged completion smoke rendering the distinguishable boundary segments.
+func TestAccessModesHarnessMultiRootRoots(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-access-modes.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	for _, must := range []string{
+		`MR_HOME="$ALLOWED_ROOT"`,
+		`MR_OPT="/opt/$PRINCIPAL"`,
+		`dh config allowed-root add --access read_write "$MR_OPT"`,
+		`--filesystem-root "$MR_HELPER=read_only"`,
+		`--filesystem-root "$MR_CACHE=read_write"`,
+		`dh run --image alpine:3.24 --mount "$MR_HELPER:/helper:ro" --`,
+		`dh run --image alpine:3.24 --mount "$MR_CACHE:/cache" --`,
+		`dh run --image alpine:3.24 --mount "$MR_EXTRA:/extra" --`,
+		`acc_ok "MR1e unissued Launcher path refused (invalid_mount, no pin/container/residue)"`,
+		`--filesystem-root /srv/outside-ceiling=read_write`,
+		`acc_ok "MR3 outside-ceiling root refused (invalid_filesystem_policy, no Session/residue)"`,
+		`--filesystem-root "$MR_WS=read_only"`,
+		`snapshot_has "$MR5_ID" "$MR_OPT/repos" read_only`,
+		`acc_ok "MR6 issued Session snapshot immutable after the parent-policy change (cache still RW)"`,
+		`dh completion bash > "$MR_CRED_SCRIPT"`,
+		`acc_ok "MR7 packaged completion smoke: '/' renders the distinguishable home/ and opt/ boundaries"`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("multi-root scenario must carry the required proof (%s)", must)
+		}
+	}
+
+	// Every MR residue baseline is a fail-closed mandatory capture.
+	for _, must := range []string{
+		`if ! MR1C_BASE="$(residue_state)"; then`,
+		`if ! MR1E_BASE="$(residue_state)"; then`,
+		`if ! MR2_BASE="$(residue_state)"; then`,
+		`if ! MR3_BASE="$(residue_state)" || ! MR3_BEFORE="$(session_list_count)"; then`,
+		`if ! MR5_BASE="$(residue_state)"; then`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("MR residue baseline must be fail-closed (%s)", must)
+		}
+	}
 }
 
 // TestAccessModesHarnessIssuanceNarrowing pins the canonical Launcher
 // per-Session issuance-time narrowing scenario in the access-mode UAT: the
 // dynamic run workspace is created by the harness before the Session, the
-// narrowed create uses the repeatable --filesystem-entry CLI grammar under a
-// Launcher credential, the issued snapshot is verified through effective
-// semantics (not redundant storage), the omitted-entry inherited behavior is
-// proven on the same run workspace, and the widening refusal is the stable
+// narrowed create issues the absolute filesystem roots through the
+// repeatable --filesystem-root CLI grammar under a Launcher credential, the
+// issued snapshot is verified through effective semantics (not redundant
+// storage), the omitted-root inherited behavior is proven on the same run
+// workspace, and the widening refusal is the stable
 // invalid_filesystem_policy contract with no issued state or residue.
 func TestAccessModesHarnessIssuanceNarrowing(t *testing.T) {
 	data, err := os.ReadFile("scripts/uat-access-modes.sh")
@@ -9740,10 +9807,10 @@ func TestAccessModesHarnessIssuanceNarrowing(t *testing.T) {
 		`RUNDIR="$TREE/run-uat-$(date +%s)-$$"`,
 		`mkdir -p "$RUNDIR/project" "$RUNDIR/pipeline-inputs" "$RUNDIR/pipeline-outputs"`,
 		`--token-file /tmp/uat-am-cred-main`,
-		`--filesystem-entry .=read_only`,
-		`--filesystem-entry project=read_write`,
-		`--filesystem-entry pipeline-inputs=read_only`,
-		`--filesystem-entry pipeline-outputs=read_write`,
+		`--filesystem-root "$RUNDIR=read_only"`,
+		`--filesystem-root "$RUNDIR/project=read_write"`,
+		`--filesystem-root "$RUNDIR/pipeline-inputs=read_only"`,
+		`--filesystem-root "$RUNDIR/pipeline-outputs=read_write"`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("issuance-narrowing scenario must carry the motivating Launcher create (%s)", must)
@@ -9765,10 +9832,10 @@ func TestAccessModesHarnessIssuanceNarrowing(t *testing.T) {
 		}
 	}
 
-	// Omitted filesystem_entries keeps the inherited behavior on the same run
+	// Omitted filesystem_roots keeps the inherited behavior on the same run
 	// workspace.
-	if !strings.Contains(content, `acc_ok "13 omitted filesystem_entries keeps the inherited read-write behavior"`) {
-		t.Error("the omitted-entry inherited behavior must be proven on the same run workspace")
+	if !strings.Contains(content, `acc_ok "13 omitted filesystem_roots keeps the inherited read-write behavior"`) {
+		t.Error("the omitted-root inherited behavior must be proven on the same run workspace")
 	}
 
 	// The widening refusal is the stable issuance-time contract: no Session
@@ -9810,7 +9877,7 @@ func TestAccessModesHarnessIssuanceNarrowing(t *testing.T) {
 		if strings.Contains(line, `N_BEFORE="$(session_list_count)"`) && beforeLine < 0 {
 			beforeLine = i
 		}
-		if strings.Contains(line, `--filesystem-entry .=read_write`) {
+		if strings.Contains(line, `--filesystem-root "$RUNDIR=read_write"`) {
 			createCount++
 			if createLine < 0 {
 				createLine = i
@@ -10143,10 +10210,12 @@ func TestAccessModesHarnessAuthoritySymmetry(t *testing.T) {
 	// Both new authorities use the same valid narrowing request vocabulary
 	// as the Launcher scenario (three issued creates) and make their own
 	// widening attempt against the read_only ceiling (three attempts total).
-	if got := strings.Count(content, "--filesystem-entry pipeline-outputs=read_write"); got != 3 {
+	if got := strings.Count(content, `--filesystem-root "$WS/pipeline-outputs=read_write"`) +
+		strings.Count(content, `--filesystem-root "$RUNDIR/pipeline-outputs=read_write"`); got != 3 {
 		t.Errorf("the same narrowing request must be issued per authority (launcher, admin, principal), got %d creates", got)
 	}
-	if got := strings.Count(content, "--filesystem-entry pipeline-inputs=read_write"); got != 3 {
+	if got := strings.Count(content, `--filesystem-root "$WS/pipeline-inputs=read_write"`) +
+		strings.Count(content, `--filesystem-root "$RUNDIR/pipeline-inputs=read_write"`); got != 3 {
 		t.Errorf("each authority must make its own widening attempt, got %d attempts", got)
 	}
 
