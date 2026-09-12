@@ -835,9 +835,9 @@ fi
 # window (journalctl's @epoch since-form is not uniformly accepted across
 # systemd builds); the window is retried briefly because journald can lag the
 # just-finished run, and a failed read is diagnosed instead of failing silent.
-S7_AUDIT_START="$(date -u -d "@${AUDIT_START_EPOCH}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
+S7_AUDIT_START="$(date -u -d "@${AUDIT_START_EPOCH}" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || true)"
 S7_AUDIT_OK=""
-for _s7i in 1 2 3; do
+for _s7i in 1 2 3 4 5; do
   if [ -n "$S7_AUDIT_START" ] \
       && journalctl --utc -u docker-helper.service --since "$S7_AUDIT_START" --no-pager 2>/dev/null \
         | grep '"event":"run.start"' | grep -q '"workload_mac_backend":"selinux"'; then

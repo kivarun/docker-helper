@@ -133,7 +133,15 @@ if S_SELF="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$S_TOK
   if printf '%s\n' "$S_SELF" | grep -q '"type": "session"' \
       && printf '%s\n' "$S_SELF" | grep -q "\"id\": \"$S_ID\"" \
       && printf '%s\n' "$S_SELF" | grep -q "\"workspace\": \"$WS\"" \
-      && printf '%s\n' "$S_SELF" | tr '\n' ' ' | grep -Eq "\"filesystem_snapshot\": \{[^}]*\"entries\": \[[^]]*${WS}[^\]]*read_write[^\]]*\]"; then
+      && printf '%s' "$S_SELF" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)
+res = env["resource"]
+entries = res["filesystem_snapshot"]["entries"]
+assert res["workspace"] == "$WS", res["workspace"]
+assert entries == [{"path": "$WS", "access": "read_write"}], entries
+print("A-JSON-OK")
+' >/dev/null 2>&1; then
     reg_ok "A: session bearer self carries type/session, workspace, and the workspace-only read_write snapshot"
   else
     reg_fail "A: session bearer self mismatch: $(printf '%s\n' "$S_SELF" | redact | head -8 | tr '\n' ' ')"
