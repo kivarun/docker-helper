@@ -196,13 +196,19 @@ type resolvedMount struct {
 	ReadOnly   bool
 }
 
+// resolveMount resolves one caller mount request into its canonical mount
+// facts. The source grammar is two-form: a relative source is resolved
+// against the session workspace (the existing convenience, and a structural
+// boundary — the workspace-relative spelling can never reach another issued
+// root), and an absolute source is an absolute host path. Both forms
+// canonicalize to the same identity rules: the resolved path must exist as a
+// directory or regular file, and the canonical resolved path (never the
+// caller spelling, which may name a symlink alias) is the only policy
+// identity later authorized against the issued Session filesystem snapshot
+// by resolveSessionFilesystemExposure.
 func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) {
 	if mount.Source == "" {
 		return nil, fmt.Errorf("mount source is required")
-	}
-
-	if filepath.IsAbs(mount.Source) {
-		return nil, fmt.Errorf("mount source must be relative: %s", mount.Source)
 	}
 
 	if mount.Target == "" {
@@ -222,12 +228,17 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 		return nil, fmt.Errorf("mount target contains unsupported character: %s", cleaned)
 	}
 
-	sourcePath := filepath.Join(workspace, mount.Source)
-	sourcePath, err := filepath.Abs(sourcePath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve mount source: %w", err)
+	sourcePath := mount.Source
+	if !filepath.IsAbs(sourcePath) {
+		joined := filepath.Join(workspace, sourcePath)
+		abs, err := filepath.Abs(joined)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve mount source: %w", err)
+		}
+		sourcePath = abs
 	}
 
+	var err error
 	sourcePath, err = filepath.EvalSymlinks(sourcePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -240,8 +251,18 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 		return nil, fmt.Errorf("mount source contains unsupported character: %s", sourcePath)
 	}
 
-	if !pathWithin(workspace, sourcePath) {
-		return nil, fmt.Errorf("mount source escapes workspace: %s", mount.Source)
+	if !filepath.IsAbs(sourcePath) {
+		return nil, fmt.Errorf("mount source is not absolute: %s", mount.Source)
+	}
+
+	// The workspace-relative grammar keeps the mount scoped to the session
+	// workspace. An absolute source skips this proof: its authority is the
+	// issued Session filesystem snapshot alone, proven by the exposure
+	// resolution.
+	if !filepath.IsAbs(mount.Source) {
+		if !pathWithin(workspace, sourcePath) {
+			return nil, fmt.Errorf("mount source escapes workspace: %s", mount.Source)
+		}
 	}
 
 	info, err := os.Stat(sourcePath)
@@ -364,14 +385,6 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if cfg.Mode == ModeUser && resolved.SourcePath != session.Workspace {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
-			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
-			return
-		}
-
 		if targetSeen[resolved.Target] {
 			if leaseRelease != nil {
 				leaseRelease()
@@ -435,6 +448,14 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			}
 			if errors.Is(err, ErrReadOnlyRoot) {
 				writeRunReadOnlyRootRejected(ctx, w, session, req.Mounts[i], exposure)
+				return
+			}
+			if errors.Is(err, ErrOutsideSessionSnapshot) {
+				// An ordinary caller policy mistake: the source was never
+				// issued to this Session. The stable non-disclosing
+				// invalid_mount contract answers before any pin,
+				// operation, or Docker state exists.
+				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 				return
 			}
 			opLog(ctx).Error("cannot resolve session filesystem exposure",
@@ -583,7 +604,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	pinnedMounts := make([]*pinnedMount, 0, len(resolvedMounts))
 	if cfg.Mode == ModeSystem {
 		for i, m := range resolvedMounts {
-			pm, err := a.pinWorkspaceMountSource(session.Workspace, m.SourcePath, cfg.RuntimeDir, op.ID, i)
+			pm, err := a.pinMountSource(m.SourcePath, cfg.RuntimeDir, op.ID, i)
 			if err != nil {
 				opLog(ctx).Error("cannot pin mount source",
 					slog.String("operation", "run"),

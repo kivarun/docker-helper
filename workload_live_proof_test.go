@@ -463,7 +463,7 @@ func TestLiveWorkloadSELinux(t *testing.T) {
 
 	// Pin the source through the production mount-pin owner so the
 	// projection is built exactly from the kernel materialization source.
-	pinned, err := pinWorkspaceMountSource(filepath.Dir(source), source,
+	pinned, err := pinMountSource(source,
 		filepath.Join(dir, "runtime"), "op_livesel1", 0)
 	if err != nil {
 		t.Fatalf("production pin: %v", err)
@@ -569,7 +569,7 @@ func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 	}
 
 	// Pin the regular file through the production mount-pin owner.
-	pinned, err := pinWorkspaceMountSource(filepath.Dir(source), source,
+	pinned, err := pinMountSource(source,
 		filepath.Join(dir, "runtime"), "op_liveself1", 0)
 	if err != nil {
 		t.Fatalf("production pin: %v", err)
@@ -698,7 +698,7 @@ func TestLiveWorkloadMCSConcurrentRWRO(t *testing.T) {
 	}
 	labelsBefore := inodeContextOf(source)
 
-	pinned, err := pinWorkspaceMountSource(filepath.Dir(source), source,
+	pinned, err := pinMountSource(source,
 		filepath.Join(dir, "runtime"), "op_livemcs1", 0)
 	if err != nil {
 		t.Fatalf("production pin: %v", err)
