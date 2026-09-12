@@ -214,6 +214,21 @@ policy.
 .B docker-helper session delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-id SESSION_ID [\-\-json]
 Delete a session by ID. With \-\-json, output in JSON format.
 .TP
+.B docker-helper self [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
+Introspect the authenticated credential's own identity. The daemon
+classifies the bearer credential and answers with the matching self
+resource; the CLI performs no local classification and takes no target.
+A Principal credential answers with its Principal (username, uid/gid,
+home, enabled state, stored and effective allowed-root entries), a
+Launcher credential with its Launcher (id, name, owning principal,
+enabled state, scope, stored and effective allowed-root entries), and a
+Session bearer with its Session's own \fBsession show\fR body
+(workspace, ownership, expiry, persisted immutable filesystem snapshot).
+The admin token has no self resource and receives the stable
+\fB404 self_not_available\fR; unknown, revoked, disabled, or expired
+credentials receive the non-disclosing 401 authentication contract. The
+endpoint is read-only. With \-\-json, output the raw response envelope.
+.TP
 .B docker-helper session cleanup
 Remove expired sessions from the local state database and clean up stale
 session runtime directories. Session runtime directories may contain

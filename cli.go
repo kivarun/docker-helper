@@ -674,6 +674,7 @@ func init() {
 		configCommand,
 		principalCommand,
 		launcherCommand,
+		selfCommand,
 		credentialCommand,
 		adminTokenCommand,
 		appArmorCommand,

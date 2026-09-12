@@ -1669,6 +1669,11 @@ docker-helper session create --workspace ~/myproject
 The agent can verify its delegated identity through the HTTP API
 (`GET /auth` with the installed credential): the response reports
 `{"authority": "launcher", "principal": "alice", "launcher_id": "dhl_..."}`.
+The full self resource is available through `docker-helper self` (HTTP
+`GET /self`): a Launcher credential answers with its Launcher's identity,
+scope, stored and effective allowed-root entries; a Session bearer
+answers with its own `session show` body including the persisted
+filesystem snapshot.
 
 With multiple launchers, a Principal credential can target one explicitly
 at session creation time with `--launcher` (name or `dhl_...` ID); a
