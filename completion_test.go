@@ -3513,11 +3513,6 @@ func runCompletionWithPreambleForWords(t *testing.T, script, endpoint, tokenPath
 	return runCompletionWithPreamble(t, script, completionPATHPreamble(t), words)
 }
 
-// TestCompletionFilesystemEntryLastEqualsGrammar proves the --filesystem-entry
-// ACCESS-side completion follows the same last-'=' grammar as the CLI parser:
-// a PATH containing '=' is split at the last '=', the ACCESS vocabulary is
-// completed with prefix filtering, and the caller-typed PATH prefix is
-// preserved in every candidate.
 // startWorkspaceTreeBoundaryServer stubs the create-policy query with the
 // canonical real configuration: two sibling effective roots
 // <base>/home/michael and <base>/opt/michael — the exact motivating shape of
@@ -3717,9 +3712,117 @@ func TestCompletionFilesystemRootLastEqualsGrammar(t *testing.T) {
 		t.Errorf("ordinary completion = %v, want the ACCESS vocabulary with the typed PATH prefix", results)
 	}
 
+	// A trailing '=' is the unambiguous ACCESS delimiter: the empty suffix
+	// offers the whole canonical access vocabulary.
+	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-root", "/data/project="})
+	if len(results) != 2 || !slices.Contains(results, "/data/project=read_only") || !slices.Contains(results, "/data/project=read_write") {
+		t.Errorf("trailing-'=' completion = %v, want the ACCESS vocabulary", results)
+	}
+
 	// A fully typed ACCESS value filters to the exact root.
 	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-root", "/data/project=read_write"})
 	if len(results) != 1 || !slices.Contains(results, "/data/project=read_write") {
 		t.Errorf("exact completion = %v, want [/data/project=read_write]", results)
+	}
+
+	// A suffix that is not an ACCESS-prefix decision keeps the value on the
+	// PATH side: without a daemon the PATH falls back to generic filesystem
+	// completion (here no daemon and no matching files, so no suggestion is
+	// expected; the PATH-side classification itself is proven daemon-backed
+	// in TestCompletionFilesystemRootPathContainingEquals).
+	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-root", "/data/foo=bar"})
+	if len(results) != 0 {
+		t.Errorf("PATH-side suffix offered %v, want no ACCESS rendering", results)
+	}
+}
+
+// TestCompletionPolicyPartialNextComponent proves the partial next component
+// of the tree-boundary rendering: a typed prefix that is a proper prefix of
+// the next component toward a root continues through the next component
+// boundary (/h offers /home, /home/m offers /home/michael), for the
+// workspace and for the filesystem-root PATH side alike — and the sibling
+// boundaries stay distinguishable (no duplicated basenames).
+func TestCompletionPolicyPartialNextComponent(t *testing.T) {
+	endpoint, tokenPath, home, _ := startWorkspaceTreeBoundaryServer(t)
+	script := completionScript(t)
+	base := filepath.Dir(filepath.Dir(home))
+	baseWords := []string{"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath}
+
+	cases := []struct {
+		name  string
+		flag  string
+		typed string
+		want  []string
+	}{
+		{"workspace /h", "workspace", base + "/h", []string{filepath.Join(base, "home")}},
+		{"workspace /o", "workspace", base + "/o", []string{filepath.Join(base, "opt")}},
+		{"workspace /home/m", "workspace", filepath.Join(base, "home") + "/m", []string{home}},
+		// A longer partial prefix matches only one sibling boundary and
+		// offers that boundary's next component (/op toward /opt/michael
+		// renders /opt, whose unique insertion keeps filename semantics).
+		{"filesystem-root /ho", "filesystem-root", base + "/ho", []string{filepath.Join(base, "home")}},
+		{"filesystem-root /op", "filesystem-root", base + "/op", []string{filepath.Join(base, "opt")}},
+		{"filesystem-root /h", "filesystem-root", base + "/h", []string{filepath.Join(base, "home")}},
+		{"filesystem-root /o", "filesystem-root", base + "/o", []string{filepath.Join(base, "opt")}},
+		{"filesystem-root /home/m", "filesystem-root", filepath.Join(base, "home") + "/m", []string{home}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+				append(append([]string{}, baseWords...), "--"+tc.flag, tc.typed))
+			if stderr != "" {
+				t.Fatalf("policy completion must not write to stderr: %q", stderr)
+			}
+			if !slices.Equal(sortedTrimmed(results), tc.want) {
+				t.Errorf("partial component completion = %v, want %v", results, tc.want)
+			}
+		})
+	}
+}
+
+// TestCompletionFilesystemRootPathContainingEquals proves the deterministic
+// '=' ambiguity rule end to end against a real daemon-backed tree: a real
+// host path containing '=' stays on the PATH side while the suffix is not an
+// ACCESS-prefix decision (navigation continues through it), and the final
+// ACCESS delimiter after that path completes the canonical access vocabulary.
+func TestCompletionFilesystemRootPathContainingEquals(t *testing.T) {
+	endpoint, tokenPath, home, _ := startWorkspaceTreeBoundaryServer(t)
+	script := completionScript(t)
+	baseWords := []string{"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath}
+	// A real directory whose name contains '=': <home>/data/foo=bar/ with a
+	equalsDir := filepath.Join(home, "data", "foo=bar")
+	deepDir := filepath.Join(equalsDir, "deep")
+	if err := os.MkdirAll(deepDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(equalsDir, "notes.txt"), []byte("n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A partial PATH suffix after the last '=' is not an ACCESS decision:
+	// the whole value stays the PATH side and the real '=' directory is
+	// offered (with its regular file, the filesystem-root flag accepts both).
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", filepath.Join(home, "data", "foo=ba")))
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{equalsDir}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Fatalf("'foo=ba' PATH-side completion = %v, want %v", results, want)
+	}
+
+	// The navigation continues inside the '=' directory.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", equalsDir+"/"))
+	if want := []string{deepDir, filepath.Join(equalsDir, "notes.txt")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("inside '=' directory navigation = %v, want %v", results, want)
+	}
+
+	// Once the final delimiter is unambiguously the ACCESS delimiter after a
+	// real '=' path, the canonical access vocabulary completes.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", equalsDir+"=read_"))
+	if want := []string{equalsDir + "=read_only", equalsDir + "=read_write"}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("ACCESS completion after an '=' path = %v, want %v", results, want)
 	}
 }
