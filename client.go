@@ -818,6 +818,29 @@ func (c *apiClient) auth() (*authResponse, error) {
 	return &result, nil
 }
 
+// self reports the authenticated credential's own self resource via GET
+// /self. The daemon classifies the bearer itself; the CLI performs no local
+// classification. The resource stays raw because the concrete resource shape
+// depends on the authenticated class; the CLI decodes it per type.
+func (c *apiClient) self() (*selfResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/self", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result selfResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
 // createLauncherClientRequest is the narrow wire request the CLI sends to
 // create a Launcher. The CLI maps --name/--allowed-root defaults into the
 // existing HTTP create request; the daemon remains the policy authority.

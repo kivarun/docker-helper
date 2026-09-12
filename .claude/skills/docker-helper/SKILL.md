@@ -112,6 +112,12 @@ DOCKER_HELPER_SESSION_TOKEN
 
 Never display its value.
 
+To introspect what your own credential is authorized as (its class, its
+workspace snapshot for a session bearer, its allowed-root scope for
+Principal and Launcher credentials), use `docker-helper self` (HTTP:
+`GET /self` with the same bearer). It is read-only and returns exactly the
+authority the credential already has — no more.
+
 The Docker Helper socket is normally:
 
 ```text

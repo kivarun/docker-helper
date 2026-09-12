@@ -249,7 +249,7 @@ jobs:
             UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
             UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" scripts/uat-blackbox.sh
 
-  # Ubuntu targeted regressions 3-18 (DEB/AppArmor). Exact candidate DEB; the
+  # Ubuntu targeted regressions 3-19 (DEB/AppArmor). Exact candidate DEB; the
   # runner never rebuilds when the candidate DEB is supplied.
   uat-regressions-ubuntu:
     if: inputs.scope == 'full'
@@ -277,7 +277,7 @@ jobs:
           echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
           echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
 
-      - name: Run targeted Release-2 regressions (3-18, collect-all, exact candidate DEB)
+      - name: Run targeted Release-2 regressions (3-19, collect-all, exact candidate DEB)
         run: |
           sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
             UAT_ALLOWED_ROOT=/home \
@@ -321,6 +321,43 @@ jobs:
             UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
             UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
             scripts/uat-access-modes.sh
+
+  # Ubuntu DEB / AppArmor — the canonical full self-introspection matrix
+  # (exact candidate DEB). This is the ONE full GET /self matrix of the
+  # gate; the other install formats get the self smoke inside the common
+  # black-box UAT (phase 3b).
+  uat-self-introspection-ubuntu:
+    if: inputs.scope == 'full'
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+
+      - name: Download candidate set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.producer.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate DEB from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate deb)
+          echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
+          echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run full self-introspection UAT (exact candidate DEB)
+        run: |
+          sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
+            UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
+            UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
+            scripts/uat-self-introspection.sh
 
   # Ubuntu DEB / AppArmor — the full AppArmor workload-MAC acceptance matrix on
   # the exact candidate (docs/release-2.2-mac-enforcement.md, AppArmor matrix).

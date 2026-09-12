@@ -8123,6 +8123,7 @@ func TestArtifactGateConsumersNoRebuild(t *testing.T) {
 		{"uat-blackbox-ubuntu-tarball", false},
 		{"uat-regressions-ubuntu", false},
 		{"uat-access-modes-ubuntu", false},
+		{"uat-self-introspection-ubuntu", false},
 		{"uat-workload-apparmor-ubuntu", true},
 		{"uat-blackbox-opensuse-apparmor", false},
 		{"uat-blackbox-opensuse-selinux", true},

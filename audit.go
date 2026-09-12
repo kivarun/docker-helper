@@ -1,11 +1,15 @@
 package main
 
 type auditRecord struct {
-	Time              string       `json:"time"`
-	Stream            string       `json:"stream"`
-	Event             string       `json:"event"`
-	Method            string       `json:"method,omitempty"`
-	Path              string       `json:"path,omitempty"`
+	Time   string `json:"time"`
+	Stream string `json:"stream"`
+	Event  string `json:"event"`
+	Method string `json:"method,omitempty"`
+	Path   string `json:"path,omitempty"`
+	// SelfType is the authenticated credential class of a successful GET
+	// /self introspection (principal, launcher, or session). It names the
+	// caller's own authority class only and carries no credential material.
+	SelfType          string       `json:"self_type,omitempty"`
 	SessionID         string       `json:"session_id,omitempty"`
 	RequestID         string       `json:"request_id,omitempty"`
 	OperationID       string       `json:"operation_id,omitempty"`
