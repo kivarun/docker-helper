@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -429,36 +430,92 @@ func TestErrorContractDeleteSessionInternalError(t *testing.T) {
 
 // ---------- requireSessionCapability DB error ----------
 
-func TestErrorContractRequireSessionDBError(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
+// TestErrorContractSessionAuthorityDBErrorOneDocument pins the shared
+// Session-filesystem-authority database-error contract for every data-plane
+// handler that consumes it: exactly ONE HTTP status, exactly ONE JSON error
+// document on the wire, and no trailing content after that document. The
+// decoder reads the ENTIRE response body and requires io.EOF after the first
+// JSON value — a second JSON object after the first is the duplicate-write
+// regression and fails the test (the pre-fix /run and /build paths wrote the
+// internal-error document twice).
+func TestErrorContractSessionAuthorityDBErrorOneDocument(t *testing.T) {
+	cases := []struct {
+		kind   string
+		method string
+		path   string
+		body   []byte
+	}{
+		{
+			kind:   "run",
+			method: http.MethodPost,
+			path:   "/run",
+			body:   []byte(`{"image":"alpine:latest"}`),
+		},
+		{
+			kind:   "build",
+			method: http.MethodPost,
+			path:   "/build",
+			body:   []byte(`{"image":"alpine:latest"}`),
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.kind, func(t *testing.T) {
+			app := newTestAppWithAdminTokenAndStaging(t)
 
-	// Replace DB with one that fails Query.
-	dbPath := app.Config.DatabasePath
-	app.DB.Close()
-	app.DB = newFailQueryDB(t, dbPath, sql.ErrTxDone)
-	defer app.DB.Close()
+			created, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+			if err != nil {
+				t.Fatalf("createSession: %v", err)
+			}
 
-	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(reqBody))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
+			// Replace the DB with one whose queries fail: the live-Session
+			// lookup inside the transactional filesystem-authority capture
+			// fails with a database error (never the non-disclosing
+			// not-found), which routes the shared authority failure path.
+			dbPath := app.Config.DatabasePath
+			app.DB.Close()
+			app.DB = newFailQueryDB(t, dbPath, sql.ErrTxDone)
+			defer app.DB.Close()
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d", w.Code)
-	}
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer "+created.Token)
+			w := httptest.NewRecorder()
+			if tc.kind == "build" {
+				app.handleBuild(w, req)
+			} else {
+				app.handleRun(w, req)
+			}
 
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Code != "internal_error" {
-		t.Errorf("expected code 'internal_error', got %q", resp.Code)
+			if w.Code != http.StatusInternalServerError {
+				t.Fatalf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
+			}
+
+			// Exactly one JSON document, then EOF: read the ENTIRE body and
+			// decode strictly. A second JSON value after the first (the
+			// duplicate-write regression) fails here.
+			dec := json.NewDecoder(bytes.NewReader(w.Body.Bytes()))
+			var resp response
+			if err := dec.Decode(&resp); err != nil {
+				t.Fatalf("cannot decode the error document: %v (body: %q)", err, w.Body.String())
+			}
+			var trailing struct{}
+			if err := dec.Decode(&trailing); err != nil {
+				if err != io.EOF {
+					t.Fatalf("trailing content after the error document is not valid JSON: %v (body: %q)", err, w.Body.String())
+				}
+			} else {
+				t.Fatalf("a second JSON document follows the error document (duplicate write): body %q", w.Body.String())
+			}
+
+			if resp.OK {
+				t.Errorf("ok = true, want false")
+			}
+			if resp.Code != "internal_error" {
+				t.Errorf("code = %q, want %q", resp.Code, "internal_error")
+			}
+			if resp.Message != "internal server error" {
+				t.Errorf("message = %q, want %q", resp.Message, "internal server error")
+			}
+		})
 	}
 }
 
