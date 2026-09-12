@@ -309,9 +309,6 @@ var buildCommand = &Command{
 				if *ctx == "" {
 					return fmt.Errorf("--context is required")
 				}
-				if filepath.IsAbs(*ctx) {
-					return fmt.Errorf("--context must be relative to session workspace")
-				}
 				if *dockerfile == "" {
 					return fmt.Errorf("--dockerfile is required")
 				}
@@ -467,12 +464,6 @@ var runContainerCommand = &Command{
 					}
 					source := parts[0]
 					target := parts[1]
-
-					// Validate source is relative to workspace
-					if filepath.IsAbs(source) {
-						fmt.Fprintf(stderr, "invalid mount source %q: source must be relative to session workspace\n", source)
-						return 2
-					}
 
 					// Validate target is absolute
 					if !filepath.IsAbs(target) {

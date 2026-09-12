@@ -71,6 +71,10 @@ VERSION="${UAT_VERSION:-2.2.0-uat}"
 # tilde-expands a bare "~" replacement in ${var//pat/rep} ($HOME), so the
 # transform goes through tr.
 RPM_VERSION="$(printf '%s' "$VERSION" | tr '-' '~')"
+# The one global ceiling of this guest matrix: the principal's home must sit
+# under it (2.2 principal-home contract), so the acceptance tree, the
+# workspace, and the SE external-root launcher all carry this root.
+ALLOWED_ROOT="/home/opc"
 PRINCIPAL="${UAT_PRINCIPAL:-opc}"
 RPM_PATH_IN="${UAT_RPM:-}"
 RPM_SHA256_IN="${UAT_RPM_SHA256:-}"
@@ -354,8 +358,8 @@ fi
 # The principal's home must sit under the global allowed root (2.2 contract),
 # so this acceptance tree lives under /home/opc. Non-home fcontext lifecycle
 # remains owned by the targeted SELinux regression groups.
-if dh init --allowed-root /home/opc >/tmp/uat-wls-init.log 2>&1; then
-  acc_ok "system init (global ceiling: /home/opc)"
+if dh init --allowed-root "$ALLOWED_ROOT" >/tmp/uat-wls-init.log 2>&1; then
+  acc_ok "system init (global ceiling: $ALLOWED_ROOT)"
   dh config allowed-root list 2>/dev/null | sed 's/^/  config-roots: /' >&2 || true
 else
   printf '  init output: %s\n' "$(redact </tmp/uat-wls-init.log)" >&2
