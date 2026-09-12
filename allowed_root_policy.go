@@ -408,6 +408,37 @@ func (s *sessionFilesystemSnapshot) LookupAccess(source string) (AllowedRootAcce
 	return lookupAllowedRootAccess(s.Entries, source)
 }
 
+// sessionMACBoundaries derives the canonical minimal set of filesystem tree
+// boundaries requiring Session MAC coverage from an already validated issued
+// immutable snapshot. It is the one canonical snapshot-to-MAC-boundaries
+// projection: it never inspects global/Principal/Launcher policy, never
+// recomputes authorization, and is access-agnostic (read_write/read_only
+// transitions inside a tree do not create independent Session-MAC
+// semantics — Session MAC binding provides host/backend reachability only).
+//
+// Deterministic and canonically ordered: the snapshot entries are already
+// canonically ordered, and a boundary is dropped exactly when an issued
+// ancestor already covers it, so the result is duplicate-free, keeps
+// disjoint roots, preserves a regular-file root as an exact concrete
+// boundary, and always keeps the workspace covered through one of the
+// resulting trees (the workspace is one issued tree).
+func sessionMACBoundaries(snapshot *sessionFilesystemSnapshot) []string {
+	kept := make([]string, 0, len(snapshot.Entries))
+	for _, e := range snapshot.Entries {
+		covered := false
+		for _, boundary := range kept {
+			if boundaryCoversWorkspace(boundary, e.Path) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			kept = append(kept, e.Path)
+		}
+	}
+	return kept
+}
+
 // CanExposeWritable is the one writable-parent query: a source may be
 // exposed writable only when the source itself resolves read_write and no
 // effective read_only transition exists strictly below it inside the

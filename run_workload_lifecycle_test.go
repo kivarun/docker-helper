@@ -552,13 +552,15 @@ func TestRunWorkloadSELinuxPartialProjectionRetainsDependencies(t *testing.T) {
 	if len(pinCleaned) != 0 {
 		t.Errorf("dependent pins must remain when partial MAC state is retained, got %v", pinCleaned)
 	}
-	leases := app.MACCoordinator.workspaceUseLeases
+	leases := app.MACCoordinator.sessionUseLeases
 	if len(leases) == 0 {
 		t.Fatal("the workspace-use lease must remain when partial MAC state is retained")
 	}
-	for _, ws := range leases {
-		if ws != result.Session.Workspace {
-			t.Errorf("retained lease must cover the run workspace, got %q", ws)
+	for _, lease := range leases {
+		for _, coverage := range lease.coverage {
+			if !boundaryCoversWorkspace(coverage.Boundary, result.Session.Workspace) {
+				t.Errorf("retained lease coverage must cover the run workspace, got %q", coverage.Boundary)
+			}
 		}
 	}
 	// The durable state of the failed operation is the only workload-mac

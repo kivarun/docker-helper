@@ -181,24 +181,41 @@ func TestAppArmorBoundaryAddNonExistentPath(t *testing.T) {
 	}
 }
 
-func TestAppArmorBoundaryAddFileNotDirectory(t *testing.T) {
+func TestAppArmorBoundaryAddRegularFile(t *testing.T) {
 	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
 
-	tmpfile := filepath.Join(t.TempDir(), "notadir")
-	if err := os.WriteFile(tmpfile, []byte("data"), 0644); err != nil {
+	rootDir := testAllowedRootDir(t)
+	filePath := filepath.Join(rootDir, "issued-file")
+	if err := os.WriteFile(filePath, []byte("data"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add", tmpfile}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for file path, got %d", code)
+	_, mgr, _ := setupAppArmorTest(t)
+
+	result, err := mgr.addManagedBoundary(filePath)
+	if err != nil {
+		t.Fatalf("a regular-file issued tree must be accepted as a managed boundary: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "not a directory") {
-		t.Errorf("expected not a directory error, got: %s", stderr.String())
+	if result.Path != filePath || !result.Changed {
+		t.Fatalf("result = %+v, want canonical file path with Changed=true", result)
+	}
+
+	data, err := os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A regular-file boundary renders the exact-file read rule; the
+	// trailing-slash and descendant rules would never match a file.
+	fragment := string(data)
+	want := "\"" + escapeAppArmorPath(filePath) + "\" r,\n"
+	if !strings.Contains(fragment, want) {
+		t.Errorf("fragment must render the exact-file rule %q, got:\n%s", want, fragment)
+	}
+	if strings.Contains(fragment, escapeAppArmorPath(filePath)+"/") {
+		t.Errorf("a regular-file boundary must not render directory rules:\n%s", fragment)
 	}
 }
 

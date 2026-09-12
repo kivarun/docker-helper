@@ -95,7 +95,9 @@ func validateWorkspacePathSafety(canonical string) error {
 // It:
 //   - expands ~ to the user's home directory
 //   - resolves to an absolute path
-//   - verifies the path exists and is a directory
+//   - verifies the path exists and is a directory (authorization ceilings
+//     are directory trees; an issued Session filesystem root may also be a
+//     regular file and is validated by its own canonical tree-kind owner)
 //   - resolves all symlinks
 //   - applies the workspace-path policy
 //
@@ -127,6 +129,48 @@ func canonicalizeWorkspacePathForAdd(path string) (string, error) {
 	canonical, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve workspace root symlinks: %w", err)
+	}
+
+	if err := validateWorkspacePathSafety(canonical); err != nil {
+		return "", err
+	}
+
+	return canonical, nil
+}
+
+// canonicalizeIssuedTreePathForAdd is the canonicalization owner for an
+// issued Session filesystem tree (a managed MAC boundary candidate): the
+// same tilde/absolute/symlink/workspace-path-policy semantics as
+// canonicalizeWorkspacePathForAdd, but the path may be a directory or a
+// regular file — exactly the kinds an issued Session filesystem root may
+// carry.
+func canonicalizeIssuedTreePathForAdd(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("issued tree must be a non-empty path")
+	}
+
+	path = expandTilde(path)
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve issued tree to absolute path: %w", err)
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("issued tree does not exist: %s", abs)
+		}
+		return "", fmt.Errorf("cannot stat issued tree: %w", err)
+	}
+
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return "", fmt.Errorf("issued tree is not a directory or regular file: %s", abs)
+	}
+
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve issued tree symlinks: %w", err)
 	}
 
 	if err := validateWorkspacePathSafety(canonical); err != nil {

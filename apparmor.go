@@ -118,8 +118,10 @@ func validateBoundaryPathForAdd(path string) (string, error) {
 		return "", &inputError{msg: "path must be absolute"}
 	}
 
-	// Use the workspace-path policy for canonicalization and security checks.
-	canonical, err := canonicalizeWorkspacePathForAdd(path)
+	// Use the issued-tree path policy for canonicalization and security
+	// checks: a managed MAC boundary may be a directory or a regular file
+	// (both are kinds an issued Session filesystem root may carry).
+	canonical, err := canonicalizeIssuedTreePathForAdd(path)
 	if err != nil {
 		return "", &inputError{msg: err.Error()}
 	}
@@ -202,11 +204,27 @@ func renderFragment(boundaries []string) []byte {
 		escaped := escapeAppArmorPath(boundary)
 		buf.WriteString("\n")
 		buf.WriteString("# root-json: " + jsonQuote(boundary) + "\n")
+		if appArmorBoundaryIsRegularFile(boundary) {
+			// A regular-file boundary grants read reachability to exactly
+			// that file: the trailing-slash and descendant rules would
+			// never match a file.
+			buf.WriteString("\"" + escaped + "\" r,\n")
+			continue
+		}
 		buf.WriteString("\"" + escaped + "/\" r,\n")
 		buf.WriteString("\"" + escaped + "/**\" r,\n")
 	}
 
 	return buf.Bytes()
+}
+
+// appArmorBoundaryIsRegularFile reports whether the boundary path is a
+// regular file, deciding which fragment rules represent it. A path that
+// cannot be stated (deleted between validation and render) renders as a
+// directory, preserving the existing behavior for the validated add path.
+func appArmorBoundaryIsRegularFile(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func parseFragment(data []byte) ([]string, error) {

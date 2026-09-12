@@ -650,7 +650,7 @@ func TestRunReadOnlyRootRefusalReleasesLease(t *testing.T) {
 	// The lease was released with the refusal: only zero workspace-use
 	// leases remain after the refused request.
 	mac.mu.Lock()
-	leaseCount := len(mac.workspaceUseLeases)
+	leaseCount := len(mac.sessionUseLeases)
 	mac.mu.Unlock()
 	if leaseCount != 0 {
 		t.Errorf("read_only_root refusal must release the workspace-use lease, got %d", leaseCount)
