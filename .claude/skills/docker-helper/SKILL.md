@@ -124,7 +124,9 @@ If `DOCKER_HELPER_SOCKET_PATH` is set, use that socket path instead.
 
 Both interfaces share the same path semantics. Define once, apply everywhere.
 
-- **Build contexts** are always relative to the session workspace.
+- **Build contexts** are workspace-relative by default; an absolute host
+  path inside the session workspace is also accepted (containment is
+  daemon-validated).
 - **Mount sources** are never agent-container absolute paths such as
   `/workspace/...`. The accepted source depends on deployment mode:
   - in **user mode**, only the workspace root source `.` is accepted;

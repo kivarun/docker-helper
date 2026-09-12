@@ -516,6 +516,8 @@ Pull a Docker image.
 .TP
 .B docker-helper build [\-\-system] [\-\-endpoint ENDPOINT] \-\-context PATH \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...]
 Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
+\-\-context accepts a workspace-relative path or an absolute host path
+inside the session workspace (the daemon validates containment).
 .TP
 .B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] \-\- [command]
  Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.

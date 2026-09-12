@@ -1721,8 +1721,7 @@ requested offset refers to evicted data.
 
 `docker-helper build` hides the async operation lifecycle; it streams
 logs and propagates the container exit code. SIGINT/SIGTERM cancels the
-operation (exit 130/143). `--context` must be relative to the session
-workspace.
+operation (exit 130/143).
 
 Validation details:
 
