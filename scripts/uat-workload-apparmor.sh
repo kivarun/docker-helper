@@ -14,8 +14,11 @@
 #   6  the backend-only forced-writable RO case is denied by AppArmor ITSELF
 #      (not the VFS readonly bit): the compiled live-proof harness drives the
 #      production renderer/parser/lifecycle from the same source SHA the
-#      candidate was built from, over a deliberately VFS-writable target,
-#      and the attributable kernel DENIED record is independently verified;
+#      candidate was built from, over a deliberately VFS-writable
+#      materialization — including the external-root chain (real external
+#      root → production mount-pin owner → production exposure shape →
+#      production workload AppArmor prep) — and the attributable kernel
+#      DENIED record is independently verified;
 #   7  generated workload profile/state is cleaned after success AND failure;
 #   8  daemon restart/reconciliation leaves no stale helper-owned
 #      profile/state;
@@ -459,10 +462,12 @@ else
   acc_fail "WE external RW write failed: $(redact </tmp/uat-wla-we-w.log | tail -3)"
 fi
 
-# WE-RO: the external RO root is denied writable by the backend itself: the
-# run fails and the host file is not created. The denial happens inside the
-# shared audit window, so the attributable workload-profile DENIED record
-# collected by W10 carries the external-root evidence too.
+# WE-RO: the external RO root is denied writable in the ordinary run. The
+# readonly bind participates here (production defense in depth), so this is
+# the behavioral immutability check; the independent backend-only denial of
+# the external root — VFS materialization writable, the generated profile
+# itself the refuser, attributable to this proof's profile — is proven by the
+# W6 external-root live proof below.
 DOCKER_HELPER_SESSION_TOKEN="$WE_TOKEN" \
   dh run --image alpine:3.24 --mount "$WE_HELPER:/helper:ro" -- \
   sh -ec 'echo forbidden > /helper/forbidden.txt' >/dev/null 2>&1
@@ -534,7 +539,7 @@ if [ -x /tmp/uat-wla-proof.test ]; then
   if DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 WORKLOAD_EVIDENCE_DIR=/tmp/uat-wla-evidence \
       /tmp/uat-wla-proof.test -test.run 'TestLiveWorkloadAppArmor' -test.v \
       >/tmp/uat-wla-harness.log 2>&1; then
-    acc_ok "W6 live harness passed: AppArmor denies the would-be-RO write (VFS view writable)"
+    acc_ok "W6 live harness passed: AppArmor denies the would-be-RO write (VFS view writable), including the external-root backend-only proof (production pin → exposure shape → workload prep)"
   else
     acc_fail "W6 live harness failed: $(tail -8 /tmp/uat-wla-harness.log 2>/dev/null | redact)"
   fi

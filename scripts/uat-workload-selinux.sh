@@ -18,8 +18,10 @@
 #   6  the backend-only forced-writable RO case is denied by SELinux ITSELF
 #      (not the VFS): the host-compiled live harness drives the production
 #      bindfs/projection backend from the same source SHA the candidate was
-#      built from over a deliberately VFS-writable projection, and the
-#      matching docker_helper_ro_projection_t AVC is independently verified;
+#      built from over a deliberately VFS-writable projection — including
+#      the external-source chain (real external root → production
+#      mount-pin owner → RO projection owner) — and the matching
+#      docker_helper_ro_projection_t AVC is independently verified;
 #   7  the workload stays in docker_helper_container_t and Docker-owned MCS
 #      confinement is preserved (distinct per-container categories);
 #   8  two concurrent Sessions use one host tree with different issued
@@ -558,7 +560,10 @@ fi
 
 # SE-RO: the external RO root is projected read-only (bindfs path): reads
 # succeed through the projection and the writable attempt is denied with the
-# host file not created.
+# host file not created. The readonly bind participates in the ordinary run
+# (production defense in depth), so the independent backend-only denial of
+# the external source — projection VFS writable underneath, the projection
+# type itself the refuser — is proven by the S13 external-root live proof.
 SE_RO="$(DOCKER_HELPER_SESSION_TOKEN="$SE_TOKEN" \
   dh run --image alpine:3.24 --mount "$SE_HELPER:/helper:ro" -- \
   sh -ec 'test "$(cat /helper/main.go)" = "se-helper-src" && echo SE-RO-READ-OK' 2>&1)"
@@ -816,9 +821,9 @@ count_unexpected_helper_avcs() {
 say "S13: forced-writable RO denied by SELinux (harness) + audit evidence"
 mkdir -p "$EVIDENCE_DIR"
 if DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 WORKLOAD_EVIDENCE_DIR="$EVIDENCE_DIR" \
-    "$PROOF_BIN_IN" -test.run 'TestLiveWorkloadSELinux|TestLiveWorkloadSELinuxRegularFile|TestLiveWorkloadMCSConcurrentRWRO' -test.v \
+    "$PROOF_BIN_IN" -test.run 'TestLiveWorkloadSELinux|TestLiveWorkloadSELinuxRegularFile|TestLiveWorkloadSELinuxExternalRoot|TestLiveWorkloadMCSConcurrentRWRO' -test.v \
     >/tmp/uat-wls-harness.log 2>&1; then
-  acc_ok "S13 live harness passed: bindfs projection denies the would-be-RO write (VFS view writable), regular-file RO proven, MCS concurrency proven"
+  acc_ok "S13 live harness passed: bindfs projection denies the would-be-RO write (VFS view writable), regular-file RO proven, MCS concurrency proven, external-source backend-only proof proven"
 else
   acc_fail "S13 live harness failed: $(tail -10 /tmp/uat-wls-harness.log 2>/dev/null | redact)"
 fi

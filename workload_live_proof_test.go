@@ -13,7 +13,11 @@ package main
 // evidence. After the application decision the read-only exposure is
 // deliberately VFS-writable, but the production MAC mechanism (generated
 // AppArmor profile / bindfs SELinux projection) denies the mutation, with
-// attributable denial evidence.
+// attributable denial evidence. The external-root proofs mirror the UAT
+// external-root scenarios: a real external root outside the helper runtime
+// state is pinned through the production pin owner, exposed through the
+// production exposure shape and workload preparation, and denied by the MAC
+// mechanism alone.
 
 import (
 	"bytes"
@@ -388,6 +392,182 @@ func TestLiveWorkloadAppArmor(t *testing.T) {
 	}
 }
 
+// TestLiveWorkloadAppArmorExternalRoot is the backend-only mirror of the UAT
+// external-root scenario (WE): a real external root outside the helper
+// runtime state — the /opt/<principal> shape — is pinned through the
+// production mount-pin owner, exposed through the production exposure shape
+// and the production workload AppArmor preparation, and mounted into the
+// container with a deliberately writable bind so the VFS readonly bit cannot
+// be the refuser. The generated profile must deny create/mutate/delete
+// writes into the external root (every mandatory behavioral attempt runs
+// even after attribution), the host must show no mutation, an external
+// read-write control write outside the MAC must still succeed, and the
+// attributable kernel DENIED record must name this proof's generated
+// profile, with cleanup leaving no loaded profile or generated profile
+// source.
+func TestLiveWorkloadAppArmorExternalRoot(t *testing.T) {
+	requireLiveProof(t)
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	requireLiveProofDependency(t, fileExists(appArmorParserPath), "apparmor_parser unavailable")
+	active, lsmErr := appArmorLSMActive()
+	requireLiveProofDependency(t, lsmErr == nil && active,
+		fmt.Sprintf("AppArmor is not the active LSM: active=%v err=%v", active, lsmErr))
+	dir, err := os.MkdirTemp("", "docker-helper-live-aaext-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Real external root: outside the runtime state, mirroring the UAT
+	// external-root fixture (the /opt/<principal> shape), deliberately
+	// VFS-writable before any MAC involvement.
+	externalBase := "/opt/docker-helper-live-aa-external"
+	externalRoot := filepath.Join(externalBase, "repos", "helper")
+	if err := os.RemoveAll(externalBase); err != nil {
+		t.Fatalf("cannot reset the external-root fixture: %v", err)
+	}
+	if err := os.MkdirAll(externalRoot, 0777); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(externalBase)
+	seed := filepath.Join(externalRoot, "main.go")
+	if err := os.WriteFile(seed, []byte("external-helper-src\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin the external root through the production mount-pin owner so the
+	// exposure is built exactly from the kernel materialization source.
+	pinned, err := pinMountSource(externalRoot,
+		filepath.Join(dir, "runtime"), "op_liveaaext1", 0)
+	if err != nil {
+		t.Fatalf("production pin of the external root: %v", err)
+	}
+	defer pinned.Cleanup()
+
+	b := newWorkloadAppArmorBackend()
+	prep := workloadPreparation{
+		OperationID:   "op_liveaaext1",
+		SessionID:     "live",
+		StateDir:      filepath.Join(dir, "state", "op_liveaaext1"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_liveaaext1"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/helper", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned.PinnedPath},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepErr := b.prepare(prep)
+	if prepErr != nil {
+		t.Fatalf("production AppArmor prepare: %v", prepErr)
+	}
+	profileName := workloadAppArmorProfileName(prep.OperationID)
+	defer prepared.Cleanup()
+
+	// Proof precondition: the pinned external materialization is VFS
+	// writable (a host write through the pinned mount succeeds; removed
+	// again so the denial attempts below start from the seeded state).
+	probe := filepath.Join(pinned.PinnedPath, "vfs-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0666); err != nil {
+		t.Fatalf("pinned external materialization is not VFS-writable for the proof: %v", err)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every mandatory denial attempt runs even after attribution: create,
+	// mutate, and delete writes into the would-be-RO external root must all
+	// be denied, and the attributable record is collected opportunistically
+	// with a bounded retry loop of fresh denial attempts.
+	bind := fmt.Sprintf("%s:/helper:rw", pinned.PinnedPath)
+	deniedAttempts := []struct{ name, snippet string }{
+		{"create", "echo forbidden > /helper/forbidden.txt"},
+		{"mutate", "echo corrupt >> /helper/main.go"},
+		{"delete", "rm /helper/main.go"},
+	}
+	var denialLine string
+	attributable := false
+	for _, attempt := range deniedAttempts {
+		writeErr := runInContainerWithOpts(t, prepared.SecurityOpts, bind, attempt.snippet)
+		if writeErr == nil {
+			t.Fatalf("AppArmor must deny the %s write through the external root", attempt.name)
+		}
+		t.Logf("denied external-root %s write output: %v", attempt.name, writeErr)
+		if !attributable {
+			if found, line := appArmorAttributableRecord(t, profileName, 4*time.Second); found {
+				denialLine = line
+				attributable = true
+			}
+		}
+	}
+	for retry := 0; !attributable && retry < 8; retry++ {
+		path := fmt.Sprintf("/helper/retry%d.txt", retry)
+		writeErr := runInContainerWithOpts(t, prepared.SecurityOpts, bind, "echo retry > "+path)
+		if writeErr == nil {
+			t.Fatalf("AppArmor must deny the external-root retry write %s", path)
+		}
+		t.Logf("denied external-root attribution-retry write output: %v", writeErr)
+		if found, line := appArmorAttributableRecord(t, profileName, 4*time.Second); found {
+			denialLine = line
+			attributable = true
+		}
+	}
+	if !attributable {
+		appArmorDenialDiagnostics(t, profileName)
+		t.Fatal("attributable AppArmor DENIED record not found for the external-root writes")
+	}
+	t.Logf("attributable external-root denial: %s", denialLine)
+
+	// Host mutation absent: the denied writes must not have reached the
+	// external root.
+	if _, statErr := os.Stat(filepath.Join(externalRoot, "forbidden.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("denied create must not mutate the external root, got %v", statErr)
+	}
+	for retry := 0; retry < 8; retry++ {
+		if _, statErr := os.Stat(filepath.Join(externalRoot, fmt.Sprintf("retry%d.txt", retry))); statErr == nil {
+			t.Errorf("denied retry write must not mutate the external root: retry%d.txt exists", retry)
+		}
+	}
+	afterSeed, readErr := os.ReadFile(seed)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(afterSeed) != "external-helper-src\n" {
+		t.Fatalf("denied mutate/delete must not touch the external root, seed is %q", afterSeed)
+	}
+
+	// External read-write control write: outside the MAC, the same external
+	// root stays writable and the write is visible through the pinned
+	// materialization.
+	if err := os.WriteFile(filepath.Join(externalRoot, "control-write.txt"), []byte("control\n"), 0666); err != nil {
+		t.Fatalf("external RW control write must succeed outside the MAC: %v", err)
+	}
+	seen, seenErr := os.ReadFile(filepath.Join(pinned.PinnedPath, "control-write.txt"))
+	if seenErr != nil || string(seen) != "control\n" {
+		t.Fatalf("external control write must be visible through the pinned materialization: %v %q", seenErr, seen)
+	}
+
+	liveEvidence(t, "apparmor-external-root-denial.txt", denialLine+"\n")
+	liveEvidence(t, "apparmor-external-root-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nPROFILE=%s\nRESULT=CLOSED\n", repoHead(t), profileName))
+
+	if err := prepared.Cleanup(); err != nil {
+		t.Fatalf("production AppArmor cleanup: %v", err)
+	}
+	loaded, err := appArmorLoadedProfileNames()
+	if err != nil {
+		t.Fatalf("cannot read kernel profile inventory: %v", err)
+	}
+	if containsString(loaded, profileName) {
+		t.Fatal("generated profile must be unloaded after cleanup")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "state", "op_liveaaext1", appArmorWorkloadProfileFileName)); !os.IsNotExist(statErr) {
+		t.Errorf("generated profile source must be removed by the backend cleanup, got %v", statErr)
+	}
+}
+
 // liveContainerOutput is runInContainerWithOpts with the container stdout
 // returned for content proofs (nonzero exit = error with the output).
 func liveContainerOutput(t *testing.T, securityOpts []string, bind, snippet string) (string, error) {
@@ -533,6 +713,157 @@ func TestLiveWorkloadSELinux(t *testing.T) {
 		t.Fatalf("source device/inode/context must be unchanged after cleanup: before=%q after=%q", before, after)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "runtime", "op_livesel1", "mount-0")); !os.IsNotExist(statErr) {
+		t.Errorf("owned projection runtime state must be removed after cleanup, got %v", statErr)
+	}
+}
+
+// TestLiveWorkloadSELinuxExternalRoot is the backend-only mirror of the UAT
+// external-root scenario (SE): a real external source outside the helper
+// runtime state — the /opt/<principal> shape — is pinned through the
+// production mount-pin owner and projected read-only by the production
+// projection owner. The projection exists with the exact
+// docker_helper_ro_projection_t type, stays VFS writable underneath and is
+// bound into the container with a deliberately writable bind so neither the
+// VFS nor Docker can independently be the refuser, the container write is
+// denied through the projection with a matching AVC, the host shows no
+// mutation, an external read-write control write outside the MAC still
+// succeeds, and cleanup leaves the source inode/context unchanged and no
+// owned projection runtime state.
+func TestLiveWorkloadSELinuxExternalRoot(t *testing.T) {
+	requireLiveProof(t)
+	requireLiveProofDependency(t, dockerLiveAvailable(t), "docker daemon unavailable")
+	_, fuseErr := os.Stat(selinuxDevFusePath)
+	requireLiveProofDependency(t, fuseErr == nil, fmt.Sprintf("/dev/fuse unavailable: %v", fuseErr))
+	_, bindfsErr := exec.LookPath("bindfs")
+	requireLiveProofDependency(t, bindfsErr == nil, fmt.Sprintf("bindfs unavailable: %v", bindfsErr))
+	state, enforceErr := getenforceLive()
+	requireLiveProofDependency(t, enforceErr == nil && state == "Enforcing",
+		fmt.Sprintf("SELinux is not enforcing: state=%q err=%v", state, enforceErr))
+	dir, err := os.MkdirTemp("", "docker-helper-live-selext-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Real external source: outside the runtime state, mirroring the UAT
+	// external-root fixture (the /opt/<principal> shape), deliberately
+	// VFS-writable before any MAC involvement.
+	externalBase := "/opt/docker-helper-live-selinux-external"
+	externalRoot := filepath.Join(externalBase, "repos", "helper")
+	if err := os.RemoveAll(externalBase); err != nil {
+		t.Fatalf("cannot reset the external-root fixture: %v", err)
+	}
+	if err := os.MkdirAll(externalRoot, 0777); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(externalBase)
+	seed := filepath.Join(externalRoot, "main.go")
+	if err := os.WriteFile(seed, []byte("external-helper-src\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin the external source through the production mount-pin owner so the
+	// projection is built exactly from the kernel materialization source.
+	pinned, err := pinMountSource(externalRoot,
+		filepath.Join(dir, "runtime"), "op_liveselext1", 0)
+	if err != nil {
+		t.Fatalf("production pin of the external source: %v", err)
+	}
+	defer pinned.Cleanup()
+
+	before := inodeContextOf(externalRoot)
+	b := newWorkloadSELinuxBackend()
+	prep := workloadPreparation{
+		OperationID:   "op_liveselext1",
+		SessionID:     "live",
+		StateDir:      filepath.Join(dir, "state", "op_liveselext1"),
+		RuntimeDir:    filepath.Join(dir, "runtime", "op_liveselext1"),
+		Exposures:     []sessionFilesystemExposure{{Target: "/helper", RequestedReadOnly: true}},
+		PinnedSources: []string{pinned.PinnedPath},
+	}
+	if err := os.MkdirAll(prep.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepErr := b.prepare(prep)
+	if prepErr != nil {
+		t.Fatalf("production SELinux prepare: %v", prepErr)
+	}
+	defer prepared.Cleanup()
+	if after := inodeContextOf(externalRoot); after != before {
+		t.Fatalf("external source device/inode/context must be preserved: before=%q after=%q", before, after)
+	}
+
+	projection := prepared.MountSources[0]
+	// Independent-MAC proof preconditions: the projection exists with the
+	// exact projection type and stays VFS writable underneath (a host write
+	// through the projection succeeds; removed again before the denial).
+	if got, err := b.ops.selinuxTypeOf(projection); err != nil || got != selinuxROProjectionType {
+		t.Fatalf("projection effective type: got %q (err %v), want %q", got, err, selinuxROProjectionType)
+	}
+	probe := filepath.Join(projection, "vfs-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0666); err != nil {
+		t.Fatalf("projection is not VFS-writable for the proof: %v", err)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the container with the production label over the projection with
+	// a deliberately writable bind and attempt the write: the mutation must
+	// be denied by the projection type while neither the VFS nor Docker can
+	// independently be the refuser.
+	writeErr := runInContainerWithOpts(t, prepared.SecurityOpts,
+		fmt.Sprintf("%s:/helper:rw", projection),
+		"echo forbidden > /helper/forbidden.txt",
+	)
+	if writeErr == nil {
+		t.Fatal("write through the projected external root must fail under docker_helper_container_t")
+	}
+	t.Logf("denied external-root write output: %v", writeErr)
+
+	avc := selinuxAVCMatched(t, "docker_helper_ro_projection_t", "write", "dir")
+	if avc == "" {
+		t.Fatal("matching SELinux AVC not found")
+	}
+	t.Logf("attributable external-root AVC: %s", avc)
+
+	// Host mutation absent: the denied write must not have reached the
+	// external source.
+	if _, statErr := os.Stat(filepath.Join(externalRoot, "forbidden.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("denied write must not mutate the external source, got %v", statErr)
+	}
+	afterSeed, readErr := os.ReadFile(seed)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(afterSeed) != "external-helper-src\n" {
+		t.Fatalf("denied write must not touch the external source, seed is %q", afterSeed)
+	}
+
+	// External read-write control write: outside the MAC, the same external
+	// source stays writable and the write is visible through the projection.
+	if err := os.WriteFile(filepath.Join(externalRoot, "control-write.txt"), []byte("control\n"), 0666); err != nil {
+		t.Fatalf("external RW control write must succeed outside the MAC: %v", err)
+	}
+	seen, seenErr := os.ReadFile(filepath.Join(projection, "control-write.txt"))
+	if seenErr != nil || string(seen) != "control\n" {
+		t.Fatalf("external control write must be visible through the projection: %v %q", seenErr, seen)
+	}
+
+	liveEvidence(t, "selinux-external-root-avc.txt", avc+"\n")
+	liveEvidence(t, "selinux-external-root-summary.txt",
+		fmt.Sprintf("TESTED_SOURCE=%s\nRESULT=CLOSED\n", repoHead(t)))
+
+	if err := prepared.Cleanup(); err != nil {
+		t.Fatalf("production SELinux cleanup: %v", err)
+	}
+	if after := inodeContextOf(externalRoot); after != before {
+		t.Fatalf("external source device/inode/context must be unchanged after cleanup: before=%q after=%q", before, after)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "runtime", "op_liveselext1", "mount-0")); !os.IsNotExist(statErr) {
 		t.Errorf("owned projection runtime state must be removed after cleanup, got %v", statErr)
 	}
 }
