@@ -92,6 +92,8 @@ ACTUAL_SHA="$(sha256sum "$ARTIFACT_PATH_IN" | awk '{print $1}')"
   exit 1
 }
 
+SOCK="/run/docker-helper/docker-helper.sock"
+
 # si_wait_health waits for the system daemon to answer /health again.
 si_wait_health() {
   local _i=0
@@ -134,7 +136,6 @@ blocked() { printf '  BLOCKED: %s\n' "$*" >&2; BLOCKED_COUNT=$((BLOCKED_COUNT + 
 scenario() { say "scenario $1"; }
 
 dh() { /usr/bin/docker-helper "$@"; }
-SOCK="/run/docker-helper/docker-helper.sock"
 
 json_field() { grep -oP "\"$1\": ?\"\K[^\"]+" | head -1; }
 
@@ -219,8 +220,17 @@ mkdir -p "$RO_DIR"
 chown "$PRINCIPAL:$PRINCIPAL" "$RO_DIR"
 if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$RO_DIR" >/dev/null 2>&1; then
   if S2_SELF="$(dh self --system --token-file /tmp/uat-self-principal.token --json 2>&1)"; then
-    if printf '%s\n' "$S2_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[^]]*${RO_DIR}[^\]]*read_only" \
-        && printf '%s\n' "$S2_SELF" | tr '\n' ' ' | grep -Eq "\"effective_allowed_root_entries\": \[[^]]*${RO_DIR}[^\]]*read_only"; then
+    if printf '%s' "$S2_SELF" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)
+res = env["resource"]
+ro = "$RO_DIR"
+stored = res["allowed_root_entries"]
+effective = res["effective_allowed_root_entries"]
+assert {"path": ro, "access": "read_only"} in stored, stored
+assert {"path": ro, "access": "read_only"} in effective, effective
+print("S2-JSON-OK")
+' >/dev/null 2>&1; then
       ok "S2 stored and effective entries reflect the added read-only root"
     else
       fail "S2 added read-only root absent from the self projection: $(printf '%s\n' "$S2_SELF" | redact | tr '\n' ' ' | head -c 400)"
@@ -281,13 +291,26 @@ if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
   if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only restricted-l "$S3_RES_DIR" >/dev/null 2>&1; then
     if S3_SELF="$(dh self --system --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
       if printf '%s\n' "$S3_SELF" | grep -q '"scope": "restricted"' \
-          && printf '%s\n' "$S3_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[^]]*${S3_RES_DIR}[^\]]*read_only" \
-          && printf '%s\n' "$S3_SELF" | tr '\n' ' ' | grep -Eq "\"effective_allowed_root_entries\": \[[^]]*$S3_RES_DIR"; then
+          && printf '%s' "$S3_SELF" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)
+res = env["resource"]
+ro = "$S3_RES_DIR"
+assert {"path": ro, "access": "read_only"} in res["allowed_root_entries"], res["allowed_root_entries"]
+assert any(e["path"] == ro for e in res["effective_allowed_root_entries"]), res["effective_allowed_root_entries"]
+print("S3-JSON-OK")
+' >/dev/null 2>&1; then
         ok "S3 restricted launcher self carries stored entries and the narrowed effective composition"
       else
         fail "S3 restricted launcher self mismatch: $(printf '%s\n' "$S3_SELF" | redact | tr '\n' ' ' | head -c 400)"
       fi
-      if printf '%s\n' "$S3_SELF" | tr '\n' ' ' | grep -qE "${ALLOWED_ROOT}[^\"]*\", \"access\": \"read_write"; then
+      if printf '%s' "$S3_SELF" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)
+broad = "$ALLOWED_ROOT"
+assert not any(e["path"] == broad and e["access"] == "read_write" for e in env["resource"]["effective_allowed_root_entries"]), env["resource"]["effective_allowed_root_entries"]
+print("S3-NEG-OK")
+' >/dev/null 2>&1; then
         fail "S3 restricted launcher effective scope still carries the broad read-write root"
       else
         ok "S3 restricted launcher effective scope does not leak the broad read-write root"
@@ -357,7 +380,13 @@ if [ -n "$S5_ID" ] && [ -n "$S5_TOKEN" ]; then
       printf '%s\n' "$S5_SHOW_DOC" | redact > /tmp/uat-self-s5-show.log 2>/dev/null || true
     fi
     # Snapshot canonical ordering: exactly the issued workspace entry.
-    if printf '%s\n' "$S5_SELF" | tr '\n' ' ' | grep -Eq "\"filesystem_snapshot\": \{[^}]*\"entries\": \[[^]]*${S5_WS}[^\]]*read_write[^\]]*\]"; then
+    if printf '%s' "$S5_SELF" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)
+ws = "$S5_WS"
+assert env["resource"]["filesystem_snapshot"]["entries"] == [{"path": ws, "access": "read_write"}], env["resource"]["filesystem_snapshot"]
+print("S5-JSON-OK")
+' >/dev/null 2>&1; then
       ok "S5 persisted filesystem snapshot carries the issued workspace read_write entry"
     else
       fail "S5 filesystem snapshot missing the issued workspace entry: $(printf '%s\n' "$S5_SELF" | redact | tr '\n' ' ' | head -c 500)"

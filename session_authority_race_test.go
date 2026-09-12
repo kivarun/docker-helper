@@ -294,9 +294,9 @@ func TestRunLegacyMigratedSessionKeepsWritableBehavior(t *testing.T) {
 	// Session creation lifecycle does: the binding wraps the Session row
 	// insert. (The daemon-owner Launcher's workspace MAC coverage is
 	// driver-recorded state; the run request below only needs the
-	// workspace-use lease from the binding table.)
-	mac := newSessionMACCoordinator(db, newTestWorkspaceMACDriver(LSMBackend("test")))
-	if _, err := mac.CreateSessionBinding("legacy-sess", []string{workspace}, func([]workspaceMACCoverage) error {
+	// session-use lease from the binding table.)
+	mac := newSessionMACCoordinator(db, newTestSessionMACDriver(LSMBackend("test")))
+	if _, err := mac.CreateSessionBinding("legacy-sess", []string{workspace}, func([]sessionMACCoverage) error {
 		return insertLegacySessionRow(t, db, "legacy-sess", workspace, launcherID)
 	}); err != nil {
 		t.Fatal(err)

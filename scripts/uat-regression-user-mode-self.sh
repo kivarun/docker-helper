@@ -73,8 +73,15 @@ fi
 U_UID="$(id -u "$U_USER")"
 U_HOME="$(getent passwd "$U_USER" | cut -d: -f6)"
 # User-mode init requires a reachable Docker daemon when no system daemon
-# answers (the same dependency the other user-mode groups give the UAT user).
-usermod -aG docker "$U_USER" 2>/dev/null || true
+# answers (the same dependency the other user-mode groups give the UAT
+# user). The prerequisite mutation is required: a silently failed usermod
+# would turn the failed prerequisite into misleading downstream evidence.
+if usermod -aG docker "$U_USER" 2>/dev/null; then
+  reg_ok "setup: $U_USER added to the docker group"
+else
+  reg_fail "usermod -aG docker $U_USER failed (user-mode init cannot reach the Docker daemon)"
+  reg_result
+fi
 mkdir -p "$U_HOME/ws"; chown -R "$U_USER:$U_USER" "$U_HOME"
 
 U_XDG="/run/user/$U_UID"
@@ -133,7 +140,15 @@ if S_SELF="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$S_TOK
   if printf '%s\n' "$S_SELF" | grep -q '"type": "session"' \
       && printf '%s\n' "$S_SELF" | grep -q "\"id\": \"$S_ID\"" \
       && printf '%s\n' "$S_SELF" | grep -q "\"workspace\": \"$WS\"" \
-      && printf '%s\n' "$S_SELF" | tr '\n' ' ' | grep -Eq "\"filesystem_snapshot\": \{[^}]*\"entries\": \[[^]]*${WS}[^\]]*read_write[^\]]*\]"; then
+      && printf '%s' "$S_SELF" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)
+res = env["resource"]
+entries = res["filesystem_snapshot"]["entries"]
+assert res["workspace"] == "$WS", res["workspace"]
+assert entries == [{"path": "$WS", "access": "read_write"}], entries
+print("A-JSON-OK")
+' >/dev/null 2>&1; then
     reg_ok "A: session bearer self carries type/session, workspace, and the workspace-only read_write snapshot"
   else
     reg_fail "A: session bearer self mismatch: $(printf '%s\n' "$S_SELF" | redact | head -8 | tr '\n' ' ')"

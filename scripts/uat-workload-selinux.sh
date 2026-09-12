@@ -760,6 +760,23 @@ if [ -n "$SE6_ID" ]; then
   else
     acc_fail "SE regular-file RW write failed (ec=$SE6_W): $(redact </tmp/uat-wls-se6.log | tail -2)"
   fi
+  # Unrelated boundary mutation (a second session prepares and releases an
+  # unrelated tree) must not disturb the issued file root's usability.
+  SE6B_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+    --workspace "$SE_WS" --json \
+    --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
+  SE6B_ID="$(printf '%s' "$SE6B_OUT" | json_field id)"
+  if [ -n "$SE6B_ID" ]; then
+    dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE6B_ID" >/dev/null 2>&1
+  fi
+  SE6_W2="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE6_ID")" \
+    dh run --image alpine:3.24 --mount "$SE_FILE:/etc/worker.env" -- \
+    sh -ec 'echo file-write2 > /etc/worker.env' >/tmp/uat-wls-se6.log 2>&1; echo $?)"
+  if [ "$SE6_W2" -eq 0 ] && [ "$(cat "$SE_FILE" 2>/dev/null)" = "file-write2" ]; then
+    acc_ok "SE regular-file root survives an unrelated boundary mutation"
+  else
+    acc_fail "SE regular-file root lost write access after an unrelated boundary mutation (ec=$SE6_W2)"
+  fi
   dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE6_ID" >/dev/null 2>&1
   if se_fcontext_has_rule "$SE_FILE"; then
     acc_fail "SE regular-file boundary must be relinquished after deletion"
@@ -770,6 +787,106 @@ if [ -n "$SE6_ID" ]; then
 else
   acc_fail "SE regular-file scenario setup failed: $(printf '%s' "$SE6_OUT" | redact | tail -2)"
 fi
+
+# SE sibling coverage (review A1 live proof): one operator-owned compatible
+# ancestor rule covers two concrete sibling issued trees. BOTH siblings must
+# be relabeled and usable; the helper must neither claim nor delete the
+# operator rule; the sibling labels are restored on deletion.
+SE_SIB="$SE_OPT/sibs"
+mkdir -p "$SE_SIB/a" "$SE_SIB/b"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_SIB" 2>/dev/null || true
+semanage fcontext -a -t docker_helper_workspace_t "$SE_SIB(/.*)?" >/dev/null 2>&1
+restorecon -R "$SE_SIB" >/dev/null 2>&1
+
+SE8_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_SIB/a=read_write" \
+  --filesystem-root "$SE_SIB/b=read_write" 2>&1 || true)"
+SE8_ID="$(printf '%s' "$SE8_OUT" | json_field id)"
+if [ -n "$SE8_ID" ]; then
+  printf '%s\n' "$(printf '%s' "$SE8_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE8_ID"; chmod 600 "/tmp/uat-wls-tok-$SE8_ID"
+  SE8_A_LABEL="$(ls -Zd "$SE_SIB/a" 2>/dev/null | awk '{print $1}')"
+  SE8_B_LABEL="$(ls -Zd "$SE_SIB/b" 2>/dev/null | awk '{print $1}')"
+  case "$SE8_A_LABEL$SE8_B_LABEL" in
+    *docker_helper_workspace_t*docker_helper_workspace_t*)
+      acc_ok "SE both sibling issued trees relabeled under the operator covering rule" ;;
+    *)
+      acc_fail "SE sibling coverage skipped a concrete issued tree (a='$SE8_A_LABEL' b='$SE8_B_LABEL')" ;;
+  esac
+  SE8_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE8_ID")" \
+    dh run --image alpine:3.24 --mount "$SE_SIB/a:/sib_a" --mount "$SE_SIB/b:/sib_b" -- \
+    sh -ec 'echo sib-a > /sib_a/a.txt && echo sib-b > /sib_b/b.txt' >/tmp/uat-wls-se8.log 2>&1; echo $?)"
+  if [ "$SE8_W" -eq 0 ] && [ "$(cat "$SE_SIB/a/a.txt" 2>/dev/null)" = "sib-a" ] \
+      && [ "$(cat "$SE_SIB/b/b.txt" 2>/dev/null)" = "sib-b" ]; then
+    acc_ok "SE both sibling issued trees writable through the session"
+  else
+    acc_fail "SE sibling write failed (ec=$SE8_W): $(redact </tmp/uat-wls-se8.log | tail -2)"
+  fi
+  if se_fcontext_has_rule "$SE_SIB(/.*)?" && ! semanage fcontext -l -C 2>/dev/null | grep -F -- "$SE_SIB" | grep -vF "$SE_SIB(/.*)?" >/dev/null; then
+    acc_ok "SE sibling coverage uses the operator rule without claiming helper state"
+  else
+    acc_fail "SE sibling coverage created or claimed extra state (rules: $(semanage fcontext -l -C 2>/dev/null | grep -F "$SE_SIB" | head -3))"
+  fi
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE8_ID" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_SIB(/.*)?"; then
+    acc_ok "SE operator-owned sibling coverage rule survives the session deletion"
+  else
+    acc_fail "SE helper deleted the operator-owned sibling rule"
+  fi
+  SE8_A_AFTER="$(ls -Zd "$SE_SIB/a" 2>/dev/null | awk '{print $1}')"
+  case "$SE8_A_AFTER" in
+    *docker_helper_workspace_t*) acc_fail "SE sibling tree label not restored after deletion: '$SE8_A_AFTER'" ;;
+    *) acc_ok "SE sibling tree labels restored after deletion" ;;
+  esac
+  rm -f "$SE_SIB/a/a.txt" "$SE_SIB/b/b.txt" 2>/dev/null || true
+else
+  acc_fail "SE sibling coverage scenario setup failed: $(printf '%s' "$SE8_OUT" | redact | tail -2)"
+fi
+semanage fcontext -d "$SE_SIB(/.*)?" >/dev/null 2>&1 || true
+restorecon -R "$SE_SIB" >/dev/null 2>&1 || true
+
+# SE operator sibling rule (review A2 live proof): a helper-owned directory
+# boundary and an operator-owned compatible file rule share one stem;
+# session cleanup deletes only the helper shape and the operator rule
+# survives byte-for-byte.
+SE_MIX="$SE_OPT/mix"
+mkdir -p "$SE_MIX"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_MIX" 2>/dev/null || true
+SE_MIX_NOTE="$SE_MIX/note.txt"
+SE9_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_MIX=read_write" 2>&1 || true)"
+SE9_ID="$(printf '%s' "$SE9_OUT" | json_field id)"
+if [ -n "$SE9_ID" ]; then
+  if se_fcontext_has_rule "$SE_MIX(/.*)?"; then
+    acc_ok "SE helper owns its directory boundary rule before the operator add"
+  else
+    acc_fail "SE helper directory boundary rule missing (rules: $(semanage fcontext -l -C 2>/dev/null | grep -F "$SE_MIX" | head -3))"
+  fi
+  # Operator adds a same-stem, other-shape compatible rule.
+  semanage fcontext -a -t docker_helper_workspace_t "$SE_MIX_NOTE" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_MIX_NOTE"; then
+    acc_ok "SE operator added a same-stem file rule next to the helper directory rule"
+  else
+    acc_fail "SE operator same-stem rule setup failed"
+  fi
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE9_ID" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_MIX(/.*)?"; then
+    acc_fail "SE helper directory rule must be removed after the session deletion"
+  else
+    acc_ok "SE helper-owned directory rule removed after the session deletion"
+  fi
+  if se_fcontext_has_rule "$SE_MIX_NOTE"; then
+    acc_ok "SE operator-owned same-stem file rule survives the session deletion"
+  else
+    acc_fail "SE helper deleted the operator-owned same-stem rule"
+  fi
+else
+  acc_fail "SE operator sibling rule scenario setup failed: $(printf '%s' "$SE9_OUT" | redact | tail -2)"
+fi
+semanage fcontext -d "$SE_MIX_NOTE" >/dev/null 2>&1 || true
+restorecon -R "$SE_MIX" >/dev/null 2>&1 || true
+rm -f "/tmp/uat-wls-tok-$SE8_ID" "/tmp/uat-wls-tok-$SE9_ID" 2>/dev/null || true
 
 # SE restart: a live session's external coverage survives restart and the
 # reconciled binding keeps the write path working.
@@ -835,9 +952,9 @@ fi
 # window (journalctl's @epoch since-form is not uniformly accepted across
 # systemd builds); the window is retried briefly because journald can lag the
 # just-finished run, and a failed read is diagnosed instead of failing silent.
-S7_AUDIT_START="$(date -u -d "@${AUDIT_START_EPOCH}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
+S7_AUDIT_START="$(date -u -d "@${AUDIT_START_EPOCH}" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || true)"
 S7_AUDIT_OK=""
-for _s7i in 1 2 3; do
+for _s7i in 1 2 3 4 5; do
   if [ -n "$S7_AUDIT_START" ] \
       && journalctl --utc -u docker-helper.service --since "$S7_AUDIT_START" --no-pager 2>/dev/null \
         | grep '"event":"run.start"' | grep -q '"workload_mac_backend":"selinux"'; then

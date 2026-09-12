@@ -29,14 +29,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Acquire workspace-use lease BEFORE any filesystem access that depends
+	// Acquire session-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
 	if a.MACCoordinator != nil {
 		var leaseErr error
 		_, leaseRelease, leaseErr = a.MACCoordinator.AcquireSessionUse(session.ID, session.Workspace)
 		if leaseErr != nil {
-			opLog(ctx).Error("cannot acquire workspace-use lease",
+			opLog(ctx).Error("cannot acquire session-use lease",
 				slog.String("operation", "build"),
 				slog.String("error", leaseErr.Error()),
 			)
@@ -290,7 +290,7 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 		}
 	}
 
-	// Release workspace-use lease only if staging cleanup succeeded.
+	// Release session-use lease only if staging cleanup succeeded.
 	if cleanupErr == nil && op.macLeaseRelease != nil {
 		op.macLeaseRelease()
 	}

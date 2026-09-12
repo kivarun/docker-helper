@@ -1230,13 +1230,24 @@ MAC state follows the concrete Session lifecycle, not the policy ceilings:
 - a created session receives MAC preparation for every filesystem tree
   issued in its immutable snapshot (AppArmor managed-boundary coverage, or
   SELinux fcontext labeling with MCS constraints) as part of the session
-  lifecycle; a preparation failure after persistence fails the creation
-  closed (`mac_preparation_failed`), rolls back what it prepared through
-  the canonical removal owner, and leaves no usable bearer;
+  lifecycle. Every concrete issued tree goes through the backend
+  preparation path — verify, relabel, and actual-type check — and the
+  physical MAC boundaries are deduplicated only after every concrete tree
+  has passed preparation: several issued trees may resolve onto one
+  covering boundary, and one Session contributes at most one consumer to
+  one physical boundary. A preparation failure after persistence fails
+  the creation closed (`mac_preparation_failed`), rolls back what it
+  prepared through the canonical removal owner, and leaves no usable
+  bearer;
 - a deleted, expired, invalidated, or migrated-away session releases its
   complete MAC binding (every issued tree) through the existing release
-  paths (including startup reconciliation of stale boundaries). The
-  release is gated on pending helper-owned workload state: while a
+  paths (including startup reconciliation of stale boundaries). Startup
+  reconciliation follows the same semantics: every concrete issued tree of
+  the persisted snapshot is verified/required before the physical coverage
+  is deduplicated into the reconstructed binding; the persisted immutable
+  snapshot stays authoritative (current parent policy is never used to
+  reconstruct issued roots). The release is gated on pending helper-owned
+  workload state: while a
   workload ownership record for a session is still unresolved at startup
   (its container cannot be proven absent, e.g. Docker is temporarily
   unavailable), the session MAC coordinator defers releasing that
@@ -1248,6 +1259,22 @@ MAC state follows the concrete Session lifecycle, not the policy ceilings:
   boundary is deferred (fail closed). An expired or deleted Session stops
   authorizing new operations immediately; only its host MAC coverage may
   outlive it until the dependent workload state is proven gone.
+- removal semantics per backend: the SELinux fcontext removal deletes
+  exactly the persistent rule the helper can prove it owns — the rule
+  shape derived from the proven boundary kind (a directory boundary owns
+  its exact recursive pattern, a regular-file boundary its exact file
+  pattern) — and never claims or deletes a compatible operator-owned rule
+  sharing the stem. All fallible facts (boundary kind, mount safety, the
+  owned rule's presence) are proven before the durable rule is deleted; a
+  failure after the deletion is an error, never a falsely complete
+  transition, and the canonical removal owner retains the ownership
+  metadata for retry/reconciliation. Proven path absence (ENOENT) removes
+  the stem's single unambiguous workspace-type rule and refuses the
+  ambiguous multi-rule case. The AppArmor managed fragment persists each
+  boundary's kind (regular-file markers extend the legacy directory-only
+  fragment format), so a fragment rewrite triggered by an unrelated
+  boundary never re-derives an existing boundary's kind from mutable host
+  state;
 - managed boundaries are helper-owned MAC state (AppArmor's dynamic
   boundary state file), never authorization roots and never config.json
   state.
@@ -1848,7 +1875,7 @@ Completion goroutine (cmd.Wait → status transition)
     │
 Unified terminal-path cleanup (one ordered owner: proven container
     absence, workload MAC state, source pins, ownership record,
-    workspace-use lease, cidfile/residue)
+    session-use lease, cidfile/residue)
 ```
 
 Request validation checks that the image field is non-empty. Workdir
@@ -2127,7 +2154,7 @@ per-mount bind sources; build inputs receive no workload MAC material.
 
 Run resources are released by one unified cleanup owner through a frozen
 order — container proven absent, workload MAC state, source pins, durable
-workload ownership record/state, workspace-use lease, cidfile — from every
+workload ownership record/state, session-use lease, cidfile — from every
 terminal path, including pre-start failures (no container by construction)
 and post-start paths with one canonical container-absence proof. The
 durable ownership record is removed only after the stages it anchors are
@@ -2143,7 +2170,7 @@ which runs before the daemon accepts HTTP requests and cleans only
 positively identified helper-owned state. A preparation failure whose
 partial MAC state could not be rolled back is returned to the run path as
 a typed retained outcome (`workloadMACRetainedError`): the run fails, no
-container starts, and the dependent source pins and workspace-use lease
+container starts, and the dependent source pins and session-use lease
 remain until startup reconciliation; any other preparation failure means
 the MAC state was fully rolled back and the caller releases the dependent
 resources as usual. Reconciliation removes the durable ownership record

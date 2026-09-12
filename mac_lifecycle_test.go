@@ -21,18 +21,20 @@ import (
 	"time"
 )
 
-// testWorkspaceMACDriver is a mock workspaceMACDriver for testing the coordinator.
-type testWorkspaceMACDriver struct {
+// testSessionMACDriver is a mock sessionMACDriver for testing the coordinator.
+type testSessionMACDriver struct {
 	mu                    sync.Mutex
 	coverageMap           map[string]string // workspace -> boundary
 	helperOwnedBoundaries map[string]bool   // boundary -> is helper-owned
 	removeErrors          map[string]bool   // boundary -> should removal fail
 	ensureFailures        map[string]bool   // tree -> should ensureCoverage fail
 	boundaryBackend       LSMBackend
+	preparedTrees         []string // every concrete tree ensureCoverage saw, in order
+	verifiedTrees         []string // every concrete tree verifyCoverage saw, in order
 }
 
-func newTestWorkspaceMACDriver(backend LSMBackend) *testWorkspaceMACDriver {
-	return &testWorkspaceMACDriver{
+func newTestSessionMACDriver(backend LSMBackend) *testSessionMACDriver {
+	return &testSessionMACDriver{
 		coverageMap:           make(map[string]string),
 		helperOwnedBoundaries: make(map[string]bool),
 		removeErrors:          make(map[string]bool),
@@ -40,34 +42,38 @@ func newTestWorkspaceMACDriver(backend LSMBackend) *testWorkspaceMACDriver {
 	}
 }
 
-func (b *testWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
+func (b *testSessionMACDriver) ensureCoverage(workspace string) (sessionMACCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.preparedTrees = append(b.preparedTrees, workspace)
+
 	if b.ensureFailures[workspace] {
-		return workspaceMACCoverage{}, false, fmt.Errorf("ensureCoverage failure injected for %s", workspace)
+		return sessionMACCoverage{}, false, fmt.Errorf("ensureCoverage failure injected for %s", workspace)
 	}
 
 	if boundary, ok := b.coverageMap[workspace]; ok {
-		return workspaceMACCoverage{Boundary: boundary, HelperOwned: b.helperOwnedBoundaries[boundary]}, false, nil
+		return sessionMACCoverage{Boundary: boundary, HelperOwned: b.helperOwnedBoundaries[boundary]}, false, nil
 	}
 
 	b.coverageMap[workspace] = workspace
 	b.helperOwnedBoundaries[workspace] = true
-	return workspaceMACCoverage{Boundary: workspace, HelperOwned: true}, true, nil
+	return sessionMACCoverage{Boundary: workspace, HelperOwned: true}, true, nil
 }
 
-func (b *testWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
+func (b *testSessionMACDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.verifiedTrees = append(b.verifiedTrees, workspace)
+
 	if boundary, ok := b.coverageMap[workspace]; ok {
-		return workspaceMACCoverage{Boundary: boundary, HelperOwned: b.helperOwnedBoundaries[boundary]}, nil
+		return sessionMACCoverage{Boundary: boundary, HelperOwned: b.helperOwnedBoundaries[boundary]}, nil
 	}
-	return workspaceMACCoverage{}, fmt.Errorf("no coverage for %s", workspace)
+	return sessionMACCoverage{}, fmt.Errorf("no coverage for %s", workspace)
 }
 
-func (b *testWorkspaceMACDriver) removeBoundary(boundary string) error {
+func (b *testSessionMACDriver) removeBoundary(boundary string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -79,7 +85,7 @@ func (b *testWorkspaceMACDriver) removeBoundary(boundary string) error {
 	return nil
 }
 
-func (b *testWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
+func (b *testSessionMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -90,12 +96,12 @@ func (b *testWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, erro
 	return result, nil
 }
 
-func (b *testWorkspaceMACDriver) backend() LSMBackend {
+func (b *testSessionMACDriver) backend() LSMBackend {
 	return b.boundaryBackend
 }
 
 // setupTestMACCoordinator creates a test app with a MAC coordinator and mock driver.
-func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testWorkspaceMACDriver) {
+func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testSessionMACDriver) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -113,7 +119,7 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	allowedRoot := testAllowedRootDir(t)
@@ -202,7 +208,7 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 	}
 
 	// Create session binding.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-1", workspace)
 	})
 	if err != nil {
@@ -327,7 +333,7 @@ func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
 	// removal failing, forcing the recovery-warning path.
 	triggerWarning := func(sessionID string) {
 		t.Helper()
-		if _, err := mac.CreateSessionBinding(sessionID, []string{workspace}, func([]workspaceMACCoverage) error {
+		if _, err := mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
 			return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
 		}); err != nil {
 			t.Fatalf("CreateSessionBinding: %v", err)
@@ -378,7 +384,7 @@ func TestDBInsertFailurePreservesOwnership(t *testing.T) {
 	driver.removeErrors[workspace] = true
 
 	// Create session binding with a failing DB insert.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		return fmt.Errorf("simulated DB insert failure")
 	})
 	if err == nil {
@@ -409,7 +415,7 @@ func TestDBInsertFailureRemovesOwnershipOnSuccessfulRemoval(t *testing.T) {
 	}
 
 	// Boundary removal succeeds (default).
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		return fmt.Errorf("simulated DB insert failure")
 	})
 	if err == nil {
@@ -447,7 +453,7 @@ func TestLegacyAppArmorOwnershipReconciliation(t *testing.T) {
 	}
 
 	// Simulate pre-existing helper-owned boundary (in fragment but not in mac_boundaries).
-	driver := newTestWorkspaceMACDriver(LSMAppArmor)
+	driver := newTestSessionMACDriver(LSMAppArmor)
 	driver.coverageMap["/data/workspace"] = "/data"
 	driver.helperOwnedBoundaries["/data"] = true
 
@@ -511,7 +517,7 @@ func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 		},
 	}
 
-	driver := &selinuxWorkspaceMACDriver{mgr: mgr, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: mgr, treeKind: fakeTreeKindDirectory}
 
 	// ensureCoverage should fail when listCoveringFcontexts fails.
 	_, _, err = driver.ensureCoverage("/data/workspace")
@@ -545,11 +551,11 @@ func TestMACPreparationErrorClassification(t *testing.T) {
 	}
 
 	// Create a driver that fails on ensureCoverage.
-	driver := &failingWorkspaceMACDriver{err: fmt.Errorf("MAC setup failed")}
+	driver := &failingSessionMACDriver{err: fmt.Errorf("MAC setup failed")}
 	mac := newSessionMACCoordinator(db, driver)
 
 	// CreateSessionBinding should return an error wrapped with ErrMACPreparation.
-	_, err = mac.CreateSessionBinding("sess-1", []string{"/data/workspace"}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{"/data/workspace"}, func([]sessionMACCoverage) error {
 		return nil
 	})
 	if err == nil {
@@ -581,7 +587,7 @@ func TestDBInsertErrorRemainsDatabaseError(t *testing.T) {
 	}
 
 	// Create session binding with a failing DB insert.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		return fmt.Errorf("database locked")
 	})
 	if err == nil {
@@ -594,28 +600,28 @@ func TestDBInsertErrorRemainsDatabaseError(t *testing.T) {
 	}
 }
 
-// failingWorkspaceMACDriver is a mock driver that always fails on ensureCoverage.
-type failingWorkspaceMACDriver struct {
+// failingSessionMACDriver is a mock driver that always fails on ensureCoverage.
+type failingSessionMACDriver struct {
 	err error
 }
 
-func (b *failingWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
-	return workspaceMACCoverage{}, false, b.err
+func (b *failingSessionMACDriver) ensureCoverage(workspace string) (sessionMACCoverage, bool, error) {
+	return sessionMACCoverage{}, false, b.err
 }
 
-func (b *failingWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
-	return workspaceMACCoverage{}, b.err
+func (b *failingSessionMACDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
+	return sessionMACCoverage{}, b.err
 }
 
-func (b *failingWorkspaceMACDriver) removeBoundary(boundary string) error {
+func (b *failingSessionMACDriver) removeBoundary(boundary string) error {
 	return nil
 }
 
-func (b *failingWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
+func (b *failingSessionMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	return nil, nil
 }
 
-func (b *failingWorkspaceMACDriver) backend() LSMBackend {
+func (b *failingSessionMACDriver) backend() LSMBackend {
 	return LSMBackend("test")
 }
 
@@ -633,43 +639,43 @@ type selinuxTestDriver struct {
 	verifyActualTypeFail bool
 }
 
-func (b *selinuxTestDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
+func (b *selinuxTestDriver) ensureCoverage(workspace string) (sessionMACCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if boundaries, ok := b.coveringFcontexts[workspace]; ok && len(boundaries) > 0 {
 		// Existing compatible coverage: run restorecon and verify actual type.
 		if b.restoreconFail {
-			return workspaceMACCoverage{}, false, fmt.Errorf("restorecon failed for %s", workspace)
+			return sessionMACCoverage{}, false, fmt.Errorf("restorecon failed for %s", workspace)
 		}
 		b.restoreconCalls++
 		if b.verifyActualTypeFail {
-			return workspaceMACCoverage{}, false, fmt.Errorf("actual type verification failed for %s", workspace)
+			return sessionMACCoverage{}, false, fmt.Errorf("actual type verification failed for %s", workspace)
 		}
-		return workspaceMACCoverage{Boundary: boundaries[0], HelperOwned: false}, false, nil
+		return sessionMACCoverage{Boundary: boundaries[0], HelperOwned: false}, false, nil
 	}
 
 	// No existing coverage: create new boundary.
-	return workspaceMACCoverage{Boundary: workspace, HelperOwned: true}, true, nil
+	return sessionMACCoverage{Boundary: workspace, HelperOwned: true}, true, nil
 }
 
-func (b *selinuxTestDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
+func (b *selinuxTestDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if boundaries, ok := b.coveringFcontexts[workspace]; ok && len(boundaries) > 0 {
 		// Boundary exists — verify actual on-disk type.
 		if b.verifyActualTypeFail {
-			return workspaceMACCoverage{}, fmt.Errorf("existing SELinux boundary %s exists but actual type for %s is incorrect: wrong_type", boundaries[0], workspace)
+			return sessionMACCoverage{}, fmt.Errorf("existing SELinux boundary %s exists but actual type for %s is incorrect: wrong_type", boundaries[0], workspace)
 		}
-		return workspaceMACCoverage{Boundary: boundaries[0], HelperOwned: false}, nil
+		return sessionMACCoverage{Boundary: boundaries[0], HelperOwned: false}, nil
 	}
 
 	// No boundary — check workspace itself.
 	if b.verifyActualTypeFail {
-		return workspaceMACCoverage{}, fmt.Errorf("workspace %s not covered by any SELinux boundary", workspace)
+		return sessionMACCoverage{}, fmt.Errorf("workspace %s not covered by any SELinux boundary", workspace)
 	}
-	return workspaceMACCoverage{Boundary: workspace, HelperOwned: false}, nil
+	return sessionMACCoverage{Boundary: workspace, HelperOwned: false}, nil
 }
 
 func (b *selinuxTestDriver) removeBoundary(boundary string) error {
@@ -767,7 +773,7 @@ func TestSELinuxRestoreconFailureFailsClosed(t *testing.T) {
 
 	mac := newSessionMACCoordinator(db, driver)
 
-	_, err = mac.CreateSessionBinding("sess-1", []string{"/data/workspace"}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{"/data/workspace"}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-1", "/data/workspace")
 	})
 	if err == nil {
@@ -792,7 +798,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 	}
 
 	// Create session binding.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-1", workspace)
 	})
 	if err != nil {
@@ -876,14 +882,14 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	parentWS := "/data/parent"
 	childWS := "/data/parent/child"
 
 	// Create parent session binding.
-	_, err = mac.CreateSessionBinding("sess-parent", []string{parentWS}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-parent", []string{parentWS}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-parent", parentWS)
 	})
 	if err != nil {
@@ -891,7 +897,7 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 	}
 
 	// Create child session binding.
-	_, err = mac.CreateSessionBinding("sess-child", []string{childWS}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-child", []string{childWS}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-child", childWS)
 	})
 	if err != nil {
@@ -970,14 +976,14 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	parentWS := "/data/parent"
 	childWS := "/data/parent/child"
 
 	// Create parent session binding.
-	_, err = mac.CreateSessionBinding("sess-parent", []string{parentWS}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-parent", []string{parentWS}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-parent", parentWS)
 	})
 	if err != nil {
@@ -985,7 +991,7 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 	}
 
 	// Create child session binding.
-	_, err = mac.CreateSessionBinding("sess-child", []string{childWS}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-child", []string{childWS}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-child", childWS)
 	})
 	if err != nil {
@@ -1054,20 +1060,20 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	workspace := "/data/workspace"
 
 	// Create two session bindings on the same workspace.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding sess-1: %v", err)
 	}
 
-	_, err = mac.CreateSessionBinding("sess-2", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-2", []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-2", workspace)
 	})
 	if err != nil {
@@ -1140,7 +1146,7 @@ func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
 	}
 
 	const sessionID = "sess-pending-workload"
-	_, err = mac.CreateSessionBinding(sessionID, []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
 	})
 	if err != nil {
@@ -1254,7 +1260,7 @@ func TestSessionDeleteKeepsBoundaryWhenPendingWorkloadUnresolvable(t *testing.T)
 	}
 
 	const sessionID = "sess-real-session"
-	_, err = mac.CreateSessionBinding(sessionID, []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
 	})
 	if err != nil {
@@ -1316,13 +1322,13 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	}
 
 	// Create lifecycle with "apparmor" driver.
-	apparmorDriver := newTestWorkspaceMACDriver(LSMAppArmor)
+	apparmorDriver := newTestSessionMACDriver(LSMAppArmor)
 	mac1 := newSessionMACCoordinator(db, apparmorDriver)
 
 	workspace := "/data/workspace"
 
 	// Create boundary with apparmor driver.
-	_, err = mac1.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac1.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-1", workspace)
 	})
 	if err != nil {
@@ -1344,7 +1350,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	mac1.ReleaseSessionBinding("sess-1")
 
 	// Now create lifecycle with "selinux" driver.
-	selinuxDriver := newTestWorkspaceMACDriver(LSMSELinux)
+	selinuxDriver := newTestSessionMACDriver(LSMSELinux)
 	mac2 := newSessionMACCoordinator(db, selinuxDriver)
 
 	// selinux should NOT see apparmor's ownership.
@@ -1359,7 +1365,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	}
 
 	// selinux can create its own boundary at the same path.
-	_, err = mac2.CreateSessionBinding("sess-2", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac2.CreateSessionBinding("sess-2", []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-2", workspace)
 	})
 	if err != nil {
@@ -1414,7 +1420,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 
 	initializeTestDatabase(t, db)
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1460,7 +1466,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 
 	launcherID := testMACLauncherID(t, db)
 
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
@@ -1550,7 +1556,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 
 	initializeTestDatabase(t, db)
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1595,7 +1601,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 
 	launcherID := testMACLauncherID(t, db)
 
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
@@ -1671,7 +1677,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 
 	initializeTestDatabase(t, db)
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1717,7 +1723,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 
 	launcherID := testMACLauncherID(t, db)
 
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
@@ -1808,7 +1814,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 
 	initializeTestDatabase(t, db)
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1854,7 +1860,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 
 	launcherID := testMACLauncherID(t, db)
 
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
@@ -1942,7 +1948,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 
 	initializeTestDatabase(t, db)
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1990,7 +1996,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 
 	launcherID := testMACLauncherID(t, db)
 
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
@@ -2056,7 +2062,7 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 
 	initializeTestDatabase(t, db)
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -2105,7 +2111,7 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 
 	launcherID := testMACLauncherID(t, db)
 
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
@@ -2173,19 +2179,19 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 }
 
 // =============================================================================
-// SELinux durable coverage with real selinuxWorkspaceMACDriver
+// SELinux durable coverage with real selinuxMACDriver
 // =============================================================================
 
 // selinuxSeam is an injectable mock selinuxFcontextManager for testing
-// the real selinuxWorkspaceMACDriver path.
+// the real selinuxMACDriver path.
 type selinuxSeam struct {
 	coveringFcontexts []string // returned by listCoveringFcontexts
 	fcontextErr       error    // returned by listCoveringFcontexts
 	actualTypeErr     error    // returned by verifyActualType
 	restoreconErr     error    // returned by restoreconTree
-	ensureCalled      bool     // tracks whether ensureWorkspaceFcontext was called
-	ensureCreated     bool     // newlyCreated from ensureWorkspaceFcontext
-	ensureErr         error    // error from ensureWorkspaceFcontext
+	ensureCalled      bool     // tracks whether ensureTreeFcontext was called
+	ensureCreated     bool     // newlyCreated from ensureTreeFcontext
+	ensureErr         error    // error from ensureTreeFcontext
 	removeErr         error    // error from removeWorkspaceFcontext
 }
 
@@ -2204,7 +2210,7 @@ func (s *selinuxSeam) restoreconTree(tree string, kind selinuxTreeKind) error {
 	return s.restoreconErr
 }
 
-func (s *selinuxSeam) ensureWorkspaceFcontext(tree string, kind selinuxTreeKind) (bool, error) {
+func (s *selinuxSeam) ensureTreeFcontext(tree string, kind selinuxTreeKind) (bool, error) {
 	s.ensureCalled = true
 	return s.ensureCreated, s.ensureErr
 }
@@ -2219,7 +2225,7 @@ func TestSELinuxRealDriverAncestorCorrectType(t *testing.T) {
 		coveringFcontexts: []string{"/data"},
 		actualTypeErr:     nil,
 	}
-	driver := &selinuxWorkspaceMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
 	cov, err := driver.verifyCoverage("/data/workspace")
 	if err != nil {
@@ -2236,7 +2242,7 @@ func TestSELinuxRealDriverAncestorWrongType(t *testing.T) {
 		coveringFcontexts: []string{"/data"},
 		actualTypeErr:     errors.New("wrong type"),
 	}
-	driver := &selinuxWorkspaceMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
 	_, err := driver.verifyCoverage("/data/workspace")
 	if err == nil {
@@ -2254,7 +2260,7 @@ func TestSELinuxRealDriverNoBoundaryCorrectXattrFails(t *testing.T) {
 		coveringFcontexts: nil,
 		actualTypeErr:     nil, // correct type but no persistent boundary
 	}
-	driver := &selinuxWorkspaceMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
 	_, err := driver.verifyCoverage("/data/workspace")
 	if err == nil {
@@ -2272,7 +2278,7 @@ func TestSELinuxRealDriverEnsureRepairsWrongType(t *testing.T) {
 		restoreconErr:     nil,
 		actualTypeErr:     nil,
 	}
-	driver := &selinuxWorkspaceMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
 	cov, changed, err := driver.ensureCoverage("/data/workspace")
 	if err != nil {
@@ -2293,7 +2299,7 @@ func TestSELinuxRealDriverEnsureCreatesNewBoundary(t *testing.T) {
 		ensureCreated:     true,
 		ensureErr:         nil,
 	}
-	driver := &selinuxWorkspaceMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
 	cov, changed, err := driver.ensureCoverage("/data/workspace")
 	if err != nil {
@@ -2309,11 +2315,11 @@ func TestSELinuxRealDriverEnsureCreatesNewBoundary(t *testing.T) {
 
 func TestSELinuxOptNoExistingBoundaryFails(t *testing.T) {
 	// workspace = /opt, no existing compatible boundary.
-	// Expected: failure, ensureWorkspaceFcontext is NOT called.
+	// Expected: failure, ensureTreeFcontext is NOT called.
 	seam := &selinuxSeam{
 		coveringFcontexts: nil,
 	}
-	driver := &selinuxWorkspaceMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
 	_, _, err := driver.ensureCoverage("/opt")
 	if err == nil {
@@ -2323,7 +2329,7 @@ func TestSELinuxOptNoExistingBoundaryFails(t *testing.T) {
 		t.Errorf("expected '/opt' in error, got: %v", err)
 	}
 	if seam.ensureCalled {
-		t.Error("ensureWorkspaceFcontext must NOT be called for /opt")
+		t.Error("ensureTreeFcontext must NOT be called for /opt")
 	}
 }
 
@@ -2337,7 +2343,7 @@ func TestSELinuxOptExistingBoundarySucceeds(t *testing.T) {
 		restoreconErr:     nil,
 		actualTypeErr:     nil,
 	}
-	driver := &selinuxWorkspaceMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
 	cov, changed, err := driver.ensureCoverage("/opt")
 	if err != nil {
@@ -2353,7 +2359,7 @@ func TestSELinuxOptExistingBoundarySucceeds(t *testing.T) {
 		t.Error("existing operator boundary must not be helper-owned")
 	}
 	if seam.ensureCalled {
-		t.Error("ensureWorkspaceFcontext must NOT be called when compatible boundary exists")
+		t.Error("ensureTreeFcontext must NOT be called when compatible boundary exists")
 	}
 }
 
@@ -2382,7 +2388,7 @@ func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
 		ensureCreated:     true,
 		ensureErr:         nil,
 	}
-	driver := &selinuxWorkspaceMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
+	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 	mac := newSessionMACCoordinator(db, driver)
 	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
 		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
@@ -2531,14 +2537,14 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	parentWS := "/data/parent"
 	childWS := "/data/parent/child"
 
 	// Create parent session binding (the only live consumer).
-	_, err = mac.CreateSessionBinding("sess-parent", []string{parentWS}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-parent", []string{parentWS}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-parent", parentWS)
 	})
 	if err != nil {
@@ -2640,7 +2646,7 @@ func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create a session with MAC binding.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := app.DB.Exec(
 			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2723,7 +2729,7 @@ func TestPrincipalDeleteReleasesMACBindings(t *testing.T) {
 	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create a session with MAC binding.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := app.DB.Exec(
 			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2772,7 +2778,7 @@ func TestPrincipalDeleteReleasesMACBindings(t *testing.T) {
 }
 
 func TestPrincipalDisableLeasePreserved(t *testing.T) {
-	// Session has MAC binding, operation acquires workspace-use lease,
+	// Session has MAC binding, operation acquires session-use lease,
 	// principal disable removes session, boundary NOT removed while lease exists,
 	// lease release allows boundary removal.
 	app, mac, driver := setupTestMACCoordinator(t)
@@ -2806,7 +2812,7 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create a session with MAC binding.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := app.DB.Exec(
 			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2818,7 +2824,7 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
-	// Operation acquires workspace-use lease.
+	// Operation acquires session-use lease.
 	_, leaseRelease, err := mac.AcquireSessionUse("sess-1", workspace)
 	if err != nil {
 		t.Fatalf("AcquireSessionUse: %v", err)
@@ -2833,7 +2839,7 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 	}
 
 	// Disable principal via the production Principal lifecycle owner — removes
-	// the session binding while the workspace-use lease keeps holding.
+	// the session binding while the session-use lease keeps holding.
 	result, err := app.disablePrincipalLaunchers("leaseuser")
 	if err != nil {
 		t.Fatalf("disablePrincipalLaunchers: %v", err)
@@ -2907,7 +2913,7 @@ func TestPrincipalDeleteLeasePreserved(t *testing.T) {
 	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create a session with MAC binding.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := app.DB.Exec(
 			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2919,7 +2925,7 @@ func TestPrincipalDeleteLeasePreserved(t *testing.T) {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
-	// Operation acquires workspace-use lease.
+	// Operation acquires session-use lease.
 	_, leaseRelease, err := mac.AcquireSessionUse("sess-1", workspace)
 	if err != nil {
 		t.Fatalf("AcquireSessionUse: %v", err)
@@ -2997,7 +3003,7 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create two sessions on the same workspace boundary.
-	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := app.DB.Exec(
 			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -3009,7 +3015,7 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 		t.Fatalf("CreateSessionBinding sess-1: %v", err)
 	}
 
-	_, err = mac.CreateSessionBinding("sess-2", []string{workspace}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-2", []string{workspace}, func([]sessionMACCoverage) error {
 		_, err := app.DB.Exec(
 			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,

@@ -374,15 +374,15 @@ allow docker_helper_t self:capability { dac_read_search dac_override sys_admin }
 
 # fowner: the Session MAC binding relabels issued external filesystem trees
 # owned by the Principal user (restorecon sets security.selinux on
-# non-daemon-owned objects; setxattr on a foreign file requires CAP_FOWNER).
+# non-daemon-owned objects; that setxattr requires CAP_FOWNER for a foreign
+# file). This is a domain capability grant to docker_helper_t as a whole,
+# not a call-stack-scoped permission; restorecon is the observed daemon
+# operation that exercises it.
 # Proven necessary by the enforcing final UAT (Release 2.2 issued-tree
 # architectural correction):
-#   avc:  denied  { fowner } for pid=9092 comm="restorecon"
+#   avc:  denied  { fowner } comm="restorecon"
 #     scontext=system_u:system_r:docker_helper_t:s0
 #     tcontext=system_u:system_r:docker_helper_t:s0 tclass=capability permissive=0
-# (the same denial exercised permissively by the harness: pid=4817/4964,
-# permissive=1, comm=restorecon). Scoped to the restorecon relabel path; no
-# other ownership override is granted.
 allow docker_helper_t self:capability fowner;
 
 # bindfs (the projection worker) reads the libmount utab under /run/mount on

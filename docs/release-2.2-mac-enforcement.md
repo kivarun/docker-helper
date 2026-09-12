@@ -59,7 +59,7 @@ matrices remain Phase 2.2.7 release gates. The accepted production shape:
   correlation label `com.dockerhelper.operation.id` joins the existing
   runtime label schema. A preparation failure whose partial MAC state
   cannot be rolled back is a typed retained outcome: the run path retains
-  the dependent source pins and workspace-use lease until startup
+  the dependent source pins and session-use lease until startup
   reconciliation. The ownership-record decoder is exact: exactly one JSON
   value with exactly the current-owner fields, and the operation and
   session IDs must be exactly the canonical issued production shapes

@@ -222,7 +222,7 @@ type principalEnabledChangeResult struct {
 //     through the MAC coordinator;
 //   - returns explicit Changed and RevokedSessionIDs.
 //
-// Running operations are NOT terminated. Existing workspace-use leases
+// Running operations are NOT terminated. Existing session-use leases
 // continue to hold the MAC boundary until the operation releases its lease.
 func (a *App) applyPrincipalEnabledChange(username string, enabled bool) (principalEnabledChangeResult, error) {
 	result, err := persistPrincipalEnabledChange(a.DB, username, enabled)
@@ -247,7 +247,7 @@ func (a *App) applyPrincipalEnabledChange(username string, enabled bool) (princi
 //     through the MAC coordinator.
 //
 // Returns the deleted session IDs for best-effort runtime directory cleanup.
-// Running operations are NOT terminated. Existing workspace-use leases
+// Running operations are NOT terminated. Existing session-use leases
 // continue to hold the MAC boundary until the operation releases its lease.
 func (a *App) deletePrincipalWithMAC(username string) ([]string, error) {
 	sessionIDs, err := deletePrincipal(a.DB, username)
