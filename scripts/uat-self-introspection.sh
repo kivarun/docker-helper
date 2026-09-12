@@ -128,6 +128,8 @@ systemctl enable --now docker-helper.service || { echo "error: systemctl enable 
 si_wait_health || { echo "error: the installed system daemon did not become healthy" >&2; exit 1; }
 say "installed candidate artifact verified by SHA-256; system daemon healthy"
 
+S8_AUDIT_EPOCH="$(date +%s)"
+
 FAIL_COUNT=0
 BLOCKED_COUNT=0
 ok()      { printf '  ok:      %s\n' "$*"; }
@@ -159,9 +161,6 @@ cleanup() {
   dh principal delete --system "$SELF_PRINC" >/dev/null 2>&1 || true
   dh config allowed-root remove "$FIXTURE_ROOT" >/dev/null 2>&1 || true
   dh principal delete --system "$PRINCIPAL" >/dev/null 2>&1 || true
-  if id -u selfint-disabled >/dev/null 2>&1; then
-    userdel -r selfint-disabled >/dev/null 2>&1 || true
-  fi
   rm -rf "$FIXTURE_ROOT"
   rm -f /tmp/uat-self-principal.token /tmp/uat-self-launcher.token \
     /tmp/uat-self-session.token /tmp/uat-self-s5-resource.log \
@@ -479,28 +478,19 @@ S7_probe "unknown token" "dht_unknown_self_uat_token_3m9k2"
   || fail "S7 revoked-credential fixture could not be issued"
 S7_probe "wrong scheme" "Basic c2VsZjppbnRyb3NwZWN0aW9u"
 
-# Disabled principal: disable the fixture Principal's SECOND principal only
-# if a disposable one exists; disabling the shared fixture principal would
-# break the later scenarios. The disabled-principal probe therefore uses the
-# daemon-owner pattern: create a dedicated principal, disable it with its
-# credential in hand.
-if id -u selfint-disabled >/dev/null 2>&1 || useradd -m selfint-disabled >/dev/null 2>&1; then
-  dh principal create --system --no-credential selfint-disabled >/dev/null 2>&1 || true
+# Disabled principal: disable the fixture Principal in place and probe with
+# its S1 credential (the credential itself is valid; the disabled principal
+# fails authentication closed). S7 is the last mutating scenario, so the
+# re-enable restores the state scenario Z expects.
+S7_PRIN_DISABLING=0
+if dh principal set --system "$PRINCIPAL" enabled false >/dev/null 2>&1; then
+  S7_PRIN_DISABLING=1
 fi
-if dh principal allowed-root add --system selfint-disabled "$FIXTURE_ROOT" >/dev/null 2>&1 \
-    && S7_DIS_CRED="$(dh credential create --system --name self-disabled selfint-disabled 2>/dev/null)" \
-    && S7_DIS_TOKEN="$(printf '%s\n' "$S7_DIS_CRED" | cli_line_field Token)" \
-    && [ -n "$S7_DIS_TOKEN" ]; then
-  if dh principal set --system selfint-disabled enabled false >/dev/null 2>&1; then
-    S7_probe "disabled principal" "$S7_DIS_TOKEN"
-    dh principal delete --system selfint-disabled >/dev/null 2>&1 || true
-  else
-    fail "S7 disabled-principal fixture disable failed"
-    dh principal delete --system selfint-disabled >/dev/null 2>&1 || true
-  fi
+if [ "$S7_PRIN_DISABLING" = 1 ] && [ -n "${S1_CRED_TOKEN:-}" ]; then
+  S7_probe "disabled principal" "$S1_CRED_TOKEN"
+  dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || fail "S7 principal re-enable failed"
 else
   fail "S7 disabled-principal fixture could not be issued"
-  dh principal delete --system selfint-disabled >/dev/null 2>&1 || true
 fi
 
 # Disabled launcher probe (S3 fixture launcher, disabled above).
@@ -548,7 +538,7 @@ fi
 # scenario S8: audit contract (self_type, no bearer material)
 # =============================================================================
 scenario "S8: audit contract"
-S8_AUDIT_JSON="$(journalctl --utc -u docker-helper.service --since "@${S6_AUDIT_EPOCH}" --no-pager 2>/dev/null || true)"
+S8_AUDIT_JSON="$(journalctl --utc -u docker-helper.service --since "@${S8_AUDIT_EPOCH}" --no-pager 2>/dev/null || true)"
 if [ -n "$S8_AUDIT_JSON" ]; then
   for want_type in principal launcher session; do
     if printf '%s\n' "$S8_AUDIT_JSON" | grep -q "\"event\":\"self.show\"" \
