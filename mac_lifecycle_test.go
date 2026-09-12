@@ -27,6 +27,7 @@ type testWorkspaceMACDriver struct {
 	coverageMap           map[string]string // workspace -> boundary
 	helperOwnedBoundaries map[string]bool   // boundary -> is helper-owned
 	removeErrors          map[string]bool   // boundary -> should removal fail
+	ensureFailures        map[string]bool   // tree -> should ensureCoverage fail
 	boundaryBackend       LSMBackend
 }
 
@@ -42,6 +43,10 @@ func newTestWorkspaceMACDriver(backend LSMBackend) *testWorkspaceMACDriver {
 func (b *testWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if b.ensureFailures[workspace] {
+		return workspaceMACCoverage{}, false, fmt.Errorf("ensureCoverage failure injected for %s", workspace)
+	}
 
 	if boundary, ok := b.coverageMap[workspace]; ok {
 		return workspaceMACCoverage{Boundary: boundary, HelperOwned: b.helperOwnedBoundaries[boundary]}, false, nil
@@ -103,9 +108,6 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase: %v", err)
-	}
-	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
-		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
 	}
 	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
 		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
