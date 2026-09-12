@@ -47,14 +47,17 @@ and use the returned session token for Docker operations exactly as
 described below.
 
 When the Launcher's effective policy permits finer per-Session control,
-the creating authority may narrow the Session at issuance time with a
-repeatable `--filesystem-entry PATH=ACCESS` flag (PATH relative to the
-workspace, `.` for the root; ACCESS `read_write` or `read_only`):
+the creating authority may issue additional filesystem roots at
+issuance time with a repeatable `--filesystem-root PATH=ACCESS` flag
+(PATH is an absolute host path inside the target Launcher's effective
+allowed roots; ACCESS `read_write` or `read_only`). The workspace stays
+mandatory and receives the maximum permitted ceiling mode; a root at the
+canonical workspace path explicitly narrows it:
 
 ```bash
-docker-helper session create --workspace . \
-  --filesystem-entry .=read_only \
-  --filesystem-entry outputs=read_write
+docker-helper session create --workspace /home/michael/work/git/BoxProbe \
+  --filesystem-root /home/michael/work/git/BoxProbe=read_only \
+  --filesystem-root /opt/michael/cache=read_write
 ```
 
 The request may only narrow the target Launcher's ceiling; a widening

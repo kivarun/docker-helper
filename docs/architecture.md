@@ -1729,8 +1729,10 @@ directory; it never writes into the source tree (see
 ### Run
 
 `docker-helper run` uses the same lifecycle semantics as `build`.
-`--mount` source must be relative to the session workspace; target is an
-absolute container path.
+`--mount` source is a relative path (resolved against the session
+workspace) or an absolute host path; target is an absolute container
+path. Both spellings are authorized only through the issued immutable
+Session filesystem snapshot.
 
 ```
 Authentication + coherent filesystem authority read

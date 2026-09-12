@@ -142,16 +142,18 @@ Machine-facing completion query: print the Principal names the authenticated aut
 Machine-facing completion query: print the Launcher selectors the authenticated authority may target with a \-\-launcher selector or the positional [LAUNCHER] argument, one per line, honoring the typed \-\-principal context. An admin with a context receives that Principal's Launcher names; an admin without one receives only globally resolvable \fBdhl_\fR Launcher IDs; a Principal credential receives its own Launchers' names; a Launcher credential and any foreign scope receive nothing.
 .SS Session Commands
 .TP
-.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-filesystem-entry PATH=ACCESS]... [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
+.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-filesystem-root PATH=ACCESS]... [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
 Create a new session for a workspace. With \-\-json, output in JSON format.
-The repeatable \fB\-\-filesystem-entry PATH=ACCESS\fR flag requests the
-issuance-time Session filesystem narrowing: PATH is a path relative to the
-Session workspace (exactly \fB.\fR for the workspace root, which is required
-whenever the flag is used; the orchestrator creates the run directories
-before creating the Session) and ACCESS is exactly \fBread_write\fR or
-\fBread_only\fR. The request may only narrow the resolved target Launcher's
-effective filesystem ceiling: a \fBread_write\fR entry under an effective
-read_only region, or any path outside the ceiling, is refused with
+The repeatable \fB\-\-filesystem-root PATH=ACCESS\fR flag issues additional
+filesystem roots for the Session: PATH is an absolute host path inside the
+resolved target Launcher's effective allowed roots (an existing directory
+or regular file; the root is created before the Session) and ACCESS is
+exactly \fBread_write\fR or \fBread_only\fR. The workspace itself remains
+mandatory and receives the maximum access the effective policy permits at
+that path; a root whose canonical path equals the workspace explicitly
+narrows it instead. The request may only narrow the effective filesystem
+ceiling: a \fBread_write\fR root under an effective read_only region, or
+any path outside the ceiling, is refused with
 \fB400 invalid_filesystem_policy\fR before the Session exists. Omitting the
 flag preserves the inherited create behavior. The CLI validates
 PATH=ACCESS syntax only; whether the request is a valid narrowing is decided
