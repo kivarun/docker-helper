@@ -388,6 +388,96 @@ else
 fi
 
 # ==============================================================================
+# scenario WE: external Session filesystem roots under the workload MAC
+# backend — the Session issues an external read-only root and an external
+# read-write root through the absolute --filesystem-root grammar and mounts
+# them through the same exposure/pin/workload-MAC owners as the workspace
+# itself: the external RW root is really writable and the external RO root is
+# denied writable with attributable workload-profile denial evidence inside
+# the shared audit window.
+# ==============================================================================
+say "WE: external Session filesystem roots under the workload MAC backend"
+
+WE_OPT="/opt/$PRINCIPAL"
+WE_HELPER="$WE_OPT/repos/helper"
+WE_CACHE="$WE_OPT/cache"
+rm -rf "$WE_OPT"
+mkdir -p "$WE_HELPER" "$WE_CACHE"
+printf 'we-helper-src\n' > "$WE_HELPER/main.go"
+printf 'seed\n' > "$WE_CACHE/seed.txt"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$WE_OPT"
+chmod -R u+rwX,go+rX "$WE_OPT"
+if dh config allowed-root add --access read_write "$WE_OPT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$WE_OPT" >/dev/null 2>&1; then
+  acc_ok "WE setup: second effective root $WE_OPT (global RW + Principal RW)"
+else
+  acc_fail "WE setup: second effective root setup failed"
+fi
+WE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name we-multiroot --no-credential 2>/dev/null || true)"
+WE_L_ID="$(printf '%s' "$WE_L_JSON" | json_field id)"
+if [ -n "$WE_L_ID" ] \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_L_ID" "$WE_OPT" >/dev/null 2>&1; then
+  acc_ok "WE setup: multiroot launcher carries both effective roots"
+else
+  acc_fail "WE setup: multiroot launcher setup failed: $WE_L_JSON"
+fi
+WE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" "$WE_L_ID" 2>/dev/null || true)"
+WE_LC_TOKEN="$(printf '%s' "$WE_LC_OUT" | json_field token)"
+if [ -n "$WE_LC_TOKEN" ]; then
+  printf '%s\n' "$WE_LC_TOKEN" > /tmp/uat-wla-cred-multiroot; chmod 600 /tmp/uat-wla-cred-multiroot
+else
+  echo "error: WE launcher credential create failed" >&2; exit 1
+fi
+WE_WS="$ALLOWED_ROOT/we-runs/run-123"
+rm -rf "$ALLOWED_ROOT/we-runs"
+mkdir -p "$WE_WS"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT/we-runs"
+chmod -R u+rwX,go+rX "$ALLOWED_ROOT/we-runs"
+WE_OUT="$(dh session create --system --token-file /tmp/uat-wla-cred-multiroot \
+  --workspace "$WE_WS" --json \
+  --filesystem-root "$WE_HELPER=read_only" \
+  --filesystem-root "$WE_CACHE=read_write" 2>&1 || true)"
+WE_ID="$(printf '%s' "$WE_OUT" | json_field id)"
+if [ -n "$WE_ID" ]; then
+  printf '%s' "$WE_OUT" | json_field token > "/tmp/uat-wla-tok-$WE_ID"; chmod 600 "/tmp/uat-wla-tok-$WE_ID"
+  WE_TOKEN="$(cat "/tmp/uat-wla-tok-$WE_ID")"
+  acc_ok "WE multi-root Session created (external helper RO + cache RW)"
+else
+  acc_fail "WE multi-root session create failed: $(printf '%s\n' "$WE_OUT" | redact | tail -3)"
+fi
+
+# WE-RW: the external RW root mounts writable through the same workload-MAC
+# owner; the write persists to the host.
+WE_W="$(DOCKER_HELPER_SESSION_TOKEN="$WE_TOKEN" \
+  dh run --image alpine:3.24 --mount "$WE_CACHE:/cache" -- \
+  sh -ec 'echo we-write > /cache/written.txt && echo WE-RW-OK' >/tmp/uat-wla-we-w.log 2>&1)"
+if [ -f "$WE_CACHE/written.txt" ] && [ "$(cat "$WE_CACHE/written.txt" 2>/dev/null)" = "we-write" ]; then
+  acc_ok "WE external RW root writable through the workload MAC owner"
+else
+  acc_fail "WE external RW write failed: $(redact </tmp/uat-wla-we-w.log | tail -3)"
+fi
+
+# WE-RO: the external RO root is denied writable by the backend itself: the
+# run fails and the host file is not created. The denial happens inside the
+# shared audit window, so the attributable workload-profile DENIED record
+# collected by W10 carries the external-root evidence too.
+DOCKER_HELPER_SESSION_TOKEN="$WE_TOKEN" \
+  dh run --image alpine:3.24 --mount "$WE_HELPER:/helper:ro" -- \
+  sh -ec 'echo forbidden > /helper/forbidden.txt' >/dev/null 2>&1
+WE_EC=$?
+if [ "$WE_EC" -ne 0 ] && [ ! -e "$WE_HELPER/forbidden.txt" ]; then
+  acc_ok "WE external RO root write denied and the host file was not created"
+else
+  acc_fail "WE external RO root immutability broken (ec=$WE_EC)"
+fi
+
+# The WE session is cleaned up with the scenario set (the final W7/W9
+# residue checks own the cleanup proof); its runtime state is ordinary
+# workload state.
+
+# ==============================================================================
 # scenario W7a: cleanup after success
 # ==============================================================================
 say "W7a: cleanup after a successful workload"

@@ -1087,10 +1087,11 @@ func TestLiveWorkloadAppArmorPrefixCollisionRW(t *testing.T) {
 
 	// The kernel printk fallback drops audit records under rate limiting
 	// when no auditd consumer runs (observed on the runner: only a subset
-	// of the denial records survives in the ring buffer). The denial
-	// behavior itself is proven on every attempt; the attributable record
-	// is obtained by retrying the denial until the kernel log observes it,
-	// within a bounded attempt budget.
+	// of the denial records survives in the ring buffer). Every mandatory
+	// denial path is executed and asserted — the attributable record only
+	// satisfies the attribution evidence and must never stop the remaining
+	// behavioral denial checks; the attribution retry loop below closes the
+	// remaining gap within a bounded attempt budget.
 	deniedWrites := []struct{ name, path string }{
 		{"sibling aX", "/work/aX"},
 		{"continued prefix abc", "/work/abc"},
@@ -1105,10 +1106,11 @@ func TestLiveWorkloadAppArmorPrefixCollisionRW(t *testing.T) {
 			t.Fatalf("AppArmor must deny writes to the %s path %s", denied.name, denied.path)
 		}
 		t.Logf("denied %s write output: %v", denied.name, writeErr)
-		if found, line := appArmorAttributableRecord(t, profileName, 4*time.Second); found {
-			denialLine = line
-			attributable = true
-			break
+		if !attributable {
+			if found, line := appArmorAttributableRecord(t, profileName, 4*time.Second); found {
+				denialLine = line
+				attributable = true
+			}
 		}
 	}
 	for attempt := 0; !attributable && attempt < 8; attempt++ {
