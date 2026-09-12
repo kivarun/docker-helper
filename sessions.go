@@ -177,7 +177,11 @@ type listSessionsResponse struct {
 // sessionFilesystemSnapshotJSON is the canonical public projection of the
 // persisted immutable Session filesystem snapshot. The workspace is not
 // repeated here: the top-level Session workspace is its canonical public
-// owner, and the snapshot's first entry carries the root access mode.
+// owner. The entries carry every issued disjoint access tree in the exact
+// persisted canonical ordering (ancestor first), so the workspace's root
+// access mode is carried by the workspace's own entry in that ordering —
+// the first entry is the canonical ordering's first tree, not by
+// definition the workspace.
 type sessionFilesystemSnapshotJSON struct {
 	Entries []AllowedRootEntry `json:"entries"`
 }

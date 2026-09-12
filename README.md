@@ -9,12 +9,13 @@ build images and run containers. Giving the agent direct access to
 and run arbitrary processes. docker-helper sits between the agent and
 Docker and enforces policy:
 
-- host paths accepted as build contexts and bind-mount sources are
-  restricted to the session workspace;
+- host paths accepted as build contexts are restricted to the session
+  workspace, and bind-mount sources are restricted to the session's issued
+  filesystem snapshot (the workspace plus any issued additional roots);
 - build, pull, and run require a session token; session management
   requires an admin token, Principal credential, or Launcher credential;
 - all supported Docker operations are mediated by the daemon;
-- the developer controls which workspace each session can access.
+- the developer controls which filesystem snapshot each session is issued.
 
 docker-helper assumes the agent cannot directly read `admin.token` or
 access `docker.sock`. It does not sandbox an otherwise unrestricted agent
@@ -92,8 +93,8 @@ Four authentication classes provide different levels of access:
 3. **Launcher credential** — bound to one launcher (at most one credential
    per launcher): create sessions owned by that launcher, list and delete
    only that launcher's sessions. Cannot manage launchers or principals.
-4. **Session token** — narrow workspace capability for Docker operations
-   (pull, build, run, registry login).
+4. **Session token** — narrow data-plane capability for one session's
+   issued filesystem snapshot (pull, build, run, registry login).
 
 A credential is a rotatable authentication key, never an owner. Every
 session is owned by exactly one launcher; principal identity is derived

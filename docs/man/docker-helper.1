@@ -10,7 +10,8 @@ docker-helper \- Policy-enforcing Docker mediation daemon
 .B docker-helper
 is a policy-enforcing daemon that provides a restricted interface to Docker.
 It mediates Docker operations for coding agents running on the same machine,
-restricting host path access to session workspaces and enforcing policy on
+restricting host path access to each session's issued filesystem snapshot
+(the workspace plus any issued additional roots) and enforcing policy on
 build, pull, and run operations.
 .PP
 Deployment mode is determined by effective UID:
@@ -159,6 +160,9 @@ flag preserves the inherited create behavior. The CLI validates
 PATH=ACCESS syntax only; whether the request is a valid narrowing is decided
 by the daemon. The issued snapshot is immutable; there is no post-create
 Session filesystem mutation.
+In user mode every requested root must be the canonical workspace itself
+(user mode has no inode-pinned mounts); any other root is refused with the
+same error.
 The target Launcher is chosen by the daemon. Without a selector the
 authority-specific defaults apply: a Principal credential resolves its
 Principal's \fBdefault\fR Launcher; a Launcher credential is forced to its
@@ -514,8 +518,11 @@ Pull a Docker image.
 Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
 .TP
 .B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] \-\- [command]
-Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
-A requested writable mount whose source resolves to a read-only region of
+ Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
+A mount source is a workspace-relative path (system mode: any file or
+subdirectory; user mode: only the workspace root \fB.\fR) or an absolute
+host path inside the issued Session filesystem snapshot; any other source
+is refused. A requested writable mount whose source resolves to a read-only region of
 the issued Session filesystem snapshot is refused before any container
 starts with the \fBread_only_root\fR error \- a policy refusal, distinct
 from the structural \fBinvalid_mount\fR. When a source is only needed for

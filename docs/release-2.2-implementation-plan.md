@@ -719,9 +719,11 @@ wire contract; the typed `ErrInvalidSessionFilesystemPolicy` family
 answers `400 invalid_filesystem_policy` with the audit result
 `invalid_filesystem_policy`; no new persistence schema and no MAC/runtime
 change. Run mounts gain the absolute-source spelling authorized only
-through the issued snapshot; user mode loses its workspace-only
-special case through the same snapshot owner; completion renders the
-effective roots as tree boundaries and completes both sides of
+through the issued snapshot; in system mode the snapshot owner covers the
+workspace and the issued disjoint roots alike, while user mode keeps its
+workspace-only special case (user mode has no `CAP_SYS_ADMIN` for
+inode-pinned mounts) through the same snapshot owner; completion renders
+the effective roots as tree boundaries and completes both sides of
 `--filesystem-root`.
 
 Release 2.2 underdelivered the original orchestrator capability: a Session
