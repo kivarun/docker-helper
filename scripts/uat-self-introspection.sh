@@ -92,6 +92,27 @@ ACTUAL_SHA="$(sha256sum "$ARTIFACT_PATH_IN" | awk '{print $1}')"
   exit 1
 }
 
+# Install the exact candidate artifact (never rebuilds it) and start the
+# confined system service, exactly like the DEB install adapter in
+# scripts/uat-install-deb.sh. The runner has no prior installation.
+dpkg -i "$ARTIFACT_PATH_IN" 2>/tmp/uat-self-install.err || {
+  printf 'error: candidate DEB install failed\n' >&2
+  sed -n '1,5p' /tmp/uat-self-install.err 2>/dev/null | redact >&2
+  exit 1
+}
+[ -d "$ALLOWED_ROOT" ] || { echo "error: allowed root does not exist: $ALLOWED_ROOT" >&2; exit 1; }
+INIT_OUT="$(/usr/bin/docker-helper init --allowed-root "$ALLOWED_ROOT" 2>&1)"
+INIT_EC=$?
+if [ "$INIT_EC" -ne 0 ]; then
+  printf 'error: docker-helper init failed\n' >&2
+  printf '%s\n' "$INIT_OUT" | redact >&2
+  exit 1
+fi
+systemctl daemon-reload || { echo "error: systemctl daemon-reload failed" >&2; exit 1; }
+systemctl enable --now docker-helper.service || { echo "error: systemctl enable --now docker-helper failed" >&2; exit 1; }
+si_wait_health || { echo "error: the installed system daemon did not become healthy" >&2; exit 1; }
+say "installed candidate artifact verified by SHA-256; system daemon healthy"
+
 FAIL_COUNT=0
 BLOCKED_COUNT=0
 ok()      { printf '  ok:      %s\n' "$*"; }

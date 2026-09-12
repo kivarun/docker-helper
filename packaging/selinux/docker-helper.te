@@ -112,7 +112,7 @@ module docker_helper 1.0;
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
-		class capability { dac_read_search dac_override sys_admin };
+		class capability { dac_read_search dac_override sys_admin fowner };
 		class process { transition siginh noatsecure rlimitinh };
 		class process2 { nnp_transition };
 	}
@@ -371,6 +371,19 @@ allow docker_helper_t var_lock_t:file { create open read write getattr lock };
 # Capabilities for workspace access, mount-pin, and helper-owned projection
 # mount/unmount mechanics (proven in enforcing UAT).
 allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };
+
+# fowner: the Session MAC binding relabels issued external filesystem trees
+# owned by the Principal user (restorecon sets security.selinux on
+# non-daemon-owned objects; setxattr on a foreign file requires CAP_FOWNER).
+# Proven necessary by the enforcing final UAT (Release 2.2 issued-tree
+# architectural correction):
+#   avc:  denied  { fowner } for pid=9092 comm="restorecon"
+#     scontext=system_u:system_r:docker_helper_t:s0
+#     tcontext=system_u:system_r:docker_helper_t:s0 tclass=capability permissive=0
+# (the same denial exercised permissively by the harness: pid=4817/4964,
+# permissive=1, comm=restorecon). Scoped to the restorecon relabel path; no
+# other ownership override is granted.
+allow docker_helper_t self:capability fowner;
 
 # bindfs (the projection worker) reads the libmount utab under /run/mount on
 # every FUSE mount.
