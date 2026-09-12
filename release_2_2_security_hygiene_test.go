@@ -26,6 +26,9 @@ func TestSELinuxPolicyKeepsGenericBinTExecBounded(t *testing.T) {
 	}
 
 	capGrant := "allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };"
+	if !strings.Contains(policy, "allow docker_helper_t self:capability fowner;") {
+		t.Fatal("the restorecon relabel path must carry the evidence-backed fowner capability grant")
+	}
 	if got := strings.Count(policy, capGrant); got != 1 {
 		t.Fatalf("daemon capability grant must have one canonical declaration, got %d", got)
 	}

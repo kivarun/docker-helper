@@ -556,9 +556,14 @@ printf '%s\n' "$PRINC_SELF_JSON" | grep -q "\"username\": \"$PRINCIPAL\"" \
   || fail_uat "principal self does not carry the authenticated principal: $PRINC_SELF_JSON"
 
 # Session bearer self: the Session's own resource, equal in shape to the
-# session show body (workspace, ownership, expiry, persisted snapshot).
-SESSION_SELF_JSON="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN" docker-helper self --system --json)" \
+# session show body (workspace, ownership, expiry, persisted snapshot). The
+# session bearer is an operator-style bearer: the CLI reads it from
+# --token-file exactly like `session show`.
+SESSION_SELF_FILE="$(mktemp /tmp/uat-self-session-token.XXXXXX)"
+printf '%s\n' "$SESSION_PRINC_TOKEN" > "$SESSION_SELF_FILE"; chmod 600 "$SESSION_SELF_FILE"
+SESSION_SELF_JSON="$(docker-helper self --system --token-file "$SESSION_SELF_FILE" --json)" \
   || fail_uat "session bearer self failed"
+rm -f "$SESSION_SELF_FILE"
 printf '%s\n' "$SESSION_SELF_JSON" | grep -q '"type": "session"' \
   || fail_uat "session self returned the wrong class: $SESSION_SELF_JSON"
 printf '%s\n' "$SESSION_SELF_JSON" | grep -q "\"id\": \"$SESSION_PRINC_ID\"" \
