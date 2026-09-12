@@ -139,6 +139,11 @@ dh() { /usr/bin/docker-helper "$@"; }
 
 json_field() { grep -oP "\"$1\": ?\"\K[^\"]+" | head -1; }
 
+# cli_line_field extracts the value from the human-oriented operator CLI
+# output lines ("  Token: dht_...", "  ID:    dhcr_..."); credential create
+# prints this form, not JSON.
+cli_line_field() { sed -n "s/^  $1:[[:space:]]*//p" | head -1; }
+
 # si_cleanup removes everything the scenarios created, best-effort; the
 # fail-closed residue assertions live in scenario Z.
 FIXTURE_ROOT="$ALLOWED_ROOT/self-introspection"
@@ -155,6 +160,9 @@ cleanup() {
   dh config allowed-root remove "$FIXTURE_ROOT" >/dev/null 2>&1 || true
   dh principal delete --system "$PRINCIPAL" >/dev/null 2>&1 || true
   rm -rf "$FIXTURE_ROOT"
+  rm -f /tmp/uat-self-principal.token /tmp/uat-self-launcher.token \
+    /tmp/uat-self-session.token /tmp/uat-self-s5-resource.log \
+    /tmp/uat-self-s5-show.log
 }
 trap cleanup EXIT
 
@@ -181,7 +189,7 @@ PUID="$(id -u "$PRINCIPAL")"; PGID="$(id -g "$PRINCIPAL")"
 P_HOME="$(getent passwd "$PRINCIPAL" | cut -d: -f6)"
 
 S1_CRED_OUT="$(dh credential create --system --name self-uat "$PRINCIPAL" 2>/dev/null || true)"
-S1_CRED_TOKEN="$(printf '%s\n' "$S1_CRED_OUT" | json_field token)"
+S1_CRED_TOKEN="$(printf '%s\n' "$S1_CRED_OUT" | cli_line_field Token)"
 if [ -n "$S1_CRED_TOKEN" ]; then
   printf '%s\n' "$S1_CRED_TOKEN" > /tmp/uat-self-principal.token
   chmod 600 /tmp/uat-self-principal.token
@@ -220,11 +228,11 @@ mkdir -p "$RO_DIR"
 chown "$PRINCIPAL:$PRINCIPAL" "$RO_DIR"
 if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$RO_DIR" >/dev/null 2>&1; then
   if S2_SELF="$(dh self --system --token-file /tmp/uat-self-principal.token --json 2>&1)"; then
-    if printf '%s' "$S2_SELF" | python3 -c '
-import json, sys
+    if printf '%s' "$S2_SELF" | EXPECTED_RO="$RO_DIR" python3 -c '
+import json, os, sys
 env = json.load(sys.stdin)
 res = env["resource"]
-ro = "$RO_DIR"
+ro = os.environ["EXPECTED_RO"]
 stored = res["allowed_root_entries"]
 effective = res["effective_allowed_root_entries"]
 assert {"path": ro, "access": "read_only"} in stored, stored
@@ -259,7 +267,7 @@ fi
 # scenario S3: launcher self (inherit and restricted scopes)
 # =============================================================================
 scenario "S3: launcher self (inherit and restricted scopes)"
-S3_L_OUT="$(dh launcher create --system --principal "$PRINCIPAL" --name restricted-l 2>/dev/null || true)"
+S3_L_OUT="$(dh launcher create --system --principal "$PRINCIPAL" --name restricted-l --issue-credential 2>/dev/null || true)"
 S3_L_TOKEN="$(printf '%s\n' "$S3_L_OUT" | json_field token)"
 S3_L_ID="$(printf '%s\n' "$S3_L_OUT" | json_field id)"
 if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
@@ -291,11 +299,11 @@ if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
   if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only restricted-l "$S3_RES_DIR" >/dev/null 2>&1; then
     if S3_SELF="$(dh self --system --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
       if printf '%s\n' "$S3_SELF" | grep -q '"scope": "restricted"' \
-          && printf '%s' "$S3_SELF" | python3 -c '
-import json, sys
+          && printf '%s' "$S3_SELF" | EXPECTED_RO="$S3_RES_DIR" python3 -c '
+import json, os, sys
 env = json.load(sys.stdin)
 res = env["resource"]
-ro = "$S3_RES_DIR"
+ro = os.environ["EXPECTED_RO"]
 assert {"path": ro, "access": "read_only"} in res["allowed_root_entries"], res["allowed_root_entries"]
 assert any(e["path"] == ro for e in res["effective_allowed_root_entries"]), res["effective_allowed_root_entries"]
 print("S3-JSON-OK")
@@ -304,10 +312,10 @@ print("S3-JSON-OK")
       else
         fail "S3 restricted launcher self mismatch: $(printf '%s\n' "$S3_SELF" | redact | tr '\n' ' ' | head -c 400)"
       fi
-      if printf '%s' "$S3_SELF" | python3 -c '
-import json, sys
+      if printf '%s' "$S3_SELF" | EXPECTED_BROAD="$ALLOWED_ROOT" python3 -c '
+import json, os, sys
 env = json.load(sys.stdin)
-broad = "$ALLOWED_ROOT"
+broad = os.environ["EXPECTED_BROAD"]
 assert not any(e["path"] == broad and e["access"] == "read_write" for e in env["resource"]["effective_allowed_root_entries"]), env["resource"]["effective_allowed_root_entries"]
 print("S3-NEG-OK")
 ' >/dev/null 2>&1; then
@@ -353,7 +361,7 @@ fi
 # =============================================================================
 scenario "S5: session self equals the session show body"
 S5_WS="$FIXTURE_ROOT/ws"
-S5_CREATE="$(dh session create --system --workspace "$S5_WS" --json 2>/dev/null || true)"
+S5_CREATE="$(dh session create --system --token-file /tmp/uat-self-principal.token --workspace "$S5_WS" --json 2>/dev/null || true)"
 S5_ID="$(printf '%s\n' "$S5_CREATE" | json_field id)"
 S5_TOKEN="$(printf '%s\n' "$S5_CREATE" | json_field token)"
 if [ -n "$S5_ID" ] && [ -n "$S5_TOKEN" ]; then
@@ -380,10 +388,10 @@ if [ -n "$S5_ID" ] && [ -n "$S5_TOKEN" ]; then
       printf '%s\n' "$S5_SHOW_DOC" | redact > /tmp/uat-self-s5-show.log 2>/dev/null || true
     fi
     # Snapshot canonical ordering: exactly the issued workspace entry.
-    if printf '%s' "$S5_SELF" | python3 -c '
-import json, sys
+    if printf '%s' "$S5_SELF" | EXPECTED_WS="$S5_WS" python3 -c '
+import json, os, sys
 env = json.load(sys.stdin)
-ws = "$S5_WS"
+ws = os.environ["EXPECTED_WS"]
 assert env["resource"]["filesystem_snapshot"]["entries"] == [{"path": ws, "access": "read_write"}], env["resource"]["filesystem_snapshot"]
 print("S5-JSON-OK")
 ' >/dev/null 2>&1; then
@@ -404,7 +412,7 @@ fi
 scenario "S6: admin self_not_available"
 ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 [ -n "$ADMIN_TOKEN" ] || blocked "cannot read the admin token"
-S6_AUDIT_SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
+S6_AUDIT_EPOCH="$(date +%s)"
 S6_OUT="$(curl --silent --max-time 5 --unix-socket "$SOCK" \
   -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost/self 2>/dev/null || true)"
 S6_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
@@ -415,7 +423,7 @@ if [ "$S6_CODE" = "404" ] && printf '%s\n' "$S6_OUT" | grep -q '"self_not_availa
 else
   fail "S6 admin self outcome unexpected (code=$S6_CODE): $(printf '%s\n' "$S6_OUT" | redact | head -3)"
 fi
-S6_AUDIT_JSON="$(journalctl --utc -u docker-helper.service --since "$S6_AUDIT_SINCE" --no-pager 2>/dev/null | grep '"event":"self.show"' | grep 'self_not_available' | tail -1 || true)"
+S6_AUDIT_JSON="$(journalctl --utc -u docker-helper.service --since "@${S6_AUDIT_EPOCH}" --no-pager 2>/dev/null | grep '"event":"self.show"' | grep 'self_not_available' | tail -1 || true)"
 if [ -n "$S6_AUDIT_JSON" ]; then
   if printf '%s\n' "$S6_AUDIT_JSON" | grep -q '"self_type"'; then
     fail "S6 self_not_available audit record unexpectedly carries a self_type"
@@ -433,8 +441,8 @@ scenario "S7: negative authentication matrix"
 
 # Revoked principal credential: issue a second credential and revoke it.
 S7_REV_OUT="$(dh credential create --system --name self-revoked "$PRINCIPAL" 2>/dev/null || true)"
-S7_REV_TOKEN="$(printf '%s\n' "$S7_REV_OUT" | json_field token)"
-S7_REV_ID="$(printf '%s\n' "$S7_REV_OUT" | json_field id)"
+S7_REV_TOKEN="$(printf '%s\n' "$S7_REV_OUT" | cli_line_field Token)"
+S7_REV_ID="$(printf '%s\n' "$S7_REV_OUT" | cli_line_field ID)"
 if [ -n "$S7_REV_TOKEN" ] && [ -n "$S7_REV_ID" ]; then
   dh credential revoke --system "$S7_REV_ID" >/dev/null 2>&1 || true
 fi
@@ -476,7 +484,7 @@ S7_probe "wrong scheme" "Basic c2VsZjppbnRyb3NwZWN0aW9u"
 dh principal create --system --no-credential selfint-disabled >/dev/null 2>&1 || true
 if dh principal allowed-root add --system selfint-disabled "$FIXTURE_ROOT" >/dev/null 2>&1 \
     && S7_DIS_CRED="$(dh credential create --system --name self-disabled selfint-disabled 2>/dev/null)" \
-    && S7_DIS_TOKEN="$(printf '%s\n' "$S7_DIS_CRED" | json_field token)" \
+    && S7_DIS_TOKEN="$(printf '%s\n' "$S7_DIS_CRED" | cli_line_field Token)" \
     && [ -n "$S7_DIS_TOKEN" ]; then
   if dh principal set --system selfint-disabled enabled false >/dev/null 2>&1; then
     S7_probe "disabled principal" "$S7_DIS_TOKEN"
@@ -505,7 +513,7 @@ if [ -n "$S7_TTL_BEFORE" ] \
     && dh config set session_ttl 2s >/dev/null 2>&1 \
     && dh reload --system >/dev/null 2>&1 \
     && si_wait_health; then
-  S7_EXP_CREATE="$(dh session create --system --workspace "$S5_WS" --json 2>/dev/null || true)"
+  S7_EXP_CREATE="$(dh session create --system --token-file /tmp/uat-self-principal.token --workspace "$S5_WS" --json 2>/dev/null || true)"
   S7_EXP_ID="$(printf '%s\n' "$S7_EXP_CREATE" | json_field id)"
   S7_EXP_TOKEN="$(printf '%s\n' "$S7_EXP_CREATE" | json_field token)"
   if [ -n "$S7_EXP_ID" ] && [ -n "$S7_EXP_TOKEN" ]; then
