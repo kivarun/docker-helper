@@ -1,6 +1,6 @@
 ---
 name: docker-helper
-description: Use Docker through Docker Helper to pull images, build images, run containers, and authenticate to container registries without direct access to Docker or docker.sock. Use this skill whenever a task requires Docker operations in an environment where Docker Helper is available.
+description: Drive Docker through Docker Helper — pull images, build images, run containers, and authenticate to registries without direct access to Docker or docker.sock. Covers delegated Session creation when the environment provisions a Launcher or Principal credential, the Session's issued filesystem scope (workspace plus filesystem roots), and self-introspection of your own authority with docker-helper self / GET /self. Use this skill whenever a task requires Docker operations in an environment where Docker Helper is available.
 ---
 
 # Docker Helper
@@ -12,16 +12,17 @@ Never:
 - invoke `docker` directly;
 - access `docker.sock`;
 - start, stop, reload, or configure Docker Helper;
-- create, list, or delete Docker Helper sessions when the environment
-  provisioned this agent only with a Session token: Session management
-  requires a Docker Helper credential (Launcher or Principal — see Delegated
-  identity below) and is then allowed only as permitted by that authority;
+- use any `session` subcommand with only a Session token: Session
+  management requires a Docker Helper credential (Launcher or Principal —
+  see Delegated identity below) and is then allowed only as permitted by
+  that authority;
 - look for or use the Docker Helper administrative token;
 - print, log, echo, or otherwise expose `DOCKER_HELPER_SESSION_TOKEN` or a
   Docker Helper credential token;
 - fall back to direct Docker access if a Docker Helper operation fails;
 - use administrative/operator commands: `serve`, `init`, `reload`, `config`,
-  `principal`, `launcher`, `credential`.
+  `principal`, `launcher`, `credential`, `admin-token`, `apparmor`,
+  `selinux`.
 
 ## Delegated identity
 
@@ -37,43 +38,83 @@ agent never installs or rotates it):
   principal's default launcher automatically. Do not pass a selector
   unless explicitly instructed.
 
-With a credential, create sessions with:
+`GET /auth` (HTTP, with the installed credential as the Bearer token)
+reports the authority: the response is `{"authority":"launcher",...}` or
+`{"authority":"principal",...}`. The CLI consumes the credential from the
+canonical installed credential file automatically; do not display any
+token value.
+
+If the environment provides only `DOCKER_HELPER_SESSION_TOKEN` and no
+credential, skip this section entirely: do not create, list, show, or
+delete sessions.
+
+### Creating a Session (Launcher or Principal credential)
+
+CLI:
 
 ```bash
 docker-helper session create --workspace .
 ```
 
-and use the returned session token for Docker operations exactly as
-described below.
+The workspace is resolved against your own current directory; it must lie
+inside the Launcher's effective allowed roots. The response shows the
+session token once — export it as `DOCKER_HELPER_SESSION_TOKEN` and never
+display it.
 
-When the Launcher's effective policy permits finer per-Session control,
-the creating authority may issue additional filesystem roots at
-issuance time with a repeatable `--filesystem-root PATH=ACCESS` flag
-(PATH is an absolute host path inside the target Launcher's effective
-allowed roots; ACCESS `read_write` or `read_only`). The workspace stays
-mandatory and receives the maximum permitted ceiling mode; a root at the
-canonical workspace path explicitly narrows it:
+HTTP (the installed credential is the Bearer; read it from the canonical
+installed credential file without displaying it):
 
 ```bash
-docker-helper session create --workspace /home/michael/work/git/BoxProbe \
-  --filesystem-root /home/michael/work/git/BoxProbe=read_only \
-  --filesystem-root /opt/michael/cache=read_write
+curl --silent --show-error \
+  --unix-socket "$SOCKET" \
+  -H "Authorization: Bearer $CREDENTIAL" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace":"/host/path/inside/effective/roots"}' \
+  http://localhost/sessions
 ```
 
-The request may only narrow the target Launcher's ceiling; a widening
+### Session filesystem roots
+
+The Session's filesystem scope is issued at creation time and is immutable
+afterwards: parent allowed-root policy changes never affect an
+already-issued Session. The workspace is mandatory. What else can be
+issued depends on the deployment mode:
+
+- **System mode**: a repeatable `--filesystem-root PATH=ACCESS` flag (CLI)
+  or a `filesystem_roots` array of `{path, access}` objects (HTTP) may add
+  absolute host filesystem roots — directories or regular files — inside
+  the target Launcher's effective ceiling. ACCESS is `read_write` or
+  `read_only`, always within the parent authority. Issued roots may be
+  used as absolute mount sources (see Path model).
+- **User mode**: no disjoint filesystem root can be issued — an explicit
+  root is accepted only when its canonical path equals the canonical
+  workspace. Such an explicit workspace root may narrow the workspace to
+  `read_only` (for example
+  `--filesystem-root /host/path/to/workspace=read_only`); any additional,
+  disjoint, or child root is refused before the Session exists.
+
+Every request may only narrow the target Launcher's ceiling; a widening
 request is refused `invalid_filesystem_policy` before the Session exists.
 Omitting the flag keeps the inherited behavior. There is no post-create
 Session filesystem mutation.
 
-`GET /auth` (HTTP, with the installed credential as the Bearer token)
-reports the authority: the response is `{"authority":"launcher",...}` or
-`{"authority":"principal",...}`. The credential is consumed by the existing
-client resolution from the canonical installed credential file; do not copy
-it into shell variables or command text, and do not display any token value.
+## Introspection: self
 
-If the environment provides only `DOCKER_HELPER_SESSION_TOKEN` and no
-credential, skip this section entirely: do not create, list, or delete
-sessions.
+`docker-helper self` (HTTP: `GET /self` with the same bearer) is the one
+self-introspection surface. The daemon classifies your credential and
+answers with exactly your own authority — no more:
+
+- **Session bearer** → your Session: identity, ownership, expiry, and the
+  persisted immutable filesystem snapshot (workspace plus any issued
+  filesystem roots, each with its access mode);
+- **Launcher credential** → your Launcher: id, name, owning principal,
+  scope, and stored/effective allowed-root entries;
+- **Principal credential** → your Principal: username, uid/gid, home,
+  enabled state, and stored/effective allowed-root entries.
+
+The admin token has no self resource (`404 self_not_available`). A self
+read is read-only and grants no authority over peers: it never permits
+listing or managing other Sessions, Launchers, or Principals.
 
 ## Client interfaces
 
@@ -89,8 +130,9 @@ Use the interface selected by the user or environment.
 If no interface was explicitly selected, determine availability of both:
 
 - **CLI available:** `command -v docker-helper >/dev/null 2>&1`
-- **HTTP available:** the Docker Helper socket exists and a suitable HTTP
-  client is present (for the documented curl examples — `curl`)
+- **HTTP available:** a Docker Helper socket is resolvable (see Socket
+  discovery) and a suitable HTTP client is present (for the documented
+  curl examples — `curl`)
 
 Then:
 
@@ -112,19 +154,22 @@ DOCKER_HELPER_SESSION_TOKEN
 
 Never display its value.
 
-To introspect what your own credential is authorized as (its class, its
-workspace snapshot for a session bearer, its allowed-root scope for
-Principal and Launcher credentials), use `docker-helper self` (HTTP:
-`GET /self` with the same bearer). It is read-only and returns exactly the
-authority the credential already has — no more.
+### Socket discovery
 
-The Docker Helper socket is normally:
+Resolve the Docker Helper Unix socket in this order:
 
-```text
-/run/docker-helper/docker-helper.sock
-```
+1. `DOCKER_HELPER_SOCKET_PATH`, if set — the authoritative override;
+2. the user-mode socket
+   `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`, when
+   `XDG_RUNTIME_DIR` is set and that socket exists;
+3. the system socket `/run/docker-helper/docker-helper.sock` — the
+   system/sandbox default.
 
-If `DOCKER_HELPER_SOCKET_PATH` is set, use that socket path instead.
+The CLI resolves this order automatically. An HTTP client resolves the
+same order itself. Never declare Docker Helper unavailable only because
+the system-mode socket is absent while the daemon runs in user mode: check
+the user-mode socket first. A transport/connectivity failure on every
+resolved socket is the only unavailability evidence.
 
 ## Path model
 
@@ -134,14 +179,18 @@ Both interfaces share the same path semantics. Define once, apply everywhere.
   path inside the session workspace is also accepted (containment is
   daemon-validated).
 - **Mount sources** are never agent-container absolute paths such as
-  `/workspace/...`. The accepted source depends on deployment mode:
-  - in **user mode**, only the workspace root source `.` is accepted;
-  - in **system mode**, a workspace-relative file or subdirectory source
-    is accepted, and an absolute host path is accepted when it lies inside
-    the session's issued filesystem snapshot (an additional PATH/ACCESS
-    entry in `session show`); any other absolute path is refused;
-  - if the deployment mode is not explicitly known, use `.` as the portable
-    mount source.
+  `/workspace/...`. Two source forms exist:
+  - a **workspace-relative source** (including `.` for the workspace
+    root) is scoped to the session workspace by grammar;
+  - an **absolute host source** is authorized through the Session's issued
+    filesystem snapshot: it is accepted when it lies inside the snapshot
+    (the workspace, or an issued filesystem root visible in your `self`
+    snapshot); any other absolute path is refused.
+- **User-mode mount rule** — the daemon-enforced invariant is that the
+  canonical resolved source equals the canonical Session workspace.
+  `.` is the recommended portable spelling and is valid in both modes;
+  in user mode no subdirectory, file, or disjoint source is accepted
+  (rejected as `invalid_mount`).
 - **Mount targets** are absolute paths inside the launched container.
 - **`--workdir`** / **`workdir`** is an absolute path inside the launched
   container.
@@ -151,12 +200,13 @@ deployment mode.
 
 ### Session filesystem policy
 
-The session's filesystem policy is an immutable snapshot issued when the
-session was created (visible through `session show` as a PATH/ACCESS
-table; do not run `session show` unless you were provisioned with a
-credential that authorizes it). It does not change during the session's
-lifetime, and parent allowed-root policy changes do not affect an
-already-issued session.
+The session's filesystem policy is the immutable snapshot issued when the
+session was created. Introspect your own snapshot with `docker-helper self`
+— it renders the exact persisted PATH/ACCESS table for a Session bearer.
+`session show SESSION_ID` is the operator/control-plane lookup for a
+credential that authorizes it, not a Session-bearer surface. The snapshot
+does not change during the session's lifetime, and parent allowed-root
+policy changes do not affect an already-issued session.
 
 What this means for mounts:
 
@@ -203,12 +253,16 @@ docker-helper help build
 docker-helper help run
 docker-helper help registry
 docker-helper help registry login
+docker-helper help self
+docker-helper help session
 ```
 
 Do not use administrative/operator commands: `serve`, `init`, `reload`,
-`config`, `principal`, `launcher`, `credential`. The `session` subcommands
-(create, list, delete) require a Docker Helper credential (Launcher or
-Principal); with only a Session token, do not use them.
+`config`, `principal`, `launcher`, `credential`, `admin-token`, `apparmor`,
+`selinux`. The `session` subcommands (create, list, show,
+delete) require a Docker Helper credential (Launcher or Principal); with
+only a Session token, do not use them. `self` works with whichever bearer
+you hold, including a Session token.
 
 ## Pull
 
@@ -369,7 +423,13 @@ The HTTP API is a fully supported direct client interface.
 Set the socket path without displaying any secret:
 
 ```bash
-SOCKET="${DOCKER_HELPER_SOCKET_PATH:-/run/docker-helper/docker-helper.sock}"
+if [ -n "$DOCKER_HELPER_SOCKET_PATH" ]; then
+  SOCKET="$DOCKER_HELPER_SOCKET_PATH"
+elif [ -n "$XDG_RUNTIME_DIR" ] && [ -S "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" ]; then
+  SOCKET="$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock"
+else
+  SOCKET=/run/docker-helper/docker-helper.sock
+fi
 ```
 
 Protected requests require:
@@ -466,6 +526,17 @@ Example mount (system-mode-only — relative subdirectory):
 }
 ```
 
+Example mount (system-mode-only — issued absolute filesystem root; the
+same capability the CLI `--mount /opt/agent/cache:/cache` example shows):
+
+```json
+{
+  "source": "/opt/agent/cache",
+  "target": "/cache",
+  "read_only": false
+}
+```
+
 ## Async operation lifecycle
 
 For HTTP `build` and `run`, follow this algorithm:
@@ -539,9 +610,9 @@ Do not describe Docker Helper as unavailable after an HTTP response.
   refusal, not a structural error and not daemon unavailability: request
   the source read-only when reads suffice, or report the policy
   limitation as described in the Session filesystem policy section.
-- **Transport/connectivity failure** (e.g., inability to connect to the
-  configured Unix socket) is the only condition that indicates Docker Helper
-  is unavailable.
+- **Transport/connectivity failure** (e.g., inability to connect to any
+  socket resolved by the Socket discovery order) is the only condition
+  that indicates Docker Helper is unavailable.
 
 Do not switch to direct Docker access after an API rejection.
 

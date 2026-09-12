@@ -764,6 +764,71 @@ func TestUninstallSkillRemovesOnlyDockerHelper(t *testing.T) {
 	}
 }
 
+// TestSkillAgentContract verifies the shipped agent-facing SKILL.md keeps
+// the canonical Release 2.2 contract vocabulary and does not resurrect
+// known-stale claims. The file is a shipped release artifact
+// (skills/docker-helper/SKILL.md in the bundle), so its agent-facing
+// invariants are product contracts, not prose.
+func TestSkillAgentContract(t *testing.T) {
+	data, err := os.ReadFile(".claude/skills/docker-helper/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The frontmatter must identify the skill and cover the agent-facing
+	// scope beyond the data plane (delegated identity and self-introspection).
+	if !strings.Contains(content, "name: docker-helper") {
+		t.Error("SKILL.md frontmatter must name the skill")
+	}
+	if !strings.Contains(content, "docker-helper self") {
+		t.Error("SKILL.md must document docker-helper self introspection")
+	}
+	if !strings.Contains(content, "GET /self") {
+		t.Error("SKILL.md must document the GET /self surface")
+	}
+
+	// Canonical filesystem-roots vocabulary on both the CLI and wire forms;
+	// the retired --filesystem-entry spelling must not return.
+	if !strings.Contains(content, "--filesystem-root") {
+		t.Error("SKILL.md must use the canonical --filesystem-root CLI flag")
+	}
+	if !strings.Contains(content, "filesystem_roots") {
+		t.Error("SKILL.md must use the canonical filesystem_roots wire field")
+	}
+	if strings.Contains(content, "--filesystem-entry") || strings.Contains(content, "filesystem_entries") {
+		t.Error("SKILL.md must not resurrect the retired --filesystem-entry vocabulary")
+	}
+
+	// Socket discovery must cover both deployment modes: the authoritative
+	// override, the user-mode runtime socket, and the system socket.
+	for _, fact := range []string{
+		"DOCKER_HELPER_SOCKET_PATH",
+		"XDG_RUNTIME_DIR",
+		"/run/docker-helper/docker-helper.sock",
+	} {
+		if !strings.Contains(content, fact) {
+			t.Errorf("SKILL.md socket discovery must state %q", fact)
+		}
+	}
+
+	// The user-mode mount invariant is the canonical workspace rule, never
+	// the literal "." spelling; the known-stale sentence must stay gone.
+	if !strings.Contains(content, "canonical resolved source equals the canonical Session workspace") {
+		t.Error("SKILL.md must state the canonical user-mode mount rule")
+	}
+	if strings.Contains(content, "only the workspace root source `.` is accepted") {
+		t.Error("SKILL.md must not claim the literal `.` spelling as the user-mode invariant")
+	}
+
+	// A Session bearer introspects its own issued snapshot through self;
+	// the operator `session show` lookup must not be presented as the
+	// Session-bearer surface.
+	if !strings.Contains(content, "not a Session-bearer surface") {
+		t.Error("SKILL.md must qualify session show as the operator lookup, not the Session-bearer surface")
+	}
+}
+
 // setupInstallEnv creates a minimal test environment for install.sh.
 // Returns (tempHome, scriptDir, fakeDir, callLog).
 // Each test writes its own systemctl script to fakeDir.
