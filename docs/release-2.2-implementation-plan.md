@@ -432,13 +432,15 @@ Create one Session-owned derived snapshot representation.
 At the Session creation linearization point:
 
 1. resolve one coherent current global/Principal/Launcher policy;
-2. validate the requested workspace;
+2. validate the requested workspace and any issuance-time filesystem roots;
 3. derive the normalized filesystem snapshot relative to/cropped by that
-   workspace;
-4. prepare the existing concrete workspace MAC coverage;
+   workspace (multi-root when roots were issued);
+4. prepare the concrete MAC coverage for every tree issued in that
+   snapshot (the workspace is one issued tree);
 5. persist Session + snapshot atomically under the existing creation/lifecycle
    ownership boundary;
-6. return the bearer only after both Session and snapshot are committed.
+6. return the bearer only after Session, snapshot, and the complete
+   Session MAC binding are established.
 
 There must be no committed Session bearer without a complete snapshot.
 

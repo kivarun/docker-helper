@@ -318,7 +318,7 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	}
 
 	if a.MACCoordinator != nil {
-		_, err := a.MACCoordinator.CreateSessionBinding(absWorkspace, sessionID, func(coverage workspaceMACCoverage) error {
+		_, err := a.MACCoordinator.CreateSessionBinding(sessionID, sessionMACBoundaries(snapshot), func([]workspaceMACCoverage) error {
 			return insertSession()
 		})
 		if err != nil {

@@ -646,6 +646,9 @@ func TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage(t *testing.T
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
+	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
+		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
+	}
 
 	workspace := "/data/pending-workload"
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
@@ -653,7 +656,7 @@ func TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage(t *testing.T
 
 	// Bind the workspace coverage to a live session so the boundary is
 	// helper-owned; the session row carries the workspace for the gate.
-	if _, err := mac.CreateSessionBinding(workspace, testWorkloadSessionID, func(cov workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding(testWorkloadSessionID, []string{workspace}, func([]workspaceMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), testWorkloadSessionID, workspace)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -731,6 +734,9 @@ func TestStaleBoundaryCleanupDeferredForPendingWorkload(t *testing.T) {
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
+	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
+		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
+	}
 
 	// A live parent binding keeps its own boundary; a disjoint orphaned
 	// boundary (owned, no consumers) is the stale target under test.
@@ -738,7 +744,7 @@ func TestStaleBoundaryCleanupDeferredForPendingWorkload(t *testing.T) {
 	childWS := "/data/gated-other"
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
-	if _, err := mac.CreateSessionBinding(parentWS, testWorkloadSessionID, func(cov workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding(testWorkloadSessionID, []string{parentWS}, func([]workspaceMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), testWorkloadSessionID, parentWS)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)

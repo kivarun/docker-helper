@@ -296,7 +296,7 @@ func TestRunLegacyMigratedSessionKeepsWritableBehavior(t *testing.T) {
 	// driver-recorded state; the run request below only needs the
 	// workspace-use lease from the binding table.)
 	mac := newSessionMACCoordinator(db, newTestWorkspaceMACDriver(LSMBackend("test")))
-	if _, err := mac.CreateSessionBinding(workspace, "legacy-sess", func(cov workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("legacy-sess", []string{workspace}, func([]workspaceMACCoverage) error {
 		return insertLegacySessionRow(t, db, "legacy-sess", workspace, launcherID)
 	}); err != nil {
 		t.Fatal(err)

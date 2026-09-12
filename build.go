@@ -34,7 +34,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	var leaseRelease func()
 	if a.MACCoordinator != nil {
 		var leaseErr error
-		_, leaseRelease, leaseErr = a.MACCoordinator.AcquireWorkspaceUse(session.ID, session.Workspace)
+		_, leaseRelease, leaseErr = a.MACCoordinator.AcquireSessionUse(session.ID, session.Workspace)
 		if leaseErr != nil {
 			opLog(ctx).Error("cannot acquire workspace-use lease",
 				slog.String("operation", "build"),
