@@ -361,6 +361,126 @@ inventory_count() {
   printf '%s\n' "$out" | wc -l | tr -d ' '
 }
 
+# --- SELinux fcontext/label inventory primitives (fail-closed tri-state) -----
+# Canonical owner of the SELinux inventory contract for the SELinux UAT
+# suites. Every mandatory SELinux residue/coverage observation distinguishes
+# exactly three states:
+#   PRESENT -> positively proven present (rule in a readable inventory);
+#   ABSENT  -> positively proven absent (readable inventory, rule not in it);
+#   ERROR   -> the inspection itself failed (semanage/stat failure, malformed
+#              listing) -> the caller must fail the scenario.
+# "Cannot inspect" is never "no rule", never "not relabeled", and never
+# "restored": an inability to observe state is never evidence of absence.
+
+# selinux_fcontext_patterns prints the first-field pattern of every local
+# semanage fcontext customization, one per line (equivalence redirects
+# included: their first field is the DEST path). Exit 0 with a readable
+# inventory; exit 1 when the inventory command fails OR a non-empty row is
+# not an absolute-path data row (the same fail-closed listing contract the
+# daemon itself applies) — a partially unreadable listing is never an empty
+# but successful one.
+selinux_fcontext_patterns() {
+  local out rc
+  out="$(semanage fcontext -l -C -n 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  if printf '%s\n' "$out" | awk 'NF && $1 !~ /^\// {found=1} END {exit !found}'; then
+    return 1
+  fi
+  printf '%s\n' "$out" | awk 'NF && $1 ~ /^\// {print $1}'
+}
+
+# selinux_rule_state PATTERN — tri-state exact membership of one local
+# fcontext rule: first-field equality, so a child-path rule never satisfies a
+# parent pattern and vice versa. Exit 0 = PRESENT, 1 = ABSENT,
+# 2 = inventory unavailable.
+selinux_rule_state() {
+  local patterns
+  patterns="$(selinux_fcontext_patterns)" || return 2
+  printf '%s\n' "$patterns" | grep -Fxq -- "$1"
+}
+
+# selinux_rule_line PATTERN prints the full raw listing line of the local
+# fcontext rule whose first field equals PATTERN. Exit 0 = PRESENT (line
+# printed), 1 = ABSENT, 2 = inventory unavailable. A byte-for-byte survival
+# proof compares this line across an operation; a failed read is never a
+# missing line.
+selinux_rule_line() {
+  local out rc line
+  out="$(semanage fcontext -l -C -n 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] || return 2
+  line="$(printf '%s\n' "$out" | awk -v p="$1" 'NF && $1 == p {print; exit}')"
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line"
+}
+
+# selinux_context_type PATH prints the SELinux type component (third
+# colon-separated field) of PATH's security context. Exit 0 with the type;
+# exit 2 when the context read fails or the output is not a full SELinux
+# context — a mandatory label observation on an unreadable path is an
+# inventory error, never "not relabeled" and never "restored".
+selinux_context_type() {
+  local ctx
+  ctx="$(stat -c '%C' -- "$1" 2>/dev/null)" || return 2
+  case "$ctx" in
+    *:*:*:*) printf '%s\n' "$(printf '%s' "$ctx" | cut -d: -f3)" ;;
+    *) return 2 ;;
+  esac
+}
+
+# reg_expect_se_rule EXPECTATION PATTERN LABEL — tri-state fcontext rule
+# assertion with the regression accounting. EXPECTATION is "present" or
+# "absent". An unavailable inventory fails the group in every direction
+# (never evidence of absence); PRESENT where absence is expected fails.
+reg_expect_se_rule() {
+  local expectation="$1" pattern="$2" label="$3" rc
+  selinux_rule_state "$pattern"; rc=$?
+  case "$rc" in
+    0) if [ "$expectation" = "present" ]; then reg_ok "$label"; else reg_fail "$label: rule '$pattern' is PRESENT"; fi ;;
+    1) if [ "$expectation" = "absent" ]; then reg_ok "$label"; else reg_fail "$label: rule '$pattern' is ABSENT"; fi ;;
+    *) reg_fail "$label: fcontext inventory unavailable (semanage failed); absence is never assumed" ;;
+  esac
+}
+
+# reg_expect_se_context EXPECTATION PATH WANT LABEL — tri-state SELinux
+# context-type assertion. EXPECTATION is "is" (type equals WANT) or "is-not".
+# A failed context read fails the group in every direction.
+reg_expect_se_context() {
+  local expectation="$1" path="$2" want="$3" label="$4" type rc
+  type="$(selinux_context_type "$path")"; rc=$?
+  case "$rc" in
+    0) case "$expectation" in
+         is) if [ "$type" = "$want" ]; then reg_ok "$label"; else reg_fail "$label (type '$type', want '$want')"; fi ;;
+         is-not) if [ "$type" = "$want" ]; then reg_fail "$label (type '$type')"; else reg_ok "$label (type '$type')"; fi ;;
+         *) reg_fail "$label: reg_expect_se_context expectation must be is|is-not" ;;
+       esac ;;
+    *) reg_fail "$label: SELinux context inventory unavailable for $path (context read failed)" ;;
+  esac
+}
+
+# reg_expect_no_se_rule_for FRAGMENT LABEL — no local fcontext rule mentions
+# FRAGMENT (regex over-match / residue check). An inventory failure fails the
+# group; an empty match on a readable inventory is the positive proof.
+reg_expect_no_se_rule_for() {
+  local fragment="$1" label="$2" patterns rc
+  patterns="$(selinux_fcontext_patterns)"; rc=$?
+  case "$rc" in
+    0) if printf '%s\n' "$patterns" | grep -Fq -- "$fragment"; then reg_fail "$label"; else reg_ok "$label"; fi ;;
+    *) reg_fail "$label: fcontext inventory unavailable (semanage failed); absence is never assumed" ;;
+  esac
+}
+
+# selinux_rules_for FRAGMENT prints every local rule pattern mentioning
+# FRAGMENT. Exit 0 with the (possibly empty) matching set on a readable
+# inventory; exit 2 when the inventory is unavailable. Callers must treat
+# exit 2 as a failure, never as "no rules".
+selinux_rules_for() {
+  local patterns
+  patterns="$(selinux_fcontext_patterns)" || return 2
+  printf '%s\n' "$patterns" | grep -F -- "$1" || true
+}
+
 # --- shared ubuntu/deb/apparmor setup helpers --------------------------------
 # Used by the Ubuntu-hosted regression groups. The collect-all runner inits the
 # system service with global allowed root /home, so every /home/* home below is

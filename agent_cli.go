@@ -407,7 +407,7 @@ var runContainerCommand = &Command{
 		var mountSlice stringSlice
 		fs.Var(&envSlice, "env", "Environment variable KEY=VALUE (repeatable)")
 		fs.Var(&envFromSlice, "env-from", "Environment variable DEST=SOURCE; value comes from this process environment (repeatable)")
-		fs.Var(&mountSlice, "mount", "Mount WORKSPACE_RELATIVE_SOURCE:ABSOLUTE_TARGET[:ro] (repeatable)")
+		fs.Var(&mountSlice, "mount", "Mount SOURCE:ABSOLUTE_TARGET[:ro] (repeatable); SOURCE is workspace-relative or an absolute host path")
 
 		return Invocation{
 			Validate: func() error {

@@ -167,3 +167,122 @@ func TestAppArmorDriverOverlapRelease(t *testing.T) {
 		t.Error("the boundary must be removed once every consumer released it")
 	}
 }
+
+// TestAppArmorDriverFileBoundaryNeverCoversDescendant proves the kind-aware
+// coverage semantics (the B3 review repair): a persisted regular-file
+// boundary covers exactly its canonical path and NEVER a descendant path,
+// in both ensure and verify. The check runs through the real fragment-backed
+// driver, not a reimplemented predicate.
+func TestAppArmorDriverFileBoundaryNeverCoversDescendant(t *testing.T) {
+	app, mac, driver, mgr := setupAppArmorMACCoordinator(t)
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	treeFile := filepath.Join(allowedRoot, "aa-file-boundary")
+	if err := os.WriteFile(treeFile, []byte("token"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A descendant path of the FILE boundary (reachable only if the host
+	// object were replaced by a directory).
+	child := filepath.Join(treeFile, "child")
+
+	if _, err := mac.CreateSessionBinding("sess-aa-file-kind", []string{treeFile}, func([]sessionMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-file-kind", allowedRoot)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// The fragment persists the boundary as a regular-file boundary.
+	fragmentBytes, err := os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatalf("read fragment: %v", err)
+	}
+	if !strings.Contains(string(fragmentBytes), appArmorBoundaryFileMarker) {
+		t.Fatalf("the file boundary must persist its regular-file kind:\n%s", fragmentBytes)
+	}
+
+	// verify: the exact file is covered; a descendant is not.
+	if _, err := driver.verifyCoverage(treeFile); err != nil {
+		t.Fatalf("verifyCoverage(exact file): %v", err)
+	}
+	if _, err := driver.verifyCoverage(child); err == nil {
+		t.Error("a regular-file boundary must never cover a descendant path")
+	}
+
+	// ensure: the exact file is covered by the persisted boundary. A
+	// descendant of a regular-file boundary can never be satisfied by it:
+	// the kind-aware verify proof above already refuses the descendant, and
+	// the real descendant-boundary preparation is proven by
+	// TestAppArmorDriverFileBoundaryNotWidenedByKindChange.
+	coverage, created, err := driver.ensureCoverage(treeFile)
+	if err != nil {
+		t.Fatalf("ensureCoverage(exact file): %v", err)
+	}
+	if created || coverage.Boundary != treeFile || coverage.Kind != macBoundaryRegularFile {
+		t.Errorf("coverage = %+v created=%v, want the persisted exact-file boundary with its kind", coverage, created)
+	}
+}
+
+// TestAppArmorDriverFileBoundaryNotWidenedByKindChange proves that replacing
+// the host file with a directory neither widens the persisted exact-file
+// rule nor re-derives its kind: the old boundary stays exact-file, and a new
+// coverage requirement for the replaced directory tree is prepared as its
+// own directory boundary (the B3 review repair).
+func TestAppArmorDriverFileBoundaryNotWidenedByKindChange(t *testing.T) {
+	app, mac, driver, mgr := setupAppArmorMACCoordinator(t)
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	treeFile := filepath.Join(allowedRoot, "aa-file-replaced")
+	if err := os.WriteFile(treeFile, []byte("token"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mac.CreateSessionBinding("sess-aa-replaced", []string{treeFile}, func([]sessionMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-replaced", allowedRoot)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// The operator replaces the file with a directory at the same path.
+	if err := os.Remove(treeFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(treeFile, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The persisted exact-file boundary must not become recursive coverage:
+	// ensure for the exact path returns the persisted boundary unchanged.
+	coverage, created, err := driver.ensureCoverage(treeFile)
+	if err != nil {
+		t.Fatalf("ensureCoverage(replaced tree): %v", err)
+	}
+	if created || coverage.Boundary != treeFile || coverage.Kind != macBoundaryRegularFile {
+		t.Errorf("coverage = %+v created=%v, want the persisted exact-file boundary with its unchanged kind", coverage, created)
+	}
+
+	// The fragment still renders the exact-file rule and no directory rules
+	// for that boundary.
+	fragmentBytes, err := os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatalf("read fragment: %v", err)
+	}
+	fragment := string(fragmentBytes)
+	if !strings.Contains(fragment, "\""+escapeAppArmorPath(treeFile)+"\" r,\n") {
+		t.Errorf("the persisted exact-file rule must survive the kind change:\n%s", fragment)
+	}
+	if strings.Contains(fragment, "\""+escapeAppArmorPath(treeFile)+"/\"") {
+		t.Errorf("the exact-file boundary must never widen into directory rules:\n%s", fragment)
+	}
+
+	// A new coverage requirement for a tree the exact-file rule cannot
+	// serve is prepared as its own directory boundary.
+	descendant := filepath.Join(treeFile, "sub")
+	if err := os.MkdirAll(descendant, 0755); err != nil {
+		t.Fatal(err)
+	}
+	descCoverage, created, err := driver.ensureCoverage(descendant)
+	if err != nil {
+		t.Fatalf("ensureCoverage(descendant): %v", err)
+	}
+	if !created || descCoverage.Boundary != descendant || descCoverage.Kind != macBoundaryDirectory {
+		t.Errorf("coverage = %+v created=%v, want a new directory boundary for the descendant tree", descCoverage, created)
+	}
+}

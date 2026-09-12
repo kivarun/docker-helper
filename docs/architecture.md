@@ -1264,13 +1264,16 @@ MAC state follows the concrete Session lifecycle, not the policy ceilings:
   shape derived from the proven boundary kind (a directory boundary owns
   its exact recursive pattern, a regular-file boundary its exact file
   pattern) — and never claims or deletes a compatible operator-owned rule
-  sharing the stem. All fallible facts (boundary kind, mount safety, the
+  sharing the stem.   All fallible facts (boundary kind, mount safety, the
   owned rule's presence) are proven before the durable rule is deleted; a
   failure after the deletion is an error, never a falsely complete
   transition, and the canonical removal owner retains the ownership
-  metadata for retry/reconciliation. Proven path absence (ENOENT) removes
-  the stem's single unambiguous workspace-type rule and refuses the
-  ambiguous multi-rule case. The AppArmor managed fragment persists each
+  metadata for retry/reconciliation. Proven path absence (ENOENT) with a
+  durable kind removes exactly the proven pattern; the legacy kind-less
+  ownership row keeps the same-stem single-unambiguous-rule contract for a
+  vanished tree: the stem's single unambiguous workspace-type rule is
+  removed, and the ambiguous multi-rule case is refused (ownership
+  retained for reconciliation). The AppArmor managed fragment persists each
   boundary's kind (regular-file markers extend the legacy directory-only
   fragment format), so a fragment rewrite triggered by an unrelated
   boundary never re-derives an existing boundary's kind from mutable host

@@ -52,7 +52,8 @@ reg_ok "/opt is an authorized global root (authorization ceiling)"
 UNRELATED="/opt/uat-ws-unrelated-$RANDOM"
 mkdir -p "$UNRELATED"
 printf 'unrelated-marker\n' > "$UNRELATED/marker.txt"
-UNREL_TYPE_BEFORE="$(stat -c '%C' "$UNRELATED" 2>/dev/null | cut -d: -f3)"
+UNREL_TYPE_BEFORE="$(selinux_context_type "$UNRELATED")"
+[ -n "$UNREL_TYPE_BEFORE" ] || { reg_fail "unrelated /opt path context inventory unavailable (stat failed)"; UNREL_TYPE_BEFORE="<unavailable>"; }
 UNREL_INODE_BEFORE="$(stat -c '%d:%i' "$UNRELATED")"
 
 # --- workspace below /opt ----------------------------------------------------------
@@ -84,41 +85,29 @@ SID="$REG_SESSION_ID"; STOK="$REG_SESSION_TOKEN"
 [ -n "$SID" ] && [ -n "$STOK" ] || { reg_fail "session create returned no id/token"; reg_result; }
 reg_ok "session created under /opt (authorization + MAC preparation)"
 
-# --- persistent fcontext coverage ----------------------------------------------------
-FC="$(semanage fcontext -l -C 2>/dev/null)"
-if printf '%s' "$FC" | grep -Fq "$WS"; then
-  if printf '%s' "$FC" | grep -F "$WS" | grep -q 'docker_helper_workspace_t'; then
-    reg_ok "persistent fcontext rule created for the workspace (docker_helper_workspace_t)"
-  else
-    reg_fail "fcontext rule for workspace does not use docker_helper_workspace_t"
-  fi
-else
-  reg_fail "no persistent fcontext rule created for the workspace"
-fi
+# --- persistent fcontext coverage (fail-closed tri-state inventory) ----------
+RULE_LINE="$(selinux_rule_line "$WS(/.*)?")"; RULE_RC=$?
+case "$RULE_RC" in
+  0) if printf '%s' "$RULE_LINE" | grep -q 'docker_helper_workspace_t'; then
+       reg_ok "persistent fcontext rule created for the workspace (docker_helper_workspace_t)"
+     else
+       reg_fail "fcontext rule for workspace does not use docker_helper_workspace_t"
+     fi ;;
+  1) reg_fail "no persistent fcontext rule created for the workspace" ;;
+  *) reg_fail "fcontext inventory unavailable (semanage failed); absence is never assumed" ;;
+esac
 
-# --- actual workspace type ------------------------------------------------------------
-WS_TYPE="$(stat -c '%C' "$WS" 2>/dev/null | cut -d: -f3)"
-if [ "$WS_TYPE" = "docker_helper_workspace_t" ]; then
-  reg_ok "actual workspace type is docker_helper_workspace_t"
-else
-  reg_fail "workspace type != docker_helper_workspace_t (got '$WS_TYPE')"
-fi
+# --- actual workspace type (fail-closed tri-state label inventory) -----------
+reg_expect_se_context is "$WS" docker_helper_workspace_t \
+  "actual workspace type is docker_helper_workspace_t"
 
 # --- regex/path boundary does not match a sibling -------------------------------------
 SIBLING="$WS-sibling"
 mkdir -p "$SIBLING"
-SIB_TYPE="$(stat -c '%C' "$SIBLING" 2>/dev/null | cut -d: -f3)"
-if [ "$SIB_TYPE" != "docker_helper_workspace_t" ]; then
-  reg_ok "sibling outside the fcontext regex is not relabeled (type '$SIB_TYPE')"
-else
-  reg_fail "sibling outside the fcontext regex was relabeled to docker_helper_workspace_t"
-fi
-# ensure no fcontext rule covers the sibling
-if printf '%s' "$FC" | grep -Fq "$SIBLING"; then
-  reg_fail "a fcontext rule matches the sibling path (regex over-match)"
-else
-  reg_ok "no fcontext rule matches the sibling path"
-fi
+reg_expect_se_context is-not "$SIBLING" docker_helper_workspace_t \
+  "sibling outside the fcontext regex is not relabeled"
+# ensure no fcontext rule covers the sibling (fail-closed tri-state inventory)
+reg_expect_no_se_rule_for "$SIBLING" "no fcontext rule matches the sibling path"
 
 # --- container RW works ---------------------------------------------------------------
 # The container runs as the principal's unprivileged uid:gid
@@ -150,21 +139,14 @@ else
   reg_fail "session delete failed"
 fi
 
-FC_AFTER="$(semanage fcontext -l -C 2>/dev/null)"
-if printf '%s' "$FC_AFTER" | grep -Fq "$WS"; then
-  reg_fail "fcontext rule NOT removed after session delete (MAC state not released)"
-else
-  reg_ok "fcontext rule removed after session delete (MAC state released)"
-fi
-WS_TYPE_AFTER="$(stat -c '%C' "$WS" 2>/dev/null | cut -d: -f3)"
-if [ "$WS_TYPE_AFTER" != "docker_helper_workspace_t" ]; then
-  reg_ok "workspace relabeled back off docker_helper_workspace_t after delete (type '$WS_TYPE_AFTER')"
-else
-  reg_fail "workspace still docker_helper_workspace_t after session delete"
-fi
+reg_expect_se_rule absent "$WS(/.*)?" \
+  "fcontext rule removed after session delete (MAC state released)" \
+  "fcontext rule NOT removed after session delete (MAC state not released)"
+reg_expect_se_context is-not "$WS" docker_helper_workspace_t \
+  "workspace relabeled back off docker_helper_workspace_t after delete"
 
 # --- unrelated /opt paths untouched -----------------------------------------------------
-UNREL_TYPE_AFTER="$(stat -c '%C' "$UNRELATED" 2>/dev/null | cut -d: -f3)"
+UNREL_TYPE_AFTER="$(selinux_context_type "$UNRELATED")"
 UNREL_INODE_AFTER="$(stat -c '%d:%i' "$UNRELATED")"
 UNREL_MARK="$(cat "$UNRELATED/marker.txt" 2>/dev/null || true)"
 if [ "$UNREL_TYPE_AFTER" = "$UNREL_TYPE_BEFORE" ] \

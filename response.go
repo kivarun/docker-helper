@@ -400,7 +400,6 @@ func (a *App) requireSessionFilesystemCapability(w http.ResponseWriter, r *http.
 			}
 			opLog(ctx).Error(cerr.logMsg, logArgs...)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return nil, false
 	}

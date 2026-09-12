@@ -9573,6 +9573,180 @@ func TestUATLibResidueInventoryFailClosed(t *testing.T) {
 	}
 }
 
+// TestUATLibSELinuxInventoryTriState pins the fail-closed SELinux inventory
+// contract of the shared lib (the A1 review repair): every mandatory
+// SELinux residue/coverage observation distinguishes PRESENT / ABSENT /
+// ERROR, and an unavailable inventory (semanage exits nonzero, semanage
+// emits malformed output, the label context read fails) is a tri-state
+// ERROR that the UAT assertion helpers report as a scenario failure —
+// never as evidence of absence, of no residue, or of a restored label.
+func TestUATLibSELinuxInventoryTriState(t *testing.T) {
+	shim := t.TempDir()
+	// semanage stub: modes — healthy listing (both legal shapes at ONE stem
+	// plus a child-path rule), exit-1 failure, empty readable listing,
+	// malformed output, and a child-only listing to prove exact first-field
+	// matching (a child-path rule never satisfies a parent pattern and vice
+	// versa).
+	semanage := "#!/bin/sh\ncase \"${SEMANAGE_MODE:-healthy}\" in\n" +
+		"  healthy) printf '%s\\n' \"/opt/parent(/.*)?\" \"/opt/parent/child.txt\" \"/opt/parent\" ;;\n" +
+		"  fail) echo 'semanage: database unavailable' >&2; exit 1 ;;\n" +
+		"  empty) exit 0 ;;\n" +
+		"  malformed) printf 'not-a-path-row\\n??garbage\\n' ;;\n" +
+		"  child) printf '%s\\n' \"/opt/parent/child.txt\" ;;\n" +
+		"esac\n"
+	writeStub(t, shim, "semanage", semanage)
+	// stat stub: fails for the sentinel path (context read unavailable),
+	// execs the real stat otherwise.
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStub(t, shim, "stat", fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *uat-selinux-unknown*) exit 2 ;;\n  *) exec %q \"$@\" ;;\nesac\n", realStat))
+
+	// A real labeled path for the healthy context read: on a dev host the
+	// SELinux context may be unavailable, so the healthy label case is only
+	// asserted when the context read positively succeeds; the UNAVAILABLE
+	// case is the deterministic one the repair is about.
+	var sb strings.Builder
+	sb.WriteString("set -uo pipefail\n")
+	fmt.Fprintf(&sb, "export PATH=%q:$PATH\n", shim)
+	sb.WriteString("source scripts/uat-regression-lib.sh\n")
+	// rule_state: PRESENT(0) for an exact listed pattern; ABSENT(1) for an
+	// unlisted pattern; ERROR(2) when semanage fails; ERROR(2) for a
+	// readable-but-non-matching scan must stay ABSENT(1), never an error.
+	sb.WriteString("selinux_rule_state '/opt/parent(/.*)?'; printf 'S1:%s\\n' \"$?\"\n")
+	sb.WriteString("selinux_rule_state '/opt/parent'; printf 'S2:%s\\n' \"$?\"\n")
+	sb.WriteString("SEMANAGE_MODE=fail selinux_rule_state '/opt/parent(/.*)?'; printf 'S3:%s\\n' \"$?\"\n")
+	sb.WriteString("SEMANAGE_MODE=empty selinux_rule_state '/opt/parent(/.*)?'; printf 'S4:%s\\n' \"$?\"\n")
+	sb.WriteString("SEMANAGE_MODE=malformed selinux_rule_state '/opt/parent(/.*)?'; printf 'S7:%s\\n' \"$?\"\n")
+	// Exact first-field matching: the child rule must never satisfy the
+	// parent pattern and vice versa.
+	sb.WriteString("SEMANAGE_MODE=child selinux_rule_state '/opt/parent(/.*)?'; printf 'S5:%s\\n' \"$?\"\n")
+	sb.WriteString("SEMANAGE_MODE=child selinux_rule_state '/opt/parent'; printf 'S6:%s\\n' \"$?\"\n")
+	// rule_line: full raw line for the exact pattern; ABSENT(1) otherwise;
+	// ERROR(2) on semanage failure.
+	sb.WriteString("selinux_rule_line '/opt/parent'; printf 'L1:%s\\n' \"$?\"\n")
+	sb.WriteString("selinux_rule_line '/opt/parent/absent'; printf 'L2:%s\\n' \"$?\"\n")
+	sb.WriteString("SEMANAGE_MODE=fail selinux_rule_line '/opt/parent'; printf 'L3:%s\\n' \"$?\"\n")
+	// context_type: the sentinel path read fails -> ERROR(2), never a
+	// verdict; a healthy read prints the type field.
+	sb.WriteString("selinux_context_type /tmp/uat-selinux-unknown-path; printf 'T1:%s\\n' \"$?\"\n")
+	sb.WriteString("selinux_context_type /proc/self >/dev/null 2>&1; printf 'T2:%s\\n' \"$?\"\n")
+	sb.WriteString("type_ctx=$(selinux_context_type /proc/self) && printf 'T3:%s\\n' \"$type_ctx\" || printf 'T3:%s\\n' \"unavailable-on-host\"\n")
+	out, err := runBashIn(t, ".", sb.String())
+	if err != nil {
+		t.Fatalf("harness run failed: %v\n%s", err, out)
+	}
+
+	want := map[string]string{
+		"S1": "0", // PRESENT (recursive rule listed)
+		"S2": "0", // PRESENT (exact-file rule listed at the same stem)
+		"S3": "2", // semanage failure -> ERROR, never ABSENT
+		"S4": "1", // readable empty inventory -> ABSENT
+		"S5": "1", // child-only listing: the recursive pattern is ABSENT (a substring grep would have matched it — the repaired exact match)
+		"S6": "1", // child-only listing: the parent stem is ABSENT (a child rule never satisfies a parent stem)
+		"L1": "0", // full exact line present
+		"L2": "1", // absent
+		"L3": "2", // semanage failure -> ERROR
+		"S7": "2", // malformed listing -> ERROR (the same fail-closed listing contract as the daemon)
+		"T1": "2", // context read failure -> ERROR, never "not relabeled"
+	}
+	for key, exp := range want {
+		if got := extractHarnessValue(out, key); got != exp {
+			t.Errorf("%s = %q, want %q (the tri-state contract)", key, got, exp)
+		}
+	}
+	// The healthy label read must either positively print a type (T2=0) or
+	// be reported unavailable on a non-SELinux dev host — never an empty
+	// successful read.
+	if extractHarnessValue(out, "T2") != "0" && extractHarnessValue(out, "T2") != "2" {
+		t.Errorf("context_type on a healthy path must be 0 (type printed) or 2 (non-SELinux host), got %q", extractHarnessValue(out, "T2"))
+	}
+}
+
+// extractHarnessValue returns the value after "KEY:" in a harness output
+// line ("KEY:value").
+func extractHarnessValue(out, key string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if v, ok := strings.CutPrefix(line, key+":"); ok {
+			return v
+		}
+	}
+	return "<missing>"
+}
+
+// TestUATWorkloadSELinuxInventoryAssertionsFailClosed proves the workload
+// SELinux acceptance script's assertion wrappers route the tri-state
+// inventory contract into scenario accounting: an unavailable semanage
+// inventory or an unavailable context read increments the failure count
+// (the scenario is red) in every direction — including the absence checks,
+// which the pre-repair boolean helper silently converted into PASS.
+func TestUATWorkloadSELinuxInventoryAssertionsFailClosed(t *testing.T) {
+	shim := t.TempDir()
+	writeStub(t, shim, "semanage", "#!/bin/sh\nif [ \"${SEMANAGE_FAIL:-}\" = \"1\" ]; then\n  echo 'semanage: unavailable' >&2\n  exit 1\nfi\nprintf '%s\\n' \"/opt/parent(/.*)?\"\n")
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStub(t, shim, "stat", fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *uat-selinux-unknown*) exit 2 ;;\n  *) exec %q \"$@\" ;;\nesac\n", realStat))
+
+	wrappers := []string{
+		"se_rules_dump",
+		"se_expect_rule_present",
+		"se_expect_rule_absent",
+		"se_expect_rule_line_equal",
+		"se_expect_context_type",
+		"se_expect_context_type_not",
+		"se_only_rule_for",
+	}
+	var sb strings.Builder
+	sb.WriteString("set -uo pipefail\n")
+	fmt.Fprintf(&sb, "export PATH=%q:$PATH\n", shim)
+	sb.WriteString("source scripts/uat-regression-lib.sh\n")
+	// The script's own scenario accounting verbs, verbatim contracts.
+	sb.WriteString("FAIL_COUNT=0\n")
+	sb.WriteString("acc_ok() { printf '  ok:      %s\\n' \"$*\"; }\n")
+	sb.WriteString("acc_fail() { printf '  FAIL:    %s\\n' \"$*\" >&2; FAIL_COUNT=$((FAIL_COUNT + 1)); }\n")
+	sb.WriteString("acc_blocked() { FAIL_COUNT=$((FAIL_COUNT + 1)); }\n")
+	for _, name := range wrappers {
+		sb.WriteString(extractShellFunction(t, "scripts/uat-workload-selinux.sh", name))
+		sb.WriteString("\n")
+	}
+
+	// Healthy inventory cases first (the assertions must still pass and must
+	// not increment the failure count on a readable inventory).
+	sb.WriteString("se_expect_rule_present '/opt/parent(/.*)?' 'present-ok'\n")
+	sb.WriteString("se_expect_rule_absent '/opt/parent/missing' 'absent-ok' 'absent-fail'\n")
+	sb.WriteString("se_expect_rule_line_equal '/opt/parent(/.*)?' '/opt/parent(/.*)?' 'line-ok' 'line-fail'\n")
+	sb.WriteString("se_only_rule_for '/opt/parent' '/opt/parent(/.*)?' 'only-ok' 'only-fail'\n")
+	sb.WriteString("printf 'HEALTHY_FAILS:%s\\n' \"$FAIL_COUNT\"\n")
+
+	// The unavailable-inventory cases: EVERY wrapper direction must treat
+	// the inventory failure as a scenario failure, never as absence.
+	sb.WriteString("FAIL_COUNT=0\n")
+	sb.WriteString("SEMANAGE_FAIL=1\n")
+	sb.WriteString("export SEMANAGE_FAIL\n")
+	sb.WriteString("se_expect_rule_present '/opt/parent(/.*)?' 'present-unavailable'\n")
+	sb.WriteString("se_expect_rule_absent '/opt/parent(/.*)?' 'absent-unavailable' 'absent-fail-unavailable'\n")
+	sb.WriteString("se_expect_rule_line_equal '/opt/parent(/.*)?' 'x' 'line-unavailable' 'line-fail-unavailable'\n")
+	sb.WriteString("se_only_rule_for '/opt/parent' '/opt/parent(/.*)?' 'only-unavailable' 'only-fail-unavailable'\n")
+	sb.WriteString("printf 'UNAVAILABLE_FAILS:%s\\n' \"$FAIL_COUNT\"\n")
+
+	out, err := runBashIn(t, ".", sb.String())
+	if err != nil {
+		t.Fatalf("harness run failed: %v\n%s", err, out)
+	}
+	if got := extractHarnessValue(out, "HEALTHY_FAILS"); got != "0" {
+		t.Errorf("healthy readable inventory must keep the scenario green, got FAILS=%s, output:\n%s", got, out)
+	}
+	if got := extractHarnessValue(out, "UNAVAILABLE_FAILS"); got == "0" || got == "<missing>" {
+		t.Errorf("an unavailable inventory must make every absence/presence direction red, got FAILS=%s, output:\n%s", got, out)
+	}
+	if strings.Contains(out, "absent-ok") && strings.Contains(out, "UNAVAILABLE_FAILS:0") {
+		t.Error("an absence expectation must not be satisfied by an unavailable inventory (old false-green condition)")
+	}
+}
+
 // TestUATHarnessRichListCLIGrammar runs the rich allowed-root list forms the
 // Release-2 UAT harness uses through the REAL production CLI parser (the same
 // in-process dispatch as the binary) and proves the grammar contract directly:
@@ -10151,7 +10325,7 @@ func TestAccessModesHarnessGlobalROProof(t *testing.T) {
 
 	// Ordering semantics: global narrowing -> Principal grant -> Launcher
 	// grant/credential -> issued Session -> writable refusal -> restore. The
-	// Session is created without filesystem_entries (the standard authority
+	// Session is created without filesystem_roots (the standard authority
 	// path), which the create_session marker proves. The ordering search is
 	// scoped to the scenario G block: the P2 control-plane proof runs the
 	// same set-access mutation earlier in the file.

@@ -61,9 +61,11 @@ if [ "$WS_DEV" != "$OUT_DEV" ]; then
   reg_result
 fi
 
-EXT_TYPE_BEFORE="$(stat -c '%C' "$OUT/marker.txt" 2>/dev/null | cut -d: -f3)"
+EXT_TYPE_BEFORE="$(selinux_context_type "$OUT/marker.txt")"
+[ -n "$EXT_TYPE_BEFORE" ] || { reg_fail "external marker context inventory unavailable (stat failed)"; EXT_TYPE_BEFORE="<unavailable>"; }
 EXT_INODE_BEFORE="$(stat -c '%d:%i' "$OUT/marker.txt" 2>/dev/null)"
-WS_TYPE_BEFORE="$(stat -c '%C' "$WS" 2>/dev/null | cut -d: -f3)"
+WS_TYPE_BEFORE="$(selinux_context_type "$WS")"
+[ -n "$WS_TYPE_BEFORE" ] || { reg_fail "workspace context inventory unavailable (stat failed)"; WS_TYPE_BEFORE="<unavailable>"; }
 reg_info "external source inode BEFORE: type=$EXT_TYPE_BEFORE inode=$EXT_INODE_BEFORE; workspace type=$WS_TYPE_BEFORE"
 
 if ! mount --bind "$OUT" "$WS/mnt" 2>/dev/null; then
@@ -106,9 +108,9 @@ else
 fi
 
 # --- the external source inode must be untouched -----------------------------------
-EXT_TYPE_AFTER="$(stat -c '%C' "$OUT/marker.txt" 2>/dev/null | cut -d: -f3)"
+EXT_TYPE_AFTER="$(selinux_context_type "$OUT/marker.txt")"
 EXT_INODE_AFTER="$(stat -c '%d:%i' "$OUT/marker.txt" 2>/dev/null)"
-WS_TYPE_AFTER="$(stat -c '%C' "$WS" 2>/dev/null | cut -d: -f3)"
+WS_TYPE_AFTER="$(selinux_context_type "$WS")"
 MARK="$(cat "$OUT/marker.txt" 2>/dev/null || true)"
 if [ "$EXT_TYPE_AFTER" = "$EXT_TYPE_BEFORE" ] \
    && [ "$EXT_INODE_AFTER" = "$EXT_INODE_BEFORE" ] \
@@ -123,13 +125,8 @@ else
   reg_fail "workspace type changed $WS_TYPE_BEFORE -> $WS_TYPE_AFTER"
 fi
 
-# --- no persistent fcontext rule may have been created ------------------------------
-FC="$(semanage fcontext -l -C 2>/dev/null)"
-if printf '%s' "$FC" | grep -Fq "$WS"; then
-  reg_fail "a persistent fcontext rule was created for the rejected workspace"
-else
-  reg_ok "no persistent fcontext rule created for the rejected workspace"
-fi
+# --- no persistent fcontext rule may have been created (fail-closed tri-state) ------
+reg_expect_no_se_rule_for "$WS" "no persistent fcontext rule created for the rejected workspace"
 
 # --- cleanup -------------------------------------------------------------------------
 umount "$WS/mnt" >/dev/null 2>&1 || true

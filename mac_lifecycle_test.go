@@ -21,6 +21,13 @@ import (
 	"time"
 )
 
+// removedBoundary records one removeBoundary call with the durable kind the
+// coordinator resolved for it.
+type removedBoundary struct {
+	Boundary string
+	Kind     macBoundaryKind
+}
+
 // testSessionMACDriver is a mock sessionMACDriver for testing the coordinator.
 type testSessionMACDriver struct {
 	mu                    sync.Mutex
@@ -31,6 +38,7 @@ type testSessionMACDriver struct {
 	boundaryBackend       LSMBackend
 	preparedTrees         []string // every concrete tree ensureCoverage saw, in order
 	verifiedTrees         []string // every concrete tree verifyCoverage saw, in order
+	removedBoundaries     []removedBoundary
 }
 
 func newTestSessionMACDriver(backend LSMBackend) *testSessionMACDriver {
@@ -58,7 +66,7 @@ func (b *testSessionMACDriver) ensureCoverage(workspace string) (sessionMACCover
 
 	b.coverageMap[workspace] = workspace
 	b.helperOwnedBoundaries[workspace] = true
-	return sessionMACCoverage{Boundary: workspace, HelperOwned: true}, true, nil
+	return sessionMACCoverage{Boundary: workspace, HelperOwned: true, Kind: macBoundaryDirectory}, true, nil
 }
 
 func (b *testSessionMACDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
@@ -73,9 +81,11 @@ func (b *testSessionMACDriver) verifyCoverage(workspace string) (sessionMACCover
 	return sessionMACCoverage{}, fmt.Errorf("no coverage for %s", workspace)
 }
 
-func (b *testSessionMACDriver) removeBoundary(boundary string) error {
+func (b *testSessionMACDriver) removeBoundary(boundary string, kind macBoundaryKind) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	b.removedBoundaries = append(b.removedBoundaries, removedBoundary{Boundary: boundary, Kind: kind})
 
 	if b.removeErrors[boundary] {
 		return fmt.Errorf("removeBoundary failed for %s", boundary)
@@ -85,13 +95,13 @@ func (b *testSessionMACDriver) removeBoundary(boundary string) error {
 	return nil
 }
 
-func (b *testSessionMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
+func (b *testSessionMACDriver) discoverHelperOwnedBoundaries() ([]helperOwnedBoundary, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	var result []string
+	var result []helperOwnedBoundary
 	for boundary := range b.helperOwnedBoundaries {
-		result = append(result, boundary)
+		result = append(result, helperOwnedBoundary{Boundary: boundary, Kind: macBoundaryDirectory})
 	}
 	return result, nil
 }
@@ -434,6 +444,146 @@ func TestDBInsertFailureRemovesOwnershipOnSuccessfulRemoval(t *testing.T) {
 	}
 }
 
+// TestSessionMACRemovalUsesDurableKindAcrossRestart proves the coordinator
+// resolves the removal kind from the durable ownership metadata and that the
+// identity survives a restart: a boundary created as a directory is removed
+// through reconciliation with that same durable kind, even after the
+// coordinator (and its in-memory bindings) were rebuilt from the database.
+func TestSessionMACRemovalUsesDurableKindAcrossRestart(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	workspace, err := os.MkdirTemp(allowedRoot, "durable-kind-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mac.CreateSessionBinding("sess-durable", []string{workspace}, func([]sessionMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-durable", workspace)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// The creation-proven kind is persisted with the ownership metadata.
+	kind, err := mac.boundaryOwnedKind(workspace)
+	if err != nil {
+		t.Fatalf("boundaryOwnedKind: %v", err)
+	}
+	if kind != macBoundaryDirectory {
+		t.Fatalf("durable kind = %s, want directory", macBoundaryKindName(kind))
+	}
+
+	// First removal attempt fails: ownership is retained.
+	driver.removeErrors[workspace] = true
+	mac.ReleaseSessionBinding("sess-durable")
+	if owned, err := func() (bool, error) {
+		mac.mu.Lock()
+		defer mac.mu.Unlock()
+		return mac.isBoundaryOwnedByHelper(workspace)
+	}(); err != nil || !owned {
+		t.Fatalf("ownership must be retained after the failed removal (owned=%v err=%v)", owned, err)
+	}
+
+	// The session row is gone (production deletes it before releasing the
+	// binding); simulate the restart with a fresh coordinator on the same
+	// database.
+	if _, err := app.DB.Exec(`DELETE FROM sessions WHERE id = ?`, "sess-durable"); err != nil {
+		t.Fatalf("delete session row: %v", err)
+	}
+	restartedDriver := newTestSessionMACDriver(LSMBackend("test"))
+	restarted := newSessionMACCoordinator(app.DB, restartedDriver)
+	if err := restarted.ReconcileLiveSessions(); err != nil {
+		t.Fatalf("ReconcileLiveSessions: %v", err)
+	}
+
+	// The stale owned boundary must be removed through the reconciliation
+	// owner with exactly the durable kind, and the ownership metadata must
+	// be forgotten only after that successful completion.
+	found := false
+	for _, removed := range restartedDriver.removedBoundaries {
+		if removed.Boundary == workspace {
+			found = true
+			if removed.Kind != macBoundaryDirectory {
+				t.Errorf("restart removal kind = %s, want the durable creation-proven kind directory", macBoundaryKindName(removed.Kind))
+			}
+		}
+	}
+	if !found {
+		t.Error("the restart reconciliation must remove the stale owned boundary")
+	}
+	restarted.mu.Lock()
+	owned, err := restarted.isBoundaryOwnedByHelper(workspace)
+	restarted.mu.Unlock()
+	if err != nil {
+		t.Fatalf("isBoundaryOwnedByHelper after restart: %v", err)
+	}
+	if owned {
+		t.Error("ownership metadata must be forgotten after the completed removal")
+	}
+}
+
+// TestSessionMACCleanupResumesAfterPartialRemoval proves the cleanup
+// transition is explicitly retryable (the B2 review defect): after a failed
+// removal attempt retains the ownership metadata, the next reconciliation
+// completes the removal and forgets the ownership only at final completion.
+// The driver must be attempted exactly twice for the same boundary: once
+// failed, once completing.
+func TestSessionMACCleanupResumesAfterPartialRemoval(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	workspace, err := os.MkdirTemp(allowedRoot, "resume-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mac.CreateSessionBinding("sess-resume", []string{workspace}, func([]sessionMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-resume", workspace)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Attempt 1: the removal fails; the ownership state is retained for the
+	// canonical retry/reconciliation owner.
+	driver.removeErrors[workspace] = true
+	mac.ReleaseSessionBinding("sess-resume")
+	mac.mu.Lock()
+	owned, err := mac.isBoundaryOwnedByHelper(workspace)
+	mac.mu.Unlock()
+	if err != nil {
+		t.Fatalf("isBoundaryOwnedByHelper: %v", err)
+	}
+	if !owned {
+		t.Fatal("ownership must be retained after the failed removal attempt")
+	}
+
+	// The session row is gone; the next reconciliation retries and completes.
+	if _, err := app.DB.Exec(`DELETE FROM sessions WHERE id = ?`, "sess-resume"); err != nil {
+		t.Fatalf("delete session row: %v", err)
+	}
+	driver.removeErrors[workspace] = false
+	if err := mac.ReconcileLiveSessions(); err != nil {
+		t.Fatalf("ReconcileLiveSessions: %v", err)
+	}
+
+	attempts := 0
+	for _, removed := range driver.removedBoundaries {
+		if removed.Boundary == workspace {
+			attempts++
+		}
+	}
+	if attempts != 2 {
+		t.Errorf("removal attempts for %s = %d, want exactly two (failed, completing)", workspace, attempts)
+	}
+	mac.mu.Lock()
+	owned, err = mac.isBoundaryOwnedByHelper(workspace)
+	mac.mu.Unlock()
+	if err != nil {
+		t.Fatalf("isBoundaryOwnedByHelper after completion: %v", err)
+	}
+	if owned {
+		t.Error("ownership metadata must be removed only at final completion")
+	}
+}
+
 // TestLegacyAppArmorOwnershipReconciliation verifies that existing AppArmor
 // helper-owned boundaries are imported into ownership metadata during reconciliation.
 func TestLegacyAppArmorOwnershipReconciliation(t *testing.T) {
@@ -613,11 +763,11 @@ func (b *failingSessionMACDriver) verifyCoverage(workspace string) (sessionMACCo
 	return sessionMACCoverage{}, b.err
 }
 
-func (b *failingSessionMACDriver) removeBoundary(boundary string) error {
+func (b *failingSessionMACDriver) removeBoundary(boundary string, kind macBoundaryKind) error {
 	return nil
 }
 
-func (b *failingSessionMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
+func (b *failingSessionMACDriver) discoverHelperOwnedBoundaries() ([]helperOwnedBoundary, error) {
 	return nil, nil
 }
 
@@ -678,13 +828,13 @@ func (b *selinuxTestDriver) verifyCoverage(workspace string) (sessionMACCoverage
 	return sessionMACCoverage{Boundary: workspace, HelperOwned: false}, nil
 }
 
-func (b *selinuxTestDriver) removeBoundary(boundary string) error {
+func (b *selinuxTestDriver) removeBoundary(boundary string, kind macBoundaryKind) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return nil
 }
 
-func (b *selinuxTestDriver) discoverHelperOwnedBoundaries() ([]string, error) {
+func (b *selinuxTestDriver) discoverHelperOwnedBoundaries() ([]helperOwnedBoundary, error) {
 	return nil, nil
 }
 
@@ -1213,15 +1363,15 @@ func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
 	// row deletion the coverage pass classifies it fail-closed (the workspace
 	// can no longer be resolved), so the canonical owner keeps blocking.
 	mac.mu.Lock()
-	pendingWorkspaces, deferAll := mac.pendingWorkloadCoverage()
-	removable := mac.boundaryMayBeRemoved(workspace, pendingWorkspaces, deferAll)
+	pendingRoots, deferAll := mac.pendingWorkloadCoverage()
+	removable := mac.boundaryMayBeRemoved(workspace, pendingRoots, deferAll)
 	reported := mac.pendingWorkloadSessions()
 	mac.mu.Unlock()
 	if !reported[sessionID] {
 		t.Error("pending workload state must remain reported for reconciliation after the Session row is deleted")
 	}
 	if !deferAll {
-		t.Errorf("coverage pass must fail closed when the deleted session row cannot be resolved (deferAll=%v, pending=%v)", deferAll, pendingWorkspaces)
+		t.Errorf("coverage pass must fail closed when the deleted session row cannot be resolved (deferAll=%v, pending=%v)", deferAll, pendingRoots)
 	}
 	if removable {
 		t.Error("canonical removal owner must still block the boundary while pending workload is unproven")
@@ -2206,16 +2356,16 @@ func (s *selinuxSeam) verifyActualType(workspace string) error {
 	return s.actualTypeErr
 }
 
-func (s *selinuxSeam) restoreconTree(tree string, kind selinuxTreeKind) error {
+func (s *selinuxSeam) restoreconTree(tree string, kind macBoundaryKind) error {
 	return s.restoreconErr
 }
 
-func (s *selinuxSeam) ensureTreeFcontext(tree string, kind selinuxTreeKind) (bool, error) {
+func (s *selinuxSeam) ensureTreeFcontext(tree string, kind macBoundaryKind) (bool, error) {
 	s.ensureCalled = true
 	return s.ensureCreated, s.ensureErr
 }
 
-func (s *selinuxSeam) removeFcontextBoundary(boundary string) error {
+func (s *selinuxSeam) removeFcontextBoundary(boundary string, kind macBoundaryKind) error {
 	return s.removeErr
 }
 
@@ -3172,6 +3322,6 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 
 // fakeTreeKindDirectory classifies every issued tree as a directory for the
 // coordinator driver tests that do not exercise real path kinds.
-func fakeTreeKindDirectory(string) (selinuxTreeKind, error) {
-	return selinuxTreeDirectory, nil
+func fakeTreeKindDirectory(string) (macBoundaryKind, error) {
+	return macBoundaryDirectory, nil
 }

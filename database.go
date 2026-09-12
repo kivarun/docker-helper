@@ -240,6 +240,21 @@ func initializeDatabase(db *sql.DB) error {
 		}
 	}
 
+	// Additive migration: the kind column records the durable
+	// creation-proven kind of the helper-owned boundary (canonical spellings
+	// "directory" / "regular-file"). Rows written by builds without durable
+	// kinds keep NULL and are treated as legacy rows without a proven kind.
+	var kindColCount int
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('mac_boundaries') WHERE name='kind';`).Scan(&kindColCount)
+	if err != nil {
+		return fmt.Errorf("cannot check mac_boundaries kind column: %w", err)
+	}
+	if kindColCount == 0 {
+		if _, err := db.Exec(`ALTER TABLE mac_boundaries ADD COLUMN kind TEXT;`); err != nil {
+			return fmt.Errorf("cannot add mac_boundaries kind column: %w", err)
+		}
+	}
+
 	return nil
 }
 
