@@ -1239,8 +1239,8 @@ mkdir -p "$MR_WS" "$MR_HELPER" "$MR_CACHE" "$MR_EXTRA"
 printf 'helper-src\n' > "$MR_HELPER/main.go"
 printf 'seed\n' > "$MR_CACHE/seed.txt"
 printf 'extra-file\n' > "$MR_EXTRA/keep.txt"
-chown -R "$PRINCIPAL:$PRINCIPAL" "$MR_OPT"
-chmod -R u+rwX,go+rX "$MR_OPT"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$MR_WS" "$MR_OPT"
+chmod -R u+rwX,go+rX "$MR_WS" "$MR_OPT"
 
 # The second effective Launcher root: a second global allowed root plus the
 # matching Principal entries, so the restricted multiroot Launcher carries
@@ -1531,7 +1531,10 @@ MR_CRED_SCRIPT="$(mktemp /tmp/uat-am-completion-XXXXXX)"
 dh completion bash > "$MR_CRED_SCRIPT" 2>/dev/null
 MR7_PROBE='
   source "$1" >/dev/null 2>&1
-  COMP_WORDS=("$@")
+  # The completion script is $1 (sourced, not a completion word): the word
+  # view starts at the second argument, so ${_docker_helper_WORDS[0]} — the
+  # program the machinery re-invokes for the daemon query — is docker-helper.
+  COMP_WORDS=("${@:2}")
   COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
   COMP_LINE="${COMP_WORDS[*]}"
   COMP_POINT=${#COMP_LINE}
@@ -1590,7 +1593,7 @@ rm -f "$MR_CRED_SCRIPT"
 # inventory failure blocks the gate instead of reporting zero residue)
 # ==============================================================================
 scenario "Z: no container/mount-pin/workload-MAC/runtime residue"
-for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}" "${SN_ID:-}" "${SN2_ID:-}" "${G_ID:-}" "${SYM_ADMIN_ID:-}" "${SYM_PRIN_ID:-}"; do
+for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}" "${SN_ID:-}" "${SN2_ID:-}" "${G_ID:-}" "${SYM_ADMIN_ID:-}" "${SYM_PRIN_ID:-}" "${MR1_ID:-}" "${MR2_ID:-}" "${MR5_ID:-}"; do
   [ -n "$sid" ] || continue
   dh session delete --system --id "$sid" >/dev/null 2>&1 || acc_fail "Z session $sid delete failed"
 done
