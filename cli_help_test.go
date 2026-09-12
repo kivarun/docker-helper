@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -260,6 +261,99 @@ func TestBlackBoxFlagAfterPositionalDiagnostic(t *testing.T) {
 	}
 	if out2 := stderr2.String(); strings.Contains(out2, "flags must precede positional arguments") {
 		t.Errorf("explicit -- must not produce flag-after-positional diagnostic, got: %s", out2)
+	}
+}
+
+// TestAllowedRootAddAccessFlagSyntax proves the parser-consistent public add
+// contract: the optional --access flag is documented and accepted only before
+// the positional arguments (the project CLI parser's flags-must-precede
+// invariant), and the usage strings show --access before the positionals.
+func TestAllowedRootAddAccessFlagSyntax(t *testing.T) {
+	t.Run("usage strings show --access before the positionals", func(t *testing.T) {
+		usage := principalAllowedRootAddCommand.Usage
+		accessIdx := strings.Index(usage, "[--access ACCESS]")
+		positionsIdx := strings.Index(usage, "USER PATH")
+		if accessIdx < 0 || positionsIdx < 0 || accessIdx > positionsIdx {
+			t.Errorf("principal add usage %q must show [--access ACCESS] before USER PATH", usage)
+		}
+		usage = launcherAllowedRootAddCommand.Usage
+		accessIdx = strings.Index(usage, "[--access ACCESS]")
+		positionsIdx = strings.Index(usage, "[LAUNCHER] PATH")
+		if accessIdx < 0 || positionsIdx < 0 || accessIdx > positionsIdx {
+			t.Errorf("launcher add usage %q must show [--access ACCESS] before [LAUNCHER] PATH", usage)
+		}
+		usage = configAllowedRootAddCommand.Usage
+		accessIdx = strings.Index(usage, "[--access ACCESS]")
+		if accessIdx < 0 || !strings.HasSuffix(usage, "PATH") {
+			t.Errorf("config add usage %q must show [--access ACCESS] before PATH", usage)
+		}
+	})
+
+	t.Run("access flag after a positional is the parser diagnostic", func(t *testing.T) {
+		tests := [][]string{
+			{"config", "allowed-root", "add", "/some/path", "--access", "read_only"},
+			{"principal", "allowed-root", "add", "alice", "/some/path", "--access", "read_only"},
+			{"launcher", "allowed-root", "add", "--principal", "alice", "default", "/some/path", "--access", "read_only"},
+		}
+		for _, args := range tests {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(args, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("%v: exit = %d, want the parser refusal 2", args, code)
+			}
+			if !strings.Contains(stderr.String(), "flags must precede positional arguments") {
+				t.Errorf("%v: stderr = %q, want the flags-must-precede diagnostic", args, stderr.String())
+			}
+		}
+	})
+
+	t.Run("flags before positionals pass the parser", func(t *testing.T) {
+		// With an isolated config and runtime dir (no daemon), the
+		// flags-first form must reach past the parser: the config add
+		// performs its real mutation and the daemon-side commands fail at
+		// client resolution, never with the parser diagnostic.
+		root := testAllowedRootDir(t)
+		data, _ := json.Marshal(map[string]any{"allowed_roots": []string{root}, "session_ttl": "12h"})
+		setupConfigTestWithData(t, data)
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", "--access", "read_only", root}, &stdout, &stderr)
+		if code != 0 || !strings.Contains(stdout.String(), "already present") {
+			t.Errorf("flags-first config add: exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+
+		stdout, stderr = bytes.Buffer{}, bytes.Buffer{}
+		code = runCommandWithWriters([]string{"principal", "allowed-root", "add", "--access", "read_only", "alice", root}, &stdout, &stderr)
+		if code == 2 && strings.Contains(stderr.String(), "flags must precede positional arguments") {
+			t.Errorf("flags-first principal add was rejected by the parser: %q", stderr.String())
+		}
+
+		stdout, stderr = bytes.Buffer{}, bytes.Buffer{}
+		code = runCommandWithWriters([]string{"launcher", "allowed-root", "add", "--principal", "alice", "--access", "read_only", "default", root}, &stdout, &stderr)
+		if code == 2 && strings.Contains(stderr.String(), "flags must precede positional arguments") {
+			t.Errorf("flags-first launcher add was rejected by the parser: %q", stderr.String())
+		}
+	})
+}
+
+// TestConfigAllowedRootListHelpDescribesOutput proves the list help describes
+// the actual default one-root-per-line output and the explicit --json rich
+// projection, not the retired PATH/ACCESS table.
+func TestConfigAllowedRootListHelpDescribesOutput(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "allowed-root", "list", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("help exit = %d, stderr=%s", code, stderr.String())
+	}
+	help := stdout.String() + stderr.String()
+	if strings.Contains(help, "PATH/ACCESS") {
+		t.Errorf("list help = %q, must not claim the retired PATH/ACCESS table", help)
+	}
+	if !strings.Contains(help, "one canonical root per line") {
+		t.Errorf("list help = %q, must describe the one-root-per-line default", help)
+	}
+	if !strings.Contains(help, "--json") {
+		t.Errorf("list help = %q, must describe the --json rich projection", help)
 	}
 }
 

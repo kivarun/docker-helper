@@ -529,6 +529,55 @@ func getInitDefaultRoot() string {
 	return home
 }
 
+// accessFlag is the presence-aware --access flag value shared by the
+// allowed-root add commands: an explicitly supplied value must parse to the
+// canonical vocabulary (an empty or unknown spelling is rejected at parse
+// time, never reinterpreted as omission); an unsupplied flag selects the
+// canonical read_write grant at the call site.
+type accessFlag struct {
+	set    bool
+	access AllowedRootAccess
+}
+
+func (f *accessFlag) String() string {
+	return string(f.access)
+}
+
+func (f *accessFlag) Set(value string) error {
+	parsed, err := parseAllowedRootAccess(value)
+	if err != nil {
+		return err
+	}
+	f.set = true
+	f.access = parsed
+	return nil
+}
+
+// optionalAccessFromFlag projects the parsed --access flag to the wire form:
+// an unsupplied flag is nil (the 2.1 path-only request), a supplied flag is
+// always sent explicitly.
+func optionalAccessFromFlag(f *accessFlag) *AllowedRootAccess {
+	if !f.set {
+		return nil
+	}
+	return &f.access
+}
+
+// printAllowedRootList prints the human allowed-root listing shared by the
+// config, Principal, and Launcher allowed-root list commands. The default
+// output is the 2.1-compatible one canonical root per line in stored-entry
+// order; --json prints the canonical rich entries ([{"path","access"}, ...])
+// in the same order for access-aware tooling.
+func printAllowedRootList(w io.Writer, entries []AllowedRootEntry, jsonOut bool) error {
+	if jsonOut {
+		return encodeJSONOut(w, entries)
+	}
+	for _, e := range entries {
+		fmt.Fprintln(w, e.Path)
+	}
+	return nil
+}
+
 var versionCommand = &Command{
 	Name:    "version",
 	Summary: "Print version",
@@ -625,6 +674,7 @@ func init() {
 		configCommand,
 		principalCommand,
 		launcherCommand,
+		selfCommand,
 		credentialCommand,
 		adminTokenCommand,
 		appArmorCommand,

@@ -22,7 +22,7 @@ func TestBuildTailOutputNotLost(t *testing.T) {
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

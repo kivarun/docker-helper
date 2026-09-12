@@ -51,6 +51,14 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/var/lib/docker-helper/apparmor/ rw,
 	/var/lib/docker-helper/apparmor/* rw,
 
+	# Workload MAC state (Release 2.2 Phase 2.2.6): generated workload
+	# profiles and ownership records under the durable state root, plus the
+	# apparmor_parser invocation against the generated profile source.
+	# Helper-owned files only; no lock character is needed for these files.
+	/var/lib/docker-helper/workload-mac/ rw,
+	/var/lib/docker-helper/workload-mac/*/ rw,
+	/var/lib/docker-helper/workload-mac/** rw,
+
 	# Docker socket — filesystem access.
 	/run/docker.sock rw,
 	/var/run/docker.sock rw,
@@ -98,9 +106,11 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	#     version detection and capability probing;
 	#   - write access to the .replace interface for profile replacement.
 	#
-	# This section is deliberately narrow: only the metadata the parser probes
-	# and the single .replace interface used by --replace are exposed.
-	# .remove, .load, and unrelated namespace administration are NOT granted.
+# This section is deliberately narrow: only the metadata the parser probes
+# and the two profile-mutation interfaces the daemon uses are exposed:
+# .replace for confined profile replacement and .remove for unloading a
+# generated workload profile (Release 2.2 workload-MAC cleanup and prepare
+# rollback). .load and unrelated namespace administration are NOT granted.
 
 	# MAC_ADMIN is required by the kernel for any profile load/replace operation.
 	# This is the only MAC capability granted; mac_override is intentionally omitted.
@@ -122,8 +132,19 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/sys/kernel/security/apparmor/.ops r,
 
 	# Profile replacement interface — write access required by --replace.
-	# Only .replace is writable; .load and .remove are intentionally excluded.
+	# Only .replace is writable; .load is intentionally excluded.
 	/sys/kernel/security/apparmor/.replace w,
+
+	# Profile removal interface — write access required by --remove to unload
+	# a generated workload profile during workload-MAC cleanup and prepare
+	# rollback. Only .remove is writable here; .load stays excluded.
+	/sys/kernel/security/apparmor/.remove w,
+
+	# Kernel profile inventory — the workload-MAC backend verifies that a
+	# generated workload profile is loaded (prepare) and that reconciliation
+	# removed helper-owned profiles (rollback/cleanup) by reading this
+	# inventory. Read-only; .replace remains the only profile-mutation path.
+	/sys/kernel/security/apparmor/profiles r,
 
 	# /proc/mounts — apparmor_parser reads the global mount list to discover
 	# the AppArmor securityfs mount point when --subdomainfs is not provided.

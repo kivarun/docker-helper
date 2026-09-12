@@ -351,17 +351,63 @@ func TestRunInvalidMountOption(t *testing.T) {
 	}
 }
 
-// TestRunMountAbsoluteSourceRejected verifies that absolute source paths
-// are rejected at CLI level with a clear error.
-func TestRunMountAbsoluteSourceRejected(t *testing.T) {
-	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+// TestRunMountAbsoluteSourceForwarded verifies that an absolute host source
+// is forwarded verbatim to POST /run: the daemon owns the mount-source
+// authorization (issued snapshot authority), never the CLI.
+func TestRunMountAbsoluteSourceForwarded(t *testing.T) {
+	var gotSource, gotTarget string
+	_, _, exitCode := runAgentCLITestWithServer(t, []string{
 		"run", "--image", "alpine:3.24", "--mount", "/workspace/probe.txt:/target", "--", "echo", "hi",
-	}, "", nil)
-	if exitCode != 2 {
-		t.Errorf("expected exit 2, got %d", exitCode)
+	}, "", func(s *agentCLITestServer) {
+		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
+			var req runRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("cannot decode run request: %v", err)
+			}
+			if len(req.Mounts) != 1 {
+				t.Errorf("expected exactly one mount, got %d", len(req.Mounts))
+			} else {
+				gotSource = req.Mounts[0].Source
+				gotTarget = req.Mounts[0].Target
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": "op_absmount1",
+				"status":       "running",
+			})
+		})
+		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": "op_absmount1",
+				"status":       "succeeded",
+				"result_code":  "succeeded",
+				"exit_code":    0,
+			})
+		})
+		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": "op_absmount1",
+				"offset":       int64(0),
+				"next_offset":  int64(0),
+				"truncated":    false,
+				"logs":         "",
+			})
+		})
+	})
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d", exitCode)
 	}
-	if !strings.Contains(stderr.String(), "source must be relative to session workspace") {
-		t.Errorf("expected source relative error, got: %s", stderr.String())
+	if gotSource != "/workspace/probe.txt" {
+		t.Errorf("absolute source must be forwarded verbatim, got %q", gotSource)
+	}
+	if gotTarget != "/target" {
+		t.Errorf("absolute target must be forwarded verbatim, got %q", gotTarget)
 	}
 }
 
@@ -1140,16 +1186,55 @@ func TestSignalNoOrphanGoroutine(t *testing.T) {
 	}
 }
 
-// TestBuildContextAbsoluteRejected verifies that build rejects absolute --context.
-func TestBuildContextAbsoluteRejected(t *testing.T) {
-	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+// TestBuildContextAbsoluteForwarded verifies that an absolute build context
+// is forwarded verbatim to POST /build: the daemon owns the context
+// authorization (workspace containment), never the CLI.
+func TestBuildContextAbsoluteForwarded(t *testing.T) {
+	var gotContext string
+	_, _, exitCode := runAgentCLITestWithServer(t, []string{
 		"build", "--context", "/absolute/path", "--dockerfile", "Dockerfile", "--image", "app:test",
-	}, "", nil)
-	if exitCode != 2 {
-		t.Errorf("expected exit 2, got %d", exitCode)
+	}, "", func(s *agentCLITestServer) {
+		s.handleBuild(func(w http.ResponseWriter, r *http.Request) {
+			var req buildRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("cannot decode build request: %v", err)
+			}
+			gotContext = req.Context
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": "op_absctx1",
+				"status":       "running",
+			})
+		})
+		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": "op_absctx1",
+				"status":       "succeeded",
+				"result_code":  "succeeded",
+				"exit_code":    0,
+			})
+		})
+		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": "op_absctx1",
+				"offset":       int64(0),
+				"next_offset":  int64(0),
+				"truncated":    false,
+				"logs":         "",
+			})
+		})
+	})
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d", exitCode)
 	}
-	if !strings.Contains(stderr.String(), "relative") {
-		t.Errorf("expected relative path error, got: %s", stderr.String())
+	if gotContext != "/absolute/path" {
+		t.Errorf("absolute context must be forwarded verbatim, got %q", gotContext)
 	}
 }
 

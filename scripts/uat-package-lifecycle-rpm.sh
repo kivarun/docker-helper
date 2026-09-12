@@ -30,7 +30,7 @@
 # Env inputs:
 #   UAT_RPM                            exact candidate RPM path inside the guest (required)
 #   UAT_RPM_SHA256                     expected candidate RPM SHA-256 (required)
-#   UAT_VERSION                        candidate version string (e.g. 2.1.0-uat)
+#   UAT_VERSION                        candidate version string (e.g. 2.2.0-uat)
 #   UAT_UPGRADE_BASELINE_RPM           v2.0.0 upgrade-baseline RPM path inside the guest (required;
 #                                      the only baseline value supplied by the VM driver)
 #   UAT_ALLOWED_ROOT    global allowed root (default: principal home)
@@ -45,7 +45,7 @@
 
 set -uo pipefail
 
-VERSION="${UAT_VERSION:-2.1.0-uat}"
+VERSION="${UAT_VERSION:-2.2.0-uat}"
 CANDIDATE_RPM="${UAT_RPM:-}"
 CANDIDATE_SHA256="${UAT_RPM_SHA256:-}"
 BASELINE_RPM="${UAT_UPGRADE_BASELINE_RPM:-}"

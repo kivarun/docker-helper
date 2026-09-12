@@ -21,6 +21,7 @@ func newSystemModeRunTestApp(t *testing.T) *App {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 	mockDetectLSM(t, LSMAppArmor, nil)
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	return app
 }
 
@@ -67,7 +68,9 @@ func TestHelperSocketSystemModeInjectsReadOnlyRuntimeMount(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -108,7 +111,9 @@ func TestHelperSocketOmittedByDefault(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -176,7 +181,7 @@ func TestHelperSocketUserMountOverlapRejected(t *testing.T) {
 	for _, tc := range table {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newSystemModeRunTestApp(t)
-			app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+			app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 				return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
 			}
 
@@ -235,7 +240,7 @@ func TestHelperSocketUserMountExactTargetAllowedWithoutCapability(t *testing.T) 
 	// itself is not newly policed by this feature.
 
 	app := newSystemModeRunTestApp(t)
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
 	}
 
@@ -379,5 +384,242 @@ func TestHelperSocketCLIFlagWithEnvFrom(t *testing.T) {
 	}
 	if body.Environment["LLM_KEY"] != "uat-combined-marker" {
 		t.Errorf("expected resolved LLM_KEY, got %v", body.Environment)
+	}
+}
+
+// dockerEnvSpecs returns the values of all --env flag arguments in the
+// captured docker argv.
+func dockerEnvSpecs(args []string) []string {
+	specs := make([]string, 0)
+	for i, arg := range args {
+		if arg == "--env" && i+1 < len(args) {
+			specs = append(specs, args[i+1])
+		}
+	}
+	return specs
+}
+
+// countEnvOccurrences counts how many docker argv entries carry the given
+// environment variable assignment.
+func countEnvOccurrences(args []string, name string) int {
+	n := 0
+	for _, spec := range dockerEnvSpecs(args) {
+		if strings.HasPrefix(spec, name+"=") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestHelperSocketInjectsCanonicalLocatorEnv proves the server-owned socket
+// locator: with the helper runtime projection the docker argv carries the
+// canonical DOCKER_HELPER_SOCKET_PATH exactly once, and the injected locator
+// is not a caller env key (the run.start audit env keys stay caller-only).
+func TestHelperSocketInjectsCanonicalLocatorEnv(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newSystemModeRunTestApp(t)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	var capturedArgs []string
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	w, _ := postRunRequest(app, result.Token,
+		`{"image":"alpine:3.24","helper_socket":true,"command":["true"]}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if n := countEnvOccurrences(capturedArgs, helperSocketLocatorEnv); n != 1 {
+		t.Errorf("docker argv carries %d DOCKER_HELPER_SOCKET_PATH entries, want exactly one: %v", n, capturedArgs)
+	}
+	want := "--env " + helperSocketLocatorEnv + "=" + helperSocketLocatorEnvValue
+	if !strings.Contains(strings.Join(capturedArgs, " "), want) {
+		t.Errorf("expected the canonical locator %q in docker args %v", want, capturedArgs)
+	}
+
+	for _, rec := range filterBySession(parseAuditRecords(auditBuf), result.Session.ID) {
+		if rec.Event == "run.start" {
+			for _, key := range rec.EnvKeys {
+				if key == helperSocketLocatorEnv {
+					t.Error("server-injected locator must not be audited as a caller env key")
+				}
+			}
+		}
+	}
+}
+
+// TestHelperSocketOmitsLocatorWithoutCapability proves the locator injection
+// is bound to the helper_socket capability: without it the environment
+// behavior is unchanged (no injected locator), and a caller-supplied locator
+// stays an ordinary caller environment variable.
+func TestHelperSocketOmitsLocatorWithoutCapability(t *testing.T) {
+	app := newSystemModeRunTestApp(t)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	var capturedArgs []string
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	w, _ := postRunRequest(app, result.Token,
+		`{"image":"alpine:3.24","command":["true"],"environment":{"DOCKER_HELPER_SOCKET_PATH":"/some/caller/path"}}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	specs := dockerEnvSpecs(capturedArgs)
+	found := false
+	for _, spec := range specs {
+		if spec == helperSocketLocatorEnv+"=/some/caller/path" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("without helper_socket the caller locator must pass through unchanged: %v", specs)
+	}
+	if n := countEnvOccurrences(capturedArgs, helperSocketLocatorEnv); n != 1 {
+		t.Errorf("docker argv carries %d DOCKER_HELPER_SOCKET_PATH entries, want the caller's single value: %v", n, capturedArgs)
+	}
+}
+
+// TestHelperSocketCallerCanonicalLocatorAcceptedOnce proves the accepted
+// caller path: a caller-supplied exactly-canonical locator is accepted, kept
+// as one docker argv entry, and remains part of the caller env-key audit.
+func TestHelperSocketCallerCanonicalLocatorAcceptedOnce(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newSystemModeRunTestApp(t)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	var capturedArgs []string
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	w, _ := postRunRequest(app, result.Token,
+		`{"image":"alpine:3.24","helper_socket":true,"command":["true"],"environment":{"DOCKER_HELPER_SOCKET_PATH":"`+helperSocketLocatorEnvValue+`"}}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if n := countEnvOccurrences(capturedArgs, helperSocketLocatorEnv); n != 1 {
+		t.Errorf("docker argv carries %d DOCKER_HELPER_SOCKET_PATH entries, want exactly one: %v", n, capturedArgs)
+	}
+	want := "--env " + helperSocketLocatorEnv + "=" + helperSocketLocatorEnvValue
+	if !strings.Contains(strings.Join(capturedArgs, " "), want) {
+		t.Errorf("expected the canonical locator %q in docker args %v", want, capturedArgs)
+	}
+
+	// The caller-provided key remains part of the caller env-key audit.
+	audited := false
+	for _, rec := range filterBySession(parseAuditRecords(auditBuf), result.Session.ID) {
+		if rec.Event == "run.start" {
+			for _, key := range rec.EnvKeys {
+				if key == helperSocketLocatorEnv {
+					audited = true
+				}
+			}
+		}
+	}
+	if !audited {
+		t.Error("caller-supplied canonical locator must remain part of the caller env-key audit")
+	}
+}
+
+// TestHelperSocketConflictingLocatorRejected proves the fail-closed refusal:
+// a caller-supplied locator that differs from the canonical value is refused
+// through the existing helper-socket refusal family before any pin,
+// operation, or Docker state exists.
+func TestHelperSocketConflictingLocatorRejected(t *testing.T) {
+	app := newSystemModeRunTestApp(t)
+	pinCalled := false
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinCalled = true
+		return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
+	}
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerCalled := false
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerCalled = true
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	w, _ := postRunRequest(app, result.Token,
+		`{"image":"alpine:3.24","helper_socket":true,"command":["true"],"environment":{"DOCKER_HELPER_SOCKET_PATH":"/wrong/other.sock"}}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if resp["code"] != "invalid_helper_socket" {
+		t.Errorf("expected invalid_helper_socket code, got %v", resp)
+	}
+	if dockerCalled {
+		t.Error("conflicting locator must be rejected before any docker call")
+	}
+	if pinCalled {
+		t.Error("conflicting locator must be rejected before any mount pin exists")
+	}
+	if resp["operation_id"] != nil {
+		t.Error("conflicting locator rejection must not create an operation")
+	}
+}
+
+// TestHelperSocketNeverInjectsSessionToken proves the capability separation:
+// the server-owned locator injection never injects the Session bearer; the
+// socket is transport reachability only.
+func TestHelperSocketNeverInjectsSessionToken(t *testing.T) {
+	app := newSystemModeRunTestApp(t)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	var capturedArgs []string
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	w, _ := postRunRequest(app, result.Token,
+		`{"image":"alpine:3.24","helper_socket":true,"command":["true"]}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	for _, spec := range dockerEnvSpecs(capturedArgs) {
+		if strings.HasPrefix(spec, "DOCKER_HELPER_SESSION_TOKEN=") {
+			t.Errorf("the daemon must never inject the Session token into docker argv: %v", capturedArgs)
+		}
 	}
 }

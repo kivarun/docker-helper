@@ -125,7 +125,7 @@ func TestShmSizeIntegration(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestContainerLifecycleGracefulCancel(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestContainerLifecycleForcedCancel(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

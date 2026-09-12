@@ -30,7 +30,7 @@ func provisionDefaultLauncherForDB(t *testing.T, db *sql.DB) string {
 
 func TestCreateSession(t *testing.T) {
 	app := newTestApp(t)
-	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 
 	result, err := createDefaultAdminSessionForTest(app, workspace)
 	if err != nil {
@@ -51,7 +51,7 @@ func TestCreateSession(t *testing.T) {
 func TestCreateSessionCanonicalWorkspace(t *testing.T) {
 	app := newTestApp(t)
 
-	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
+	subdir := filepath.Join(app.Config.AllowedRoots[0].Path, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatalf("cannot create subdir: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestCreateSessionCanonicalWorkspace(t *testing.T) {
 func TestCreateSessionIDPrefix(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestCreateSessionIDPrefix(t *testing.T) {
 func TestCreateSessionTokenPrefix(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestCreateSessionTokenPrefix(t *testing.T) {
 func TestTokenNotStoredInDatabase(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestTokenNotStoredInDatabase(t *testing.T) {
 func TestTokenHashIsSHA256(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestTokenHashIsSHA256(t *testing.T) {
 func TestExpiresAtMatchesSessionTTL(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestExpiresAtMatchesSessionTTL(t *testing.T) {
 func TestFindSessionByToken(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestFindSessionByTokenNotFound(t *testing.T) {
 func TestListSessionsReturnsActive(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestListSessionsReturnsActive(t *testing.T) {
 func TestListSessionsExcludesExpired(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestListSessionsExcludesExpired(t *testing.T) {
 func TestDeleteSession(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestDeleteSessionNotFound(t *testing.T) {
 func TestDeleteSessionRepeatedReturnsError(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestWorkspaceSymlinkEscapeRejected(t *testing.T) {
 	app := newTestApp(t)
 
 	escapeDir := t.TempDir()
-	linkPath := filepath.Join(app.Config.AllowedRoots[0], "escape-link")
+	linkPath := filepath.Join(app.Config.AllowedRoots[0].Path, "escape-link")
 
 	if err := os.Symlink(escapeDir, linkPath); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
@@ -316,12 +316,12 @@ func TestWorkspaceSymlinkEscapeRejected(t *testing.T) {
 func TestCreateSessionUniqueIDs(t *testing.T) {
 	app := newTestApp(t)
 
-	result1, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result1, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("first createSessionAuthorized() error: %v", err)
 	}
 
-	result2, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result2, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("second createSessionAuthorized() error: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	_, err := app.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"dhs_expired", "hash1", app.Config.AllowedRoots[0],
+		"dhs_expired", "hash1", app.Config.AllowedRoots[0].Path,
 		time.Now().Add(-2*time.Hour).Unix(),
 		time.Now().Add(-1*time.Hour).Unix(),
 		app.userModeDefault.launcherID,
@@ -356,7 +356,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	_, err = app.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"dhs_expires_now", "hash2", app.Config.AllowedRoots[0],
+		"dhs_expires_now", "hash2", app.Config.AllowedRoots[0].Path,
 		now-3600, now,
 		app.userModeDefault.launcherID,
 	)
@@ -368,7 +368,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	_, err = app.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"dhs_active", "hash3", app.Config.AllowedRoots[0],
+		"dhs_active", "hash3", app.Config.AllowedRoots[0].Path,
 		now, now+3600,
 		app.userModeDefault.launcherID,
 	)

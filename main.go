@@ -201,6 +201,7 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /registry/login", app.handleRegistryLogin)
 	mux.HandleFunc("POST /sessions", app.handleCreateSession)
 	mux.HandleFunc("GET /sessions", app.handleListSessions)
+	mux.HandleFunc("GET /sessions/{id}", app.handleGetSession)
 	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
 	mux.HandleFunc("POST /reload", app.handleReload)
 	mux.HandleFunc("GET /operations/{id}", app.handleOperationStatus)
@@ -209,11 +210,13 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /principals", app.handleCreatePrincipal)
 	mux.HandleFunc("GET /principals", app.handleListPrincipals)
 	mux.HandleFunc("GET /auth", app.handleAuth)
+	mux.HandleFunc("GET /self", app.handleSelf)
 	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
 	mux.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
 	mux.HandleFunc("DELETE /principals/{username}", app.handleDeletePrincipal)
 	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddPrincipalAllowedRoot)
 	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemovePrincipalAllowedRoot)
+	mux.HandleFunc("PATCH /principals/{username}/allowed-roots", app.handleSetPrincipalAllowedRootAccess)
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreatePrincipalCredential)
 	mux.HandleFunc("GET /principals/{username}/credentials", app.handleListPrincipalCredentials)
 	mux.HandleFunc("GET /credentials", app.handleListPrincipalCredentialsForAuthority)
@@ -229,6 +232,7 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("PUT /principals/{username}/launchers/{launcher}/allowed-roots", app.handleReplaceLauncherAllowedRoots)
 	mux.HandleFunc("POST /principals/{username}/launchers/{launcher}/allowed-roots", app.handleAddLauncherAllowedRoot)
 	mux.HandleFunc("DELETE /principals/{username}/launchers/{launcher}/allowed-roots", app.handleRemoveLauncherAllowedRoot)
+	mux.HandleFunc("PATCH /principals/{username}/launchers/{launcher}/allowed-roots", app.handleSetLauncherAllowedRootAccess)
 	mux.HandleFunc("DELETE /principals/{username}/launchers/{launcher}", app.handleDeleteLauncher)
 	mux.HandleFunc("PUT /principals/{username}/launchers/{launcher}/credential", app.handleIssueLauncherCredential)
 	mux.HandleFunc("GET /principals/{username}/launchers/{launcher}/credential", app.handleGetLauncherCredential)
@@ -320,9 +324,36 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
-		if _, err := cleanupExpiredSessions(db); err != nil {
+		// Session filesystem snapshot migration/integrity gate. Runs after the
+		// ownership cutover, and before any MAC consumer so MAC never
+		// reconciles a live Session whose issued filesystem authority is not
+		// proven. The snapshot table's presence is the cutover marker: absent
+		// -> one atomic compatibility backfill from sessions.workspace alone;
+		// present -> post-cutover validation that fails closed on any
+		// missing/partial/corrupt snapshot. It runs before the expired-Session
+		// cleanup, so the coverage gate below can still resolve the
+		// workspaces of expired-but-pending workload sessions.
+		if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
 			serveStartupError(err, "")
 			return err
+		}
+
+		// Workload MAC coordinator (2.2.6): operation/container-lifetime
+		// workload MAC state, separate from the session MAC coordinator.
+		// Startup reconciliation of helper-owned workload state happens
+		// before the session MAC reconciliation, so workspace coverage a
+		// pending workload relies on is never removed while that workload
+		// state is still unproven.
+		workloadMAC, err := newWorkloadMACCoordinatorForMode(cfg, detectLSM)
+		if err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+		if workloadMAC != nil {
+			if err := workloadMAC.ReconcileStartup(context.Background()); err != nil {
+				serveStartupError(err, "workload MAC state cannot be reconciled")
+				return err
+			}
 		}
 
 		// Create MAC coordinator and reconcile live sessions.
@@ -335,12 +366,28 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
+		// Startup coverage gate source: the session MAC coordinator must not
+		// release workspace coverage while a workload ownership record is
+		// still pending for that workspace's Session.
+		if macCoordinator != nil && workloadMAC != nil {
+			macCoordinator.pendingWorkloadSessions = workloadMAC.PendingWorkloadSessions
+		}
+
 		// Reconcile: ensure all live sessions have valid MAC state.
 		if macCoordinator != nil {
 			if err := macCoordinator.ReconcileLiveSessions(); err != nil {
 				serveStartupError(err, "MAC state for live sessions cannot be reconciled")
 				return err
 			}
+		}
+
+		// Expire Sessions last: the coverage gate above must still resolve
+		// the workspaces of Sessions with pending helper-owned workload
+		// state, so expired rows are deleted only after both reconciliations
+		// had their first chance to prove or retain them.
+		if _, err := cleanupExpiredSessions(db); err != nil {
+			serveStartupError(err, "")
+			return err
 		}
 
 		// Clean up stale session runtime directories that no longer
@@ -358,6 +405,7 @@ func runDaemon(stdout, stderr io.Writer) error {
 			AdminTokenHash:      adminHash,
 			OperationSupervisor: newOperationSupervisor(),
 			MACCoordinator:      macCoordinator,
+			WorkloadMAC:         workloadMAC,
 			userModeDefault:     userModeDefault,
 		}
 

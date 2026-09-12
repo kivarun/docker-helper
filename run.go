@@ -99,6 +99,18 @@ func validateShmSize(raw string) (int64, error) {
 // runtime directory; the client selects only the boolean capability.
 const helperSocketContainerDir = "/run/docker-helper"
 
+// helperSocketLocatorEnv is the server-owned socket locator environment
+// variable the daemon provides to the workload alongside the helper runtime
+// projection. The socket is transport reachability only; the Session bearer
+// authority is a separate capability and is never injected (the workload
+// receives the credential only when the caller passes it explicitly).
+const helperSocketLocatorEnv = "DOCKER_HELPER_SOCKET_PATH"
+
+// helperSocketLocatorEnvValue is the canonical locator value: the fixed
+// in-container projection target plus the helper Unix socket file name. A
+// caller-supplied locator must match exactly or the request is refused.
+const helperSocketLocatorEnvValue = helperSocketContainerDir + "/docker-helper.sock"
+
 // isHelperSocketMountOverlap reports whether a user mount target overlaps
 // the server-owned helper runtime projection: an exact match with the
 // injected mount point, a descendant of it, or one of its ancestors. A
@@ -184,13 +196,19 @@ type resolvedMount struct {
 	ReadOnly   bool
 }
 
+// resolveMount resolves one caller mount request into its canonical mount
+// facts. The source grammar is two-form: a relative source is resolved
+// against the session workspace (the existing convenience, and a structural
+// boundary — the workspace-relative spelling can never reach another issued
+// root), and an absolute source is an absolute host path. Both forms
+// canonicalize to the same identity rules: the resolved path must exist as a
+// directory or regular file, and the canonical resolved path (never the
+// caller spelling, which may name a symlink alias) is the only policy
+// identity later authorized against the issued Session filesystem snapshot
+// by resolveSessionFilesystemExposure.
 func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) {
 	if mount.Source == "" {
 		return nil, fmt.Errorf("mount source is required")
-	}
-
-	if filepath.IsAbs(mount.Source) {
-		return nil, fmt.Errorf("mount source must be relative: %s", mount.Source)
 	}
 
 	if mount.Target == "" {
@@ -210,12 +228,17 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 		return nil, fmt.Errorf("mount target contains unsupported character: %s", cleaned)
 	}
 
-	sourcePath := filepath.Join(workspace, mount.Source)
-	sourcePath, err := filepath.Abs(sourcePath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve mount source: %w", err)
+	sourcePath := mount.Source
+	if !filepath.IsAbs(sourcePath) {
+		joined := filepath.Join(workspace, sourcePath)
+		abs, err := filepath.Abs(joined)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve mount source: %w", err)
+		}
+		sourcePath = abs
 	}
 
+	var err error
 	sourcePath, err = filepath.EvalSymlinks(sourcePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -228,8 +251,18 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 		return nil, fmt.Errorf("mount source contains unsupported character: %s", sourcePath)
 	}
 
-	if !pathWithin(workspace, sourcePath) {
-		return nil, fmt.Errorf("mount source escapes workspace: %s", mount.Source)
+	if !filepath.IsAbs(sourcePath) {
+		return nil, fmt.Errorf("mount source is not absolute: %s", mount.Source)
+	}
+
+	// The workspace-relative grammar keeps the mount scoped to the session
+	// workspace. An absolute source skips this proof: its authority is the
+	// issued Session filesystem snapshot alone, proven by the exposure
+	// resolution.
+	if !filepath.IsAbs(mount.Source) {
+		if !pathWithin(workspace, sourcePath) {
+			return nil, fmt.Errorf("mount source escapes workspace: %s", mount.Source)
+		}
 	}
 
 	info, err := os.Stat(sourcePath)
@@ -249,10 +282,11 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 }
 
 func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
-	session, ok := a.requireSessionCapability(w, r)
+	authority, ok := a.requireSessionFilesystemCapability(w, r, "run")
 	if !ok {
 		return
 	}
+	session := authority.Session
 
 	ctx := withSessionID(r.Context(), session.ID)
 
@@ -309,6 +343,19 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// With the helper runtime projection active, the server owns the socket
+	// locator: the caller may either omit it or supply exactly the canonical
+	// value. A conflicting locator is refused fail-closed before any lease,
+	// pin, operation, or Docker state exists; it is never silently
+	// overwritten. Without helper_socket the locator is an ordinary caller
+	// environment variable with unchanged behavior.
+	if req.HelperSocket && cfg.Mode == ModeSystem {
+		if v, exists := req.Environment[helperSocketLocatorEnv]; exists && v != helperSocketLocatorEnvValue {
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_helper_socket", "helper_socket requires the canonical socket locator", session.PrincipalName)
+			return
+		}
+	}
+
 	// Acquire workspace-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
@@ -338,6 +385,20 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// User-mode backend-safety boundary (Release 2.2): user mode has no
+		// inode-pinning handoff, so dockerd would consume the bind source
+		// through its pathname. Only the canonical workspace root carries the
+		// established pathname-stability invariant (the sandbox cannot write
+		// its parent, so it cannot replace the workspace directory entry);
+		// a relative "." mount, a workspace-root symlink alias, and an
+		// absolute spelling resolving exactly to the canonical workspace all
+		// canonicalize to that one stable source. Every other source — child
+		// or file, relative or absolute, disjoint absolute — is refused as
+		// invalid_mount before any pin, operation, or Docker state exists.
+		// This is the user-mode source-shape restriction of the same
+		// workspace-root-only contract the Session-create filesystem-root
+		// boundary enforces; the immutable Session snapshot remains the
+		// filesystem access-mode owner.
 		if cfg.Mode == ModeUser && resolved.SourcePath != session.Workspace {
 			if leaseRelease != nil {
 				leaseRelease()
@@ -386,19 +447,62 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	mountAudit := make([]auditMount, 0, len(req.Mounts))
-	for _, m := range req.Mounts {
-		mountAudit = append(mountAudit, auditMount{
-			Source:   m.Source,
-			Target:   m.Target,
-			ReadOnly: m.ReadOnly,
-		})
-	}
-
 	var cmdArgCount *int
 	if len(req.Command) > 0 {
 		n := len(req.Command)
 		cmdArgCount = &n
+	}
+
+	// Resolve the data-plane filesystem exposure of every mount against the
+	// persisted immutable Session filesystem snapshot — the filesystem
+	// authority issued at Session creation. Policy identity is only the
+	// canonical resolved source; the caller spelling (including symlinks)
+	// never selects an access mode. Read-only requests are permitted from
+	// either access mode; writable requests require the snapshot owner's
+	// writable-parent query. A refusal happens before any mount pin,
+	// operation, or Docker state exists, and the lease is released.
+	exposurePlan := make([]sessionFilesystemExposure, 0, len(resolvedMounts))
+	for i, resolved := range resolvedMounts {
+		exposure, err := resolveSessionFilesystemExposure(authority.Snapshot, resolved.SourcePath, resolved.Target, resolved.ReadOnly)
+		if err != nil {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
+			if errors.Is(err, ErrReadOnlyRoot) {
+				writeRunReadOnlyRootRejected(ctx, w, session, req.Mounts[i], exposure)
+				return
+			}
+			if errors.Is(err, ErrOutsideSessionSnapshot) {
+				// An ordinary caller policy mistake: the source was never
+				// issued to this Session. The stable non-disclosing
+				// invalid_mount contract answers before any pin,
+				// operation, or Docker state exists.
+				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+				return
+			}
+			opLog(ctx).Error("cannot resolve session filesystem exposure",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
+			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			return
+		}
+		exposurePlan = append(exposurePlan, exposure)
+	}
+
+	// Audit mounts keep the existing caller fields and project the resolved
+	// policy facts (canonical source, effective snapshot access, and the
+	// writable-exposure permission — false is meaningful and must survive).
+	mountAudit := make([]auditMount, 0, len(exposurePlan))
+	for i := range exposurePlan {
+		mountAudit = append(mountAudit, auditMount{
+			Source:          req.Mounts[i].Source,
+			Target:          req.Mounts[i].Target,
+			ReadOnly:        req.Mounts[i].ReadOnly,
+			ResolvedSource:  exposurePlan[i].SourcePath,
+			Access:          string(exposurePlan[i].Access),
+			WritableAllowed: &exposurePlan[i].WritableAllowed,
+		})
 	}
 
 	// Determine trusted CA injection.
@@ -415,6 +519,17 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, exists := allEnv[trustedCAEnvNodeExtra]; !exists {
 			allEnv[trustedCAEnvNodeExtra] = trustedCAEnvNodeExtraValue
+		}
+	}
+	// Server-owned socket locator injection (only when absent): with the
+	// helper runtime projection the workload always receives the canonical
+	// locator; a caller-supplied identical value is accepted and stays a
+	// single argv entry (the map is keyed by name). The injection is
+	// server-owned and is not a caller env key, so the audit env keys stay
+	// caller-provided only. No Session token is ever injected here.
+	if req.HelperSocket && cfg.Mode == ModeSystem {
+		if _, exists := allEnv[helperSocketLocatorEnv]; !exists {
+			allEnv[helperSocketLocatorEnv] = helperSocketLocatorEnvValue
 		}
 	}
 
@@ -457,43 +572,25 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In system mode, determine the MAC backend before pin creation,
-	// operation registration, and run.start audit.
-	// A detection failure or unsupported configuration must fail closed.
-	securityOpt := ""
+	// In system mode, the workload MAC coordinator (2.2.6) decides the
+	// container security options and materializes the accepted exposure plan
+	// through the active backend. A missing coordinator means no supported
+	// MAC backend is active — fail closed before any state exists.
+	var securityOpts []string
 	if cfg.Mode == ModeSystem {
-		backend, err := detectLSM()
-		if err != nil {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
-			opLog(ctx).Error("cannot determine MAC backend",
-				slog.String("operation", "run"),
-				slog.String("error", err.Error()),
-			)
-			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
-			return
-		}
-		switch backend {
-		case LSMSELinux:
-			securityOpt = "label=type:docker_helper_container_t"
-		case LSMAppArmor:
-			securityOpt = "label=disable"
-		default:
-			// LSMNone: no supported MAC backend active — fail closed.
+		if a.WorkloadMAC == nil {
 			if leaseRelease != nil {
 				leaseRelease()
 			}
 			opLog(ctx).Error("no MAC backend active for system mode",
 				slog.String("operation", "run"),
-				slog.String("backend", string(backend)),
 			)
 			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
 	} else {
-		// User mode: disable SELinux labels (existing behavior)
-		securityOpt = "label=disable"
+		// User mode: disable SELinux labels (existing behavior).
+		securityOpts = []string{"label=disable"}
 	}
 
 	bufSize := cfg.OperationLogMaxBytes
@@ -505,6 +602,13 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	op.auditEnvKeys = envNames
 	op.auditTrustedCAInjected = trustedCAInjected
 	op.auditHelperSocket = req.HelperSocket && cfg.Mode == ModeSystem
+	if cfg.Mode == ModeSystem && a.WorkloadMAC != nil {
+		op.auditWorkloadMACBackend = string(a.WorkloadMAC.Backend())
+	}
+	// Associate the lease with the operation immediately so every failure
+	// path — pre-admission rollback included — releases it through the one
+	// rollback owner.
+	op.macLeaseRelease = leaseRelease
 	if shmSizeBytes > 0 {
 		op.auditShmSize = req.ShmSize
 	}
@@ -516,65 +620,74 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// In system mode, pin each mount source to a helper-owned destination.
-	// In user mode, use the resolved host paths directly.
+	// In user mode, use the resolved host paths directly. Pins are appended
+	// to the operation incrementally so the shared rollback owner sees the
+	// exact prepared state on failure.
 	pinnedMounts := make([]*pinnedMount, 0, len(resolvedMounts))
 	if cfg.Mode == ModeSystem {
 		for i, m := range resolvedMounts {
-			pm, err := a.pinWorkspaceMountSource(session.Workspace, m.SourcePath, cfg.RuntimeDir, op.ID, i)
+			pm, err := a.pinMountSource(m.SourcePath, cfg.RuntimeDir, op.ID, i)
 			if err != nil {
-				// Cleanup pins before releasing lease.
-				pinCleanupErr := false
-				for j := len(pinnedMounts) - 1; j >= 0; j-- {
-					if ce := pinnedMounts[j].Cleanup(); ce != nil {
-						opLog(ctx).Error("pin cleanup failed",
-							slog.String("operation", "run"),
-							slog.String("error", ce.Error()),
-						)
-						pinCleanupErr = true
-					}
-				}
-				if !pinCleanupErr && leaseRelease != nil {
-					leaseRelease()
-				} else if pinCleanupErr {
-					opLog(ctx).Error("MAC lease intentionally retained because workspace-dependent pin cleanup did not complete",
-						slog.String("operation", "run"),
-					)
-				}
 				opLog(ctx).Error("cannot pin mount source",
 					slog.String("operation", "run"),
 					slog.String("error", err.Error()),
 				)
+				a.rollbackRunPreparation(ctx, op)
 				writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 				return
 			}
+			op.pinnedMounts = append(op.pinnedMounts, pm)
 			pinnedMounts = append(pinnedMounts, pm)
 		}
 	}
 
-	// Store pins in operation before registering so the operation owns them.
-	op.pinnedMounts = pinnedMounts
+	// Workload MAC materialization (2.2.6, system mode only): after the
+	// pins, because the SELinux accepted mechanism projects from the pinned
+	// kernel source; before admission and container creation, because no
+	// admitted or running workload may exist without validated workload
+	// MAC state.
+	if cfg.Mode == ModeSystem {
+		pinnedSources := make([]string, len(pinnedMounts))
+		for i, pm := range pinnedMounts {
+			pinnedSources[i] = pm.PinnedPath
+		}
+		prepared, err := a.WorkloadMAC.Prepare(workloadPreparation{
+			OperationID:   op.ID,
+			SessionID:     session.ID,
+			Exposures:     exposurePlan,
+			PinnedSources: pinnedSources,
+		})
+		if err != nil {
+			opLog(ctx).Error("cannot prepare workload MAC state",
+				slog.String("operation", "run"),
+				slog.String("operation_id", op.ID),
+				slog.String("backend", string(a.WorkloadMAC.Backend())),
+				slog.String("error", err.Error()),
+			)
+			var retained *workloadMACRetainedError
+			if errors.As(err, &retained) {
+				// Partial MAC state could not be rolled back: the pins and
+				// the workspace-use lease that the projections depend on
+				// must remain until startup reconciliation. No container
+				// was started.
+				opLog(ctx).Error("workload MAC state retained after prepare failure — dependent pins and workspace lease intentionally retained",
+					slog.String("operation", "run"),
+					slog.String("operation_id", op.ID),
+				)
+			} else {
+				a.rollbackRunPreparation(ctx, op)
+			}
+			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			return
+		}
+		op.workloadMAC = prepared
+		securityOpts = prepared.SecurityOpts
+	}
 
-	// Register the operation. Single admit after all pins are created.
+	// Register the operation. Single admit after pins and MAC preparation.
 	if a.OperationSupervisor != nil {
 		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
-			// Cleanup pins before releasing lease.
-			pinCleanupErr := false
-			for j := len(pinnedMounts) - 1; j >= 0; j-- {
-				if ce := pinnedMounts[j].Cleanup(); ce != nil {
-					opLog(ctx).Error("pin cleanup failed",
-						slog.String("operation", "run"),
-						slog.String("error", ce.Error()),
-					)
-					pinCleanupErr = true
-				}
-			}
-			if !pinCleanupErr && leaseRelease != nil {
-				leaseRelease()
-			} else if pinCleanupErr {
-				opLog(ctx).Error("MAC lease intentionally retained because workspace-dependent pin cleanup did not complete",
-					slog.String("operation", "run"),
-				)
-			}
+			a.rollbackRunPreparation(ctx, op)
 			if decision == admissionRefusedShutdown {
 				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			} else {
@@ -585,38 +698,39 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
 
-	// Lease is now associated with the registered operation; it will be
-	// released by waitRunCompletion after cmd.Wait().
-	op.macLeaseRelease = leaseRelease
-
 	writeRequestContextAudit(ctx, auditRecord{
-		Event:             "run.start",
-		SessionID:         session.ID,
-		OperationID:       op.ID,
-		Image:             req.Image,
-		CommandArgCount:   cmdArgCount,
-		Mounts:            mountAudit,
-		EnvKeys:           envNames,
-		ShmSize:           op.auditShmSize,
-		TrustedCAInjected: trustedCAInjected,
-		HelperSocket:      op.auditHelperSocket,
-		PrincipalName:     session.PrincipalName,
-		LauncherID:        session.LauncherID,
-		LauncherName:      session.LauncherName,
+		Event:              "run.start",
+		SessionID:          session.ID,
+		OperationID:        op.ID,
+		Image:              req.Image,
+		CommandArgCount:    cmdArgCount,
+		Mounts:             mountAudit,
+		EnvKeys:            envNames,
+		ShmSize:            op.auditShmSize,
+		TrustedCAInjected:  trustedCAInjected,
+		HelperSocket:       op.auditHelperSocket,
+		WorkloadMACBackend: op.auditWorkloadMACBackend,
+		PrincipalName:      session.PrincipalName,
+		LauncherID:         session.LauncherID,
+		LauncherName:       session.LauncherName,
 	})
 
-	// Container security label determined above (before pins/registration/audit).
+	// Container security options come from the prepared workload MAC state
+	// in system mode and from the fixed user-mode label disable otherwise.
 	args := []string{
 		"--config", dockerDir,
 		"run",
 		"--rm",
 		"--user", fmt.Sprintf("%d:%d", execUID, execGID),
-		"--security-opt", securityOpt,
+	}
+	for _, opt := range securityOpts {
+		args = append(args, "--security-opt", opt)
 	}
 
 	// Add the reserved helper-owned runtime labels. Values derive from the
-	// resolved Session ownership chain, never from caller input.
-	for _, l := range runtimeLabelsFor(session) {
+	// resolved Session ownership chain plus the server-generated operation
+	// ID, never from caller input.
+	for _, l := range runtimeLabelsForRun(session, op.ID) {
 		args = append(args, "--label", l)
 	}
 
@@ -653,14 +767,19 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			cfg.RuntimeDir, helperSocketContainerDir))
 	}
 
-	// Add user mounts: pinned paths in system mode, resolved paths in user mode.
-	for i, m := range resolvedMounts {
-		dockerBindSource := m.SourcePath
+	// Add user mounts from the accepted exposure plan: the bind source is
+	// the prepared MAC materialization source in system mode (the existing
+	// pin, or the helper-owned projection path for a SELinux read-only
+	// exposure) and the canonical resolved path in user mode; the readonly
+	// flag follows exactly the caller-requested consumption mode, never the
+	// snapshot access of the source.
+	for i, exposure := range exposurePlan {
+		dockerBindSource := exposure.SourcePath
 		if cfg.Mode == ModeSystem {
-			dockerBindSource = pinnedMounts[i].PinnedPath
+			dockerBindSource = op.workloadMAC.MountSources[i]
 		}
-		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", dockerBindSource, m.Target)
-		if m.ReadOnly {
+		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", dockerBindSource, exposure.Target)
+		if exposure.RequestedReadOnly {
 			mountSpec += ",readonly"
 		}
 		args = append(args, "--mount", mountSpec)
@@ -681,18 +800,10 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	if result.Terminated {
 		cancel()
-		// Cleanup cidfile and pins before releasing lease.
-		cleanupCidfile(op)
-		cleanupErr := cleanupPinnedMounts(op)
-		if cleanupErr != nil {
-			opLog(ctx).Error("pin cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "run"),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-		if cleanupErr == nil && op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
+		// No container exists by construction: the operation was terminated
+		// before the process could start. Reverse the prepared resources in
+		// ownership order.
+		a.rollbackRunPreparation(ctx, op)
 		msg := "run cancelled: daemon is shutting down"
 		if op.reason == terminationCancelled {
 			msg = "run cancelled"
@@ -705,18 +816,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Err != nil {
 		cancel()
-		// Cleanup cidfile and pins before releasing lease.
-		cleanupCidfile(op)
-		cleanupErr := cleanupPinnedMounts(op)
-		if cleanupErr != nil {
-			opLog(ctx).Error("pin cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "run"),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-		if cleanupErr == nil && op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
+		a.rollbackRunPreparation(ctx, op)
 		opLog(ctx).Error("cannot start run process",
 			slog.String("operation", "run"),
 			slog.String("error", result.Err.Error()),
@@ -751,28 +851,12 @@ func (a *App) newDockerCommand(ctx context.Context, name string, args ...string)
 func (a *App) waitRunCompletion(op *operation, started time.Time) {
 	err := op.cmd.Wait()
 
-	// Clean up the cidfile regardless of outcome.
-	// The container is already handled by --rm (normal exit) or
-	// daemon-side kill (force shutdown), so the cidfile is no longer needed.
-	cleanupCidfile(op)
-
-	// Clean up pinned mounts after cmd.Wait completes.
-	cleanupErr := cleanupPinnedMounts(op)
-	if cleanupErr != nil {
-		ctx := withSessionID(context.Background(), op.SessionID)
-		opLog(ctx).Error("pinned mount cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-			slog.String("operation", "run"),
-			slog.String("operation_id", op.ID),
-			slog.String("error", cleanupErr.Error()),
-		)
-	}
-
-	// Release workspace-use lease only if pinned mount cleanup succeeded.
-	// If cleanup failed, the MAC lease/boundary is intentionally retained
-	// to preserve confinement while a pinned workspace mount remains.
-	if cleanupErr == nil && op.macLeaseRelease != nil {
-		op.macLeaseRelease()
-	}
+	// The Docker CLI process finished. The correlated container is not
+	// assumed gone: the single run cleanup owner proves container absence
+	// first and then releases workload MAC state, pins, lease, and cidfile
+	// in the frozen ownership order. A failed proof retains state for
+	// reconciliation instead of weakening confinement.
+	a.cleanupAfterRunProcess(op)
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 

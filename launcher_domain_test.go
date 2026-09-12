@@ -27,7 +27,7 @@ func setupPrincipalForLauncherTest(t *testing.T, db *sql.DB, globalRoots []strin
 	OSUserLookup = func(u string) (string, string, string, error) {
 		return "2001", "2001", home, nil
 	}
-	p, err := createPrincipal(db, username, globalRoots)
+	p, err := createPrincipal(db, username, []AllowedRootEntry{allowedRootEntry(globalRoots[0])})
 	if err != nil {
 		t.Fatalf("createPrincipal(%s): %v", username, err)
 	}
@@ -36,7 +36,7 @@ func setupPrincipalForLauncherTest(t *testing.T, db *sql.DB, globalRoots []strin
 
 // testEffectivePrincipalRoots resolves the canonical effective Principal
 // ceiling for a system-mode test fixture through the production policy owner
-// (computeEffectivePrincipalRoots): the global roots narrowed by the
+// (effectivePrincipalAllowedRoots): the global roots narrowed by the
 // Principal's stored roots.
 func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, globalRoots []string) []string {
 	t.Helper()
@@ -44,15 +44,17 @@ func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, gl
 	if err != nil {
 		t.Fatalf("readPrincipalAllowedRoots: %v", err)
 	}
-	return computeEffectivePrincipalRoots(globalRoots, stored, principalID, 0, false)
+	return allowedRootPaths(effectivePrincipalAllowedRoots(
+		allowedRootEntriesForPaths(globalRoots), stored, principalID, 0, false))
 }
 
 // TestComputeEffectivePrincipalRootsMatrix proves the semantic matrix of the
-// canonical Principal-level effective-root policy owner. The App-aware
-// resolver and every consuming surface (Session creation, Launcher
-// restricted-scope create and replacement, Principal effective-roots
-// introspection) delegate the Principal-level rule to this single function,
-// so the matrix pins the rule exactly once:
+// canonical Principal-level effective-root policy owner
+// (effectivePrincipalAllowedRoots). The App-aware resolver and every
+// consuming surface (Session creation, Launcher restricted-scope create and
+// replacement, Principal effective-roots introspection) delegate the
+// Principal-level rule to this single function, so the matrix pins the rule
+// exactly once:
 //
 //   - user mode + daemon-owner identity + zero stored roots => the global
 //     roots (the transparent ownership chain defers wholly to the global
@@ -64,7 +66,7 @@ func testEffectivePrincipalRoots(t *testing.T, db *sql.DB, principalID int64, gl
 //   - everything else (system mode, user-mode non-owners) => the plain
 //     intersection: zero or disjoint stored roots mean an empty ceiling.
 func TestComputeEffectivePrincipalRootsMatrix(t *testing.T) {
-	global := []string{"/global"}
+	global := []AllowedRootEntry{allowedRootEntry("/global")}
 	daemonOwner := int64(7)
 	other := int64(8)
 
@@ -73,21 +75,21 @@ func TestComputeEffectivePrincipalRootsMatrix(t *testing.T) {
 		userMode    bool
 		principalID int64
 		daemonID    int64
-		stored      []string
+		stored      []AllowedRootEntry
 		want        []string
 	}{
-		{"system principal with stored roots", false, other, 0, []string{"/global/home"}, []string{"/global/home"}},
+		{"system principal with stored roots", false, other, 0, []AllowedRootEntry{allowedRootEntry("/global/home")}, []string{"/global/home"}},
 		{"system principal with zero stored roots", false, other, 0, nil, nil},
-		{"user-mode daemon-owner with zero stored roots", true, daemonOwner, daemonOwner, nil, global},
-		{"user-mode daemon-owner with stray stored roots (startup-refused state)", true, daemonOwner, daemonOwner, []string{"/elsewhere"}, nil},
+		{"user-mode daemon-owner with zero stored roots", true, daemonOwner, daemonOwner, nil, []string{"/global"}},
+		{"user-mode daemon-owner with stray stored roots (startup-refused state)", true, daemonOwner, daemonOwner, []AllowedRootEntry{allowedRootEntry("/elsewhere")}, nil},
 		{"user-mode non-owner with zero stored roots", true, other, daemonOwner, nil, nil},
-		{"user-mode non-owner with stored roots", true, other, daemonOwner, []string{"/global/home"}, []string{"/global/home"}},
+		{"user-mode non-owner with stored roots", true, other, daemonOwner, []AllowedRootEntry{allowedRootEntry("/global/home")}, []string{"/global/home"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeEffectivePrincipalRoots(global, tc.stored, tc.principalID, tc.daemonID, tc.userMode)
+			got := allowedRootPaths(effectivePrincipalAllowedRoots(global, tc.stored, tc.principalID, tc.daemonID, tc.userMode))
 			if !slices.Equal(got, tc.want) {
-				t.Errorf("computeEffectivePrincipalRoots(userMode=%v, principal=%d, owner=%d, stored=%v) = %v, want %v",
+				t.Errorf("effectivePrincipalAllowedRoots(userMode=%v, principal=%d, owner=%d, stored=%v) = %v, want %v",
 					tc.userMode, tc.principalID, tc.daemonID, tc.stored, got, tc.want)
 			}
 		})
@@ -144,7 +146,7 @@ func TestLauncherScopeReplaceInheritRejectsRootsAtDomain(t *testing.T) {
 	}
 
 	// inherit + roots must be rejected at the domain boundary.
-	if _, err := replaceLauncherScope(db, l, LauncherScopeInherit, []string{proj}, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
+	if _, err := replaceLauncherScope(db, l, LauncherScopeInherit, []AllowedRootEntry{allowedRootEntry(proj)}, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
 		t.Fatalf("expected ErrInvalidAllowedRoots for inherit+roots, got: %v", err)
 	}
 	// Prior scope/roots unchanged.
@@ -274,7 +276,7 @@ func TestLauncherCreateRestricted(t *testing.T) {
 	if l.ScopeMode != LauncherScopeRestricted {
 		t.Errorf("expected restricted scope, got %s", l.ScopeMode)
 	}
-	if len(l.AllowedRoots) != 1 || l.AllowedRoots[0] != proj {
+	if len(l.AllowedRoots) != 1 || l.AllowedRoots[0].Path != proj {
 		t.Errorf("expected stored root %q, got %v", proj, l.AllowedRoots)
 	}
 }
@@ -538,7 +540,7 @@ func TestLauncherScopeReplaceInheritToRestricted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots))
+	updated, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []AllowedRootEntry{allowedRootEntry(proj)}, testEffectivePrincipalRoots(t, db, pid, globalRoots))
 	if err != nil {
 		t.Fatalf("replaceLauncherScope: %v", err)
 	}
@@ -616,7 +618,7 @@ func TestLauncherScopeReplaceInvalidRootRejectedAtomically(t *testing.T) {
 	if err := os.MkdirAll(outside, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []string{outside}, testEffectivePrincipalRoots(t, db, pid, globalRoots)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
+	if _, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []AllowedRootEntry{allowedRootEntry(outside)}, testEffectivePrincipalRoots(t, db, pid, globalRoots)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("expected ErrLauncherRootOutsidePrincipal, got: %v", err)
 	}
 	// Old scope/roots unchanged.
@@ -624,7 +626,7 @@ func TestLauncherScopeReplaceInvalidRootRejectedAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.ScopeMode != LauncherScopeRestricted || len(after.AllowedRoots) != 1 || after.AllowedRoots[0] != proj {
+	if after.ScopeMode != LauncherScopeRestricted || len(after.AllowedRoots) != 1 || after.AllowedRoots[0].Path != proj {
 		t.Errorf("scope/roots changed after failed replacement: %+v", after)
 	}
 }
@@ -975,7 +977,7 @@ func TestLauncherCredentialAuthDisabledPrincipal(t *testing.T) {
 func TestLauncherCredentialControlsOwnSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	globalRoots := app.Config.AllowedRoots
-	home := filepath.Join(globalRoots[0], "home", "victor")
+	home := filepath.Join(allowedRootPaths(globalRoots)[0], "home", "victor")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1120,7 +1122,7 @@ func TestPrincipalRevokeUnchanged(t *testing.T) {
 	OSUserLookup = func(u string) (string, string, string, error) {
 		return "2001", "2001", home, nil
 	}
-	if _, err := createPrincipal(db, "x", globalRoots); err != nil {
+	if _, err := createPrincipal(db, "x", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}); err != nil {
 		t.Fatal(err)
 	}
 	pc, token, err := createPrincipalCredential(db, "x", "oc")

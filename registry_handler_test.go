@@ -36,7 +36,7 @@ func TestRegistryLoginMissingSession(t *testing.T) {
 func TestRegistryLoginInvalidJSON(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestRegistryLoginInvalidJSON(t *testing.T) {
 func TestRegistryLoginMissingFields(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRegistryLoginSuccess(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestRegistryLoginSuccess(t *testing.T) {
 func TestRegistryLoginFailure(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestRegistryLoginFailure(t *testing.T) {
 func TestRegistryLoginSessionDockerDirCreated(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestRegistryLoginNilExecCommandContext(t *testing.T) {
 	// (the production default). It must use the real exec.CommandContext fallback.
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestRegistryLoginNilExecCommandContext(t *testing.T) {
 func TestRegistryLoginDiscardsOutput(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestRegistryLoginDiscardsOutput(t *testing.T) {
 func TestRegistryLoginFailureNoOutput(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestRegistryLoginFailureClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newTestAppWithAdminToken(t)
 
-			result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+			result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 			if err != nil {
 				t.Fatalf("createSession: %v", err)
 			}

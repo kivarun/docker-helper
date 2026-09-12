@@ -15,14 +15,16 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -75,14 +77,16 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -135,14 +139,16 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -194,7 +200,7 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 func TestRunEnvironmentInvalidName(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -221,7 +227,7 @@ func TestRunEnvironmentInvalidName(t *testing.T) {
 func TestRunEnvironmentNameStartsWithDigit(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -248,7 +254,7 @@ func TestRunEnvironmentNameStartsWithDigit(t *testing.T) {
 func TestRunEnvironmentNameWithSpace(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -275,7 +281,7 @@ func TestRunEnvironmentNameWithSpace(t *testing.T) {
 func TestRunEnvironmentNameWithDash(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -303,14 +309,16 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -371,6 +379,7 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 		"--label", runtimeLabelSessionID + "=" + result.Session.ID,
 		"--label", runtimeLabelLauncherID + "=" + result.Session.LauncherID,
 		"--label", runtimeLabelPrincipalName + "=" + result.Session.PrincipalName,
+		"--label", runtimeLabelOperationID + "=" + opID,
 	}
 	for i, expected := range expectedLabels {
 		if capturedArgs[labelStart+i] != expected {

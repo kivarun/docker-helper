@@ -25,9 +25,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openDatabase: %v", err)
 	}
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	allowedRoot := testAllowedRootDir(t)
 	// Create a RuntimeDir where MkdirAll will fail: put a regular file
@@ -42,7 +40,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{allowedRoot},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(allowedRoot)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -157,9 +155,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openDatabase: %v", err)
 	}
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	allowedRoot := testAllowedRootDir(t)
 	// Create a RuntimeDir where MkdirAll will fail: put a regular file
@@ -174,7 +170,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{allowedRoot},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(allowedRoot)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -278,7 +274,7 @@ func TestPullEnsureSessionDockerDirFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

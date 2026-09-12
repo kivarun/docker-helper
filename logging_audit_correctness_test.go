@@ -58,7 +58,7 @@ func setupReloadApp(t *testing.T, auditEnabled bool) (*App, string, string, *byt
 func writeReloadConfig(t *testing.T, configPath string, cfg *Config, auditEnabled *bool) {
 	t.Helper()
 	newCfg := map[string]any{
-		"allowed_root": cfg.AllowedRoots[0],
+		"allowed_root": cfg.AllowedRoots[0].Path,
 		"session_ttl":  "12h",
 		"log_level":    "info",
 	}
@@ -272,7 +272,7 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revoke-test")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "revoke-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	_, _ = setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "idempotent-test")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "idempotent-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	// Create a real credential that can be revoked.
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "preread-test")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "preread-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +459,7 @@ func TestPullNonZeroNoOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +485,7 @@ func TestPullStartFailureOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +557,7 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,6 +596,7 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	result, err := createSystemSession(t, app)
 	if err != nil {
@@ -615,7 +616,7 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 
 	// In system mode the mount source is pinned before the run starts. Provide
 	// a succeeding pin so the operation proceeds to the docker start failure.
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
 			cleanup:    func() error { return nil },
@@ -674,7 +675,7 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -779,7 +780,7 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessioncleanupuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "sessioncleanupuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -900,7 +901,7 @@ func TestSessionDeleteCleanupCorrelation(t *testing.T) {
 
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessiondeleteuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "sessiondeleteuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1140,6 +1141,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 	app.Config.Mode = ModeSystem
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	result, err := createSystemSession(t, app)
 	if err != nil {
@@ -1149,7 +1151,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 
 	// Inject a pinned mount with a failing Cleanup.
 	sentinelErr := errors.New("injected pinned mount cleanup error")
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {
@@ -1195,10 +1197,20 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 			continue
 		}
 		msg, _ := rec["msg"].(string)
-		if !strings.HasPrefix(msg, "pinned mount cleanup failed") {
+		if !strings.HasPrefix(msg, "ordered cleanup stage failed") {
 			continue
 		}
 		foundCleanup = true
+
+		// The failed stage is the named canonical stage of the frozen
+		// cleanup order.
+		stageField, ok := rec["stage"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing stage field")
+		}
+		if stageField != string(cleanupStageSourcePins) {
+			t.Errorf("cleanup log stage = %q, want %q", stageField, cleanupStageSourcePins)
+		}
 
 		// Assert operation == "run".
 		opField, ok := rec["operation"].(string)
@@ -1355,5 +1367,126 @@ func TestBuildStagingCleanupCorrelation(t *testing.T) {
 	}
 	if !foundCleanup {
 		t.Fatalf("cleanup log not found in operational output:\n%s", opOutput)
+	}
+}
+
+// TestRunSnapshotCorruptionAuditOutcome proves F8: after a successful
+// Session authentication, a corrupted filesystem snapshot fails closed with
+// 500 internal_error, no Docker invocation and no registered operation, and
+// exactly one run.rejected audit record with the session/ownership
+// provenance and no bearer or secret values.
+func TestRunSnapshotCorruptionAuditOutcome(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, capture := newRunEnforcementApp(t)
+	created := createRunEnforcementSession(t, app, nil)
+
+	// Corrupt the issued snapshot after issuance: truncate the snapshot
+	// tail and keep the metadata row intact — the loader's integrity
+	// verification must catch it.
+	if _, err := app.DB.Exec(
+		`DELETE FROM session_filesystem_snapshot_entries WHERE session_id = ?`,
+		created.Session.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	w, _ := postRunRequest(app, created.Token,
+		`{"image":"alpine:3.24","mounts":[{"source":".","target":"/data","read_only":true}],"command":["true"]}`)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	if code := readRootResponseCode(t, w.Body.String()); code != "internal_error" {
+		t.Fatalf("expected code internal_error, got %q", code)
+	}
+	assertNoRunPolicyResidue(t, app, nil, nil)
+	if capture() != nil {
+		t.Errorf("docker must not be invoked on a corrupted snapshot, got argv %v", capture())
+	}
+
+	records := parseAuditRecords(auditBuf)
+	filtered := filterBySession(records, created.Session.ID)
+	var rejected []auditRecord
+	for _, rec := range filtered {
+		if rec.Event == "run.rejected" {
+			rejected = append(rejected, rec)
+		}
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("expected exactly one run.rejected record for the corrupted snapshot, got %d in %v", len(rejected), filtered)
+	}
+	rec := rejected[0]
+	if rec.Result != "internal_error" {
+		t.Errorf("result = %q, want internal_error", rec.Result)
+	}
+	if rec.PrincipalName != created.Session.PrincipalName || rec.LauncherID != created.Session.LauncherID {
+		t.Errorf("audit record must carry the session ownership provenance: %+v", rec)
+	}
+	for _, line := range auditRawLinesBySession(auditBuf, created.Session.ID) {
+		if strings.Contains(line, created.Token) {
+			t.Errorf("bearer token must not appear in the audit trail: %s", line)
+		}
+	}
+}
+
+// TestBuildSnapshotCorruptionAuditOutcome proves the build side of the F8
+// symmetric contract: build.rejected with result internal_error, 500, and
+// no staged build work after a successful authentication with a corrupted
+// snapshot.
+func TestBuildSnapshotCorruptionAuditOutcome(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, capture := newRunEnforcementApp(t)
+	created := createRunEnforcementSession(t, app, nil)
+
+	if _, err := app.DB.Exec(
+		`DELETE FROM session_filesystem_snapshot_entries WHERE session_id = ?`,
+		created.Session.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+created.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	if code := readRootResponseCode(t, w.Body.String()); code != "internal_error" {
+		t.Fatalf("expected code internal_error, got %q", code)
+	}
+	if capture() != nil {
+		t.Errorf("docker must not be invoked on a corrupted snapshot, got argv %v", capture())
+	}
+
+	records := parseAuditRecords(auditBuf)
+	filtered := filterBySession(records, created.Session.ID)
+	var rejected []auditRecord
+	for _, rec := range filtered {
+		if rec.Event == "build.rejected" {
+			rejected = append(rejected, rec)
+		}
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("expected exactly one build.rejected record for the corrupted snapshot, got %d in %v", len(rejected), filtered)
+	}
+	rec := rejected[0]
+	if rec.Result != "internal_error" {
+		t.Errorf("result = %q, want internal_error", rec.Result)
+	}
+	if rec.PrincipalName != created.Session.PrincipalName {
+		t.Errorf("audit record must carry the principal provenance: %+v", rec)
+	}
+	for _, line := range auditRawLinesBySession(auditBuf, created.Session.ID) {
+		if strings.Contains(line, created.Token) {
+			t.Errorf("bearer token must not appear in the audit trail: %s", line)
+		}
 	}
 }

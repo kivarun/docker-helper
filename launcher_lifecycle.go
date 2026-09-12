@@ -242,7 +242,7 @@ func (a *App) applyLauncherEnabledChange(launcherID string, enabled bool) (launc
 func (a *App) createPrincipalWithLifecycle(username string, issueCredential bool) (*PrincipalWithRoots, *PrincipalCredential, string, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	globalRoots, err := a.appResolvedGlobalRoots()
+	globalRoots, err := a.appResolvedGlobalRootEntries()
 	if err != nil {
 		return nil, nil, "", err
 	}

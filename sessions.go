@@ -52,9 +52,10 @@ func (s *sessionSelectorField) isInvalid() bool { return s.invalid }
 func (s *sessionSelectorField) selectorOrEmpty() string { return s.value }
 
 type sessionRequest struct {
-	Workspace  string               `json:"workspace"`
-	LauncherID sessionSelectorField `json:"launcher_id"`
-	Principal  sessionSelectorField `json:"principal"`
+	Workspace       string                        `json:"workspace"`
+	LauncherID      sessionSelectorField          `json:"launcher_id"`
+	Principal       sessionSelectorField          `json:"principal"`
+	FilesystemRoots sessionFilesystemRootsRequest `json:"filesystem_roots"`
 }
 
 // validateCreateSelector applies the Session create-selector contract to the
@@ -79,6 +80,79 @@ func (req sessionRequest) validateCreateSelector() (createSelector, *createTarge
 	return createSelector{launcherID: req.LauncherID.selectorOrEmpty(), principal: req.Principal.selectorOrEmpty()}, nil
 }
 
+// sessionFilesystemRootEntry is one caller-supplied issuance-time filesystem
+// root of a Session create request: an absolute host path and the canonical
+// access value. Path is resolved and converted to the canonical policy
+// identity by the Session lifecycle; this type is the caller-supplied wire
+// value only.
+type sessionFilesystemRootEntry struct {
+	Path   string `json:"path"`
+	Access string `json:"access"`
+}
+
+// sessionFilesystemRootsRequest is the presence-aware optional
+// filesystem_roots field of the Session create request. Occurrence and
+// validity are distinct facts: omitted and the empty array preserve the
+// inherited create behavior, while null and every malformed shape are an
+// explicit refused request. Structural defects (JSON null, a non-array
+// value, an unknown nested field, a malformed entry type, trailing data
+// inside the array) are recorded as request state rather than decode
+// errors, so every malformed Session filesystem request is refused with
+// the one issuance-time invalid_filesystem_policy contract instead of the
+// generic invalid_json shape.
+type sessionFilesystemRootsRequest struct {
+	present   bool
+	malformed bool
+	roots     []sessionFilesystemRootEntry
+}
+
+// UnmarshalJSON marks the field present on any occurrence and captures the
+// request state leniently: JSON null and structurally invalid arrays become
+// request state refused later by the handler, never a decode failure. Each
+// array element is decoded strictly with unknown fields rejected; a
+// structurally invalid element marks the whole request malformed, because one
+// refusal code governs every malformed Session filesystem request. Trailing
+// JSON after the field value cannot reach this decoder as reachable state:
+// the outer request body is parsed as one JSON value first, and trailing
+// outer data keeps the existing invalid_json contract, matching the Launcher
+// rich-entries field.
+func (r *sessionFilesystemRootsRequest) UnmarshalJSON(data []byte) error {
+	r.present = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		r.malformed = true
+		return nil
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		r.malformed = true
+		return nil
+	}
+	for _, rawRoot := range raw {
+		dec := json.NewDecoder(bytes.NewReader(rawRoot))
+		dec.DisallowUnknownFields()
+		var root sessionFilesystemRootEntry
+		if err := dec.Decode(&root); err != nil {
+			r.malformed = true
+			return nil
+		}
+		r.roots = append(r.roots, root)
+	}
+	return nil
+}
+
+// isPresent reports whether filesystem_roots occurred in the request.
+func (r *sessionFilesystemRootsRequest) isPresent() bool { return r.present }
+
+// suppliedRoots returns the explicitly supplied filesystem roots, or nil
+// when the request was omitted or carried the empty array (both preserve
+// the inherited workspace-only create behavior).
+func (r *sessionFilesystemRootsRequest) suppliedRoots() []sessionFilesystemRootEntry {
+	if !r.isPresent() {
+		return nil
+	}
+	return r.roots
+}
+
 type sessionJSON struct {
 	ID         string  `json:"id"`
 	Workspace  string  `json:"workspace"`
@@ -98,6 +172,39 @@ type createSessionResponse struct {
 type listSessionsResponse struct {
 	OK       bool          `json:"ok"`
 	Sessions []sessionJSON `json:"sessions"`
+}
+
+// sessionFilesystemSnapshotJSON is the canonical public projection of the
+// persisted immutable Session filesystem snapshot. The workspace is not
+// repeated here: the top-level Session workspace is its canonical public
+// owner. The entries carry every issued disjoint access tree in the exact
+// persisted canonical ordering (ancestor first), so the workspace's root
+// access mode is carried by the workspace's own entry in that ordering —
+// the first entry is the canonical ordering's first tree, not by
+// definition the workspace.
+type sessionFilesystemSnapshotJSON struct {
+	Entries []AllowedRootEntry `json:"entries"`
+}
+
+// sessionShowJSON is the flat GET /sessions/{id} response body: the Session's
+// usual public metadata plus the persisted immutable filesystem snapshot in
+// its exact canonical persisted ordering. It never includes the token, the
+// token hash, parent live policy, or MAC internals.
+type sessionShowJSON struct {
+	sessionJSON
+
+	FilesystemSnapshot sessionFilesystemSnapshotJSON `json:"filesystem_snapshot"`
+}
+
+// sessionShowToJSON projects one Session and its persisted snapshot to the
+// canonical public show body. entries is always an array, never null.
+func sessionShowToJSON(s Session, snapshot *sessionFilesystemSnapshot) sessionShowJSON {
+	entries := make([]AllowedRootEntry, 0, len(snapshot.Entries))
+	entries = append(entries, snapshot.Entries...)
+	return sessionShowJSON{
+		sessionJSON:        sessionToJSON(s),
+		FilesystemSnapshot: sessionFilesystemSnapshotJSON{Entries: entries},
+	}
 }
 
 func sessionToJSON(s Session) sessionJSON {
@@ -193,6 +300,16 @@ func workspaceErrorMessage(err error) string {
 	return "invalid workspace"
 }
 
+// sessionFilesystemPolicyMessage is the bounded HTTP message of an
+// issuance-time Session filesystem refusal: the refusal names no policy
+// detail at all, because the domain refusal's internal diagnostic (which
+// carries the canonical requested path) may disclose a resolved symlink
+// target or upstream policy shape and stays in the operational log only.
+// The stable code `invalid_filesystem_policy` carries the meaning; the
+// client learns only that its request was refused before the Session
+// existed.
+const sessionFilesystemPolicyMessage = "invalid session filesystem policy"
+
 // classifier for a create target relates a create error to its HTTP contract.
 type createTargetError struct {
 	status int
@@ -259,7 +376,27 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, cerr := a.createSessionAuthorized(authCtx, sel, req.Workspace)
+	// Issuance-time Session filesystem roots: presence semantics are
+	// checked before any Session state exists. Omitted and the empty array
+	// preserve the inherited create behavior; null and every malformed
+	// shape are the one invalid_filesystem_policy refusal (not the generic
+	// invalid_json code), because one code governs malformed/unauthorized
+	// Session filesystem requests.
+	if req.FilesystemRoots.isPresent() && req.FilesystemRoots.malformed {
+		auditRec := auditRecord{
+			Event:     "session.create",
+			Workspace: req.Workspace,
+			Result:    "invalid_filesystem_policy",
+			Duration:  duration,
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		writeRequestContextAudit(ctx, auditRec)
+		writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy",
+			"filesystem_roots must be omitted, an empty array, or a well-formed array of {path, access} objects")
+		return
+	}
+
+	result, cerr := a.createSessionAuthorized(authCtx, sel, req.Workspace, req.FilesystemRoots.suppliedRoots())
 	if cerr != nil {
 		// Stale-owner/enabled rejection at final persistence carries the same
 		// deterministic typed contract as resolution-time rejection
@@ -305,6 +442,18 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", cerr.Error()),
 			)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", workspaceErrorMessage(cerr))
+		} else if errors.Is(cerr, ErrInvalidSessionFilesystemPolicy) {
+			// Issuance-time filesystem refusal: the request is malformed or
+			// is not a narrowing of the effective Launcher ceiling. The HTTP
+			// message is the bounded non-disclosing contract — the internal
+			// diagnostic (canonical requested path, which may name a resolved
+			// symlink target or upstream policy shape) stays in the
+			// operational log and never reaches the client.
+			opLog(ctx).Warn("session creation rejected",
+				slog.String("operation", "session_create"),
+				slog.String("error", cerr.Error()),
+			)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", sessionFilesystemPolicyMessage)
 		} else {
 			opLog(ctx).Error("session creation error",
 				slog.String("operation", "session_create"),
@@ -577,4 +726,143 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetSession serves the read-only Session introspection surface
+// (GET /sessions/{id}): the Session's usual public metadata plus its persisted
+// immutable filesystem snapshot loaded through the single canonical snapshot
+// loader. It shares the Session-control authority allow-list (an admin token,
+// a Principal credential, or a Launcher credential — a Session bearer has no
+// control-plane introspection authority) and the same ownership scope as
+// Session list/delete: a missing or foreign Session is the same non-disclosing
+// 404 session_not_found. A snapshot corruption discovered after startup is an
+// internal error with an operational log (never silently hidden as not-found).
+func (a *App) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+
+	authCtx, err := a.authenticateSessionControlRequest(w, r)
+	if err != nil || authCtx == nil {
+		return
+	}
+
+	ctx := r.Context()
+
+	id := r.PathValue("id")
+	if id == "" {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:    "session.show",
+			Result:   "invalid_session_id",
+			Duration: duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest, "invalid_session_id", "session id is required")
+		return
+	}
+
+	scope, err := a.resolveSessionControlScope(authCtx)
+	if err != nil {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:     "session.show",
+			SessionID: id,
+			Result:    "database_error",
+			Duration:  duration,
+		})
+		opLog(ctx).Error("session show error",
+			slog.String("operation", "session_show"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	s, err := a.findSessionInScope(id, scope)
+
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	if err != nil {
+		resultCode := "database_error"
+		var workspace string
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			resultCode = "not_found"
+		case errors.Is(err, ErrDatabase):
+			if s != nil {
+				workspace = s.Workspace
+			}
+		default:
+			resultCode = "unknown_error"
+		}
+		auditRec := auditRecord{
+			Event:     "session.show",
+			SessionID: id,
+			Result:    resultCode,
+			Duration:  duration,
+		}
+		if workspace != "" {
+			auditRec.Workspace = workspace
+		}
+		if s != nil {
+			auditRec.LauncherID = s.LauncherID
+			auditRec.LauncherName = s.LauncherName
+			auditRec.PrincipalName = s.PrincipalName
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		writeRequestContextAudit(ctx, auditRec)
+
+		if errors.Is(err, ErrSessionNotFound) {
+			// Non-disclosing: a Session outside the authority's scope (or a
+			// nonexistent Session) is never revealed with a 403.
+			writeError(ctx, w, http.StatusNotFound, "session_not_found", "session not found")
+		} else {
+			opLog(ctx).Error("session show error",
+				slog.String("operation", "session_show"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+
+	// The persisted snapshot is loaded through the single canonical loader,
+	// the same owner the future data-plane consumers use. A post-startup
+	// corruption is an internal integrity failure, not a policy refusal, and
+	// is never hidden as not-found.
+	snapshot, err := loadSessionFilesystemSnapshot(a.DB, s.ID, s.Workspace)
+	if err != nil {
+		auditRec := auditRecord{
+			Event:         "session.show",
+			SessionID:     s.ID,
+			Workspace:     s.Workspace,
+			LauncherID:    s.LauncherID,
+			LauncherName:  s.LauncherName,
+			PrincipalName: s.PrincipalName,
+			Result:        "database_error",
+			Duration:      time.Since(started).Round(time.Millisecond).String(),
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		writeRequestContextAudit(ctx, auditRec)
+		opLog(ctx).Error("session show error",
+			slog.String("operation", "session_show"),
+			slog.String("session_id", s.ID),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	auditRec := auditRecord{
+		Event:         "session.show",
+		SessionID:     s.ID,
+		Workspace:     s.Workspace,
+		LauncherID:    s.LauncherID,
+		LauncherName:  s.LauncherName,
+		PrincipalName: s.PrincipalName,
+		Result:        "success",
+		Duration:      time.Since(started).Round(time.Millisecond).String(),
+	}
+	a.populateSessionAudit(&auditRec, authCtx)
+	writeRequestContextAudit(ctx, auditRec)
+
+	writeJSONRaw(ctx, w, http.StatusOK, sessionShowToJSON(*s, snapshot))
 }

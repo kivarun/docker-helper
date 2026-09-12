@@ -39,7 +39,7 @@ func dropTableBreakFK(t *testing.T, db *sql.DB, table string) {
 // result or a 404.
 func TestListSessionsDBFailureIs500(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	if _, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0])); err != nil {
+	if _, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)); err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
@@ -64,7 +64,7 @@ func TestListSessionsDBFailureIs500(t *testing.T) {
 func TestPrincipalListSessionsDBFailureIs500(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "listdbfail")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "listdbfail")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestPrincipalListSessionsDBFailureIs500(t *testing.T) {
 func TestPrincipalDeleteSessionsDBFailureIs500(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "deldbfail")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "deldbfail")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestPrincipalDeleteSessionsDBFailureIs500(t *testing.T) {
 // contract not-found, not an internal error.
 func TestCreateSelectorMissingPrincipalIs404(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0])
+	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sessions", app.handleCreateSession)
@@ -190,7 +190,7 @@ func TestCreateSelectorMissingPrincipalIs404(t *testing.T) {
 // non-disclosing 404: it must surface as 500.
 func TestCreateSelectorPrincipalLookupDBFailureIs500(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0])
+	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 
 	dropTableBreakFK(t, app.DB, "principals")
 

@@ -35,7 +35,7 @@ func setupRunTestApp(t *testing.T) (*App, string) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -59,7 +59,9 @@ func TestRunCAAutoAddsMountAndEnv(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -121,7 +123,9 @@ func TestRunCAExplicitEnvWins(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -175,7 +179,9 @@ func TestRunCADisabledNoMountOrEnv(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 

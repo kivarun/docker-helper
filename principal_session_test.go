@@ -19,7 +19,7 @@ import (
 func TestCredentialAuthValid(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "authuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "authuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestCredentialAuthSkipsAllowedRootsQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	installOSUserMock(t, map[string]string{"rootskipuser": home})
-	if _, err := createPrincipal(db, "rootskipuser", globalRoots); err != nil {
+	if _, err := createPrincipal(db, "rootskipuser", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 	_, token, err := createPrincipalCredential(db, "rootskipuser", "oc")
@@ -114,7 +114,7 @@ func TestCredentialAuthRandomToken(t *testing.T) {
 func TestCredentialAuthRevoked(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revokeduser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "revokeduser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestCredentialAuthRevoked(t *testing.T) {
 func TestCredentialAuthPrincipalDisabled(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disableduser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "disableduser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestCredentialAuthDBError(t *testing.T) {
 func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "sessuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -329,7 +329,7 @@ func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
 func TestPrincipalWorkspaceInsideFirstRoot(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "wsuser1")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "wsuser1")
 	subdir := filepath.Join(home, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
@@ -372,8 +372,8 @@ func TestPrincipalWorkspaceInsideFirstRoot(t *testing.T) {
 func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "wsuser2")
-	secondRoot := filepath.Join(app.Config.AllowedRoots[0], "second")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "wsuser2")
+	secondRoot := filepath.Join(app.Config.AllowedRoots[0].Path, "second")
 	subdir := filepath.Join(secondRoot, "subdir")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
@@ -395,7 +395,7 @@ func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add second allowed root.
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "wsuser2", secondRoot, app.Config.AllowedRoots); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "wsuser2", secondRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -424,8 +424,8 @@ func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 func TestPrincipalWorkspaceOutsideAllRootsRejected(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "wsuser3")
-	outsideRoot := filepath.Join(app.Config.AllowedRoots[0], "outside")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "wsuser3")
+	outsideRoot := filepath.Join(app.Config.AllowedRoots[0].Path, "outside")
 	subdir := filepath.Join(outsideRoot, "subdir")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
@@ -472,8 +472,8 @@ func TestPrincipalWorkspaceOutsideAllRootsRejected(t *testing.T) {
 func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home1 := filepath.Join(app.Config.AllowedRoots[0], "home", "owner1")
-	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "owner2")
+	home1 := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "owner1")
+	home2 := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "owner2")
 	if err := os.MkdirAll(filepath.Join(home1, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +561,7 @@ func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
 func TestPrincipalDoesNotSeeLegacySessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "legacyuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "legacyuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +612,7 @@ func TestPrincipalDoesNotSeeLegacySessions(t *testing.T) {
 func TestAdminSeesAllSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "adminseesuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "adminseesuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -679,7 +679,7 @@ func TestAdminSeesAllSessions(t *testing.T) {
 func TestPrincipalDeletesOwnSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delownuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "delownuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -735,8 +735,8 @@ func TestPrincipalDeletesOwnSession(t *testing.T) {
 func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home1 := filepath.Join(app.Config.AllowedRoots[0], "home", "delother1")
-	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "delother2")
+	home1 := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "delother1")
+	home2 := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "delother2")
 	if err := os.MkdirAll(filepath.Join(home1, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -811,7 +811,7 @@ func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
 func TestPrincipalDeletingLegacySessionReturns404(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dellegacyuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "dellegacyuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -854,7 +854,7 @@ func TestPrincipalDeletingLegacySessionReturns404(t *testing.T) {
 func TestAdminDeletesAnySession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "admindeluser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "admindeluser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -911,7 +911,7 @@ func TestAdminDeletesAnySession(t *testing.T) {
 func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "surviveuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "surviveuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -971,7 +971,7 @@ func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
 func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "concurrentuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "concurrentuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1027,7 +1027,7 @@ func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
 func TestSessionTokenInvalidatedOnPrincipalDisable(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "survivedisuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "survivedisuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1184,7 +1184,7 @@ func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "noadminfail")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "noadminfail")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1234,7 +1234,7 @@ func TestInvalidCredentialSingleAuthFailure(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -1282,7 +1282,7 @@ func TestSessionManagementGenericUnauthorizedMessage(t *testing.T) {
 func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "principalresp")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "principalresp")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1336,7 +1336,7 @@ func TestCredentialSessionListAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "listaudit")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "listaudit")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1384,7 +1384,7 @@ func TestCredentialSessionListAudit(t *testing.T) {
 func TestGlobalPolicyNarrowing(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	broadRoot := filepath.Join(app.Config.AllowedRoots[0], "broad")
+	broadRoot := filepath.Join(app.Config.AllowedRoots[0].Path, "broad")
 	narrowRoot := filepath.Join(broadRoot, "narrow")
 	otherDir := filepath.Join(broadRoot, "other")
 	if err := os.MkdirAll(filepath.Join(narrowRoot, "project"), 0755); err != nil {
@@ -1412,7 +1412,7 @@ func TestGlobalPolicyNarrowing(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add the broad root to the principal.
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "narrowuser", broadRoot, app.Config.AllowedRoots); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "narrowuser", broadRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -1423,7 +1423,7 @@ func TestGlobalPolicyNarrowing(t *testing.T) {
 
 	// Narrow global policy to the narrower root.
 	app.setConfig(&Config{
-		AllowedRoots:          []string{narrowRoot},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(narrowRoot)},
 		SessionTTL:            app.Config.SessionTTL,
 		LogLevel:              app.Config.LogLevel,
 		AuditEnabled:          app.Config.AuditEnabled,
@@ -1462,8 +1462,8 @@ func TestGlobalPolicyNarrowing(t *testing.T) {
 func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	staleRoot := filepath.Join(app.Config.AllowedRoots[0], "stale")
-	newGlobalRoot := filepath.Join(app.Config.AllowedRoots[0], "newglobal")
+	staleRoot := filepath.Join(app.Config.AllowedRoots[0].Path, "stale")
+	newGlobalRoot := filepath.Join(app.Config.AllowedRoots[0].Path, "newglobal")
 	if err := os.MkdirAll(filepath.Join(staleRoot, "project"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1471,7 +1471,7 @@ func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "staleuser")
+	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "staleuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1489,7 +1489,7 @@ func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add a root that will become stale.
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "staleuser", staleRoot, app.Config.AllowedRoots); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "staleuser", staleRoot, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
@@ -1500,7 +1500,7 @@ func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
 
 	// Change global policy so staleRoot is no longer covered.
 	app.setConfig(&Config{
-		AllowedRoots:          []string{newGlobalRoot},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(newGlobalRoot)},
 		SessionTTL:            app.Config.SessionTTL,
 		LogLevel:              app.Config.LogLevel,
 		AuditEnabled:          app.Config.AuditEnabled,

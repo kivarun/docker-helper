@@ -104,6 +104,9 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
+	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
+		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
+	}
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -115,7 +118,7 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{allowedRoot},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(allowedRoot)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -178,7 +181,7 @@ func insertTestSession(t *testing.T, db *sql.DB, launcherID, sessionID, workspac
 func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -285,7 +288,7 @@ func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
 
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace := filepath.Join(allowedRoot, "mac-warn-ws")
 	if err := os.MkdirAll(workspace, 0700); err != nil {
 		t.Fatal(err)
@@ -336,7 +339,7 @@ func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
 func TestDBInsertFailurePreservesOwnership(t *testing.T) {
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -370,7 +373,7 @@ func TestDBInsertFailurePreservesOwnership(t *testing.T) {
 func TestDBInsertFailureRemovesOwnershipOnSuccessfulRemoval(t *testing.T) {
 	app, mac, _ := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +532,7 @@ func TestMACPreparationErrorClassification(t *testing.T) {
 func TestDBInsertErrorRemainsDatabaseError(t *testing.T) {
 	app, mac, _ := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -737,7 +740,7 @@ func TestSELinuxRestoreconFailureFailsClosed(t *testing.T) {
 func TestLeaseReleaseIdempotent(t *testing.T) {
 	app, mac, _ := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1063,6 +1066,179 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 }
 
 // =============================================================================
+// Pending-workload coverage gate on Session deletion (canonical removal owner)
+// =============================================================================
+
+// TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven drives the real
+// production Session deletion path (deleteSessionScoped) with pending
+// helper-owned workload state still referencing the Session (container
+// absence not yet provable — the startup reconciliation retains the workload
+// state), and proves the deletion cannot drop the Session's MAC coverage
+// before that state is proven gone. After the workload state is proven
+// cleaned, the canonical retry path removes the boundary.
+func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const sessionID = "sess-pending-workload"
+	_, err = mac.CreateSessionBinding(workspace, sessionID, func(cov workspaceMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Wire the workload MAC coordinator's pending-workload coverage gate to
+	// report this Session: its helper-owned workload state is retained for
+	// reconciliation and its container absence is not yet proven.
+	mac.pendingWorkloadSessions = func() map[string]bool {
+		return map[string]bool{sessionID: true}
+	}
+
+	// The canonical removal owner classifies the boundary as covering the
+	// pending session's workspace while the row still resolves.
+	mac.mu.Lock()
+	classified := mac.boundaryMayBeRemoved(workspace, map[string]bool{workspace: true}, false)
+	mac.mu.Unlock()
+	if classified {
+		t.Fatal("canonical removal owner must classify the boundary as pending-workload covered before deletion")
+	}
+
+	// Delete the Session through the real production deletion path.
+	session, err := app.deleteSessionScoped(sessionID, sessionControlScope{admin: true})
+	if err != nil {
+		t.Fatalf("deleteSessionScoped: %v", err)
+	}
+	if session == nil || session.ID != sessionID {
+		t.Fatalf("deleted session mismatch: %+v", session)
+	}
+
+	// Session deletion semantics remain what the product contract requires:
+	// the row is gone, so the session no longer exists in the database.
+	var rowCount int
+	if err := app.DB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id = ?`, sessionID).Scan(&rowCount); err != nil {
+		t.Fatalf("count session rows: %v", err)
+	}
+	if rowCount != 0 {
+		t.Fatalf("session row must be deleted by deleteSessionScoped, found %d", rowCount)
+	}
+
+	// The MAC coverage must remain while the pending workload state is
+	// unproven: the boundary stays in the driver, ownership metadata stays,
+	// and the boundary is registered for the retry path.
+	if _, err := driver.verifyCoverage(workspace); err != nil {
+		t.Fatalf("boundary coverage must remain while pending workload is unproven: %v", err)
+	}
+	mac.mu.Lock()
+	owned, oerr := mac.isBoundaryOwnedByHelper(workspace)
+	deferred := mac.deferredBoundaries[workspace]
+	mac.mu.Unlock()
+	if oerr != nil {
+		t.Fatalf("isBoundaryOwnedByHelper: %v", oerr)
+	}
+	if !owned {
+		t.Error("boundary ownership metadata must remain while pending workload is unproven")
+	}
+	if !deferred {
+		t.Error("boundary must be registered deferred for the retry path while pending workload is unproven")
+	}
+
+	// The pending workload dependency stays classifiable/reconcilable: the
+	// workload coordinator still reports the pending session, and after the
+	// row deletion the coverage pass classifies it fail-closed (the workspace
+	// can no longer be resolved), so the canonical owner keeps blocking.
+	mac.mu.Lock()
+	pendingWorkspaces, deferAll := mac.pendingWorkloadCoverage()
+	removable := mac.boundaryMayBeRemoved(workspace, pendingWorkspaces, deferAll)
+	reported := mac.pendingWorkloadSessions()
+	mac.mu.Unlock()
+	if !reported[sessionID] {
+		t.Error("pending workload state must remain reported for reconciliation after the Session row is deleted")
+	}
+	if !deferAll {
+		t.Errorf("coverage pass must fail closed when the deleted session row cannot be resolved (deferAll=%v, pending=%v)", deferAll, pendingWorkspaces)
+	}
+	if removable {
+		t.Error("canonical removal owner must still block the boundary while pending workload is unproven")
+	}
+
+	// After the pending workload state is proven cleaned, the canonical retry
+	// path may remove the boundary.
+	mac.pendingWorkloadSessions = func() map[string]bool { return nil }
+	mac.mu.Lock()
+	mac.retryDeferredBoundaries()
+	ownedAfter, oerrAfter := mac.isBoundaryOwnedByHelper(workspace)
+	mac.mu.Unlock()
+	if oerrAfter != nil {
+		t.Fatalf("isBoundaryOwnedByHelper after retry: %v", oerrAfter)
+	}
+	if ownedAfter {
+		t.Error("boundary ownership metadata must be removed after the pending workload is proven cleaned")
+	}
+	if _, err := driver.verifyCoverage(workspace); err == nil {
+		t.Error("boundary must be removed from the driver after the pending workload is proven cleaned")
+	}
+}
+
+// TestSessionDeleteKeepsBoundaryWhenPendingWorkloadUnresolvable proves the
+// fail-closed branch of the canonical removal owner: a pending workload
+// session ID exists but its workspace cannot be resolved (no session row),
+// so the whole removal pass defers and the deleted Session's boundary MUST
+// NOT be removed.
+func TestSessionDeleteKeepsBoundaryWhenPendingWorkloadUnresolvable(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const sessionID = "sess-real-session"
+	_, err = mac.CreateSessionBinding(workspace, sessionID, func(cov workspaceMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// The pending workload references a session ID whose row cannot be
+	// resolved: the pending-workload coverage resolution fails closed.
+	mac.pendingWorkloadSessions = func() map[string]bool {
+		return map[string]bool{"dhs_unresolvable0000000000000000000000": true}
+	}
+
+	if _, err := app.deleteSessionScoped(sessionID, sessionControlScope{admin: true}); err != nil {
+		t.Fatalf("deleteSessionScoped: %v", err)
+	}
+
+	// The boundary MUST NOT be removed: coverage and ownership remain and the
+	// boundary is deferred until the pending workload state resolves or is
+	// proven cleaned.
+	if _, err := driver.verifyCoverage(workspace); err != nil {
+		t.Fatalf("boundary coverage must remain when pending workload workspace is unresolvable: %v", err)
+	}
+	mac.mu.Lock()
+	owned, oerr := mac.isBoundaryOwnedByHelper(workspace)
+	deferred := mac.deferredBoundaries[workspace]
+	mac.mu.Unlock()
+	if oerr != nil {
+		t.Fatalf("isBoundaryOwnedByHelper: %v", oerr)
+	}
+	if !owned {
+		t.Error("boundary ownership metadata must remain when pending workload workspace is unresolvable")
+	}
+	if !deferred {
+		t.Error("boundary must be deferred when pending workload workspace is unresolvable")
+	}
+}
+
+// =============================================================================
 // Backend-safe ownership key
 // =============================================================================
 
@@ -1179,9 +1355,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1192,7 +1366,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1213,6 +1387,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	// Create workspace and session.
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
@@ -1237,9 +1412,13 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
+
 	// Inject a pinned mount with a failing Cleanup.
 	sentinelErr := errors.New("injected pinned mount cleanup error")
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {
@@ -1312,9 +1491,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1325,7 +1502,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1346,6 +1523,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
@@ -1369,8 +1547,12 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
+
 	// Inject a pinned mount with a successful Cleanup.
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {
@@ -1430,9 +1612,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1443,7 +1623,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1488,6 +1668,10 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
+
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
 
 	// Inject staging seam with failing Cleanup.
 	sentinelErr := errors.New("injected staging cleanup error")
@@ -1565,9 +1749,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1578,7 +1760,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1623,6 +1805,10 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
+
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
 
 	// Inject staging seam with successful Cleanup.
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -1697,9 +1883,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1710,7 +1894,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1731,6 +1915,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
+	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	// Force admit rejection.
 	app.OperationSupervisor.beginShutdown()
 
@@ -1757,8 +1942,12 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
+
 	var cleanupOrder []string
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {
@@ -1808,9 +1997,7 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase: %v", err)
-	}
+	initializeTestDatabase(t, db)
 
 	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
@@ -1821,7 +2008,7 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots:          []string{dir},
+		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(dir)},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -1869,6 +2056,10 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
+
+	// The coherent run/build authority read loads the persisted snapshot
+	// rows of the directly seeded session; issue them for the fixture.
+	insertTestSessionSnapshot(t, db, "sess-1", workspace)
 
 	var cleanupCalled bool
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -2353,7 +2544,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2436,7 +2627,7 @@ func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 func TestPrincipalDeleteReleasesMACBindings(t *testing.T) {
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2519,7 +2710,7 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 	// lease release allows boundary removal.
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2620,7 +2811,7 @@ func TestPrincipalDeleteLeasePreserved(t *testing.T) {
 	// Same as TestPrincipalDisableLeasePreserved but for delete.
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2710,7 +2901,7 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 	// boundary accounting remains correct.
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
 	if err != nil {
 		t.Fatal(err)
@@ -2811,7 +3002,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	// helper-owned boundary.
 	app, mac, driver := setupTestMACCoordinator(t)
 
-	allowedRoot := app.Config.AllowedRoots[0]
+	allowedRoot := app.Config.AllowedRoots[0].Path
 
 	// Create a principal.
 	home := filepath.Join(allowedRoot, "home", "staleauthuser")
@@ -2870,6 +3061,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 		&operatorAuthority{class: operatorAuthorityPrincipal, principal: auth.Principal},
 		createSelector{},
 		projDir,
+		nil,
 	)
 	if !errors.Is(err, ErrLauncherUnavailable) {
 		t.Fatalf("expected ErrLauncherUnavailable for stale disabled principal, got %v", err)

@@ -314,10 +314,11 @@ func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
 	}
 
 	// Session-create workspace completion with a typed separated selector:
-	// the forwarded --launcher killme resolves the restricted root.
+	// the forwarded --launcher killme resolves the restricted root, whose
+	// boundary completes in one TAB from the typed parent.
 	p.resetLine(t)
 	rec.snapshot() // drain prior requests
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher killme --workspace ", optDir)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher killme --workspace "+filepath.Dir(optDir), optDir)
 	if !strings.Contains(out, optDir) {
 		t.Fatalf("separated selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
 	}
@@ -329,7 +330,7 @@ func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
 	// carries the same semantics.
 	p.resetLine(t)
 	rec.snapshot()
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher=killme --workspace ", optDir)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher=killme --workspace "+filepath.Dir(optDir), optDir)
 	if !strings.Contains(out, optDir) {
 		t.Fatalf("inline selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
 	}
@@ -367,15 +368,117 @@ func TestCompletionInteractiveExplicitHTTPEndpoint(t *testing.T) {
 	assertCompletionPTYHTTPQuery(t, httpRec, "inline endpoint", "/principals", "")
 
 	// Session-create workspace completion over the explicit HTTP endpoint
-	// with a typed inline launcher selector: the restricted root, resolved by
-	// the daemon the URL names — never the generic filesystem fallback.
+	// with a typed inline launcher selector: the restricted root, resolved
+	// by the daemon the URL names — never the generic filesystem fallback.
 	p.resetLine(t)
 	httpRec.snapshot()
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+httpEndpoint+" --token-file "+adminTokenPath+" --launcher=killme --workspace ", httpOpt)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+httpEndpoint+" --token-file "+adminTokenPath+" --launcher=killme --workspace "+filepath.Dir(httpOpt), httpOpt)
 	if !strings.Contains(out, httpOpt) {
 		t.Fatalf("HTTP endpoint session workspace <TAB>: completion output missing %s:\n%s", httpOpt, out)
 	}
 	assertCompletionPTYHTTPQuery(t, httpRec, "session policy", "/sessions/create-policy", "launcher=killme")
+}
+
+// TestCompletionInteractiveFilesystemRootTreeNavigation proves the
+// policy-root tree completion under a real interactive Bash and real TAB
+// keystrokes: the /home/michael + /opt/michael sibling-boundary regression
+// lists two distinguishable boundary segments (never two identical
+// basenames), a unique boundary inserts as a navigable directory (filename
+// semantics, trailing separator), the next TAB continues the navigation
+// inside the boundary toward the root, and both the separated and the inline
+// --filesystem-root forms drive the same daemon-backed tree — on the PATH
+// side and, after a real '=' path, on the ACCESS side.
+func TestCompletionInteractiveFilesystemRootTreeNavigation(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "home", "michael")
+	opt := filepath.Join(base, "opt", "michael")
+	equalsDir := filepath.Join(home, "data", "foo=bar")
+	for _, dir := range []string{filepath.Join(home, "BoxProbe"), opt, equalsDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sockPath := filepath.Join(base, "dh-tree.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
+				OK: true, Principal: "michael", LauncherID: "dhl_x", Launcher: "agent",
+				AllowedRoots: []string{home, opt},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+		_ = os.Remove(sockPath)
+	})
+	tokenPath := writeCompletionPTYToken(t, base, "admin.token", "tree-pty-token")
+
+	p := startCompletionPTY(t, completionScript(t))
+	prefix := "docker-helper session create --endpoint " + sockPath + " --token-file " + tokenPath + " "
+
+	// The sibling-boundary regression: from the roots' parent the listing
+	// renders the distinguishable home/ and opt/ segments — never the two
+	// identical michael/ basenames. The typed line and both TAB keystrokes
+	// are sent together (typeAndTab convention); the listing is the
+	// completion's observable result.
+	p.resetLine(t)
+	p.send(t, prefix+"--filesystem-root "+base+"/\t\t")
+	out := p.waitNext(t, "opt/", 10*time.Second)
+	if !strings.Contains(out, "home/") {
+		t.Fatalf("boundary listing must contain both sibling segments:\n%s", out)
+	}
+	if strings.Contains(out, "michael") {
+		t.Fatalf("boundary listing must not offer identical basenames:\n%s", out)
+	}
+
+	// A unique boundary from a partial component navigates as a directory:
+	// /h<TAB> inserts <base>/home/ with filename semantics and the next TAB
+	// continues inside it to the root (the chained result proves the unique
+	// boundary stayed navigable instead of terminating the word).
+	p.resetLine(t)
+	p.send(t, prefix+"--filesystem-root "+base+"/h\t\t")
+	p.waitNext(t, filepath.Join(base, "home", "michael")+"/", 10*time.Second)
+
+	// The next two TABs enter the root: the entry TAB rings the bell (two
+	// children) and the second TAB lists both.
+	p.send(t, "\t\t")
+	out = p.waitNext(t, "data/", 10*time.Second)
+	if !strings.Contains(out, "BoxProbe/") {
+		t.Fatalf("inside-root listing must offer both children:\n%s", out)
+	}
+
+	// The inline --filesystem-root=PATH form drives the same tree: /o<TAB>
+	// navigates the opt boundary to its root in two TABs.
+	p.resetLine(t)
+	p.send(t, prefix+"--filesystem-root="+base+"/o\t\t")
+	p.waitNext(t, filepath.Join(base, "opt", "michael")+"/", 10*time.Second)
+
+	// The separated ACCESS side after a real '=' path: the final delimiter
+	// completes the canonical access vocabulary. Each ACCESS prefix
+	// disambiguates to one mode, and the inserted result proves the
+	// vocabulary is offered behind the '=' path. Readline renders the
+	// inserted word with the '=' separators quoted (they are word-break
+	// characters), so the anchored display form carries the backslashes.
+	p.resetLine(t)
+	out = p.typeAndTab(t, prefix+"--filesystem-root "+equalsDir+"=read_o", "read_only")
+	if !strings.Contains(out, `foo\=bar\=read_only`) {
+		t.Fatalf("separated ACCESS completion after an '=' path inserted the wrong value:\n%s", out)
+	}
+
+	// The inline ACCESS form behind the '=' path completes identically.
+	p.resetLine(t)
+	out = p.typeAndTab(t, prefix+"--filesystem-root="+equalsDir+"=read_w", "read_write")
+	if !strings.Contains(out, `foo\=bar\=read_write`) {
+		t.Fatalf("inline ACCESS completion after an '=' path inserted the wrong value:\n%s", out)
+	}
 }
 
 // TestCompletionInteractiveLauncherAllowedRootFirstPosition proves the

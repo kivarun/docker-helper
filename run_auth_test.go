@@ -16,7 +16,7 @@ func TestRunSessionCapabilityAuthValidToken(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRunSessionCapabilityAuthInvalidToken(t *testing.T) {
 func TestRunSessionCapabilityAuthExpiredSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRunSessionCapabilityAuthExpiredSession(t *testing.T) {
 func TestRunSessionCapabilityAuthDeletedSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestRunSessionCapabilityAuthHashIsComputed(t *testing.T) {
 	app := newTestApp(t)
 	app.AdminTokenHash = hash
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
