@@ -21,7 +21,7 @@ func newTestManager(active func() (bool, bool, error)) *selinuxFcontextManager {
 			return func() error { return nil }, nil
 		},
 		readMountinfo: func() ([]byte, error) { return []byte{}, nil },
-		treeKind:      func(string) (selinuxTreeKind, error) { return selinuxTreeDirectory, nil },
+		treeKind:      func(string) (macBoundaryKind, error) { return macBoundaryDirectory, nil },
 	}
 }
 
@@ -374,7 +374,7 @@ func TestEscapeFcontextPath(t *testing.T) {
 	}
 }
 
-func TestFcontextPattern(t *testing.T) {
+func TestFcontextPatternForDirectory(t *testing.T) {
 	tests := []struct {
 		boundary string
 		want     string
@@ -386,8 +386,8 @@ func TestFcontextPattern(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.boundary, func(t *testing.T) {
-			if got := fcontextPattern(tc.boundary); got != tc.want {
-				t.Errorf("fcontextPattern(%q) = %q, want %q", tc.boundary, got, tc.want)
+			if got := fcontextPatternFor(tc.boundary, macBoundaryDirectory); got != tc.want {
+				t.Errorf("fcontextPatternFor(%q, directory) = %q, want %q", tc.boundary, got, tc.want)
 			}
 		})
 	}
@@ -417,7 +417,7 @@ func TestFcontextStem(t *testing.T) {
 
 func TestEnsureWorkspaceFcontextNotEnforcing(t *testing.T) {
 	mgr := newTestManager(func() (bool, bool, error) { return false, false, nil })
-	created, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("expected nil, got: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestEnsureWorkspaceFcontextNotEnforcing(t *testing.T) {
 
 func TestEnsureWorkspaceFcontextPermissive(t *testing.T) {
 	mgr := newTestManager(func() (bool, bool, error) { return true, false, nil })
-	created, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("expected nil, got: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestEnsureWorkspaceFcontextNewRule(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("expected nil, got: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestEnsureWorkspaceFcontextIdempotent(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("expected nil, got: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestEnsureWorkspaceFcontextConflictingRule(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for conflicting rule")
 	}
@@ -557,7 +557,7 @@ func TestEnsureWorkspaceFcontextRestoreconFails(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for restorecon failure")
 	}
@@ -586,7 +586,7 @@ func TestEnsureWorkspaceFcontextExistingMappingRunsRestorecon(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("expected nil, got: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestEnsureWorkspaceFcontextExistingMappingVerifyFails(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return "default_t", nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for type mismatch on existing mapping")
 	}
@@ -634,7 +634,7 @@ func TestOverlapSiblingBoundaries(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("sibling /data2 should not conflict with /data, got: %v", err)
 	}
@@ -652,7 +652,7 @@ func TestOverlapNestedOperatorRule(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for nested operator rule")
 	}
@@ -670,7 +670,7 @@ func TestOverlapAncestorLocalRule(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/projects/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/projects/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for ancestor local rule")
 	}
@@ -688,7 +688,7 @@ func TestOverlapRegexUnclassifiable(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for unclassifiable regex")
 	}
@@ -706,7 +706,7 @@ func TestOverlapEquivalenceRecord(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for equivalence record")
 	}
@@ -724,7 +724,7 @@ func TestOverlapUnparseableLocalCustomization(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for unparseable local customization")
 	}
@@ -744,7 +744,7 @@ func TestOverlapEscapedPathNested(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data.test", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data.test", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for nested rule under /data.test")
 	}
@@ -765,7 +765,7 @@ func TestOverlapEscapedPathSibling(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/data.test", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data.test", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("sibling /data.test2 should not conflict, got: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestOverlapEscapedPathBracket(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/project[1]", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/project[1]", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for nested rule under /project[1]")
 	}
@@ -804,7 +804,7 @@ func TestOverlapEscapedPathPlusSibling(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/foo+bar", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/foo+bar", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("sibling /foo+bar2 should not conflict with /foo+bar, got: %v", err)
 	}
@@ -818,7 +818,7 @@ func TestOverlapEscapedPathPlusSibling(t *testing.T) {
 func TestEnsureWorkspaceFcontextExistingRuleWithNestedConflict(t *testing.T) {
 	// existing: /data(/.*)? -> docker_helper_workspace_t
 	// existing: /data/secrets(/.*)? -> operator_type
-	// ensureTreeFcontext("/data", selinuxTreeDirectory) MUST fail before restorecon.
+	// ensureTreeFcontext("/data", macBoundaryDirectory) MUST fail before restorecon.
 	var restoreconCalled bool
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
@@ -830,7 +830,7 @@ func TestEnsureWorkspaceFcontextExistingRuleWithNestedConflict(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for nested operator rule alongside our exact rule")
 	}
@@ -845,7 +845,7 @@ func TestEnsureWorkspaceFcontextExistingRuleWithNestedConflict(t *testing.T) {
 func TestEnsureWorkspaceFcontextExistingRuleWithUnrelatedSibling(t *testing.T) {
 	// existing: /data(/.*)? -> docker_helper_workspace_t
 	// existing: /data2(/.*)? -> other_type
-	// ensureTreeFcontext("/data", selinuxTreeDirectory) => idempotent success.
+	// ensureTreeFcontext("/data", macBoundaryDirectory) => idempotent success.
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -856,7 +856,7 @@ func TestEnsureWorkspaceFcontextExistingRuleWithUnrelatedSibling(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("unrelated sibling should not conflict, got: %v", err)
 	}
@@ -886,7 +886,7 @@ func TestRemoveFcontextBoundary(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	if err := mgr.removeFcontextBoundary("/data"); err != nil {
+	if err := mgr.removeFcontextBoundary("/data", macBoundaryDirectory); err != nil {
 		t.Fatalf("rollback failed: %v", err)
 	}
 	if !deleteCalled {
@@ -1030,7 +1030,7 @@ func TestRestoreconRecursiveArgv(t *testing.T) {
 		lastArgs = args
 		return []byte{}, nil
 	}
-	if err := mgr.restoreconTree("/data", selinuxTreeDirectory); err != nil {
+	if err := mgr.restoreconTree("/data", macBoundaryDirectory); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"-R", "-m", "-x", "/data"}
@@ -1152,7 +1152,7 @@ func TestRestoreconRecursiveRefusesNestedMount(t *testing.T) {
 		restoreconCalled = true
 		return []byte{}, nil
 	}
-	err := mgr.restoreconTree("/opt/ws", selinuxTreeDirectory)
+	err := mgr.restoreconTree("/opt/ws", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for nested mount beneath workspace")
 	}
@@ -1177,7 +1177,7 @@ func TestEnsureWorkspaceFcontextUnsafeFailsClosed(t *testing.T) {
 		mutation = true
 		return []byte{}, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/opt/ws", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/opt/ws", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for workspace with nested mount")
 	}
@@ -1211,7 +1211,7 @@ func TestRemoveFcontextBoundaryUnsafeKeepsRule(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	err := mgr.removeFcontextBoundary("/opt/ws")
+	err := mgr.removeFcontextBoundary("/opt/ws", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for unsafe removal boundary")
 	}
@@ -1281,7 +1281,7 @@ func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
 
 	firstDone := make(chan struct{})
 	go func() {
-		_, _ = mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+		_, _ = mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 		close(firstDone)
 	}()
 
@@ -1310,7 +1310,7 @@ func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
 	}
 
 	go func() {
-		_, _ = mgr2.ensureTreeFcontext("/data", selinuxTreeDirectory)
+		_, _ = mgr2.ensureTreeFcontext("/data", macBoundaryDirectory)
 		close(secondDone)
 	}()
 
@@ -1349,7 +1349,7 @@ func TestSELinuxWorkspaceLockAcquisitionFailure(t *testing.T) {
 		return []byte{}, nil
 	}
 
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for lock acquisition failure")
 	}
@@ -1441,7 +1441,7 @@ func TestEquivalenceRegexDestRejected(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for regex in equivalence DEST")
 	}
@@ -1459,7 +1459,7 @@ func TestEquivalenceRegexSourceRejected(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for regex in equivalence SOURCE")
 	}
@@ -1477,7 +1477,7 @@ func TestEquivalenceNonAbsDestRejected(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for non-absolute equivalence DEST")
 	}
@@ -1495,7 +1495,7 @@ func TestEquivalenceEscapedDestRejected(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for escaped regex in equivalence DEST")
 	}
@@ -1516,7 +1516,7 @@ func TestUnknownEscapeBackslashD(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for unknown escape \\d")
 	}
@@ -1534,7 +1534,7 @@ func TestUnknownEscapeBackslashW(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for unknown escape \\w")
 	}
@@ -1552,7 +1552,7 @@ func TestUnknownEscapeBackslashS(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for unknown escape \\s")
 	}
@@ -1570,7 +1570,7 @@ func TestUnknownEscapeBackslashX2f(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for unknown escape \\x2f")
 	}
@@ -1588,7 +1588,7 @@ func TestUnknownEscapeBackslashQ(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for unknown escape \\Q")
 	}
@@ -1681,7 +1681,7 @@ func TestEquivalenceDisjointAllowed(t *testing.T) {
 	mgr.readPathCon = func(path string) (string, error) {
 		return selinuxWorkspaceType, nil
 	}
-	created, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err != nil {
 		t.Fatalf("disjoint equivalence should be allowed, got: %v", err)
 	}
@@ -1699,7 +1699,7 @@ func TestEquivalenceDestEqualsBoundary(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for equivalence DEST equals boundary")
 	}
@@ -1717,7 +1717,7 @@ func TestEquivalenceDestDescendantOfBoundary(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for equivalence DEST descendant of boundary")
 	}
@@ -1735,7 +1735,7 @@ func TestEquivalenceSourceEqualsBoundary(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for equivalence SOURCE equals boundary")
 	}
@@ -1753,7 +1753,7 @@ func TestEquivalenceSourceDescendantOfBoundary(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for equivalence SOURCE descendant of boundary")
 	}
@@ -1771,7 +1771,7 @@ func TestEquivalenceDestAncestorOfBoundary(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/parent/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/parent/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for equivalence DEST ancestor of boundary")
 	}
@@ -1789,7 +1789,7 @@ func TestEquivalenceSourceAncestorOfBoundary(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	_, err := mgr.ensureTreeFcontext("/parent/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/parent/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("expected error for equivalence SOURCE ancestor of boundary")
 	}
@@ -1807,10 +1807,10 @@ func TestSELinuxWorkspaceTypeConstant(t *testing.T) {
 // --- Fcontext regex no over-match ---
 
 func TestFcontextRegexNoOverMatch(t *testing.T) {
-	if pattern := fcontextPattern("/data"); pattern != "/data(/.*)?" {
+	if pattern := fcontextPatternFor("/data", macBoundaryDirectory); pattern != "/data(/.*)?" {
 		t.Errorf("pattern = %q, want %q", pattern, "/data(/.*)?")
 	}
-	if pattern := fcontextPattern("/data.test"); pattern != "/data\\.test(/.*)?" {
+	if pattern := fcontextPatternFor("/data.test", macBoundaryDirectory); pattern != "/data\\.test(/.*)?" {
 		t.Errorf("pattern = %q, want %q", pattern, "/data\\.test(/.*)?")
 	}
 }
@@ -1863,7 +1863,7 @@ func TestSELinuxRootSlashConflictingFcontext(t *testing.T) {
 	}
 
 	// /data is a proper descendant of "/". The "/" rule must conflict.
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("ensureTreeFcontext must fail when operator-local rule at / overlaps /data")
 	}
@@ -1897,7 +1897,7 @@ func TestSELinuxRootSlashEquivalenceOverlap(t *testing.T) {
 	}
 
 	// /data must conflict with the equivalence at "/".
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("ensureTreeFcontext must fail when equivalence at / overlaps /data")
 	}
@@ -1930,7 +1930,7 @@ func TestSELinuxRootSlashEquivalenceSourceOverlap(t *testing.T) {
 		},
 	}
 
-	_, err := mgr.ensureTreeFcontext("/data", selinuxTreeDirectory)
+	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("ensureTreeFcontext must fail when equivalence source / overlaps /data")
 	}

@@ -77,10 +77,14 @@ type inputError struct {
 
 func (e *inputError) Error() string { return e.msg }
 
-// boundaryResult is the structured return value for addManagedBoundary and removeManagedBoundary.
+// boundaryResult is the structured return value for addManagedBoundary and
+// removeManagedBoundary. Kind carries the boundary's proven kind for an add
+// (decided once at the caller-syntax boundary from the issued tree) and the
+// persisted kind for an existing boundary; it is zero for a remove.
 type boundaryResult struct {
 	Path    string
 	Changed bool
+	Kind    appArmorBoundaryKind
 }
 
 // validateBoundaryLexical checks a path string without filesystem access.
@@ -579,7 +583,7 @@ func (m *appArmorProfileManager) addManagedBoundary(path string) (boundaryResult
 			// The boundary is already managed with its persisted kind; the
 			// add is idempotent and never re-derives the kind from host
 			// state.
-			return boundaryResult{Path: canonical, Changed: false}, nil
+			return boundaryResult{Path: canonical, Changed: false, Kind: r.Kind}, nil
 		}
 	}
 
@@ -598,7 +602,7 @@ func (m *appArmorProfileManager) addManagedBoundary(path string) (boundaryResult
 		return boundaryResult{}, fmt.Errorf("reload failed: %w", err)
 	}
 
-	return boundaryResult{Path: canonical, Changed: true}, nil
+	return boundaryResult{Path: canonical, Changed: true, Kind: kind}, nil
 }
 
 func (m *appArmorProfileManager) removeManagedBoundary(path string) (boundaryResult, error) {

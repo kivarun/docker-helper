@@ -17,10 +17,111 @@ import (
 var ErrMACPreparation = errors.New("MAC preparation failed")
 
 // sessionMACCoverage describes the actual MAC coverage boundary for one
-// issued filesystem tree.
+// issued filesystem tree. Kind carries the durable creation-proven kind of
+// the coverage boundary when the backend can prove it (macBoundaryUnknown
+// when it cannot, for example a coverage resolved before the boundary's kind
+// was recorded); the coordinator consumes it only where the driver proved it.
 type sessionMACCoverage struct {
-	Boundary    string // the actual boundary path providing coverage
-	HelperOwned bool   // true if docker-helper owns this boundary (operator-compatible boundaries are not helper-owned)
+	Boundary    string          // the actual boundary path providing coverage
+	HelperOwned bool            // true if docker-helper owns this boundary (operator-compatible boundaries are not helper-owned)
+	Kind        macBoundaryKind // the boundary's kind where the backend proves it durably
+}
+
+// macBoundaryKind is the concrete kind of one Session MAC boundary or issued
+// tree. Directory boundaries cover the exact path and every descendant;
+// regular-file boundaries cover exactly the canonical file path. The kind of
+// a HELPER-OWNED boundary is proven once when the boundary is created and is
+// persisted with the boundary's ownership metadata, so a later change of the
+// host object kind can never reinterpret or widen the owned boundary;
+// ownership identity is never derived from mutable current host state.
+type macBoundaryKind int
+
+const (
+	// macBoundaryUnknown is the zero value: no kind has been proven (a
+	// coverage resolved without a durable kind, or the legacy ownership row
+	// recorded by a build without durable kinds).
+	macBoundaryUnknown macBoundaryKind = iota
+	macBoundaryDirectory
+	macBoundaryRegularFile
+	// macBoundaryMissing records the proven absence of the tree (ENOENT on
+	// lstat): no surviving inode exists, so a removal has nothing left to
+	// relabel. It is a classification result, never a guess — any other
+	// stat failure is an error, not Missing.
+	macBoundaryMissing
+)
+
+// Canonical persisted spellings of a proven boundary kind (the
+// mac_boundaries kind column). The regular-file spelling is the same one the
+// AppArmor fragment marker uses.
+const (
+	macBoundaryKindDirectoryValue   = "directory"
+	macBoundaryKindRegularFileValue = "regular-file"
+)
+
+// macBoundaryKindName names a boundary kind for deterministic diagnostics.
+func macBoundaryKindName(kind macBoundaryKind) string {
+	switch kind {
+	case macBoundaryDirectory:
+		return "directory"
+	case macBoundaryRegularFile:
+		return "regular file"
+	case macBoundaryMissing:
+		return "missing"
+	default:
+		return "unclassifiable"
+	}
+}
+
+// macBoundaryKindValue is the canonical persisted spelling of one proven
+// boundary kind. Only kinds that can own a physical boundary have one; a
+// missing tree owns nothing.
+func macBoundaryKindValue(kind macBoundaryKind) (string, error) {
+	switch kind {
+	case macBoundaryDirectory:
+		return macBoundaryKindDirectoryValue, nil
+	case macBoundaryRegularFile:
+		return macBoundaryKindRegularFileValue, nil
+	default:
+		return "", fmt.Errorf("boundary kind %s has no persisted value", macBoundaryKindName(kind))
+	}
+}
+
+// parseMacBoundaryKindValue parses one persisted kind value. Anything that
+// is not a canonical persisted spelling is a database integrity failure
+// (fail closed), never a guessed kind.
+func parseMacBoundaryKindValue(s string) (macBoundaryKind, error) {
+	switch s {
+	case macBoundaryKindDirectoryValue:
+		return macBoundaryDirectory, nil
+	case macBoundaryKindRegularFileValue:
+		return macBoundaryRegularFile, nil
+	default:
+		return macBoundaryUnknown, fmt.Errorf("unknown persisted MAC boundary kind %q", s)
+	}
+}
+
+// macBoundaryKindFor classifies one canonical issued tree path by its
+// on-disk kind. An issued tree exists at issuance (the Session-create
+// boundary proved it); a missing tree is the proven-absence classification;
+// any other stat failure or an unsupported object kind (symlink, device,
+// socket, fifo) fails closed. The classification reads current host state
+// and is legitimate for creation, the removal relabel step, and legacy
+// ownership rows — never for reinterpreting a persisted boundary's kind.
+func macBoundaryKindFor(path string) (macBoundaryKind, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return macBoundaryMissing, nil
+		}
+		return macBoundaryUnknown, fmt.Errorf("cannot stat issued tree %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return macBoundaryDirectory, nil
+	}
+	if info.Mode().IsRegular() {
+		return macBoundaryRegularFile, nil
+	}
+	return macBoundaryUnknown, fmt.Errorf("issued tree %s is neither a directory nor a regular file", path)
 }
 
 // sessionMACDriver is the backend-specific adapter for Session MAC
@@ -30,27 +131,41 @@ type sessionMACCoverage struct {
 type sessionMACDriver interface {
 	// ensureCoverage ensures MAC coverage for a concrete canonical issued
 	// tree. Returns the actual coverage boundary (may be the tree or an
-	// ancestor). created is true if a new boundary was created.
+	// ancestor) with the boundary's kind where the backend proves it
+	// durably. created is true if a new boundary was created; a newly
+	// created boundary always carries its proven kind.
 	ensureCoverage(tree string) (coverage sessionMACCoverage, created bool, err error)
 
 	// verifyCoverage checks that a concrete canonical issued tree has valid
 	// MAC coverage without mutating state. Returns the actual coverage
-	// boundary.
+	// boundary with the boundary's kind where the backend proves it
+	// durably.
 	verifyCoverage(tree string) (coverage sessionMACCoverage, err error)
 
-	// removeBoundary removes a docker-helper-owned boundary.
-	// Only called when the coordinator has verified ownership.
-	removeBoundary(boundary string) error
+	// removeBoundary removes a docker-helper-owned boundary. kind is the
+	// durable creation-proven kind from the boundary's ownership metadata
+	// (macBoundaryUnknown for a legacy row recorded without one). The
+	// owned rule shape is decided by that durable kind, never by the
+	// current host object kind.
+	removeBoundary(boundary string, kind macBoundaryKind) error
 
-	// discoverHelperOwnedBoundaries returns boundaries intrinsically attributable
-	// to docker-helper. Used during startup to import pre-existing helper-owned
-	// boundaries into durable ownership metadata.
+	// discoverHelperOwnedBoundaries returns boundaries intrinsically
+	// attributable to docker-helper, with the durable kind each backend can
+	// prove for them. Used during startup to import pre-existing
+	// helper-owned boundaries into durable ownership metadata.
 	// Operator-compatible boundaries MUST NOT be returned.
-	discoverHelperOwnedBoundaries() ([]string, error)
+	discoverHelperOwnedBoundaries() ([]helperOwnedBoundary, error)
 
 	// backend returns the LSM backend identity for this driver
 	// ("apparmor" or "selinux").
 	backend() LSMBackend
+}
+
+// helperOwnedBoundary is one boundary the driver attributes intrinsically to
+// docker-helper, with the durable kind the backend can prove for it.
+type helperOwnedBoundary struct {
+	Boundary string
+	Kind     macBoundaryKind
 }
 
 // sessionLease records the coverage set one operation lease acquired, so the
@@ -133,10 +248,13 @@ func (c *sessionMACCoordinator) ensureBoundaryWithOwnership(tree string) (sessio
 	}
 
 	// Record ownership for newly-created boundaries before any dependent
-	// state is created.
+	// state is created. A newly created boundary always carries its proven
+	// kind: the ownership metadata captures the exact owned shape at
+	// creation, so later removal never re-derives it from mutable host
+	// state.
 	if newlyCreated {
-		if err := c.recordBoundaryOwnership(coverage.Boundary); err != nil {
-			c.driver.removeBoundary(coverage.Boundary) // best-effort cleanup
+		if err := c.recordBoundaryOwnership(coverage.Boundary, coverage.Kind); err != nil {
+			c.driver.removeBoundary(coverage.Boundary, coverage.Kind) // best-effort cleanup
 			return sessionMACCoverage{}, false, fmt.Errorf("%w: %w", ErrMACPreparation, err)
 		}
 	}
@@ -222,7 +340,14 @@ func (c *sessionMACCoordinator) rollbackPreparedBoundaries(prepared []string) {
 			c.deferredBoundaries[boundary] = true
 			continue
 		}
-		if err := c.driver.removeBoundary(boundary); err != nil {
+		kind, err := c.ownedBoundaryRemovalKind(boundary)
+		if err != nil {
+			opLog(context.Background()).Warn("MAC boundary rollback cannot read the durable owned kind, ownership preserved for retry",
+				slog.String("boundary", boundary),
+				slog.String("error", err.Error()))
+			continue
+		}
+		if err := c.driver.removeBoundary(boundary, kind); err != nil {
 			// Removal failed: ownership metadata stays for retry on the
 			// next startup reconciliation.
 			opLog(context.Background()).Warn("MAC boundary removal failed during rollback, ownership preserved for retry",
@@ -427,9 +552,9 @@ func (c *sessionMACCoordinator) importHelperOwnedBoundaries() error {
 		return err
 	}
 	for _, boundary := range boundaries {
-		if err := c.recordBoundaryOwnership(boundary); err != nil {
+		if err := c.recordBoundaryOwnership(boundary.Boundary, boundary.Kind); err != nil {
 			opLog(context.Background()).Warn("failed to record helper-owned boundary during import",
-				slog.String("boundary", boundary),
+				slog.String("boundary", boundary.Boundary),
 				slog.String("error", err.Error()))
 		}
 	}
@@ -503,7 +628,14 @@ func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, help
 		return
 	}
 
-	if err := c.driver.removeBoundary(boundary); err != nil {
+	kind, err := c.ownedBoundaryRemovalKind(boundary)
+	if err != nil {
+		opLog(context.Background()).Warn("MAC boundary removal cannot read the durable owned kind, ownership preserved for retry",
+			slog.String("boundary", boundary),
+			slog.String("error", err.Error()))
+		return
+	}
+	if err := c.driver.removeBoundary(boundary, kind); err != nil {
 		// Failed removal: keep ownership metadata for retry on next startup.
 		opLog(context.Background()).Warn("MAC boundary removal failed, ownership preserved for retry",
 			slog.String("boundary", boundary),
@@ -542,7 +674,14 @@ func (c *sessionMACCoordinator) retryDeferredBoundaries() {
 			continue
 		}
 
-		if err := c.driver.removeBoundary(boundary); err != nil {
+		kind, err := c.ownedBoundaryRemovalKind(boundary)
+		if err != nil {
+			opLog(context.Background()).Warn("deferred MAC boundary removal cannot read the durable owned kind, will retry on next startup",
+				slog.String("boundary", boundary),
+				slog.String("error", err.Error()))
+			continue
+		}
+		if err := c.driver.removeBoundary(boundary, kind); err != nil {
 			opLog(context.Background()).Warn("deferred MAC boundary removal failed, will retry on next startup",
 				slog.String("boundary", boundary),
 				slog.String("error", err.Error()))
@@ -643,7 +782,14 @@ func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 			c.deferredBoundaries[boundary] = true
 			continue
 		}
-		if err := c.driver.removeBoundary(boundary); err != nil {
+		kind, err := c.ownedBoundaryRemovalKind(boundary)
+		if err != nil {
+			opLog(context.Background()).Warn("stale MAC boundary removal cannot read the durable owned kind, will retry on next startup",
+				slog.String("boundary", boundary),
+				slog.String("error", err.Error()))
+			continue
+		}
+		if err := c.driver.removeBoundary(boundary, kind); err != nil {
 			opLog(context.Background()).Warn("stale MAC boundary removal failed, will retry on next startup",
 				slog.String("boundary", boundary),
 				slog.String("error", err.Error()))
@@ -728,13 +874,61 @@ func (c *sessionMACCoordinator) listLiveSessionsWithIDs() ([]liveSessionWithID, 
 	return sessions, rows.Err()
 }
 
-// recordBoundaryOwnership stores ownership metadata for a docker-helper-owned boundary.
-func (c *sessionMACCoordinator) recordBoundaryOwnership(boundary string) error {
+// recordBoundaryOwnership stores ownership metadata for a docker-helper-owned
+// boundary, including the durable creation-proven kind of the owned boundary
+// shape (nil for macBoundaryUnknown — the legacy row without a proven kind).
+func (c *sessionMACCoordinator) recordBoundaryOwnership(boundary string, kind macBoundaryKind) error {
+	var kindValue any
+	if kind != macBoundaryUnknown {
+		value, err := macBoundaryKindValue(kind)
+		if err != nil {
+			return err
+		}
+		kindValue = value
+	}
 	_, err := c.db.Exec(
-		`INSERT OR REPLACE INTO mac_boundaries (backend, boundary) VALUES (?, ?)`,
-		c.backend(), boundary,
+		`INSERT OR REPLACE INTO mac_boundaries (backend, boundary, kind) VALUES (?, ?, ?)`,
+		c.backend(), boundary, kindValue,
 	)
 	return err
+}
+
+// boundaryOwnedKind resolves the durable creation-proven kind of a
+// helper-owned boundary from the ownership metadata: macBoundaryUnknown for
+// a legacy row recorded without a kind, a parse failure for a non-canonical
+// stored value (database integrity failure, fail closed), and
+// macBoundaryUnknown for an absent row (the caller decides whether that is
+// reachable).
+func (c *sessionMACCoordinator) boundaryOwnedKind(boundary string) (macBoundaryKind, error) {
+	var kindValue sql.NullString
+	err := c.db.QueryRow(
+		`SELECT kind FROM mac_boundaries WHERE backend = ? AND boundary = ?`,
+		c.backend(), boundary,
+	).Scan(&kindValue)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return macBoundaryUnknown, nil
+		}
+		return macBoundaryUnknown, err
+	}
+	if !kindValue.Valid || kindValue.String == "" {
+		return macBoundaryUnknown, nil
+	}
+	return parseMacBoundaryKindValue(kindValue.String)
+}
+
+// ownedBoundaryRemovalKind resolves the durable kind for one removal attempt.
+// It is the single kind source of every coordinator removal decision: the
+// creation-proven kind persisted with the ownership metadata. A failed read
+// is a removal failure (the decision owner may not proceed on an unreadable
+// ownership record); macBoundaryUnknown is the legacy row without one.
+// Must be called with c.mu held.
+func (c *sessionMACCoordinator) ownedBoundaryRemovalKind(boundary string) (macBoundaryKind, error) {
+	kind, err := c.boundaryOwnedKind(boundary)
+	if err != nil {
+		return macBoundaryUnknown, fmt.Errorf("cannot read the durable kind of owned boundary %s: %w", boundary, err)
+	}
+	return kind, nil
 }
 
 // isBoundaryOwnedByHelper checks if the boundary is owned by docker-helper
@@ -835,6 +1029,20 @@ func macBoundaryOverlap(a, b string) bool {
 	return rel != pathDisjoint
 }
 
+// appArmorBoundaryCoversTree reports whether one persisted managed boundary
+// provides MAC reachability for the canonical issued tree. Kind-aware: a
+// directory boundary covers the exact path and every descendant; a
+// regular-file boundary covers exactly its canonical path and NEVER a
+// descendant — the fragment's persisted kind, not mutable host state,
+// decides, so a file replaced by a directory can never widen the exact-file
+// boundary into recursive coverage.
+func appArmorBoundaryCoversTree(boundary appArmorManagedBoundary, tree string) bool {
+	if boundary.Kind == appArmorBoundaryRegularFile {
+		return boundary.Path == tree
+	}
+	return pathWithin(boundary.Path, tree)
+}
+
 // appArmorMACDriver wraps the AppArmor manager for the coordinator.
 type appArmorMACDriver struct {
 	addManagedBoundary    func(string) (boundaryResult, error)
@@ -849,8 +1057,12 @@ func (d *appArmorMACDriver) ensureCoverage(workspace string) (sessionMACCoverage
 	}
 
 	for _, boundary := range boundaries {
-		if boundaryCoversTree(boundary.Path, workspace) {
-			return sessionMACCoverage{Boundary: boundary.Path, HelperOwned: true}, false, nil
+		if appArmorBoundaryCoversTree(boundary, workspace) {
+			return sessionMACCoverage{
+				Boundary:    boundary.Path,
+				HelperOwned: true,
+				Kind:        macBoundaryKindForAppArmor(boundary.Kind),
+			}, false, nil
 		}
 	}
 
@@ -858,7 +1070,11 @@ func (d *appArmorMACDriver) ensureCoverage(workspace string) (sessionMACCoverage
 	if err != nil {
 		return sessionMACCoverage{}, false, err
 	}
-	return sessionMACCoverage{Boundary: workspace, HelperOwned: true}, result.Changed, nil
+	return sessionMACCoverage{
+		Boundary:    result.Path,
+		HelperOwned: true,
+		Kind:        macBoundaryKindForAppArmor(result.Kind),
+	}, result.Changed, nil
 }
 
 func (d *appArmorMACDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
@@ -867,28 +1083,50 @@ func (d *appArmorMACDriver) verifyCoverage(workspace string) (sessionMACCoverage
 		return sessionMACCoverage{}, err
 	}
 	for _, boundary := range boundaries {
-		if boundaryCoversTree(boundary.Path, workspace) {
-			return sessionMACCoverage{Boundary: boundary.Path, HelperOwned: true}, nil
+		if appArmorBoundaryCoversTree(boundary, workspace) {
+			return sessionMACCoverage{
+				Boundary:    boundary.Path,
+				HelperOwned: true,
+				Kind:        macBoundaryKindForAppArmor(boundary.Kind),
+			}, nil
 		}
 	}
 	return sessionMACCoverage{}, fmt.Errorf("tree %s not covered by any managed AppArmor boundary", workspace)
 }
 
-func (d *appArmorMACDriver) removeBoundary(boundary string) error {
+// removeBoundary removes one managed boundary by its canonical path. The
+// fragment persists each boundary's kind, so the durable-kind parameter of
+// the driver contract is already owned by the boundary state itself; the
+// coordinator's kind is informational here and never re-derives the removal.
+func (d *appArmorMACDriver) removeBoundary(boundary string, _ macBoundaryKind) error {
 	_, err := d.removeManagedBoundary(boundary)
 	return err
 }
 
-func (d *appArmorMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
+func (d *appArmorMACDriver) discoverHelperOwnedBoundaries() ([]helperOwnedBoundary, error) {
 	boundaries, err := d.listManagedBoundaries()
 	if err != nil {
 		return nil, err
 	}
-	paths := make([]string, 0, len(boundaries))
+	discovered := make([]helperOwnedBoundary, 0, len(boundaries))
 	for _, boundary := range boundaries {
-		paths = append(paths, boundary.Path)
+		discovered = append(discovered, helperOwnedBoundary{
+			Boundary: boundary.Path,
+			Kind:     macBoundaryKindForAppArmor(boundary.Kind),
+		})
 	}
-	return paths, nil
+	return discovered, nil
+}
+
+// macBoundaryKindForAppArmor translates the fragment's backend-native
+// boundary kind marker into the canonical boundary kind. The AppArmor
+// fragment vocabulary is backend state; the canonical kind is the product
+// concept both drivers and the ownership metadata share.
+func macBoundaryKindForAppArmor(kind appArmorBoundaryKind) macBoundaryKind {
+	if kind == appArmorBoundaryRegularFile {
+		return macBoundaryRegularFile
+	}
+	return macBoundaryDirectory
 }
 
 func (d *appArmorMACDriver) backend() LSMBackend {
@@ -901,61 +1139,9 @@ func (d *appArmorMACDriver) backend() LSMBackend {
 type selinuxFcontextOps interface {
 	listCoveringFcontexts(tree string) ([]string, error)
 	verifyActualType(tree string) error
-	restoreconTree(tree string, kind selinuxTreeKind) error
-	ensureTreeFcontext(tree string, kind selinuxTreeKind) (bool, error)
-	removeFcontextBoundary(boundary string) error
-}
-
-// selinuxTreeKind describes the concrete filesystem kind of one issued
-// Session MAC boundary. An issued tree may be a directory or a regular
-// file; the backend mechanics differ (recursive vs exact fcontext rule and
-// restorecon invocation).
-type selinuxTreeKind int
-
-const (
-	selinuxTreeDirectory selinuxTreeKind = iota
-	selinuxTreeRegularFile
-	// selinuxTreeMissing records the proven absence of the tree (ENOENT on
-	// lstat): no surviving inode exists, so a removal has nothing left to
-	// relabel. It is a classification result, never a guess — any other
-	// stat failure is an error, not Missing.
-	selinuxTreeMissing
-)
-
-// selinuxTreeKindFor classifies one canonical issued tree path by its
-// on-disk kind. An issued tree exists at issuance (the Session-create
-// boundary proved it); a missing tree is the proven-absence classification;
-// any other stat failure or an unsupported object kind (symlink, device,
-// socket, fifo) fails closed.
-func selinuxTreeKindFor(path string) (selinuxTreeKind, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return selinuxTreeMissing, nil
-		}
-		return 0, fmt.Errorf("cannot stat issued tree %s: %w", path, err)
-	}
-	if info.IsDir() {
-		return selinuxTreeDirectory, nil
-	}
-	if info.Mode().IsRegular() {
-		return selinuxTreeRegularFile, nil
-	}
-	return 0, fmt.Errorf("issued tree %s is neither a directory nor a regular file", path)
-}
-
-// selinuxTreeKindName names a tree kind for deterministic diagnostics.
-func selinuxTreeKindName(kind selinuxTreeKind) string {
-	switch kind {
-	case selinuxTreeDirectory:
-		return "directory"
-	case selinuxTreeRegularFile:
-		return "regular file"
-	case selinuxTreeMissing:
-		return "missing"
-	default:
-		return "unclassifiable"
-	}
+	restoreconTree(tree string, kind macBoundaryKind) error
+	ensureTreeFcontext(tree string, kind macBoundaryKind) (bool, error)
+	removeFcontextBoundary(boundary string, kind macBoundaryKind) error
 }
 
 // selinuxMACDriver is the MAC driver backed by selinuxFcontextManager
@@ -964,8 +1150,8 @@ func selinuxTreeKindName(kind selinuxTreeKind) string {
 type selinuxMACDriver struct {
 	mgr selinuxFcontextOps
 	// treeKind classifies the issued tree's filesystem kind. Production
-	// wires selinuxTreeKindFor; tests inject a fake.
-	treeKind func(string) (selinuxTreeKind, error)
+	// wires macBoundaryKindFor; tests inject a fake.
+	treeKind func(string) (macBoundaryKind, error)
 }
 
 func (d *selinuxMACDriver) ensureCoverage(tree string) (sessionMACCoverage, bool, error) {
@@ -977,8 +1163,8 @@ func (d *selinuxMACDriver) ensureCoverage(tree string) (sessionMACCoverage, bool
 	if err != nil {
 		return sessionMACCoverage{}, false, err
 	}
-	if kind != selinuxTreeDirectory && kind != selinuxTreeRegularFile {
-		return sessionMACCoverage{}, false, fmt.Errorf("issued tree %s is %s; a missing or unsupported tree cannot be covered", tree, selinuxTreeKindName(kind))
+	if kind != macBoundaryDirectory && kind != macBoundaryRegularFile {
+		return sessionMACCoverage{}, false, fmt.Errorf("issued tree %s is %s; a missing or unsupported tree cannot be covered", tree, macBoundaryKindName(kind))
 	}
 
 	// Check if an existing boundary covers this tree.
@@ -1005,12 +1191,14 @@ func (d *selinuxMACDriver) ensureCoverage(tree string) (sessionMACCoverage, bool
 		)
 	}
 
-	// Prepare the tree as a helper-owned boundary.
+	// Prepare the tree as a helper-owned boundary. The boundary's kind is the
+	// kind proven here at creation: the driver returns it so the coordinator
+	// can persist the durable owned rule shape with the ownership metadata.
 	newlyCreated, err := d.mgr.ensureTreeFcontext(tree, kind)
 	if err != nil {
 		return sessionMACCoverage{}, false, err
 	}
-	return sessionMACCoverage{Boundary: tree, HelperOwned: true}, newlyCreated, nil
+	return sessionMACCoverage{Boundary: tree, HelperOwned: true, Kind: kind}, newlyCreated, nil
 }
 
 func (d *selinuxMACDriver) verifyCoverage(tree string) (sessionMACCoverage, error) {
@@ -1053,17 +1241,20 @@ func (d *selinuxMACDriver) findExistingCoverage(tree string) (sessionMACCoverage
 	return sessionMACCoverage{}, false, nil
 }
 
-func (d *selinuxMACDriver) removeBoundary(boundary string) error {
+// removeBoundary removes the boundary whose durable creation-proven kind the
+// coordinator resolved from the ownership metadata. The owned rule shape is
+// that durable kind, never the current host object kind.
+func (d *selinuxMACDriver) removeBoundary(boundary string, kind macBoundaryKind) error {
 	if isUnderHome(boundary) {
 		return nil
 	}
-	return d.mgr.removeFcontextBoundary(boundary)
+	return d.mgr.removeFcontextBoundary(boundary, kind)
 }
 
 // discoverHelperOwnedBoundaries returns nil because the driver does not know
 // durable helper ownership; sessionMACCoordinator resolves HelperOwned using
 // mac_boundaries metadata.
-func (d *selinuxMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
+func (d *selinuxMACDriver) discoverHelperOwnedBoundaries() ([]helperOwnedBoundary, error) {
 	return nil, nil
 }
 
@@ -1100,7 +1291,7 @@ func newSessionMACDriver(mode DeploymentMode, detectLSM func() (LSMBackend, erro
 	case LSMSELinux:
 		return &selinuxMACDriver{
 			mgr:      newSELinuxFcontextManager(),
-			treeKind: selinuxTreeKindFor,
+			treeKind: macBoundaryKindFor,
 		}, nil
 	default:
 		return nil, nil
