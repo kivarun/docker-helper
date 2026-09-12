@@ -596,9 +596,216 @@ else
   acc_fail "SE external RW write failed: $(redact </tmp/uat-wls-se-w.log | tail -3)"
 fi
 
-# The SE session is cleaned up with the scenario set (the final S12 residue
-# checks own the cleanup proof); its runtime state is ordinary workload
-# state.
+# SE introspection: session show and self carry the issued external roots.
+SE_SHOW="$(dh session show --system --token-file "/tmp/uat-wls-tok-$SE_ID" --id "$SE_ID" --json 2>/dev/null || true)"
+if printf '%s' "$SE_SHOW" | grep -q '"'"$SE_CACHE"'"' \
+    && printf '%s' "$SE_SHOW" | grep -q '"'"$SE_HELPER"'"'; then
+  acc_ok "SE session show carries the issued external roots (RW cache + RO helper)"
+else
+  acc_fail "SE session show does not expose the issued external roots: $(printf '%s' "$SE_SHOW" | redact | head -2)"
+fi
+SE_SELF="$(dh self --system --token-file "/tmp/uat-wls-tok-$SE_ID" --json 2>/dev/null || true)"
+if printf '%s' "$SE_SELF" | grep -q '"'"$SE_CACHE"'"' \
+    && printf '%s' "$SE_SELF" | grep -q 'read_write'; then
+  acc_ok "SE self carries the issued external RW root"
+else
+  acc_fail "SE self does not expose the issued external RW root: $(printf '%s' "$SE_SELF" | redact | head -2)"
+fi
+
+# SE fcontext coverage: the external issued RW tree carries the helper-owned
+# persistent coverage while the session is live; the ceiling parent never
+# gets a rule merely by existing.
+se_fcontext_has_rule() {
+  local pattern="$1"
+  semanage fcontext -l -C 2>/dev/null | grep -F -- "$pattern" >/dev/null
+}
+if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
+  acc_ok "SE external RW tree carries helper-owned persistent fcontext coverage"
+else
+  acc_fail "SE external RW tree has no persistent fcontext coverage: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -3)"
+fi
+if se_fcontext_has_rule "$SE_OPT(/.*)?"; then
+  acc_fail "SE the ceiling parent $SE_OPT must not gain coverage merely by being authorized (only issued trees do)"
+else
+  acc_ok "SE ceiling parent has no MAC state from authorization alone"
+fi
+SE_LABEL="$(ls -Zd "$SE_CACHE" 2>/dev/null | awk '{print $1}')"
+case "$SE_LABEL" in
+  *docker_helper_workspace_t*) acc_ok "SE external RW tree actually relabeled to docker_helper_workspace_t" ;;
+  *) acc_fail "SE external RW tree label wrong: '$SE_LABEL'" ;;
+esac
+
+# SE share: a second Session issuing the same external tree must prevent
+# early release of the coverage when the first Session is deleted.
+SE2_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
+SE2_ID="$(printf '%s' "$SE2_OUT" | json_field id)"
+if [ -n "$SE2_ID" ]; then
+  printf '%s' "$SE2_OUT" | json_field token > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
+  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE_ID" --id "$SE_ID" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
+    acc_ok "SE shared external tree survives the first Session deletion (second Session keeps it)"
+  else
+    acc_fail "SE external fcontext coverage was released while a second Session still issues the tree"
+  fi
+  SE2_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE2_ID")" \
+    dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
+    sh -ec 'echo se2-write > /cache/se2.txt' >/tmp/uat-wls-se2.log 2>&1; echo $?)"
+  if [ "$SE2_W" -eq 0 ] && [ "$(cat "$SE_CACHE/se2.txt" 2>/dev/null)" = "se2-write" ]; then
+    acc_ok "SE second Session still writes the shared external tree"
+  else
+    acc_fail "SE second Session lost write access to the shared tree (ec=$SE2_W)"
+  fi
+  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE2_ID" --id "$SE2_ID" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
+    acc_fail "SE external fcontext coverage must be relinquished after the last Session released it"
+  else
+    acc_ok "SE external fcontext coverage relinquished after the last Session deletion"
+  fi
+  SE_RELBL="$(ls -Zd "$SE_CACHE" 2>/dev/null | awk '{print $1}')"
+  case "$SE_RELBL" in
+    *docker_helper_workspace_t*) acc_fail "SE external tree label not restored after the last Session deletion: '$SE_RELBL'" ;;
+    *) acc_ok "SE external tree labels restored after the last Session deletion" ;;
+  esac
+  rm -f "$SE_CACHE/se2.txt"
+else
+  acc_fail "SE share scenario setup failed: $(printf '%s' "$SE2_OUT" | redact | tail -2)"
+fi
+
+# SE overlap: issued ancestor/descendant trees survive either deletion order.
+SE3_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_OPT=read_write" \
+  --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
+SE3_ID="$(printf '%s' "$SE3_OUT" | json_field id)"
+if [ -n "$SE3_ID" ]; then
+  printf '%s' "$SE3_OUT" | json_field token > "/tmp/uat-wls-tok-$SE3_ID"; chmod 600 "/tmp/uat-wls-tok-$SE3_ID"
+  # The projection collapses the descendant into the issued ancestor: only
+  # the ancestor boundary is prepared.
+  if se_fcontext_has_rule "$SE_OPT(/.*)?" && ! se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
+    acc_ok "SE nested issued roots collapse to the single ancestor MAC boundary"
+  else
+    acc_fail "SE nested issued roots did not collapse (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -3))"
+  fi
+  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE3_ID" --id "$SE3_ID" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_OPT(/.*)?"; then
+    acc_fail "SE ancestor boundary must be removed after the only session released it"
+  else
+    acc_ok "SE ancestor boundary removed after the only session deletion"
+  fi
+  rm -f "$SE_CACHE/written.txt" 2>/dev/null || true
+else
+  acc_fail "SE overlap scenario setup failed: $(printf '%s' "$SE3_OUT" | redact | tail -2)"
+fi
+
+# SE reverse overlap: issue the child first, then the parent; deleting the
+# child must keep the parent usable, deleting the parent cleans up.
+SE4_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
+SE4_ID="$(printf '%s' "$SE4_OUT" | json_field id)"
+SE5_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_OPT=read_write" 2>&1 || true)"
+SE5_ID="$(printf '%s' "$SE5_OUT" | json_field id)"
+if [ -n "$SE4_ID" ] && [ -n "$SE5_ID" ]; then
+  printf '%s' "$SE4_OUT" | json_field token > "/tmp/uat-wls-tok-$SE4_ID"; chmod 600 "/tmp/uat-wls-tok-$SE4_ID"
+  printf '%s' "$SE5_OUT" | json_field token > "/tmp/uat-wls-tok-$SE5_ID"; chmod 600 "/tmp/uat-wls-tok-$SE5_ID"
+  # Both boundaries exist (created in reverse order: child, then parent).
+  if se_fcontext_has_rule "$SE_CACHE(/.*)?" && se_fcontext_has_rule "$SE_OPT(/.*)?"; then
+    acc_ok "SE reverse-order issuance prepares both disjoint boundaries"
+  else
+    acc_fail "SE reverse-order issuance boundaries missing (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -4))"
+  fi
+  # Delete the child session first: the parent boundary stays.
+  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE4_ID" --id "$SE4_ID" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_OPT(/.*)?"; then
+    acc_ok "SE child deletion first keeps the parent boundary"
+  else
+    acc_fail "SE child deletion removed the parent boundary needed by the parent session"
+  fi
+  # Delete the parent session: everything is released and restored.
+  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE5_ID" --id "$SE5_ID" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_OPT(/.*)?" || se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
+    acc_fail "SE final deletion leaves fcontext residue (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -4))"
+  else
+    acc_ok "SE final deletion relinquishes every external boundary"
+  fi
+  SE_RELBL2="$(ls -Zd "$SE_OPT" 2>/dev/null | awk '{print $1}')"
+  case "$SE_RELBL2" in
+    *docker_helper_workspace_t*) acc_fail "SE parent tree label not restored after final deletion: '$SE_RELBL2'" ;;
+    *) acc_ok "SE parent tree labels restored after final deletion" ;;
+  esac
+else
+  acc_fail "SE reverse overlap setup failed: $(printf '%s' "$SE4_OUT" "$SE5_OUT" | redact | tail -2)"
+fi
+
+# SE regular file: an issued regular-file RW root is writable and its exact
+# fcontext coverage is relinquished on deletion.
+SE_FILE="$SE_OPT/worker.env"
+printf 'se-file-src\n' > "$SE_FILE"
+chown "$PRINCIPAL:$PRINCIPAL" "$SE_FILE" 2>/dev/null || true
+SE6_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_FILE=read_write" 2>&1 || true)"
+SE6_ID="$(printf '%s' "$SE6_OUT" | json_field id)"
+if [ -n "$SE6_ID" ]; then
+  printf '%s' "$SE6_OUT" | json_field token > "/tmp/uat-wls-tok-$SE6_ID"; chmod 600 "/tmp/uat-wls-tok-$SE6_ID"
+  SE6_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE6_ID")" \
+    dh run --image alpine:3.24 --mount "$SE_FILE:/etc/worker.env" -- \
+    sh -ec 'echo file-write > /etc/worker.env' >/tmp/uat-wls-se6.log 2>&1; echo $?)"
+  if [ "$SE6_W" -eq 0 ] && [ "$(cat "$SE_FILE" 2>/dev/null)" = "file-write" ]; then
+    acc_ok "SE issued regular-file RW root is writable through the backend"
+  else
+    acc_fail "SE regular-file RW write failed (ec=$SE6_W): $(redact </tmp/uat-wls-se6.log | tail -2)"
+  fi
+  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE6_ID" --id "$SE6_ID" >/dev/null 2>&1
+  if se_fcontext_has_rule "$SE_FILE"; then
+    acc_fail "SE regular-file boundary must be relinquished after deletion"
+  else
+    acc_ok "SE regular-file boundary relinquished after deletion"
+  fi
+  printf 'se-file-src\n' > "$SE_FILE"
+else
+  acc_fail "SE regular-file scenario setup failed: $(printf '%s' "$SE6_OUT" | redact | tail -2)"
+fi
+
+# SE restart: a live session's external coverage survives restart and the
+# reconciled binding keeps the write path working.
+SE7_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
+SE7_ID="$(printf '%s' "$SE7_OUT" | json_field id)"
+if [ -n "$SE7_ID" ]; then
+  printf '%s' "$SE7_OUT" | json_field token > "/tmp/uat-wls-tok-$SE7_ID"; chmod 600 "/tmp/uat-wls-tok-$SE7_ID"
+  systemctl restart docker-helper.service >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    systemctl is-active --quiet docker-helper.service && break
+    sleep 1
+  done
+  if se_fcontext_has_rule "$SE_CACHE(/.*)?" \
+      && DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE7_ID")" \
+        dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
+        sh -ec 'echo restart-write > /cache/restart.txt' >/tmp/uat-wls-se7.log 2>&1 \
+      && [ "$(cat "$SE_CACHE/restart.txt" 2>/dev/null)" = "restart-write" ]; then
+    acc_ok "SE restart/reconciliation restores live issued external coverage and write access"
+  else
+    acc_fail "SE restart lost the external coverage or write access: $(redact </tmp/uat-wls-se7.log | tail -2)"
+  fi
+  dh session delete --system --token-file "/tmp/uat-wls-tok-$SE7_ID" --id "$SE7_ID" >/dev/null 2>&1
+  rm -f "$SE_CACHE/restart.txt"
+  if se_fcontext_has_rule "$SE_CACHE(/.*)?"; then
+    acc_fail "SE final cleanup leaves external fcontext residue (rules: $(semanage fcontext -l -C 2>/dev/null | grep docker_helper_workspace_t | head -3))"
+  else
+    acc_ok "SE no external fcontext residue after the final cleanup"
+  fi
+else
+  acc_fail "SE restart scenario setup failed: $(printf '%s' "$SE7_OUT" | redact | tail -2)"
+fi
+rm -f "/tmp/uat-wls-tok-$SE_ID" "/tmp/uat-wls-tok-$SE2_ID" "/tmp/uat-wls-tok-$SE3_ID" \
+  "/tmp/uat-wls-tok-$SE4_ID" "/tmp/uat-wls-tok-$SE5_ID" "/tmp/uat-wls-tok-$SE6_ID" \
+  "/tmp/uat-wls-tok-$SE7_ID" 2>/dev/null || true
 
 # ==============================================================================
 # scenario S7: bindfs projection really used on the packaged RPM path

@@ -665,3 +665,39 @@ func TestCoordinatorStartupConcurrentDeleteRunRace(t *testing.T) {
 		}
 	}
 }
+
+// TestCoordinatorInsertFailureRollback proves the create transaction's
+// commit point rollback: when insertFn (the Session+snapshot commit) fails,
+// the boundaries this call prepared are rolled back through the canonical
+// removal owner and no binding or consumer registration survives.
+func TestCoordinatorInsertFailureRollback(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	ws, err := os.MkdirTemp(allowedRoot, "ins-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext, err := os.MkdirTemp(allowedRoot, "ins-ext-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	injected := errors.New("session creation transaction failed")
+	_, err = mac.CreateSessionBinding("sess-ins", []string{ws, ext}, func([]workspaceMACCoverage) error {
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("err = %v, want the injected insert failure", err)
+	}
+	mac.mu.Lock()
+	_, hasBinding := mac.sessionBindings["sess-ins"]
+	mac.mu.Unlock()
+	if hasBinding {
+		t.Fatal("no binding may be registered when the create commit fails")
+	}
+	for _, boundary := range []string{ws, ext} {
+		if _, err := driver.verifyCoverage(boundary); err == nil {
+			t.Errorf("prepared boundary %s must be rolled back after the failed create commit", boundary)
+		}
+	}
+}
