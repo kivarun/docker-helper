@@ -46,25 +46,6 @@ docker-helper session create --workspace .
 and use the returned session token for Docker operations exactly as
 described below.
 
-When the Launcher's effective policy permits finer per-Session control,
-the creating authority may issue additional filesystem roots at
-issuance time with a repeatable `--filesystem-root PATH=ACCESS` flag
-(PATH is an absolute host path inside the target Launcher's effective
-allowed roots; ACCESS `read_write` or `read_only`). The workspace stays
-mandatory and receives the maximum permitted ceiling mode; a root at the
-canonical workspace path explicitly narrows it:
-
-```bash
-docker-helper session create --workspace /home/michael/work/git/BoxProbe \
-  --filesystem-root /home/michael/work/git/BoxProbe=read_only \
-  --filesystem-root /opt/michael/cache=read_write
-```
-
-The request may only narrow the target Launcher's ceiling; a widening
-request is refused `invalid_filesystem_policy` before the Session exists.
-Omitting the flag keeps the inherited behavior. There is no post-create
-Session filesystem mutation.
-
 `GET /auth` (HTTP, with the installed credential as the Bearer token)
 reports the authority: the response is `{"authority":"launcher",...}` or
 `{"authority":"principal",...}`. The credential is consumed by the existing
@@ -112,12 +93,6 @@ DOCKER_HELPER_SESSION_TOKEN
 
 Never display its value.
 
-To introspect what your own credential is authorized as (its class, its
-workspace snapshot for a session bearer, its allowed-root scope for
-Principal and Launcher credentials), use `docker-helper self` (HTTP:
-`GET /self` with the same bearer). It is read-only and returns exactly the
-authority the credential already has — no more.
-
 The Docker Helper socket is normally:
 
 ```text
@@ -130,16 +105,12 @@ If `DOCKER_HELPER_SOCKET_PATH` is set, use that socket path instead.
 
 Both interfaces share the same path semantics. Define once, apply everywhere.
 
-- **Build contexts** are workspace-relative by default; an absolute host
-  path inside the session workspace is also accepted (containment is
-  daemon-validated).
+- **Build contexts** are always relative to the session workspace.
 - **Mount sources** are never agent-container absolute paths such as
   `/workspace/...`. The accepted source depends on deployment mode:
   - in **user mode**, only the workspace root source `.` is accepted;
   - in **system mode**, a workspace-relative file or subdirectory source
-    is accepted, and an absolute host path is accepted when it lies inside
-    the session's issued filesystem snapshot (an additional PATH/ACCESS
-    entry in `session show`); any other absolute path is refused;
+    is accepted;
   - if the deployment mode is not explicitly known, use `.` as the portable
     mount source.
 - **Mount targets** are absolute paths inside the launched container.
@@ -148,34 +119,6 @@ Both interfaces share the same path semantics. Define once, apply everywhere.
 
 Do not call operator commands such as `config show mode` to discover the
 deployment mode.
-
-### Session filesystem policy
-
-The session's filesystem policy is an immutable snapshot issued when the
-session was created (visible through `session show` as a PATH/ACCESS
-table; do not run `session show` unless you were provisioned with a
-credential that authorizes it). It does not change during the session's
-lifetime, and parent allowed-root policy changes do not affect an
-already-issued session.
-
-What this means for mounts:
-
-- A requested **writable** mount can be refused with
-  **`read_only_root`** when the source resolves to a read-only region of
-  the issued snapshot, or when it would cover such a region. This is a
-  policy refusal, distinct from `invalid_mount` (which reports a
-  structurally invalid mount). Correct responses are to request the
-  source read-only or to stop and report the policy limitation — never
-  to retry the same writable request, re-spell the source path (for
-  example through a symlink), or bypass Docker Helper.
-- If a source is only needed for reading, request it read-only
-  (`--mount source:target:ro` or `"read_only": true`). A read-only
-  request is valid for a source in either access mode.
-- If the workload genuinely requires write access that the session
-  snapshot forbids, report the policy limitation to the user and request
-  a suitable session from the environment owner. Do not attempt to
-  bypass Docker Helper or use symlink spellings to widen authority; the
-  daemon decides on the canonical resolved source, never on the spelling.
 
 ### Trusted CA injection
 
@@ -302,16 +245,6 @@ System-mode-only: mount a workspace-relative file or subdirectory:
 docker-helper run \
   --image IMAGE \
   --mount relative/source:/container/path \
-  -- command arg...
-```
-
-System-mode-only: mount an issued absolute filesystem root (a
-`--filesystem-root` entry of the session's issued snapshot):
-
-```bash
-docker-helper run \
-  --image IMAGE \
-  --mount /opt/agent/cache:/cache \
   -- command arg...
 ```
 
@@ -534,11 +467,6 @@ Do not describe Docker Helper as unavailable after an HTTP response.
   policy was rejected. After this error, inspect the source, target, and
   deployment-mode restrictions described in the Path model section, then
   correct the request.
-- **`read_only_root`** specifically means the issued session filesystem
-  policy refuses a writable exposure of the source. This is a policy
-  refusal, not a structural error and not daemon unavailability: request
-  the source read-only when reads suffice, or report the policy
-  limitation as described in the Session filesystem policy section.
 - **Transport/connectivity failure** (e.g., inability to connect to the
   configured Unix socket) is the only condition that indicates Docker Helper
   is unavailable.

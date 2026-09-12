@@ -18,7 +18,7 @@ import (
 func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "deluser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "deluser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 	}
 	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "deluser"))
 
-	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", home, AllowedRootAccessReadWrite, allowedRootPaths(app.Config.AllowedRoots)); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", home, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("addAllowedRoot: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 func TestPrincipalDeleteSessionTokenInvalidated(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "deltokenuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "deltokenuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestPrincipalDeleteSessionTokenInvalidated(t *testing.T) {
 func TestPrincipalDeleteCredentialTokenInvalidated(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "delcreduser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delcreduser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestPrincipalDeleteCredentialTokenInvalidated(t *testing.T) {
 func TestPrincipalDeleteAdminSessionUnaffected(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "deladminuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "deladminuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestPrincipalDeleteAdminSessionUnaffected(t *testing.T) {
 		return "1053", "1053", home, nil
 	}
 
-	adminResult, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	adminResult, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestPrincipalDeleteAdminSessionUnaffected(t *testing.T) {
 func TestPrincipalDisableDeletesSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "disuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestPrincipalDisableDeletesSessions(t *testing.T) {
 func TestPrincipalDisableIdempotent(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "disidempuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disidempuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestPrincipalDisableIdempotent(t *testing.T) {
 func TestPrincipalEnableDoesNotRestoreSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "disenuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disenuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestPrincipalEnableDoesNotRestoreSessions(t *testing.T) {
 func TestPrincipalDeleteAPI204(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "api204user")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "api204user")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +420,7 @@ func TestPrincipalDeleteAPI204(t *testing.T) {
 func TestPrincipalCheckedDeleteCleansRuntimeDirsWhenOwnerRemovalFails(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "prdelclean")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "prdelclean")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestPrincipalDeleteAPI404(t *testing.T) {
 func TestPrincipalDeleteAPI401(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "api401user")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "api401user")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +649,7 @@ func TestPrincipalDeleteCLIHelp(t *testing.T) {
 func TestPrincipalDisableCredentialStillWorks(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "discreduser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "discreduser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +706,7 @@ func TestPrincipalDisableCredentialStillWorks(t *testing.T) {
 func TestPrincipalDisableSessionTokenUnauthorized(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "disauthuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disauthuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -765,7 +765,7 @@ func TestPrincipalDisableSessionTokenUnauthorized(t *testing.T) {
 func TestPrincipalDeleteAuditEvent(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "auditdeluser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditdeluser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -846,7 +846,7 @@ func TestPrincipalDeleteAuditNotFound(t *testing.T) {
 func TestPrincipalDeleteAuditNoTokenInOutput(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "audittokenuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "audittokenuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -893,7 +893,7 @@ func TestPrincipalDeleteAuditNoTokenInOutput(t *testing.T) {
 func TestPrincipalDeleteMultipleSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "delsessuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delsessuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -955,7 +955,7 @@ func TestPrincipalDeleteMultipleSessions(t *testing.T) {
 func TestPrincipalDeleteWithExpiredSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "delexpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delexpuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1016,7 +1016,7 @@ func TestPrincipalDisableConcurrentConfigReload(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	baseCfg := app.getConfig()
-	allowedRoot := baseCfg.AllowedRoots[0].Path
+	allowedRoot := baseCfg.AllowedRoots[0]
 	home := filepath.Join(allowedRoot, "home", "configraceuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
@@ -1113,7 +1113,7 @@ func TestPrincipalDeleteConcurrentConfigReload(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	baseCfg := app.getConfig()
-	allowedRoot := baseCfg.AllowedRoots[0].Path
+	allowedRoot := baseCfg.AllowedRoots[0]
 	home := filepath.Join(allowedRoot, "home", "delconfigraceuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)

@@ -12,16 +12,8 @@
 #   1. preflight: Docker, systemd, versions
 #   2. artifact production + system-mode install + confinement
 #   3. operator surface: principal + credential; admin and principal sessions
-#   3b. Release 2.2 self-introspection smoke: the principal credential, the
-#       Session bearer, the admin self_not_available contract, and the
-#       non-disclosing unknown-credential 401
 #   4. pull + run (uid/gid/workdir + container exit-code propagation)
 #   5. workspace mounts: RW write, RO read, RO write rejected, no host leak
-#   5b. Release 2.2 access-mode smoke: a policy read_only region refuses the
-#       writable exposure with the stable read_only_root refusal BEFORE any
-#       workload is created (no container/operation residue), while the same
-#       region mounts read-only and an existing Session keeps its issued
-#       snapshot
 #   6. docker build via docker-helper (Buildx path)
 #   7. self-contained trusted-CA E2E: ephemeral CA + local HTTPS endpoint
 #   8. MAC audit check of fresh confinement denies (allowlist)
@@ -79,7 +71,7 @@
 #   UAT_PLATFORM      platform adapter to exercise (default ubuntu)
 #   UAT_INSTALL       artifact+install adapter pair to exercise (default deb)
 #   UAT_MAC           MAC adapter to exercise (default apparmor)
-#   UAT_VERSION       version string (default 2.2.0-uat)
+#   UAT_VERSION       version string (default 2.1.0-uat)
 #   UAT_ALLOWED_ROOT  global allowed root (default: platform-provided)
 #   UAT_WORKSPACE     session workspace (default $UAT_ALLOWED_ROOT/uat-workspace)
 #   UAT_PRINCIPAL     OS user mapped to the docker-helper principal (default: platform-provided)
@@ -101,7 +93,7 @@
 
 set -uo pipefail
 
-VERSION="${UAT_VERSION:-2.2.0-uat}"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
 TLS_PORT="${UAT_TLS_PORT:-8443}"
 KEEP="${UAT_KEEP:-}"
 INSTALL="${UAT_INSTALL:-deb}"
@@ -541,43 +533,6 @@ SESSION_PRINC_TOKEN="$(printf '%s\n' "$SESSION_PRINC_JSON" | grep -oP '"token": 
 info "principal session: $SESSION_PRINC_ID (principal $PRINCIPAL)"
 
 # ==============================================================================
-# Phase 3b: self-introspection smoke (Release 2.2 credential self-introspection)
-# ==============================================================================
-
-say "phase 3b: self introspection smoke (principal, launcher, session, admin)"
-
-# Principal credential self: the daemon classifies the bearer and answers
-# with the matching self resource; the CLI performs no local classification.
-PRINC_SELF_JSON="$(docker-helper self --system --token-file "$CRED_FILE" --json)" \
-  || fail_uat "principal credential self failed"
-printf '%s\n' "$PRINC_SELF_JSON" | grep -q '"type": "principal"' \
-  || fail_uat "principal self returned the wrong class: $PRINC_SELF_JSON"
-printf '%s\n' "$PRINC_SELF_JSON" | grep -q "\"username\": \"$PRINCIPAL\"" \
-  || fail_uat "principal self does not carry the authenticated principal: $PRINC_SELF_JSON"
-
-# Session bearer self: the Session's own resource, equal in shape to the
-# session show body (workspace, ownership, expiry, persisted snapshot).
-SESSION_SELF_JSON="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN" docker-helper self --system --json)" \
-  || fail_uat "session bearer self failed"
-printf '%s\n' "$SESSION_SELF_JSON" | grep -q '"type": "session"' \
-  || fail_uat "session self returned the wrong class: $SESSION_SELF_JSON"
-printf '%s\n' "$SESSION_SELF_JSON" | grep -q "\"id\": \"$SESSION_PRINC_ID\"" \
-  || fail_uat "session self does not carry the authenticated session: $SESSION_SELF_JSON"
-
-# Admin has no self resource: the stable 404 self_not_available contract.
-ADMIN_SELF_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
-  --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost/self 2>/dev/null || true)"
-[ "$ADMIN_SELF_CODE" = "404" ] \
-  || fail_uat "admin self returned $ADMIN_SELF_CODE (expected 404 self_not_available)"
-
-# Unknown credential: the non-disclosing 401 authentication contract.
-UNKNOWN_SELF_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
-  --unix-socket "$DH_SOCK" -H 'Authorization: Bearer dht_unknown_self_smoke_probe' http://localhost/self 2>/dev/null || true)"
-[ "$UNKNOWN_SELF_CODE" = "401" ] \
-  || fail_uat "unknown credential self returned $UNKNOWN_SELF_CODE (expected 401)"
-info "self-introspection smoke passed (principal/session/404/401 contracts)"
-
-# ==============================================================================
 # Phase 4: basic functionality (pull, run, identity, exit codes)
 # ==============================================================================
 
@@ -647,75 +602,6 @@ printf '%s\n' "$MOUNT_OUT" | grep -q 'MOUNT-OK' \
 [ ! -e "$WS/ro/forbidden.txt" ] \
   || fail_uat "forbidden host-side file was created: $WS/ro/forbidden.txt"
 info "mount behavior ok"
-
-# ==============================================================================
-# Phase 5b: Release 2.2 access-mode smoke
-# ==============================================================================
-# A POLICY read_only region (issued by the allowed-root hierarchy into the
-# Session filesystem snapshot) must refuse a writable exposure with the stable
-# `read_only_root` refusal BEFORE any workload is created, while the same
-# region mounts read-only. The caller-requested `:ro` in phase 5 is NOT
-# Release 2.2 policy; this smoke exercises the issued access mode itself.
-# Every install format (deb/tarball/rpm) therefore touches the 2.2 surface.
-say "phase 5b: access-mode smoke (policy RO region, read_only_root before workload creation)"
-
-# Install the policy RO region through the operator CLI (global ceiling).
-docker-helper config allowed-root add --access read_only "$WS/ro" \
-  || fail_uat "config allowed-root add --access read_only failed"
-
-# A session created BEFORE the policy mutation keeps its issued snapshot:
-# its writable behavior is unchanged (run with a caller-requested :ro mount
-# already passed in phase 5; a writable request on the same source is still
-# allowed because the OLD snapshot carries no RO region).
-PRE_OLD_OUT="$(docker-helper run --image alpine:3.24 --mount ro:/mnt/ro -- sh -ec 'echo OLD-SNAPSHOT-RW-OK' 2>&1)"
-PRE_OLD_EC=$?
-if [ "$PRE_OLD_EC" -ne 0 ] && printf '%s\n' "$PRE_OLD_OUT" | grep -q 'read_only_root'; then
-  fail_uat "pre-policy session unexpectedly inherited the new RO region (snapshot immutability broken)"
-fi
-info "existing session keeps its issued snapshot (writable behavior unchanged)"
-
-# New session after the mutation: the RO region is part of the issued snapshot.
-NEW_SESS_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" --workspace "$WS" --json)" \
-  || fail_uat "post-policy session create failed"
-NEW_SESS_ID="$(printf '%s\n' "$NEW_SESS_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
-NEW_SESS_TOKEN="$(printf '%s\n' "$NEW_SESS_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
-[ -n "$NEW_SESS_ID" ] && [ -n "$NEW_SESS_TOKEN" ] \
-  || fail_uat "post-policy session returned no id/token"
-docker-helper session show --system --id "$NEW_SESS_ID" \
-  | grep -Eq "^$(printf '%s' "$WS/ro" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_only$" \
-  || fail_uat "issued snapshot does not show the policy RO region (session show)"
-
-# 1. The RO region mounts read-only: reads pass.
-SMOKE_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$NEW_SESS_TOKEN" \
-  docker-helper run --image alpine:3.24 --mount ro:/mnt/ro:ro -- sh -ec 'test "$(cat /mnt/ro/readme.txt)" = "ro-content" && echo SMOKE-RO-READ-OK')" \
-  || fail_uat "policy RO region read failed: $SMOKE_RO_OUT"
-printf '%s\n' "$SMOKE_RO_OUT" | grep -q 'SMOKE-RO-READ-OK' \
-  || fail_uat "policy RO read did not reach SMOKE-RO-READ-OK: $SMOKE_RO_OUT"
-
-# 2. A writable request on the RO region must be refused with the stable
-#    read_only_root code BEFORE any workload is created: no container, no
-#    operation, no mount pin, no workload-MAC state.
-CONTAINERS_BEFORE="$(docker ps -a --filter 'label=com.dockerhelper.schema=1' -q | wc -l)"
-PINS_BEFORE="$(ls /run/docker-helper/mounts 2>/dev/null | wc -l)"
-WLMAC_BEFORE="$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)"
-RO_REJECT_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$NEW_SESS_TOKEN" \
-  docker-helper run --image alpine:3.24 --mount ro:/mnt/ro -- sh -ec 'echo must-not-run' 2>&1)"
-RO_REJECT_EC=$?
-[ "$RO_REJECT_EC" -ne 0 ] || fail_uat "writable request on the policy RO region unexpectedly succeeded"
-printf '%s\n' "$RO_REJECT_OUT" | grep -q 'read_only_root' \
-  || fail_uat "writable RO-region request must report read_only_root: $RO_REJECT_OUT"
-[ "$(docker ps -a --filter 'label=com.dockerhelper.schema=1' -q | wc -l)" = "$CONTAINERS_BEFORE" ] \
-  || fail_uat "read_only_root refusal created a container (must be refused before workload creation)"
-[ "$(ls /run/docker-helper/mounts 2>/dev/null | wc -l)" = "$PINS_BEFORE" ] \
-  || fail_uat "read_only_root refusal left a mount pin behind"
-[ "$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)" = "$WLMAC_BEFORE" ] \
-  || fail_uat "read_only_root refusal left workload-MAC state behind"
-info "read_only_root refused before workload creation (no container/pin/MAC residue)"
-
-# Cleanup the smoke session.
-docker-helper session delete --system --id "$NEW_SESS_ID" >/dev/null 2>&1 \
-  || fail_uat "smoke session delete failed"
-unset NEW_SESS_TOKEN
 
 # ==============================================================================
 # Phase 6: docker build via docker-helper

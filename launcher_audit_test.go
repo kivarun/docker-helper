@@ -21,7 +21,7 @@ func launcherAuditApp(t *testing.T, username string) (*App, string, string, *Lau
 	t.Helper()
 	app := newTestAppWithAdminToken(t)
 	globalRoots := app.Config.AllowedRoots
-	home := filepath.Join(allowedRootPaths(globalRoots)[0], "home", username)
+	home := filepath.Join(globalRoots[0], "home", username)
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestLauncherCreateAuditProvenance(t *testing.T) {
 func TestLauncherAllowedRootAddAuditCommittedProjection(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app, credToken, _, l := launcherAuditApp(t, "lnaradd")
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "lnaradd")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "lnaradd")
 	inRoot := filepath.Join(home, "proj")
 	if err := os.MkdirAll(inRoot, 0755); err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestLauncherAllowedRootAddAuditCommittedProjection(t *testing.T) {
 	if got := readLauncherScopeMode(t, app.DB, l.ID); got != LauncherScopeRestricted {
 		t.Fatalf("db scope after first add = %q, want restricted", got)
 	}
-	if got := readLauncherStoredRoots(t, app.DB, l.ID); !slices.Equal(got, []AllowedRootEntry{allowedRootEntry(inRoot)}) {
+	if got := readLauncherStoredRoots(t, app.DB, l.ID); !slices.Equal(got, []string{inRoot}) {
 		t.Fatalf("db stored roots = %v, want [%s]", got, inRoot)
 	}
 	raw := findAuditLine(auditBuf, "launcher.allowed_root_add")
@@ -250,7 +250,7 @@ func TestSessionCreateAuditLauncherProvenance(t *testing.T) {
 
 	// The workspace must be inside the launcher principal's own allowed root
 	// (its home), not merely inside the global root.
-	workspace := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "lncaudit3", "ws")
+	workspace := filepath.Join(app.Config.AllowedRoots[0], "home", "lncaudit3", "ws")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +658,7 @@ func TestLauncherControlAuditTargetOwnerProvenance(t *testing.T) {
 
 	// Admin scope replace to restricted, with a root under the target
 	// Principal's home.
-	ws := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "lnctarget", "proj")
+	ws := filepath.Join(app.Config.AllowedRoots[0], "home", "lnctarget", "proj")
 	if err := os.MkdirAll(ws, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -923,7 +923,7 @@ func TestRunAuditLauncherProvenance(t *testing.T) {
 	mux.HandleFunc("POST /run", app.handleRun)
 	mux.HandleFunc("POST /sessions", app.handleCreateSession)
 
-	workspace := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "lncauditrun", "ws")
+	workspace := filepath.Join(app.Config.AllowedRoots[0], "home", "lncauditrun", "ws")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -988,7 +988,7 @@ func TestSessionDeleteAuditOwnershipProvenance(t *testing.T) {
 	mux.HandleFunc("POST /sessions", app.handleCreateSession)
 	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
 
-	workspace := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "lncauditdel", "ws")
+	workspace := filepath.Join(app.Config.AllowedRoots[0], "home", "lncauditdel", "ws")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
 	}

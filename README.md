@@ -9,13 +9,12 @@ build images and run containers. Giving the agent direct access to
 and run arbitrary processes. docker-helper sits between the agent and
 Docker and enforces policy:
 
-- host paths accepted as build contexts are restricted to the session
-  workspace, and bind-mount sources are restricted to the session's issued
-  filesystem snapshot (the workspace plus any issued additional roots);
+- host paths accepted as build contexts and bind-mount sources are
+  restricted to the session workspace;
 - build, pull, and run require a session token; session management
   requires an admin token, Principal credential, or Launcher credential;
 - all supported Docker operations are mediated by the daemon;
-- the developer controls which filesystem snapshot each session is issued.
+- the developer controls which workspace each session can access.
 
 docker-helper assumes the agent cannot directly read `admin.token` or
 access `docker.sock`. It does not sandbox an otherwise unrestricted agent
@@ -93,8 +92,8 @@ Four authentication classes provide different levels of access:
 3. **Launcher credential** — bound to one launcher (at most one credential
    per launcher): create sessions owned by that launcher, list and delete
    only that launcher's sessions. Cannot manage launchers or principals.
-4. **Session token** — narrow data-plane capability for one session's
-   issued filesystem snapshot (pull, build, run, registry login).
+4. **Session token** — narrow workspace capability for Docker operations
+   (pull, build, run, registry login).
 
 A credential is a rotatable authentication key, never an owner. Every
 session is owned by exactly one launcher; principal identity is derived
@@ -309,15 +308,6 @@ For system mode from a tarball:
 sudo ./install-system.sh --yes --allowed-root /srv/workspaces
 ```
 
-`install-system.sh` requires the runtime tooling of the active MAC backend:
-the AppArmor parser on an AppArmor host, and `semodule`, `restorecon`, and
-`bindfs` on an enforcing SELinux host (`bindfs` implements the SELinux
-read-only workload projection). The RPM package declares `bindfs` as a
-dependency for the SELinux backend; a tarball system install on an
-enforcing SELinux host requires `bindfs`, and `install-system.sh` fails
-before mutating the system when it is absent. The DEB/AppArmor packaging
-path does not require `bindfs`.
-
 Unlike native packages, extracting or running the normal tarball installer does
 not provision system mode. `install-system.sh` is the explicit manual
 system-install path.
@@ -467,7 +457,7 @@ Configuration fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowed_roots` | array of rich entries | Canonical root directories for agent workspaces (required). Canonical entries are `{"path": "/srv/run-root", "access": "read_write"}` objects with `access` exactly `read_write` or `read_only`; a legacy plain string entry is accepted for compatibility and means `read_write`. This is the global authorization ceiling only; it does not own MAC state. See [Allowed-root access modes](#allowed-root-access-modes) |
+| `allowed_roots` | array of strings | Canonical root directories for agent workspaces (required) |
 | `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
 | `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
 | `audit_enabled` | boolean | Override audit behavior (default: `true` in system mode; in user mode, `true` only when `log_level` is `debug`) |
@@ -632,7 +622,6 @@ config.json. If present, configuration validation and daemon startup fail:
 | `database_path` | SQLite database path |
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
-| `allowed_root_entries` | Rich `{path, access}` projection of the canonical global allowed roots (show-only; a config.json carrying it fails validation) |
 | `mode` | `"user"` or `"system"` |
 
 ### 3. Start the daemon
@@ -732,18 +721,6 @@ A launcher name is principal-scoped and is never searched globally: an
 admin narrowing by name must also pass `--principal`; without it only the
 global `dhl_...` launcher ID is accepted. Foreign or missing targets fail
 with the non-disclosing not-found error.
-
-### Show a session
-
-```bash
-docker-helper session show --id dhs_...
-```
-
-Displays the session metadata plus the persisted immutable filesystem
-snapshot (a PATH/ACCESS table) that governs this session's Docker
-operations. The snapshot is issued at session creation time and never
-changes afterwards — see
-[Allowed-root access modes](#allowed-root-access-modes).
 
 ### Delete a session
 
@@ -965,7 +942,7 @@ records contain only `build_arg_keys`, never build-arg values.
 Response (HTTP 201):
 
 ```json
-{"ok":true,"operation_id":"op_abcdef1234567890abcdef1234567890","status":"running"}
+{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
 ```
 
 **Poll status** until `status` is `succeeded` or `failed`:
@@ -973,7 +950,7 @@ Response (HTTP 201):
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
-  http://localhost/operations/op_abcdef1234567890abcdef1234567890
+  http://localhost/operations/op_abcdef1234567890
 ```
 
 **Read incremental logs** using the `offset` parameter:
@@ -981,7 +958,7 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
-  'http://localhost/operations/op_abcdef1234567890abcdef1234567890/logs?offset=0'
+  'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
 ```
 
 The logs response includes `next_offset` (use it as the `offset` for the
@@ -1008,7 +985,7 @@ Example: `"64m"`, `"1g"`. Maximum is 2 GiB. If omitted, Docker uses its default.
 Response (HTTP 201):
 
 ```json
-{"ok":true,"operation_id":"op_abcdef1234567890abcdef1234567890","status":"running"}
+{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
 ```
 
 Track progress using the same operation workflow as build:
@@ -1018,7 +995,7 @@ Track progress using the same operation workflow as build:
   ```bash
   curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
     -H "Authorization: Bearer $SESSION_TOKEN" \
-    http://localhost/operations/op_abcdef1234567890abcdef1234567890
+    http://localhost/operations/op_abcdef1234567890
   ```
 
 - **Read incremental logs** using the `offset` parameter:
@@ -1026,7 +1003,7 @@ Track progress using the same operation workflow as build:
   ```bash
   curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
     -H "Authorization: Bearer $SESSION_TOKEN" \
-    'http://localhost/operations/op_abcdef1234567890abcdef1234567890/logs?offset=0'
+    'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
   ```
 
 Run-specific result codes:
@@ -1036,12 +1013,6 @@ Run-specific result codes:
 - `container_exit_nonzero` — container exited with a non-zero status;
 - `cancelled` — operation cancelled by client.
 
-A run whose requested writable mount is refused by the issued Session
-filesystem policy fails before any container starts with the
-`read_only_root` error — a policy refusal, distinct from the structural
-`invalid_mount` (see
-[Allowed-root access modes](#allowed-root-access-modes)).
-
 ### Cancel an operation
 
 Cancel a running build or run operation:
@@ -1049,7 +1020,7 @@ Cancel a running build or run operation:
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
-  -X POST 'http://localhost/operations/op_abcdef1234567890abcdef1234567890/cancel'
+  -X POST 'http://localhost/operations/op_abcdef1234567890/cancel'
 ```
 
 The operation becomes terminal with `status=failed` and `result_code=cancelled`.
@@ -1114,11 +1085,10 @@ Note: `docker-helper config show` (without a field) displays
 
 ## Security
 
-- **Host path policy** — bind-mount sources are workspace-relative paths
-  or absolute host paths, both authorized only through the issued
-  immutable Session filesystem snapshot (workspace + issued filesystem
-  roots). Builds use an isolated staging copy with FD-relative traversal;
-  system-mode run mounts use inode-pinned helper-owned mounts.
+- **Host path policy** — build contexts, Dockerfiles, and bind-mount
+  sources are validated against the session workspace. Builds use an
+  isolated staging copy with FD-relative traversal; system-mode run
+  mounts use inode-pinned helper-owned mounts.
 - **Bearer authentication** — admin token uses SHA-256 hashing with
   constant-time comparison in memory; Principal credentials and session
   tokens use SHA-256 hashes stored in SQLite and resolved through
@@ -1143,17 +1113,8 @@ Note: `docker-helper config show` (without a field) displays
 
 - docker-helper does not sandbox a coding tool that already has direct
   access to the host filesystem.
-- In user mode there is no inode pinning; the issued Session filesystem
-  snapshot (workspace + issued filesystem roots) is still the only
-  authority, and a writable mount spanning a nested read-only region is
-  refused exactly as in system mode.
-- Filesystem policy is pathname-based: policy resolution canonicalizes
-  paths (including symlinks), but two authorized pathnames can still
-  reference the same inode through a hard link. If one alias lies under a
-  `read_write` root and the other under a `read_only` root, a write
-  through the read-write alias is also visible through the read-only
-  alias. Release 2.2 does not promise inode-level immutability or
-  confidentiality between hard-link aliases.
+- In user mode, bind-mount sources are restricted to the workspace root.
+  Subdirectory and file mounts are not available.
 - Builds and containers use Docker's default networking; docker-helper
   does not provide network isolation.
 - docker-helper is a highly trusted component because it has access to
@@ -1206,12 +1167,6 @@ sudo docker-helper config allowed-root add /path/to/workspace
 It does NOT prepare MAC state. MAC preparation occurs at session creation
 time for the concrete workspace.
 
-Access modes are also enforced independently by the active MAC backend in
-system mode: for every run, the daemon additionally protects each
-read-only exposure with backend-owned state so a workload cannot write
-through a read-only exposure even if the bind itself were writable. The
-application policy remains the only owner of the access-mode decision.
-
 ### AppArmor
 
 System mode uses mandatory AppArmor confinement with the
@@ -1223,12 +1178,6 @@ not own MAC state.
 
 MAC preparation occurs at session creation time for the concrete workspace.
 `docker-helper init` does NOT prepare MAC state for the bootstrap allowed root.
-
-For read-only allowed-root exposures, each run workload additionally runs
-under a helper-owned generated AppArmor profile
-(`docker-helper-workload-<operation-id>`) that denies writes to the
-read-only container targets; the profile is removed when the operation
-finishes or is reconciled at daemon startup.
 
 Advanced backend-specific management:
 
@@ -1248,13 +1197,6 @@ installed manually.
 On an enforcing SELinux system, the systemd service runs in
 `docker_helper_t`; containers started by the service use
 `docker_helper_container_t` with MCS confinement.
-
-For read-only allowed-root exposures, each run additionally materializes
-a helper-owned `bindfs` projection mounted with the
-`docker_helper_ro_projection_t` context, which independently denies
-workload writes while the container keeps its MCS confinement; the
-backing tree keeps its labels and is never relabeled, and read-write
-exposures remain direct binds.
 
 #### Workspace SELinux labeling
 
@@ -1396,105 +1338,6 @@ New workspace roots are resolved to their canonical path through symlink
 resolution before policy evaluation; the canonical path is the effective
 and stored root.
 
-### Allowed-root access modes
-
-Every allowed root carries an access mode. The only values are
-`read_write` (the default; a legacy plain string entry means
-`read_write`) and `read_only`.
-
-Canonical object form in `config.json`:
-
-```json
-"allowed_roots": [
-  {"path": "/srv/run-root", "access": "read_write"},
-  {"path": "/srv/run-root/pipeline-inputs", "access": "read_only"}
-]
-```
-
-The legacy string array `"allowed_roots": ["/srv/run-root"]` is still
-accepted and means `read_write`; after a 2.2 write the config persists
-the canonical object form. `config show` displays both projections of
-the same stored entries: the authoritative rich `allowed_root_entries`
-and the 2.x path-only `allowed_roots` compatibility projection.
-
-Set the mode when adding a root and change it later:
-
-```bash
-docker-helper config allowed-root add --access read_only /srv/run-root/pipeline-inputs
-docker-helper config allowed-root set-access /srv/run-root/pipeline-inputs read_write
-```
-
-The same `--access` flag and `set-access` command exist for
-`principal allowed-root` and `launcher allowed-root`.
-
-Hierarchy behavior: within one scope the most-specific path wins; across
-scopes a lower authority (principal, launcher) may narrow but never widen
-its parent — `read_only` dominates. A writable mount is admitted only
-when the source is `read_write` and covers no effective nested
-`read_only` region; the daemon refuses it with `read_only_root` — a
-policy refusal, distinct from the structural `invalid_mount` — and never
-silently downgrades the request to read-only.
-
-A Session captures the effective filesystem policy as an immutable
-snapshot at creation time (visible through `docker-helper session
-show`). Later allowed-root changes affect only new Sessions; an issued
-Session keeps its issued snapshot for its whole lifetime.
-
-The authority creating a Session can also issue additional filesystem
-roots for it: `session create` accepts a repeatable
-`--filesystem-root PATH=ACCESS` flag where PATH is an absolute host path
-inside the target Launcher's effective allowed roots (a directory or a
-regular file) and ACCESS is `read_write` or `read_only`. The workspace
-itself remains mandatory and receives the maximum access the target
-Launcher's effective policy permits; passing a filesystem root at the
-canonical workspace path explicitly narrows it instead:
-
-```bash
-docker-helper session create --system \
-  --launcher agent \
-  --workspace /srv/run-root/work \
-  --filesystem-root /srv/run-root/work=read_only \
-  --filesystem-root /srv/run-root/work/project=read_write \
-  --filesystem-root /home/michael/work/git/docker-helper=read_only \
-  --filesystem-root /opt/michael/cache=read_write \
-  --json
-```
-
-A system-mode admin token must target exactly one Launcher explicitly
-(`--launcher NAME_OR_ID` or `--principal USER`); a Principal or Launcher
-credential targets its own scope and takes no `--principal` selector.
-The request may only narrow the target Launcher's effective ceiling; a
-`read_write` root under an effective `read_only` region, or a path
-outside the ceiling, is refused with `invalid_filesystem_policy` before
-the Session exists. Omitting the flag keeps the inherited behavior. A
-Launcher credential can issue its own Session this way and can never
-widen Launcher/Principal/global authority; there is no post-create
-Session filesystem mutation. Run mounts may use the relative spelling
-for workspace sources and the absolute host spelling for any issued
-filesystem root:
-
-A practical example — one run tree with separate data planes:
-
-```text
-run-root/
-  project/           read_write
-  pipeline-inputs/   read_only
-  pipeline-outputs/  read_write
-```
-
-With `/srv/run-root` as the session workspace (system mode permits the
-subdirectory mounts):
-
-- mounting `project` or `pipeline-outputs` writable succeeds and the
-  workload can write;
-- mounting `pipeline-inputs` reads fine, but requesting it writable
-  fails before any container starts with `read_only_root`;
-- a writable mount of the workspace root itself (`.`) is refused with
-  `read_only_root`, because it would cover the nested read-only
-  `pipeline-inputs` region;
-- if a source is only needed for reading, request it read-only
-  (`--mount source:target:ro`) so the exposure is valid in either mode.
-
 ## System mode: provisioning a principal
 
 System mode requires the operator to configure both docker-helper policy
@@ -1534,9 +1377,7 @@ sudo docker-helper principal credential create \
 The allowed-root narrowing model (global → principal → launcher → session):
 
 - **Global allowed root** — system-wide ceiling managed by
-  `config allowed-root add` (with `--access read_write|read_only`;
-  see [Allowed-root access modes](#allowed-root-access-modes));
-  authorization-only, does NOT prepare MAC.
+  `config allowed-root add`; authorization-only, does NOT prepare MAC.
 - **Principal allowed root** — per-principal narrowing managed by
   `principal allowed-root add`; does not prepare MAC.
 - **Launcher allowed root** — per-launcher narrowing for launchers in
@@ -1546,11 +1387,6 @@ The allowed-root narrowing model (global → principal → launcher → session)
 - **Project workspace** — selected only at session creation time via
   `session create --workspace PATH`; must be under the global and principal
   allowed roots (and, for restricted launchers, the launcher's roots).
-  The create request may further issue additional absolute filesystem
-  roots and an explicit workspace grant per Session through
-  `filesystem_roots` (issuance-time filesystem roots only; see
-  [Allowed-root access modes](#allowed-root-access-modes)); it is never a
-  post-create mutation surface.
 
 Individual projects are not registered persistently. The operator adds
 global roots and principal roots, then creates sessions for specific
@@ -1669,11 +1505,6 @@ docker-helper session create --workspace ~/myproject
 The agent can verify its delegated identity through the HTTP API
 (`GET /auth` with the installed credential): the response reports
 `{"authority": "launcher", "principal": "alice", "launcher_id": "dhl_..."}`.
-The full self resource is available through `docker-helper self` (HTTP
-`GET /self`): a Launcher credential answers with its Launcher's identity,
-scope, stored and effective allowed-root entries; a Session bearer
-answers with its own `session show` body including the persisted
-filesystem snapshot.
 
 With multiple launchers, a Principal credential can target one explicitly
 at session creation time with `--launcher` (name or `dhl_...` ID); a

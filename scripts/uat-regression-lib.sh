@@ -2,19 +2,14 @@
 #
 # uat-regression-lib.sh — shared helpers for the Release-2 targeted UAT
 # regression groups (scripts/uat-regression-*.sh) and their collect-all
-# runners (scripts/uat-regressions-runner-*.sh). The standalone Release-2
-# acceptance suites (uat-release2-acceptance.sh, uat-migration-rpm-211.sh,
-# uat-access-modes.sh) source it for the shared measurement primitives only
-# and keep their own scenario accounting.
+# runners (scripts/uat-regressions-runner-*.sh).
 #
 # Every regression script sources this file. The lib owns only the small amount
 # of per-regression bookkeeping (subcase ok/fail accounting, the final
-# PASS/FAIL/BLOCKED verdict, the common redaction helper), the structural
-# rich allowed-root JSON parse shared by the list-output contracts, and the
-# fail-closed residue inventory primitives. It deliberately does NOT own any
-# docker-helper operation, MAC behavior or install logic: that stays in the
-# individual scripts, which run against an already-installed, running
-# docker-helper system service.
+# PASS/FAIL/BLOCKED verdict and the common redaction helper). It deliberately
+# does NOT own any docker-helper operation, MAC behavior or install logic:
+# that stays in the individual regression scripts, which run against an
+# already-installed, running docker-helper system service.
 #
 # Contract between the collect-all runners and the individual scripts:
 #   exit 0 = PASS      (script prints REGRESSION_RESULT=PASS)
@@ -136,243 +131,13 @@ json_field() { # field
   grep -oP "\"$1\": \"\K[^\"]+" | head -1
 }
 
-# --- canonical rich allowed-root list helpers --------------------------------
-# The default human `allowed-root list` is the 2.1-compatible surface: one
-# canonical path per line, no ACCESS column. Access-aware assertions must use
-# the rich `--json` projection (the canonical [{"path","access"}, ...] list in
-# stored-entry order) and parse it structurally — never by grepping a
-# pretty-printed layout for a path and an access on the same or neighboring
-# lines. These helpers are the shared owner of that structural parse for the
-# UAT suites. Fail-closed: any inspection failure (unparsable JSON, wrong
-# shape, malformed entry, missing path) reports failure and prints nothing, so
-# an inspection error can never be mistaken for a verified value.
-
-# allowed_root_json_access PATH prints the canonical access mode
-# (read_write|read_only) of PATH from the rich allowed-root JSON list read on
-# stdin. Exit 1 when the document is not that list, PATH is absent, or any
-# entry is malformed.
-allowed_root_json_access() { # PATH
-  python3 -c '
-import json, sys
-try:
-    entries = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-if not isinstance(entries, list):
-    sys.exit(1)
-for entry in entries:
-    if not (isinstance(entry, dict) and isinstance(entry.get("path"), str)
-            and entry.get("access") in ("read_write", "read_only")):
-        sys.exit(1)
-for entry in entries:
-    if entry["path"] == sys.argv[1]:
-        print(entry["access"])
-        sys.exit(0)
-sys.exit(1)
-' "$1" 2>/dev/null
-}
-
-# allowed_root_json_projection prints the canonical, formatting-independent
-# projection of the rich allowed-root JSON list read on stdin: one
-# "path<TAB>access" line per entry, in stored-entry order. Exit 1 when the
-# document is not that list, so a stability comparison can never mistake an
-# inspection failure for an unchanged policy.
-allowed_root_json_projection() {
-  python3 -c '
-import json, sys
-try:
-    entries = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-if not isinstance(entries, list):
-    sys.exit(1)
-for entry in entries:
-    if not (isinstance(entry, dict) and isinstance(entry.get("path"), str)
-            and entry.get("access") in ("read_write", "read_only")):
-        sys.exit(1)
-for entry in entries:
-    print("%s\t%s" % (entry["path"], entry["access"]))
-' 2>/dev/null
-}
-
-# session_list_count prints the authoritative number of active Sessions from
-# `dh session list --system --json`. Fail-closed: the list command must
-# succeed and the document must be exactly the canonical session-list shape
-# (`{"ok":true,"sessions":[{"id","workspace"},...]}` with well-formed session
-# objects); a command failure, malformed JSON, an unexpected shape, or a
-# malformed session entry exits 1 — never a silent 0. "Cannot inspect" is
-# never "zero sessions": the no-state-on-refusal proofs must distinguish a
-# positively empty inventory from an unavailable one.
-session_list_count() {
-  local out rc
-  out="$(dh session list --system --json 2>/dev/null)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf '  session list inventory unavailable (session list failed)\n' >&2
-    return 1
-  fi
-  printf '%s' "$out" | python3 -c '
-import json, sys
-try:
-    doc = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-if not (isinstance(doc, dict) and doc.get("ok") is True):
-    sys.exit(1)
-sessions = doc.get("sessions")
-if not isinstance(sessions, list):
-    sys.exit(1)
-for session in sessions:
-    if not (isinstance(session, dict) and isinstance(session.get("id"), str) and session["id"]
-            and isinstance(session.get("workspace"), str) and session["workspace"]):
-        sys.exit(1)
-print(len(sessions))
-' 2>/dev/null
-}
-
 # dh is the docker-helper CLI used by the regressions (system mode).
 dh() { /usr/bin/docker-helper "$@"; }
-
-# durable_session_snapshot_counts DB_PATH prints the durable Session/snapshot
-# row counts of the authoritative system database as
-# "<sessions>\t<snapshot_entries>\t<snapshot_meta>" (one line, tab-separated).
-# The required table set comes from the schema owner
-# (session_snapshot_store.go): the sessions table plus the immutable snapshot
-# child tables session_filesystem_snapshot_entries and
-# session_filesystem_snapshot_meta. Fail-closed: the helper opens the
-# database read-only through the python3 stdlib sqlite3 module and never
-# mutates it; a missing database file, an unopenable database, an SQL error,
-# a parse failure, or an unexpected schema (any required table absent) exits
-# 1 with no counts printed — an unavailable inventory is never a zero count.
-durable_session_snapshot_counts() {
-  local db="$1"
-  if [ -z "$db" ]; then
-    printf '  durable DB inventory unavailable (no database path)\n' >&2
-    return 1
-  fi
-  if [ ! -f "$db" ]; then
-    printf '  durable DB inventory unavailable (database file absent: %s)\n' "$db" >&2
-    return 1
-  fi
-  python3 - "$db" 2>/dev/null <<'UAT_DB_PY'
-import sqlite3, sys
-path = sys.argv[1]
-required = (
-    "sessions",
-    "session_filesystem_snapshot_entries",
-    "session_filesystem_snapshot_meta",
-)
-try:
-    con = sqlite3.connect("file:" + path + "?mode=ro", uri=True)
-    tables = {row[0] for row in con.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table'")}
-    if not set(required) <= tables:
-        raise LookupError("unexpected schema: missing snapshot tables")
-    counts = []
-    for table in required:
-        row = con.execute('SELECT COUNT(*) FROM "%s"' % table).fetchone()
-        if row is None:
-            raise ValueError("unreadable count")
-        counts.append(str(row[0]))
-except Exception:
-    sys.exit(1)
-print("\t".join(counts))
-UAT_DB_PY
-}
-
-# wait_service_health: the single shared readiness owner for the regression
-# family. Returns 0 only when the docker-helper system service is active AND
-# GET /health succeeds over its unix API socket, within a bounded poll (no
-# blind sleeps). Callers set $SERVICE (systemd unit name) and $SOCK (API
-# socket path). systemd active alone is never a readiness oracle: with
-# Type=exec the unit reports active as soon as the binary is exec'd, before
-# the startup sequence (snapshot integrity, startup reconciliation, session
-# cleanup) completes and the listener serves /health.
-wait_service_health() {
-  for _ in $(seq 1 60); do
-    if systemctl is-active --quiet "$SERVICE" 2>/dev/null \
-        && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
-
-# --- fail-closed residue inventory primitives --------------------------------
-# Canonical owner of the release-critical residue inventory contract (the
-# workload AppArmor/SELinux UAT matrices and the access-mode UAT residue
-# proofs). Three observable states, never mixed:
-#   ABSENT  -> positively proven absent (count 0 / empty inventory);
-#   PRESENT -> positively proven present (count > 0 / entries);
-#   UNKNOWN -> the inspection itself failed -> error status, never 0/empty.
-# "Cannot inspect" is never "clean".
-
-# helper_container_count counts helper-owned containers (including exited —
-# --rm removes them on exit, and a pre-admission refusal never creates one).
-# A docker inventory failure is UNKNOWN (exit 1), never zero residue.
-helper_container_count() {
-  local out rc
-  out="$(docker ps -a --filter 'label=com.dockerhelper.schema=1' -q 2>/dev/null)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf '  helper container inventory unavailable (docker ps failed)\n' >&2
-    return 1
-  fi
-  if [ -z "$out" ]; then
-    printf '0'
-    return 0
-  fi
-  printf '%s\n' "$out" | wc -l | tr -d ' '
-}
-
-# wait_no_helper_containers waits until the helper-owned container inventory
-# is positively empty. Exit status: 0 = positively empty, 1 = residue/timeout,
-# 2 = inventory unavailable (never reports clean).
-wait_no_helper_containers() {
-  local _i=0 count
-  for _i in $(seq 1 40); do
-    count="$(helper_container_count)" || return 2
-    [ "$count" = "0" ] && return 0
-    sleep 0.25
-  done
-  return 1
-}
-
-# inventory_count DIR prints the number of entries in DIR. A positively
-# absent directory is an empty inventory (the owner creates it lazily);
-# an existing but unreadable directory is an inventory error, never 0.
-inventory_count() {
-  local dir="$1" out rc
-  out="$(ls -A -- "$dir" 2>/dev/null)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    if [ ! -e "$dir" ]; then
-      printf '0'
-      return 0
-    fi
-    printf '  inventory %s is unreadable\n' "$dir" >&2
-    return 1
-  fi
-  if [ -z "$out" ]; then
-    printf '0'
-    return 0
-  fi
-  printf '%s\n' "$out" | wc -l | tr -d ' '
-}
 
 # --- shared ubuntu/deb/apparmor setup helpers --------------------------------
 # Used by the Ubuntu-hosted regression groups. The collect-all runner inits the
 # system service with global allowed root /home, so every /home/* home below is
 # authorized for principal/session use.
-
-# reg_config_global_roots prints the global allowed root paths from
-# `config allowed-root list`, one per line. The default human list is the
-# 2.1-compatible one path per line surface, so the first field of every data
-# row is the path; a PATH/ACCESS table header (no leading slash) is skipped.
-reg_config_global_roots() {
-  dh config allowed-root list 2>/dev/null | awk 'NF && $1 ~ /^\// {print $1}'
-}
 
 # reg_setup_principal USER creates (or reuses) the OS user + docker-helper
 # principal (enabled), and prints the user's home directory.
@@ -391,14 +156,14 @@ reg_setup_principal() {
         if [ "$root" = "/home" ]; then home_base="/home"; root_ok=1; break; fi
         ;;
     esac
-  done <<< "$(reg_config_global_roots)"
+  done <<< "$(dh config allowed-root list 2>/dev/null || true)"
   if [ "$root_ok" != 1 ]; then
-    if reg_config_global_roots | grep -qx '/opt'; then
+    if dh config allowed-root list 2>/dev/null | grep -qx '/opt'; then
       home_base="/opt"; root_ok=1
     fi
   fi
   if [ "$root_ok" != 1 ]; then
-    home_base="$(reg_config_global_roots | sed -n '1p')"
+    home_base="$(dh config allowed-root list 2>/dev/null | sed -n '1p')"
   fi
   if [ -z "$home_base" ]; then
     echo "error: no global allowed root under which to place principal '$user' home" >&2

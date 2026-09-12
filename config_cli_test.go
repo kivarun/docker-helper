@@ -156,20 +156,6 @@ func TestConfigShowAllJSON(t *testing.T) {
 	if result["allowed_roots"] == nil {
 		t.Error("allowed_roots is nil")
 	}
-	// allowed_roots is the frozen 2.x path-only projection.
-	if roots, ok := result["allowed_roots"].([]any); !ok || len(roots) != 1 || roots[0] != "/home/user/work" {
-		t.Errorf("allowed_roots = %v, want the path-only array [\"/home/user/work\"]", result["allowed_roots"])
-	}
-	// allowed_root_entries is the rich projection of the same canonical
-	// stored entries.
-	entries, ok := result["allowed_root_entries"].([]any)
-	if !ok || len(entries) != 1 {
-		t.Fatalf("allowed_root_entries = %v, want the rich projection of the same entry", result["allowed_root_entries"])
-	}
-	entry, ok := entries[0].(map[string]any)
-	if !ok || entry["path"] != "/home/user/work" || entry["access"] != "read_write" {
-		t.Errorf("allowed_root_entries[0] = %v, want the {path,access} object", entries[0])
-	}
 	if result["session_ttl"] != "12h" {
 		t.Errorf("session_ttl = %v", result["session_ttl"])
 	}
@@ -216,11 +202,7 @@ func TestConfigShowSingleField(t *testing.T) {
 		field string
 		want  string
 	}{
-		// allowed_roots keeps the frozen 2.x path-only projection.
 		{"allowed_roots", "[\n  \"/home/user/work\"\n]\n"},
-		// allowed_root_entries is the authoritative rich projection of the
-		// same stored entries.
-		{"allowed_root_entries", "[\n  {\n    \"path\": \"/home/user/work\",\n    \"access\": \"read_write\"\n  }\n]\n"},
 		{"session_ttl", "12h\n"},
 		{"log_level", "warn\n"},
 	}
@@ -232,48 +214,6 @@ func TestConfigShowSingleField(t *testing.T) {
 			}
 		})
 	}
-}
-
-// Req 8b: allowed_root_entries is a show-only projection, never a
-// config-file field: a config.json carrying it fails closed, and it cannot
-// be set or unset.
-func TestConfigAllowedRootEntriesIsShowOnly(t *testing.T) {
-	t.Run("config file carrying allowed_root_entries is rejected", func(t *testing.T) {
-		cfg := `{
-  "allowed_roots": ["/home/user/work"],
-  "allowed_root_entries": [{"path": "/home/user/work", "access": "read_write"}],
-  "session_ttl": "12h"
-}`
-		setupConfigTestWithData(t, []byte(cfg))
-		var stdout, stderr bytes.Buffer
-		code := runCommandWithWriters([]string{"config", "show", "allowed_roots"}, &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("exit = 0, want a fail-closed validation error: stdout=%q", stdout.String())
-		}
-		if !strings.Contains(stderr.String(), "allowed_root_entries") {
-			t.Errorf("stderr = %q, want the allowed_root_entries diagnostic", stderr.String())
-		}
-	})
-
-	t.Run("set and unset reject the projection field", func(t *testing.T) {
-		cfg := `{
-  "allowed_roots": ["/home/user/work"],
-  "session_ttl": "12h"
-}`
-		setupConfigTestWithData(t, []byte(cfg))
-
-		var stdout, stderr bytes.Buffer
-		code := runCommandWithWriters([]string{"config", "set", "allowed_root_entries", "x"}, &stdout, &stderr)
-		if code != 2 || !strings.Contains(stderr.String(), "read-only") {
-			t.Errorf("set allowed_root_entries: exit = %d, stderr = %q, want the read-only refusal", code, stderr.String())
-		}
-
-		stdout, stderr = bytes.Buffer{}, bytes.Buffer{}
-		code = runCommandWithWriters([]string{"config", "unset", "allowed_root_entries"}, &stdout, &stderr)
-		if code != 2 || !strings.Contains(stderr.String(), "read-only") {
-			t.Errorf("unset allowed_root_entries: exit = %d, stderr = %q, want the read-only refusal", code, stderr.String())
-		}
-	})
 }
 
 // Req 9: show admin_token returns complete real token
@@ -1890,8 +1830,8 @@ func TestLoadAndPrepareRuntimeConfigAcceptsValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if c.AllowedRoots[0].Path != allowedRoot {
-		t.Errorf("AllowedRoot = %q, want %q", c.AllowedRoots[0].Path, allowedRoot)
+	if c.AllowedRoots[0] != allowedRoot {
+		t.Errorf("AllowedRoot = %q, want %q", c.AllowedRoots[0], allowedRoot)
 	}
 }
 
@@ -2234,11 +2174,10 @@ func TestConfigAllowedRootCommandTree(t *testing.T) {
 		}
 		// Verify config was updated.
 		raw := readConfigJSON(t, configPath)
-		var entries []AllowedRootEntry
-		if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
+		var roots []string
+		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
 			t.Fatalf("cannot parse allowed_roots: %v", err)
 		}
-		roots := allowedRootPaths(entries)
 		if !slices.Contains(roots, newRoot) {
 			t.Errorf("expected %s in allowed_roots, got: %v", newRoot, roots)
 		}
@@ -2264,11 +2203,10 @@ func TestConfigAllowedRootCommandTree(t *testing.T) {
 		}
 		// Verify config was updated.
 		raw := readConfigJSON(t, configPath)
-		var entries []AllowedRootEntry
-		if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
+		var roots []string
+		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
 			t.Fatalf("cannot parse allowed_roots: %v", err)
 		}
-		roots := allowedRootPaths(entries)
 		if len(roots) != 1 || roots[0] != allowedRoot {
 			t.Errorf("expected [%s], got: %v", allowedRoot, roots)
 		}

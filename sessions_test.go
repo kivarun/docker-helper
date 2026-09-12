@@ -13,7 +13,7 @@ import (
 func TestHTTPCreateSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -76,7 +76,7 @@ func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
 func TestHTTPListSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	_, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	_, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestHTTPListSessions(t *testing.T) {
 func TestHTTPDeleteSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestHTTPDeleteSessionNotFound(t *testing.T) {
 func TestHTTPCreateSessionRFC3339(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -169,62 +169,53 @@ func TestHTTPCreateSessionRFC3339(t *testing.T) {
 	}
 }
 
-func TestComposeAllowedRootScopes_GlobalInsidePrincipal(t *testing.T) {
+func TestIntersectAllowedRootScopes_GlobalInsidePrincipal(t *testing.T) {
 	// global = /root/project, principal = /root
 	// effective should be /root/project
-	composed := composeAllowedRootScopes(
-		allowedRootEntriesForPaths([]string{"/root/project"}),
-		allowedRootEntriesForPaths([]string{"/root"}),
-	)
-	paths := allowedRootPaths(composed)
-	if len(paths) != 1 || paths[0] != "/root/project" {
-		t.Errorf("expected [/root/project], got %v", paths)
+	global := []string{"/root/project"}
+	principal := []string{"/root"}
+	result := intersectAllowedRootScopes(global, principal)
+	if len(result) != 1 || result[0] != "/root/project" {
+		t.Errorf("expected [/root/project], got %v", result)
 	}
 }
 
-func TestComposeAllowedRootScopes_PrincipalInsideGlobal(t *testing.T) {
+func TestIntersectAllowedRootScopes_PrincipalInsideGlobal(t *testing.T) {
 	// global = /root, principal = /root/project
 	// effective should be /root/project
-	composed := composeAllowedRootScopes(
-		allowedRootEntriesForPaths([]string{"/root"}),
-		allowedRootEntriesForPaths([]string{"/root/project"}),
-	)
-	paths := allowedRootPaths(composed)
-	if len(paths) != 1 || paths[0] != "/root/project" {
-		t.Errorf("expected [/root/project], got %v", paths)
+	global := []string{"/root"}
+	principal := []string{"/root/project"}
+	result := intersectAllowedRootScopes(global, principal)
+	if len(result) != 1 || result[0] != "/root/project" {
+		t.Errorf("expected [/root/project], got %v", result)
 	}
 }
 
-func TestComposeAllowedRootScopes_Equal(t *testing.T) {
-	composed := composeAllowedRootScopes(
-		allowedRootEntriesForPaths([]string{"/root/project"}),
-		allowedRootEntriesForPaths([]string{"/root/project"}),
-	)
-	paths := allowedRootPaths(composed)
-	if len(paths) != 1 || paths[0] != "/root/project" {
-		t.Errorf("expected [/root/project], got %v", paths)
+func TestIntersectAllowedRootScopes_Equal(t *testing.T) {
+	global := []string{"/root/project"}
+	principal := []string{"/root/project"}
+	result := intersectAllowedRootScopes(global, principal)
+	if len(result) != 1 || result[0] != "/root/project" {
+		t.Errorf("expected [/root/project], got %v", result)
 	}
 }
 
-func TestComposeAllowedRootScopes_Disjoint(t *testing.T) {
-	composed := composeAllowedRootScopes(
-		allowedRootEntriesForPaths([]string{"/a"}),
-		allowedRootEntriesForPaths([]string{"/b"}),
-	)
-	if len(composed) != 0 {
-		t.Errorf("expected no composed roots, got %v", allowedRootPaths(composed))
+func TestIntersectAllowedRootScopes_Disjoint(t *testing.T) {
+	global := []string{"/a"}
+	principal := []string{"/b"}
+	result := intersectAllowedRootScopes(global, principal)
+	if len(result) != 0 {
+		t.Errorf("expected [], got %v", result)
 	}
 }
 
-func TestComposeAllowedRootScopes_NoDuplicates(t *testing.T) {
+func TestIntersectAllowedRootScopes_NoDuplicates(t *testing.T) {
 	// Two principal roots both contain the same global root
-	composed := composeAllowedRootScopes(
-		allowedRootEntriesForPaths([]string{"/root/project"}),
-		allowedRootEntriesForPaths([]string{"/root", "/root/parent"}),
-	)
-	paths := allowedRootPaths(composed)
-	sort.Strings(paths)
-	if len(paths) != 1 || paths[0] != "/root/project" {
-		t.Errorf("expected [/root/project], got %v", paths)
+	global := []string{"/root/project"}
+	principal := []string{"/root", "/root/parent"}
+	result := intersectAllowedRootScopes(global, principal)
+	sort.Strings(result)
+	if len(result) != 1 || result[0] != "/root/project" {
+		t.Errorf("expected [/root/project], got %v", result)
 	}
 }

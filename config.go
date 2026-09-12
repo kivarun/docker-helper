@@ -47,7 +47,7 @@ func resolveDeploymentMode() DeploymentMode {
 }
 
 type Config struct {
-	AllowedRoots          []AllowedRootEntry
+	AllowedRoots          []string
 	SessionTTL            time.Duration
 	LogLevel              slog.Level
 	AuditEnabled          bool
@@ -72,22 +72,21 @@ type Config struct {
 }
 
 // fileConfig is the JSON-decoded form of config.json.
-// AllowedRoots is the canonical rich schema: each entry is a path string
-// (normalized to read_write) or a {"path","access"} object.
+// AllowedRoots is the canonical new schema.
 // AllowedRootLegacy is the legacy scalar for migration compatibility only.
 type fileConfig struct {
-	AllowedRoots          []AllowedRootEntry `json:"allowed_roots,omitempty"`
-	AllowedRootLegacy     string             `json:"allowed_root,omitempty"`
-	SessionTTL            string             `json:"session_ttl"`
-	Level                 string             `json:"log_level,omitempty"`
-	AuditEnabled          *bool              `json:"audit_enabled,omitempty"`
-	ShutdownTimeout       string             `json:"shutdown_timeout,omitempty"`
-	OperationRetentionTTL string             `json:"operation_retention_ttl,omitempty"`
-	OperationMaxCompleted *int               `json:"operation_max_completed,omitempty"`
-	OperationLogMaxBytes  *int64             `json:"operation_log_max_bytes,omitempty"`
-	TrustedCAPath         string             `json:"trusted_ca_path,omitempty"`
-	TrustedCAInjection    string             `json:"trusted_ca_injection,omitempty"`
-	HTTPAddress           string             `json:"http_address,omitempty"`
+	AllowedRoots          []string `json:"allowed_roots,omitempty"`
+	AllowedRootLegacy     string   `json:"allowed_root,omitempty"`
+	SessionTTL            string   `json:"session_ttl"`
+	Level                 string   `json:"log_level,omitempty"`
+	AuditEnabled          *bool    `json:"audit_enabled,omitempty"`
+	ShutdownTimeout       string   `json:"shutdown_timeout,omitempty"`
+	OperationRetentionTTL string   `json:"operation_retention_ttl,omitempty"`
+	OperationMaxCompleted *int     `json:"operation_max_completed,omitempty"`
+	OperationLogMaxBytes  *int64   `json:"operation_log_max_bytes,omitempty"`
+	TrustedCAPath         string   `json:"trusted_ca_path,omitempty"`
+	TrustedCAInjection    string   `json:"trusted_ca_injection,omitempty"`
+	HTTPAddress           string   `json:"http_address,omitempty"`
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
@@ -118,11 +117,6 @@ type configFieldSpec struct {
 var configFields = []configFieldSpec{
 	{name: "allowed_roots", writable: true, required: true},
 	{name: "allowed_root", writable: false, required: false},
-	// allowed_root_entries is the rich CLI show projection of the canonical
-	// stored allowed_roots; it is a show surface, never a config-file field,
-	// so the read-only classification makes a config.json carrying it a
-	// fail-closed validation error.
-	{name: "allowed_root_entries"},
 	{name: "session_ttl", writable: true, required: true},
 	{name: "log_level", writable: true},
 	{name: "audit_enabled", writable: true},
@@ -488,53 +482,44 @@ func resolveTrustedCAInjection(s string) string {
 	return s
 }
 
-// resolveAllowedRoots resolves the canonical rich allowed_roots entries from
-// raw config with legacy migration. canonicalize=true means full
-// canonicalization (for loading config); canonicalize=false means just
-// resolve legacy migration (for config show).
-//
-// Legacy string entries and the legacy scalar allowed_root normalize to
-// read_write. Repeated canonical paths with the same access keep the first
-// occurrence (the current duplicate semantics); the same canonical path with
-// conflicting access is a fail-closed error, never a silent choice.
-func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
+// resolveAllowedRoots resolves allowed_roots from raw config with legacy migration.
+// canonicalize=true means full canonicalization (for loading config).
+// canonicalize=false means just resolve legacy migration (for config show).
+func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]string, error) {
 	hasLegacy := raw["allowed_root"] != nil
 	hasNew := raw["allowed_roots"] != nil
 	if hasLegacy && hasNew {
 		return nil, fmt.Errorf("ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
 	}
-	var entries []AllowedRootEntry
+	var roots []string
 	if hasNew {
-		entries = fc.AllowedRoots
+		roots = fc.AllowedRoots
 	} else if hasLegacy {
-		entries = []AllowedRootEntry{allowedRootEntry(fc.AllowedRootLegacy)}
+		roots = []string{fc.AllowedRootLegacy}
 	} else {
 		return nil, fmt.Errorf("allowed_roots is required")
 	}
-	if len(entries) == 0 {
+	if len(roots) == 0 {
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
 	}
-	seen := make(map[string]AllowedRootAccess)
-	result := make([]AllowedRootEntry, 0, len(entries))
-	for _, e := range entries {
-		if e.Path == "" {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == "" {
 			return nil, fmt.Errorf("allowed_roots contains an empty entry")
 		}
-		if !filepath.IsAbs(e.Path) {
-			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", e.Path)
+		if !filepath.IsAbs(r) {
+			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", r)
 		}
-		canon, err := canonicalizeWorkspacePathForAdd(e.Path)
+		canon, err := canonicalizeWorkspacePathForAdd(r)
 		if err != nil {
-			return nil, fmt.Errorf("invalid allowed_roots entry %q: %w", e.Path, err)
+			return nil, fmt.Errorf("invalid allowed_roots entry %q: %w", r, err)
 		}
-		if prev, ok := seen[canon]; ok {
-			if prev != e.Access {
-				return nil, fmt.Errorf("conflicting allowed_roots entries for %q: %q and %q", canon, prev, e.Access)
-			}
+		if seen[canon] {
 			continue
 		}
-		seen[canon] = e.Access
-		result = append(result, AllowedRootEntry{Path: canon, Access: e.Access})
+		seen[canon] = true
+		result = append(result, canon)
 	}
 	if len(result) == 0 {
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
@@ -543,44 +528,38 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]Allo
 }
 
 // resolveAllowedRootsForShow resolves allowed_roots for config show.
-// It does not canonicalize paths, just resolves legacy migration and projects
-// the stored entries in first-occurrence order: the stored paths keep their
-// stored spelling and every entry reports its authoritative access (a legacy
-// path-only entry is the read_write grant). The returned entries are the one
-// canonical policy value from which both public `config show` projections
-// (allowed_roots and allowed_root_entries) derive; see
-// allowedRootShowProjections.
-func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
+// It does not canonicalize paths, just resolves legacy migration.
+func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]string, error) {
 	hasLegacy := raw["allowed_root"] != nil
 	hasNew := raw["allowed_roots"] != nil
 	if hasLegacy && hasNew {
 		return nil, fmt.Errorf("ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
 	}
-	var entries []AllowedRootEntry
+	var roots []string
 	if hasNew {
-		entries = fc.AllowedRoots
+		roots = fc.AllowedRoots
 	} else if hasLegacy {
-		entries = []AllowedRootEntry{allowedRootEntry(fc.AllowedRootLegacy)}
+		roots = []string{fc.AllowedRootLegacy}
 	} else {
 		return nil, fmt.Errorf("allowed_roots is required")
 	}
-	if len(entries) == 0 {
+	if len(roots) == 0 {
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
 	}
 	seen := make(map[string]bool)
-	result := make([]AllowedRootEntry, 0, len(entries))
-	for _, e := range entries {
-		if e.Path == "" {
+	result := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == "" {
 			return nil, fmt.Errorf("allowed_roots contains an empty entry")
 		}
-		if !filepath.IsAbs(e.Path) {
-			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", e.Path)
+		if !filepath.IsAbs(r) {
+			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", r)
 		}
-		if seen[e.Path] {
+		if seen[r] {
 			continue
 		}
-		seen[e.Path] = true
-		result = append(result, e)
+		seen[r] = true
+		result = append(result, r)
 	}
 	if len(result) == 0 {
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
@@ -719,46 +698,6 @@ func validateAllowedRootValue(s string) error {
 	return validateWorkspacePathPolicy(filepath.Clean(s))
 }
 
-// validateAllowedRootEntryValue validates one raw allowed_roots array entry:
-// either a legacy path string (read_write) or a canonical {"path","access"}
-// object with exactly those two fields. Unknown object fields, unsupported
-// shapes, unknown access values, and invalid paths fail closed.
-// Note: this is a lexical check only (no filesystem access); the full
-// canonicalization + policy is applied by canonicalizeWorkspacePathForAdd.
-func validateAllowedRootEntryValue(er json.RawMessage) error {
-	var path string
-	if err := json.Unmarshal(er, &path); err == nil {
-		return validateAllowedRootValue(path)
-	}
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(er, &fields); err != nil {
-		return fmt.Errorf(`allowed_roots entry must be a path string or a {"path","access"} object`)
-	}
-	if len(fields) != 2 {
-		return fmt.Errorf(`allowed_roots entry must contain exactly "path" and "access"`)
-	}
-	pathRaw, ok := fields["path"]
-	if !ok {
-		return fmt.Errorf(`allowed_roots entry must contain exactly "path" and "access"`)
-	}
-	accessRaw, ok := fields["access"]
-	if !ok {
-		return fmt.Errorf(`allowed_roots entry must contain exactly "path" and "access"`)
-	}
-	if err := json.Unmarshal(pathRaw, &path); err != nil {
-		return fmt.Errorf("allowed_roots entry path must be a JSON string")
-	}
-	var access AllowedRootAccess
-	if err := json.Unmarshal(accessRaw, &access); err != nil || !access.isValid() {
-		return fmt.Errorf("allowed_roots entry access must be \"read_write\" or \"read_only\"")
-	}
-	if err := validateAllowedRootValue(path); err != nil {
-		return fmt.Errorf("invalid allowed_roots entry path %q: %w", path, err)
-	}
-	return nil
-}
-
 // validateHTTPAddress validates that the http_address value is a loopback
 // IPv4 address with a valid port (1..65535).
 func validateHTTPAddress(s string) error {
@@ -890,7 +829,7 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 			return nil, fmt.Errorf("invalid allowed root: %w", err)
 		}
 		defaultConfig := fileConfig{
-			AllowedRoots:          []AllowedRootEntry{allowedRootEntry(canonRoot)},
+			AllowedRoots:          []string{canonRoot},
 			SessionTTL:            "12h",
 			Level:                 "info",
 			ShutdownTimeout:       "30s",
@@ -1015,7 +954,7 @@ func initSystem(allowedRoot string, stdout, stderr io.Writer,
 			return fmt.Errorf("cannot decode existing configuration: %w", err)
 		}
 
-		existingRoots = allowedRootPaths(fc.AllowedRoots)
+		existingRoots = fc.AllowedRoots
 		if fc.AllowedRootLegacy != "" && len(fc.AllowedRoots) == 0 {
 			existingRoots = []string{fc.AllowedRootLegacy}
 		}
@@ -1253,25 +1192,21 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 	}
 
 	// Validate allowed_roots (new) or allowed_root (legacy).
-	// Each allowed_roots entry is either the legacy path string (read_write)
-	// or the canonical {"path","access"} object; unknown object fields are
-	// rejected. Full canonicalization and canonical-path conflict detection
-	// happen in resolveAllowedRoots at the load boundary.
 	hasAllowedRoots := raw["allowed_roots"] != nil
 	hasAllowedRootLegacy := raw["allowed_root"] != nil
 	if hasAllowedRoots && hasAllowedRootLegacy {
 		return fmt.Errorf("ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
 	}
 	if hasAllowedRoots {
-		var entries []json.RawMessage
-		if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
-			return fmt.Errorf(`allowed_roots must be a JSON array of path strings or {"path","access"} objects`)
+		var roots []string
+		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+			return fmt.Errorf("allowed_roots must be a JSON array of strings")
 		}
-		if len(entries) == 0 {
+		if len(roots) == 0 {
 			return fmt.Errorf("allowed_roots must contain at least one entry")
 		}
-		for _, er := range entries {
-			if err := validateAllowedRootEntryValue(er); err != nil {
+		for _, r := range roots {
+			if err := validateAllowedRootValue(r); err != nil {
 				return err
 			}
 		}

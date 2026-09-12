@@ -301,7 +301,7 @@ func TestLauncherPatchCollidingRenameAbortsDisable(t *testing.T) {
 func TestLauncherCheckedDeleteCleansRuntimeDirsWhenRowRemovalFails(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	globalRoots := app.Config.AllowedRoots
-	home := filepath.Join(allowedRootPaths(globalRoots)[0], "home", "lnccleanrow")
+	home := filepath.Join(globalRoots[0], "home", "lnccleanrow")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestLauncherCheckedDeleteCleansRuntimeDirsWhenRowRemovalFails(t *testing.T)
 	if err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
-	l, _, credToken, err := createLauncher(app.DB, int64(p.ID), "agent", LauncherScopeInherit, nil, allowedRootPaths(globalRoots), true)
+	l, _, credToken, err := createLauncher(app.DB, int64(p.ID), "agent", LauncherScopeInherit, nil, globalRoots, true)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}
@@ -398,7 +398,7 @@ func deleteLifecycleApp(t *testing.T, db *sql.DB) *App {
 	app := &App{
 		Config: &Config{
 			RuntimeDir:   t.TempDir(),
-			AllowedRoots: []AllowedRootEntry{allowedRootEntry(testAllowedRootDir(t))},
+			AllowedRoots: []string{testAllowedRootDir(t)},
 		},
 		DB: db,
 		InspectHelperContainers: func(ctx context.Context, launcherID string) ([]helperContainer, error) {
@@ -1070,7 +1070,7 @@ func launcherLifecycleWorkspace(t *testing.T, app *App, db *sql.DB) string {
 		t.Fatalf("find fixture principal: %v", err)
 	}
 	// launcherLifecycleDB builds the home as <fixtureRoot>/home/<username>.
-	app.Config.AllowedRoots = []AllowedRootEntry{allowedRootEntry(filepath.Dir(filepath.Dir(p.Home)))}
+	app.Config.AllowedRoots = []string{filepath.Dir(filepath.Dir(p.Home))}
 	ws := filepath.Join(p.Home, "ws")
 	if err := os.MkdirAll(ws, 0755); err != nil {
 		t.Fatal(err)
@@ -1107,7 +1107,6 @@ func TestRaceNoNewSessionAfterCheckedDelete(t *testing.T) {
 			&operatorAuthority{class: operatorAuthorityAdmin},
 			createSelector{launcherID: laID},
 			ws,
-			nil,
 		)
 		createDone <- err
 	}()
@@ -1349,7 +1348,6 @@ func TestDisableEnableFreshSessionCanAdmit(t *testing.T) {
 		&operatorAuthority{class: operatorAuthorityAdmin},
 		createSelector{launcherID: laID},
 		ws,
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("create fresh session after re-enable: %v", err)
@@ -1800,7 +1798,9 @@ func freshFileTestDB(t *testing.T) (*sql.DB, string) {
 		t.Fatalf("openDatabase: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	initializeTestDatabase(t, db)
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
 	return db, dbPath
 }
 
@@ -2042,14 +2042,14 @@ func TestLauncherScopeReplaceCommitsWithoutPostCommitLookup(t *testing.T) {
 	// Permit exactly the three pre-commit reads and fail every later query.
 	failDB := newFailQueryAfterDB(t, dbPath, 3, errMockQueryFail)
 	app := deleteLifecycleApp(t, failDB)
-	app.Config.AllowedRoots = []AllowedRootEntry{allowedRootEntry(globalRoots[0])}
+	app.Config.AllowedRoots = globalRoots
 
 	proj := filepath.Join(home, "proj")
 	if err := os.MkdirAll(proj, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	updated, err := app.replaceLauncherScopeWithLifecycle(l.ID, LauncherScopeRestricted, []AllowedRootEntry{allowedRootEntry(proj)})
+	updated, err := app.replaceLauncherScopeWithLifecycle(l.ID, LauncherScopeRestricted, []string{proj})
 	if err != nil {
 		t.Fatalf("scope replace under post-commit query failure: %v", err)
 	}
@@ -2057,7 +2057,7 @@ func TestLauncherScopeReplaceCommitsWithoutPostCommitLookup(t *testing.T) {
 		updated.Name != renamed || updated.Enabled || !updated.CreatedAt.Equal(l.CreatedAt) {
 		t.Errorf("returned projection lost pre-change metadata: %+v", updated)
 	}
-	if updated.ScopeMode != LauncherScopeRestricted || !slices.Equal(updated.AllowedRoots, []AllowedRootEntry{allowedRootEntry(proj)}) {
+	if updated.ScopeMode != LauncherScopeRestricted || !slices.Equal(updated.AllowedRoots, []string{proj}) {
 		t.Errorf("returned projection lost the committed scope/roots: %+v", updated)
 	}
 
@@ -2101,7 +2101,7 @@ func TestLauncherScopeReplaceTransactionFailureKeepsOldState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.ScopeMode != LauncherScopeRestricted || !slices.Equal(after.AllowedRoots, []AllowedRootEntry{allowedRootEntry(proj)}) {
+	if after.ScopeMode != LauncherScopeRestricted || !slices.Equal(after.AllowedRoots, []string{proj}) {
 		t.Errorf("scope/roots changed after failed replacement: %+v", after)
 	}
 }

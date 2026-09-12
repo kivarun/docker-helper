@@ -21,7 +21,7 @@ func TestUserModeRestartKeepsPersistedSessionsUsable(t *testing.T) {
 	// Persist a live session before the simulated restart.
 	first := newTestAppWithAdminToken(t)
 	first.OperationSupervisor = newOperationSupervisor()
-	workspace := testWorkspaceDir(t, first.Config.AllowedRoots[0].Path)
+	workspace := testWorkspaceDir(t, first.Config.AllowedRoots[0])
 	result, err := createDefaultAdminSessionForTest(first, workspace)
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)

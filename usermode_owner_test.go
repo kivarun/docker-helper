@@ -88,7 +88,7 @@ func expectReservedResponse(t *testing.T, w *httptest.ResponseRecorder, what str
 func TestUserModeOwnerPrincipalMutationsRejected(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	owner := app.userModeDefault.username
-	root := app.Config.AllowedRoots[0].Path
+	root := app.Config.AllowedRoots[0]
 
 	// disable
 	w := launcherRequest(t, app, http.MethodPatch, "/principals/"+owner, testAdminToken, `{"enabled":false}`)
@@ -155,7 +155,7 @@ func TestUserModeOwnerDefaultLauncherMutationsRejected(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	owner := app.userModeDefault.username
 	base := "/principals/" + owner + "/launchers/default"
-	proj := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
+	proj := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	// disable
 	w := launcherRequest(t, app, http.MethodPatch, base, testAdminToken, `{"enabled":false}`)
@@ -264,7 +264,7 @@ func TestUserModeOwnerSecondLauncherMutable(t *testing.T) {
 
 	// Another Principal is not reserved either, including its own 'default'
 	// Launcher (reservation identity is the startup-resolved ID, never a name).
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "otheruser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "otheruser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestUserModeOwnerReservationSystemModeUnaffected(t *testing.T) {
 		t.Fatalf("system-mode delete of the owner-named principal: expected 204, got %d (body=%s)", w.Code, w.Body.String())
 	}
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "sysuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sysuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func userModeOwnerTestApp(t *testing.T, db *sql.DB, dbPath string, owner *userMo
 	}
 	app := &App{
 		Config: &Config{
-			AllowedRoots:          []AllowedRootEntry{allowedRootEntry(allowedRoot)},
+			AllowedRoots:          []string{allowedRoot},
 			SessionTTL:            24 * time.Hour,
 			SocketPath:            filepath.Join(dir, "test.sock"),
 			StateDir:              dir,
@@ -415,7 +415,7 @@ func TestUserModeOwnerReservationRestartInvariant(t *testing.T) {
 		t.Fatalf("startup provisioning: %v", err)
 	}
 	app := userModeOwnerTestApp(t, db, dbPath, owner)
-	root := app.Config.AllowedRoots[0].Path
+	root := app.Config.AllowedRoots[0]
 
 	prohibited := []struct {
 		name   string
@@ -459,7 +459,7 @@ func TestUserModeOwnerReservationRestartInvariant(t *testing.T) {
 func TestUserModeOwnerReservationCurrentRuntimeUsable(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	owner := app.userModeDefault
-	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
+	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	// A selector-less user-mode Session resolves the cached default chain.
 	createSession := func() createSessionResponse {
@@ -636,7 +636,7 @@ func raceNarrowingReload(t *testing.T, app *App, narrowRoot string, newMutationR
 func narrowCfg(t *testing.T, app *App, narrowRoot string) *Config {
 	t.Helper()
 	cfg := app.getConfig()
-	cfg.AllowedRoots = []AllowedRootEntry{allowedRootEntry(narrowRoot)}
+	cfg.AllowedRoots = []string{narrowRoot}
 	return &cfg
 }
 
@@ -665,7 +665,7 @@ func TestRaceReloadSerializesPrincipalRootAdd(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
 	setupLauncherHandlerPrincipal(t, app, "mutator")
-	root := app.Config.AllowedRoots[0].Path
+	root := app.Config.AllowedRoots[0]
 	narrow := filepath.Join(root, "narrow")
 	stale := filepath.Join(root, "stale")
 	for _, d := range []string{narrow, stale} {
@@ -691,7 +691,7 @@ func TestRaceReloadSerializesPrincipalRootAdd(t *testing.T) {
 	if reloadCode != http.StatusOK {
 		t.Fatalf("reload: expected 200, got %d", reloadCode)
 	}
-	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0].Path != narrowRoot {
+	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0] != narrowRoot {
 		t.Fatalf("reload did not narrow the global roots: %v", got)
 	}
 	// The add linearized after the narrowed commit: the stale root is outside
@@ -725,7 +725,7 @@ func TestRaceReloadSerializesLauncherScopeReplace(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
 	home, _ := setupLauncherHandlerPrincipal(t, app, "mutator")
-	root := app.Config.AllowedRoots[0].Path
+	root := app.Config.AllowedRoots[0]
 	narrow := filepath.Join(root, "narrow")
 	if err := os.MkdirAll(narrow, 0755); err != nil {
 		t.Fatal(err)
@@ -754,7 +754,7 @@ func TestRaceReloadSerializesLauncherScopeReplace(t *testing.T) {
 	if reloadCode != http.StatusOK {
 		t.Fatalf("reload: expected 200, got %d", reloadCode)
 	}
-	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0].Path != narrowRoot {
+	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0] != narrowRoot {
 		t.Fatalf("reload did not narrow the global roots: %v", got)
 	}
 	// The replacement linearized after the narrowed commit: the root under the
@@ -821,7 +821,7 @@ func TestUserModeOwnerReservationLookupFailureFailsClosed(t *testing.T) {
 func TestRaceReloadSerializesPrincipalCreate(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app.Config.AllowedRoots[0].Path
+	root := app.Config.AllowedRoots[0]
 	narrow := filepath.Join(root, "narrow")
 	if err := os.MkdirAll(narrow, 0755); err != nil {
 		t.Fatal(err)
@@ -844,7 +844,7 @@ func TestRaceReloadSerializesPrincipalCreate(t *testing.T) {
 	if reloadCode != http.StatusOK {
 		t.Fatalf("reload: expected 200, got %d", reloadCode)
 	}
-	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0].Path != narrow {
+	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0] != narrow {
 		t.Fatalf("reload did not narrow the global roots: %v", got)
 	}
 	// The creation linearized after the narrowed commit: the home is outside
@@ -886,7 +886,7 @@ func TestRaceReloadSerializesPrincipalCreate(t *testing.T) {
 func TestPrincipalCreateLinearizesBeforeReload(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app.Config.AllowedRoots[0].Path
+	root := app.Config.AllowedRoots[0]
 	narrow := filepath.Join(root, "narrow")
 	home := filepath.Join(root, "home", "newuser")
 	proj := filepath.Join(home, "proj")
@@ -924,7 +924,7 @@ func TestPrincipalCreateLinearizesBeforeReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("find principal newuser: %v", err)
 	}
-	if !slices.Equal(p.AllowedRoots, []AllowedRootEntry{allowedRootEntry(home)}) {
+	if !slices.Equal(p.AllowedRoots, []string{home}) {
 		t.Fatalf("stored home root not intact after the later reload: %v, want [%s]", p.AllowedRoots, home)
 	}
 	if _, err := findDefaultLauncher(app.DB, int64(p.ID)); err != nil {
@@ -963,7 +963,7 @@ func TestPrincipalCreateLinearizesBeforeReload(t *testing.T) {
 func TestPrincipalAllowedRootAddUsesResolvedGlobalCeiling(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app.Config.AllowedRoots[0].Path
+	root := app.Config.AllowedRoots[0]
 
 	// Configure the global ceiling through a symlink to the real root.
 	symlink := filepath.Join(filepath.Dir(root), ".dh-symlink-ceiling")
@@ -972,7 +972,7 @@ func TestPrincipalAllowedRootAddUsesResolvedGlobalCeiling(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Remove(symlink) })
 	cfg := app.getConfig()
-	cfg.AllowedRoots = []AllowedRootEntry{allowedRootEntry(symlink)}
+	cfg.AllowedRoots = []string{symlink}
 	app.setConfig(&cfg)
 
 	// The Principal is created through the real public handler against the
@@ -1002,7 +1002,7 @@ func TestPrincipalAllowedRootAddUsesResolvedGlobalCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("find principal resuser: %v", err)
 	}
-	if !slices.Equal(p.AllowedRoots, []AllowedRootEntry{allowedRootEntry(home), allowedRootEntry(proj)}) {
+	if !slices.Equal(p.AllowedRoots, []string{home, proj}) {
 		t.Fatalf("stored roots = %v, want the canonical real paths [%s %s]", p.AllowedRoots, home, proj)
 	}
 }

@@ -140,22 +140,22 @@ type createSelector struct {
 }
 
 // sessionOwnershipSnapshot is a consistent single-transaction projection of a
-// Launcher and its owning Principal (allowed-root entries and scope) used for
-// Session-creation admission. It is deliberately a snapshot, not a live query:
-// the admission policy must observe one consistent Principal/Launcher state,
-// read in its own transaction. Persistence later conditionally re-validates
-// (via a conditional INSERT/SELECT) that the Launcher and Principal still
-// exist and remain enabled before inserting the Session.
+// Launcher and its owning Principal (roots and scope) used for Session-creation
+// admission. It is deliberately a snapshot, not a live query: the admission
+// policy must observe one consistent Principal/Launcher state, read in its own
+// transaction. Persistence later conditionally re-validates (via a
+// conditional INSERT/SELECT) that the Launcher and Principal still exist and
+// remain enabled before inserting the Session.
 type sessionOwnershipSnapshot struct {
 	launcherID       string
 	launcherName     string
 	launcherEnabled  bool
 	launcherScope    LauncherScopeMode
-	launcherRoots    []AllowedRootEntry
+	launcherRoots    []string
 	principalID      int64
 	principalName    string
 	principalEnabled bool
-	principalRoots   []AllowedRootEntry
+	principalRoots   []string
 }
 
 // resolveSessionOwnershipSnapshot loads a Launcher and its Principal (with
@@ -209,20 +209,19 @@ func loadSessionOwnershipSnapshot(q txQuerier, launcherID string) (*sessionOwner
 
 	if snap.launcherScope == LauncherScopeRestricted {
 		rows, err := q.Query(
-			`SELECT root_path, access FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`,
+			`SELECT root_path FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`,
 			launcherID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("cannot query launcher allowed roots: %w", err)
 		}
 		for rows.Next() {
-			var rootPath string
-			var access string
-			if err := rows.Scan(&rootPath, &access); err != nil {
+			var root string
+			if err := rows.Scan(&root); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("cannot scan launcher allowed root: %w", err)
 			}
-			snap.launcherRoots = append(snap.launcherRoots, AllowedRootEntry{Path: rootPath, Access: AllowedRootAccess(access)})
+			snap.launcherRoots = append(snap.launcherRoots, root)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -231,20 +230,19 @@ func loadSessionOwnershipSnapshot(q txQuerier, launcherID string) (*sessionOwner
 	}
 
 	rows, err := q.Query(
-		`SELECT root_path, access FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
+		`SELECT root_path FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
 		snap.principalID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot query principal allowed roots: %w", err)
 	}
 	for rows.Next() {
-		var rootPath string
-		var access string
-		if err := rows.Scan(&rootPath, &access); err != nil {
+		var root string
+		if err := rows.Scan(&root); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("cannot scan principal allowed root: %w", err)
 		}
-		snap.principalRoots = append(snap.principalRoots, AllowedRootEntry{Path: rootPath, Access: AllowedRootAccess(access)})
+		snap.principalRoots = append(snap.principalRoots, root)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -257,6 +255,35 @@ func loadSessionOwnershipSnapshot(q txQuerier, launcherID string) (*sessionOwner
 // ErrLauncherUnavailable is returned when the resolved owning Launcher/Principal
 // is disabled or otherwise not admissible for a new Session.
 var ErrLauncherUnavailable = errors.New("launcher unavailable")
+
+// computeLauncherEffectiveRoots is the single authoritative three-level
+// Session-creation root policy. It consumes the global allowed roots (the
+// config owner), the Principal's current roots, and the Launcher scope. The
+// Principal-level ceiling is the canonical effective-Principal-root policy
+// owner (computeEffectivePrincipalRoots): the user-mode daemon-owner
+// Principal with zero stored roots collapses onto the global roots, every
+// other Principal intersects with them.
+//
+//   - inherit Launcher scope adds no narrowing: the effective roots equal the
+//     effective Principal ceiling.
+//   - restricted Launcher scope first revalidates the Launcher's stored roots
+//     against the current effective Principal ceiling (rejecting stale or
+//     directly-injected out-of-ceiling roots), then intersects.
+func computeLauncherEffectiveRoots(globalAllowedRoots []string, snap *sessionOwnershipSnapshot, daemonOwnerPrincipalID int64, userMode bool) ([]string, error) {
+	principalCeiling := computeEffectivePrincipalRoots(globalAllowedRoots, snap.principalRoots, snap.principalID, daemonOwnerPrincipalID, userMode)
+
+	if snap.launcherScope == LauncherScopeRestricted {
+		// Revalidate stored roots against the current ceiling; fail closed on
+		// stale or injected out-of-ceiling roots.
+		for _, stored := range snap.launcherRoots {
+			if !isWithinAnyAllowedRoot(stored, principalCeiling) {
+				return nil, ErrLauncherUnavailable
+			}
+		}
+		return intersectAllowedRootScopes(principalCeiling, snap.launcherRoots), nil
+	}
+	return principalCeiling, nil
+}
 
 var (
 	// ErrConflictingSelectors is returned when a Session create request supplies
@@ -286,34 +313,11 @@ func resolveAllowedRootPaths(roots []string) ([]string, error) {
 	return out, nil
 }
 
-// resolveAllowedRootEntries returns each configured global allowed-root entry
-// with its path symlink-resolved (the same resolution semantics as
-// resolveAllowedRootPaths), preserving the canonical access mode; resolution
-// failure of any root fails closed with an error.
-func resolveAllowedRootEntries(entries []AllowedRootEntry) ([]AllowedRootEntry, error) {
-	out := make([]AllowedRootEntry, 0, len(entries))
-	for _, e := range entries {
-		resolved, err := filepath.EvalSymlinks(e.Path)
-		if err != nil {
-			return nil, fmt.Errorf("cannot resolve allowed root %q: %w: %w", e.Path, err, ErrSystem)
-		}
-		out = append(out, AllowedRootEntry{Path: resolved, Access: e.Access})
-	}
-	return out, nil
-}
-
 // appResolvedGlobalRoots returns the canonicalized global allowed roots (the
 // config owner). Each root is symlink-resolved; resolution failure of any root
 // fails closed with an error.
 func (a *App) appResolvedGlobalRoots() ([]string, error) {
-	return resolveAllowedRootPaths(allowedRootPaths(a.getConfig().AllowedRoots))
-}
-
-// appResolvedGlobalRootEntries returns the canonical global allowed-root
-// entries (the config owner) with each path symlink-resolved; resolution
-// failure of any root fails closed with an error.
-func (a *App) appResolvedGlobalRootEntries() ([]AllowedRootEntry, error) {
-	return resolveAllowedRootEntries(a.getConfig().AllowedRoots)
+	return resolveAllowedRootPaths(a.getConfig().AllowedRoots)
 }
 
 // resolveCreateLauncher maps an authenticated authority and create selectors
@@ -394,17 +398,11 @@ func (a *App) resolveLauncherWithinPrincipal(launcherID string, principalID int6
 // target, ownership names, and three-level effective root scope) for an
 // authenticated authority and create request. It never mutates state.
 //
-// filesystemRoots is the caller-supplied issuance-time Session filesystem
-// request (nil when the request omitted filesystem_roots or carried the
-// empty array); it is carried into the resolved policy unchanged and is
-// proven/composed by createSessionWithPolicyLocked inside the same
-// lifecycle serialization boundary.
-//
 // Callers must hold lifecycleMu when calling this, so the resolved projection
 // comes from one coherent policy snapshot: real Session creation holds the
 // boundary around resolution and persistence, and read-only create-policy
 // introspection goes through resolveCreatePolicySnapshot.
-func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, workspace string, filesystemRoots []sessionFilesystemRootEntry) (*sessionCreatePolicy, error) {
+func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
 	launcherID, err := a.resolveCreateLauncher(auth, sel)
 	if err != nil {
 		return nil, err
@@ -418,7 +416,7 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 		return nil, ErrLauncherUnavailable
 	}
 
-	globalEntries, err := a.appResolvedGlobalRootEntries()
+	globalRoots, err := a.appResolvedGlobalRoots()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSystem, err)
 	}
@@ -427,19 +425,17 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 	if userMode && a.userModeDefault != nil {
 		daemonID = a.userModeDefault.principalID
 	}
-	effectiveEntries, err := effectiveLauncherAllowedRoots(globalEntries, snap, daemonID, userMode)
+	effective, err := computeLauncherEffectiveRoots(globalRoots, snap, daemonID, userMode)
 	if err != nil {
 		return nil, err
 	}
 
 	return &sessionCreatePolicy{
-		Workspace:                   workspace,
-		EffectiveAllowedRoots:       allowedRootPaths(effectiveEntries),
-		EffectiveAllowedRootEntries: effectiveEntries,
-		FilesystemRoots:             filesystemRoots,
-		LauncherID:                  snap.launcherID,
-		LauncherName:                snap.launcherName,
-		PrincipalName:               snap.principalName,
+		Workspace:             workspace,
+		EffectiveAllowedRoots: effective,
+		LauncherID:            snap.launcherID,
+		LauncherName:          snap.launcherName,
+		PrincipalName:         snap.principalName,
 	}, nil
 }
 
@@ -449,11 +445,9 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 // lifecycle serialization boundary, so it observes the same coherent
 // ownership-policy state as createSessionAuthorized — a concurrent config
 // reload or ownership mutation linearizes wholly before or wholly after the
-// read, never between its component reads. Introspection carries no Session
-// filesystem request: the projection is the maximum filesystem ceiling a
-// real create may further narrow through filesystem_entries.
+// read, never between its component reads.
 func (a *App) resolveCreatePolicySnapshot(auth *operatorAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	return a.resolveCreatePolicy(auth, sel, workspace, nil)
+	return a.resolveCreatePolicy(auth, sel, workspace)
 }

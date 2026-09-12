@@ -103,19 +103,13 @@ var configShowCommand = &Command{
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	Help: `Without FIELD, prints the complete effective configuration as JSON.
-With FIELD, prints only that field's value followed by a newline.
+With FIELD, prints only that field's scalar value followed by a newline.
 
 The general JSON output redacts admin_token.
 "config show admin_token" intentionally prints the complete real token.
 
-allowed_roots is the 2.x path-only projection of the global allowed roots
-(a JSON array of canonical paths) and allowed_root_entries is the
-authoritative rich projection of the same stored entries; both derive from
-one canonical policy value.
-
 Fields:
   allowed_roots
-  allowed_root_entries
   session_ttl
   log_level
   audit_enabled
@@ -262,7 +256,6 @@ remove does not invalidate already-issued sessions.`,
 	Subcommands: []*Command{
 		configAllowedRootListCommand,
 		configAllowedRootAddCommand,
-		configAllowedRootSetAccessCommand,
 		configAllowedRootRemoveCommand,
 	},
 }
@@ -270,15 +263,14 @@ remove does not invalidate already-issued sessions.`,
 var configAllowedRootListCommand = &Command{
 	Name:       "list",
 	Summary:    "List all allowed roots",
-	Usage:      "docker-helper config allowed-root list [--json]",
+	Usage:      "docker-helper config allowed-root list",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
-	Help:       `List all allowed roots, one canonical root per line; --json prints the canonical rich entries with their access modes.`,
+	Help:       `List all allowed roots, one canonical root per line.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return configAllowedRootList(*jsonOut, stdout, stderr)
+				return configAllowedRootList(stdout, stderr)
 			},
 		}
 	},
@@ -287,21 +279,18 @@ var configAllowedRootListCommand = &Command{
 var configAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root",
-	Usage:      "docker-helper config allowed-root add [--access ACCESS] PATH",
+	Usage:      "docker-helper config allowed-root add PATH",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Add an allowed root.
 
 Canonicalizes and validates the path. Idempotent (prints "already present"
-if the root exists; an add never changes the access of a stored root).
-Preserves existing roots.`,
+if the root exists). Preserves existing roots.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		access := &accessFlag{}
-		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				return configAllowedRootAdd(args[0], access, stdout, stderr)
+				return configAllowedRootAdd(args[0], stdout, stderr)
 			},
 		}
 	},
@@ -328,10 +317,8 @@ Does not invalidate already-issued sessions.`,
 	},
 }
 
-// configAllowedRootList prints all allowed roots, one canonical root per
-// line; --json prints the canonical rich entries so the access mode of
-// every global root is visible to access-aware tooling.
-func configAllowedRootList(jsonOut bool, stdout, stderr io.Writer) int {
+// configAllowedRootList prints all allowed roots, one per line.
+func configAllowedRootList(stdout, stderr io.Writer) int {
 	raw, _, err := loadRawConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -352,16 +339,15 @@ func configAllowedRootList(jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	if err := printAllowedRootList(stdout, requestedRoots, jsonOut); err != nil {
-		fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-		return 1
+	for _, r := range requestedRoots {
+		fmt.Fprintln(stdout, r)
 	}
 	return 0
 }
 
 // configAllowedRootAdd adds a root to allowed_roots.
 // MAC preparation is now handled at session creation time, not at config time.
-func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Writer) int {
+func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 	if path == "" {
 		fmt.Fprintln(stderr, "error: path is required")
 		return 2
@@ -369,13 +355,6 @@ func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Wri
 	if !filepath.IsAbs(path) {
 		fmt.Fprintln(stderr, "error: path must be absolute")
 		return 2
-	}
-
-	// An omitted --access is the canonical read_write grant; the parsed
-	// flag value is always a canonical vocabulary value.
-	requestedAccess := AllowedRootAccessReadWrite
-	if access != nil && access.set {
-		requestedAccess = access.access
 	}
 
 	canonical, err := canonicalizeWorkspacePathForAdd(path)
@@ -384,115 +363,7 @@ func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Wri
 		return 2
 	}
 
-	return addAllowedRootToConfig(canonical, requestedAccess, stdout, stderr)
-}
-
-// configAllowedRootSetAccessCommand changes the access mode of exactly one
-// stored global root: PATH ACCESS. The mutation runs inside the shared
-// config transaction (file lock, atomic replace, reload/rollback), so it is
-// one daemon-side change, never a read-modify-write over the root list.
-var configAllowedRootSetAccessCommand = &Command{
-	Name:       "set-access",
-	Summary:    "Change the access mode of an allowed root",
-	Usage:      "docker-helper config allowed-root set-access PATH read_only|read_write",
-	MinPosArgs: 2,
-	MaxPosArgs: 2,
-	Help: `Change the access mode of one stored allowed root.
-
-The path is matched by the same canonical stored identity as remove
-(symlink-resolved). Unlike remove, a root that is not stored is an error,
-not an idempotent no-op. An unchanged access is reported as "unchanged".`,
-	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		return Invocation{
-			Run: func(stdout, stderr io.Writer) int {
-				args := fs.Args()
-				return configAllowedRootSetAccess(args[0], args[1], stdout, stderr)
-			},
-		}
-	},
-}
-
-// configAllowedRootSetAccess resolves the requested root identity and access
-// at the CLI boundary (a user-error exit before any file transaction) and
-// then performs the targeted access mutation inside the shared config
-// transaction owner.
-func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer) int {
-	if path == "" {
-		fmt.Fprintln(stderr, "error: path is required")
-		return 2
-	}
-	if !filepath.IsAbs(path) {
-		fmt.Fprintln(stderr, "error: path must be absolute")
-		return 2
-	}
-	requestedAccess, err := parseAllowedRootAccess(accessArg)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 2
-	}
-
-	requestedIdentity, err := resolveAllowedRootIdentity(path)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 2
-	}
-
-	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
-		fc, err := decodeFileConfig(raw)
-		if err != nil {
-			return configMutationResult{}, err
-		}
-
-		// Build the stored roots with the shared identity-resolution owner,
-		// so a symlink alias names the same stored entry.
-		storedRoots := fc.AllowedRoots
-		if len(storedRoots) == 0 {
-			return configMutationResult{}, fmt.Errorf("allowed_roots must contain at least one entry")
-		}
-		roots := make([]removableRoot, 0, len(storedRoots))
-		for _, r := range storedRoots {
-			if r.Path == "" || !filepath.IsAbs(r.Path) {
-				return configMutationResult{}, fmt.Errorf("invalid stored root %q", r.Path)
-			}
-			identity, err := resolveAllowedRootIdentity(r.Path)
-			if err != nil {
-				return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r.Path, err)
-			}
-			roots = append(roots, removableRoot{Stored: r, Identity: identity})
-		}
-
-		// Find the targeted entry (match by identity) and change only its
-		// access; the stored path spelling and position are preserved.
-		for _, rr := range roots {
-			if rr.Identity != requestedIdentity {
-				continue
-			}
-			if rr.Stored.Access == requestedAccess {
-				if migrated {
-					return configMutationResult{Message: fmt.Sprintf("unchanged %s (access %s; legacy schema migrated)\n", rr.Stored.Path, rr.Stored.Access)}, nil
-				}
-				return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("unchanged %s (access %s)\n", rr.Stored.Path, rr.Stored.Access)}, nil
-			}
-			updated := make([]AllowedRootEntry, 0, len(roots))
-			for _, inner := range roots {
-				entry := inner.Stored
-				if inner.Identity == requestedIdentity {
-					entry.Access = requestedAccess
-				}
-				updated = append(updated, entry)
-			}
-			rawBytes, _ := json.Marshal(updated)
-			raw["allowed_roots"] = rawBytes
-			return configMutationResult{Message: fmt.Sprintf("changed %s to access %s\n", rr.Stored.Path, requestedAccess)}, nil
-		}
-
-		// Unlike remove, a missing stored root is a user-facing failure of
-		// the targeted access mutation: the goal state is not satisfiable,
-		// reported without a write. The failure also abandons any pending
-		// legacy migration prepared by the transaction: a failed targeted
-		// mutation must never persist a migration as its side effect.
-		return configMutationResult{}, configUserError{fmt.Sprintf("not found %s", requestedIdentity)}
-	})
+	return addAllowedRootToConfig(canonical, stdout, stderr)
 }
 
 // configAllowedRootRemove removes a root from allowed_roots.
@@ -506,13 +377,20 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// Resolve the requested removal path identity through the shared
-	// allowed-root identity owner (fail-closed on non-ENOENT resolution
-	// errors).
-	requestedIdentity, err := resolveAllowedRootIdentity(path)
+	// Resolve the requested removal path identity.
+	requestedAbs, err := filepath.Abs(path)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		fmt.Fprintf(stderr, "error: cannot resolve path: %v\n", err)
 		return 2
+	}
+	requestedIdentity, err := filepath.EvalSymlinks(requestedAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			requestedIdentity = filepath.Clean(requestedAbs)
+		} else {
+			fmt.Fprintf(stderr, "error: cannot resolve path: %v\n", err)
+			return 2
+		}
 	}
 
 	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
@@ -525,22 +403,30 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 			return configMutationResult{}, fmt.Errorf("allowed_roots must contain at least one entry")
 		}
 
-		// Build removable roots with the shared allowed-root identity owner.
+		// Build removable roots with identity resolution.
 		roots := make([]removableRoot, 0, len(storedRoots))
 		for _, r := range storedRoots {
-			if r.Path == "" || !filepath.IsAbs(r.Path) {
-				return configMutationResult{}, fmt.Errorf("invalid stored root %q", r.Path)
+			if r == "" || !filepath.IsAbs(r) {
+				return configMutationResult{}, fmt.Errorf("invalid stored root %q", r)
 			}
-			identity, err := resolveAllowedRootIdentity(r.Path)
+			abs, err := filepath.Abs(r)
 			if err != nil {
-				return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r.Path, err)
+				return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r, err)
+			}
+			identity, err := filepath.EvalSymlinks(abs)
+			if err != nil {
+				if os.IsNotExist(err) {
+					identity = filepath.Clean(abs)
+				} else {
+					return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r, err)
+				}
 			}
 			roots = append(roots, removableRoot{Stored: r, Identity: identity})
 		}
 
 		// Find and remove the root (match by identity).
 		found := false
-		newStored := make([]AllowedRootEntry, 0, len(roots))
+		newStored := make([]string, 0, len(roots))
 		for _, rr := range roots {
 			if rr.Identity == requestedIdentity {
 				found = true
@@ -669,15 +555,12 @@ func configShowAll(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Resolve effective allowed_roots (handles legacy migration). The
-	// resolved entries are the one canonical policy value both public show
-	// projections derive from.
+	// Resolve effective allowed_roots (handles legacy migration).
 	requestedRoots, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	roots, entries := allowedRootShowProjections(requestedRoots)
 
 	ec := resolveEffectiveConfig(*fc)
 
@@ -694,8 +577,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
 	result := map[string]any{
-		"allowed_roots":           roots,
-		"allowed_root_entries":    entries,
+		"allowed_roots":           requestedRoots,
 		"session_ttl":             fc.SessionTTL,
 		"log_level":               ec.LogLevel,
 		"audit_enabled":           ec.AuditEnabled,
@@ -727,23 +609,6 @@ func configShowAll(stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-// allowedRootShowProjections derives both public `config show` projections
-// from the one canonical resolved entries value: allowed_roots is the 2.x
-// path-only projection ([]string, the frozen compatibility shape) and
-// allowed_root_entries is the authoritative rich projection. Both are always
-// serialized as JSON arrays — an empty policy projects the empty array,
-// never null — and neither projection is an independent owner.
-func allowedRootShowProjections(entries []AllowedRootEntry) ([]string, []AllowedRootEntry) {
-	roots := allowedRootPaths(entries)
-	if roots == nil {
-		roots = []string{}
-	}
-	if entries == nil {
-		entries = []AllowedRootEntry{}
-	}
-	return roots, entries
 }
 
 // resolveHTTPAddress returns the effective HTTP address.
@@ -853,15 +718,12 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Resolve effective allowed_roots (handles legacy migration). The
-	// resolved entries are the one canonical policy value both public show
-	// projections derive from.
+	// Resolve effective allowed_roots (handles legacy migration).
 	requestedRoots, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	roots, entries := allowedRootShowProjections(requestedRoots)
 
 	ec := resolveEffectiveConfig(*fc)
 
@@ -869,10 +731,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 
 	switch field {
 	case "allowed_roots":
-		data, _ := json.MarshalIndent(roots, "", "  ")
-		fmt.Fprintln(stdout, string(data))
-	case "allowed_root_entries":
-		data, _ := json.MarshalIndent(entries, "", "  ")
+		data, _ := json.MarshalIndent(requestedRoots, "", "  ")
 		fmt.Fprintln(stdout, string(data))
 	case "session_ttl":
 		fmt.Fprintln(stdout, fc.SessionTTL)
@@ -906,10 +765,8 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 }
 
 // addAllowedRootToConfig adds a root to allowed_roots using the shared
-// config transaction owner. The add is an idempotent create: it never
-// changes the access of an already-stored root (only set-access does), so
-// the unchanged message reports the stored access.
-func addAllowedRootToConfig(canonical string, access AllowedRootAccess, stdout, stderr io.Writer) int {
+// config transaction owner.
+func addAllowedRootToConfig(canonical string, stdout, stderr io.Writer) int {
 	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
@@ -924,11 +781,9 @@ func addAllowedRootToConfig(canonical string, access AllowedRootAccess, stdout, 
 
 		// Check if already present.
 		present := false
-		var storedAccess AllowedRootAccess
 		for _, r := range existingRoots {
-			if r.Path == canonical {
+			if r == canonical {
 				present = true
-				storedAccess = r.Access
 				break
 			}
 		}
@@ -937,22 +792,21 @@ func addAllowedRootToConfig(canonical string, access AllowedRootAccess, stdout, 
 			if !migrated {
 				return configMutationResult{
 					SkipWrite: true,
-					Message:   fmt.Sprintf("already present %s (access %s)\n", canonical, storedAccess),
+					Message:   fmt.Sprintf("already present %s\n", canonical),
 				}, nil
 			}
 			// Legacy migration needed: write migrated config.
 			return configMutationResult{
-				Message: fmt.Sprintf("already present %s (access %s; legacy schema migrated)\n", canonical, storedAccess),
+				Message: fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical),
 			}, nil
 		}
 
-		// Persist the canonical rich entry list. 2.2 writes always emit the
-		// canonical object form.
-		rawBytes, _ := json.Marshal(append(existingRoots, AllowedRootEntry{Path: canonical, Access: access}))
+		// Add new root to canonical roots list.
+		rawBytes, _ := json.Marshal(append(existingRoots, canonical))
 		raw["allowed_roots"] = rawBytes
 
 		return configMutationResult{
-			Message: fmt.Sprintf("added %s (access %s)\n", canonical, access),
+			Message: fmt.Sprintf("added %s\n", canonical),
 		}, nil
 	})
 }
@@ -1199,8 +1053,8 @@ func formatRollbackReloadError(r reloadOutcome) string {
 
 // removableRoot separates stored representation from comparison identity.
 type removableRoot struct {
-	Stored   AllowedRootEntry // canonical stored entry
-	Identity string           // EvalSymlinks result or cleaned abs on ENOENT
+	Stored   string // original absolute stored spelling
+	Identity string // EvalSymlinks result or cleaned abs on ENOENT
 }
 
 // trustedCAPreflightWarning is printed to stderr when a successful system-mode
@@ -1274,7 +1128,7 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 			fmt.Fprintf(stderr, "error: cannot canonicalize allowed_root %q: %v\n", legacyVal, canonErr)
 			return 1
 		}
-		newRoots, _ := json.Marshal([]AllowedRootEntry{allowedRootEntry(canon)})
+		newRoots, _ := json.Marshal([]string{canon})
 		raw["allowed_roots"] = newRoots
 		delete(raw, "allowed_root")
 		migrated = true

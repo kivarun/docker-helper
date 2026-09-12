@@ -983,7 +983,7 @@ func TestPrincipalCredentialClientRequests(t *testing.T) {
 		},
 		{
 			name:       "addPrincipalAllowedRoot",
-			call:       func(c *apiClient) error { _, err := c.addPrincipalAllowedRoot("bob", "/data", nil); return err },
+			call:       func(c *apiClient) error { _, err := c.addPrincipalAllowedRoot("bob", "/data"); return err },
 			wantMethod: "POST",
 			wantURI:    "/principals/bob/allowed-roots",
 			wantBody:   `{"path":"/data"}`,

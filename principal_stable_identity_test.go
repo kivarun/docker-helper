@@ -42,7 +42,7 @@ func createStalePrincipalFixture(t *testing.T) *stalePrincipalFixture {
 	t.Helper()
 	app := newTestAppWithAdminToken(t)
 
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "alice")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "alice")
 	extra := filepath.Join(home, "extra")
 	if err := os.MkdirAll(extra, 0755); err != nil {
 		t.Fatal(err)

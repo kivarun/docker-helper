@@ -26,23 +26,11 @@ func TestAllowedRootListHappyPath(t *testing.T) {
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	configPath := setupConfigTestWithData(t, data)
 
-	// Verify list output: the default human surface is the 2.1-compatible
-	// one canonical root per line, with no header.
+	// Verify list output
 	stdout, _ := runConfigCLI(t, 0, "config", "allowed-root", "list")
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
 	if len(lines) != 1 || lines[0] != allowedRoot {
-		t.Errorf("expected one canonical root per line with %s, got %v", allowedRoot, lines)
-	}
-
-	// The explicit --json opt-in is the canonical rich projection carrying
-	// the stored access mode.
-	jsonOut, _ := runConfigCLI(t, 0, "config", "allowed-root", "list", "--json")
-	var entries []AllowedRootEntry
-	if err := json.Unmarshal([]byte(jsonOut), &entries); err != nil {
-		t.Fatalf("--json list must decode as the canonical rich entries: %v (%s)", err, jsonOut)
-	}
-	if len(entries) != 1 || entries[0].Path != allowedRoot || entries[0].Access != AllowedRootAccessReadWrite {
-		t.Errorf("--json list must carry the canonical entry, got %+v", entries)
+		t.Errorf("expected [%s], got %v", allowedRoot, lines)
 	}
 
 	// Verify list matches config show
@@ -53,45 +41,6 @@ func TestAllowedRootListHappyPath(t *testing.T) {
 
 	// Verify config file unchanged
 	verifyConfigUnchanged(t, configPath, data)
-}
-
-// TestAllowedRootListOutputShapes proves the restored list contract with
-// genuinely multi-value state: the default human output is one canonical
-// root per line in stored order with no header or access column, and the
-// explicit --json opt-in is the canonical rich entry array whose access
-// modes are exactly the stored ones (read_write and read_only).
-func TestAllowedRootListOutputShapes(t *testing.T) {
-	rwRoot := testAllowedRootDir(t)
-	roRoot := testAllowedRootDir(t)
-	cfg := map[string]any{
-		"allowed_roots": []any{
-			rwRoot,
-			map[string]any{"path": roRoot, "access": "read_only"},
-		},
-		"session_ttl": "12h",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	setupConfigTestWithData(t, data)
-
-	stdout, _ := runConfigCLI(t, 0, "config", "allowed-root", "list")
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	if len(lines) != 2 || lines[0] != rwRoot || lines[1] != roRoot {
-		t.Errorf("default list must be one canonical root per line in stored order, got %v", lines)
-	}
-	if strings.Contains(stdout, "read_write") || strings.Contains(stdout, "read_only") || strings.Contains(stdout, "ACCESS") {
-		t.Errorf("default list must not carry an access column, got: %q", stdout)
-	}
-
-	jsonOut, _ := runConfigCLI(t, 0, "config", "allowed-root", "list", "--json")
-	var entries []AllowedRootEntry
-	if err := json.Unmarshal([]byte(jsonOut), &entries); err != nil {
-		t.Fatalf("--json list must decode as the canonical rich entries: %v (%s)", err, jsonOut)
-	}
-	if len(entries) != 2 ||
-		entries[0].Path != rwRoot || entries[0].Access != AllowedRootAccessReadWrite ||
-		entries[1].Path != roRoot || entries[1].Access != AllowedRootAccessReadOnly {
-		t.Errorf("--json list must carry the stored entries in order with exact access, got %+v", entries)
-	}
 }
 
 func TestAllowedRootAddHappyPath(t *testing.T) {
@@ -111,7 +60,10 @@ func TestAllowedRootAddHappyPath(t *testing.T) {
 
 	// Verify both roots present
 	raw := readConfigJSON(t, configPath)
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 2 || !slices.Contains(roots, allowedRoot) || !slices.Contains(roots, newRoot) {
 		t.Errorf("expected [%s, %s], got %v", allowedRoot, newRoot, roots)
 	}
@@ -134,7 +86,10 @@ func TestAllowedRootRemoveHappyPath(t *testing.T) {
 
 	// Verify only original root remains
 	raw := readConfigJSON(t, configPath)
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 1 || roots[0] != allowedRoot {
 		t.Errorf("expected [%s], got %v", allowedRoot, roots)
 	}
@@ -188,7 +143,10 @@ func TestAllowedRootRemoveDeletedDirectory(t *testing.T) {
 
 	// Verify only base remains
 	raw := readConfigJSON(t, configPath)
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 1 || roots[0] != base {
 		t.Errorf("expected [%s], got %v", base, roots)
 	}
@@ -221,7 +179,10 @@ func TestAllowedRootRemoveSymlinkSpelling(t *testing.T) {
 
 	// Verify only base remains
 	raw := readConfigJSON(t, configPath)
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 1 || roots[0] != base {
 		t.Errorf("expected [%s], got %v", base, roots)
 	}
@@ -250,7 +211,10 @@ func TestAllowedRootRemoveSymlinkToForbiddenTarget(t *testing.T) {
 
 	// Verify only base remains
 	raw := readConfigJSON(t, configPath)
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 1 || roots[0] != base {
 		t.Errorf("expected [%s], got %v", base, roots)
 	}
@@ -290,7 +254,10 @@ func TestAllowedRootRemovePreservesUnrelatedSymlinkSpelling(t *testing.T) {
 
 	// Verify link2 stored spelling preserved (not rewritten to canonical)
 	raw := readConfigJSON(t, configPath)
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 1 || roots[0] != link2 {
 		t.Errorf("expected [%s] (stored spelling preserved), got %v", link2, roots)
 	}
@@ -379,7 +346,10 @@ func TestUnchangedSetMigratesLegacy(t *testing.T) {
 	if raw["allowed_root"] != nil {
 		t.Error("allowed_root should be removed after migration")
 	}
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 1 || roots[0] != allowedRoot {
 		t.Errorf("expected [%s], got %v", allowedRoot, roots)
 	}
@@ -405,7 +375,10 @@ func TestUnchangedUnsetMigratesLegacy(t *testing.T) {
 	if raw["allowed_root"] != nil {
 		t.Error("allowed_root should be removed after migration")
 	}
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 1 || roots[0] != allowedRoot {
 		t.Errorf("expected [%s], got %v", allowedRoot, roots)
 	}
@@ -431,7 +404,10 @@ func TestIdempotentAddMigratesLegacy(t *testing.T) {
 	if raw["allowed_root"] != nil {
 		t.Error("allowed_root should be removed after migration")
 	}
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 1 || roots[0] != allowedRoot {
 		t.Errorf("expected [%s], got %v", allowedRoot, roots)
 	}
@@ -659,7 +635,10 @@ func TestAllowedRootAddDaemonNotRunning(t *testing.T) {
 
 	// Verify config was persisted.
 	raw := readConfigJSON(t, configPath)
-	roots := parseStoredAllowedRootPaths(t, raw)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
 	if len(roots) != 2 || !slices.Contains(roots, allowedRoot) || !slices.Contains(roots, newRoot) {
 		t.Errorf("expected both roots, got %v", roots)
 	}
@@ -924,7 +903,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/opt", nil, &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0 for /opt as authorization root, got %d, stderr: %s", code, stderr.String())
 		}
@@ -960,7 +939,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/home", nil, &stdout, &stderr)
+		code := configAllowedRootAdd("/home", &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -989,7 +968,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(testRoot, nil, &stdout, &stderr)
+		code := configAllowedRootAdd(testRoot, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1038,7 +1017,7 @@ func TestConfigAllowedRootValidationBeforeConfigChange(t *testing.T) {
 		// Use a non-/opt path to test config validation failure.
 		newRoot := testAllowedRootDir(t)
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(newRoot, nil, &stdout, &stderr)
+		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("expected non-zero exit, got 0")
 		}
@@ -1062,7 +1041,7 @@ func TestConfigAllowedRootValidationBeforeConfigChange(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := addAllowedRootToConfig(testRoot, AllowedRootAccessReadWrite, &stdout, &stderr)
+		code := addAllowedRootToConfig(testRoot, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1082,7 +1061,7 @@ func TestConfigAllowedRootValidationBeforeConfigChange(t *testing.T) {
 		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		var stdout, stderr bytes.Buffer
-		code := addAllowedRootToConfig(testRoot, AllowedRootAccessReadWrite, &stdout, &stderr)
+		code := addAllowedRootToConfig(testRoot, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1141,7 +1120,7 @@ func TestOptAuthorizationCeiling(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/opt", nil, &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0 for /opt as authorization root, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1342,15 +1321,4 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("initializeDatabase() error: %v", err)
 	}
 	return db
-}
-
-// parseStoredAllowedRootPaths decodes the canonical {"path","access"} entries
-// a 2.2 config write produces and projects their stored paths.
-func parseStoredAllowedRootPaths(t *testing.T, raw map[string]json.RawMessage) []string {
-	t.Helper()
-	var entries []AllowedRootEntry
-	if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
-		t.Fatalf("cannot parse allowed_roots: %v", err)
-	}
-	return allowedRootPaths(entries)
 }

@@ -249,7 +249,7 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	// Actual session token.
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -260,11 +260,11 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 	defer func() { OSUserLookup = orig }()
 	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
 		if username == "rotateuser" {
-			return "1006", "1006", filepath.Join(app.Config.AllowedRoots[0].Path, "home", "rotateuser"), nil
+			return "1006", "1006", filepath.Join(app.Config.AllowedRoots[0], "home", "rotateuser"), nil
 		}
 		return "", "", "", os.ErrNotExist
 	}
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "rotateuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "rotateuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func TestAdminTokenRotateCLIAuthFailure(t *testing.T) {
 // a data race on AdminTokenHash.
 func TestAdminTokenRotationConcurrentSessionAuth(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})

@@ -12,7 +12,7 @@ import (
 // not a late insert-time error from a manual parallel policy construction.
 func TestCreateSessionGoesThroughResolveCreatePolicy(t *testing.T) {
 	app := newTestApp(t)
-	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
+	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	if _, err := app.DB.Exec(`UPDATE launchers SET enabled = 0 WHERE id = ?`, app.userModeDefault.launcherID); err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestCreateSessionGoesThroughResolveCreatePolicy(t *testing.T) {
 // (the user-mode collapsed policy owner), producing the daemon-owner identity.
 func TestCreateSessionResolvesDaemonOwnerDefault(t *testing.T) {
 	app := newTestApp(t)
-	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
+	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	result, err := createDefaultAdminSessionForTest(app, ws)
 	if err != nil {

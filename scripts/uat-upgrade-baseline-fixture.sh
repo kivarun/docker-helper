@@ -14,12 +14,8 @@
 # Concept: an "upgrade baseline fixture" is a TEST INPUT, not a runtime/product
 # resource and not an owner in the Principal/Launcher/Session model. It
 # represents the released stable that a candidate must be a real forward
-# upgrade from. Two released stables are pinned here:
-#
-#   - v2.0.0: the historical pre-Launcher ownership baseline (Release-2
-#     package-lifecycle and ownership-migration scenarios);
-#   - v2.1.1: the mandatory Release 2.2 migration baseline (the last
-#     pre-2.2 path-only release; access-mode migration scenarios).
+# upgrade from. The natural baseline for testing 2.1 development candidates is
+# the released stable v2.0.0.
 #
 # The pinned VERSION and SHA-256 values are IDENTITY and are NEVER overridable
 # by environment variables. Only the artifact SOURCE may be overridden, for
@@ -51,10 +47,6 @@
 #   2. UAT_UPGRADE_BASELINE_RPM_URL
 #   3. (default) canonical v2.0.0 GitHub Release URL; download; verify.
 #
-# v2.1.1 (Release 2.2 migration baseline) uses the same precedence with the
-# dedicated override variables UAT_UPGRADE211_DEB_PATH/URL and
-# UAT_UPGRADE211_RPM_PATH/URL.
-#
 # An explicit bad/unavailable override FAILS CLOSED: it never silently falls
 # back to another source after an explicit override fails. The pinned SHA is
 # always the authority. We never rebuild the baseline package, never accept a
@@ -66,11 +58,9 @@
 # is not deleted on validation failure.
 #
 # Functions:
-#   upgrade_baseline_fetch_deb DEST — resolve + verify the v2.0.0 DEB per the
+#   upgrade_baseline_fetch_deb DEST — resolve + verify the DEB per the
 #     precedence above; prints DEST on success, nonzero on any failure.
-#   upgrade_baseline_fetch_rpm DEST — same for the v2.0.0 RPM.
-#   upgrade211_fetch_deb DEST — same for the pinned v2.1.1 DEB.
-#   upgrade211_fetch_rpm DEST — same for the pinned v2.1.1 RPM.
+#   upgrade_baseline_fetch_rpm DEST — same for the RPM.
 
 UPGRADE_BASELINE_VERSION="2.0.0"
 
@@ -173,60 +163,4 @@ upgrade_baseline_fetch_rpm() {
     return $?
   fi
   upgrade_baseline_fetch_url "$UPGRADE_BASELINE_RPM_URL" "$UPGRADE_BASELINE_RPM_SHA256" "$dest"
-}
-
-# ---------------------------------------------------------------------------
-# Released stable v2.1.1 — the mandatory Release 2.2 migration baseline
-# ---------------------------------------------------------------------------
-#
-# The natural baseline for testing Release 2.2 access-mode/migration behavior
-# is the released stable v2.1.1: the last pre-2.2 path-only release. The same
-# integrity contract applies: the pinned VERSION and SHA-256 values are
-# IDENTITY and are never overridable by environment variables; only the
-# artifact SOURCE may be overridden, with deterministic precedence and a
-# fail-closed explicit override.
-#
-# The hashes below were verified against the published v2.1.1 release
-# SHA256SUMS (and the downloaded bytes re-hashed) BEFORE being pinned here.
-
-UPGRADE211_VERSION="2.1.1"
-
-UPGRADE211_DEB_SHA256="86bc9b99f674ef1306795376a6ede32f4e25c342509dbae48a56300c6a85a140"
-UPGRADE211_DEB_URL="https://github.com/kivarun/docker-helper/releases/download/v2.1.1/docker-helper_2.1.1_amd64.deb"
-
-UPGRADE211_RPM_SHA256="19d4262083d4ac064cb187bfda8dfe93fc40bc03a17a9b582704329e1b3410a6"
-UPGRADE211_RPM_URL="https://github.com/kivarun/docker-helper/releases/download/v2.1.1/docker-helper-2.1.1-1.x86_64.rpm"
-
-# upgrade211_fetch_deb DEST — resolve + verify the v2.1.1 DEB
-# (UAT_UPGRADE211_DEB_PATH -> UAT_UPGRADE211_DEB_URL -> canonical).
-upgrade211_fetch_deb() {
-  local dest="$1"
-  local path="${UAT_UPGRADE211_DEB_PATH:-}"
-  local url="${UAT_UPGRADE211_DEB_URL:-}"
-  if [ -n "$path" ]; then
-    upgrade_baseline_source_from "$path" "$UPGRADE211_DEB_SHA256" "$dest"
-    return $?
-  fi
-  if [ -n "$url" ]; then
-    upgrade_baseline_fetch_url "$url" "$UPGRADE211_DEB_SHA256" "$dest"
-    return $?
-  fi
-  upgrade_baseline_fetch_url "$UPGRADE211_DEB_URL" "$UPGRADE211_DEB_SHA256" "$dest"
-}
-
-# upgrade211_fetch_rpm DEST — resolve + verify the v2.1.1 RPM
-# (UAT_UPGRADE211_RPM_PATH -> UAT_UPGRADE211_RPM_URL -> canonical).
-upgrade211_fetch_rpm() {
-  local dest="$1"
-  local path="${UAT_UPGRADE211_RPM_PATH:-}"
-  local url="${UAT_UPGRADE211_RPM_URL:-}"
-  if [ -n "$path" ]; then
-    upgrade_baseline_source_from "$path" "$UPGRADE211_RPM_SHA256" "$dest"
-    return $?
-  fi
-  if [ -n "$url" ]; then
-    upgrade_baseline_fetch_url "$url" "$UPGRADE211_RPM_SHA256" "$dest"
-    return $?
-  fi
-  upgrade_baseline_fetch_url "$UPGRADE211_RPM_URL" "$UPGRADE211_RPM_SHA256" "$dest"
 }

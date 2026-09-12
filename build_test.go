@@ -32,7 +32,7 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestBuildContextRelativeSubdir(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	subdir := filepath.Join(app.Config.AllowedRoots[0].Path, "subdir")
+	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatalf("cannot create subdir: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -276,12 +276,12 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 func TestBuildContextSiblingDirectoryRejected(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	subdir := filepath.Join(app.Config.AllowedRoots[0].Path, "subdir")
+	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatalf("cannot create subdir: %v", err)
 	}
 
-	sibling := filepath.Join(app.Config.AllowedRoots[0].Path, "sibling")
+	sibling := filepath.Join(app.Config.AllowedRoots[0], "sibling")
 	if err := os.MkdirAll(sibling, 0755); err != nil {
 		t.Fatalf("cannot create sibling: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestBuildContextOutsideAllowedRootRejected(t *testing.T) {
 
 	escapeDir := t.TempDir()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
 	escapeDir := t.TempDir()
-	linkPath := filepath.Join(app.Config.AllowedRoots[0].Path, "escape-link")
+	linkPath := filepath.Join(app.Config.AllowedRoots[0], "escape-link")
 
 	if err := os.Symlink(escapeDir, linkPath); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
@@ -371,7 +371,7 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -398,12 +398,12 @@ func TestBuildWorkspaceIsSymlink(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	realDir := filepath.Join(app.Config.AllowedRoots[0].Path, "real-dir")
+	realDir := filepath.Join(app.Config.AllowedRoots[0], "real-dir")
 	if err := os.MkdirAll(realDir, 0755); err != nil {
 		t.Fatalf("cannot create real dir: %v", err)
 	}
 
-	linkDir := filepath.Join(app.Config.AllowedRoots[0].Path, "link-dir")
+	linkDir := filepath.Join(app.Config.AllowedRoots[0], "link-dir")
 	if err := os.Symlink(realDir, linkDir); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -532,7 +532,7 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -577,7 +577,7 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 func TestBuildContextErrorContainsCode(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
@@ -646,7 +646,7 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

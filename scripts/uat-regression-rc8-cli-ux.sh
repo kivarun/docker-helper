@@ -161,43 +161,6 @@ assert_unique() {
   fi
 }
 
-# assert_boundary_chain LABEL SCRIPT ROOT ARGS...: the policy-root
-# completion renders tree boundaries, not terminal full roots — from the
-# empty prefix each canonical component toward the root is offered, and the
-# root itself is the terminal offer at its parent prefix. Walk that chain:
-# for every proper ancestor prefix of ROOT (empty prefix first), the single
-# offered candidate must be exactly the next component boundary, ending at
-# ROOT itself. ARGS are the completion words before --workspace.
-assert_boundary_chain() {
-  local label="$1" script="$2" root="$3"
-  shift 3
-  local -a chain=()
-  local p="$root"
-  while :; do
-    p="$(dirname -- "$p")"
-    [ "$p" = "/" ] && break
-    chain=("$p" "${chain[@]}")
-  done
-  local prefix rel first expected out have
-  for prefix in "" "${chain[@]}"; do
-    rel="${root#"$prefix"}"
-    rel="${rel#/}"
-    first="${rel%%/*}"
-    if [ -z "$first" ]; then
-      expected="$root"
-    else
-      expected="$prefix/$first"
-    fi
-    out="$(run_completion "$script" "$@" --workspace "$prefix")"
-    have="$(printf '%s' "$out" | LC_ALL=C sort -u)"
-    if [ "$have" = "$expected" ]; then
-      reg_ok "$label (prefix '$prefix' offers '$expected')"
-    else
-      reg_fail "$label (prefix '$prefix'): suggestions = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want [$expected] ($(completion_harness_diag))"
-    fi
-  done
-}
-
 # launcher_credential_token USER LAUNCHER creates a launcher credential
 # through the packaged CLI and prints the token (the JSON document's token
 # field).
@@ -330,24 +293,17 @@ subcase_b() {
     reg_fail "B: introspection query (admin + typed selectors) failed (rc=$roots_rc): $(printf '%s' "$roots_out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
-  # 1. admin + --principal USER --launcher NAME: the restricted root's tree
-  #    renders as the navigable boundary chain — the empty prefix offers the
-  #    first component, and the chain resolves to the restricted root.
+  # 1. admin + --principal USER --launcher NAME: only the restricted root.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --principal "$user" --launcher killme --workspace "")"
-  assert_completion "B: admin --principal+--launcher offers the first component boundary" \
-    "$(dirname -- "$home")" "$out" || true
+  assert_completion "B: admin --principal+--launcher offers only the restricted root" "$opt" "$out" || true
 
-  # 2. the wider Principal ceiling must not leak into the suggestions: the
-  #    first boundary component is not the wider root.
+  # 2. the wider Principal ceiling must not leak into the suggestion.
   if printf '%s' "$out" | grep -qx "$home"; then
     reg_fail "B: the wider Principal root leaked into the suggestions"
   else
     reg_ok "B: the wider Principal root stays out of the restricted suggestions"
   fi
-  assert_boundary_chain "B: admin --principal+--launcher boundary chain reaches the restricted root" \
-    "$script" "$opt" /usr/bin/docker-helper --system session create \
-    --principal "$user" --launcher killme
 
   # 3. --launcher=NAME reaches the same query (identical suggestions).
   local out_eq
@@ -363,16 +319,12 @@ subcase_b() {
   #    selector inside the credential's own scope.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --launcher killme --workspace "")"
-  assert_completion "B: principal credential --launcher offers the first component boundary" \
-    "$(dirname -- "$home")" "$out" || true
+  assert_completion "B: principal credential --launcher offers only the restricted root" "$opt" "$out" || true
   if printf '%s' "$out" | grep -qx "$home"; then
     reg_fail "B: principal credential completion leaked the wider Principal root"
   else
     reg_ok "B: principal credential completion stays inside the restricted root"
   fi
-  assert_boundary_chain "B: principal credential --launcher boundary chain reaches the restricted root" \
-    "$script" "$opt" /usr/bin/docker-helper --system session create \
-    --token-file "$cred" --launcher killme
 
   # 5. selectorless completion keeps the default-target semantics: the
   #    default Launcher inherits the Principal ceiling (the home root).
@@ -384,11 +336,7 @@ subcase_b() {
   fi
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
     --token-file "$cred" --workspace "")"
-  assert_completion "B: selectorless principal-credential completion offers the first component boundary" \
-    "$(dirname -- "$home")" "$out" || true
-  assert_boundary_chain "B: selectorless boundary chain reaches the default target" \
-    "$script" "$home" /usr/bin/docker-helper --system session create \
-    --token-file "$cred"
+  assert_completion "B: selectorless principal-credential completion keeps the default target" "$home" "$out" || true
 
   # 6. continuation inside the restricted root: only its subdirectories.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
@@ -431,11 +379,7 @@ subcase_c() {
   reg_principal_credential "$user" "$cred" || { reg_fail "C: principal credential create failed"; cleanup_principal "$user"; return; }
 
   # Nested roots: the default Launcher's ceiling spans home and home/opt.
-  # The nested root is a real access-mode transition (read_only inside the
-  # read_write home ceiling): the effective-root projection normalizes
-  # redundant nesting away, so only a genuine mode transition is guaranteed
-  # to reach the introspection and completion surfaces.
-  if ! out="$(dh principal allowed-root add --system --access read_only "$user" "$opt" 2>&1)"; then
+  if ! out="$(dh principal allowed-root add --system "$user" "$opt" 2>&1)"; then
     reg_fail "C: nested root fixture failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     rm -f "$cred"
@@ -637,11 +581,10 @@ subcase_e() {
 
   # 6. integration invariant: the offered selector resolves to exactly the
   #    Session-create target a real create with that selector would use —
-  #    the restricted root's boundary chain, never the wider Principal
-  #    ceiling as a terminal offer.
-  assert_boundary_chain "E: the offered selector resolves the restricted create target" \
-    "$script" "$opt" /usr/bin/docker-helper --system session create \
-    --token-file "$cred" --launcher killme
+  #    the restricted root, never the wider Principal ceiling.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
+    --token-file "$cred" --launcher killme --workspace "")"
+  assert_completion "E: the offered selector resolves the restricted create target" "$opt" "$out" || true
 
   cleanup_principal "$user"
   rm -f "$cred" "$script"
@@ -876,11 +819,11 @@ subcase_g() {
   #    list is LC_ALL=C sorted: assert_completion compares sorted-unique.)
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "")"
   assert_completion "G: principal show USER <TAB> offers the FIELD vocabulary" \
-    "allowed_root_entries|allowed_roots|enabled|gid|home|uid|username" "$out" || true
+    "allowed_roots|enabled|gid|home|uid|username" "$out" || true
 
   # 6. FIELD partial: a typed prefix filters the vocabulary.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "a")"
-  assert_completion "G: principal show USER a<TAB> offers the allowed_ro* vocabulary" "allowed_root_entries|allowed_roots" "$out" || true
+  assert_completion "G: principal show USER a<TAB> offers allowed_roots" "allowed_roots" "$out" || true
 
   # 7. after a complete USER+FIELD pair: no further positional suggestions.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" uid "")"
@@ -889,7 +832,7 @@ subcase_g() {
   # 8. operator flags (bool and value-taking) never shift the FIELD position.
   out="$(run_completion "$script" /usr/bin/docker-helper principal show --system --token-file "$cred" "$user" "")"
   assert_completion "G: flags do not shift the FIELD position" \
-    "allowed_root_entries|allowed_roots|enabled|gid|home|uid|username" "$out" || true
+    "allowed_roots|enabled|gid|home|uid|username" "$out" || true
 
   cleanup_principal "$user"
   cleanup_principal "$user2"

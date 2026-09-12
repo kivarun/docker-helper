@@ -17,7 +17,7 @@ import (
 // Principal credential bearer token.
 func setupPolicyPrincipal(t *testing.T, app *App, username, root string) string {
 	t.Helper()
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", username)
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", username)
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -89,15 +89,15 @@ func decodeCreatePolicy(t *testing.T, body string) sessionCreatePolicyResponse {
 // a foreign selector is the same non-disclosing 404 as an unknown Principal;
 // a Launcher credential and an unauthenticated request are unauthorized; and
 // the returned roots are the daemon-side effective Principal ceiling computed
-// by the canonical effectivePrincipalAllowedRoots policy owner.
+// by the canonical computeEffectivePrincipalRoots policy owner.
 func TestPrincipalEffectiveRootsContractMatrix(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	proj := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "alice", "proj")
+	proj := filepath.Join(app.Config.AllowedRoots[0], "home", "alice", "proj")
 	if err := os.MkdirAll(proj, 0755); err != nil {
 		t.Fatal(err)
 	}
 	aliceToken := setupPolicyPrincipal(t, app, "alice", proj)
-	setupPolicyPrincipal(t, app, "bob", app.Config.AllowedRoots[0].Path)
+	setupPolicyPrincipal(t, app, "bob", app.Config.AllowedRoots[0])
 
 	// Admin targets alice: effective = alice's narrowed stored roots.
 	w := launcherRequest(t, app, http.MethodGet, "/principals/alice/effective-allowed-roots", testAdminToken, "")
@@ -154,9 +154,9 @@ func TestPrincipalEffectiveRootsContractMatrix(t *testing.T) {
 	// Zero stored roots: a non-owner Principal with an empty stored set has
 	// an empty effective ceiling, and the wire contract serializes it as the
 	// empty JSON array, never null.
-	zoeToken := setupPolicyPrincipal(t, app, "zoe", app.Config.AllowedRoots[0].Path)
+	zoeToken := setupPolicyPrincipal(t, app, "zoe", app.Config.AllowedRoots[0])
 	w = launcherRequest(t, app, http.MethodDelete, "/principals/zoe/allowed-roots", testAdminToken,
-		fmt.Sprintf(`{"path":%q}`, app.Config.AllowedRoots[0].Path))
+		fmt.Sprintf(`{"path":%q}`, app.Config.AllowedRoots[0]))
 	if w.Code != http.StatusOK {
 		t.Fatalf("remove zoe root: %d %s", w.Code, w.Body.String())
 	}
@@ -179,7 +179,7 @@ func TestPrincipalEffectiveRootsContractMatrix(t *testing.T) {
 // are rejected.
 func TestSessionCreatePolicyContractMatrix(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	aliceRoot := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "alice")
+	aliceRoot := filepath.Join(app.Config.AllowedRoots[0], "home", "alice")
 	if err := os.MkdirAll(aliceRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -224,9 +224,9 @@ func TestSessionCreatePolicyContractMatrix(t *testing.T) {
 	// Zero stored roots: a Principal with an empty stored set has an empty
 	// effective ceiling for its default Launcher, and the wire contract
 	// serializes it as the empty JSON array, never null.
-	zoeToken := setupPolicyPrincipal(t, app, "zoe", app.Config.AllowedRoots[0].Path)
+	zoeToken := setupPolicyPrincipal(t, app, "zoe", app.Config.AllowedRoots[0])
 	w = launcherRequest(t, app, http.MethodDelete, "/principals/zoe/allowed-roots", testAdminToken,
-		fmt.Sprintf(`{"path":%q}`, app.Config.AllowedRoots[0].Path))
+		fmt.Sprintf(`{"path":%q}`, app.Config.AllowedRoots[0]))
 	if w.Code != http.StatusOK {
 		t.Fatalf("remove zoe root: %d %s", w.Code, w.Body.String())
 	}
@@ -268,7 +268,7 @@ func TestSessionCreatePolicyContractMatrix(t *testing.T) {
 // launcher-not-found or invalid-selector contract.
 func TestSessionCreatePolicySelectorsMatchCreate(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	globalRoot := app.Config.AllowedRoots[0].Path
+	globalRoot := app.Config.AllowedRoots[0]
 	home := filepath.Join(globalRoot, "home", "michael")
 	opt := filepath.Join(globalRoot, "opt", "michael")
 	for _, dir := range []string{home, opt} {
@@ -386,7 +386,7 @@ func TestSessionCreatePolicySelectorsMatchCreate(t *testing.T) {
 // Launcher is disabled; the rejection comes from the shared resolution owner.
 func TestSessionCreatePolicyUnavailableLauncher(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	aliceToken := setupPolicyPrincipal(t, app, "alice", app.Config.AllowedRoots[0].Path)
+	aliceToken := setupPolicyPrincipal(t, app, "alice", app.Config.AllowedRoots[0])
 
 	// Disable alice's default Launcher (the one her credential resolves).
 	launcherID := mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "alice"))
@@ -414,8 +414,8 @@ func TestSessionCreatePolicyUserModeAdmin(t *testing.T) {
 	if resp.Principal != "dhtestowner" || resp.Launcher != "default" {
 		t.Fatalf("response = %+v", resp)
 	}
-	if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0] != app.Config.AllowedRoots[0].Path {
-		t.Fatalf("allowed_roots = %v, want [%s]", resp.AllowedRoots, app.Config.AllowedRoots[0].Path)
+	if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0] != app.Config.AllowedRoots[0] {
+		t.Fatalf("allowed_roots = %v, want [%s]", resp.AllowedRoots, app.Config.AllowedRoots[0])
 	}
 }
 

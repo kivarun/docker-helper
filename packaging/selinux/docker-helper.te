@@ -95,9 +95,6 @@ module docker_helper 1.0;
 		type semanage_exec_t;
 		type bin_t;
 		type var_lock_t;
-		type fusefs_t;
-		type fuse_device_t;
-		type mount_var_run_t;
 
 		role system_r;
 
@@ -108,11 +105,11 @@ module docker_helper 1.0;
 		class chr_file { append create getattr ioctl read watch open write };
 		class blk_file { append create getattr ioctl read };
 		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock relabelfrom relabelto };
-		class filesystem { mount remount unmount getattr associate mounton relabelfrom relabelto };
+		class filesystem { mount remount unmount getattr };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
-		class capability { dac_read_search dac_override sys_admin };
+		class capability { dac_read_search sys_admin };
 		class process { transition siginh noatsecure rlimitinh };
 		class process2 { nnp_transition };
 	}
@@ -209,12 +206,8 @@ allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink 
 allow docker_helper_t docker_helper_runtime_t:lnk_file { create read unlink };
 
 # State (from live AVC evidence)
-# dir create/rmdir: the 2.2 workload-MAC lifecycle creates the durable
-# workload-mac state root and per-operation directories at startup and
-# removes them through reconciliation; file rename: the crash-safe
-# ownership-record commit (write temp file + rename).
-allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name create rmdir };
-allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink rename };
+allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name };
+allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink };
 
 # Trusted CA material is dynamically created by the daemon under
 # /run/docker-helper/trusted-ca. Type transitions label newly created snapshot
@@ -347,9 +340,7 @@ allow docker_helper_t docker_helper_workspace_t:lnk_file { read };
 # fcontext/relabel of /usr/bin/python3.* keyed to the interpreter version
 # (python3.13 vs python3.14), which is distro/version coupling and worse than
 # the bounded bin_t file-permission grant below (exec only, no process
-# transition/entrypoint, no generic policy-store access). Same-domain generic
-# execution remains forbidden: there is deliberately no execute_no_trans on
-# bin_t.
+# transition/entrypoint, no generic policy-store access).
 #
 # NoNewPrivileges=true in docker-helper.service means the transition requires
 # process2:nnp_transition (mirrors the existing init_t -> docker_helper_t rule).
@@ -368,18 +359,8 @@ allow docker_helper_t bin_t:file { execute read open getattr map };
 allow docker_helper_t var_lock_t:dir { write add_name };
 allow docker_helper_t var_lock_t:file { create open read write getattr lock };
 
-# Capabilities for workspace access, mount-pin, and helper-owned projection
-# mount/unmount mechanics (proven in enforcing UAT).
-allow docker_helper_t self:capability { dac_read_search dac_override sys_admin };
-
-# bindfs (the projection worker) reads the libmount utab under /run/mount on
-# every FUSE mount.
-#   avc: denied { search } scontext=docker_helper_t tcontext=mount_var_run_t
-#     name=mount tclass=dir
-#   avc: denied { dac_override } scontext=docker_helper_t comm=bindfs
-#     tclass=capability (user-owned backing files read through projections)
-allow docker_helper_t mount_var_run_t:dir { search };
-allow docker_helper_t mount_var_run_t:file { getattr read open };
+# Capabilities for workspace access and mount-pin (proven in enforcing UAT)
+allow docker_helper_t self:capability { dac_read_search sys_admin };
 
 # Mount-pin: unmount filesystem (proven in enforcing UAT)
 allow docker_helper_t fs_t:filesystem { unmount };
@@ -590,98 +571,3 @@ allow docker_helper_container_t docker_helper_t:unix_stream_socket { connectto }
 allow init_t docker_helper_trusted_ca_t:dir { write remove_name rmdir };
 allow init_t docker_helper_trusted_ca_t:file { unlink };
 allow init_t docker_helper_trusted_ca_t:lnk_file { unlink };
-
-# --- Workload read-only projection (Release 2.2 Phase 2.2.6, M0-S accepted) ---
-#
-# Mechanism: the helper builds one bindfs FUSE passthrough projection per
-# accepted read-only exposure from the pinned kernel materialization source.
-# bindfs projects the pinned backing tree with a fixed mount context
-# (system_u:object_r:docker_helper_ro_projection_t:s0); the backing source
-# label, device, and inode never change. The container receives the
-# projection (or the pinned source directly for read-write mounts) through a
-# Docker bind that stays readonly in production.
-#
-# The projection type is a dedicated file type. It deliberately does not
-# carry container_file_type: container-selinux's generic writable-volume
-# rules must not apply to it. It deliberately does not carry any attribute
-# that would grant mutation semantics.
-
-type docker_helper_ro_projection_t, file_type;
-
-# Mount-context labels on FUSE must be associable with the FUSE filesystem.
-allow docker_helper_ro_projection_t fusefs_t:filesystem associate;
-
-# Workload read/execute compatibility with an explicit mutation exclusion.
-# Deliberately omitted for the projection type: write, append, create,
-# setattr, add_name, remove_name, unlink, rename, link, and reparent.
-allow docker_helper_container_t docker_helper_ro_projection_t:file {
-	execute execute_no_trans entrypoint getattr ioctl lock map open read
-};
-allow docker_helper_container_t docker_helper_ro_projection_t:dir {
-	getattr ioctl lock open read search
-};
-allow docker_helper_container_t docker_helper_ro_projection_t:lnk_file { getattr read };
-allow docker_helper_container_t docker_helper_ro_projection_t:sock_file {
-	getattr ioctl lock open read
-};
-allow docker_helper_container_t docker_helper_ro_projection_t:fifo_file {
-	getattr ioctl lock open read
-};
-allow docker_helper_container_t fusefs_t:filesystem getattr;
-
-# Docker/runc may inspect the already-mounted projection while constructing
-# the bind in the container mount namespace. Setup-only read grants; workload
-# mutation remains governed by docker_helper_container_t above.
-allow container_runtime_t docker_helper_ro_projection_t:dir { getattr open read search };
-allow container_runtime_t docker_helper_ro_projection_t:file { getattr open read };
-allow container_runtime_t docker_helper_ro_projection_t:lnk_file { getattr read };
-allow container_runtime_t fusefs_t:filesystem getattr;
-
-# --- Helper-side projection mechanics (bindfs/FUSE) ---
-
-# bindfs executable: the helper execs the bindfs worker in its own domain
-# (no process transition). The dedicated exec type is applied by the shipped
-# file context rule for /usr/bin/bindfs.
-type docker_helper_bindfs_exec_t, file_type, exec_type;
-
-allow docker_helper_t docker_helper_bindfs_exec_t:file {
-	getattr open read execute execute_no_trans map
-};
-
-# /dev/fuse (fuse_device_t, from the base policy) is required by the bindfs
-# FUSE worker to open the FUSE device.
-allow docker_helper_t fuse_device_t:chr_file { getattr open read write ioctl };
-
-# The bindfs worker (docker_helper_t process) performs the FUSE mount of the
-# projection with the fixed projection mount context. Projection cleanup uses
-# the kernel unmount API directly (normal unmount, then lazy-detach fallback),
-# and startup reconciliation uses the same production mount owner.
-allow docker_helper_t fusefs_t:filesystem { mount unmount getattr relabelfrom };
-
-# With the fixed context= mount option the mounted superblock carries the
-# projection context itself, so the mount/unmount/getattr checks name
-# docker_helper_ro_projection_t, not the fuse filesystem type. Without this
-# grant the FUSE mount fails with EACCES under enforcing SELinux and the
-# read-only projection backend is unreachable (observed as
-# "fuse: mount failed: Permission denied" on the packaged RPM and tarball
-# paths of the exact-artifact UAT).
-allow docker_helper_t docker_helper_ro_projection_t:filesystem { mount unmount getattr relabelto relabelfrom };
-
-# The projection mountpoints live under the helper-owned runtime tree.
-allow docker_helper_t docker_helper_runtime_t:dir { mounton };
-
-# The lower-item bind for regular-file projections mounts onto a
-# helper-owned lower item under the runtime tree (docker_helper_runtime_t,
-# covered by the runtime dir/file mounton grants above). No workspace-typed
-# or home-typed object receives a mounton grant: regular-file bind targets
-# are always helper-owned runtime items, never workspace files. If an
-# enforcing live run ever shows a real mounton AVC for a workspace/home
-# source object, record the exact source context, target context, tclass,
-# denied permission, and syscall/mount direction first, then add only the
-# one minimal grant that evidence requires.
-
-# The helper proves the projection after preparation (security.selinux
-# getxattr) by getattr/open on the mounted projection files.
-allow docker_helper_t docker_helper_ro_projection_t:dir { getattr open read search };
-allow docker_helper_t docker_helper_ro_projection_t:file { getattr open read };
-allow docker_helper_t docker_helper_ro_projection_t:lnk_file { getattr read };

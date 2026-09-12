@@ -28,7 +28,7 @@ type Principal struct {
 
 type PrincipalWithRoots struct {
 	Principal
-	AllowedRoots []AllowedRootEntry
+	AllowedRoots []string
 }
 
 // OSUserLookup can be replaced in tests.
@@ -122,20 +122,7 @@ func findPrincipalIDByUsername(db *sql.DB, username string) (int, error) {
 // ErrPrincipalRootOutsideGlobal is returned when a principal root is outside global roots.
 var ErrPrincipalRootOutsideGlobal = errors.New("principal root outside global allowed roots")
 
-// ErrInvalidAllowedRootAccess is returned when a request supplies an access
-// value outside the canonical vocabulary (read_write, read_only). It is the
-// fail-closed refusal for every control-plane access input; there is no
-// default access for an unparseable value.
-var ErrInvalidAllowedRootAccess = errors.New("invalid allowed-root access")
-
-// ErrAllowedRootNotFound is returned by the targeted set-access mutation when
-// no stored root with the requested canonical identity exists for the owner.
-// Unlike the idempotent remove (whose goal state is satisfied by absence), a
-// targeted access change on a missing entry is refused so a mistyped path can
-// never be silently reported as satisfied.
-var ErrAllowedRootNotFound = errors.New("allowed root not found")
-
-func createPrincipal(db *sql.DB, username string, globalAllowedRoots []AllowedRootEntry) (*PrincipalWithRoots, error) {
+func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (*PrincipalWithRoots, error) {
 	p, _, _, err := createPrincipalWithOptionalCredential(db, username, globalAllowedRoots, false)
 	return p, err
 }
@@ -151,7 +138,7 @@ func createPrincipal(db *sql.DB, username string, globalAllowedRoots []AllowedRo
 // launcher allowed roots, no credential): every Principal exists only through
 // the Launcher-owned Session model, so a freshly created Principal must never
 // lack its default ownership anchor.
-func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []AllowedRootEntry, issueCredential bool) (*PrincipalWithRoots, *PrincipalCredential, string, error) {
+func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []string, issueCredential bool) (*PrincipalWithRoots, *PrincipalCredential, string, error) {
 	if username == "" {
 		return nil, nil, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -172,7 +159,7 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 	}
 
 	// Validate the home directory is under at least one global allowed root.
-	if !isWithinAnyAllowedRoot(canonicalHome, allowedRootPaths(globalAllowedRoots)) {
+	if !isWithinAnyAllowedRoot(canonicalHome, globalAllowedRoots) {
 		return nil, nil, "", fmt.Errorf("OS user %q home directory %q is not under any global allowed root: %w", username, canonicalHome, ErrPrincipalRootOutsideGlobal)
 	}
 
@@ -200,9 +187,9 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO principal_allowed_roots (principal_id, root_path, access)
-		 VALUES (?, ?, ?)`,
-		principalID, canonicalHome, string(AllowedRootAccessReadWrite),
+		`INSERT INTO principal_allowed_roots (principal_id, root_path)
+		 VALUES (?, ?)`,
+		principalID, canonicalHome,
 	); err != nil {
 		return nil, nil, "", fmt.Errorf("cannot add default allowed root: %w", err)
 	}
@@ -236,7 +223,7 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 			Home:     home,
 			Enabled:  true,
 		},
-		AllowedRoots: []AllowedRootEntry{allowedRootEntry(canonicalHome)},
+		AllowedRoots: []string{canonicalHome},
 	}
 	return p, cred, token, nil
 }
@@ -257,7 +244,7 @@ func findPrincipalByUsername(db *sql.DB, username string) (*PrincipalWithRoots, 
 	}
 
 	rows, err := db.Query(
-		`SELECT root_path, access FROM principal_allowed_roots
+		`SELECT root_path FROM principal_allowed_roots
 		 WHERE principal_id = ?
 		 ORDER BY root_path`,
 		principalID,
@@ -267,14 +254,13 @@ func findPrincipalByUsername(db *sql.DB, username string) (*PrincipalWithRoots, 
 	}
 	defer rows.Close()
 
-	roots := []AllowedRootEntry{}
+	roots := []string{}
 	for rows.Next() {
 		var rootPath string
-		var access string
-		if err := rows.Scan(&rootPath, &access); err != nil {
+		if err := rows.Scan(&rootPath); err != nil {
 			return nil, fmt.Errorf("cannot scan allowed root: %w", err)
 		}
-		roots = append(roots, AllowedRootEntry{Path: rootPath, Access: AllowedRootAccess(access)})
+		roots = append(roots, rootPath)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate allowed roots: %w", err)
@@ -450,70 +436,41 @@ func isWithinAnyAllowedRoot(path string, allowedRoots []string) bool {
 
 // addPrincipalAllowedRoot adds an allowed root to a Principal's scope.
 // The root must be contained within the global allowed-root ceiling.
-// The add is an idempotent create: it never changes the access of an already
-// stored root (only set-access does), so the returned entry reports the
-// stored access of the canonical root — the requested access when the row
-// was created, the pre-existing access when it was already present.
-func addPrincipalAllowedRoot(db *sql.DB, username string, rootPath string, access AllowedRootAccess, globalAllowedRoots []string) (changed bool, entry AllowedRootEntry, err error) {
+func addPrincipalAllowedRoot(db *sql.DB, username string, rootPath string, globalAllowedRoots []string) (changed bool, canonicalPath string, err error) {
 	if username == "" {
-		return false, AllowedRootEntry{}, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
-	}
-	if !access.isValid() {
-		return false, AllowedRootEntry{}, fmt.Errorf("access must be read_write or read_only: %w", ErrInvalidAllowedRootAccess)
+		return false, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
 
 	resolved, err := validatePrincipalAllowedRootForAdd(rootPath)
 	if err != nil {
-		return false, AllowedRootEntry{}, err
+		return false, "", err
 	}
 
 	// Validate the root is under at least one global allowed root.
 	if !isWithinAnyAllowedRoot(resolved, globalAllowedRoots) {
-		return false, AllowedRootEntry{}, fmt.Errorf("path %q is not under any global allowed root: %w", resolved, ErrPrincipalRootOutsideGlobal)
+		return false, "", fmt.Errorf("path %q is not under any global allowed root: %w", resolved, ErrPrincipalRootOutsideGlobal)
 	}
 
 	principalID, err := findPrincipalIDByUsername(db, username)
 	if err != nil {
-		return false, AllowedRootEntry{}, err
+		return false, "", err
 	}
 
-	// INSERT OR IGNORE keeps an already-stored root (and its access)
-	// untouched: re-adding a root is never an access mutation.
 	result, err := db.Exec(
-		`INSERT OR IGNORE INTO principal_allowed_roots (principal_id, root_path, access)
-		 VALUES (?, ?, ?)`,
-		principalID, resolved, string(access),
+		`INSERT OR IGNORE INTO principal_allowed_roots (principal_id, root_path)
+		 VALUES (?, ?)`,
+		principalID, resolved,
 	)
 	if err != nil {
-		return false, AllowedRootEntry{}, fmt.Errorf("cannot add allowed root: %w", err)
+		return false, "", fmt.Errorf("cannot add allowed root: %w", err)
 	}
 
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return false, AllowedRootEntry{}, fmt.Errorf("cannot check insert result: %w", err)
+		return false, "", fmt.Errorf("cannot check insert result: %w", err)
 	}
 
-	if affected > 0 {
-		return true, AllowedRootEntry{Path: resolved, Access: access}, nil
-	}
-	stored, err := storedPrincipalAllowedRootAccess(db, principalID, resolved)
-	if err != nil {
-		return false, AllowedRootEntry{}, err
-	}
-	return false, AllowedRootEntry{Path: resolved, Access: stored}, nil
-}
-
-// storedPrincipalAllowedRootAccess reads the stored access of one canonical
-// Principal root after an idempotent no-op mutation.
-func storedPrincipalAllowedRootAccess(db *sql.DB, principalID int, canonicalPath string) (AllowedRootAccess, error) {
-	var stored AllowedRootAccess
-	if err := db.QueryRow(
-		`SELECT access FROM principal_allowed_roots WHERE principal_id = ? AND root_path = ?`,
-		principalID, canonicalPath,
-	).Scan(&stored); err != nil {
-		return "", fmt.Errorf("cannot read stored allowed root: %w", err)
-	}
-	return stored, nil
+	return affected > 0, resolved, nil
 }
 
 // removePrincipalAllowedRoot removes an allowed root from a Principal's scope.
@@ -530,9 +487,12 @@ func removePrincipalAllowedRoot(db *sql.DB, username string, rootPath string) (c
 
 	// For REMOVE, we do NOT require the path to exist on the filesystem.
 	// We match against the stored canonical path.
-	resolved, err := resolveAllowedRootIdentity(rootPath)
+	resolved, err := filepath.Abs(rootPath)
 	if err != nil {
-		return false, "", err
+		return false, "", fmt.Errorf("cannot resolve path: %w: %w", err, ErrInvalidAllowedRoot)
+	}
+	if canonical, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = canonical
 	}
 
 	principalID, err := findPrincipalIDByUsername(db, username)
@@ -555,75 +515,6 @@ func removePrincipalAllowedRoot(db *sql.DB, username string, rootPath string) (c
 	}
 
 	return affected > 0, resolved, nil
-}
-
-// setPrincipalAllowedRootAccess changes the access mode of exactly one stored
-// Principal root, addressed by the same canonical stored identity as the
-// remove (symlink-resolved when the path still exists, cleaned absolute
-// otherwise). The targeted access change is a single conditional mutation:
-// the ceiling is deliberately not re-checked here, because the effective
-// policy is composed by the canonical 2.2 effective-root owner at every
-// consumption boundary (widening an entry cannot exceed the composed meet).
-// A missing stored root is ErrAllowedRootNotFound — unlike the idempotent
-// remove, a targeted access change must not silently report a satisfied goal
-// state for an entry that does not exist. An unchanged access (same value) is
-// the idempotent no-op: changed=false with the stored entry.
-func setPrincipalAllowedRootAccess(db *sql.DB, username string, rootPath string, access AllowedRootAccess) (changed bool, entry AllowedRootEntry, err error) {
-	if username == "" {
-		return false, AllowedRootEntry{}, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
-	}
-	if !access.isValid() {
-		return false, AllowedRootEntry{}, fmt.Errorf("access must be read_write or read_only: %w", ErrInvalidAllowedRootAccess)
-	}
-	if rootPath == "" {
-		return false, AllowedRootEntry{}, fmt.Errorf("path is required: %w", ErrInvalidAllowedRoot)
-	}
-	if !filepath.IsAbs(rootPath) {
-		return false, AllowedRootEntry{}, fmt.Errorf("path must be absolute: %w", ErrInvalidAllowedRoot)
-	}
-
-	resolved, err := resolveAllowedRootIdentity(rootPath)
-	if err != nil {
-		return false, AllowedRootEntry{}, err
-	}
-
-	principalID, err := findPrincipalIDByUsername(db, username)
-	if err != nil {
-		return false, AllowedRootEntry{}, err
-	}
-
-	// The stored access is read once and compared before the mutation, so a
-	// same-value request is the idempotent no-op (changed=false) without
-	// rewriting the row, and a missing stored root is refused before any
-	// mutation.
-	stored, err := storedPrincipalAllowedRootAccess(db, principalID, resolved)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, AllowedRootEntry{}, allowedRootNotFoundError{path: resolved}
-		}
-		return false, AllowedRootEntry{}, err
-	}
-	if stored == access {
-		return false, AllowedRootEntry{Path: resolved, Access: stored}, nil
-	}
-
-	result, err := db.Exec(
-		`UPDATE principal_allowed_roots SET access = ?
-		 WHERE principal_id = ? AND root_path = ?`,
-		string(access), principalID, resolved,
-	)
-	if err != nil {
-		return false, AllowedRootEntry{}, fmt.Errorf("cannot change allowed root access: %w", err)
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, AllowedRootEntry{}, fmt.Errorf("cannot check update result: %w", err)
-	}
-	if affected == 0 {
-		return false, AllowedRootEntry{}, allowedRootNotFoundError{path: resolved}
-	}
-	return true, AllowedRootEntry{Path: resolved, Access: access}, nil
 }
 
 // isSQLiteUniqueError checks if an error is a SQLite UNIQUE constraint violation.

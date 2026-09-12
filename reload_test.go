@@ -640,8 +640,8 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfgAfter.AllowedRoots[0].Path != wantRoot {
-		t.Fatalf("expected allowed_root=%s, got %s", wantRoot, cfgAfter.AllowedRoots[0].Path)
+	if cfgAfter.AllowedRoots[0] != wantRoot {
+		t.Fatalf("expected allowed_root=%s, got %s", wantRoot, cfgAfter.AllowedRoots[0])
 	}
 }
 
@@ -1043,7 +1043,7 @@ func TestTryReloadConfigMissingToken(t *testing.T) {
 // does not race. Run with -race flag.
 func TestConfigSnapshotRace(t *testing.T) {
 	cfg := &Config{
-		AllowedRoots: []AllowedRootEntry{allowedRootEntry("/workspace/test-work")},
+		AllowedRoots: []string{"/workspace/test-work"},
 		SessionTTL:   12 * time.Hour,
 		LogLevel:     slog.LevelInfo,
 		AuditEnabled: false,
@@ -1068,7 +1068,7 @@ func TestConfigSnapshotRace(t *testing.T) {
 
 	for i := 0; i < 200; i++ {
 		newCfg := &Config{
-			AllowedRoots: []AllowedRootEntry{allowedRootEntry("/workspace/test-new-work")},
+			AllowedRoots: []string{"/workspace/test-new-work"},
 			SessionTTL:   6 * time.Hour,
 			LogLevel:     slog.LevelDebug,
 			AuditEnabled: true,
@@ -2363,7 +2363,7 @@ func TestReloadAcceptsOutsideCASourceSystemMode(t *testing.T) {
 	// 6. Manually replace config.json with a structurally valid config
 	//    containing trusted_ca_injection=auto and an outside CA path.
 	newCfg := map[string]any{
-		"allowed_root":         originalConfig.AllowedRoots[0].Path,
+		"allowed_root":         originalConfig.AllowedRoots[0],
 		"session_ttl":          "12h",
 		"log_level":            "info",
 		"trusted_ca_injection": "auto",
@@ -2449,7 +2449,7 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 
 	app := &App{
 		Config: &Config{
-			AllowedRoots: []AllowedRootEntry{allowedRootEntry("/home")},
+			AllowedRoots: []string{"/home"},
 			SessionTTL:   12 * time.Hour,
 			LogLevel:     slog.LevelInfo,
 			Mode:         ModeSystem,
@@ -2463,7 +2463,7 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 	deps := reloadDeps{
 		loadAndPrepareRuntimeConfig: func() (*Config, error) {
 			return &Config{
-				AllowedRoots: []AllowedRootEntry{allowedRootEntry("/opt")},
+				AllowedRoots: []string{"/opt"},
 				SessionTTL:   12 * time.Hour,
 				LogLevel:     slog.LevelInfo,
 				Mode:         ModeSystem,
@@ -2483,8 +2483,8 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 
 	// Config was updated.
 	currentConfig := app.getConfig()
-	if currentConfig.AllowedRoots[0].Path != "/opt" {
-		t.Errorf("AllowedRoot not updated: got %q, want /opt", currentConfig.AllowedRoots[0].Path)
+	if currentConfig.AllowedRoots[0] != "/opt" {
+		t.Errorf("AllowedRoot not updated: got %q, want /opt", currentConfig.AllowedRoots[0])
 	}
 }
 
