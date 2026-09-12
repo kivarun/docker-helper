@@ -1363,15 +1363,15 @@ func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
 	// row deletion the coverage pass classifies it fail-closed (the workspace
 	// can no longer be resolved), so the canonical owner keeps blocking.
 	mac.mu.Lock()
-	pendingWorkspaces, deferAll := mac.pendingWorkloadCoverage()
-	removable := mac.boundaryMayBeRemoved(workspace, pendingWorkspaces, deferAll)
+	pendingRoots, deferAll := mac.pendingWorkloadCoverage()
+	removable := mac.boundaryMayBeRemoved(workspace, pendingRoots, deferAll)
 	reported := mac.pendingWorkloadSessions()
 	mac.mu.Unlock()
 	if !reported[sessionID] {
 		t.Error("pending workload state must remain reported for reconciliation after the Session row is deleted")
 	}
 	if !deferAll {
-		t.Errorf("coverage pass must fail closed when the deleted session row cannot be resolved (deferAll=%v, pending=%v)", deferAll, pendingWorkspaces)
+		t.Errorf("coverage pass must fail closed when the deleted session row cannot be resolved (deferAll=%v, pending=%v)", deferAll, pendingRoots)
 	}
 	if removable {
 		t.Error("canonical removal owner must still block the boundary while pending workload is unproven")

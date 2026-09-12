@@ -173,8 +173,7 @@ type helperOwnedBoundary struct {
 // session binding they came from is gone (a concurrent session deletion
 // must never strip a live operation's MAC coverage).
 type sessionLease struct {
-	sessionID string
-	coverage  []sessionMACCoverage
+	coverage []sessionMACCoverage
 }
 
 // sessionMACCoordinator is the single internal owner of session MAC state.
@@ -446,7 +445,7 @@ func (c *sessionMACCoordinator) AcquireSessionUse(sessionID, workspace string) (
 
 	// Create unique lease key.
 	leaseKey = generateLeaseKey()
-	c.sessionUseLeases[leaseKey] = sessionLease{sessionID: sessionID, coverage: coverageSet}
+	c.sessionUseLeases[leaseKey] = sessionLease{coverage: coverageSet}
 
 	// Idempotent release: use sync.Once so the release function affects
 	// coordinator state exactly once.
@@ -574,7 +573,7 @@ func (c *sessionMACCoordinator) importHelperOwnedBoundaries() error {
 // pending coverage is resolved once per removal pass through the existing
 // pendingWorkloadCoverage() owner.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) boundaryMayBeRemoved(boundary string, pendingWorkspaces map[string]bool, deferAll bool) bool {
+func (c *sessionMACCoordinator) boundaryMayBeRemoved(boundary string, pendingRoots map[string]bool, deferAll bool) bool {
 	if c.boundaryConsumerCounts[boundary] > 0 {
 		return false
 	}
@@ -587,7 +586,7 @@ func (c *sessionMACCoordinator) boundaryMayBeRemoved(boundary string, pendingWor
 		// closed.
 		return false
 	}
-	if c.boundaryCoversPendingWorkload(boundary, pendingWorkspaces) {
+	if c.boundaryCoversPendingWorkload(boundary, pendingRoots) {
 		// Pending helper-owned workload state still relies on this coverage
 		// (any issued tree of a pending workload's session, not only the
 		// workspace); keep it until workload reconciliation proves the state
@@ -612,8 +611,8 @@ func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, help
 	}
 
 	// No direct consumers remain — decide through the canonical removal owner.
-	pendingWorkspaces, deferAll := c.pendingWorkloadCoverage()
-	if !c.boundaryMayBeRemoved(boundary, pendingWorkspaces, deferAll) {
+	pendingRoots, deferAll := c.pendingWorkloadCoverage()
+	if !c.boundaryMayBeRemoved(boundary, pendingRoots, deferAll) {
 		// Deferred cleanup: record the boundary for retry when the blocking
 		// consumer or pending workload later disappears. Do NOT set a
 		// synthetic count — keep boundaryConsumerCounts truthful.
@@ -652,9 +651,9 @@ func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, help
 // now that a consumer has disappeared.
 // Must be called with c.mu held.
 func (c *sessionMACCoordinator) retryDeferredBoundaries() {
-	pendingWorkspaces, deferAll := c.pendingWorkloadCoverage()
+	pendingRoots, deferAll := c.pendingWorkloadCoverage()
 	for boundary := range c.deferredBoundaries {
-		if !c.boundaryMayBeRemoved(boundary, pendingWorkspaces, deferAll) {
+		if !c.boundaryMayBeRemoved(boundary, pendingRoots, deferAll) {
 			// Still blocked by the canonical removal owner (direct consumers,
 			// overlapping bindings/leases, or pending helper-owned workload
 			// coverage): keep deferred.
@@ -769,13 +768,13 @@ func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 	}
 
 	// Resolve pending workload sessions to their workspaces once per pass.
-	pendingWorkspaces, deferAll := c.pendingWorkloadCoverage()
+	pendingRoots, deferAll := c.pendingWorkloadCoverage()
 
 	for _, boundary := range boundaries {
 		if c.boundaryConsumerCounts[boundary] > 0 {
 			continue
 		}
-		if !c.boundaryMayBeRemoved(boundary, pendingWorkspaces, deferAll) {
+		if !c.boundaryMayBeRemoved(boundary, pendingRoots, deferAll) {
 			// No direct consumers but the canonical removal owner blocks the
 			// removal. Register as deferred so it is retried when the blocker
 			// disappears.
@@ -804,8 +803,8 @@ func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 
 // boundaryCoversPendingWorkload reports whether the boundary covers any
 // issued filesystem tree that still has pending helper-owned workload state.
-func (c *sessionMACCoordinator) boundaryCoversPendingWorkload(boundary string, pendingWorkspaces map[string]bool) bool {
-	for root := range pendingWorkspaces {
+func (c *sessionMACCoordinator) boundaryCoversPendingWorkload(boundary string, pendingRoots map[string]bool) bool {
+	for root := range pendingRoots {
 		if boundaryCoversTree(boundary, root) {
 			return true
 		}

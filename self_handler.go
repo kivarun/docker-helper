@@ -166,7 +166,7 @@ func (a *App) handleSelf(w http.ResponseWriter, r *http.Request) {
 
 	if sessionAuthority != nil {
 		session := sessionAuthority.Session
-		resource := marshalSelfResourceOrPanic(ctx, w, sessionShowToJSON(*session, sessionAuthority.Snapshot))
+		resource := marshalSelfResource(ctx, w, sessionShowToJSON(*session, sessionAuthority.Snapshot))
 		if resource == nil {
 			return
 		}
@@ -227,7 +227,7 @@ func (a *App) handleSelf(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
-		resource := marshalSelfResourceOrPanic(ctx, w, principalSelfResource{
+		resource := marshalSelfResource(ctx, w, principalSelfResource{
 			Username:                    snap.Principal.Username,
 			UID:                         snap.Principal.UID,
 			GID:                         snap.Principal.GID,
@@ -262,7 +262,7 @@ func (a *App) handleSelf(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ownership := snap.Ownership
-		resource := marshalSelfResourceOrPanic(ctx, w, launcherSelfResource{
+		resource := marshalSelfResource(ctx, w, launcherSelfResource{
 			ID:                          ownership.launcherID,
 			Name:                        ownership.launcherName,
 			Principal:                   ownership.principalName,
@@ -351,12 +351,12 @@ func ensureRootEntries(entries []AllowedRootEntry) []AllowedRootEntry {
 	return entries
 }
 
-// marshalSelfResourceOrPanic marshals one self resource document into the
+// marshalSelfResource marshals one self resource document into the
 // envelope's raw resource body. The resource types are plain projections of
 // already-validated domain state, so a marshal failure is an internal
 // anomaly, answered with the internal-error contract and never silently
 // dropped.
-func marshalSelfResourceOrPanic(ctx context.Context, w http.ResponseWriter, resource any) json.RawMessage {
+func marshalSelfResource(ctx context.Context, w http.ResponseWriter, resource any) json.RawMessage {
 	body, err := json.Marshal(resource)
 	if err != nil {
 		opLog(ctx).Error("cannot marshal self resource",

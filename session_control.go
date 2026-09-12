@@ -451,7 +451,7 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 // reload or ownership mutation linearizes wholly before or wholly after the
 // read, never between its component reads. Introspection carries no Session
 // filesystem request: the projection is the maximum filesystem ceiling a
-// real create may further narrow through filesystem_entries.
+// real create may further narrow through filesystem_roots.
 func (a *App) resolveCreatePolicySnapshot(auth *operatorAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()

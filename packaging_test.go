@@ -10325,7 +10325,7 @@ func TestAccessModesHarnessGlobalROProof(t *testing.T) {
 
 	// Ordering semantics: global narrowing -> Principal grant -> Launcher
 	// grant/credential -> issued Session -> writable refusal -> restore. The
-	// Session is created without filesystem_entries (the standard authority
+	// Session is created without filesystem_roots (the standard authority
 	// path), which the create_session marker proves. The ordering search is
 	// scoped to the scenario G block: the P2 control-plane proof runs the
 	// same set-access mutation earlier in the file.
