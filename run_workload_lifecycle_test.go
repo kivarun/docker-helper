@@ -42,7 +42,7 @@ func newRunWorkloadLifecycleFixture(t *testing.T) *runWorkloadLifecycleFixture {
 	prov := coord.docker
 	prov.remove = func(ctx context.Context, id string) error { return nil }
 	coord.docker = prov
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		f.mu.Lock()
 		pinned := filepath.Join(runtimeDir, "mounts", operationID, fmt.Sprint(mountIndex))
 		if err := os.MkdirAll(filepath.Dir(pinned), 0700); err != nil {
@@ -193,7 +193,7 @@ func TestRunWorkloadCompletionCleanupOrder(t *testing.T) {
 		f.dockerArgv = append(f.dockerArgv, append([]string{name}, args...))
 		return exec.CommandContext(ctx, "/bin/true")
 	}
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/runtime/pinned/0",
 			cleanup: func() error {
@@ -309,7 +309,7 @@ func TestRunWorkloadPinFailureRetainsRecordUntilReconciliation(t *testing.T) {
 	f := newRunWorkloadLifecycleFixture(t)
 	app := f.app
 	f.parser(t, false)
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		pinned := filepath.Join(runtimeDir, "mounts", operationID, fmt.Sprint(mountIndex))
 		if err := os.MkdirAll(filepath.Dir(pinned), 0700); err != nil {
 			return nil, err
@@ -394,7 +394,7 @@ func TestRunWorkloadStaleOwnedContainerForceRemoved(t *testing.T) {
 	// The stale-container removal path shells out through the Docker CLI
 	// seam; classify + remove happen through removeContainer at the App
 	// level, which records the removed container and simulates absence.
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{PinnedPath: "/runtime/pinned/0", cleanup: func() error { return nil }}, nil
 	}
 	result, err := createSystemSession(t, app)
@@ -489,7 +489,7 @@ func TestRunWorkloadSELinuxPartialProjectionRetainsDependencies(t *testing.T) {
 	var mu sync.Mutex
 	var pinCleaned []string
 	var dockerArgv [][]string
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		pinned := filepath.Join(runtimeDir, "mounts", operationID, fmt.Sprint(mountIndex))
 		if err := os.MkdirAll(filepath.Dir(pinned), 0700); err != nil {
 			return nil, err

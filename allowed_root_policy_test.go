@@ -918,18 +918,20 @@ func TestDaemonOwnerCollapseIsCanonicalized(t *testing.T) {
 }
 
 // TestNewSessionFilesystemSnapshotBoundary proves the reusable snapshot
-// boundary rejects persisted policy data that does not match the trusted
-// Session workspace: wrong root (ancestor or descendant), outside entries,
-// empty entries, and invalid entries all fail closed.
+// boundary rejects persisted policy data that does not authorize the trusted
+// Session workspace: a descendant-only root, an outside-entry-only snapshot
+// that does not cover the workspace, empty entries, and invalid entries all
+// fail closed. An ancestor root that authorizes the workspace is now the
+// valid disjoint-root shape and is proven by
+// TestSessionFilesystemSnapshotMultiRoot.
 func TestNewSessionFilesystemSnapshotBoundary(t *testing.T) {
 	const workspace = "/run/job"
 	tests := []struct {
 		name    string
 		entries []AllowedRootEntry
 	}{
-		{name: "ancestor root", entries: []AllowedRootEntry{rwP("/run"), roP("/run/job/inputs")}},
 		{name: "descendant root", entries: []AllowedRootEntry{rwP("/run/job/sub"), roP("/run/job/sub/in")}},
-		{name: "workspace root plus outside entry", entries: []AllowedRootEntry{rwP("/run/job"), rwP("/elsewhere")}},
+		{name: "unrelated root only", entries: []AllowedRootEntry{rwP("/elsewhere")}},
 		{name: "empty entries", entries: nil},
 		{name: "invalid access", entries: []AllowedRootEntry{{Path: workspace}}},
 		{name: "conflicting duplicates", entries: []AllowedRootEntry{rwP(workspace), roP(workspace)}},
@@ -947,8 +949,8 @@ func TestNewSessionFilesystemSnapshotBoundary(t *testing.T) {
 	// The trusted workspace is never guessed from the entries: the
 	// independent-workspace refusal with canonical entries is proven by
 	// TestSnapshotBoundaryRejectsNonCanonicalWorkspace.
-	// The valid shape keeps the invariant: root == workspace, all entries
-	// inside, canonically ordered.
+	// The valid shape keeps the canonical normalized representation and
+	// authorizes the workspace.
 	valid := []AllowedRootEntry{rwP(workspace), roP(workspace + "/inputs"), rwP(workspace + "/inputs/gen")}
 	snap, err := newSessionFilesystemSnapshot(workspace, valid)
 	if err != nil {
@@ -1088,8 +1090,8 @@ func narrowRefused(t *testing.T, ceiling []AllowedRootEntry, workspace string, r
 // TestNarrowSessionFilesystemPolicy proves the accepted issuance-time
 // narrowing shapes: the request may lower the access of the workspace root
 // and of authorized subtrees, and a re-exposed read-write exception stays
-// inside the parent ceiling. Ceiling read-only regions strictly inside the
-// workspace survive the composition even when the request re-exposes their
+// inside the parent ceiling. Ceiling read-only regions inside a selected
+// root survive the composition even when the selection re-exposes their
 // parent read-write.
 func TestNarrowSessionFilesystemPolicy(t *testing.T) {
 	workspace := "/run-root/run-1"
@@ -1175,13 +1177,8 @@ func TestNarrowSessionFilesystemPolicyRefusals(t *testing.T) {
 	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
 		[]AllowedRootEntry{roP(workspace), rwP("/elsewhere/work")})
 
-	// The workspace entry "." is required: a request that narrows only a
-	// subtree leaves the workspace unauthorized and is refused instead of
-	// producing a snapshot without a capability root.
-	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
-		[]AllowedRootEntry{rwP(workspace + "/project")})
-
-	// An empty explicit request is refused.
+	// An empty explicit request is refused: the workspace-only create is
+	// the inherited derivation path, not an issuance operation.
 	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace, nil)
 
 	// Duplicate canonical requested paths are refused: one canonical path is
@@ -1196,4 +1193,161 @@ func TestNarrowSessionFilesystemPolicyRefusals(t *testing.T) {
 		[]AllowedRootEntry{AllowedRootEntry{Path: "project", Access: AllowedRootAccessReadWrite}})
 	narrowRefused(t, []AllowedRootEntry{rwP("/run-root")}, workspace,
 		[]AllowedRootEntry{AllowedRootEntry{Path: workspace + "/project", Access: "writable"}})
+}
+
+// TestNarrowSessionFilesystemPolicyMultiRoot proves the multi-root issuance
+// shapes: additional absolute filesystem roots anywhere inside the effective
+// Launcher ceiling, disjoint root trees in one snapshot, the implicit
+// workspace grant, the explicit workspace-root replacement, and the nested
+// ceiling read_only protection surviving a wider selection.
+func TestNarrowSessionFilesystemPolicyMultiRoot(t *testing.T) {
+	workspace := "/home/michael/work/git/BoxProbe"
+
+	// Workspace only: the implicit grant materializes the workspace with its
+	// effective ceiling mode.
+	composed := mustNarrow(t, []AllowedRootEntry{rwP("/home/michael")}, workspace, []AllowedRootEntry{rwP(workspace)})
+	if got := lookupAll(t, composed, workspace); !slices.Equal(got, []string{"read_write"}) {
+		t.Errorf("explicit-workspace-only lookups = %v, want [read_write]", got)
+	}
+
+	// Workspace + disjoint read-write root outside the workspace: the
+	// selected root is issued; the unselected sibling region keeps its
+	// ceiling mode but carries no issued snapshot authority.
+	composed = mustNarrow(t, []AllowedRootEntry{rwP("/home/michael"), rwP("/opt/michael")}, workspace,
+		[]AllowedRootEntry{rwP("/opt/michael/cache")})
+	if got := lookupAll(t, composed, workspace, "/opt/michael/cache", "/opt/michael/cache/file"); !slices.Equal(got, []string{"read_write", "read_write", "read_write"}) {
+		t.Errorf("disjoint RW root lookups = %v, want workspace and cache authorized", got)
+	}
+	if _, ok := lookupAllowedRootAccess(composed, "/opt/michael/other"); ok {
+		t.Errorf("unselected ceiling region %q was issued: %v", "/opt/michael/other", composed)
+	}
+
+	// Workspace + disjoint read-only root: the root narrows its own tree
+	// only; the unselected sibling region keeps its ceiling mode but is not
+	// issued to this Session.
+	composed = mustNarrow(t, []AllowedRootEntry{rwP("/home/michael"), rwP("/opt/michael")}, workspace,
+		[]AllowedRootEntry{roP("/home/michael/repos/helper")})
+	if got := lookupAll(t, composed, workspace, "/home/michael/repos/helper/file"); !slices.Equal(got, []string{"read_write", "read_only"}) {
+		t.Errorf("disjoint RO root lookups = %v, want [read_write read_only]", got)
+	}
+	if _, ok := lookupAllowedRootAccess(composed, "/home/michael/repos/other"); ok {
+		t.Errorf("unselected ceiling region %q was issued: %v", "/home/michael/repos/other", composed)
+	}
+
+	// Multiple disjoint roots in one request.
+	composed = mustNarrow(t, []AllowedRootEntry{rwP("/home/michael"), rwP("/opt/michael")}, workspace,
+		[]AllowedRootEntry{roP("/home/michael/repos/helper"), rwP("/opt/michael/cache")})
+	if got := lookupAll(t, composed, workspace, "/home/michael/repos/helper", "/opt/michael/cache"); !slices.Equal(got, []string{"read_write", "read_only", "read_write"}) {
+		t.Errorf("multi-root lookups = %v, want [read_write read_only read_write]", got)
+	}
+
+	// Selected parent RW preserves the ceiling nested read_only region
+	// (the motivating protected-transition shape): the parent selection
+	// re-exposes the parent read-write but the nested read-only region
+	// survives the composition.
+	composed = mustNarrow(t, []AllowedRootEntry{rwP("/home/michael"), roP("/home/michael/secrets")}, workspace,
+		[]AllowedRootEntry{rwP("/home/michael")})
+	if got := lookupAll(t, composed, "/home/michael", "/home/michael/secrets"); !slices.Equal(got, []string{"read_write", "read_only"}) {
+		t.Errorf("nested RO survival lookups = %v, want [read_write read_only]", got)
+	}
+	if snap, err := newSessionFilesystemSnapshot(workspace, composed); err == nil {
+		if access, ok := snap.LookupAccess("/home/michael/secrets"); !ok || access != AllowedRootAccessReadOnly {
+			t.Errorf("nested RO lost in snapshot lookup: %q ok=%v", access, ok)
+		}
+	} else {
+		t.Fatalf("snapshot from selected-parent composition: %v", err)
+	}
+
+	// Explicit workspace-root replacement: read_only replaces the implicit
+	// read_write grant.
+	composed = mustNarrow(t, []AllowedRootEntry{rwP("/home/michael")}, workspace, []AllowedRootEntry{roP(workspace)})
+	if got := lookupAll(t, composed, workspace); !slices.Equal(got, []string{"read_only"}) {
+		t.Errorf("explicit workspace RO lookups = %v, want [read_only]", got)
+	}
+
+	// Selected parent RO with an authorized workspace RW child: the child
+	// stays no wider than the ceiling (the ceiling authorizes it RW).
+	composed = mustNarrow(t, []AllowedRootEntry{roP("/home/michael/work"), rwP(workspace)}, workspace,
+		[]AllowedRootEntry{roP("/home/michael/work")})
+	if got := lookupAll(t, composed, "/home/michael/work", workspace); !slices.Equal(got, []string{"read_only", "read_write"}) {
+		t.Errorf("parent RO + child RW lookups = %v, want [read_only read_write]", got)
+	}
+
+	// read_write requested for the workspace when the effective ceiling
+	// keeps it read_only is a refusal, not a silent widening.
+	narrowRefused(t, []AllowedRootEntry{roP(workspace)}, workspace, []AllowedRootEntry{rwP(workspace)})
+}
+
+// TestSessionFilesystemSnapshotMultiRoot proves the generalized snapshot
+// boundary and its source queries over disjoint root trees: the workspace is
+// authorized (by an ancestor entry when it is not an entry itself), sources
+// outside every issued root have no authority, and the writable-parent query
+// works independently inside each disjoint tree. A legacy workspace-only
+// snapshot remains a valid subset of the model.
+func TestSessionFilesystemSnapshotMultiRoot(t *testing.T) {
+	workspace := "/home/michael/work/git/BoxProbe"
+	// Canonical byte order: helper < work/git/BoxProbe < opt/michael/cache.
+	entries := []AllowedRootEntry{
+		roP("/home/michael/repos/helper"),
+		rwP("/home/michael/work/git/BoxProbe"),
+		rwP("/opt/michael/cache"),
+	}
+	snap, err := newSessionFilesystemSnapshot(workspace, entries)
+	if err != nil {
+		t.Fatalf("multi-root snapshot rejected: %v", err)
+	}
+	if snap.Workspace != workspace {
+		t.Errorf("snapshot workspace = %q, want %q", snap.Workspace, workspace)
+	}
+
+	// LookupAccess resolves outside the workspace and inside each tree.
+	if access, ok := snap.LookupAccess("/home/michael/repos/helper/input.txt"); !ok || access != AllowedRootAccessReadOnly {
+		t.Errorf("helper lookup = %q ok=%v, want read_only", access, ok)
+	}
+	if access, ok := snap.LookupAccess("/opt/michael/cache/file"); !ok || access != AllowedRootAccessReadWrite {
+		t.Errorf("cache lookup = %q ok=%v, want read_write", access, ok)
+	}
+	if access, ok := snap.LookupAccess(workspace + "/main.go"); !ok || access != AllowedRootAccessReadWrite {
+		t.Errorf("workspace lookup = %q ok=%v, want read_write", access, ok)
+	}
+	if _, ok := snap.LookupAccess("/home/michael/repos/other"); ok {
+		t.Error("unissued Launcher root resolved snapshot authority")
+	}
+	if _, ok := snap.LookupAccess("/srv/elsewhere"); ok {
+		t.Error("outside-snapshot source resolved snapshot authority")
+	}
+
+	// CanExposeWritable works independently in each disjoint tree.
+	if !snap.CanExposeWritable(workspace) {
+		t.Error("workspace RW root must be writable-exposable")
+	}
+	if !snap.CanExposeWritable("/opt/michael/cache") {
+		t.Error("cache RW root must be writable-exposable")
+	}
+	if snap.CanExposeWritable("/home/michael/repos/helper") {
+		t.Error("helper RO root must not be writable-exposable")
+	}
+
+	// A nested read_only transition under a selected read_write root keeps
+	// the writable-parent rule protecting it.
+	nested := []AllowedRootEntry{rwP("/home/michael"), roP("/home/michael/secrets")}
+	nestedSnap, err := newSessionFilesystemSnapshot(workspace, nested)
+	if err != nil {
+		t.Fatalf("nested snapshot rejected: %v", err)
+	}
+	if nestedSnap.CanExposeWritable("/home/michael") {
+		t.Error("writable exposure spanning the nested RO region must be refused")
+	}
+	if !nestedSnap.CanExposeWritable(workspace) {
+		t.Error("workspace below the selected RW parent must stay writable-exposable")
+	}
+
+	// The legacy workspace-only snapshot remains valid.
+	legacy, err := newSessionFilesystemSnapshot(workspace, []AllowedRootEntry{rwP(workspace)})
+	if err != nil {
+		t.Fatalf("legacy workspace-only snapshot rejected: %v", err)
+	}
+	if access, ok := legacy.LookupAccess(workspace); !ok || access != AllowedRootAccessReadWrite {
+		t.Errorf("legacy snapshot workspace lookup = %q ok=%v, want read_write", access, ok)
+	}
 }

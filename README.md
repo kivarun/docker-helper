@@ -9,12 +9,13 @@ build images and run containers. Giving the agent direct access to
 and run arbitrary processes. docker-helper sits between the agent and
 Docker and enforces policy:
 
-- host paths accepted as build contexts and bind-mount sources are
-  restricted to the session workspace;
+- host paths accepted as build contexts are restricted to the session
+  workspace, and bind-mount sources are restricted to the session's issued
+  filesystem snapshot (the workspace plus any issued additional roots);
 - build, pull, and run require a session token; session management
   requires an admin token, Principal credential, or Launcher credential;
 - all supported Docker operations are mediated by the daemon;
-- the developer controls which workspace each session can access.
+- the developer controls which filesystem snapshot each session is issued.
 
 docker-helper assumes the agent cannot directly read `admin.token` or
 access `docker.sock`. It does not sandbox an otherwise unrestricted agent
@@ -92,8 +93,8 @@ Four authentication classes provide different levels of access:
 3. **Launcher credential** — bound to one launcher (at most one credential
    per launcher): create sessions owned by that launcher, list and delete
    only that launcher's sessions. Cannot manage launchers or principals.
-4. **Session token** — narrow workspace capability for Docker operations
-   (pull, build, run, registry login).
+4. **Session token** — narrow data-plane capability for one session's
+   issued filesystem snapshot (pull, build, run, registry login).
 
 A credential is a rotatable authentication key, never an owner. Every
 session is owned by exactly one launcher; principal identity is derived
@@ -1113,10 +1114,11 @@ Note: `docker-helper config show` (without a field) displays
 
 ## Security
 
-- **Host path policy** — build contexts, Dockerfiles, and bind-mount
-  sources are validated against the session workspace. Builds use an
-  isolated staging copy with FD-relative traversal; system-mode run
-  mounts use inode-pinned helper-owned mounts.
+- **Host path policy** — bind-mount sources are workspace-relative paths
+  or absolute host paths, both authorized only through the issued
+  immutable Session filesystem snapshot (workspace + issued filesystem
+  roots). Builds use an isolated staging copy with FD-relative traversal;
+  system-mode run mounts use inode-pinned helper-owned mounts.
 - **Bearer authentication** — admin token uses SHA-256 hashing with
   constant-time comparison in memory; Principal credentials and session
   tokens use SHA-256 hashes stored in SQLite and resolved through
@@ -1141,8 +1143,10 @@ Note: `docker-helper config show` (without a field) displays
 
 - docker-helper does not sandbox a coding tool that already has direct
   access to the host filesystem.
-- In user mode, bind-mount sources are restricted to the workspace root.
-  Subdirectory and file mounts are not available.
+- In user mode there is no inode pinning; the issued Session filesystem
+  snapshot (workspace + issued filesystem roots) is still the only
+  authority, and a writable mount spanning a nested read-only region is
+  refused exactly as in system mode.
 - Filesystem policy is pathname-based: policy resolution canonicalizes
   paths (including symlinks), but two authorized pathnames can still
   reference the same inode through a hard link. If one alias lies under a
@@ -1436,29 +1440,38 @@ snapshot at creation time (visible through `docker-helper session
 show`). Later allowed-root changes affect only new Sessions; an issued
 Session keeps its issued snapshot for its whole lifetime.
 
-The authority creating a Session can also narrow it at issuance time:
-`session create` accepts a repeatable `--filesystem-entry PATH=ACCESS`
-flag where PATH is relative to the Session workspace (`.` for the
-workspace root, which is required when the flag is used) and ACCESS is
-`read_write` or `read_only`:
+The authority creating a Session can also issue additional filesystem
+roots for it: `session create` accepts a repeatable
+`--filesystem-root PATH=ACCESS` flag where PATH is an absolute host path
+inside the target Launcher's effective allowed roots (a directory or a
+regular file) and ACCESS is `read_write` or `read_only`. The workspace
+itself remains mandatory and receives the maximum access the target
+Launcher's effective policy permits; passing a filesystem root at the
+canonical workspace path explicitly narrows it instead:
 
 ```bash
 docker-helper session create --system \
-  --workspace /srv/pipeline-runs/run-123 \
-  --filesystem-entry .=read_only \
-  --filesystem-entry project=read_write \
-  --filesystem-entry pipeline-inputs=read_only \
-  --filesystem-entry pipeline-outputs=read_write \
+  --launcher agent \
+  --workspace /srv/run-root/work \
+  --filesystem-root /srv/run-root/work=read_only \
+  --filesystem-root /srv/run-root/work/project=read_write \
+  --filesystem-root /home/michael/work/git/docker-helper=read_only \
+  --filesystem-root /opt/michael/cache=read_write \
   --json
 ```
 
+A system-mode admin token must target exactly one Launcher explicitly
+(`--launcher NAME_OR_ID` or `--principal USER`); a Principal or Launcher
+credential targets its own scope and takes no `--principal` selector.
 The request may only narrow the target Launcher's effective ceiling; a
-`read_write` entry under an effective `read_only` region, or a path
+`read_write` root under an effective `read_only` region, or a path
 outside the ceiling, is refused with `invalid_filesystem_policy` before
 the Session exists. Omitting the flag keeps the inherited behavior. A
-Launcher credential can narrow its own Session at creation this way and
-can never widen Launcher/Principal/global authority; there is no
-post-create Session filesystem mutation.
+Launcher credential can issue its own Session this way and can never
+widen Launcher/Principal/global authority; there is no post-create
+Session filesystem mutation. Run mounts may use the relative spelling
+for workspace sources and the absolute host spelling for any issued
+filesystem root:
 
 A practical example — one run tree with separate data planes:
 
@@ -1533,8 +1546,9 @@ The allowed-root narrowing model (global → principal → launcher → session)
 - **Project workspace** — selected only at session creation time via
   `session create --workspace PATH`; must be under the global and principal
   allowed roots (and, for restricted launchers, the launcher's roots).
-  The create request may further narrow the issued snapshot per Session
-  through `filesystem_entries` (issuance-time narrowing only; see
+  The create request may further issue additional absolute filesystem
+  roots and an explicit workspace grant per Session through
+  `filesystem_roots` (issuance-time filesystem roots only; see
   [Allowed-root access modes](#allowed-root-access-modes)); it is never a
   post-create mutation surface.
 

@@ -394,17 +394,17 @@ func (a *App) resolveLauncherWithinPrincipal(launcherID string, principalID int6
 // target, ownership names, and three-level effective root scope) for an
 // authenticated authority and create request. It never mutates state.
 //
-// filesystemEntries is the caller-supplied issuance-time Session filesystem
-// narrowing (nil when the request omitted filesystem_entries); it is carried
-// into the resolved policy unchanged and is proven/composed by
-// createSessionWithPolicyLocked inside the same lifecycle serialization
-// boundary.
+// filesystemRoots is the caller-supplied issuance-time Session filesystem
+// request (nil when the request omitted filesystem_roots or carried the
+// empty array); it is carried into the resolved policy unchanged and is
+// proven/composed by createSessionWithPolicyLocked inside the same
+// lifecycle serialization boundary.
 //
 // Callers must hold lifecycleMu when calling this, so the resolved projection
 // comes from one coherent policy snapshot: real Session creation holds the
 // boundary around resolution and persistence, and read-only create-policy
 // introspection goes through resolveCreatePolicySnapshot.
-func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, workspace string, filesystemEntries []sessionFilesystemRequestEntry) (*sessionCreatePolicy, error) {
+func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, workspace string, filesystemRoots []sessionFilesystemRootEntry) (*sessionCreatePolicy, error) {
 	launcherID, err := a.resolveCreateLauncher(auth, sel)
 	if err != nil {
 		return nil, err
@@ -436,7 +436,7 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 		Workspace:                   workspace,
 		EffectiveAllowedRoots:       allowedRootPaths(effectiveEntries),
 		EffectiveAllowedRootEntries: effectiveEntries,
-		FilesystemRequest:           filesystemEntries,
+		FilesystemRoots:             filesystemRoots,
 		LauncherID:                  snap.launcherID,
 		LauncherName:                snap.launcherName,
 		PrincipalName:               snap.principalName,

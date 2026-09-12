@@ -616,7 +616,7 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 
 	// In system mode the mount source is pinned before the run starts. Provide
 	// a succeeding pin so the operation proceeds to the docker start failure.
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
 			cleanup:    func() error { return nil },
@@ -1151,7 +1151,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 
 	// Inject a pinned mount with a failing Cleanup.
 	sentinelErr := errors.New("injected pinned mount cleanup error")
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -74,6 +73,7 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
@@ -91,31 +91,33 @@ func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
+	// User mode has no inode pinning, so only the canonical workspace root
+	// carries the pathname-stability invariant a bind source needs: a
+	// workspace-contained subdirectory is refused before any pin, operation,
+	// or Docker state exists.
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
-
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	if !strings.Contains(w.Body.String(), "invalid_mount") {
+		t.Errorf("refusal is not invalid_mount: %s", w.Body.String())
 	}
-	if resp.Code != "invalid_mount" {
-		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
-	}
-
 	if dockerCalled {
-		t.Error("docker should not be called after user-mode mount rejection")
+		t.Error("docker must not be called for a refused user-mode mount")
+	}
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("a refused user-mode mount must not create an operation")
 	}
 }
 
 func TestRunMountUserModeRejectsFile(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
@@ -127,21 +129,30 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	dockerCalled := false
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerCalled = true
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	// A workspace-contained regular file is refused in user mode before any
+	// operation or Docker state exists.
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"testfile.txt","target":"/data"}]}`)))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
-
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	if !strings.Contains(w.Body.String(), "invalid_mount") {
+		t.Errorf("refusal is not invalid_mount: %s", w.Body.String())
 	}
-	if resp.Code != "invalid_mount" {
-		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	if dockerCalled {
+		t.Error("docker must not be called for a refused user-mode file mount")
+	}
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("a refused user-mode mount must not create an operation")
 	}
 }
 
@@ -166,8 +177,8 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
-	// Mock PinWorkspaceMountSourceFn to return a fake pinned mount.
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	// Mock PinMountSourceFn to return a fake pinned mount.
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: sourcePath,
 			cleanup:    func() error { return nil },
@@ -199,17 +210,18 @@ func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The refused user-mode subdirectory mount is answered before operation
+	// registration: the supervisor stays empty and Docker is never called.
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
-
 	if len(app.OperationSupervisor.ops) != 0 {
-		t.Error("operation should not be created after user-mode mount rejection")
+		t.Error("a refused user-mode mount must not create an operation")
 	}
 }
 
@@ -247,7 +259,7 @@ func TestRunSecondPinError(t *testing.T) {
 
 	cleanupOrder := []string{}
 	callCount := 0
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		callCount++
 		if mountIndex == 1 {
 			return nil, errors.New("second pin failed")
@@ -319,7 +331,7 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 	}
 
 	cleanupCalled := false
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/pinned/0",
 			cleanup: func() error {
@@ -382,10 +394,10 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// PinWorkspaceMountSourceFn should be called (fail-closed), and should fail
+	// PinMountSourceFn should be called (fail-closed), and should fail
 	// because RuntimeDir is empty.
 	pinCalled := false
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		pinCalled = true
 		return nil, fmt.Errorf("runtimeDir must be absolute: %q", runtimeDir)
 	}
@@ -408,9 +420,9 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 
-	// PinWorkspaceMountSourceFn must have been called (no RuntimeDir shortcut).
+	// PinMountSourceFn must have been called (no RuntimeDir shortcut).
 	if !pinCalled {
-		t.Error("PinWorkspaceMountSourceFn should be called regardless of RuntimeDir")
+		t.Error("PinMountSourceFn should be called regardless of RuntimeDir")
 	}
 
 	// Docker should not be called.
@@ -447,7 +459,7 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	}
 
 	stablePaths := []string{"/runtime/pinned/0", "/runtime/pinned/1"}
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: stablePaths[mountIndex],
 			cleanup:    func() error { return nil },
@@ -512,7 +524,7 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 	}
 
 	pinCalled := false
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		pinCalled = true
 		return nil, errors.New("should not be called")
 	}
@@ -535,9 +547,9 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
 
-	// A: PinWorkspaceMountSourceFn must not be called in user mode.
+	// A: PinMountSourceFn must not be called in user mode.
 	if pinCalled {
-		t.Error("PinWorkspaceMountSourceFn should not be called in user mode")
+		t.Error("PinMountSourceFn should not be called in user mode")
 	}
 
 	// B: Docker argv must use the resolved workspace path, not a pinned path.
@@ -567,7 +579,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	}
 
 	cleanupCount := int32(0)
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: fmt.Sprintf("/pinned/%d", mountIndex),
 			cleanup: func() error {
@@ -625,7 +637,7 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	}
 
 	cleanupCount := int32(0)
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: fmt.Sprintf("/pinned/%d", mountIndex),
 			cleanup: func() error {
@@ -686,7 +698,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 	}
 
 	cleanupOrder := []int{}
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		mi := mountIndex
 		return &pinnedMount{
 			PinnedPath: fmt.Sprintf("/pinned/%d", mountIndex),
@@ -755,7 +767,7 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/pinned/0",
 			cleanup:    func() error { return errors.New("cleanup failed") },
@@ -818,7 +830,7 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
 			PinnedPath: "/runtime/pinned/0",
 			cleanup:    func() error { return nil },

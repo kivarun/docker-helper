@@ -35,10 +35,10 @@ type App struct {
 	AdminTokenHash      [sha256.Size]byte
 	ExecCommandContext  func(context.Context, string, ...string) *exec.Cmd
 	OperationSupervisor *operationSupervisor
-	// PinWorkspaceMountSourceFn is a test seam for the inode-pinning primitive.
-	// Production default calls the real pinWorkspaceMountSource; tests can return
+	// PinMountSourceFn is a test seam for the inode-pinning primitive.
+	// Production default calls the real pinMountSource; tests can return
 	// a fake pinnedMount with controlled Cleanup behavior.
-	PinWorkspaceMountSourceFn func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error)
+	PinMountSourceFn func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error)
 	// StageBuildContextFn is a test seam for the build context staging primitive.
 	// Production default calls the real StageBuildContext; tests can return
 	// a fake stagedBuildContext with controlled Cleanup behavior.
@@ -69,13 +69,13 @@ type App struct {
 	userModeDefault *userModeDefaultLauncher
 }
 
-// pinWorkspaceMountSource calls PinWorkspaceMountSourceFn if set, otherwise the
-// real pinWorkspaceMountSource.
-func (a *App) pinWorkspaceMountSource(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-	if a.PinWorkspaceMountSourceFn != nil {
-		return a.PinWorkspaceMountSourceFn(workspace, sourcePath, runtimeDir, operationID, mountIndex)
+// pinMountSource calls PinMountSourceFn if set, otherwise the
+// real pinMountSource.
+func (a *App) pinMountSource(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	if a.PinMountSourceFn != nil {
+		return a.PinMountSourceFn(sourcePath, runtimeDir, operationID, mountIndex)
 	}
-	return pinWorkspaceMountSource(workspace, sourcePath, runtimeDir, operationID, mountIndex)
+	return pinMountSource(sourcePath, runtimeDir, operationID, mountIndex)
 }
 
 // stageBuildContext calls StageBuildContextFn if set, otherwise the real StageBuildContext.

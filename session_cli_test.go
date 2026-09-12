@@ -225,10 +225,10 @@ func startSessionCreateCapture(t *testing.T, socketPath string, captured *string
 	})
 }
 
-// TestSessionCreateFsEntriesWire proves the repeatable
-// --filesystem-entry flag maps onto the canonical filesystem_entries wire
+// TestSessionCreateFsRootsWire proves the repeatable
+// --filesystem-root flag maps onto the canonical filesystem_roots wire
 // field in request order, through the real CLI command path.
-func TestSessionCreateFsEntriesWire(t *testing.T) {
+func TestSessionCreateFsRootsWire(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 	_ = configPath
@@ -240,28 +240,26 @@ func TestSessionCreateFsEntriesWire(t *testing.T) {
 	code := runCommandWithWriters([]string{
 		"session", "create",
 		"--workspace", "/state/runs/run-1",
-		"--filesystem-entry", ".=read_only",
-		"--filesystem-entry", "project=read_write",
-		"--filesystem-entry", "pipeline-inputs=read_only",
-		"--filesystem-entry", "pipeline-outputs=read_write",
+		"--filesystem-root", "/home/michael/work/git/docker-helper=read_only",
+		"--filesystem-root", "/opt/michael/cache=read_write",
 		"--json",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("session create failed: code %d stderr=%s", code, stderr.String())
 	}
-	want := `"filesystem_entries":[{"path":".","access":"read_only"},{"path":"project","access":"read_write"},{"path":"pipeline-inputs","access":"read_only"},{"path":"pipeline-outputs","access":"read_write"}]`
+	want := `"filesystem_roots":[{"path":"/home/michael/work/git/docker-helper","access":"read_only"},{"path":"/opt/michael/cache","access":"read_write"}]`
 	if !strings.Contains(captured, want) {
-		t.Errorf("wire body missing canonical filesystem_entries: %s", captured)
+		t.Errorf("wire body missing canonical filesystem_roots: %s", captured)
 	}
 	if !strings.Contains(captured, `"workspace":"/state/runs/run-1"`) {
 		t.Errorf("wire body missing workspace: %s", captured)
 	}
 }
 
-// TestSessionCreateOmittedFsEntries proves the old create
-// syntax is unchanged: a create without --filesystem-entry sends no
-// filesystem_entries key at all.
-func TestSessionCreateOmittedFsEntries(t *testing.T) {
+// TestSessionCreateOmittedFsRoots proves the old create
+// syntax is unchanged: a create without --filesystem-root sends no
+// filesystem_roots key at all.
+func TestSessionCreateOmittedFsRoots(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 	_ = configPath
@@ -278,63 +276,64 @@ func TestSessionCreateOmittedFsEntries(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("session create failed: code %d stderr=%s", code, stderr.String())
 	}
-	if strings.Contains(captured, "filesystem_entries") {
-		t.Errorf("omitted flag must not send filesystem_entries: %s", captured)
+	if strings.Contains(captured, "filesystem_roots") {
+		t.Errorf("omitted flag must not send filesystem_roots: %s", captured)
 	}
 	if !strings.Contains(captured, `"workspace":"/state/runs/run-1"`) {
 		t.Errorf("wire body missing workspace: %s", captured)
 	}
 }
 
-// TestSessionCreateBadFsEntrySyntax proves the CLI performs
+// TestSessionCreateBadFsRootSyntax proves the CLI performs
 // PATH=ACCESS syntax validation only, rejects bad values locally (exit 2)
 // before any request is sent, and parses ACCESS through the canonical access
 // vocabulary. Flag parsing rejects the value before the client resolves, so
 // no daemon socket is needed: reaching the daemon would require successful
 // flag parsing.
-func TestSessionCreateBadFsEntrySyntax(t *testing.T) {
+func TestSessionCreateBadFsRootSyntax(t *testing.T) {
 	for name, value := range map[string]string{
 		"missing separator":  "no-access-value",
 		"empty path":         "=read_only",
-		"empty access":       "project=",
-		"unknown access":     "project=ro",
-		"unknown access rw":  "project=rw",
-		"noncanonical value": "project=writable",
+		"relative path":      "project=read_only",
+		"empty access":       "/home/michael/data=",
+		"unknown access":     "/home/michael/data=ro",
+		"unknown access rw":  "/home/michael/data=rw",
+		"noncanonical value": "/home/michael/data=writable",
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := runCommandWithWriters([]string{
 				"session", "create",
 				"--workspace", "/state/runs/run-1",
-				"--filesystem-entry", value,
+				"--filesystem-root", value,
 			}, &stdout, &stderr)
 			if code == 0 {
-				t.Fatalf("bad entry accepted: %s stderr=%s", value, stderr.String())
+				t.Fatalf("bad root accepted: %s stderr=%s", value, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "filesystem-entry") {
-				t.Errorf("expected a --filesystem-entry syntax error, got: %s", stderr.String())
+			if !strings.Contains(stderr.String(), "filesystem-root") {
+				t.Errorf("expected a --filesystem-root syntax error, got: %s", stderr.String())
 			}
 		})
 	}
 }
 
-// TestSessionCreateFsEntryHelp proves the new flag is documented
+// TestSessionCreateFsRootHelp proves the flag is documented
 // in the command help.
-func TestSessionCreateFsEntryHelp(t *testing.T) {
+func TestSessionCreateFsRootHelp(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/config.json")
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session", "create", "--help"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("help exited %d", code)
 	}
-	if !strings.Contains(stdout.String(), "--filesystem-entry PATH=ACCESS") {
-		t.Errorf("help does not document --filesystem-entry: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "--filesystem-root PATH=ACCESS") {
+		t.Errorf("help does not document --filesystem-root: %s", stdout.String())
 	}
 }
 
 // TestSessionCreateEqualsInPathWire proves the PATH=ACCESS split is on the
 // LAST '=' — the same grammar the completion consumes: a PATH containing '='
-// parses as one workspace-relative path with the canonical ACCESS.
+// parses as one absolute host path with the canonical ACCESS.
 func TestSessionCreateEqualsInPathWire(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
@@ -347,13 +346,13 @@ func TestSessionCreateEqualsInPathWire(t *testing.T) {
 	code := runCommandWithWriters([]string{
 		"session", "create",
 		"--workspace", "/state/runs/run-1",
-		"--filesystem-entry", "foo=bar=read_only",
+		"--filesystem-root", "/data/foo=bar=read_only",
 		"--json",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("session create failed: code %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(captured, `"path":"foo=bar","access":"read_only"`) {
+	if !strings.Contains(captured, `"path":"/data/foo=bar","access":"read_only"`) {
 		t.Errorf("wire body does not carry the last-'=' split: %s", captured)
 	}
 }

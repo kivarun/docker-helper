@@ -672,11 +672,13 @@ Prove through public CLI/API:
 11. audit contains mode/path facts and no secret values;
 12. no Session/container/mount/MAC/runtime residue remains;
 13. a Launcher credential creates a dynamically named run workspace and
-    narrows the Session at issuance time through `filesystem_entries`
-    (`.` read-only, project/pipeline-outputs read-write,
-    pipeline-inputs read-only), the issued snapshot enforces exactly those
-    effective semantics (normalization may drop redundant entries), and the
-    inherited behavior without `filesystem_entries` is unchanged;
+    issues additional absolute filesystem roots at issuance time through
+    `filesystem_roots` (`--filesystem-root PATH=ACCESS`; the workspace
+    narrowed read-only via an explicit root, project/pipeline-outputs
+    read-write, an external read-only root, an external read-write root),
+    the issued snapshot enforces exactly those effective semantics
+    (normalization may drop redundant entries), and the inherited behavior
+    without `filesystem_roots` is unchanged;
 14. an attempted issuance-time widening (`read_write` where the parent
     ceiling is `read_only`) fails `400 invalid_filesystem_policy` and
     creates no Session, bearer, container, pin, or workload-MAC residue.
@@ -698,45 +700,59 @@ the existing release pipeline. Source-only success is not sufficient.
 
 ## Phase 2.2.8 — issuance-time Session filesystem narrowing
 
-**Status: IMPLEMENTED, awaiting architectural acceptance and the full UAT
-gate.** Implemented on `feature/2.2.10-session-filesystem-narrowing` (base
-`release/2.2@802ecc4f`), opened as a PR against `release/2.2`. The
-implementation extends the existing owners only:
-`narrowSessionFilesystemPolicy` in `allowed_root_policy.go` (the single
-domain owner) proves and composes the narrowing; the Session-create
-lifecycle canonicalizes the workspace-relative entries and consumes the
-composition inside the existing `lifecycleMu` boundary;
-`POST /sessions`/`session create --filesystem-entry` carry the wire
-contract; the typed `ErrInvalidSessionFilesystemPolicy` family answers
-`400 invalid_filesystem_policy` with the audit result
+**Status: CORRECTED to the multi-root filesystem-roots contract; awaiting
+architectural acceptance and the full UAT gate.** The original
+issuance-time narrowing increment
+(`feature/2.2.10-session-filesystem-narrowing`) issued a
+workspace-relative entry grammar; the release owner corrected the model
+to multi-root filesystem roots on
+`feature/2.2.12-multi-root-session-filesystem`. The implementation still
+extends the existing owners only: `narrowSessionFilesystemPolicy` in
+`allowed_root_policy.go` (the single domain owner) proves and composes
+the requested scope — the implicit workspace grant at the effective
+ceiling mode, replaced by an explicit workspace root, plus the
+canonicalized absolute roots — with the ceiling through the existing
+composition owner; the snapshot boundary generalizes to disjoint root
+trees (the workspace authorized, additional roots wherever the ceiling
+allows); `POST /sessions`/`session create --filesystem-root` carry the
+wire contract; the typed `ErrInvalidSessionFilesystemPolicy` family
+answers `400 invalid_filesystem_policy` with the audit result
 `invalid_filesystem_policy`; no new persistence schema and no MAC/runtime
-change. Domain/HTTP/CLI/race regressions and the canonical access-mode UAT
-scenario N pin the contract.
+change. Run mounts gain the absolute-source spelling authorized only
+through the issued snapshot; in system mode the snapshot owner covers the
+workspace and the issued disjoint roots alike, while user mode keeps its
+workspace-only special case (user mode has no `CAP_SYS_ADMIN` for
+inode-pinned mounts) through the same snapshot owner; completion renders
+the effective roots as tree boundaries and completes both sides of
+`--filesystem-root`.
 
 Release 2.2 underdelivered the original orchestrator capability: a Session
 received an immutable filesystem snapshot automatically derived from
 global ∩ Principal ∩ Launcher, but the Launcher could not state, per
-created Session, which parts of the workspace are `read_write` and which
-are `read_only`. A dynamic pipeline run
-(`pipeline-runs/<run-id>/project|pipeline-inputs|pipeline-outputs`) cannot
-mutate durable Launcher policy per run, so the capability was unreachable.
+created Session, which additional host directories the Session receives
+and which mode each carries. A dynamic pipeline run cannot mutate durable
+Launcher policy per run, so the capability was unreachable.
 
 The correction restores the contract without changing the architecture:
 
 - the Session filesystem request is **issuance-time narrowing**
-  (effective Launcher ceiling ∩ request = the immutable Session snapshot);
-  it is not a fourth mutable policy scope;
-- the request may only narrow; a requested path outside the effective
+  (effective Launcher ceiling ∩ request = the immutable multi-root
+  snapshot); it is not a fourth mutable policy scope;
+- the request may only narrow; a requested root outside the effective
   ceiling, or `read_write` under an effective `read_only` region, is
   refused before the Session exists (`400 invalid_filesystem_policy`,
   audit result `invalid_filesystem_policy`, no residual state). No silent
-  downgrade and no composition-only validation: every requested entry is
+  downgrade and no composition-only validation: every requested root is
   proven against the ceiling before the existing
   `composeAllowedRootScopes` owner composes and normalizes;
-- `filesystem_entries` is optional on `POST /sessions` (CLI: repeatable
-  `--filesystem-entry PATH=ACCESS`): omitted preserves the inherited
-  2.1/2.2 create path byte-for-byte; `null`/`[]` are refused; the `.`
-  entry is required for explicit narrowing;
+- `filesystem_roots` is optional on `POST /sessions` (CLI: repeatable
+  `--filesystem-root PATH=ACCESS`): omitted and `[]` preserve the
+  inherited 2.1/2.2 create path byte-for-byte; `null` is refused; every
+  root is an absolute host path inside the ceiling (existing directory or
+  regular file; symlink-safe canonical identity; duplicate canonical
+  roots refused); the workspace receives the maximum permitted ceiling
+  mode, replaced by an explicit workspace root under the same privilege
+  rule;
 - all Session-create authorities (Admin, Principal credential, Launcher
   credential) narrow only against the resolved target Launcher ceiling;
   no authority receives bypass semantics and no Launcher credential gains
@@ -804,11 +820,12 @@ Release 2.2 is complete only when:
 - 2.1 path-only state upgrades compatibly to RW;
 - the policy hierarchy and most-specific rules have one implementation owner;
 - every Session has an immutable filesystem snapshot;
-- the Launcher-credential issuance-time narrowing scenario (Phase 2.2.7
-  functional UAT items 13-14) is proven: a dynamically named run workspace
-  created under a Launcher credential with a narrowed immutable snapshot,
+- the Launcher-credential issuance-time filesystem-roots scenario
+  (Phase 2.2.7 functional UAT items 13-14) is proven: a dynamically named
+  run workspace created under a Launcher credential with an issued
+  immutable multi-root snapshot (external read-only and read-write roots),
   the widening refusal contract, and unchanged inherited behavior without
-  `filesystem_entries`;
+  `filesystem_roots`;
 - writable parent bypass is closed;
 - every applicable host source is checked against the snapshot;
 - AppArmor and SELinux independently mirror RO denial under system-mode UAT;

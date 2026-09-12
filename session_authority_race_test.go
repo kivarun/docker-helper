@@ -324,7 +324,7 @@ func TestRunLegacyMigratedSessionKeepsWritableBehavior(t *testing.T) {
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{PinnedPath: sourcePath, cleanup: func() error { return nil }}, nil
 	}
 

@@ -508,7 +508,7 @@ func TestPostCutoverCorruptionFailsClosed(t *testing.T) {
 			wantErr: "positions are not exactly 0..N-1",
 		},
 		{
-			name: "snapshot root is not the workspace",
+			name: "workspace loses its authorization",
 			buildEntries: func(t *testing.T, db *sql.DB, sessionID, workspace string) {
 				if _, err := db.Exec(
 					`UPDATE session_filesystem_snapshot_entries SET path = '/run/other' WHERE session_id = ? AND position = 0`,
@@ -517,7 +517,7 @@ func TestPostCutoverCorruptionFailsClosed(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantErr: "is not the workspace",
+			wantErr: "does not authorize the workspace",
 		},
 		{
 			name: "unordered canonical transitions",
@@ -556,7 +556,7 @@ func TestPostCutoverCorruptionFailsClosed(t *testing.T) {
 			wantErr: "not the canonical normalized representation",
 		},
 		{
-			name: "entry outside the workspace",
+			name: "noncanonical disjoint insertion",
 			buildEntries: func(t *testing.T, db *sql.DB, sessionID, workspace string) {
 				sibling := filepath.Join(filepath.Dir(workspace), "elsewhere")
 				if _, err := db.Exec(
@@ -567,7 +567,7 @@ func TestPostCutoverCorruptionFailsClosed(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantErr: "outside the workspace",
+			wantErr: "not the canonical normalized representation",
 		},
 	}
 

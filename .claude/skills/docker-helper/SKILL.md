@@ -47,14 +47,17 @@ and use the returned session token for Docker operations exactly as
 described below.
 
 When the Launcher's effective policy permits finer per-Session control,
-the creating authority may narrow the Session at issuance time with a
-repeatable `--filesystem-entry PATH=ACCESS` flag (PATH relative to the
-workspace, `.` for the root; ACCESS `read_write` or `read_only`):
+the creating authority may issue additional filesystem roots at
+issuance time with a repeatable `--filesystem-root PATH=ACCESS` flag
+(PATH is an absolute host path inside the target Launcher's effective
+allowed roots; ACCESS `read_write` or `read_only`). The workspace stays
+mandatory and receives the maximum permitted ceiling mode; a root at the
+canonical workspace path explicitly narrows it:
 
 ```bash
-docker-helper session create --workspace . \
-  --filesystem-entry .=read_only \
-  --filesystem-entry outputs=read_write
+docker-helper session create --workspace /home/michael/work/git/BoxProbe \
+  --filesystem-root /home/michael/work/git/BoxProbe=read_only \
+  --filesystem-root /opt/michael/cache=read_write
 ```
 
 The request may only narrow the target Launcher's ceiling; a widening
@@ -126,7 +129,9 @@ Both interfaces share the same path semantics. Define once, apply everywhere.
   `/workspace/...`. The accepted source depends on deployment mode:
   - in **user mode**, only the workspace root source `.` is accepted;
   - in **system mode**, a workspace-relative file or subdirectory source
-    is accepted;
+    is accepted, and an absolute host path is accepted when it lies inside
+    the session's issued filesystem snapshot (an additional PATH/ACCESS
+    entry in `session show`); any other absolute path is refused;
   - if the deployment mode is not explicitly known, use `.` as the portable
     mount source.
 - **Mount targets** are absolute paths inside the launched container.
@@ -289,6 +294,16 @@ System-mode-only: mount a workspace-relative file or subdirectory:
 docker-helper run \
   --image IMAGE \
   --mount relative/source:/container/path \
+  -- command arg...
+```
+
+System-mode-only: mount an issued absolute filesystem root (a
+`--filesystem-root` entry of the session's issued snapshot):
+
+```bash
+docker-helper run \
+  --image IMAGE \
+  --mount /opt/agent/cache:/cache \
   -- command arg...
 ```
 

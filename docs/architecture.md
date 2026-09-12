@@ -68,10 +68,11 @@ means it can read any file on the host, access any network, and run arbitrary
 processes. docker-helper sits between the agent and Docker and enforces
 policy:
 
-- filesystem access is restricted to an explicit workspace per session;
+- filesystem access is restricted to each session's issued immutable
+  filesystem snapshot (the workspace plus any issued disjoint roots);
 - every data-plane operation requires a session token;
 - all Docker commands go through a single process;
-- the developer controls which workspace each session can access.
+- the developer controls which filesystem snapshot each session is issued.
 
 docker-helper limits the host paths exposed through its supported Docker
 operations. It is not a complete sandbox: Docker/default networking remains
@@ -88,13 +89,13 @@ Operator / agent
       ├─── Launcher credential (Launcher-scoped Session control)
       └─── session token (Docker data plane)
       │
-   +--+--+
-   │     │
-   ▼     ▼
+    +--+--+
+    │     │
+    ▼     ▼
 docker-helper CLI    direct HTTP client
 reference client     curl / native adapter
-   │     │
-   +--+--+
+    │     │
+    +--+--+
       │
    daemon HTTP API
       │
@@ -109,7 +110,8 @@ There are exactly four bearer classes, described by the [authority
 model](#authority-model): the admin token authenticates the administrator, a
 Principal credential authenticates one Principal, a Launcher credential
 authenticates one Launcher, and the session token is a Session capability —
-a data-plane key for one workspace, not a credential resource.
+a data-plane key for one issued Session's filesystem authority, not a
+credential resource.
 
 The daemon HTTP API is the single capability contract. The CLI is a
 shipped reference/convenience client of that API. Curl and native adapters
@@ -235,7 +237,7 @@ target-resolution contract:
 | Admin token | the administrator | full control plane: all Principals, Launchers, Principal and Launcher credentials, all Sessions, configuration, reload, admin-token rotation | system mode: exactly one explicit selector required (`400 missing_launcher_selector`); user mode: the local daemon-owner `default` Launcher | `?principal=USER` and/or `?launcher=LAUNCHER`; a `dhl_` Launcher ID is valid without a Principal, a Launcher name requires the Principal scope |
 | Principal credential | one Principal | that Principal's resources: its Launchers and their credentials, its own Principal credential, `principal show` on itself, and the Sessions owned by its Principal's Launchers | its Principal's `default` Launcher, or an explicit own Launcher | `?launcher=` (name or ID) inside its own scope; `--principal` is illegal, even for its own Principal |
 | Launcher credential | one Launcher | that Launcher's Sessions and `GET /auth` self-inspection | its own Launcher (forced) | none — there is no narrowing contract for this authority |
-| Session token | one Session | one workspace data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login`, and that Session's operation endpoints | not a control authority; not accepted by control endpoints or `GET /auth` | none |
+| Session token | one Session | its issued filesystem snapshot's data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login`, and that Session's operation endpoints | not a control authority; not accepted by control endpoints or `GET /auth` | none |
 
 Rules shared by every authority:
 
@@ -284,10 +286,12 @@ Delegation tiers bound what an agent can reach:
   given to a sufficiently trusted agent;
 - Launcher credential — narrower delegated operator capability; exact
   Launcher scope;
-- Session token — narrow data-plane Session capability for a single
-  workspace that expires after the configured TTL.
+- Session token — narrow data-plane Session capability for one issued
+  filesystem snapshot (the workspace plus any issued disjoint roots) that
+  expires after the configured TTL.
 
-A Session token alone grants access to one workspace and cannot create or
+A Session token alone grants access to its issued filesystem snapshot and
+cannot create or
 manage Sessions; a Launcher credential can create and manage only its
 Launcher's Sessions; a Principal credential can reach the Sessions owned by
 that Principal's Launchers. Choosing the delegation tier is the operator's
@@ -420,7 +424,8 @@ remains authoritative in both modes.
 ### Partially trusted
 
 - the allowed-root directories and their contents;
-- the workspace selected at session creation time.
+- the workspace and any additional issued filesystem roots selected at
+  session creation time.
 
 ### Untrusted
 
@@ -553,15 +558,19 @@ validate workspace inside the effective roots
 canonicalize the workspace
     (the existing Session-create owner: absolute path + EvalSymlinks)
     ↓
-when the request carries filesystem_entries:
-    canonicalize each requested workspace-relative entry
-    (join with the canonical workspace, resolve symlinks, prove the
-     resolved path remains inside the workspace, convert to canonical
-     AllowedRootEntry), prove the request is a narrowing-only composition
-     against the effective Launcher ceiling, and compose
-     ceiling ∩ request through the existing composition owner;
-    otherwise use the effective ceiling unchanged
-    (issuance-time narrowing; the request may only narrow, never widen)
+when the request carries filesystem_roots:
+    canonicalize each requested absolute host path
+    (clean, resolve symlinks, prove the resolved path exists as a
+     directory or regular file), prove the request is a narrowing-only
+     composition against the effective Launcher ceiling
+     (authorized; explicit read_write under an effective read_only
+     region refused), build the requested scope (implicit workspace
+     grant at the effective ceiling mode, replaced by an explicit
+     workspace root), and compose ceiling ∩ request through the existing
+     composition owner;
+    otherwise derive the inherited workspace-only snapshot
+    (issuance-time filesystem roots; the request may only narrow, never
+    widen)
     ↓
 derive the immutable Session filesystem snapshot
     (deriveSessionFilesystemSnapshot(effective entries, workspace) inside
@@ -599,6 +608,15 @@ canonical requested path, which may name a resolved symlink target) stays
 in the operational log and never reaches the client; no Session, bearer,
 container, pin, or workload-MAC state is created by a refused request.
 
+In user mode the issuance-time narrowing is bounded to the workspace: user
+mode has no `CAP_SYS_ADMIN` for inode-pinned mounts (see
+[User-mode run mounts](#user-mode-run-mounts)), so every requested root's
+canonical path must equal the canonical workspace — an omitted or empty
+request issues the inherited workspace-only snapshot, an explicit workspace
+root may narrow its access, and any other requested root is the same typed
+`invalid_filesystem_policy` refusal. System mode issues the full disjoint
+snapshot and pins every issued root through the same inode-pinning owner.
+
 The persisted snapshot is immutable Session child state
 (`session_filesystem_snapshot_entries`, ordered `position` entries with
 `UNIQUE(session_id, path)` and `ON DELETE CASCADE` from `sessions`), and
@@ -627,7 +645,7 @@ Release 2.2 behavior (see
 workspace-level MAC lifecycle is unchanged.
 
 The HTTP body of `POST /sessions` accepts
-`{"workspace", "launcher_id", "principal", "filesystem_entries"}`:
+`{"workspace", "launcher_id", "principal", "filesystem_roots"}`:
 
 - `launcher_id` and `principal` are mutually exclusive; both present is
   `400 conflicting_selectors`; an explicitly present but empty or malformed
@@ -635,15 +653,19 @@ The HTTP body of `POST /sessions` accepts
 - a Launcher credential's target is forced to its own launcher; a
   conflicting explicit selector is rejected;
 - with no selectors the request body carries only the workspace;
-- `filesystem_entries` is the optional issuance-time Session filesystem
-  narrowing: omitted means the inherited create behavior, and an explicit
-  occurrence must be a non-empty array of `{path, access}` objects whose
-  `path` is relative to the Session workspace (`"."` is required and the
-  workspace-relative anchor of the request) and whose `access` is exactly
-  `read_write` or `read_only`; `null` and `[]` are refused
-  `400 invalid_filesystem_policy`, as are malformed entries (absolute or
-  traversal paths, unresolvable or workspace-escaping paths, duplicate
-  canonical entries, missing/unknown access, unknown nested fields).
+- `filesystem_roots` is the optional issuance-time Session filesystem
+  request: omitted or `[]` means the inherited create behavior (workspace
+  only), and a non-empty array must be a well-formed list of `{path,
+  access}` objects whose `path` is an absolute host path inside the
+  effective Launcher ceiling (existing directory or regular file after
+  symlink resolution) and whose `access` is exactly `read_write` or
+  `read_only`; `null` is refused `400 invalid_filesystem_policy`, as are
+  malformed entries (relative or traversal paths, unresolvable paths,
+  paths of no mountable type, duplicate canonical entries, explicit
+  `read_write` under an effective `read_only` region, missing/unknown
+  access, unknown nested fields). An explicit root whose canonical path
+  equals the canonical workspace replaces the implicit workspace grant
+  under the same privilege rule.
 
 The CLI maps its selectors onto those wire fields after authenticating
 (`GET /auth`). The two selectors are mutually exclusive on the wire: the
@@ -944,10 +966,14 @@ parent-policy mutations (see
   launcher allowed root.
 - **Session filesystem snapshot** (persisted, immutable Session child
   state) — derived from the effective entries at the creation
-  linearization point, further narrowed when the Session-create request
-  carries `filesystem_entries` (issuance-time narrowing only; see
+  linearization point, further shaped when the Session-create request
+  carries `filesystem_roots` (issuance-time filesystem roots: additional
+  absolute roots inside the effective Launcher ceiling and an optional
+  explicit workspace grant; see
   [Session creation](#session-creation)), and committed atomically with the
-  Session. It is the
+  Session. The snapshot authorizes one or more disjoint canonical root
+  trees — the workspace is always authorized, additional roots wherever
+  the ceiling allows. It is the
   single data-plane filesystem authority of an existing Session: current
   global/Principal/Launcher policy is never read on the data plane, so
   parent-policy mutations affect only Sessions created afterwards.
@@ -1047,9 +1073,13 @@ remove — rejects the user-mode reserved default launcher with
 
 ### Session workspace
 
-Each session is bound to a single workspace directory. An agent with a
-session for `/home/user/project-a` cannot access `/home/user/project-b`,
-even if both are inside an allowed root.
+Each session is bound to a single workspace directory and its issued
+immutable filesystem snapshot (the workspace is always part of it). An
+agent with a session for `/home/user/project-a` cannot access
+`/home/user/project-b`, even if both are inside an allowed root, and cannot
+mount an issued-root region the Session did not request; absolute mount
+sources are authorized only through the issued snapshot (see
+[Filesystem policy](#filesystem-policy)).
 
 All paths are resolved through `filepath.EvalSymlinks` before comparison.
 This prevents symlink-based escape attacks at validation time. Note:
@@ -1109,8 +1139,8 @@ real mutations use, and neither surface widens authority.
   resolution (a system-mode admin without a resolvable Launcher receives
   the same missing-selector contract a real create would). Without a
   Session filesystem request this projection is the **maximum filesystem
-  ceiling**: a real Session create may further narrow its issued snapshot
-  against it through `filesystem_entries`, but never widen beyond it.
+  ceiling**: a real Session create may further shape its issued snapshot
+  against it through `filesystem_roots`, but never widen beyond it.
 
 `GET /auth` is the separate identity introspection surface; it reports the
 authenticated authority class, not policy (see
@@ -1304,7 +1334,7 @@ conflict.
 CLI surface (every command accepts the common operator flags):
 
 ```
-docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-entry PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]
+docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
 docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
@@ -1316,11 +1346,15 @@ resolution are the canonical
 [Session creation](#session-creation) pipeline and authority subsections;
 the CLI maps `--principal`/`--launcher` onto the wire selectors after
 `GET /auth`, and both are mutually exclusive. The repeatable
-`--filesystem-entry PATH=ACCESS` flag is the CLI form of the issuance-time
-Session filesystem narrowing: PATH is a workspace-relative path and ACCESS
-the canonical access vocabulary; the CLI validates `PATH=ACCESS` syntax
-only, and the daemon decides narrowing against the resolved Launcher
-ceiling. Omitting the flag preserves the inherited create behavior.
+`--filesystem-root PATH=ACCESS` flag is the CLI form of the issuance-time
+Session filesystem roots: PATH is an absolute host path inside the target
+Launcher's effective allowed roots (a directory or a regular file) and
+ACCESS the canonical access vocabulary; the CLI validates `PATH=ACCESS`
+syntax only, and the daemon decides narrowing against the resolved
+Launcher ceiling. `--workspace` remains mandatory and receives the maximum
+access the effective policy permits unless an explicit
+`--filesystem-root WORKSPACE=ACCESS` replaces that implicit grant. Omitting
+the flag preserves the inherited create behavior.
 Returns the session ID,
 token, workspace, creation time, and expiration time; the token is shown
 only once and cannot be retrieved later.
@@ -1434,6 +1468,7 @@ The daemon-backed policy completions are exactly:
 |---|---|
 | `launcher create --allowed-root` | Principal effective-root query |
 | `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
+| `session create --filesystem-root` | Session create-policy query (the same policy source as `--workspace` for the path side; the access side after the `=` delimiter completes the canonical `read_only`/`read_write` vocabulary) |
 
 Positional `[LAUNCHER] ... PATH` completion on `launcher allowed-root
 add/remove`: the first positional is grammar-ambiguous — with one
@@ -1713,8 +1748,10 @@ directory; it never writes into the source tree (see
 ### Run
 
 `docker-helper run` uses the same lifecycle semantics as `build`.
-`--mount` source must be relative to the session workspace; target is an
-absolute container path.
+`--mount` source is a relative path (resolved against the session
+workspace) or an absolute host path; target is an absolute container
+path. Both spellings are authorized only through the issued immutable
+Session filesystem snapshot.
 
 ```
 Authentication + coherent filesystem authority read
@@ -1784,9 +1821,12 @@ Container lifecycle:
 Validation details:
 
 - workdir must be an absolute path if provided;
-- mount source must be relative to workspace;
+- mount source is a relative path (workspace-relative) or an absolute host
+  path;
 - mount target must be absolute;
-- source is resolved through `EvalSymlinks` and checked via `pathWithin`;
+- source is resolved through `EvalSymlinks`; a relative source is checked
+  via `pathWithin` against the workspace, and every source is authorized
+  through the issued Session filesystem snapshot;
 - environment values are never logged (only names in `env_keys`);
 - environment names are sorted for deterministic output;
 - `helper_socket` injects the server-owned read-only runtime projection
@@ -1871,12 +1911,15 @@ support classification.
 
 #### Bind mounts
 
-Each mount in a `POST /run` request specifies a `source` (relative to the
-session workspace) and a `target` (absolute path inside the container).
+Each mount in a `POST /run` request specifies a `source` and a `target`
+(absolute path inside the container). The source is either a relative path
+(resolved against the session workspace, the existing convenience) or an
+absolute host path (an issued Session filesystem root).
 
 Allowed:
 
-- `source` is a relative path inside the session workspace;
+- `source` is a relative path inside the session workspace, or an absolute
+  host path;
 - `source` resolves to an existing directory or regular file;
 - `source` is `.` (the entire workspace);
 - `target` is any absolute path;
@@ -1885,27 +1928,33 @@ Allowed:
 
 Forbidden:
 
-- `source` is an absolute path;
+- a relative `source` resolves outside the session workspace (including via
+  symlinks) — the workspace-relative grammar is a structural boundary, never
+  an alternate way to reach another issued root: an absolute source is the
+  only spelling for that;
 - `source` is empty;
-- `source` resolves outside the session workspace (including via symlinks);
+- `source` resolves outside the issued Session filesystem snapshot (absolute
+  spelling) — every mount must carry issued snapshot authority;
 - `source` does not exist;
 - `source` is not a directory or regular file;
 - `target` is empty;
 - `target` is not absolute;
 - two mounts use the same `target`.
 
-Requiring a relative source ensures the mount is always scoped to the
-session workspace; an absolute source could bypass workspace isolation.
+The relative grammar keeps the mount scoped to the session workspace; an
+absolute source is authorized only through the issued Session filesystem
+snapshot, so a path the Launcher allows but this Session did not request is
+still not mountable by this Session.
 
 On top of the structural validation, the access mode of every accepted
 mount is enforced against the persisted immutable Session filesystem
 snapshot — the only data-plane filesystem authority, issued at Session
 creation. The policy decision uses only the canonical source identity
-produced by `resolveMount` (`filepath.Abs` + `EvalSymlinks` + workspace
-containment + type validation), never the caller spelling: a symlink
-spelling never selects a different access mode. A read-only request is
-permitted for either snapshot access mode; a writable request is permitted
-only through the snapshot owner's writable-parent query
+produced by `resolveMount` (`filepath.Abs`/`EvalSymlinks` + type validation,
+plus workspace containment for the relative grammar), never the caller
+spelling: a symlink spelling never selects a different access mode. A
+read-only request is permitted for either snapshot access mode; a writable
+request is permitted only through the snapshot owner's writable-parent query
 (`CanExposeWritable`), so a read_write source spanning a nested read_only
 region is refused. A refused writable request is answered with `400
 read_only_root` before any mount pin, operation, or Docker state exists —
@@ -1958,11 +2007,14 @@ backends do not load snapshots or recompute writable-parent semantics.
 
 #### System-mode run mounts
 
-In system mode, bind-mount sources are first validated with
-`pathWithin(workspace, sourcePath)`. The helper then opens "/" as a root
-file descriptor. The source path is converted to a root-relative path
-and opened with `openat2` using `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`,
-and `RESOLVE_NO_MAGICLINKS` relative to the root FD. The resulting inode
+In system mode, every bind-mount source has already been accepted by the
+filesystem exposure resolution (issued snapshot authority). The helper
+then opens "/" as a root file descriptor. The source path is converted
+to a root-relative path and opened with `openat2` using
+`RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS`
+relative to the root FD, so any issued absolute source — inside the
+workspace or in a disjoint Session filesystem root — is pinned through
+the same owner. The resulting inode
 is pinned with `open_tree` + `move_mount` into a helper-owned directory
 under the runtime path. Docker receives the pinned path, not the original
 workspace path.
@@ -2204,7 +2256,8 @@ In system mode the daemon injects one additional read-only bind mount:
 
 The client selects only the boolean. It never chooses the source, the
 target, or the mount mode, and the ordinary mount policy does not change:
-mount sources stay workspace-relative, absolute host sources and workspace
+mount sources stay workspace-relative (workspace-scoped) or absolute host
+paths authorized through the issued Session filesystem snapshot, workspace
 escapes stay rejected, and allowed-root semantics are untouched. When the
 projection is active, a user mount whose target overlaps the injected
 mount point — exact match, ancestor (`/run`, `/`), or descendant
@@ -2435,7 +2488,7 @@ Current error codes (non-exhaustive):
 | `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
 | `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
-| `invalid_filesystem_policy` | `POST /sessions` | the supplied `filesystem_entries` is malformed or is not a narrowing of the effective Launcher ceiling (issuance-time refusal; no Session exists) |
+| `invalid_filesystem_policy` | `POST /sessions` | the supplied `filesystem_roots` is malformed or is not a narrowing of the effective Launcher ceiling (issuance-time refusal; no Session exists) |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `principal_not_found` | `GET /sessions?principal=` | the selected Principal does not exist (list narrowing; non-disclosing) |
 | `launcher_not_found` | `GET /sessions?launcher=` | the selected Launcher does not exist inside the narrowed scope (list narrowing; non-disclosing) |
@@ -2647,7 +2700,7 @@ Result codes:
 | `launcher_not_found` | the selected launcher does not exist under the resolved principal (404) |
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
-| `invalid_filesystem_policy` | `filesystem_entries` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
+| `invalid_filesystem_policy` | `filesystem_roots` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
 | `mac_preparation_failed` | MAC boundary preparation failed after persistence |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
@@ -2774,7 +2827,7 @@ Each entry in `mounts` has:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `source` | string | source path relative to the workspace |
+| `source` | string | caller source spelling: a workspace-relative path or an absolute host path |
 | `target` | string | absolute target path inside the container |
 | `read_only` | boolean | whether the mount is read-only |
 | `resolved_source` | string | canonical policy identity the filesystem authority decided on (present when the exposure was resolved) |
@@ -3057,9 +3110,13 @@ mitigations (staging, inode pinning) address this gap.
 
 ### Cross-workspace access
 
-Each session is bound to one workspace. Build context and mount sources
-are validated against that workspace. An agent cannot access another
-session's workspace.
+Each session is bound to one workspace and one issued immutable filesystem
+snapshot. Build context is validated against the workspace; mount sources
+are authorized through the issued snapshot (a workspace-relative source
+stays workspace-scoped; an absolute source must carry issued snapshot
+authority). A source outside the issued snapshot is rejected even when an
+allowed root would authorize it, so an agent cannot access another
+session's workspace or an unissued region of a shared tree.
 
 ### Token handling
 

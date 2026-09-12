@@ -52,10 +52,10 @@ func (s *sessionSelectorField) isInvalid() bool { return s.invalid }
 func (s *sessionSelectorField) selectorOrEmpty() string { return s.value }
 
 type sessionRequest struct {
-	Workspace         string                   `json:"workspace"`
-	LauncherID        sessionSelectorField     `json:"launcher_id"`
-	Principal         sessionSelectorField     `json:"principal"`
-	FilesystemEntries sessionFilesystemRequest `json:"filesystem_entries"`
+	Workspace       string                        `json:"workspace"`
+	LauncherID      sessionSelectorField          `json:"launcher_id"`
+	Principal       sessionSelectorField          `json:"principal"`
+	FilesystemRoots sessionFilesystemRootsRequest `json:"filesystem_roots"`
 }
 
 // validateCreateSelector applies the Session create-selector contract to the
@@ -80,31 +80,30 @@ func (req sessionRequest) validateCreateSelector() (createSelector, *createTarge
 	return createSelector{launcherID: req.LauncherID.selectorOrEmpty(), principal: req.Principal.selectorOrEmpty()}, nil
 }
 
-// sessionFilesystemRequestEntry is one caller-supplied issuance-time
-// filesystem narrowing entry of a Session create request: a workspace-relative
-// path and the canonical access value. Path is resolved and converted to a
-// canonical absolute AllowedRootEntry by the Session lifecycle; this type is
-// the caller-supplied wire value only.
-type sessionFilesystemRequestEntry struct {
+// sessionFilesystemRootEntry is one caller-supplied issuance-time filesystem
+// root of a Session create request: an absolute host path and the canonical
+// access value. Path is resolved and converted to the canonical policy
+// identity by the Session lifecycle; this type is the caller-supplied wire
+// value only.
+type sessionFilesystemRootEntry struct {
 	Path   string `json:"path"`
 	Access string `json:"access"`
 }
 
-// sessionFilesystemRequest is the presence-aware optional filesystem_entries
-// field of the Session create request. Occurrence and validity are distinct
-// facts: omitted preserves the inherited create behavior, while any
-// occurrence — including JSON null and the empty array — is an explicit
-// request that must be a non-empty, well-formed array of {path, access}
-// objects. Structural defects (JSON null, a non-array value, an unknown
-// nested field, a malformed entry type, trailing data inside the array) are
-// recorded as request state rather than decode errors, so every malformed
-// Session filesystem request is refused with the one issuance-time
-// invalid_filesystem_policy contract instead of the generic invalid_json
-// shape.
-type sessionFilesystemRequest struct {
+// sessionFilesystemRootsRequest is the presence-aware optional
+// filesystem_roots field of the Session create request. Occurrence and
+// validity are distinct facts: omitted and the empty array preserve the
+// inherited create behavior, while null and every malformed shape are an
+// explicit refused request. Structural defects (JSON null, a non-array
+// value, an unknown nested field, a malformed entry type, trailing data
+// inside the array) are recorded as request state rather than decode
+// errors, so every malformed Session filesystem request is refused with
+// the one issuance-time invalid_filesystem_policy contract instead of the
+// generic invalid_json shape.
+type sessionFilesystemRootsRequest struct {
 	present   bool
 	malformed bool
-	entries   []sessionFilesystemRequestEntry
+	roots     []sessionFilesystemRootEntry
 }
 
 // UnmarshalJSON marks the field present on any occurrence and captures the
@@ -117,7 +116,7 @@ type sessionFilesystemRequest struct {
 // the outer request body is parsed as one JSON value first, and trailing
 // outer data keeps the existing invalid_json contract, matching the Launcher
 // rich-entries field.
-func (r *sessionFilesystemRequest) UnmarshalJSON(data []byte) error {
+func (r *sessionFilesystemRootsRequest) UnmarshalJSON(data []byte) error {
 	r.present = true
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		r.malformed = true
@@ -128,31 +127,30 @@ func (r *sessionFilesystemRequest) UnmarshalJSON(data []byte) error {
 		r.malformed = true
 		return nil
 	}
-	for _, rawEntry := range raw {
-		dec := json.NewDecoder(bytes.NewReader(rawEntry))
+	for _, rawRoot := range raw {
+		dec := json.NewDecoder(bytes.NewReader(rawRoot))
 		dec.DisallowUnknownFields()
-		var entry sessionFilesystemRequestEntry
-		if err := dec.Decode(&entry); err != nil {
+		var root sessionFilesystemRootEntry
+		if err := dec.Decode(&root); err != nil {
 			r.malformed = true
 			return nil
 		}
-		r.entries = append(r.entries, entry)
+		r.roots = append(r.roots, root)
 	}
 	return nil
 }
 
-// isPresent reports whether filesystem_entries occurred in the request.
-func (r *sessionFilesystemRequest) isPresent() bool { return r.present }
+// isPresent reports whether filesystem_roots occurred in the request.
+func (r *sessionFilesystemRootsRequest) isPresent() bool { return r.present }
 
-// suppliedEntries returns the explicitly supplied narrowing entries, or nil
-// when the request was omitted. A supplied request is never nil-returned
-// without the caller having refused it first: the empty array is an explicit
-// empty request and is refused before creation.
-func (r *sessionFilesystemRequest) suppliedEntries() []sessionFilesystemRequestEntry {
+// suppliedRoots returns the explicitly supplied filesystem roots, or nil
+// when the request was omitted or carried the empty array (both preserve
+// the inherited workspace-only create behavior).
+func (r *sessionFilesystemRootsRequest) suppliedRoots() []sessionFilesystemRootEntry {
 	if !r.isPresent() {
 		return nil
 	}
-	return r.entries
+	return r.roots
 }
 
 type sessionJSON struct {
@@ -179,7 +177,11 @@ type listSessionsResponse struct {
 // sessionFilesystemSnapshotJSON is the canonical public projection of the
 // persisted immutable Session filesystem snapshot. The workspace is not
 // repeated here: the top-level Session workspace is its canonical public
-// owner, and the snapshot's first entry carries the root access mode.
+// owner. The entries carry every issued disjoint access tree in the exact
+// persisted canonical ordering (ancestor first), so the workspace's root
+// access mode is carried by the workspace's own entry in that ordering —
+// the first entry is the canonical ordering's first tree, not by
+// definition the workspace.
 type sessionFilesystemSnapshotJSON struct {
 	Entries []AllowedRootEntry `json:"entries"`
 }
@@ -374,14 +376,13 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issuance-time Session filesystem request: presence semantics are
-	// checked before any Session state exists. Omitted preserves the
-	// inherited create behavior; an explicit occurrence must be a non-empty,
-	// structurally valid array. Every malformed shape is the one
-	// invalid_filesystem_policy refusal (not the generic invalid_json code),
-	// because one code governs malformed/unauthorized Session filesystem
-	// requests.
-	if req.FilesystemEntries.isPresent() && (req.FilesystemEntries.malformed || len(req.FilesystemEntries.entries) == 0) {
+	// Issuance-time Session filesystem roots: presence semantics are
+	// checked before any Session state exists. Omitted and the empty array
+	// preserve the inherited create behavior; null and every malformed
+	// shape are the one invalid_filesystem_policy refusal (not the generic
+	// invalid_json code), because one code governs malformed/unauthorized
+	// Session filesystem requests.
+	if req.FilesystemRoots.isPresent() && req.FilesystemRoots.malformed {
 		auditRec := auditRecord{
 			Event:     "session.create",
 			Workspace: req.Workspace,
@@ -391,11 +392,11 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		a.populateSessionAudit(&auditRec, authCtx)
 		writeRequestContextAudit(ctx, auditRec)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy",
-			"filesystem_entries must be omitted or a non-empty array of {path, access} objects")
+			"filesystem_roots must be omitted, an empty array, or a well-formed array of {path, access} objects")
 		return
 	}
 
-	result, cerr := a.createSessionAuthorized(authCtx, sel, req.Workspace, req.FilesystemEntries.suppliedEntries())
+	result, cerr := a.createSessionAuthorized(authCtx, sel, req.Workspace, req.FilesystemRoots.suppliedRoots())
 	if cerr != nil {
 		// Stale-owner/enabled rejection at final persistence carries the same
 		// deterministic typed contract as resolution-time rejection

@@ -36,7 +36,7 @@ func newRunEnforcementApp(t *testing.T) (*App, func() []string) {
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		// The pin projection is asserted to keep the same source boundary:
 		// echoing the canonical path makes the accepted bind spec directly
 		// comparable with the canonical policy identity.
@@ -288,7 +288,7 @@ func TestRunReadOnlyRootRefusalLeavesNoResidue(t *testing.T) {
 
 	pinnedCalled := false
 	dockerCalled := false
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		pinnedCalled = true
 		return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
 	}

@@ -181,7 +181,7 @@ func TestHelperSocketUserMountOverlapRejected(t *testing.T) {
 	for _, tc := range table {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newSystemModeRunTestApp(t)
-			app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+			app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 				return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
 			}
 
@@ -240,7 +240,7 @@ func TestHelperSocketUserMountExactTargetAllowedWithoutCapability(t *testing.T) 
 	// itself is not newly policed by this feature.
 
 	app := newSystemModeRunTestApp(t)
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
 	}
 
@@ -554,7 +554,7 @@ func TestHelperSocketCallerCanonicalLocatorAcceptedOnce(t *testing.T) {
 func TestHelperSocketConflictingLocatorRejected(t *testing.T) {
 	app := newSystemModeRunTestApp(t)
 	pinCalled := false
-	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		pinCalled = true
 		return &pinnedMount{PinnedPath: "/tmp/test-mount", cleanup: func() error { return nil }}, nil
 	}

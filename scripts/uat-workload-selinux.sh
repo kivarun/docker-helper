@@ -18,8 +18,10 @@
 #   6  the backend-only forced-writable RO case is denied by SELinux ITSELF
 #      (not the VFS): the host-compiled live harness drives the production
 #      bindfs/projection backend from the same source SHA the candidate was
-#      built from over a deliberately VFS-writable projection, and the
-#      matching docker_helper_ro_projection_t AVC is independently verified;
+#      built from over a deliberately VFS-writable projection — including
+#      the external-source chain (real external root → production
+#      mount-pin owner → RO projection owner) — and the matching
+#      docker_helper_ro_projection_t AVC is independently verified;
 #   7  the workload stays in docker_helper_container_t and Docker-owned MCS
 #      confinement is preserved (distinct per-container categories);
 #   8  two concurrent Sessions use one host tree with different issued
@@ -496,6 +498,105 @@ else
 fi
 
 # ==============================================================================
+# scenario SE: external Session filesystem roots under the SELinux backend —
+# the Session issues an external read-only root and an external read-write
+# root through the absolute --filesystem-root grammar and mounts them through
+# the same exposure/pin/projection owners as the workspace itself: the
+# external RO root gets the read-only projection (writes denied, readable
+# through it), the external RW root stays writable, and cleanup leaves no
+# projections/pins/state.
+# ==============================================================================
+say "SE: external Session filesystem roots under the SELinux backend"
+
+SE_OPT="/opt/$PRINCIPAL"
+SE_HELPER="$SE_OPT/repos/helper"
+SE_CACHE="$SE_OPT/cache"
+rm -rf "$SE_OPT"
+mkdir -p "$SE_HELPER" "$SE_CACHE"
+printf 'se-helper-src\n' > "$SE_HELPER/main.go"
+printf 'seed\n' > "$SE_CACHE/seed.txt"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_OPT"
+chmod -R u+rwX,go+rX "$SE_OPT"
+if dh config allowed-root add --access read_write "$SE_OPT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$SE_OPT" >/dev/null 2>&1; then
+  acc_ok "SE setup: second effective root $SE_OPT (global RW + Principal RW)"
+else
+  acc_fail "SE setup: second effective root setup failed"
+fi
+SE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name se-multiroot --no-credential 2>/dev/null || true)"
+SE_L_ID="$(printf '%s' "$SE_L_JSON" | json_field id)"
+if [ -n "$SE_L_ID" ] \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$SE_OPT" >/dev/null 2>&1; then
+  acc_ok "SE setup: multiroot launcher carries both effective roots"
+else
+  acc_fail "SE setup: multiroot launcher setup failed: $SE_L_JSON"
+fi
+SE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" "$SE_L_ID" 2>/dev/null || true)"
+SE_LC_TOKEN="$(printf '%s' "$SE_LC_OUT" | json_field token)"
+if [ -n "$SE_LC_TOKEN" ]; then
+  printf '%s\n' "$SE_LC_TOKEN" > /tmp/uat-wls-cred-multiroot; chmod 600 /tmp/uat-wls-cred-multiroot
+else
+  echo "error: SE launcher credential create failed" >&2; exit 1
+fi
+SE_WS="$ALLOWED_ROOT/se-runs/run-123"
+rm -rf "$ALLOWED_ROOT/se-runs"
+mkdir -p "$SE_WS"
+chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT/se-runs"
+chmod -R u+rwX,go+rX "$ALLOWED_ROOT/se-runs"
+SE_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  --workspace "$SE_WS" --json \
+  --filesystem-root "$SE_HELPER=read_only" \
+  --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
+SE_ID="$(printf '%s' "$SE_OUT" | json_field id)"
+if [ -n "$SE_ID" ]; then
+  printf '%s' "$SE_OUT" | json_field token > "/tmp/uat-wls-tok-$SE_ID"; chmod 600 "/tmp/uat-wls-tok-$SE_ID"
+  SE_TOKEN="$(cat "/tmp/uat-wls-tok-$SE_ID")"
+  acc_ok "SE multi-root Session created (external helper RO + cache RW)"
+else
+  acc_fail "SE multi-root session create failed: $(printf '%s\n' "$SE_OUT" | redact | tail -3)"
+fi
+
+# SE-RO: the external RO root is projected read-only (bindfs path): reads
+# succeed through the projection and the writable attempt is denied with the
+# host file not created. The readonly bind participates in the ordinary run
+# (production defense in depth), so the independent backend-only denial of
+# the external source — projection VFS writable underneath, the projection
+# type itself the refuser — is proven by the S13 external-root live proof.
+SE_RO="$(DOCKER_HELPER_SESSION_TOKEN="$SE_TOKEN" \
+  dh run --image alpine:3.24 --mount "$SE_HELPER:/helper:ro" -- \
+  sh -ec 'test "$(cat /helper/main.go)" = "se-helper-src" && echo SE-RO-READ-OK' 2>&1)"
+if printf '%s\n' "$SE_RO" | grep -q 'SE-RO-READ-OK'; then
+  acc_ok "SE external RO root readable through its projection"
+else
+  acc_fail "SE external RO read failed: $(printf '%s\n' "$SE_RO" | redact | tail -3)"
+fi
+DOCKER_HELPER_SESSION_TOKEN="$SE_TOKEN" \
+  dh run --image alpine:3.24 --mount "$SE_HELPER:/helper:ro" -- \
+  sh -ec 'echo forbidden > /helper/forbidden.txt' >/dev/null 2>&1
+SE_EC=$?
+if [ "$SE_EC" -ne 0 ] && [ ! -e "$SE_HELPER/forbidden.txt" ]; then
+  acc_ok "SE external RO root write denied and the host file was not created"
+else
+  acc_fail "SE external RO root immutability broken (ec=$SE_EC)"
+fi
+
+# SE-RW: the external RW root stays writable; the write persists to the host.
+SE_W="$(DOCKER_HELPER_SESSION_TOKEN="$SE_TOKEN" \
+  dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
+  sh -ec 'echo se-write > /cache/written.txt && echo SE-RW-OK' >/tmp/uat-wls-se-w.log 2>&1)"
+if [ -f "$SE_CACHE/written.txt" ] && [ "$(cat "$SE_CACHE/written.txt" 2>/dev/null)" = "se-write" ]; then
+  acc_ok "SE external RW root writable through the workload owner"
+else
+  acc_fail "SE external RW write failed: $(redact </tmp/uat-wls-se-w.log | tail -3)"
+fi
+
+# The SE session is cleaned up with the scenario set (the final S12 residue
+# checks own the cleanup proof); its runtime state is ordinary workload
+# state.
+
+# ==============================================================================
 # scenario S7: bindfs projection really used on the packaged RPM path
 # ==============================================================================
 say "S7: bindfs projection used on the packaged RPM path"
@@ -720,9 +821,9 @@ count_unexpected_helper_avcs() {
 say "S13: forced-writable RO denied by SELinux (harness) + audit evidence"
 mkdir -p "$EVIDENCE_DIR"
 if DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 WORKLOAD_EVIDENCE_DIR="$EVIDENCE_DIR" \
-    "$PROOF_BIN_IN" -test.run 'TestLiveWorkloadSELinux|TestLiveWorkloadSELinuxRegularFile|TestLiveWorkloadMCSConcurrentRWRO' -test.v \
+    "$PROOF_BIN_IN" -test.run 'TestLiveWorkloadSELinux|TestLiveWorkloadSELinuxRegularFile|TestLiveWorkloadSELinuxExternalRoot|TestLiveWorkloadMCSConcurrentRWRO' -test.v \
     >/tmp/uat-wls-harness.log 2>&1; then
-  acc_ok "S13 live harness passed: bindfs projection denies the would-be-RO write (VFS view writable), regular-file RO proven, MCS concurrency proven"
+  acc_ok "S13 live harness passed: bindfs projection denies the would-be-RO write (VFS view writable), regular-file RO proven, MCS concurrency proven, external-source backend-only proof proven"
 else
   acc_fail "S13 live harness failed: $(tail -10 /tmp/uat-wls-harness.log 2>/dev/null | redact)"
 fi

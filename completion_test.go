@@ -1813,11 +1813,13 @@ func TestCompletionPolicyLauncherAllowedRootAnchors(t *testing.T) {
 	script := completionScript(t)
 	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--principal", "alice", "--allowed-root", "",
+		"--principal", "alice", "--allowed-root", base + "/",
 	})
 	if stderr != "" {
 		t.Fatalf("policy completion must not write to stderr: %q", stderr)
 	}
+	// Tree-boundary rendering: the parent of both roots offers the two root
+	// boundaries as distinguishable segments.
 	if want := []string{rootA, rootB}; !slices.Equal(sortedTrimmed(results), want) {
 		t.Errorf("anchors = %v, want %v", results, want)
 	}
@@ -2016,11 +2018,13 @@ func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
 
 	script := completionScript(t)
 	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--workspace", "",
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--workspace", base + "/",
 	})
 	if stderr != "" {
 		t.Fatalf("policy completion must not write to stderr: %q", stderr)
 	}
+	// Tree-boundary rendering: the root boundary itself, bare (no trailing
+	// separator) — exactly the /home/<TAB> -> michael/ level.
 	if len(results) != 1 || results[0] != restricted || strings.HasSuffix(results[0], "/") {
 		t.Fatalf("workspace anchors = %v, want the restricted root bare (no trailing separator)", results)
 	}
@@ -2056,7 +2060,9 @@ func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
 // restricted Launcher's roots only, never the wider Principal scope. Both
 // selector forms (--launcher VALUE and --launcher=VALUE) reach the same
 // normalized query. The typed selectors travel as separate Bash arguments,
-// never as policy guessed in the shell.
+// never as policy guessed in the shell. With the boundary-segment rendering
+// the restricted root's boundary (/base/opt) is offered and the wider
+// Principal ceiling's other boundary (/base/home) is not.
 func TestCompletionPolicySessionSelectorsNarrowWorkspace(t *testing.T) {
 	base := t.TempDir()
 	opt := filepath.Join(base, "opt", "michael")
@@ -2088,7 +2094,7 @@ func TestCompletionPolicySessionSelectorsNarrowWorkspace(t *testing.T) {
 
 	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--launcher", "killme2", "--workspace", "",
+		"--launcher", "killme2", "--workspace", base + "/",
 	})
 	if stderr != "" {
 		t.Fatalf("policy completion must not write to stderr: %q", stderr)
@@ -2097,17 +2103,14 @@ func TestCompletionPolicySessionSelectorsNarrowWorkspace(t *testing.T) {
 	if got := requests.snapshot()[0].query; got != "launcher=killme2" {
 		t.Fatalf("typed --launcher must reach the normalized create-policy query, got %q", got)
 	}
-	if !slices.Contains(results, opt) {
-		t.Errorf("restricted root must be offered, got %v", results)
-	}
-	if slices.Contains(results, home) {
-		t.Errorf("the wider Principal root must not be offered, got %v", results)
+	if !slices.Equal(results, []string{filepath.Join(base, "opt")}) {
+		t.Errorf("restricted root's boundary segment must be offered, got %v", results)
 	}
 
 	// The --launcher=VALUE form reaches the same query and the same result.
 	resultsEq, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--launcher=killme2", "--workspace", "",
+		"--launcher=killme2", "--workspace", base + "/",
 	})
 	if got := requests.snapshot()[1].query; got != "launcher=killme2" {
 		t.Fatalf("--launcher= form must reach the same normalized query, got %q", got)
@@ -2120,10 +2123,12 @@ func TestCompletionPolicySessionSelectorsNarrowWorkspace(t *testing.T) {
 	// Principal ceiling is offered (the default Launcher inherits it).
 	resultsDefault, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--workspace", "",
+		"--workspace", base + "/",
 	})
-	if !slices.Contains(resultsDefault, home) || !slices.Contains(resultsDefault, opt) {
-		t.Errorf("selectorless completion must keep the default-target roots, got %v", resultsDefault)
+	if !slices.Equal(sortedTrimmed(resultsDefault), sortedTrimmed([]string{
+		filepath.Join(base, "home"), filepath.Join(base, "opt"),
+	})) {
+		t.Errorf("selectorless completion must keep the default-target boundary segments, got %v", resultsDefault)
 	}
 }
 
@@ -2943,7 +2948,7 @@ func TestCompletionSelectorsResolveSameTargetAsCreatePolicy(t *testing.T) {
 	// workspace roots the real create would use.
 	results, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--principal", "alice", "--launcher", "killme2", "--workspace", "",
+		"--principal", "alice", "--launcher", "killme2", "--workspace", filepath.Dir(opt) + "/",
 	})
 	if !slices.Equal(results, []string{opt}) {
 		t.Fatalf("workspace completion with the offered selector = %v, want only the restricted root %s", results, opt)
@@ -3033,7 +3038,7 @@ func TestCompletionPolicyFlagBeforeCommandWords(t *testing.T) {
 	script := completionScript(t)
 	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "--json", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--principal", "alice", "--allowed-root", "",
+		"--principal", "alice", "--allowed-root", base + "/",
 	})
 	if stderr != "" {
 		t.Fatalf("policy completion must not write to stderr: %q", stderr)
@@ -3069,7 +3074,7 @@ func TestCompletionPolicyForwardedEndpointForm(t *testing.T) {
 	script := completionScript(t)
 	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "launcher", "create", "--endpoint=" + endpoint, "--token-file=" + tokenPath,
-		"--principal=alice", "--allowed-root", "",
+		"--principal=alice", "--allowed-root", base + "/",
 	})
 	if stderr != "" {
 		t.Fatalf("policy completion must not write to stderr: %q", stderr)
@@ -3115,7 +3120,7 @@ func TestCompletionPolicyForwardedValueWithSpaces(t *testing.T) {
 
 	t.Run("token file path with spaces", func(t *testing.T) {
 		endpoint, _, _ := startCompletionPolicyServer(t, respond)
-		words := []string{"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "--allowed-root", ""}
+		words := []string{"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "--allowed-root", base + "/"}
 		results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), words)
 		if stderr != "" {
 			t.Fatalf("policy completion must not write to stderr: %q", stderr)
@@ -3138,7 +3143,7 @@ func TestCompletionPolicyForwardedValueWithSpaces(t *testing.T) {
 			ln.Close()
 		})
 
-		words := []string{"docker-helper", "launcher", "create", "--endpoint", sockPath, "--token-file", tokenPath, "--principal", "alice", "--allowed-root", ""}
+		words := []string{"docker-helper", "launcher", "create", "--endpoint", sockPath, "--token-file", tokenPath, "--principal", "alice", "--allowed-root", base + "/"}
 		results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), words)
 		if stderr != "" {
 			t.Fatalf("policy completion must not write to stderr: %q", stderr)
@@ -3240,7 +3245,7 @@ func TestCompletionPolicyHangingDaemonBoundedFallback(t *testing.T) {
 	start := time.Now()
 	results, stderr, harnessErr := runCompletionWithDeadline(t, script, preamble, []string{
 		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--principal", "alice", "--allowed-root", "",
+		"--principal", "alice", "--allowed-root", base + "/",
 	}, 15*time.Second)
 	elapsed := time.Since(start)
 
@@ -3260,7 +3265,7 @@ func TestCompletionPolicyHangingDaemonBoundedFallback(t *testing.T) {
 	if stderr != "" {
 		t.Errorf("degraded completion must not write to stderr: %q", stderr)
 	}
-	if !slices.Contains(results, "sentinel-file") {
+	if !slices.Contains(results, filepath.Join(base, "sentinel-file")) {
 		t.Errorf("fallback to generic filesystem completion missing sentinel-file, got %v", results)
 	}
 }
@@ -3291,11 +3296,13 @@ func TestCompletionPolicyOwnPrincipalInference(t *testing.T) {
 	script := completionScript(t)
 	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
 		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--allowed-root", "",
+		"--allowed-root", base + "/",
 	})
 	if stderr != "" {
 		t.Fatalf("policy completion must not write to stderr: %q", stderr)
 	}
+	// Tree-boundary rendering: the root boundary itself is the next segment
+	// from the typed parent.
 	if want := []string{rootA}; !slices.Equal(sortedTrimmed(results), want) {
 		t.Errorf("anchors = %v, want %v", results, want)
 	}
@@ -3506,29 +3513,316 @@ func runCompletionWithPreambleForWords(t *testing.T, script, endpoint, tokenPath
 	return runCompletionWithPreamble(t, script, completionPATHPreamble(t), words)
 }
 
-// TestCompletionFilesystemEntryLastEqualsGrammar proves the --filesystem-entry
-// ACCESS-side completion follows the same last-'=' grammar as the CLI parser:
-// a PATH containing '=' is split at the last '=', the ACCESS vocabulary is
-// completed with prefix filtering, and the caller-typed PATH prefix is
-// preserved in every candidate.
-func TestCompletionFilesystemEntryLastEqualsGrammar(t *testing.T) {
+// startWorkspaceTreeBoundaryServer stubs the create-policy query with the
+// canonical real configuration: two sibling effective roots
+// <base>/home/michael and <base>/opt/michael — the exact motivating shape of
+// the manual-UAT duplicate regression.
+func startWorkspaceTreeBoundaryServer(t *testing.T) (endpoint, tokenPath string, home, opt string) {
+	base := t.TempDir()
+	home = filepath.Join(base, "home", "michael")
+	opt = filepath.Join(base, "opt", "michael")
+	for _, dir := range []string{filepath.Join(home, "BoxProbe"), opt, filepath.Join(home, "data")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpoint, tokenPath, _ = startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
+			// The canonical owner answers: the typed --launcher killme
+			// selector resolves the restricted Launcher; the selectorless
+			// query resolves the default Launcher with both boundaries.
+			roots := []string{home, opt}
+			if r.URL.Query().Get("launcher") == "killme" {
+				roots = []string{opt}
+			}
+			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
+				OK: true, Principal: "michael", LauncherID: "dhl_x", Launcher: "agent",
+				AllowedRoots: roots,
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	return endpoint, tokenPath, home, opt
+}
+
+// TestCompletionWorkspaceTreeBoundarySegments proves the manual-UAT
+// duplicate regression stays fixed under the tree-boundary rendering: the
+// effective roots /base/home/michael and /base/opt/michael are sibling tree
+// boundaries, so the parent prefix renders two distinguishable segment
+// candidates (home and opt) — never two identical terminal michael/
+// basenames — and each root's boundary continues its own navigation.
+func TestCompletionWorkspaceTreeBoundarySegments(t *testing.T) {
+	endpoint, tokenPath, home, opt := startWorkspaceTreeBoundaryServer(t)
+	script := completionScript(t)
+	base := filepath.Dir(filepath.Dir(home))
+
+	// --workspace /<TAB> at the roots' parent: home/ and opt/.
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", base + "/",
+	})
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{filepath.Join(base, "home"), filepath.Join(base, "opt")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Fatalf("workspace /<TAB> = %v, want the distinguishable boundary segments %v (never two identical basenames)", results, want)
+	}
+
+	// --workspace /home/<TAB>: michael/.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", filepath.Dir(home) + "/",
+	})
+	if want := []string{home}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("workspace /home/<TAB> = %v, want %v", results, want)
+	}
+
+	// --workspace /opt/<TAB>: michael/ — the other boundary, distinctly.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", filepath.Dir(opt) + "/",
+	})
+	if want := []string{opt}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("workspace /opt/<TAB> = %v, want %v", results, want)
+	}
+
+	// Inside an authorized root: ordinary directory navigation continues
+	// (directories only, for the workspace).
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", home + "/",
+	})
+	if want := []string{filepath.Join(home, "BoxProbe"), filepath.Join(home, "data")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("workspace inside-root navigation = %v, want %v", results, want)
+	}
+}
+
+// TestCompletionFilesystemRootPolicyNavigation proves the PATH side of
+// --filesystem-root completes through the same daemon-backed Session
+// create-policy query as --workspace: the effective roots are the boundary
+// anchors and ordinary navigation continues inside an entered root — with
+// the daemon-query failure degrading silently to the generic filesystem
+// completion (bounded graceful fallback, no stderr pollution).
+func TestCompletionFilesystemRootPolicyNavigation(t *testing.T) {
+	endpoint, tokenPath, home, opt := startWorkspaceTreeBoundaryServer(t)
+	script := completionScript(t)
+	base := filepath.Dir(filepath.Dir(home))
+	baseWords := []string{"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath}
+
+	// Empty prefix: the boundary segments home/ and opt/.
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", base+"/"))
+	if stderr != "" {
+		t.Fatalf("filesystem-root policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{filepath.Join(base, "home"), filepath.Join(base, "opt")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("filesystem-root empty prefix = %v, want %v", results, want)
+	}
+
+	// A path prefix navigates toward the root.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", filepath.Dir(home)+"/"))
+	if want := []string{home}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("filesystem-root path prefix = %v, want %v", results, want)
+	}
+
+	// Inside an entered root: directories AND regular files are suggested.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", home+"/"))
+	if want := []string{filepath.Join(home, "BoxProbe"), filepath.Join(home, "data")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("filesystem-root inside-root navigation = %v, want %v", results, want)
+	}
+
+	// The selector context is forwarded: the typed --launcher resolves the
+	// same restricted target a real create would, and only that target's
+	// boundary is offered.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--launcher", "killme", "--filesystem-root", base+"/"))
+	if want := []string{filepath.Dir(opt)}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("filesystem-root with typed selector = %v, want the restricted boundary %v", results, want)
+	}
+}
+
+// TestCompletionFilesystemRootRepeatedAndInlineForms proves the repeatable
+// --filesystem-root flag completes on every occurrence and that the inline
+// --filesystem-root=VALUE form completes identically to the separated form,
+// on both the PATH side and the ACCESS side.
+func TestCompletionFilesystemRootRepeatedAndInlineForms(t *testing.T) {
+	endpoint, tokenPath, home, _ := startWorkspaceTreeBoundaryServer(t)
+	script := completionScript(t)
+	base := filepath.Dir(filepath.Dir(home))
+
+	// First occurrence.
+	results, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--filesystem-root", base + "/",
+	})
+	if want := []string{filepath.Join(base, "home"), filepath.Join(base, "opt")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("first --filesystem-root = %v, want %v", results, want)
+	}
+
+	// Repeated occurrence after another root: the same navigation applies.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--filesystem-root", home, "--filesystem-root", base + "/",
+	})
+	if want := []string{filepath.Join(base, "home"), filepath.Join(base, "opt")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("repeated --filesystem-root = %v, want %v", results, want)
+	}
+
+	// Inline PATH form completes like the separated form.
+	resultsInline, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--filesystem-root=" + base + "/",
+	})
+	if want := []string{filepath.Join(base, "home"), filepath.Join(base, "opt")}; !slices.Equal(sortedTrimmed(resultsInline), want) {
+		t.Errorf("inline --filesystem-root=PATH = %v, want %v", resultsInline, want)
+	}
+
+	// Inline ACCESS form completes like the separated ACCESS form.
+	resultsAccess, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--filesystem-root=" + home + "=read_",
+	})
+	resultsAccessSep, _ := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--filesystem-root", home + "=read_",
+	})
+	if !slices.Equal(sortedTrimmed(resultsAccess), sortedTrimmed(resultsAccessSep)) {
+		t.Errorf("inline and separated ACCESS forms differ: %v vs %v", resultsAccess, resultsAccessSep)
+	}
+	if want := []string{home + "=read_only", home + "=read_write"}; !slices.Equal(sortedTrimmed(resultsAccess), want) {
+		t.Errorf("ACCESS completion = %v, want %v", resultsAccess, want)
+	}
+}
+
+func TestCompletionFilesystemRootLastEqualsGrammar(t *testing.T) {
 	script := completionScript(t)
 
 	// A PATH containing '=': the split is on the last '='.
-	results := runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-entry", "foo=bar=read_"})
-	if len(results) != 2 || !slices.Contains(results, "foo=bar=read_only") || !slices.Contains(results, "foo=bar=read_write") {
-		t.Errorf("last-'=' completion = %v, want [foo=bar=read_write foo=bar=read_only]", results)
+	results := runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-root", "/data/foo=bar=read_"})
+	if len(results) != 2 || !slices.Contains(results, "/data/foo=bar=read_only") || !slices.Contains(results, "/data/foo=bar=read_write") {
+		t.Errorf("last-'=' completion = %v, want the ACCESS vocabulary behind the typed PATH prefix", results)
 	}
 
 	// The ordinary single-'=' prefix keeps working.
-	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-entry", "project=read_"})
-	if len(results) != 2 || !slices.Contains(results, "project=read_only") || !slices.Contains(results, "project=read_write") {
+	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-root", "/data/project=read_"})
+	if len(results) != 2 || !slices.Contains(results, "/data/project=read_only") || !slices.Contains(results, "/data/project=read_write") {
 		t.Errorf("ordinary completion = %v, want the ACCESS vocabulary with the typed PATH prefix", results)
 	}
 
-	// A fully typed ACCESS value filters to the exact entry.
-	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-entry", "project=read_write"})
-	if len(results) != 1 || !slices.Contains(results, "project=read_write") {
-		t.Errorf("exact completion = %v, want [project=read_write]", results)
+	// A trailing '=' is the unambiguous ACCESS delimiter: the empty suffix
+	// offers the whole canonical access vocabulary.
+	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-root", "/data/project="})
+	if len(results) != 2 || !slices.Contains(results, "/data/project=read_only") || !slices.Contains(results, "/data/project=read_write") {
+		t.Errorf("trailing-'=' completion = %v, want the ACCESS vocabulary", results)
+	}
+
+	// A fully typed ACCESS value filters to the exact root.
+	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-root", "/data/project=read_write"})
+	if len(results) != 1 || !slices.Contains(results, "/data/project=read_write") {
+		t.Errorf("exact completion = %v, want [/data/project=read_write]", results)
+	}
+
+	// A suffix that is not an ACCESS-prefix decision keeps the value on the
+	// PATH side: without a daemon the PATH falls back to generic filesystem
+	// completion (here no daemon and no matching files, so no suggestion is
+	// expected; the PATH-side classification itself is proven daemon-backed
+	// in TestCompletionFilesystemRootPathContainingEquals).
+	results = runCompletion(t, script, []string{"docker-helper", "session", "create", "--filesystem-root", "/data/foo=bar"})
+	if len(results) != 0 {
+		t.Errorf("PATH-side suffix offered %v, want no ACCESS rendering", results)
+	}
+}
+
+// TestCompletionPolicyPartialNextComponent proves the partial next component
+// of the tree-boundary rendering: a typed prefix that is a proper prefix of
+// the next component toward a root continues through the next component
+// boundary (/h offers /home, /home/m offers /home/michael), for the
+// workspace and for the filesystem-root PATH side alike — and the sibling
+// boundaries stay distinguishable (no duplicated basenames).
+func TestCompletionPolicyPartialNextComponent(t *testing.T) {
+	endpoint, tokenPath, home, _ := startWorkspaceTreeBoundaryServer(t)
+	script := completionScript(t)
+	base := filepath.Dir(filepath.Dir(home))
+	baseWords := []string{"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath}
+
+	cases := []struct {
+		name  string
+		flag  string
+		typed string
+		want  []string
+	}{
+		{"workspace /h", "workspace", base + "/h", []string{filepath.Join(base, "home")}},
+		{"workspace /o", "workspace", base + "/o", []string{filepath.Join(base, "opt")}},
+		{"workspace /home/m", "workspace", filepath.Join(base, "home") + "/m", []string{home}},
+		// A longer partial prefix matches only one sibling boundary and
+		// offers that boundary's next component (/op toward /opt/michael
+		// renders /opt, whose unique insertion keeps filename semantics).
+		{"filesystem-root /ho", "filesystem-root", base + "/ho", []string{filepath.Join(base, "home")}},
+		{"filesystem-root /op", "filesystem-root", base + "/op", []string{filepath.Join(base, "opt")}},
+		{"filesystem-root /h", "filesystem-root", base + "/h", []string{filepath.Join(base, "home")}},
+		{"filesystem-root /o", "filesystem-root", base + "/o", []string{filepath.Join(base, "opt")}},
+		{"filesystem-root /home/m", "filesystem-root", filepath.Join(base, "home") + "/m", []string{home}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+				append(append([]string{}, baseWords...), "--"+tc.flag, tc.typed))
+			if stderr != "" {
+				t.Fatalf("policy completion must not write to stderr: %q", stderr)
+			}
+			if !slices.Equal(sortedTrimmed(results), tc.want) {
+				t.Errorf("partial component completion = %v, want %v", results, tc.want)
+			}
+		})
+	}
+}
+
+// TestCompletionFilesystemRootPathContainingEquals proves the deterministic
+// '=' ambiguity rule end to end against a real daemon-backed tree: a real
+// host path containing '=' stays on the PATH side while the suffix is not an
+// ACCESS-prefix decision (navigation continues through it), and the final
+// ACCESS delimiter after that path completes the canonical access vocabulary.
+func TestCompletionFilesystemRootPathContainingEquals(t *testing.T) {
+	endpoint, tokenPath, home, _ := startWorkspaceTreeBoundaryServer(t)
+	script := completionScript(t)
+	baseWords := []string{"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath}
+	// A real directory whose name contains '=': <home>/data/foo=bar/ with a
+	equalsDir := filepath.Join(home, "data", "foo=bar")
+	deepDir := filepath.Join(equalsDir, "deep")
+	if err := os.MkdirAll(deepDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(equalsDir, "notes.txt"), []byte("n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A partial PATH suffix after the last '=' is not an ACCESS decision:
+	// the whole value stays the PATH side and the real '=' directory is
+	// offered (with its regular file, the filesystem-root flag accepts both).
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", filepath.Join(home, "data", "foo=ba")))
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{equalsDir}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Fatalf("'foo=ba' PATH-side completion = %v, want %v", results, want)
+	}
+
+	// The navigation continues inside the '=' directory.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", equalsDir+"/"))
+	if want := []string{deepDir, filepath.Join(equalsDir, "notes.txt")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("inside '=' directory navigation = %v, want %v", results, want)
+	}
+
+	// Once the final delimiter is unambiguously the ACCESS delimiter after a
+	// real '=' path, the canonical access vocabulary completes.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--filesystem-root", equalsDir+"=read_"))
+	if want := []string{equalsDir + "=read_only", equalsDir + "=read_write"}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("ACCESS completion after an '=' path = %v, want %v", results, want)
 	}
 }

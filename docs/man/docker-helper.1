@@ -10,7 +10,8 @@ docker-helper \- Policy-enforcing Docker mediation daemon
 .B docker-helper
 is a policy-enforcing daemon that provides a restricted interface to Docker.
 It mediates Docker operations for coding agents running on the same machine,
-restricting host path access to session workspaces and enforcing policy on
+restricting host path access to each session's issued filesystem snapshot
+(the workspace plus any issued additional roots) and enforcing policy on
 build, pull, and run operations.
 .PP
 Deployment mode is determined by effective UID:
@@ -142,21 +143,26 @@ Machine-facing completion query: print the Principal names the authenticated aut
 Machine-facing completion query: print the Launcher selectors the authenticated authority may target with a \-\-launcher selector or the positional [LAUNCHER] argument, one per line, honoring the typed \-\-principal context. An admin with a context receives that Principal's Launcher names; an admin without one receives only globally resolvable \fBdhl_\fR Launcher IDs; a Principal credential receives its own Launchers' names; a Launcher credential and any foreign scope receive nothing.
 .SS Session Commands
 .TP
-.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-filesystem-entry PATH=ACCESS]... [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
+.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-filesystem-root PATH=ACCESS]... [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
 Create a new session for a workspace. With \-\-json, output in JSON format.
-The repeatable \fB\-\-filesystem-entry PATH=ACCESS\fR flag requests the
-issuance-time Session filesystem narrowing: PATH is a path relative to the
-Session workspace (exactly \fB.\fR for the workspace root, which is required
-whenever the flag is used; the orchestrator creates the run directories
-before creating the Session) and ACCESS is exactly \fBread_write\fR or
-\fBread_only\fR. The request may only narrow the resolved target Launcher's
-effective filesystem ceiling: a \fBread_write\fR entry under an effective
-read_only region, or any path outside the ceiling, is refused with
+The repeatable \fB\-\-filesystem-root PATH=ACCESS\fR flag issues additional
+filesystem roots for the Session: PATH is an absolute host path inside the
+resolved target Launcher's effective allowed roots (an existing directory
+or regular file; the root is created before the Session) and ACCESS is
+exactly \fBread_write\fR or \fBread_only\fR. The workspace itself remains
+mandatory and receives the maximum access the effective policy permits at
+that path; a root whose canonical path equals the workspace explicitly
+narrows it instead. The request may only narrow the effective filesystem
+ceiling: a \fBread_write\fR root under an effective read_only region, or
+any path outside the ceiling, is refused with
 \fB400 invalid_filesystem_policy\fR before the Session exists. Omitting the
 flag preserves the inherited create behavior. The CLI validates
 PATH=ACCESS syntax only; whether the request is a valid narrowing is decided
 by the daemon. The issued snapshot is immutable; there is no post-create
 Session filesystem mutation.
+In user mode every requested root must be the canonical workspace itself
+(user mode has no inode-pinned mounts); any other root is refused with the
+same error.
 The target Launcher is chosen by the daemon. Without a selector the
 authority-specific defaults apply: a Principal credential resolves its
 Principal's \fBdefault\fR Launcher; a Launcher credential is forced to its
@@ -512,8 +518,11 @@ Pull a Docker image.
 Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
 .TP
 .B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] \-\- [command]
-Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
-A requested writable mount whose source resolves to a read-only region of
+ Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
+A mount source is a workspace-relative path (system mode: any file or
+subdirectory; user mode: only the workspace root \fB.\fR) or an absolute
+host path inside the issued Session filesystem snapshot; any other source
+is refused. A requested writable mount whose source resolves to a read-only region of
 the issued Session filesystem snapshot is refused before any container
 starts with the \fBread_only_root\fR error \- a policy refusal, distinct
 from the structural \fBinvalid_mount\fR. When a source is only needed for
