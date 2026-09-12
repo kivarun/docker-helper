@@ -70,9 +70,10 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 	}
 }
 
-func TestRunMountUserModeAcceptsSubdirectory(t *testing.T) {
+func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
@@ -90,27 +91,33 @@ func TestRunMountUserModeAcceptsSubdirectory(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
-	// User mode has no inode pinning, so the issued snapshot is the same
-	// filesystem authority as in system mode: a workspace-contained
-	// subdirectory with issued snapshot authority is accepted and Docker
-	// receives the resolved host path directly.
+	// User mode has no inode pinning, so only the canonical workspace root
+	// carries the pathname-stability invariant a bind source needs: a
+	// workspace-contained subdirectory is refused before any pin, operation,
+	// or Docker state exists.
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
-
-	if !dockerCalled {
-		t.Error("docker should be called for an accepted user-mode mount")
+	if !strings.Contains(w.Body.String(), "invalid_mount") {
+		t.Errorf("refusal is not invalid_mount: %s", w.Body.String())
+	}
+	if dockerCalled {
+		t.Error("docker must not be called for a refused user-mode mount")
+	}
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("a refused user-mode mount must not create an operation")
 	}
 }
 
-func TestRunMountUserModeAcceptsFile(t *testing.T) {
+func TestRunMountUserModeRejectsFile(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
@@ -122,13 +129,30 @@ func TestRunMountUserModeAcceptsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	dockerCalled := false
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerCalled = true
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	// A workspace-contained regular file is refused in user mode before any
+	// operation or Docker state exists.
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"testfile.txt","target":"/data"}]}`)))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_mount") {
+		t.Errorf("refusal is not invalid_mount: %s", w.Body.String())
+	}
+	if dockerCalled {
+		t.Error("docker must not be called for a refused user-mode file mount")
+	}
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("a refused user-mode mount must not create an operation")
 	}
 }
 
@@ -171,7 +195,7 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 	}
 }
 
-func TestRunMountUserModeAcceptanceCreatesOperation(t *testing.T) {
+func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
@@ -186,17 +210,18 @@ func TestRunMountUserModeAcceptanceCreatesOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The refused user-mode subdirectory mount is answered before operation
+	// registration: the supervisor stays empty and Docker is never called.
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
-
-	if len(app.OperationSupervisor.ops) != 1 {
-		t.Error("an accepted user-mode mount must create exactly one operation")
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("a refused user-mode mount must not create an operation")
 	}
 }
 

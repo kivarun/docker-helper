@@ -385,6 +385,28 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// User-mode backend-safety boundary (Release 2.2): user mode has no
+		// inode-pinning handoff, so dockerd would consume the bind source
+		// through its pathname. Only the canonical workspace root carries the
+		// established pathname-stability invariant (the sandbox cannot write
+		// its parent, so it cannot replace the workspace directory entry);
+		// a relative "." mount, a workspace-root symlink alias, and an
+		// absolute spelling resolving exactly to the canonical workspace all
+		// canonicalize to that one stable source. Every other source — child
+		// or file, relative or absolute, disjoint absolute — is refused as
+		// invalid_mount before any pin, operation, or Docker state exists.
+		// This is the user-mode source-shape restriction of the same
+		// workspace-root-only contract the Session-create filesystem-root
+		// boundary enforces; the immutable Session snapshot remains the
+		// filesystem access-mode owner.
+		if cfg.Mode == ModeUser && resolved.SourcePath != session.Workspace {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+			return
+		}
+
 		if targetSeen[resolved.Target] {
 			if leaseRelease != nil {
 				leaseRelease()

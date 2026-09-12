@@ -196,6 +196,28 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		if err != nil {
 			return nil, err
 		}
+		// User-mode backend-safety boundary (Release 2.2): user mode has no
+		// stable-object handoff for a bind source — the openat2/open_tree
+		// pinning owner needs CAP_SYS_ADMIN, so the canonical resolved path
+		// would still be consumed by dockerd through its pathname. Only the
+		// canonical workspace root carries the established pathname-stability
+		// invariant (the sandbox cannot write its parent, so it cannot
+		// replace the workspace directory entry). An explicit filesystem root
+		// is therefore accepted only when its canonical path equals the
+		// canonical workspace — which preserves the explicit workspace
+		// read_only narrowing through the same composition owner below — and
+		// every additional, disjoint, or child root is refused before any
+		// Session exists. This is a backend-safety boundary, not a second
+		// filesystem policy engine: the immutable Session snapshot remains
+		// the filesystem access-mode owner and this check never decides
+		// access modes.
+		if a.getConfig().Mode != ModeSystem {
+			for _, root := range requested {
+				if root.Path != absWorkspace {
+					return nil, fmt.Errorf("user mode accepts only the canonical workspace as a session filesystem root (%q): %w", root.Path, ErrInvalidSessionFilesystemPolicy)
+				}
+			}
+		}
 		snapshotEntries, err = narrowSessionFilesystemPolicy(p.EffectiveAllowedRootEntries, absWorkspace, requested)
 		if err != nil {
 			return nil, err

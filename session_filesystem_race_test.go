@@ -40,6 +40,9 @@ func wideningRoots(inputs string) string {
 // is validated against one ceiling generation and committed against another.
 func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
+	// The multi-root issuance contract is a system-mode capability; the
+	// user-mode workspace-only restriction is proven separately.
+	app1.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	workspace, inputs, token := setupSnapshotRacePrincipal(t, app1)
 
@@ -111,6 +114,9 @@ func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 // state.
 func TestRaceNarrowedSessionCreateLinearizesAfterParentMutation(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
+	// The multi-root issuance contract is a system-mode capability; the
+	// user-mode workspace-only restriction is proven separately.
+	app1.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	workspace, inputs, token := setupSnapshotRacePrincipal(t, app1)
 

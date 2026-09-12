@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -160,6 +161,11 @@ func wantSnapshotJSON(app *App) string {
 // every ceiling transition strictly inside the workspace.
 func TestHTTPSessionFilesystemOmittedInheritsCeiling(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	// The full multi-root issuance contract (external absolute roots) is a
+	// system-mode capability; user mode restricts filesystem roots to the
+	// canonical workspace and is proven separately.
+	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -188,6 +194,7 @@ func TestHTTPSessionFilesystemOmittedInheritsCeiling(t *testing.T) {
 // workspace-only create — the inherited derived snapshot, byte-for-byte.
 func TestHTTPSessionFilesystemEmptyArrayInherits(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -217,6 +224,7 @@ func TestHTTPSessionFilesystemEmptyArrayInherits(t *testing.T) {
 // is the inherited workspace-only create, proven separately).
 func TestHTTPSessionFilesystemPresenceRefusals(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -248,6 +256,7 @@ func TestHTTPSessionFilesystemPresenceRefusals(t *testing.T) {
 // or a duplicate canonical identity is refused before the Session exists.
 func TestHTTPSessionFilesystemCanonicalizationRefusals(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 	tree := filepath.Join(app.Config.AllowedRoots[0].Path, "runs")
@@ -316,6 +325,7 @@ func TestHTTPSessionFilesystemCanonicalizationRefusals(t *testing.T) {
 // the effective Launcher ceiling are refused before the Session exists.
 func TestHTTPSessionFilesystemCeilingRefusals(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 	tree := filepath.Join(app.Config.AllowedRoots[0].Path, "runs")
@@ -355,6 +365,7 @@ func TestHTTPSessionFilesystemCeilingRefusals(t *testing.T) {
 // canonical requested path) stays in the operational log.
 func TestHTTPSessionFilesystemRefusalDoesNotDiscloseCanonicalPath(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -389,6 +400,50 @@ func TestHTTPSessionFilesystemRefusalDoesNotDiscloseCanonicalPath(t *testing.T) 
 	}
 }
 
+// TestSessionFilesystemOutsideCeilingBranchIsCeilingCheck proves the branch
+// distinction behind the MR3 UAT proof: for an existing path outside the
+// effective Launcher ceiling, the canonicalization stage (the existence/
+// resolvability branch) succeeds, and the refusal is reached in the ceiling
+// check — the domain diagnostic names the outside-the-effective-launcher-policy
+// refusal, never an unresolvable-path canonicalization failure. The same
+// public invalid_filesystem_policy family has a different branch per cause.
+func TestSessionFilesystemOutsideCeilingBranchIsCeilingCheck(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "marker.txt"), []byte("outside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The existing outside path passes canonicalization: existence and
+	// resolvability are proven, so any refusal downstream is not the
+	// unresolvable-path branch.
+	canonical, err := canonicalizeSessionFilesystemRoots([]sessionFilesystemRootEntry{
+		{Path: outside, Access: "read_write"},
+	})
+	if err != nil {
+		t.Fatalf("existing outside path failed canonicalization (wrong branch): %v", err)
+	}
+	if len(canonical) != 1 || canonical[0].Path != outside {
+		t.Fatalf("canonicalization identity = %v, want [%s]", canonical, outside)
+	}
+
+	// The ceiling check is the reached branch: the refusal names the
+	// outside-the-effective-launcher-policy diagnostic (a stable internal
+	// fact this lower-level owner owns) and carries the typed family.
+	ceiling := []AllowedRootEntry{{Path: app.Config.AllowedRoots[0].Path, Access: AllowedRootAccessReadWrite}}
+	_, err = narrowSessionFilesystemPolicy(ceiling, app.Config.AllowedRoots[0].Path, canonical)
+	if !errors.Is(err, ErrInvalidSessionFilesystemPolicy) {
+		t.Fatalf("refusal = %v, want the ErrInvalidSessionFilesystemPolicy family", err)
+	}
+	if !strings.Contains(err.Error(), "outside the effective launcher policy") {
+		t.Errorf("refusal = %v, want the ceiling-check branch diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "cannot be resolved") || strings.Contains(err.Error(), "cannot be accessed") {
+		t.Errorf("refusal reached the canonicalization branch instead of the ceiling check: %v", err)
+	}
+}
+
 // TestHTTPLauncherCredentialRoots proves the motivating capability under a
 // Launcher credential: the credential issues its Session with external
 // absolute filesystem roots and an explicitly narrowed workspace, the issued
@@ -396,6 +451,7 @@ func TestHTTPSessionFilesystemRefusalDoesNotDiscloseCanonicalPath(t *testing.T) 
 // attempted widening is refused with no additional Session created.
 func TestHTTPLauncherCredentialRoots(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
 	auditBuf, _ := setupTestLogging(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -473,6 +529,7 @@ func TestHTTPLauncherCredentialRoots(t *testing.T) {
 // widening refusal.
 func TestHTTPSessionFilesystemAuthoritySymmetry(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	principalToken, _, launcherID, workspace := setupSessionNarrowingFixture(t, app)
 
