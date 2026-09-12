@@ -563,7 +563,13 @@ fi
 scenario "Z: no residue after the self-introspection scenarios"
 if [ -n "$SELF_SESSION_IDS" ]; then
   for sid in $SELF_SESSION_IDS; do
-    dh session delete --system --id "$sid" >/dev/null 2>&1 || fail "Z session $sid delete failed"
+    if ! dh session delete --system --id "$sid" >/dev/null 2>&1; then
+      # An expired session may already have been reaped by the daemon; the
+      # delete only failed when the Session is still provably present.
+      if dh session show --system --id "$sid" >/dev/null 2>&1; then
+        fail "Z session $sid delete failed"
+      fi
+    fi
   done
 fi
 Z_WAIT_RC=0
