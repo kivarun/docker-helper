@@ -249,7 +249,7 @@ func TestAppArmorBoundaryAddSymlinkedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(boundaries) != 1 || boundaries[0] != realDir {
+	if len(boundaries) != 1 || boundaries[0].Path != realDir {
 		t.Errorf("expected canonical boundary %s, got %v", realDir, boundaries)
 	}
 }
@@ -316,7 +316,7 @@ func TestAppArmorRootAddCLIRejectsGlob(t *testing.T) {
 // --- Deterministic sorted rendering ---
 
 func TestRenderFragmentSorted(t *testing.T) {
-	boundaries := []string{"/z/workspace", "/a/workspace", "/m/workspace"}
+	boundaries := []appArmorManagedBoundary{{Path: "/z/workspace"}, {Path: "/a/workspace"}, {Path: "/m/workspace"}}
 	data := renderFragment(boundaries)
 
 	content := string(data)
@@ -330,9 +330,9 @@ func TestRenderFragmentSorted(t *testing.T) {
 }
 
 func TestRenderFragmentDeterministic(t *testing.T) {
-	boundaries := []string{"/b", "/a", "/c"}
+	boundaries := []appArmorManagedBoundary{{Path: "/b"}, {Path: "/a"}, {Path: "/c"}}
 	data1 := renderFragment(boundaries)
-	data2 := renderFragment([]string{"/c", "/a", "/b"})
+	data2 := renderFragment([]appArmorManagedBoundary{{Path: "/c"}, {Path: "/a"}, {Path: "/b"}})
 
 	if !bytes.Equal(data1, data2) {
 		t.Error("renderFragment not deterministic for same boundaries in different order")
@@ -395,7 +395,7 @@ func TestBoundaryWithSpecialCharacters(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listBoundaries failed: %v", err)
 			}
-			if len(boundaries) != 1 || boundaries[0] != path {
+			if len(boundaries) != 1 || boundaries[0].Path != path {
 				t.Errorf("expected boundary %s, got %v", path, boundaries)
 			}
 		})
@@ -434,12 +434,12 @@ func TestMetadataRoundTrip(t *testing.T) {
 		t.Run(p, func(t *testing.T) {
 			quoted := jsonQuote(p)
 			line := "# root-json: " + quoted
-			unquoted, err := jsonUnquote(quoted)
+			boundary, err := parseRootJSONBoundary(quoted)
 			if err != nil {
-				t.Fatalf("jsonUnquote failed: %v", err)
+				t.Fatalf("parseRootJSONBoundary failed: %v", err)
 			}
-			if unquoted != p {
-				t.Errorf("round trip failed: %q -> %q -> %q", p, quoted, unquoted)
+			if boundary.Path != p || boundary.Kind != appArmorBoundaryDirectory {
+				t.Errorf("round trip failed: %q -> %q -> %+v", p, quoted, boundary)
 			}
 			if !strings.HasPrefix(line, "# root-json: ") {
 				t.Error("metadata line should start with # root-json: ")
@@ -451,7 +451,7 @@ func TestMetadataRoundTrip(t *testing.T) {
 // --- Exact AppArmor rule text ---
 
 func TestRenderFragmentRuleEscaping(t *testing.T) {
-	boundaries := []string{`/path\with"special`}
+	boundaries := []appArmorManagedBoundary{{Path: `/path\with"special`}}
 	data := renderFragment(boundaries)
 	content := string(data)
 
@@ -587,7 +587,7 @@ func TestAppArmorListMalformedFragment(t *testing.T) {
 	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	valid := renderFragment([]string{"/test"})
+	valid := renderFragment([]appArmorManagedBoundary{{Path: "/test"}})
 
 	tests := []struct {
 		name string
@@ -795,7 +795,7 @@ func TestAppArmorCheckDoesNotModifyFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	mainData := []byte("profile test { }\n")
-	fragData := renderFragment([]string{"/test"})
+	fragData := renderFragment([]appArmorManagedBoundary{{Path: "/test"}})
 	if err := os.WriteFile(mainProfile, mainData, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +851,7 @@ func TestAppArmorSuccessfulAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(boundaries) != 1 || boundaries[0] != testDir {
+	if len(boundaries) != 1 || boundaries[0].Path != testDir {
 		t.Errorf("expected boundary %s, got %v", testDir, boundaries)
 	}
 
@@ -924,10 +924,24 @@ func TestAppArmorAddMultipleBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	expected := []string{dirA, dirB, dirC}
-	if !reflectSliceEqual(boundaries, expected) {
-		t.Errorf("expected %v, got %v", expected, boundaries)
+	expected := []appArmorManagedBoundary{{Path: dirA}, {Path: dirB}, {Path: dirC}}
+	if len(boundaries) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, boundaries)
 	}
+	for i := range expected {
+		if boundaries[i].Path != expected[i].Path {
+			t.Errorf("boundary[%d] = %q, want %q", i, boundaries[i].Path, expected[i].Path)
+		}
+	}
+}
+
+// managedBoundaryPaths projects the managed boundary list to its paths.
+func managedBoundaryPaths(boundaries []appArmorManagedBoundary) []string {
+	paths := make([]string, 0, len(boundaries))
+	for _, boundary := range boundaries {
+		paths = append(paths, boundary.Path)
+	}
+	return paths
 }
 
 func reflectSliceEqual(a, b []string) bool {
@@ -1026,7 +1040,7 @@ func TestAppArmorParserFailureRestoresPrevious(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listBoundaries failed after rollback: %v", err)
 	}
-	if len(boundaries) != 1 || boundaries[0] != testDirA {
+	if len(boundaries) != 1 || boundaries[0].Path != testDirA {
 		t.Errorf("expected only %s after rollback, got %v", testDirA, boundaries)
 	}
 }
@@ -1252,7 +1266,7 @@ func TestAppArmorParserNotExecutable(t *testing.T) {
 	}
 
 	// Create a valid fragment before the operation
-	validFragment := renderFragment([]string{"/existing"})
+	validFragment := renderFragment([]appArmorManagedBoundary{{Path: "/existing"}})
 	if err := os.MkdirAll(filepath.Dir(fragment), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1644,7 +1658,7 @@ func TestAppArmorRemoveNoInference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(boundaries) != 1 || boundaries[0] != parentDir {
+	if len(boundaries) != 1 || boundaries[0].Path != parentDir {
 		t.Errorf("expected only parent %s, got %v", parentDir, boundaries)
 	}
 }
@@ -1652,14 +1666,14 @@ func TestAppArmorRemoveNoInference(t *testing.T) {
 // --- Fragment parse round-trip ---
 
 func TestFragmentRoundTrip(t *testing.T) {
-	boundaries := []string{"/a", "/b", "/c"}
+	boundaries := []appArmorManagedBoundary{{Path: "/a"}, {Path: "/b"}, {Path: "/c"}}
 	data := renderFragment(boundaries)
 
 	parsed, err := parseFragment(data)
 	if err != nil {
 		t.Fatalf("parseFragment failed: %v", err)
 	}
-	if !reflectSliceEqual(parsed, boundaries) {
+	if !reflectSliceEqual(managedBoundaryPaths(parsed), []string{"/a", "/b", "/c"}) {
 		t.Errorf("expected %v, got %v", boundaries, parsed)
 	}
 }
@@ -1676,7 +1690,7 @@ func TestFragmentEmptyRoundTrip(t *testing.T) {
 }
 
 func TestFragmentRoundTripSpecialChars(t *testing.T) {
-	boundaries := []string{"/with space", `/with"quote`, "/with\\backslash", "/with#hash", "/with,comma"}
+	boundaries := []appArmorManagedBoundary{{Path: "/with space"}, {Path: `/with"quote`}, {Path: "/with\\backslash"}, {Path: "/with#hash"}, {Path: "/with,comma"}}
 	data := renderFragment(boundaries)
 
 	parsed, err := parseFragment(data)
@@ -1685,7 +1699,7 @@ func TestFragmentRoundTripSpecialChars(t *testing.T) {
 	}
 
 	expected := []string{"/with space", `/with"quote`, "/with#hash", "/with,comma", "/with\\backslash"}
-	if !reflectSliceEqual(parsed, expected) {
+	if !reflectSliceEqual(managedBoundaryPaths(parsed), expected) {
 		t.Errorf("expected %v, got %v", expected, parsed)
 	}
 }
@@ -1724,7 +1738,7 @@ func TestAppArmorCLIExitCodes(t *testing.T) {
 // --- renderFragment format ---
 
 func TestRenderFragmentFormat(t *testing.T) {
-	boundaries := []string{"/workspace"}
+	boundaries := []appArmorManagedBoundary{{Path: "/workspace"}}
 	data := renderFragment(boundaries)
 	content := string(data)
 
@@ -1750,7 +1764,7 @@ func TestRenderFragmentFormat(t *testing.T) {
 }
 
 func TestRenderFragmentMultipleBoundaries(t *testing.T) {
-	boundaries := []string{"/a", "/b"}
+	boundaries := []appArmorManagedBoundary{{Path: "/a"}, {Path: "/b"}}
 	data := renderFragment(boundaries)
 	content := string(data)
 
@@ -1942,7 +1956,7 @@ func TestParseFragmentRejectsInvalidBoundaries(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Use renderFragment to create a properly formatted fragment
-			data := renderFragment([]string{tc.boundary})
+			data := renderFragment([]appArmorManagedBoundary{{Path: tc.boundary}})
 			_, err := parseFragment(data)
 			if err == nil {
 				t.Fatalf("expected error for invalid boundary %q, got nil", tc.boundary)
@@ -2010,7 +2024,7 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(fragmentPath), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(fragmentPath, renderFragment([]string{staleUnsafe}), 0644); err != nil {
+	if err := os.WriteFile(fragmentPath, renderFragment([]appArmorManagedBoundary{{Path: staleUnsafe}}), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2019,7 +2033,7 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listBoundaries() error: %v", err)
 	}
-	if len(boundaries) != 1 || boundaries[0] != staleUnsafe {
+	if len(boundaries) != 1 || boundaries[0].Path != staleUnsafe {
 		t.Fatalf("listBoundaries() = %v, want [%s]", boundaries, staleUnsafe)
 	}
 
@@ -2040,7 +2054,7 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 	}
 
 	// 3) check() must diagnose the policy violation (not crash or reject parse).
-	if err := os.WriteFile(fragmentPath, renderFragment([]string{staleUnsafe}), 0644); err != nil {
+	if err := os.WriteFile(fragmentPath, renderFragment([]appArmorManagedBoundary{{Path: staleUnsafe}}), 0644); err != nil {
 		t.Fatal(err)
 	}
 	err = mgr.check()
@@ -2557,14 +2571,14 @@ func TestProductionAppArmorStatePath(t *testing.T) {
 }
 
 func TestParseFragmentLegacyHeader(t *testing.T) {
-	legacy := renderFragment([]string{"/a", "/b"})
+	legacy := renderFragment([]appArmorManagedBoundary{{Path: "/a"}, {Path: "/b"}})
 	legacy = bytes.Replace(legacy, []byte(fragmentHeader2+"\n"), []byte(legacyFragmentHeader2+"\n"), 1)
 
 	parsed, err := parseFragment(legacy)
 	if err != nil {
 		t.Fatalf("parseFragment legacy header failed: %v", err)
 	}
-	if !reflectSliceEqual(parsed, []string{"/a", "/b"}) {
+	if !reflectSliceEqual(managedBoundaryPaths(parsed), []string{"/a", "/b"}) {
 		t.Errorf("parsed = %v, want [/a /b]", parsed)
 	}
 }
@@ -2579,7 +2593,7 @@ func TestRewriteNormalizesLegacyHeader(t *testing.T) {
 	_, mgr, _ := setupAppArmorTest(t)
 
 	// Write legacy header content
-	legacy := renderFragment([]string{})
+	legacy := renderFragment([]appArmorManagedBoundary{})
 	legacy = bytes.Replace(legacy, []byte(fragmentHeader2+"\n"), []byte(legacyFragmentHeader2+"\n"), 1)
 	if err := os.MkdirAll(filepath.Dir(mgr.managedFragmentPath), 0755); err != nil {
 		t.Fatal(err)
@@ -2607,7 +2621,7 @@ func TestRewriteNormalizesLegacyHeader(t *testing.T) {
 }
 
 func TestRenderFragmentBoundaryTerminology(t *testing.T) {
-	data := renderFragment([]string{"/workspace"})
+	data := renderFragment([]appArmorManagedBoundary{{Path: "/workspace"}})
 	content := string(data)
 	if !strings.Contains(content, "workspace boundaries") {
 		t.Error("renderFragment should use 'workspace boundaries' terminology")
@@ -3144,5 +3158,111 @@ func TestSystemProfileParserValidation(t *testing.T) {
 	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", tempPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("system profile parser validation failed: %v\n%s", err, out)
+	}
+}
+
+// TestManagedFragmentKindStableAcrossUnrelatedRewrites proves the managed
+// fragment persists the boundary kind: after a regular-file boundary is
+// added and its host object is deleted, an unrelated add/remove does not
+// re-derive the kind from mutable host state and the boundary keeps exact
+// file reachability instead of widening into directory rules.
+func TestManagedFragmentKindStableAcrossUnrelatedRewrites(t *testing.T) {
+	rootDir := testAllowedRootDir(t)
+	testDir := filepath.Join(rootDir, "apparmor-kind")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	testFile := filepath.Join(testDir, "token.pem")
+	if err := os.WriteFile(testFile, []byte("payload"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupAppArmorTest(t)
+
+	if _, err := mgr.addManagedBoundary(testFile); err != nil {
+		t.Fatalf("add regular-file boundary: %v", err)
+	}
+
+	otherDir := filepath.Join(rootDir, "apparmor-kind-other")
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.addManagedBoundary(otherDir); err != nil {
+		t.Fatalf("add unrelated boundary: %v", err)
+	}
+
+	data, err := os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := string(data)
+	if !strings.Contains(before, `"kind":"`+appArmorBoundaryFileMarker+`"`) {
+		t.Fatalf("fragment must persist the file kind marker:\n%s", before)
+	}
+
+	// Delete the host object of the file boundary, then force a full
+	// fragment rewrite by removing the unrelated boundary.
+	if err := os.Remove(testFile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.removeManagedBoundary(otherDir); err != nil {
+		t.Fatalf("remove unrelated boundary: %v", err)
+	}
+
+	data, err = os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := string(data)
+	if !strings.Contains(after, `"kind":"`+appArmorBoundaryFileMarker+`"`) {
+		t.Fatalf("the file boundary must not widen into directory semantics after an unrelated rewrite:\n%s", after)
+	}
+	if strings.Contains(after, testDir+"/"+"\" r,") || strings.Contains(after, testDir+"/**") {
+		t.Errorf("the file boundary must keep exact-file reachability:\n%s", after)
+	}
+
+	// The parsed representation stays the regular-file boundary.
+	parsed, err := mgr.listManagedBoundaries()
+	if err != nil {
+		t.Fatalf("listManagedBoundaries: %v", err)
+	}
+	found := false
+	for _, boundary := range parsed {
+		if boundary.Path == testFile {
+			if boundary.Kind != appArmorBoundaryRegularFile {
+				t.Errorf("parsed boundary %s kind = %d, want regular-file", boundary.Path, boundary.Kind)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("parsed boundaries = %v, want the file boundary retained", parsed)
+	}
+}
+
+// TestManagedFragmentLegacyParseIsDirectory proves the legacy fragment form
+// (quoted path root-json metadata) parses as directory boundaries.
+func TestManagedFragmentLegacyParseIsDirectory(t *testing.T) {
+	boundary, err := parseRootJSONBoundary(jsonQuote("/workspace"))
+	if err != nil {
+		t.Fatalf("parseRootJSONBoundary: %v", err)
+	}
+	if boundary.Path != "/workspace" || boundary.Kind != appArmorBoundaryDirectory {
+		t.Fatalf("boundary = %+v, want the directory legacy interpretation", boundary)
+	}
+
+	fileBoundary, err := parseRootJSONBoundary(`{"path":"/workspace/file.txt","kind":"regular-file"}`)
+	if err != nil {
+		t.Fatalf("parseRootJSONBoundary: %v", err)
+	}
+	if fileBoundary.Path != "/workspace/file.txt" || fileBoundary.Kind != appArmorBoundaryRegularFile {
+		t.Fatalf("boundary = %+v, want the regular-file kind", fileBoundary)
+	}
+
+	if _, err := parseRootJSONBoundary(`{"path":"/workspace/file.txt","kind":"mystery"}`); err == nil {
+		t.Fatal("an unknown kind must fail closed")
+	}
+	if _, err := parseRootJSONBoundary(`{not json`); err == nil {
+		t.Fatal("malformed metadata must fail closed")
 	}
 }

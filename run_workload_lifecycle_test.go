@@ -473,7 +473,7 @@ func TestRunWorkloadAmbiguousProofRetainsState(t *testing.T) {
 // SELinux projection exists, the projection proof fails, and the partial
 // projection cleanup also fails. The run must produce no Docker invocation,
 // the durable workload state must be retained, and the dependent pins and
-// the workspace-use lease must remain until startup reconciliation.
+// the session-use lease must remain until startup reconciliation.
 func TestRunWorkloadSELinuxPartialProjectionRetainsDependencies(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
@@ -482,9 +482,9 @@ func TestRunWorkloadSELinuxPartialProjectionRetainsDependencies(t *testing.T) {
 	backend := coord.backend.(*workloadSELinuxBackend)
 	seam := backend.ops.(*testMountOps).seam
 
-	// Workspace MAC coverage plus a workspace-use lease: the run path
+	// Workspace MAC coverage plus a session-use lease: the run path
 	// acquires a real lease whose release must be retained.
-	app.MACCoordinator = newSessionMACCoordinator(app.DB, newTestWorkspaceMACDriver(LSMSELinux))
+	app.MACCoordinator = newSessionMACCoordinator(app.DB, newTestSessionMACDriver(LSMSELinux))
 
 	var mu sync.Mutex
 	var pinCleaned []string
@@ -554,11 +554,11 @@ func TestRunWorkloadSELinuxPartialProjectionRetainsDependencies(t *testing.T) {
 	}
 	leases := app.MACCoordinator.sessionUseLeases
 	if len(leases) == 0 {
-		t.Fatal("the workspace-use lease must remain when partial MAC state is retained")
+		t.Fatal("the session-use lease must remain when partial MAC state is retained")
 	}
 	for _, lease := range leases {
 		for _, coverage := range lease.coverage {
-			if !boundaryCoversWorkspace(coverage.Boundary, result.Session.Workspace) {
+			if !boundaryCoversTree(coverage.Boundary, result.Session.Workspace) {
 				t.Errorf("retained lease coverage must cover the run workspace, got %q", coverage.Boundary)
 			}
 		}

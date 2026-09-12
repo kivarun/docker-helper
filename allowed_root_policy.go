@@ -427,7 +427,7 @@ func sessionMACBoundaries(snapshot *sessionFilesystemSnapshot) []string {
 	for _, e := range snapshot.Entries {
 		covered := false
 		for _, boundary := range kept {
-			if boundaryCoversWorkspace(boundary, e.Path) {
+			if boundaryCoversTree(boundary, e.Path) {
 				covered = true
 				break
 			}

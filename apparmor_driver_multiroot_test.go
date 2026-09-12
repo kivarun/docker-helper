@@ -11,7 +11,7 @@ import (
 // setupAppArmorMACCoordinator builds the coordinator on the REAL AppArmor
 // workspace MAC driver with the test-isolated managed fragment, so the
 // issued-tree lifecycle runs through the production boundary owner.
-func setupAppArmorMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *appArmorWorkspaceMACDriver, *appArmorProfileManager) {
+func setupAppArmorMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *appArmorMACDriver, *appArmorProfileManager) {
 	t.Helper()
 	mockAppArmorActive(t, true)
 	saved := EffectiveUID
@@ -33,10 +33,10 @@ func setupAppArmorMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *a
 		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
 	}
 
-	driver := &appArmorWorkspaceMACDriver{
+	driver := &appArmorMACDriver{
 		addManagedBoundary:    func(path string) (boundaryResult, error) { return mgr.addManagedBoundary(path) },
 		removeManagedBoundary: func(path string) (boundaryResult, error) { return mgr.removeManagedBoundary(path) },
-		listManagedBoundaries: func() ([]string, error) { return mgr.listManagedBoundaries() },
+		listManagedBoundaries: func() ([]appArmorManagedBoundary, error) { return mgr.listManagedBoundaries() },
 	}
 	mac := newSessionMACCoordinator(db, driver)
 
@@ -83,7 +83,7 @@ func TestAppArmorDriverExternalTreeThroughSameOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := mac.CreateSessionBinding("sess-aa", []string{extDir, extFile}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-aa", []string{extDir, extFile}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa", extDir)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -137,12 +137,12 @@ func TestAppArmorDriverOverlapRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := mac.CreateSessionBinding("sess-aa-parent", []string{parent}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-aa-parent", []string{parent}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-parent", parent)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(parent): %v", err)
 	}
-	if _, err := mac.CreateSessionBinding("sess-aa-child", []string{child}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-aa-child", []string{child}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-child", child)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(child): %v", err)

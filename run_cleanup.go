@@ -11,7 +11,7 @@ package main
 //	  -> workload MAC state removed
 //	  -> source pins removed
 //	  -> durable workload ownership record/state removed
-//	  -> workspace-use lease released
+//	  -> session-use lease released
 //	  -> cidfile removed
 //
 // The durable ownership record is removed only after every stage it

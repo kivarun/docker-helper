@@ -154,7 +154,7 @@ func (r *workloadMACRecord) RuntimeDirPath() string {
 // workloadMACRetainedError marks a failed workload MAC preparation whose
 // partial MAC state could not be rolled back and remains on the host. The
 // caller MUST retain every dependent resource — source pins and the
-// workspace-use lease — so startup reconciliation can still release the
+// session-use lease — so startup reconciliation can still release the
 // full ownership state; removing pins or releasing the lease would strand
 // live MAC kernel state on deleted sources.
 type workloadMACRetainedError struct {
@@ -288,7 +288,7 @@ func (c *workloadMACCoordinator) Backend() LSMBackend {
 //   - the returned error is a *workloadMACRetainedError exactly when
 //     partial MAC state could not be rolled back and remains on the host;
 //     the caller must retain the dependent source pins and the
-//     workspace-use lease and let startup reconciliation finish;
+//     session-use lease and let startup reconciliation finish;
 //   - any other error means the MAC state was fully rolled back and the
 //     caller must release the dependent resources as usual.
 func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorkloadMAC, error) {

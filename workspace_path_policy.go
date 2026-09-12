@@ -139,36 +139,35 @@ func canonicalizeWorkspacePathForAdd(path string) (string, error) {
 }
 
 // canonicalizeIssuedTreePathForAdd is the canonicalization owner for an
-// issued Session filesystem tree (a managed MAC boundary candidate): the
-// same tilde/absolute/symlink/workspace-path-policy semantics as
-// canonicalizeWorkspacePathForAdd, but the path may be a directory or a
-// regular file — exactly the kinds an issued Session filesystem root may
-// carry.
+// issued Session filesystem tree handed to a MAC backend (a managed
+// boundary candidate). It receives an already canonical concrete path: the
+// Session lifecycle owns caller syntax (absolute path, symlink resolution,
+// dir/regular-file kind), so no MAC backend reinterprets "~", relative
+// syntax, or another caller grammar. The validation proves the concrete
+// identity (exists, directory or regular file, symlink-resolved) and
+// applies the workspace-path safety policy.
 func canonicalizeIssuedTreePathForAdd(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("issued tree must be a non-empty path")
 	}
 
-	path = expandTilde(path)
-
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("cannot resolve issued tree to absolute path: %w", err)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("issued tree %q is not an absolute host path", path)
 	}
 
-	info, err := os.Stat(abs)
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("issued tree does not exist: %s", abs)
+			return "", fmt.Errorf("issued tree does not exist: %s", path)
 		}
 		return "", fmt.Errorf("cannot stat issued tree: %w", err)
 	}
 
 	if !info.IsDir() && !info.Mode().IsRegular() {
-		return "", fmt.Errorf("issued tree is not a directory or regular file: %s", abs)
+		return "", fmt.Errorf("issued tree is not a directory or regular file: %s", path)
 	}
 
-	canonical, err := filepath.EvalSymlinks(abs)
+	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve issued tree symlinks: %w", err)
 	}

@@ -73,8 +73,15 @@ fi
 U_UID="$(id -u "$U_USER")"
 U_HOME="$(getent passwd "$U_USER" | cut -d: -f6)"
 # User-mode init requires a reachable Docker daemon when no system daemon
-# answers (the same dependency the other user-mode groups give the UAT user).
-usermod -aG docker "$U_USER" 2>/dev/null || true
+# answers (the same dependency the other user-mode groups give the UAT
+# user). The prerequisite mutation is required: a silently failed usermod
+# would turn the failed prerequisite into misleading downstream evidence.
+if usermod -aG docker "$U_USER" 2>/dev/null; then
+  reg_ok "setup: $U_USER added to the docker group"
+else
+  reg_fail "usermod -aG docker $U_USER failed (user-mode init cannot reach the Docker daemon)"
+  reg_result
+fi
 mkdir -p "$U_HOME/ws"; chown -R "$U_USER:$U_USER" "$U_HOME"
 
 U_XDG="/run/user/$U_UID"

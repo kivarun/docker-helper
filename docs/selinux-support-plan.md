@@ -71,7 +71,7 @@ ensures that the workspace has valid MAC coverage. For SELinux, this means:
 Boundaries created by docker-helper are tracked in the `mac_boundaries` table
 and are eligible for removal when the sessionMACCoordinator proves there are no
 direct or intersecting consumers. This includes session bindings, active
-workspace-use leases, and overlapping boundaries.
+session-use leases, and overlapping boundaries.
 
 ### Operator-compatible boundaries are never claimed or deleted
 

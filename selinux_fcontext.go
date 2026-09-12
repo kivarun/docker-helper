@@ -250,10 +250,10 @@ func unescapeFcontextPath(s string) (string, bool) {
 	return b.String(), true
 }
 
-// ensureWorkspaceFcontext ensures that the canonical issued tree has a
+// ensureTreeFcontext ensures that the canonical issued tree has a
 // persistent SELinux mapping to docker_helper_workspace_t. It:
 //  1. Fails closed when the relabel boundary is unsafe (mount point
-//     at or beneath the tree; see checkWorkspaceRelabelBoundary);
+//     at or beneath the tree; see checkTreeRelabelBoundary);
 //  2. Acquires the global SELinux workspace management lock;
 //  3. Checks for existing local fcontext rules;
 //  4. If no matching rule exists, adds one (kind-aware: a directory
@@ -274,7 +274,7 @@ func unescapeFcontextPath(s string) (string, bool) {
 //
 //   - unrelated config/init/reload failures do not roll it back;
 //   - normal later removal is a separate lifecycle operation owned by
-//     sessionMACCoordinator (via selinuxWorkspaceMACDriver.removeBoundary).
+//     sessionMACCoordinator (via selinuxMACDriver.removeBoundary).
 //
 // Coverage versus ownership:
 //
@@ -285,7 +285,7 @@ func unescapeFcontextPath(s string) (string, bool) {
 //     operator-compatible (never helper-owned).
 //   - HelperOwned is resolved by the sessionMACCoordinator using durable
 //     ownership metadata, not by this backend function.
-func (m *selinuxFcontextManager) ensureWorkspaceFcontext(tree string, kind selinuxTreeKind) (newlyCreated bool, err error) {
+func (m *selinuxFcontextManager) ensureTreeFcontext(tree string, kind selinuxTreeKind) (newlyCreated bool, err error) {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {
 		return false, fmt.Errorf("cannot determine SELinux status: %w", err)
@@ -299,7 +299,7 @@ func (m *selinuxFcontextManager) ensureWorkspaceFcontext(tree string, kind selin
 	// mount point beneath it. The authoritative re-check also runs inside
 	// restoreconRecursive immediately before the command; this early check
 	// avoids creating or modifying any fcontext rule for an unsafe boundary.
-	if err := m.checkWorkspaceRelabelBoundary(tree); err != nil {
+	if err := m.checkTreeRelabelBoundary(tree); err != nil {
 		return false, err
 	}
 
@@ -504,39 +504,59 @@ func (m *selinuxFcontextManager) verifyActualType(path string) error {
 	return nil
 }
 
-// removeFcontextBoundary removes the persistent fcontext rule(s) of one
-// docker-helper-owned boundary and relabels whatever still exists at the
-// boundary back to policy defaults. It is the backend-native removal
+// removeFcontextBoundary removes the exact proven helper-owned fcontext rule
+// of one docker-helper-owned boundary and relabels whatever still exists at
+// the boundary back to policy defaults. It is the backend-native removal
 // primitive used in two contexts:
 //
-//  1. Internal rollback: when ensureWorkspaceFcontext fails before successful
+//  1. Internal rollback: when ensureTreeFcontext fails before successful
 //     return and needs to undo its own partial changes.
 //
 //  2. Lifecycle removal: called through sessionMACCoordinator when all
 //     consumers are gone, via the call path:
 //
 //     sessionMACCoordinator
-//     -> selinuxWorkspaceMACDriver.removeBoundary
+//     -> selinuxMACDriver.removeBoundary
 //     -> selinuxFcontextManager.removeFcontextBoundary
 //
 // It is NOT called by outer init or config code on a previously successful
-// mapping. Once ensureWorkspaceFcontext returns success, the mapping is
+// mapping. Once ensureTreeFcontext returns success, the mapping is
 // managed durable state and removal is a separate lifecycle operation.
 //
-// The boundary's own rules are found by stem in the local fcontext rules and
-// removed exactly as stored: a directory boundary carries the descendant
-// suffix pattern, a regular-file boundary the exact-path pattern. Removing
-// by stem keeps one path-kind-aware owner instead of guessing the rule
-// shape. Mount-safety preflight runs BEFORE deleting the persistent rule: if
-// the boundary cannot be safely restored, leave the existing rule/state
-// intact and fail closed. The authoritative re-check also runs inside
-// restoreconTree after rule removal (the rollback restorecon itself) — but
-// by then the durable rule must already be preserved by this preflight when
-// the relabel would be unsafe. A boundary whose tree no longer exists has
-// nothing left to relabel; the rule removal alone is the complete rollback.
+// Ownership semantics: the helper's durable ownership proves the boundary
+// identity, not every local rule sharing the stem. The removal therefore
+// deletes exactly the rule shape derived from the proven boundary kind — a
+// directory boundary its exact recursive pattern, a regular-file boundary
+// its exact file pattern — and never claims or touches a compatible
+// operator-owned rule with the same stem but another shape. All fallible
+// facts (kind, mount safety, the owned rule's presence) are proven before
+// the durable rule is deleted; a failure after the deletion returns an
+// error so the transition is never falsely reported complete and the
+// coordinator retains ownership for retry/reconciliation. Proven absence
+// (ENOENT) removes the stem's single unambiguous workspace_t rule (no
+// surviving inode to relabel) and refuses the ambiguous two-rule case,
+// retaining ownership for reconciliation instead.
 func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string) error {
+	// All fallible facts needed for a safe transition are proven BEFORE the
+	// durable fcontext rule is deleted:
+	//   1. the tree's kind (proven directory, proven regular file, or proven
+	//      absence) — this decides the owned rule shape and the rollback
+	//      mechanics; any unclassifiable stat failure or unsupported object
+	//      kind fails closed without touching the durable rule;
+	//   2. the mount-boundary safety preflight the rollback restorecon
+	//      requires;
+	//   3. the exact owned rule's presence in the local listing (state
+	//      drift is refused, never silently tolerated).
+	// A failure after the rule deletion returns an error: the transition is
+	// not reported complete and the coordinator retains the ownership
+	// metadata for the canonical retry/reconciliation owner.
+	kind, kindErr := m.treeKind(boundary)
+	if kindErr != nil {
+		return fmt.Errorf("cannot classify boundary %s for removal: %w", boundary, kindErr)
+	}
+
 	// Mount-safety preflight BEFORE deleting the persistent fcontext rule.
-	if err := m.checkWorkspaceRelabelBoundary(boundary); err != nil {
+	if err := m.checkTreeRelabelBoundary(boundary); err != nil {
 		return err
 	}
 
@@ -545,32 +565,74 @@ func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string) error {
 		return fmt.Errorf("cannot list local fcontext rules: %w", err)
 	}
 
-	removed := false
+	// The helper-owned rule shape is derived from the proven boundary kind:
+	// a directory boundary owns exactly its recursive pattern, a
+	// regular-file boundary exactly its file pattern. Only that exact
+	// proven pattern is ever deleted; compatible operator rules with the
+	// same stem but another shape are never claimed or touched.
+	if kind == selinuxTreeDirectory || kind == selinuxTreeRegularFile {
+		pattern := fcontextPatternFor(boundary, kind)
+		if !fcontextRulePresent(existing, pattern, selinuxWorkspaceType) {
+			return fmt.Errorf(
+				"no persistent SELinux fcontext rule %s for boundary %s; helper ownership state mismatch",
+				pattern, boundary,
+			)
+		}
+		if err := m.removeFcontextRule(pattern); err != nil {
+			return fmt.Errorf("cannot remove fcontext rule for %s: %w", boundary, err)
+		}
+		// Restore defaults for whatever still exists at the boundary.
+		if err := m.restoreconTree(boundary, kind); err != nil {
+			return fmt.Errorf("restorecon rollback for %s after rule removal: %w", boundary, err)
+		}
+		return nil
+	}
+
+	// Proven absence (selinuxTreeMissing): no surviving inode exists, so
+	// there is nothing left to relabel. The exact owned rule removal is
+	// sufficient. The owned shape is not derivable from a deleted tree, so
+	// the stem's workspace_t rules decide: exactly one unambiguous rule is
+	// removed; two same-stem rules make the owned shape unprovable and the
+	// removal is refused (the coordinator retains the ownership metadata
+	// for the canonical deferred/reconciliation cleanup).
+	var candidates []string
 	for _, rule := range existing {
-		if rule.isEquivalence {
+		if rule.isEquivalence || rule.fileType != selinuxWorkspaceType {
 			continue
 		}
 		if fcontextStem(rule.pattern) != boundary {
 			continue
 		}
-		if err := m.removeFcontextRule(rule.pattern); err != nil {
+		candidates = append(candidates, rule.pattern)
+	}
+	switch len(candidates) {
+	case 0:
+		// The durable rule is already gone; nothing helper-owned survives at
+		// the backend. The coordinator's ownership metadata cleanup is the
+		// remaining transition.
+		return nil
+	case 1:
+		if err := m.removeFcontextRule(candidates[0]); err != nil {
 			return fmt.Errorf("cannot remove fcontext rule for %s: %w", boundary, err)
 		}
-		removed = true
+		return nil
+	default:
+		return fmt.Errorf(
+			"boundary %s has %d same-stem workspace fcontext rules; the helper-owned shape cannot be proven after the tree vanished; retaining ownership for reconciliation",
+			boundary, len(candidates),
+		)
 	}
-	if !removed {
-		return fmt.Errorf("no persistent SELinux fcontext rule for boundary %s; helper ownership state mismatch", boundary)
-	}
+}
 
-	// Then restore labels to policy defaults for whatever still exists at
-	// the boundary.
-	if kind, kindErr := m.treeKind(boundary); kindErr == nil {
-		if err := m.restoreconTree(boundary, kind); err != nil {
-			return fmt.Errorf("restorecon rollback for %s after rule removal: %w", boundary, err)
+// fcontextRulePresent reports whether the local fcontext rules contain the
+// exact pattern mapping to the given type.
+func fcontextRulePresent(rules []fcontextRule, pattern, fileType string) bool {
+	for _, rule := range rules {
+		if rule.pattern == pattern && rule.fileType == fileType {
+			return true
 		}
 	}
-
-	return nil
+	return false
 }
 
 // fcontextRule represents a parsed semanage fcontext rule.
@@ -799,7 +861,7 @@ func decodeMountinfoOctal(s string) (byte, bool) {
 	return byte(v), true
 }
 
-// checkWorkspaceRelabelBoundary verifies that a helper-managed recursive
+// checkTreeRelabelBoundary verifies that a helper-managed recursive
 // relabel of the given workspace is safe. It fails closed (returns an error)
 // when the workspace itself is a mount point or when any mount point exists
 // strictly beneath the workspace: a recursive restorecon would otherwise
@@ -816,7 +878,7 @@ func decodeMountinfoOctal(s string) (byte, bool) {
 //	sibling / unrelated               -> allowed
 //
 // A mountinfo read or parse failure fails closed (relabel refused).
-func (m *selinuxFcontextManager) checkWorkspaceRelabelBoundary(workspace string) error {
+func (m *selinuxFcontextManager) checkTreeRelabelBoundary(workspace string) error {
 	data, err := m.readMountinfo()
 	if err != nil {
 		return fmt.Errorf("cannot read mount info for workspace relabel safety: %w", err)
@@ -883,7 +945,7 @@ func (m *selinuxFcontextManager) checkWorkspaceRelabelBoundary(workspace string)
 // descent into a same-filesystem bind mount (a bind mount shares the source
 // filesystem's device number) and would relabel the external source inode
 // according to the tree pathname. That mount-alias case is closed here by
-// checkWorkspaceRelabelBoundary, which rejects a tree that is itself a
+// checkTreeRelabelBoundary, which rejects a tree that is itself a
 // mount point or has any mount point strictly beneath it BEFORE restorecon
 // runs. This relabel is therefore only ever invoked on a boundary with no
 // mount point at or below it.
@@ -891,7 +953,7 @@ func (m *selinuxFcontextManager) checkWorkspaceRelabelBoundary(workspace string)
 // Type-only: restorecon is never passed -F, so user/role/MLS/MCS range are
 // not forcibly reset.
 func (m *selinuxFcontextManager) restoreconTree(path string, kind selinuxTreeKind) error {
-	if err := m.checkWorkspaceRelabelBoundary(path); err != nil {
+	if err := m.checkTreeRelabelBoundary(path); err != nil {
 		return err
 	}
 	if kind == selinuxTreeRegularFile {
@@ -926,7 +988,7 @@ func (m *selinuxFcontextManager) listCoveringFcontexts(workspace string) ([]stri
 		if stem == "" {
 			continue
 		}
-		if boundaryCoversWorkspace(stem, workspace) {
+		if boundaryCoversTree(stem, workspace) {
 			covering = append(covering, stem)
 		}
 	}

@@ -356,14 +356,14 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Acquire workspace-use lease BEFORE any filesystem access that depends
+	// Acquire session-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
 	if a.MACCoordinator != nil {
 		var leaseErr error
 		_, leaseRelease, leaseErr = a.MACCoordinator.AcquireSessionUse(session.ID, session.Workspace)
 		if leaseErr != nil {
-			opLog(ctx).Error("cannot acquire workspace-use lease",
+			opLog(ctx).Error("cannot acquire session-use lease",
 				slog.String("operation", "run"),
 				slog.String("error", leaseErr.Error()),
 			)
@@ -667,7 +667,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			var retained *workloadMACRetainedError
 			if errors.As(err, &retained) {
 				// Partial MAC state could not be rolled back: the pins and
-				// the workspace-use lease that the projections depend on
+				// the session-use lease that the projections depend on
 				// must remain until startup reconciliation. No container
 				// was started.
 				opLog(ctx).Error("workload MAC state retained after prepare failure — dependent pins and workspace lease intentionally retained",

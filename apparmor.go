@@ -113,25 +113,37 @@ func validateBoundaryLexical(path string) error {
 	return nil
 }
 
-func validateBoundaryPathForAdd(path string) (string, error) {
+func validateBoundaryPathForAdd(path string) (string, appArmorBoundaryKind, error) {
 	if !filepath.IsAbs(path) {
-		return "", &inputError{msg: "path must be absolute"}
+		return "", 0, &inputError{msg: "path must be absolute"}
 	}
 
 	// Use the issued-tree path policy for canonicalization and security
 	// checks: a managed MAC boundary may be a directory or a regular file
-	// (both are kinds an issued Session filesystem root may carry).
+	// (both are kinds an issued Session filesystem root may carry). The
+	// kind is decided exactly once here — the caller syntax boundary — and
+	// is persisted with the boundary.
 	canonical, err := canonicalizeIssuedTreePathForAdd(path)
 	if err != nil {
-		return "", &inputError{msg: err.Error()}
+		return "", 0, &inputError{msg: err.Error()}
 	}
 
 	// AppArmor-specific lexical validation (format constraints for managed fragment).
 	if err := validateBoundaryLexical(canonical); err != nil {
-		return "", err
+		return "", 0, err
 	}
 
-	return canonical, nil
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", 0, &inputError{msg: fmt.Sprintf("cannot stat issued tree: %v", err)}
+	}
+	if info.IsDir() {
+		return canonical, appArmorBoundaryDirectory, nil
+	}
+	if info.Mode().IsRegular() {
+		return canonical, appArmorBoundaryRegularFile, nil
+	}
+	return "", 0, &inputError{msg: "issued tree is neither a directory nor a regular file"}
 }
 
 func validateBoundaryPathForRemove(path string) (string, error) {
@@ -175,25 +187,64 @@ func jsonQuote(s string) string {
 	return string(b)
 }
 
-func jsonUnquote(s string) (string, error) {
-	var result string
-	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		return "", err
-	}
-	return result, nil
-}
-
 func escapeAppArmorPath(path string) string {
 	path = strings.ReplaceAll(path, `\`, `\\`)
 	path = strings.ReplaceAll(path, `"`, `\"`)
 	return path
 }
 
-func renderFragment(boundaries []string) []byte {
-	sorted := make([]string, len(boundaries))
+// appArmorBoundaryKind is the stable kind of one managed boundary, decided
+// once when the boundary is added and persisted in the managed fragment.
+// The kind decides which reachability rules the fragment renders; it is
+// never re-derived from mutable current host state, so an unrelated
+// fragment rewrite cannot reinterpret an issued regular-file boundary into
+// directory semantics (or the reverse).
+type appArmorBoundaryKind int
+
+const (
+	appArmorBoundaryDirectory appArmorBoundaryKind = iota
+	appArmorBoundaryRegularFile
+)
+
+// appArmorManagedBoundary is one managed boundary with its stable kind.
+type appArmorManagedBoundary struct {
+	Path string
+	Kind appArmorBoundaryKind
+}
+
+// appArmorBoundaryFileMarker is the JSON kind marker persisted in the
+// managed fragment's root-json metadata for a regular-file boundary. A
+// boundary whose root-json metadata is the plain quoted path (the pre
+// file-root fragment form) is a directory boundary: the legacy fragment
+// represented directory boundaries only.
+const appArmorBoundaryFileMarker = "regular-file"
+
+type appArmorBoundaryFileMeta struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+}
+
+func sortManagedBoundaries(boundaries []appArmorManagedBoundary) []appArmorManagedBoundary {
+	sorted := make([]appArmorManagedBoundary, len(boundaries))
 	copy(sorted, boundaries)
-	sort.Strings(sorted)
-	sorted = deduplicateStrings(sorted)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Path != sorted[j].Path {
+			return sorted[i].Path < sorted[j].Path
+		}
+		return sorted[i].Kind < sorted[j].Kind
+	})
+	deduped := make([]appArmorManagedBoundary, 0, len(sorted))
+	for i, boundary := range sorted {
+		if i > 0 && boundary.Path == deduped[len(deduped)-1].Path {
+			continue
+		}
+		deduped = append(deduped, boundary)
+	}
+	return deduped
+}
+
+func renderFragment(boundaries []appArmorManagedBoundary) []byte {
+	sorted := sortManagedBoundaries(boundaries)
 
 	var buf bytes.Buffer
 
@@ -201,16 +252,20 @@ func renderFragment(boundaries []string) []byte {
 	buf.WriteString(fragmentHeader2 + "\n")
 
 	for _, boundary := range sorted {
-		escaped := escapeAppArmorPath(boundary)
+		escaped := escapeAppArmorPath(boundary.Path)
 		buf.WriteString("\n")
-		buf.WriteString("# root-json: " + jsonQuote(boundary) + "\n")
-		if appArmorBoundaryIsRegularFile(boundary) {
+		if boundary.Kind == appArmorBoundaryRegularFile {
 			// A regular-file boundary grants read reachability to exactly
 			// that file: the trailing-slash and descendant rules would
-			// never match a file.
+			// never match a file. The kind is persisted in the fragment so
+			// every re-render reproduces the exact-file rule without
+			// consulting mutable host state.
+			meta, _ := json.Marshal(appArmorBoundaryFileMeta{Path: boundary.Path, Kind: appArmorBoundaryFileMarker})
+			buf.WriteString("# root-json: " + string(meta) + "\n")
 			buf.WriteString("\"" + escaped + "\" r,\n")
 			continue
 		}
+		buf.WriteString("# root-json: " + jsonQuote(boundary.Path) + "\n")
 		buf.WriteString("\"" + escaped + "/\" r,\n")
 		buf.WriteString("\"" + escaped + "/**\" r,\n")
 	}
@@ -218,16 +273,7 @@ func renderFragment(boundaries []string) []byte {
 	return buf.Bytes()
 }
 
-// appArmorBoundaryIsRegularFile reports whether the boundary path is a
-// regular file, deciding which fragment rules represent it. A path that
-// cannot be stated (deleted between validation and render) renders as a
-// directory, preserving the existing behavior for the validated add path.
-func appArmorBoundaryIsRegularFile(path string) bool {
-	info, err := os.Lstat(path)
-	return err == nil && info.Mode().IsRegular()
-}
-
-func parseFragment(data []byte) ([]string, error) {
+func parseFragment(data []byte) ([]appArmorManagedBoundary, error) {
 	content := string(data)
 	if !strings.HasSuffix(content, "\n") {
 		return nil, errors.New("fragment missing trailing newline")
@@ -245,27 +291,26 @@ func parseFragment(data []byte) ([]string, error) {
 		return nil, errors.New("fragment header mismatch")
 	}
 
-	var boundaries []string
+	var boundaries []appArmorManagedBoundary
 	for i := 2; i < len(lines); i++ {
 		line := lines[i]
 		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "# root-json: ") {
-			quoted := strings.TrimPrefix(line, "# root-json: ")
-			boundary, err := jsonUnquote(quoted)
+			metadata := strings.TrimPrefix(line, "# root-json: ")
+			boundary, err := parseRootJSONBoundary(metadata)
 			if err != nil {
 				return nil, fmt.Errorf("malformed root-json metadata at line %d: %w", i+1, err)
 			}
-			if err := validateBoundaryLexical(boundary); err != nil {
+			if err := validateBoundaryLexical(boundary.Path); err != nil {
 				return nil, fmt.Errorf("invalid root at line %d: %w", i+1, err)
 			}
 			boundaries = append(boundaries, boundary)
 		}
 	}
 
-	sort.Strings(boundaries)
-	deduped := deduplicateStrings(boundaries)
+	deduped := sortManagedBoundaries(boundaries)
 
 	expected := renderFragment(deduped)
 	legacyExpected := bytes.Replace(expected, []byte(fragmentHeader2+"\n"), []byte(legacyFragmentHeader2+"\n"), 1)
@@ -276,18 +321,24 @@ func parseFragment(data []byte) ([]string, error) {
 	return deduped, nil
 }
 
-func deduplicateStrings(s []string) []string {
-	if len(s) == 0 {
-		return s
+// parseRootJSONBoundary parses one root-json metadata value. The quoted-path
+// form is the legacy representation and is always a directory boundary (the
+// pre file-root fragments represented directory boundaries only); the
+// object form carries the stable kind for a regular-file boundary. Any
+// other JSON shape fails closed.
+func parseRootJSONBoundary(metadata string) (appArmorManagedBoundary, error) {
+	var legacy string
+	if err := json.Unmarshal([]byte(metadata), &legacy); err == nil {
+		return appArmorManagedBoundary{Path: legacy, Kind: appArmorBoundaryDirectory}, nil
 	}
-	result := make([]string, 0, len(s))
-	result = append(result, s[0])
-	for i := 1; i < len(s); i++ {
-		if s[i] != s[i-1] {
-			result = append(result, s[i])
-		}
+	var meta appArmorBoundaryFileMeta
+	if err := json.Unmarshal([]byte(metadata), &meta); err != nil {
+		return appArmorManagedBoundary{}, fmt.Errorf("not a boundary metadata value: %w", err)
 	}
-	return result
+	if meta.Kind != appArmorBoundaryFileMarker {
+		return appArmorManagedBoundary{}, fmt.Errorf("unknown boundary kind %q", meta.Kind)
+	}
+	return appArmorManagedBoundary{Path: meta.Path, Kind: appArmorBoundaryRegularFile}, nil
 }
 
 func (m *appArmorProfileManager) acquireAppArmorLock() (*os.File, error) {
@@ -311,11 +362,11 @@ func (m *appArmorProfileManager) acquireAppArmorLock() (*os.File, error) {
 	return f, nil
 }
 
-func (m *appArmorProfileManager) readFragment() ([]string, error) {
+func (m *appArmorProfileManager) readFragment() ([]appArmorManagedBoundary, error) {
 	info, err := os.Lstat(m.managedFragmentPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []string{}, nil
+			return []appArmorManagedBoundary{}, nil
 		}
 		return nil, fmt.Errorf("cannot stat managed fragment: %w", err)
 	}
@@ -334,7 +385,7 @@ func (m *appArmorProfileManager) readFragment() ([]string, error) {
 	return parseFragment(data)
 }
 
-func (m *appArmorProfileManager) writeFragment(boundaries []string) error {
+func (m *appArmorProfileManager) writeFragment(boundaries []appArmorManagedBoundary) error {
 	dir := filepath.Dir(m.managedFragmentPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("cannot create fragment directory: %w", err)
@@ -382,7 +433,7 @@ type fragmentSnapshot struct {
 	exists     bool
 	data       []byte
 	mode       os.FileMode
-	boundaries []string
+	boundaries []appArmorManagedBoundary
 }
 
 func (m *appArmorProfileManager) snapshotFragment() (*fragmentSnapshot, error) {
@@ -498,12 +549,12 @@ func (m *appArmorProfileManager) rollbackFragment(snap *fragmentSnapshot) error 
 	return nil
 }
 
-func (m *appArmorProfileManager) listManagedBoundaries() ([]string, error) {
+func (m *appArmorProfileManager) listManagedBoundaries() ([]appArmorManagedBoundary, error) {
 	return m.readFragment()
 }
 
 func (m *appArmorProfileManager) addManagedBoundary(path string) (boundaryResult, error) {
-	canonical, err := validateBoundaryPathForAdd(path)
+	canonical, kind, err := validateBoundaryPathForAdd(path)
 	if err != nil {
 		return boundaryResult{}, err
 	}
@@ -524,15 +575,16 @@ func (m *appArmorProfileManager) addManagedBoundary(path string) (boundaryResult
 	}
 
 	for _, r := range snap.boundaries {
-		if r == canonical {
+		if r.Path == canonical {
+			// The boundary is already managed with its persisted kind; the
+			// add is idempotent and never re-derives the kind from host
+			// state.
 			return boundaryResult{Path: canonical, Changed: false}, nil
 		}
 	}
 
-	newBoundaries := make([]string, 0, len(snap.boundaries)+1)
-	newBoundaries = append(newBoundaries, snap.boundaries...)
-	newBoundaries = append(newBoundaries, canonical)
-	sort.Strings(newBoundaries)
+	newBoundaries := append(append([]appArmorManagedBoundary{}, snap.boundaries...),
+		appArmorManagedBoundary{Path: canonical, Kind: kind})
 
 	if err := m.writeFragment(newBoundaries); err != nil {
 		return boundaryResult{}, err
@@ -570,10 +622,10 @@ func (m *appArmorProfileManager) removeManagedBoundary(path string) (boundaryRes
 		return boundaryResult{}, err
 	}
 
-	newBoundaries := make([]string, 0, len(snap.boundaries))
+	newBoundaries := make([]appArmorManagedBoundary, 0, len(snap.boundaries))
 	found := false
 	for _, r := range snap.boundaries {
-		if r == canonical {
+		if r.Path == canonical {
 			found = true
 		} else {
 			newBoundaries = append(newBoundaries, r)
@@ -611,8 +663,8 @@ func (m *appArmorProfileManager) check() error {
 
 	// Diagnose managed boundaries that violate the workspace-path policy.
 	for _, boundary := range boundaries {
-		if err := validateWorkspacePathPolicy(boundary); err != nil {
-			return fmt.Errorf("managed boundary %q violates workspace root policy: %s", boundary, err)
+		if err := validateWorkspacePathPolicy(boundary.Path); err != nil {
+			return fmt.Errorf("managed boundary %q violates workspace root policy: %s", boundary.Path, err)
 		}
 	}
 

@@ -95,7 +95,7 @@ type operation struct {
 	// stagedCtx is the staged build context for build operations.
 	// It is cleaned up after the operation completes or fails.
 	stagedCtx *stagedBuildContext
-	// macLeaseRelease releases the workspace-use lease held by this operation.
+	// macLeaseRelease releases the session-use lease held by this operation.
 	// nil when no lease was acquired (user mode or no MAC backend).
 	macLeaseRelease func()
 	// audit metadata for finish event, set by operation-specific factory.

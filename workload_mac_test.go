@@ -651,12 +651,12 @@ func TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage(t *testing.T
 	}
 
 	workspace := "/data/pending-workload"
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	// Bind the workspace coverage to a live session so the boundary is
 	// helper-owned; the session row carries the workspace for the gate.
-	if _, err := mac.CreateSessionBinding(testWorkloadSessionID, []string{workspace}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding(testWorkloadSessionID, []string{workspace}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), testWorkloadSessionID, workspace)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -742,9 +742,9 @@ func TestStaleBoundaryCleanupDeferredForPendingWorkload(t *testing.T) {
 	// boundary (owned, no consumers) is the stale target under test.
 	parentWS := "/data/gated-parent"
 	childWS := "/data/gated-other"
-	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
+	driver := newTestSessionMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
-	if _, err := mac.CreateSessionBinding(testWorkloadSessionID, []string{parentWS}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding(testWorkloadSessionID, []string{parentWS}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(db, testMACLauncherID(t, db), testWorkloadSessionID, parentWS)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)

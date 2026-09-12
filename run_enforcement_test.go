@@ -584,7 +584,7 @@ func TestRunCorruptSnapshotAtRequestTime(t *testing.T) {
 // TestRunReadOnlyRootRefusalReleasesLease proves the MAC lease acquired
 // before the policy decision is released on a read_only_root refusal: the
 // decision happens after lease acquisition but before any pin, operation, or
-// Docker state, and no workspace-use lease survives the refusal.
+// Docker state, and no session-use lease survives the refusal.
 func TestRunReadOnlyRootRefusalReleasesLease(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	dir := t.TempDir()
@@ -615,7 +615,7 @@ func TestRunReadOnlyRootRefusalReleasesLease(t *testing.T) {
 		OperationLogMaxBytes:  4 * 1024 * 1024,
 		Mode:                  ModeSystem,
 	}
-	mac := newSessionMACCoordinator(db, newTestWorkspaceMACDriver(LSMBackend("test")))
+	mac := newSessionMACCoordinator(db, newTestSessionMACDriver(LSMBackend("test")))
 	app := &App{
 		Config:              cfg,
 		DB:                  db,
@@ -647,12 +647,12 @@ func TestRunReadOnlyRootRefusalReleasesLease(t *testing.T) {
 		t.Fatalf("expected read_only_root, got %q", code)
 	}
 
-	// The lease was released with the refusal: only zero workspace-use
+	// The lease was released with the refusal: only zero session-use
 	// leases remain after the refused request.
 	mac.mu.Lock()
 	leaseCount := len(mac.sessionUseLeases)
 	mac.mu.Unlock()
 	if leaseCount != 0 {
-		t.Errorf("read_only_root refusal must release the workspace-use lease, got %d", leaseCount)
+		t.Errorf("read_only_root refusal must release the session-use lease, got %d", leaseCount)
 	}
 }

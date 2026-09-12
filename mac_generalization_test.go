@@ -114,7 +114,7 @@ func TestSessionMACBoundariesProjection(t *testing.T) {
 			// The workspace always remains covered through one of the trees.
 			covered := false
 			for _, boundary := range got {
-				if boundaryCoversWorkspace(boundary, tc.workspace) {
+				if boundaryCoversTree(boundary, tc.workspace) {
 					covered = true
 				}
 			}
@@ -147,7 +147,7 @@ func TestCoordinatorMultiBoundarySession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := mac.CreateSessionBinding("sess-multi", []string{ws, ext1, ext2}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-multi", []string{ws, ext1, ext2}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-multi", ws)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -194,7 +194,7 @@ func TestCoordinatorDriverDeduplicatesSameBoundary(t *testing.T) {
 	driver.coverageMap[child] = parent
 	driver.helperOwnedBoundaries[parent] = true
 
-	if _, err := mac.CreateSessionBinding("sess-shared", []string{parent, child}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-shared", []string{parent, child}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-shared", parent)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -242,7 +242,7 @@ func TestCoordinatorEnsureRollback(t *testing.T) {
 				driver.ensureFailures = map[string]bool{tree3: true}
 			}
 
-			_, err = mac.CreateSessionBinding("sess-rb", trees, func([]workspaceMACCoverage) error {
+			_, err = mac.CreateSessionBinding("sess-rb", trees, func([]sessionMACCoverage) error {
 				t.Fatal("insertFn must never run when coverage preparation fails")
 				return nil
 			})
@@ -290,7 +290,7 @@ func TestCoordinatorOwnershipRecordFailureRollsBack(t *testing.T) {
 		t.Fatalf("drop mac_boundaries: %v", err)
 	}
 
-	_, err = mac.CreateSessionBinding("sess-own", []string{ws}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-own", []string{ws}, func([]sessionMACCoverage) error {
 		return nil
 	})
 	if err == nil || !errors.Is(err, ErrMACPreparation) {
@@ -317,7 +317,7 @@ func TestCoordinatorLeaseProtectsAllBoundRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := mac.CreateSessionBinding("sess-lease", []string{ws, ext}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-lease", []string{ws, ext}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-lease", ws)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -362,7 +362,7 @@ func TestCoordinatorLeaseAcquireRejectsUnknownSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mac.CreateSessionBinding("sess-live", []string{ws}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-live", []string{ws}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-live", ws)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -388,7 +388,7 @@ func TestCoordinatorSharedBoundaryRelease(t *testing.T) {
 	}
 
 	for _, sess := range []string{"sess-a", "sess-b"} {
-		if _, err := mac.CreateSessionBinding(sess, []string{shared}, func([]workspaceMACCoverage) error {
+		if _, err := mac.CreateSessionBinding(sess, []string{shared}, func([]sessionMACCoverage) error {
 			return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sess, shared)
 		}); err != nil {
 			t.Fatalf("CreateSessionBinding(%s): %v", sess, err)
@@ -420,12 +420,12 @@ func TestCoordinatorParentChildOverlapRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := mac.CreateSessionBinding("sess-parent", []string{parent}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-parent", []string{parent}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-parent", parent)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(parent): %v", err)
 	}
-	if _, err := mac.CreateSessionBinding("sess-child", []string{child}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-child", []string{child}, func([]sessionMACCoverage) error {
 		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-child", child)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(child): %v", err)
@@ -464,7 +464,7 @@ func TestCoordinatorPendingWorkloadExternalRoot(t *testing.T) {
 
 	// The create callback commits the session row and the two-tree issued
 	// snapshot together, exactly like the real create transaction.
-	if _, err := mac.CreateSessionBinding("sess-pending", []string{ws, ext}, func([]workspaceMACCoverage) error {
+	if _, err := mac.CreateSessionBinding("sess-pending", []string{ws, ext}, func([]sessionMACCoverage) error {
 		if err := insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-pending", ws); err != nil {
 			return err
 		}
@@ -625,7 +625,7 @@ func TestCoordinatorStartupConcurrentDeleteRunRace(t *testing.T) {
 	errCh := make(chan error, iterations)
 	for i := 0; i < iterations; i++ {
 		sess := fmt.Sprintf("sess-race-%d", i)
-		if _, err := mac.CreateSessionBinding(sess, []string{ws, ext}, func([]workspaceMACCoverage) error {
+		if _, err := mac.CreateSessionBinding(sess, []string{ws, ext}, func([]sessionMACCoverage) error {
 			return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sess, ws)
 		}); err != nil {
 			t.Fatalf("CreateSessionBinding(%s): %v", sess, err)
@@ -683,7 +683,7 @@ func TestCoordinatorInsertFailureRollback(t *testing.T) {
 	}
 
 	injected := errors.New("session creation transaction failed")
-	_, err = mac.CreateSessionBinding("sess-ins", []string{ws, ext}, func([]workspaceMACCoverage) error {
+	_, err = mac.CreateSessionBinding("sess-ins", []string{ws, ext}, func([]sessionMACCoverage) error {
 		return injected
 	})
 	if !errors.Is(err, injected) {
@@ -699,5 +699,111 @@ func TestCoordinatorInsertFailureRollback(t *testing.T) {
 		if _, err := driver.verifyCoverage(boundary); err == nil {
 			t.Errorf("prepared boundary %s must be rolled back after the failed create commit", boundary)
 		}
+	}
+}
+
+// TestCoordinatorPreparesEveryConcreteIssuedTreeBeforeDedup proves the
+// physical-boundary dedup never short-circuits backend preparation: two
+// sibling issued trees resolving onto the same physical ancestor boundary
+// are BOTH prepared, and the ancestor appears in the binding exactly once.
+// The pre-correction behavior skipped tree B once the ancestor was resolved
+// through tree A, which left B's actual labels unprepared.
+func TestCoordinatorPreparesEveryConcreteIssuedTreeBeforeDedup(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	parent, err := os.MkdirTemp(allowedRoot, "shared-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	siblingA := filepath.Join(parent, "a")
+	siblingB := filepath.Join(parent, "b")
+	for _, sibling := range []string{siblingA, siblingB} {
+		if err := os.MkdirAll(sibling, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The driver resolves both siblings onto the same physical ancestor.
+	driver.coverageMap[siblingA] = parent
+	driver.coverageMap[siblingB] = parent
+	driver.helperOwnedBoundaries[parent] = true
+
+	if _, err := mac.CreateSessionBinding("sess-siblings", []string{siblingA, siblingB}, func([]sessionMACCoverage) error {
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-siblings", siblingA)
+	}); err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	if len(driver.preparedTrees) != 2 {
+		t.Fatalf("prepared trees = %v, want both concrete issued trees", driver.preparedTrees)
+	}
+	if driver.preparedTrees[0] != siblingA || driver.preparedTrees[1] != siblingB {
+		t.Errorf("prepared trees = %v, want [%s %s] in projection order", driver.preparedTrees, siblingA, siblingB)
+	}
+
+	mac.mu.Lock()
+	binding := mac.sessionBindings["sess-siblings"]
+	count := mac.boundaryConsumerCounts[parent]
+	mac.mu.Unlock()
+	if len(binding) != 1 || binding[0].Boundary != parent {
+		t.Fatalf("binding = %+v, want exactly the physical ancestor %q once", binding, parent)
+	}
+	if count != 1 {
+		t.Errorf("consumer count on the ancestor = %d, want 1 (one Session contributes at most one consumer)", count)
+	}
+}
+
+// TestCoordinatorStartupReconcilePreparesEveryConcreteIssuedTree proves the
+// startup reconciliation follows the same semantics: every concrete issued
+// tree of the persisted snapshot is verified (and repaired when needed)
+// before the physical coverage is deduplicated into the reconstructed
+// binding.
+func TestCoordinatorStartupReconcilePreparesEveryConcreteIssuedTree(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+	allowedRoot := app.Config.AllowedRoots[0].Path
+	parent, err := os.MkdirTemp(allowedRoot, "shared-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	siblingA := filepath.Join(parent, "a")
+	siblingB := filepath.Join(parent, "b")
+	for _, sibling := range []string{siblingA, siblingB} {
+		if err := os.MkdirAll(sibling, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	driver.coverageMap[siblingA] = parent
+	driver.coverageMap[siblingB] = parent
+	driver.helperOwnedBoundaries[parent] = true
+
+	if err := insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-reconcile-siblings", siblingA); err != nil {
+		t.Fatal(err)
+	}
+	insertTestSessionSnapshotEntries(t, app.DB, "sess-reconcile-siblings", normalizeAllowedRootEntries([]AllowedRootEntry{
+		{Path: siblingA, Access: AllowedRootAccessReadOnly},
+		{Path: siblingB, Access: AllowedRootAccessReadOnly},
+	}))
+
+	if err := mac.ReconcileLiveSessions(); err != nil {
+		t.Fatalf("ReconcileLiveSessions: %v", err)
+	}
+
+	if len(driver.verifiedTrees) != 2 {
+		t.Fatalf("verified trees = %v, want both concrete issued trees verified", driver.verifiedTrees)
+	}
+	if driver.verifiedTrees[0] != siblingA || driver.verifiedTrees[1] != siblingB {
+		t.Errorf("verified trees = %v, want [%s %s] in projection order", driver.verifiedTrees, siblingA, siblingB)
+	}
+
+	mac.mu.Lock()
+	binding := mac.sessionBindings["sess-reconcile-siblings"]
+	count := mac.boundaryConsumerCounts[parent]
+	mac.mu.Unlock()
+	if len(binding) != 1 || binding[0].Boundary != parent {
+		t.Fatalf("reconstructed binding = %+v, want exactly the physical ancestor %q once", binding, parent)
+	}
+	if count != 1 {
+		t.Errorf("consumer count on the ancestor = %d, want 1", count)
 	}
 }
