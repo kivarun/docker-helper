@@ -1020,15 +1020,38 @@ scope, or the meet of that ceiling with the Launcher's stored entries for
 `restricted` scope (stale out-of-ceiling Launcher roots are rejected,
 never truncated).
 
-MAC state is derived from the concrete live session/workspace lifecycle,
-not from the authorization ceiling. Only the session workspace participates
-in MAC preparation: AppArmor managed-boundary coverage for the workspace, or
-SELinux Session workspace fcontext labeling with MCS constraints. The
-authorization roots never own MAC state; a broader ceiling never causes
-recursive MAC relabeling. Adding `/opt` as a global allowed root must never
-imply recursive relabeling of `/opt/**`.
+MAC state is derived from the concrete issued-Session-tree lifecycle, not
+from the authorization ceilings. The canonical statement, corrected by the
+Release 2.2 final-UAT architectural correction (the workspace-only sentence
+it supersedes is recorded in
+[`release-2.2-mac-enforcement.md`](release-2.2-mac-enforcement.md)):
 
-Distinct from session workspace MAC preparation, system-mode `docker-helper init`
+  Session MAC preparation covers the concrete filesystem trees issued in
+  the immutable Session filesystem snapshot. The workspace is one issued
+  tree; additional issued roots participate in the same Session MAC
+  lifecycle. Authorization ceilings remain MAC-free and never trigger
+  relabeling merely because they could authorize a future Session.
+
+The three layers stay distinct:
+
+- **Authorization ceilings** (global / Principal / Launcher allowed roots):
+  no MAC state; a broader ceiling never causes recursive MAC relabeling.
+  Adding `/opt` as a global allowed root must never imply recursive
+  relabeling of `/opt/**`.
+- **Issued Session snapshot**: the concrete granted filesystem capability;
+  it derives the Session MAC binding (one canonical minimal boundary set
+  per Session, access-agnostic).
+- **Workload exposure**: the concrete operation request; the snapshot
+  decides access, and the workload MAC materialization owns the per-workload
+  read-only/read-write backend defense.
+
+Session MAC binding provides host/backend reachability only. Access modes
+(read_write/read_only), the writable-parent rule, and most-specific
+transitions remain owned exclusively by the immutable Session filesystem
+snapshot and the per-workload exposure materialization; Session MAC
+preparation never interprets access modes.
+
+Distinct from Session MAC preparation, system-mode `docker-helper init`
 under enforcing SELinux applies the installed fcontext rules to docker-helper's
 own deployment state: the helper-owned `/etc/docker-helper/**` (config) and
 `/var/lib/docker-helper/**` (state) trees are relabeled to
@@ -1204,22 +1227,27 @@ not-found. It never recomputes current parent policy.
 
 MAC state follows the concrete Session lifecycle, not the policy ceilings:
 
-- a created session receives its workspace MAC preparation (AppArmor
-  managed-boundary coverage, or SELinux workspace fcontext labeling with
-  MCS constraints) as part of the session lifecycle; a preparation failure
-  after persistence fails the creation closed (`mac_preparation_failed`);
+- a created session receives MAC preparation for every filesystem tree
+  issued in its immutable snapshot (AppArmor managed-boundary coverage, or
+  SELinux fcontext labeling with MCS constraints) as part of the session
+  lifecycle; a preparation failure after persistence fails the creation
+  closed (`mac_preparation_failed`), rolls back what it prepared through
+  the canonical removal owner, and leaves no usable bearer;
 - a deleted, expired, invalidated, or migrated-away session releases its
-  MAC boundary through the existing release paths (including startup
-  reconciliation of stale boundaries). The release is gated on pending
-  helper-owned workload state: while a workload ownership record for a
-  session's workspace is still unresolved at startup (its container
-  cannot be proven absent, e.g. Docker is temporarily unavailable), the
-  session MAC coordinator defers releasing that workspace's coverage so
-  the unproven workload state keeps the MAC world it needs to finish
+  complete MAC binding (every issued tree) through the existing release
+  paths (including startup reconciliation of stale boundaries). The
+  release is gated on pending helper-owned workload state: while a
+  workload ownership record for a session is still unresolved at startup
+  (its container cannot be proven absent, e.g. Docker is temporarily
+  unavailable), the session MAC coordinator defers releasing that
+  session's issued coverage — every issued tree, not only the workspace —
+  so the unproven workload state keeps the MAC world it needs to finish
   safely; the release happens after workload reconciliation proves the
-  cleanup done. An expired or deleted Session stops authorizing new
-  operations immediately; only its host MAC coverage may outlive it
-  until the dependent workload state is proven gone.
+  cleanup done. When a pending workload's session row or persisted
+  snapshot cannot be resolved, every possibly required helper-owned
+  boundary is deferred (fail closed). An expired or deleted Session stops
+  authorizing new operations immediately; only its host MAC coverage may
+  outlive it until the dependent workload state is proven gone.
 - managed boundaries are helper-owned MAC state (AppArmor's dynamic
   boundary state file), never authorization roots and never config.json
   state.

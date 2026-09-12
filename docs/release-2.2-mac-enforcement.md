@@ -25,8 +25,8 @@ matrices remain Phase 2.2.7 release gates. The accepted production shape:
 - `workloadMACCoordinator` (workload_mac.go) is the single operation-lifetime
   owner; it never reads allowed-root tables, Session snapshots,
   `LookupAccess`, or `CanExposeWritable`, and only materializes the accepted
-  `sessionFilesystemExposure` plan. Session workspace coverage stays with
-  `sessionMACCoordinator`.
+  `sessionFilesystemExposure` plan. Session issued-tree MAC coverage stays
+  with `sessionMACCoordinator`.
 - Workload RO/RW follows the caller-requested mode (`RequestedReadOnly`), not
   only `exposure.Access`; snapshot read_write + caller read_only still yields
   a protected RO exposure.
@@ -123,9 +123,43 @@ Release 2.1.1 SELinux:
 - grants `docker_helper_container_t` normal development-tree read/write
   semantics over those workspace types.
 
-The current Session workspace is the MAC lifecycle unit. Global, Principal, and
-Launcher allowed-root ceilings do not recursively own or relabel MAC state.
-Release 2.2 preserves that principle.
+The issued Session filesystem snapshot is the MAC lifecycle unit: one
+canonical minimal boundary set per Session, derived from the issued
+snapshot, access-agnostic. This supersedes the earlier workspace-only
+statement ("the current Session workspace is the MAC lifecycle unit");
+see the architectural-correction record below. Global, Principal, and
+Launcher allowed-root ceilings do not recursively own or relabel MAC
+state, and never trigger relabeling merely because they could authorize a
+future Session. Release 2.2 preserves that principle.
+
+## Architectural correction (final-UAT discovery)
+
+The final exact-artifact SELinux UAT demonstrated that a workspace-only
+MAC preparation cannot deliver the Release 2.2 multi-root contract: a
+read-write external issued root (the container must write it) kept its
+distro label (`usr_t`), and `docker_helper_container_t` — correctly — has
+no write permission on distro types, so the write was denied by the MAC
+backend while the snapshot authorized it. The workspace-only sentence
+("Only the session workspace participates in MAC preparation") is
+therefore superseded by the issued-snapshot statement above:
+
+- **Authorization ceilings** (global / Principal / Launcher allowed
+  roots): no MAC state; never create MAC state merely by existing.
+- **Issued Session filesystem snapshot**: the concrete capability granted
+  to one Session; it owns the concrete Session MAC binding requirement
+  (one canonical minimal boundary set, access-agnostic).
+- **Workload exposure**: the concrete operation request; the snapshot
+  decides access; the workload MAC materialization owns the per-workload
+  RO/RW backend defense.
+
+Access mode is not a Session-MAC concern: Session MAC binding provides
+host/backend reachability only. The projection from snapshot to boundaries
+is deterministic, canonically ordered, duplicate-free, and drops a
+redundant descendant boundary when an issued ancestor already covers it;
+the workspace always remains covered through one of the resulting trees.
+Regular-file issued roots are concrete boundaries. Only issuance of a
+concrete Session tree triggers helper-owned MAC mutation; ceilings never
+do.
 
 ## Security objective
 
@@ -402,11 +436,12 @@ allowed-root rows own host policy.
 
 Conceptually there are still two different lifetimes:
 
-1. **Session workspace coverage** — the existing 2.1.1 AppArmor/SELinux state
-   required for the daemon and workload to access the concrete Session
-   workspace safely;
-2. **workload exposure policy** — operation/container-lifetime MAC state needed
-   to mirror the already-resolved target read/write plan.
+1. **Session issued-tree coverage** — the existing 2.1.1 AppArmor/SELinux
+   state required for the daemon and workload to access the concrete
+   Session filesystem trees (the workspace and every additional issued
+   root) safely;
+2. **workload exposure policy** — operation/container-lifetime MAC state
+   needed to mirror the already-resolved target read/write plan.
 
 The second lifetime may be implemented without durable state if the chosen
 backend proves that safe. If helper-owned generated state is required, it must

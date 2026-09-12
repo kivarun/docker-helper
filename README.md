@@ -1303,10 +1303,12 @@ for the SELinux policy and acceptance record.
 The AppArmor and SELinux sections are intentionally asymmetric. AppArmor
 keeps persistent backend-specific managed workspace boundaries
 (`apparmor root list/add/remove`), while SELinux MAC state is owned by the
-Session lifecycle (`sessionMACCoordinator`): concrete Session workspaces
-receive the necessary SELinux file-context coverage and labels at session
-creation time. Authorization roots (global, principal, launcher) are not a
-second persistent SELinux root-management API, so there is no
+Session lifecycle (`sessionMACCoordinator`): the concrete filesystem trees
+issued in a Session's immutable snapshot (the workspace and every
+additional issued root) receive the necessary SELinux file-context
+coverage and labels at session creation time. Authorization roots (global,
+principal, launcher) are not a second persistent SELinux root-management
+API and never trigger relabeling merely by existing, so there is no
 `selinux root add/remove` command; `docker-helper selinux check` remains a
 read-only diagnostic.
 
