@@ -9,7 +9,8 @@
 #     or socket;
 #   * a workload with --helper-socket sees /run/docker-helper/
 #     docker-helper.sock and can reach the daemon through it;
-#   * ordinary absolute --mount sources remain rejected (the helper runtime
+#   * ordinary absolute --mount sources outside the issued Session
+#     filesystem snapshot remain rejected by the daemon (the helper runtime
 #     path is not obtainable through the ordinary mount contract);
 #   * workspace escape remains rejected;
 #   * the socket provides transport only: an operation without a bearer
@@ -86,12 +87,15 @@ else
 fi
 
 # --- ordinary absolute mount of the helper runtime remains rejected ----------
+# The daemon owns the mount-source authorization: /run/docker-helper is not
+# inside the issued Session filesystem snapshot, so the request is refused
+# with the stable invalid_mount code before any pin/container state exists.
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
   dh run --image "$IMAGE" --mount "/run/docker-helper:/run/docker-helper" -- true \
   >/tmp/uat-reg16-absmount.out 2>/tmp/uat-reg16-absmount.err
 ABS_RC=$?
-if [ "$ABS_RC" != 0 ] && grep -q "relative" /tmp/uat-reg16-absmount.err 2>/dev/null; then
-  reg_ok "ordinary absolute --mount of the helper runtime path remains rejected"
+if [ "$ABS_RC" != 0 ] && grep -q "invalid_mount" /tmp/uat-reg16-absmount.err 2>/dev/null; then
+  reg_ok "ordinary absolute --mount of the helper runtime path remains rejected (invalid_mount)"
 else
   reg_fail "absolute --mount handling unexpected (rc=$ABS_RC, stderr: $(cat /tmp/uat-reg16-absmount.err 2>/dev/null))"
 fi

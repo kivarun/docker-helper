@@ -622,11 +622,28 @@ else
   echo "  S7 detail: run-log=$(cat /tmp/uat-wls-s7.log 2>/dev/null | redact | tail -2)" >&2
   grep 'fuse.bindfs' /proc/mounts 2>/dev/null | sed 's/^/  S7 mounts: /' >&2 || echo "  S7 mounts: none" >&2
 fi
-if journalctl --utc -u docker-helper.service --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null \
-    | grep '"event":"run.start"' | grep -q '"workload_mac_backend":"selinux"'; then
+# The run.start audit stream carries the backend fact for every system-mode
+# run. The bounded window conversion uses the same ISO form as the S13 AVC
+# window (journalctl's @epoch since-form is not uniformly accepted across
+# systemd builds); the window is retried briefly because journald can lag the
+# just-finished run, and a failed read is diagnosed instead of failing silent.
+S7_AUDIT_START="$(date -u -d "@${AUDIT_START_EPOCH}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
+S7_AUDIT_OK=""
+for _s7i in 1 2 3; do
+  if [ -n "$S7_AUDIT_START" ] \
+      && journalctl --utc -u docker-helper.service --since "$S7_AUDIT_START" --no-pager 2>/dev/null \
+        | grep '"event":"run.start"' | grep -q '"workload_mac_backend":"selinux"'; then
+    S7_AUDIT_OK=1
+    break
+  fi
+  sleep 2
+done
+if [ -n "$S7_AUDIT_OK" ]; then
   acc_ok "S7 run.start audit records workload_mac_backend=selinux"
 else
-  acc_fail "S7 run.start audit does not record the SELinux workload backend"
+  acc_fail "S7 run.start audit does not record the SELinux workload backend (window start: ${S7_AUDIT_START:-unavailable})"
+  journalctl --utc -u docker-helper.service --no-pager 2>/dev/null \
+    | grep '"event":"run.start"' | tail -3 | sed 's/^/  S7 audit detail: /' >&2 || true
 fi
 
 # ==============================================================================
