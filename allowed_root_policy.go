@@ -164,57 +164,80 @@ func composeAllowedRootScopes(ceiling, narrowing []AllowedRootEntry) []AllowedRo
 // not a valid narrowing of the effective Launcher policy ceiling. The request
 // may only narrow: any attempt to obtain path authority or an access mode
 // wider than the ceiling is refused before the Session exists. It is distinct
-// from ErrReadOnlyRoot, which is the data-plane refusal of an already-issued
-// Session snapshot; at issuance time no Session exists.
+// from ErrReadOnlyRoot and ErrOutsideSessionSnapshot, which are data-plane
+// refusals of an already-issued Session snapshot; at issuance time no Session
+// exists.
 var ErrInvalidSessionFilesystemPolicy = errors.New("session filesystem request is not a valid narrowing of the effective launcher policy")
 
 // narrowSessionFilesystemPolicy is the one domain operation of the
-// issuance-time Session filesystem narrowing (Release 2.2): it composes the
-// effective Launcher filesystem ceiling with the canonical Session filesystem
-// request and returns the canonical effective entries the Session snapshot is
-// derived from.
+// issuance-time Session filesystem roots (Release 2.2): it composes the
+// effective Launcher filesystem ceiling with the requested Session scope and
+// returns the canonical effective entries the Session snapshot is persisted
+// from.
 //
 // ceiling and requested are canonical absolute AllowedRootEntry values:
-// requested paths have already been canonicalized by the Session lifecycle
-// (workspace join, symlink resolution, containment proof) and "." has become
-// the workspace path itself. The composition happens inside the existing
-// create linearization boundary, so the ceiling and the committed snapshot
-// always describe one coherent policy generation.
+// requested roots have already been canonicalized by the Session lifecycle
+// (absolute path, symlink resolution, existing directory or regular file).
+// The composition happens inside the existing create linearization boundary,
+// so the ceiling and the committed snapshot always describe one coherent
+// policy generation.
 //
-// Before composing, every requested entry is proven to narrow the ceiling;
+// Before composing, every requested root is proven to narrow the ceiling;
 // composeAllowedRootScopes alone is not a sufficient validation boundary,
 // because the meet could silently turn an unlawfully requested read_write
 // into read_only and an out-of-ceiling path could simply vanish from the
-// result. Each requested path must be authorized by the ceiling, and a
+// result. Each requested root must be authorized by the ceiling, and a
 // requested read_write under an effective read_only region is an explicit
-// refusal, never a silent narrowing. The requested set must also authorize
-// the workspace itself (the required "." entry), so the whole Session
-// workspace stays the capability root and no unmanaged gap can be created.
-// Duplicate canonical requested paths are refused by the canonical entry
-// validation.
+// refusal, never a silent narrowing. Duplicate canonical requested roots are
+// refused by the canonical entry validation.
 //
-// After pre-validation the composition is performed by the existing
-// composition/normalization owner: most-specific lookup and access-mode meet
-// semantics are not duplicated here. Ceiling entries strictly inside the
-// workspace survive the composition, so a narrower ceiling read_only region
-// remains protected even when the request re-exposes its parent read-write.
+// The requested scope is the implicit workspace grant — the effective
+// ceiling mode at the canonical workspace (the maximum the Session can
+// obtain there) — plus every explicit root, with an explicit root at the
+// workspace path replacing the implicit grant under the same privilege
+// rule. After pre-validation the composition is performed by the existing
+// composition/normalization owner: most-specific lookup and access-mode
+// meet semantics are not duplicated here. Ceiling entries inside a selected
+// root survive the composition, so a narrower ceiling read_only region
+// remains protected even when the selection re-exposes its parent
+// read-write, and every selected disjoint root tree is preserved in the
+// result.
 func narrowSessionFilesystemPolicy(ceiling []AllowedRootEntry, workspace string, requested []AllowedRootEntry) ([]AllowedRootEntry, error) {
-	if err := validateCanonicalAllowedRootEntries(requested); err != nil {
-		return nil, fmt.Errorf("session filesystem request: %v: %w", err, ErrInvalidSessionFilesystemPolicy)
+	if len(requested) == 0 {
+		// An empty explicit request is not an issuance operation: the
+		// workspace-only create is the inherited derivation path, and the
+		// byte-for-byte inherited behavior must never be re-composed here.
+		return nil, ErrInvalidSessionFilesystemPolicy
 	}
-	if _, ok := lookupAllowedRootAccess(requested, workspace); !ok {
-		return nil, fmt.Errorf("session filesystem request must include the workspace entry %q: %w", ".", ErrInvalidSessionFilesystemPolicy)
+	if err := validateCanonicalAllowedRootEntries(requested); err != nil {
+		return nil, fmt.Errorf("session filesystem roots: %v: %w", err, ErrInvalidSessionFilesystemPolicy)
 	}
 	for _, e := range requested {
 		up, ok := lookupAllowedRootAccess(ceiling, e.Path)
 		if !ok {
-			return nil, fmt.Errorf("filesystem entry %q is outside the effective launcher policy: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
+			return nil, fmt.Errorf("filesystem root %q is outside the effective launcher policy: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
 		}
 		if e.Access == AllowedRootAccessReadWrite && up == AllowedRootAccessReadOnly {
-			return nil, fmt.Errorf("filesystem entry %q requests read_write under an effective read_only region: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
+			return nil, fmt.Errorf("filesystem root %q requests read_write under an effective read_only region: %w", e.Path, ErrInvalidSessionFilesystemPolicy)
 		}
 	}
-	composed := composeAllowedRootScopes(ceiling, requested)
+	implicit, ok := lookupAllowedRootAccess(ceiling, workspace)
+	if !ok {
+		return nil, fmt.Errorf("workspace %q is not inside the effective launcher policy: %w", workspace, ErrInvalidSessionFilesystemPolicy)
+	}
+	scope := make([]AllowedRootEntry, 0, len(requested)+1)
+	scope = append(scope, AllowedRootEntry{Path: workspace, Access: implicit})
+	for _, e := range requested {
+		if e.Path == workspace {
+			// An explicit root at the canonical workspace replaces the
+			// implicit workspace grant (under the same privilege rule
+			// proven above).
+			scope[0] = e
+			continue
+		}
+		scope = append(scope, e)
+	}
+	composed := composeAllowedRootScopes(ceiling, scope)
 	if len(composed) == 0 {
 		return nil, ErrInvalidSessionFilesystemPolicy
 	}
@@ -293,25 +316,29 @@ func effectiveLauncherAllowedRoots(globalEntries []AllowedRootEntry, snap *sessi
 	return composeAllowedRootScopes(principalCeiling, snap.launcherRoots), nil
 }
 
-// sessionFilesystemSnapshot is the immutable derived filesystem policy of one
-// Session: the Session workspace as the explicit root entry plus every
-// effective mode transition inside it. It is derived state owned by the
-// Session lifecycle; it is not a fourth mutable policy scope.
+// sessionFilesystemSnapshot is the immutable derived filesystem policy of
+// one Session: one or more disjoint canonical root trees — the workspace is
+// always authorized and additional issued roots wherever the effective
+// Launcher ceiling allowed them. It is derived state owned by the Session
+// lifecycle; it is not a fourth mutable policy scope.
 type sessionFilesystemSnapshot struct {
 	Workspace string
 	Entries   []AllowedRootEntry
 }
 
 // newSessionFilesystemSnapshot validates one canonical snapshot value
-// against the independent trusted Session workspace. The workspace must be a
-// canonical absolute path, the entries must be canonical, non-empty, begin
-// with the workspace itself, and stay inside it. The entries must also be
-// exactly the canonical normalized representation: the boundary proves the
-// stored shape instead of silently sorting, deduplicating, or reconstructing
-// persisted Session authority. Any other state is corrupt and fails closed:
-// the snapshot is the authority an issued Session bearer grants, so the
-// boundary never guesses the workspace from persisted policy data and never
-// accepts a snapshot rooted elsewhere or in a noncanonical form.
+// against the independent trusted Session workspace. The workspace must be
+// a canonical absolute path, the entries must be canonical, non-empty, and
+// exactly the canonical normalized representation, and the snapshot must
+// authorize the workspace. Entries may form multiple disjoint root trees:
+// the workspace is not required to be the first entry, to appear as an
+// entry at all (an ancestor root may authorize it), or to contain the
+// additional issued roots. The boundary proves the stored shape instead of
+// silently sorting, deduplicating, or reconstructing persisted Session
+// authority; any other state is corrupt and fails closed: the snapshot is
+// the authority an issued Session bearer grants, so the boundary never
+// guesses the workspace from persisted policy data and never accepts a
+// snapshot that does not authorize its workspace or a noncanonical form.
 func newSessionFilesystemSnapshot(workspace string, entries []AllowedRootEntry) (*sessionFilesystemSnapshot, error) {
 	if err := validateCanonicalAllowedRootEntries(entries); err != nil {
 		return nil, err
@@ -322,13 +349,8 @@ func newSessionFilesystemSnapshot(workspace string, entries []AllowedRootEntry) 
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("session filesystem snapshot has no entries")
 	}
-	if entries[0].Path != workspace {
-		return nil, fmt.Errorf("session filesystem snapshot root %q is not the workspace %q", entries[0].Path, workspace)
-	}
-	for _, e := range entries[1:] {
-		if !pathWithin(workspace, e.Path) {
-			return nil, fmt.Errorf("session filesystem snapshot entry %q is outside the workspace %q", e.Path, workspace)
-		}
+	if _, ok := lookupAllowedRootAccess(entries, workspace); !ok {
+		return nil, fmt.Errorf("session filesystem snapshot does not authorize the workspace %q", workspace)
 	}
 	if canonical := normalizeAllowedRootEntries(entries); !slices.Equal(entries, canonical) {
 		return nil, fmt.Errorf("session filesystem snapshot entries are not the canonical normalized representation")
@@ -336,14 +358,17 @@ func newSessionFilesystemSnapshot(workspace string, entries []AllowedRootEntry) 
 	return &sessionFilesystemSnapshot{Workspace: workspace, Entries: slices.Clone(entries)}, nil
 }
 
-// deriveSessionFilesystemSnapshot derives the pure Session filesystem
-// snapshot from the canonical effective policy and the Session workspace:
+// deriveSessionFilesystemSnapshot derives the inherited (omitted-request)
+// pure Session filesystem snapshot from the canonical effective policy and
+// the Session workspace, byte-for-byte the pre-filesystem-roots behavior:
 // the workspace boundary is materialized with its effective mode (which may
 // come from an ancestor entry outside the workspace), every policy entry
 // strictly inside the workspace keeps its transition, and redundant
-// transitions are normalized away. Entries outside the workspace never enter
-// the snapshot. The derivation performs no filesystem I/O: it works on
-// already-canonical paths.
+// transitions are normalized away. Entries outside the workspace never
+// enter the snapshot. Issuance-time filesystem roots compose a different
+// requested scope through narrowSessionFilesystemPolicy and construct the
+// snapshot directly from the composed result. The derivation performs no
+// filesystem I/O: it works on already-canonical paths.
 //
 // Existing Session-create admission rules (a workspace must be a proper
 // subdirectory of an allowed root) belong to the Session lifecycle, not to
@@ -374,15 +399,12 @@ func deriveSessionFilesystemSnapshot(effective []AllowedRootEntry, workspace str
 	return newSessionFilesystemSnapshot(workspace, normalized)
 }
 
-// LookupAccess resolves one source path against the snapshot: the
-// source must be inside the snapshot workspace, and the most-specific
-// snapshot entry determines the effective read_write/read_only mode. A
-// source outside the workspace has no authority and never falls back to a
-// default mode.
+// LookupAccess resolves one source path against the snapshot entries
+// directly: the most-specific snapshot entry determines the effective
+// read_write/read_only mode. A source covered by no snapshot entry — the
+// workspace is always authorized, additional roots wherever they were
+// issued — has no authority and never falls back to a default mode.
 func (s *sessionFilesystemSnapshot) LookupAccess(source string) (AllowedRootAccess, bool) {
-	if !pathWithin(s.Workspace, source) {
-		return "", false
-	}
 	return lookupAllowedRootAccess(s.Entries, source)
 }
 
@@ -410,10 +432,21 @@ func (s *sessionFilesystemSnapshot) CanExposeWritable(source string) bool {
 // ErrReadOnlyRoot is the typed data-plane refusal: the requested writable
 // exposure of one canonical source is refused by the persisted Session
 // filesystem snapshot. It is distinct from structural mount validation
-// (invalid_mount) and from authentication (unauthorized): the Session is
-// authenticated and the source is inside its workspace, but the issued
-// snapshot does not permit writable exposure.
+// (invalid_mount), from the unissued-source refusal (ErrOutsideSessionSnapshot),
+// and from authentication (unauthorized): the Session is authenticated and
+// the source carries issued snapshot authority, but the issued snapshot does
+// not permit writable exposure.
 var ErrReadOnlyRoot = errors.New("writable exposure refused by the issued session filesystem snapshot")
+
+// ErrOutsideSessionSnapshot is the typed data-plane refusal: the canonical
+// source carries no issued Session filesystem snapshot authority. The
+// Session is authenticated, the snapshot loaded intact, and the source is a
+// resolvable directory or regular file — but it was never issued to this
+// Session (neither the workspace nor any issued filesystem root contains
+// it). It is an ordinary caller policy mistake, answered with the stable
+// non-disclosing invalid_mount contract, never an internal integrity error
+// and never a default grant.
+var ErrOutsideSessionSnapshot = errors.New("canonical source is not authorized by the issued session filesystem snapshot")
 
 // sessionFilesystemExposure is the accepted data-plane filesystem exposure
 // decision for one canonical source: the persisted immutable Session
@@ -450,9 +483,10 @@ type sessionFilesystemExposure struct {
 // identity against the snapshot for the requested consumption mode:
 // read-only consumption is permitted for either snapshot access mode, while
 // writable consumption requires the snapshot owner's writable-parent query.
-// LookupAccess failing for a workspace-contained source is an internal
-// state/integrity error, never a default grant and never the
-// read_only_root refusal.
+// LookupAccess failing is the typed ErrOutsideSessionSnapshot refusal — an
+// ordinary caller mistake, never a default grant, never the read_only_root
+// refusal, and never an internal integrity error (a corrupt snapshot fails
+// closed at load time, before any source is resolved).
 func resolveSessionFilesystemExposure(
 	snapshot *sessionFilesystemSnapshot,
 	sourcePath, target string,
@@ -460,7 +494,7 @@ func resolveSessionFilesystemExposure(
 ) (sessionFilesystemExposure, error) {
 	access, ok := snapshot.LookupAccess(sourcePath)
 	if !ok {
-		return sessionFilesystemExposure{}, fmt.Errorf("canonical source %q has no issued filesystem snapshot entry in workspace %q", sourcePath, snapshot.Workspace)
+		return sessionFilesystemExposure{}, fmt.Errorf("canonical source %q: %w", sourcePath, ErrOutsideSessionSnapshot)
 	}
 	exposure := sessionFilesystemExposure{
 		SourcePath:        sourcePath,
