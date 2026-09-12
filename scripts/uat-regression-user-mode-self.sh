@@ -129,7 +129,7 @@ else
   reg_result
 fi
 
-if S_SELF="$(dhx self --token-file /dev/stdin --json <<<"$S_TOKEN" 2>&1)"; then
+if S_SELF="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$S_TOKEN" /usr/bin/docker-helper self --json 2>&1)"; then
   if printf '%s\n' "$S_SELF" | grep -q '"type": "session"' \
       && printf '%s\n' "$S_SELF" | grep -q "\"id\": \"$S_ID\"" \
       && printf '%s\n' "$S_SELF" | grep -q "\"workspace\": \"$WS\"" \
@@ -169,7 +169,8 @@ fi
 
 # --- scenario D: the self CLI performs no local classification ---------------
 
-D_REQUESTS="$(dhx self --json 2>/dev/null; dhx self --json 2>&1)"
+D_REQUESTS="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$S_TOKEN" /usr/bin/docker-helper self --json 2>/dev/null; \
+  sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$S_TOKEN" /usr/bin/docker-helper self 2>&1)"
 if printf '%s\n' "$D_REQUESTS" | grep -q '"type": "session"'; then
   reg_ok "D: the bare self CLI resolves the user-mode session bearer from the environment and renders the resource"
 else

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"text/tabwriter"
 )
 
@@ -46,14 +47,39 @@ credential does not already have and never mutates state.
 		jsonOut := fs.Bool("json", false, "Output raw JSON response")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
-				})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
+				// Credential resolution for self: the explicit --token-file
+				// stays the operator-style bearer path (the same owner as
+				// `session show`). Without it, the agent environment's
+				// DOCKER_HELPER_SESSION_TOKEN is the session bearer's own
+				// credential — the agent-context self introspection path —
+				// resolved through the agent client owner (default user-mode
+				// socket, --system system socket, or the explicit endpoint).
+				// With neither, the operator resolution (system/default
+				// endpoint token files) answers.
+				var client *apiClient
+				if *tokenFile == "" && os.Getenv("DOCKER_HELPER_SESSION_TOKEN") != "" {
+					opts := agentClientOptions{System: *system, Endpoint: *endpoint}
+					if err := validateAgentEndpointOptions(opts); err != nil {
+						fmt.Fprintf(stderr, "error: %v\n", err)
+						return 1
+					}
+					agentClient, cerr := resolveAgentClient(opts)
+					if cerr != nil {
+						fmt.Fprintf(stderr, "error: %v\n", cerr)
+						return 1
+					}
+					client = agentClient
+				} else {
+					operatorClient, cerr := resolveOperatorClient(operatorClientOptions{
+						System:    *system,
+						Endpoint:  *endpoint,
+						TokenFile: *tokenFile,
+					})
+					if cerr != nil {
+						fmt.Fprintf(stderr, "error: %v\n", cerr)
+						return 1
+					}
+					client = operatorClient
 				}
 
 				// The daemon classifies the bearer and answers with the
