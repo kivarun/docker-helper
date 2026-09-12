@@ -31,6 +31,13 @@ authenticate this endpoint. Launcher credential rotation replaces the
 key immediately: the old bearer is rejected, the launcher's sessions are
 unaffected, and no second credential is created.
 
+The agent-facing self-introspection surface is `docker-helper self`
+(HTTP `GET /self`): the daemon classifies the bearer and answers with
+exactly that credential's own resource — for a Session bearer its issued
+immutable filesystem snapshot, for a Launcher credential its Launcher
+authority, for a Principal credential its Principal authority. A self
+read grants no authority over peers.
+
 Skill and adapter authors must treat the installed credential as a
 secret: never print it, never copy it into logs or archives.
 
@@ -48,19 +55,29 @@ for inode-pinned mounts.
 
 ## Mount policy by deployment mode
 
-- **User mode** permits only the workspace-root mount (`.`). Subdirectory
-  and file mounts are rejected as `invalid_mount`.
-- **System mode** permits workspace-relative sources and uses inode-pinned
-  mounts via `open_tree` + `move_mount`. Pinning requires Linux kernel
-  support and `CAP_SYS_ADMIN`; it fails closed when unavailable.
+- **User mode**: the daemon accepts a mount source only when its canonical
+  resolved source equals the canonical Session workspace; subdirectory,
+  file, and disjoint sources are rejected as `invalid_mount`. The
+  workspace-relative `.` spelling is the recommended portable form.
+- **System mode** permits workspace-relative sources and absolute host
+  sources authorized through the issued Session filesystem snapshot, and
+  uses inode-pinned mounts via `open_tree` + `move_mount`. Pinning
+  requires Linux kernel support and `CAP_SYS_ADMIN`; it fails closed when
+  unavailable.
 
 ## Issued Session filesystem policy (Release 2.2)
 
-A Session captures the effective allowed-root policy as an immutable
-filesystem snapshot at creation time and keeps it for its whole lifetime;
-parent-policy changes affect only new Sessions. The snapshot is the single
-data-plane filesystem authority for every mount and build context of that
-Session.
+A Session captures its filesystem scope as an immutable snapshot at
+creation time and keeps it for its whole lifetime; parent-policy changes
+affect only new Sessions. The snapshot is the single data-plane
+filesystem authority for every mount and build context of that Session.
+The workspace is mandatory; when the creation request supplies
+issuance-time filesystem roots, additional absolute host roots inside the
+Launcher's effective ceiling may narrow the scope (system mode), while
+user mode accepts only an explicit root whose canonical path equals the
+canonical workspace (an explicit workspace `read_only` narrowing); a
+widening request is refused `invalid_filesystem_policy` before the
+Session exists.
 
 Agent-facing consequences:
 
@@ -96,7 +113,8 @@ docker-helper exposes two first-class client interfaces:
 
 ### CLI
 
-`docker-helper pull`, `build`, `run`, `registry login`.
+`docker-helper pull`, `build`, `run`, `registry login`, and `self`
+(self-introspection of the authenticated credential).
 
 The `docker-helper` binary is a reference/convenience client for the daemon
 HTTP API. It is the same binary that provides operator commands (serve, init,
