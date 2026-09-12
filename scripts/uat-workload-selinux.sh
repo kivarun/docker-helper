@@ -833,10 +833,13 @@ if [ -n "$SE8_ID" ]; then
   else
     acc_fail "SE helper deleted the operator-owned sibling rule"
   fi
+  # The covering coverage is operator state: the helper must neither delete
+  # the rule nor undo the operator's labeling. The trailing script cleanup
+  # below restores the environment baseline.
   SE8_A_AFTER="$(ls -Zd "$SE_SIB/a" 2>/dev/null | awk '{print $1}')"
   case "$SE8_A_AFTER" in
-    *docker_helper_workspace_t*) acc_fail "SE sibling tree label not restored after deletion: '$SE8_A_AFTER'" ;;
-    *) acc_ok "SE sibling tree labels restored after deletion" ;;
+    *docker_helper_workspace_t*) acc_ok "SE operator label state untouched by helper cleanup" ;;
+    *) acc_fail "SE helper interfered with operator label state after deletion: '$SE8_A_AFTER'" ;;
   esac
   rm -f "$SE_SIB/a/a.txt" "$SE_SIB/b/b.txt" 2>/dev/null || true
 else
@@ -952,10 +955,21 @@ fi
 # window (journalctl's @epoch since-form is not uniformly accepted across
 # systemd builds); the window is retried briefly because journald can lag the
 # just-finished run, and a failed read is diagnosed instead of failing silent.
+S7_AUDIT_START_ISO="$(date -u -d "@${AUDIT_START_EPOCH}" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)"
 S7_AUDIT_OK=""
 for _s7i in 1 2 3 4 5; do
-  if journalctl --utc -u docker-helper.service --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null \
-        | grep '"event":"run.start"' | grep -q '"workload_mac_backend":"selinux"'; then
+  # Compare the event's own UTC ISO time field against the window start;
+  # this avoids every journalctl --since timestamp-parsing variant.
+  if journalctl --utc -u docker-helper.service --no-pager 2>/dev/null \
+      | awk -v start="${S7_AUDIT_START_ISO:-}" '
+          /"event":"run.start"/ {
+            if (match($0, /"time":"[^"]*"/)) {
+              t = substr($0, RSTART + 8, RLENGTH - 9)
+              if (start != "" && t >= start && $0 ~ /"workload_mac_backend":"selinux"/)
+                found = 1
+            }
+          }
+          END { exit found ? 0 : 1 }'; then
     S7_AUDIT_OK=1
     break
   fi
