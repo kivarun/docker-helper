@@ -239,6 +239,38 @@ target-resolution contract:
 | Launcher credential | one Launcher | that Launcher's Sessions and `GET /auth` self-inspection | its own Launcher (forced) | none — there is no narrowing contract for this authority |
 | Session token | one Session | its issued filesystem snapshot's data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login`, and that Session's operation endpoints | not a control authority; not accepted by control endpoints or `GET /auth` | none |
 
+`GET /self` is the one credential self-introspection surface for all three
+self-introspectable classes: the daemon classifies the request bearer and
+answers with `{"ok": true, "type": "...", "resource": {...}}` where the
+resource is that class's own canonical projection —
+
+- a Principal credential → type `principal`: username, uid, gid, home,
+  enabled, stored `allowed_root_entries`, and effective
+  `allowed_root_entries`, all resolved in one coherent policy generation
+  under the lifecycle serialization boundary;
+- a Launcher credential → type `launcher`: id, name, owning principal,
+  enabled, scope, stored `allowed_root_entries` (canonically empty for
+  inherit scope), and the effective three-level allowed-root entries;
+- a Session bearer → type `session`: the same body `GET /sessions/{id}`
+  renders for that Session (identity, ownership, expiry, persisted
+  immutable filesystem snapshot), read together with the snapshot in one
+  short read transaction through the transactional filesystem-authority
+  capture owner.
+
+The admin token has no self resource and is answered with the stable
+`404 self_not_available` contract (a narrow self-show HTTP family,
+separate from the admin control planes). Unknown, revoked, disabled, and
+expired credentials receive the shared non-disclosing 401 authentication
+semantics; database failures are HTTP 500 and never a 401. A live
+credential whose owning resource vanished between authentication and the
+coherent read fails closed with the same non-disclosing 401. The endpoint
+is read-only, grants no authority the credential does not already have,
+never mutates state, and never carries bearer, hash, or credential
+material in its responses or audit records. Successful introspection
+records one `self.show` audit event with the authenticated class
+(`self_type`); the admin outcome records `result=self_not_available`
+without a class.
+
 Rules shared by every authority:
 
 - **Scope-first visibility.** List surfaces (`session list`, `launcher
@@ -1144,7 +1176,16 @@ real mutations use, and neither surface widens authority.
 
 `GET /auth` is the separate identity introspection surface; it reports the
 authenticated authority class, not policy (see
-[Authority model](#authority-model)).
+[Authority model](#authority-model)). `GET /self` is the companion
+self-introspection surface: it answers the authenticated credential's own
+resource document (identity, stored/effective roots for Principal and
+Launcher authorities, the Session's own show body with its persisted
+snapshot for a Session bearer) under the same classification semantics
+(see [Authority model](#authority-model)). Identity introspection (`GET
+/auth`), self introspection (`GET /self`), and policy introspection
+(`GET /principals/{username}/effective-allowed-roots`,
+`GET /sessions/create-policy`) stay separate surfaces; neither widens the
+other.
 
 `GET /sessions/{id}` is the separate read-only **issued-Snapshot**
 introspection surface: it answers what was actually issued to an existing
@@ -2591,6 +2632,7 @@ Implemented event families are:
 | Area | Events |
 |---|---|
 | Authentication | `auth.failure`, `auth.session` |
+| Self introspection | `self.show` |
 | Sessions | `session.create`, `session.list`, `session.show`, `session.delete` |
 | Principals | `principal.create`, `principal.enabled_change`, `principal.allowed_root_add`, `principal.allowed_root_set_access`, `principal.allowed_root_remove`, `principal.delete` |
 | Launchers | `launcher.create`, `launcher.list`, `launcher.update`, `launcher.scope_replace`, `launcher.allowed_root_add`, `launcher.allowed_root_set_access`, `launcher.allowed_root_remove`, `launcher.delete`, `launcher.credential_issue`, `launcher.credential_rotate`, `launcher.credential_delete` |
@@ -2937,6 +2979,9 @@ Header parse and admin-token codes:
 | `admin.parse_failed` | `Authorization` header missing, non-Bearer, or empty/malformed on an admin endpoint |
 | `admin.wrong_token` | Bearer token does not match the configured admin token |
 | `session.parse_failed` | header parse failure on a session-token data-plane endpoint |
+| `self.parse_failed` | header parse failure on `GET /self` |
+| `self.unauthorized` | credential authentication failure on `GET /self` |
+| `self.database_error` | credential or Session lookup database failure on `GET /self` (HTTP 500, never a 401) |
 
 Credential authentication on Session-control endpoints (create, list,
 show, delete) is discriminated per failure mode:

@@ -39,6 +39,8 @@ permissions:
 #   ubuntu    deb       apparmor  ubuntu-24.04 regressions 3-18 (hosted, full)
 #   ubuntu    deb       apparmor  ubuntu-24.04 functional access-mode
 #                                                   matrix    (hosted, full)
+#   ubuntu    deb       apparmor  ubuntu-24.04 self-introspection matrix
+#                                                   (hosted, full)
 #   ubuntu    deb       apparmor  ubuntu-24.04 AppArmor workload-MAC
 #                                                   matrix    (hosted, full)
 #   opensuse  rpm       apparmor  ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full)

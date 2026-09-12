@@ -12,6 +12,9 @@
 #   1. preflight: Docker, systemd, versions
 #   2. artifact production + system-mode install + confinement
 #   3. operator surface: principal + credential; admin and principal sessions
+#   3b. Release 2.2 self-introspection smoke: the principal credential, the
+#       Session bearer, the admin self_not_available contract, and the
+#       non-disclosing unknown-credential 401
 #   4. pull + run (uid/gid/workdir + container exit-code propagation)
 #   5. workspace mounts: RW write, RO read, RO write rejected, no host leak
 #   5b. Release 2.2 access-mode smoke: a policy read_only region refuses the
@@ -536,6 +539,43 @@ SESSION_PRINC_TOKEN="$(printf '%s\n' "$SESSION_PRINC_JSON" | grep -oP '"token": 
   || fail_uat "principal session create returned no id/token"
 
 info "principal session: $SESSION_PRINC_ID (principal $PRINCIPAL)"
+
+# ==============================================================================
+# Phase 3b: self-introspection smoke (Release 2.2 credential self-introspection)
+# ==============================================================================
+
+say "phase 3b: self introspection smoke (principal, launcher, session, admin)"
+
+# Principal credential self: the daemon classifies the bearer and answers
+# with the matching self resource; the CLI performs no local classification.
+PRINC_SELF_JSON="$(docker-helper self --system --token-file "$CRED_FILE" --json)" \
+  || fail_uat "principal credential self failed"
+printf '%s\n' "$PRINC_SELF_JSON" | grep -q '"type": "principal"' \
+  || fail_uat "principal self returned the wrong class: $PRINC_SELF_JSON"
+printf '%s\n' "$PRINC_SELF_JSON" | grep -q "\"username\": \"$PRINCIPAL\"" \
+  || fail_uat "principal self does not carry the authenticated principal: $PRINC_SELF_JSON"
+
+# Session bearer self: the Session's own resource, equal in shape to the
+# session show body (workspace, ownership, expiry, persisted snapshot).
+SESSION_SELF_JSON="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN" docker-helper self --system --json)" \
+  || fail_uat "session bearer self failed"
+printf '%s\n' "$SESSION_SELF_JSON" | grep -q '"type": "session"' \
+  || fail_uat "session self returned the wrong class: $SESSION_SELF_JSON"
+printf '%s\n' "$SESSION_SELF_JSON" | grep -q "\"id\": \"$SESSION_PRINC_ID\"" \
+  || fail_uat "session self does not carry the authenticated session: $SESSION_SELF_JSON"
+
+# Admin has no self resource: the stable 404 self_not_available contract.
+ADMIN_SELF_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+  --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost/self 2>/dev/null || true)"
+[ "$ADMIN_SELF_CODE" = "404" ] \
+  || fail_uat "admin self returned $ADMIN_SELF_CODE (expected 404 self_not_available)"
+
+# Unknown credential: the non-disclosing 401 authentication contract.
+UNKNOWN_SELF_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+  --unix-socket "$DH_SOCK" -H 'Authorization: Bearer dht_unknown_self_smoke_probe' http://localhost/self 2>/dev/null || true)"
+[ "$UNKNOWN_SELF_CODE" = "401" ] \
+  || fail_uat "unknown credential self returned $UNKNOWN_SELF_CODE (expected 401)"
+info "self-introspection smoke passed (principal/session/404/401 contracts)"
 
 # ==============================================================================
 # Phase 4: basic functionality (pull, run, identity, exit codes)
