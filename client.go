@@ -177,7 +177,7 @@ type createSessionClientRequest struct {
 	Workspace         string                          `json:"workspace"`
 	LauncherID        string                          `json:"launcher_id,omitempty"`
 	Principal         string                          `json:"principal,omitempty"`
-	FilesystemEntries []sessionFilesystemRequestEntry `json:"filesystem_entries,omitempty"`
+	FilesystemRoots   []sessionFilesystemRootEntry   `json:"filesystem_roots,omitempty"`
 }
 
 func (c *apiClient) createSession(req createSessionClientRequest) (*createSessionResponse, error) {

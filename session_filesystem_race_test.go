@@ -9,26 +9,26 @@ import (
 )
 
 // createNarrowedSessionThroughMux issues a real POST /sessions with an
-// explicit issuance-time filesystem_entries request through the route mux
+// explicit issuance-time filesystem_roots request through the route mux
 // and returns the recorded response.
-func createNarrowedSessionThroughMux(app *App, token, workspace, entries string) *httptest.ResponseRecorder {
+func createNarrowedSessionThroughMux(app *App, token, workspace, roots string) *httptest.ResponseRecorder {
 	mux := http.NewServeMux()
 	registerRoutes(mux, app)
 	rec := httptest.NewRecorder()
-	body := fmt.Sprintf(`{"workspace":%q,"filesystem_entries":%s}`, workspace, entries)
+	body := fmt.Sprintf(`{"workspace":%q,"filesystem_roots":%s}`, workspace, roots)
 	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	mux.ServeHTTP(rec, req)
 	return rec
 }
 
-// wideningEntries requests read_write for the workspace root and its inputs
-// subtree: under the pre-mutation ceiling (inputs protected read-only) this
-// is an issuance-time widening; under the post-mutation ceiling it is a valid
+// wideningRoots requests read_write for the workspace's inputs subtree: under
+// the pre-mutation ceiling (inputs protected read-only) this is an
+// issuance-time widening; under the post-mutation ceiling it is a valid
 // narrowing. The ceiling generation the create observes decides the outcome,
 // and the boundary guarantees exactly one generation is observed.
-func wideningEntries() string {
-	return `[{"path":".","access":"read_write"},{"path":"inputs","access":"read_write"}]`
+func wideningRoots(inputs string) string {
+	return fmt.Sprintf(`[{"path":%q,"access":"read_write"}]`, inputs)
 }
 
 // TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation proves the
@@ -59,7 +59,7 @@ func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 	runSinglePinnedP(t, func() {
 		// 1. The create is pinned at its last pre-boundary read.
 		createDone := make(chan *httptest.ResponseRecorder, 1)
-		go func() { createDone <- createNarrowedSessionThroughMux(app, token, workspace, wideningEntries()) }()
+		go func() { createDone <- createNarrowedSessionThroughMux(app, token, workspace, wideningRoots(inputs)) }()
 		<-doorPoint.parked
 		close(doorPoint.release)
 
@@ -134,7 +134,7 @@ func TestRaceNarrowedSessionCreateLinearizesAfterParentMutation(t *testing.T) {
 
 		// 2. The create runs its pre-boundary authentication and parks there.
 		createDone := make(chan *httptest.ResponseRecorder, 1)
-		go func() { createDone <- createNarrowedSessionThroughMux(app, token, workspace, wideningEntries()) }()
+		go func() { createDone <- createNarrowedSessionThroughMux(app, token, workspace, wideningRoots(inputs)) }()
 		<-doorPoint.parked
 		close(doorPoint.release)
 
