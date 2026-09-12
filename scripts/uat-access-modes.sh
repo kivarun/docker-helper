@@ -281,6 +281,7 @@ cleanup() {
   systemctl disable docker-helper.service >/dev/null 2>&1 || true
   apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>/dev/null || true
   rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper /tmp/uat-am-api.out
+  rm -rf /srv/uat-am-outside-ceiling-* 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -912,8 +913,8 @@ if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then
   N_AUDIT_SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
   WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
     --workspace "$WS" --json \
-    --filesystem-root "$RUNDIR=read_write" \
-    --filesystem-root "$RUNDIR/pipeline-inputs=read_write" 2>&1 || true)"
+    --filesystem-root "$WS=read_write" \
+    --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
   if printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
       && printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid session filesystem policy' \
       && ! printf '%s\n' "$WIDEN_OUT" | grep -q '"id"' \
@@ -1374,15 +1375,38 @@ else
   fi
 fi
 
-# MR3: a filesystem root outside the Launcher ceiling is refused
-# invalid_filesystem_policy before the Session exists: no Session, no
-# bearer, no residue. The inventories are the fail-closed owners.
+# MR3: an existing filesystem root positively outside the effective ceiling
+# (global ∩ Principal ∩ Launcher authority) is refused invalid_filesystem_policy
+# before the Session exists: no Session, no bearer, no residue. The inventories
+# are the fail-closed owners.
+#
+# The fixture is created BEFORE the attempt and is verified to exist and to
+# lie outside every effective root, so the refusal cannot come from the
+# unresolvable-path branch of the same public family: an existing-but-
+# unauthorized path reaches the ceiling check (the lower-level branch
+# distinction is additionally pinned by the packaged harness regression).
+# A companion nonexistent-path attempt proves the same public family answers
+# the unresolvable branch, so the two proofs are distinguishable only by the
+# branch, never by the code. The fixture is removed by the scenario cleanup.
+MR_OUTSIDE="/srv/uat-am-outside-ceiling-$$"
+rm -rf "$MR_OUTSIDE"
+mkdir -p "$MR_OUTSIDE"
+printf 'outside\n' > "$MR_OUTSIDE/marker.txt"
+MR_OUTSIDE_OK=1
+for mr_ceiling_path in "$ALLOWED_ROOT" "$MR_OPT" "$TREE"; do
+  case "$MR_OUTSIDE" in "$mr_ceiling_path"|"$mr_ceiling_path"/*) MR_OUTSIDE_OK=0 ;; esac
+done
+if [ -d "$MR_OUTSIDE" ] && [ "$MR_OUTSIDE_OK" -eq 1 ]; then
+  acc_ok "MR3 setup: existing unauthorized fixture $MR_OUTSIDE positively outside every effective root"
+else
+  acc_fail "MR3 setup: outside fixture is missing or not positively outside the effective roots"
+fi
 if ! MR3_BASE="$(residue_state)" || ! MR3_BEFORE="$(session_list_count)"; then
   acc_blocked "MR3 pre-attempt inventory unavailable (fail-closed residue/session)"
 else
   MR3_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
     --workspace "$MR_WS" --json \
-    --filesystem-root /srv/outside-ceiling=read_write 2>&1 || true)"
+    --filesystem-root "$MR_OUTSIDE=read_write" 2>&1 || true)"
   if printf '%s\n' "$MR3_OUT" | grep -q 'invalid_filesystem_policy' \
       && ! printf '%s\n' "$MR3_OUT" | grep -q '"id"' \
       && MR3_AFTER="$(session_list_count)" \
@@ -1392,7 +1416,25 @@ else
   else
     acc_fail "MR3 outside-ceiling root was not refused cleanly (base: $MR3_BASE)"
   fi
+  # The companion unresolvable-path attempt: the same public family answers
+  # the cannot-resolve branch, so the two causes differ only in the branch,
+  # never in the public code or in created state.
+  MR3_MISSING="$MR_OPT/uat-am-does-not-exist"
+  MR3_OUT2="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+    --workspace "$MR_WS" --json \
+    --filesystem-root "$MR3_MISSING=read_write" 2>&1 || true)"
+  if printf '%s\n' "$MR3_OUT2" | grep -q 'invalid_filesystem_policy' \
+      && ! printf '%s\n' "$MR3_OUT2" | grep -q '"id"' \
+      && residue_unchanged "$MR3_BASE"; then
+    acc_ok "MR3 unresolvable-path root refused with the same public family (different branch, no state)"
+  else
+    acc_fail "MR3 unresolvable-path root was not refused cleanly (base: $MR3_BASE)"
+  fi
 fi
+rm -rf "$MR_OUTSIDE"
+[ ! -e "$MR_OUTSIDE" ] \
+  && acc_ok "MR3 cleanup: outside-ceiling fixture removed" \
+  || acc_fail "MR3 cleanup: outside-ceiling fixture remains"
 
 # MR4/MR5: nested Launcher RO transition under a selected RW root. The
 # launcher carries a read_only repos root under the read_write MR_OPT; a
@@ -1475,28 +1517,70 @@ dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
   "$MR_L_ID" "$MR_OPT" read_write >/dev/null 2>&1 || true
 
 # MR7: packaged completion smoke — the candidate's generated Bash completion,
-# sourced in a fresh shell, renders the two sibling root boundaries
-# (home/ and opt/) at the / level and never two identical basenames.
+# sourced in a fresh shell, drives the daemon-backed Session create-policy
+# query through the already-created multiroot Launcher credential (--system
+# --token-file; no selector needed: the credential's own effective roots are
+# exactly the two launcher boundaries). The daemon-backed proof is the
+# contrast with a failed query: a broken credential degrades to the generic
+# filesystem candidates at /, while the real credential renders exactly the
+# two distinguishable boundary segments — generic filesystem completion can
+# never produce exactly those two, and the duplicate-basename regression is
+# asserted in both directions. The filesystem-root flag completes through
+# the same policy source.
 MR_CRED_SCRIPT="$(mktemp /tmp/uat-am-completion-XXXXXX)"
 dh completion bash > "$MR_CRED_SCRIPT" 2>/dev/null
-MR_CMP_OUT="$(bash --noprofile --norc -ec '
+MR7_PROBE='
   source "$1" >/dev/null 2>&1
-  COMP_WORDS=(docker-helper session create --system --workspace /)
-  COMP_CWORD=4
-  COMP_LINE="docker-helper session create --system --workspace /"
+  COMP_WORDS=("$@")
+  COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
+  COMP_LINE="${COMP_WORDS[*]}"
   COMP_POINT=${#COMP_LINE}
   COMPREPLY=()
   _docker_helper_completion
   printf "%s\n" "${COMPREPLY[@]}"
-' _ "$MR_CRED_SCRIPT" 2>/dev/null || true)"
-MR_CMP_LINES="$(printf '%s\n' "$MR_CMP_OUT" | grep -v '^$' | sort -u | tr '\n' ' ')"
-if printf '%s' "$MR_CMP_LINES" | grep -q '/home' \
-    && printf '%s' "$MR_CMP_LINES" | grep -q '/opt' \
-    && [ "$(printf '%s\n' "$MR_CMP_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 2 ] \
-    && ! printf '%s\n' "$MR_CMP_OUT" | grep -v '^$' | sort -u | grep -q 'runner'; then
-  acc_ok "MR7 packaged completion smoke: '/' renders the distinguishable home/ and opt/ boundaries"
+'
+# MR7a negative contrast: a broken credential fails the daemon query and the
+# completion degrades to the generic filesystem candidates at /.
+MR7_NEG_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
+  docker-helper session create --system --token-file /tmp/uat-am-no-such-credential --workspace / 2>/dev/null || true)"
+if printf '%s\n' "$MR7_NEG_OUT" | grep -qE '^/(etc|usr|var|tmp|proc|sys|dev|run|sbin|bin)$'; then
+  acc_ok "MR7a negative contrast: failed credential query degrades to generic filesystem candidates"
 else
-  acc_fail "MR7 packaged completion smoke wrong: [$MR_CMP_LINES]"
+  acc_fail "MR7a negative contrast baseline missing (generic fallback not observed): [$(printf '%s\n' "$MR7_NEG_OUT" | head -3)]"
+fi
+# MR7b positive: the multiroot Launcher credential reaches the daemon-backed
+# create-policy query; at / exactly the two boundary segments are rendered.
+MR7_POS_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
+  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot --workspace / 2>/dev/null || true)"
+if printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | grep -qx '/home' \
+    && printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | grep -qx '/opt' \
+    && [ "$(printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 2 ] \
+    && ! printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | grep -qE '^/(etc|usr|var|tmp|proc|sys|dev|run|sbin|bin)$' \
+    && ! printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | grep -q 'runner'; then
+  acc_ok "MR7b daemon-backed create-policy query: '/' renders exactly the distinguishable home/ and opt/ boundaries"
+else
+  acc_fail "MR7b packaged completion smoke wrong: [$(printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | tr '\n' ' ')]"
+fi
+# MR7c partial component: /h resolves toward the home boundary through the
+# same policy source.
+MR7_H_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
+  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot --workspace /h 2>/dev/null || true)"
+if printf '%s\n' "$MR7_H_OUT" | grep -v '^$' | sort -u | grep -qx '/home' \
+    && [ "$(printf '%s\n' "$MR7_H_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 1 ]; then
+  acc_ok "MR7c partial component '/h' resolves toward the home boundary (daemon-backed)"
+else
+  acc_fail "MR7c partial component smoke wrong: [$(printf '%s\n' "$MR7_H_OUT" | grep -v '^$' | sort -u | tr '\n' ' ')]"
+fi
+# MR7d the --filesystem-root PATH side uses the same policy source: at / the
+# same two boundaries, no generic filesystem entries.
+MR7_ROOT_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
+  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot --filesystem-root / 2>/dev/null || true)"
+if printf '%s\n' "$MR7_ROOT_OUT" | grep -v '^$' | sort -u | grep -qx '/home' \
+    && printf '%s\n' "$MR7_ROOT_OUT" | grep -v '^$' | sort -u | grep -qx '/opt' \
+    && [ "$(printf '%s\n' "$MR7_ROOT_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 2 ]; then
+  acc_ok "MR7d filesystem-root completes through the same daemon-backed policy source"
+else
+  acc_fail "MR7d filesystem-root smoke wrong: [$(printf '%s\n' "$MR7_ROOT_OUT" | grep -v '^$' | sort -u | tr '\n' ' ')]"
 fi
 rm -f "$MR_CRED_SCRIPT"
 
