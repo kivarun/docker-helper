@@ -14,12 +14,6 @@
 #      identity retention, default-Launcher attribution, non-attributable admin
 #      session invalidation, no fabricated Launcher credential, restart
 #      idempotency, final schema, migrated-Launcher functionality)
-#   M  v2.1.1 -> candidate migration (mandatory Release 2.2 gate): real
-#      published-v2.1.1 path-only state (global/Principal/Launcher roots,
-#      credentials, live Sessions), fail-closed migration refusal without
-#      half-migrated state, read_write authority of migrated roots, workspace
-#      compatibility snapshots, identity/Session-ID preservation, writable
-#      behavior of the old Session, restart idempotency
 #   H  launcher hierarchy, isolation, rotation, and lifecycle on the candidate
 #      (separate namespaces, cross-launcher non-disclosure, rotation continuity,
 #      restricted scope, stale-root rejection, disable propagation, checked
@@ -39,7 +33,7 @@
 # metadata is never trusted at runtime. No private "previous release" is built.
 #
 # Env inputs:
-#   UAT_VERSION          candidate version string (e.g. 2.2.0-uat)
+#   UAT_VERSION          candidate version string (e.g. 2.1.0-uat)
 #   UAT_ARTIFACT_PATH    exact candidate .deb produced by the gate (required)
 #   UAT_ARTIFACT_SHA256  expected SHA-256 of the candidate .deb (required)
 #   UAT_ALLOWED_ROOT     global allowed root (default /home)
@@ -51,7 +45,7 @@
 
 set -uo pipefail
 
-VERSION="${UAT_VERSION:-2.2.0-uat}"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home}"
 ARTIFACT_PATH_IN="${UAT_ARTIFACT_PATH:-}"
 ARTIFACT_SHA256_IN="${UAT_ARTIFACT_SHA256:-}"
@@ -63,10 +57,6 @@ info() { printf '%s %s\n' "$PREFIX" "$*"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-upgrade-baseline-fixture.sh
 source "$SCRIPT_DIR/uat-upgrade-baseline-fixture.sh"
-# Shared measurement primitives only (structural rich allowed-root JSON parse,
-# fail-closed residue inventory); the script's own helpers below win.
-# shellcheck source=scripts/uat-regression-lib.sh
-source "$SCRIPT_DIR/uat-regression-lib.sh"
 
 # redact masks bearer-token values (admin/session dht_, credential dhc_) in a
 # captured stream so they never reach the CI log. Session IDs (dhs_) and
@@ -128,43 +118,6 @@ wait_health() {
     sleep 0.2
   done
   return 1
-}
-
-# observe_mf_failclosed: bounded fail-closed observation of the refused
-# candidate startup (MF decoy in place). With Type=exec the start job
-# completes the moment the binary is exec'd, BEFORE the serve refuses, and
-# Restart=on-failure then re-executes the unit, so systemd passes through
-# transient active windows while the refusal repeats until the start limit
-# stops it. Transient systemd active is therefore never treated as evidence
-# here. The fail-closed contract is observed directly:
-#   * the expected serve_startup refusal must appear in the journal, and
-#   * daemon readiness must NEVER become available at any point of the whole
-#     observation window (GET /health over the unix socket) — the refusal
-#     must not degenerate into a serving daemon.
-# The observation ends when the unit reaches its terminal failed state
-# (restarts exhausted: nothing further can start) or the bounded window
-# expires. Sets:
-#   MF_REFUSAL           the last observed serve_startup refusal journal line
-#                        ("" when none appeared)
-#   MF_HEALTH_AVAILABLE  1 when daemon readiness became available at ANY point
-#                        of the window, else 0
-observe_mf_failclosed() {
-  MF_REFUSAL=""
-  MF_HEALTH_AVAILABLE=0
-  local _i=0
-  for _i in $(seq 1 40); do
-    if [ -S "$SOCK" ] && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
-      MF_HEALTH_AVAILABLE=1
-      break
-    fi
-    if [ -z "$MF_REFUSAL" ]; then
-      MF_REFUSAL="$(journalctl --utc -u docker-helper.service --since '-3 min' --no-pager 2>/dev/null \
-        | grep '"operation":"serve_startup"' \
-        | grep 'unsupported session_filesystem_snapshot_entries schema' | tail -1 || true)"
-    fi
-    systemctl is-failed --quiet docker-helper.service 2>/dev/null && break
-    sleep 1
-  done
 }
 
 # json_field extracts a string field from a JSON document read on stdin.
@@ -1351,388 +1304,6 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
 fi
 
 # ==============================================================================
-# scenario M: v2.1.1 -> candidate migration (mandatory Release 2.2 gate)
-#
-# The v2.0.0 baseline of scenario G predates the 2.1 Launcher control plane,
-# so Release 2.2 carries its own migration gate from the published stable
-# v2.1.1 (the last path-only release), seeded through the v2.1.1 CLI itself:
-#   M0  the pinned v2.1.1 baseline DEB resolves and its SHA-256 verifies
-#   M1  real pre-upgrade state: two path-only global roots, two path-only
-#       Principal roots, one restricted path-only Launcher root, principal +
-#       launcher credentials, and two live Sessions (launcher-owned and
-#       principal-owned)
-#   MF  fail-closed migration: a pre-existing wrong-shaped
-#       session_filesystem_snapshot_entries table makes the candidate refuse
-#       startup with daemon readiness never becoming available; the refusal
-#       leaves no half-migrated state (config.json bytes
-#       unchanged, sessions schema unchanged, decoy table untouched and
-#       empty); dropping the decoy recovers into the successful migration on
-#       the same database
-#   M2  legacy path-only config keeps read_write authority (the --json rich
-#       list projection; the default list is the 2.1-compatible one path per
-#       line) while config.json itself keeps the legacy path-only string form —
-#       equivalent RW authority, never an object-form rewrite requirement
-#   M3  Principal roots migrated as read_write
-#   M4  Launcher roots migrated as read_write
-#   M5  both pre-existing Sessions carry the compatibility
-#       workspace/read_write snapshot (session show)
-#   M6  identity preservation: principal credential authority, launcher
-#       identity (same ID), both Session IDs in the authoritative list
-#   M7  a real operation of the pre-existing Session keeps the 2.1 writable
-#       behavior
-#   M8  restart idempotency: policy and snapshots stable, sessions schema
-#       final, snapshot table canonical
-# ==============================================================================
-scenario "M: v2.1.1 -> candidate migration"
-
-M_USER="uatr2mig"
-M_LCRED="$CRED_DIR/mig-lc.tok"
-
-M_BASELINE_DEB=""
-if upgrade211_fetch_deb /tmp/r2ac-m-baseline.deb >/dev/null 2>&1; then
-  M_BASELINE_DEB="/tmp/r2ac-m-baseline.deb"
-  acc_ok "v2.1.1 baseline DEB resolved and SHA-256 verified (migration gate)"
-else
-  acc_blocked "could not resolve/verify the v2.1.1 baseline DEB (mandatory migration gate)"
-fi
-
-if [ -n "$M_BASELINE_DEB" ]; then
-  # Clean slate; install the exact v2.1.1 baseline and seed real state.
-  systemctl stop docker-helper.service >/dev/null 2>&1 || true
-  dpkg -P docker-helper >/dev/null 2>&1 || true
-  rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
-  if dpkg -i "$M_BASELINE_DEB" >/tmp/r2ac-m-install.log 2>&1 \
-      && [ "$(docker-helper version)" = "$UPGRADE211_VERSION" ]; then
-    acc_ok "v2.1.1 baseline installed for migration seeding ($UPGRADE211_VERSION)"
-  else
-    acc_fail "v2.1.1 baseline install failed (see /tmp/r2ac-m-install.log)"
-  fi
-  if docker-helper init --allowed-root "$ALLOWED_ROOT" >/dev/null 2>&1; then
-    acc_ok "system init on v2.1.1 baseline (path-only global root)"
-  else
-    acc_fail "system init failed on v2.1.1 baseline"
-  fi
-  systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
-  for _ in $(seq 1 30); do
-    systemctl is-active --quiet docker-helper.service && break
-    sleep 1
-  done
-  wait_health "$SOCK" || acc_fail "v2.1.1 daemon not healthy (migration gate)"
-
-  # Seed real pre-upgrade state through the v2.1.1 CLI (path-only everywhere).
-  if ! getent passwd "$M_USER" >/dev/null 2>&1; then
-    useradd -m -s /bin/bash "$M_USER" || true
-  fi
-  M_HOME="$(getent passwd "$M_USER" | cut -d: -f6)"
-  M_POLICY="$M_HOME/policy"
-  mkdir -p "$M_HOME/ws" "$M_POLICY/sub/ws"
-  printf 'mig-input\n' > "$M_POLICY/sub/ws/input.txt"
-  chown -R "$M_USER:$M_USER" "$M_HOME"
-  if dh config allowed-root add "$M_POLICY" >/dev/null 2>&1 \
-      && dh config allowed-root list 2>/dev/null | grep -qx "$M_POLICY" \
-      && dh config allowed-root list 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
-    acc_ok "M1 two path-only global roots seeded (init root + added root)"
-  else
-    acc_fail "M1 global allowed-root seeding failed"
-  fi
-
-  dh principal create --system --no-credential "$M_USER" >/dev/null 2>&1 || true
-  dh principal set --system "$M_USER" enabled true >/dev/null 2>&1 || true
-  dh principal allowed-root add --system "$M_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
-  dh principal allowed-root add --system "$M_USER" "$M_POLICY" >/dev/null 2>&1 || true
-  if dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -qx "$M_POLICY" \
-      && dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
-    acc_ok "M1 two path-only Principal roots seeded"
-  else
-    acc_fail "M1 Principal allowed-root seeding failed"
-  fi
-
-  M_P_CRED_OUT="$(dh credential create --system --name mig "$M_USER" 2>/dev/null || true)"
-  M_P_TOKEN="$(printf '%s\n' "$M_P_CRED_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
-  M_P_CRED_ID="$(printf '%s\n' "$M_P_CRED_OUT" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
-  if [ -n "$M_P_TOKEN" ] && [ -n "$M_P_CRED_ID" ]; then
-    acc_ok "M1 principal credential issued ($M_P_CRED_ID)"
-  else
-    acc_fail "M1 principal credential issuance failed"
-  fi
-
-  # Restricted Launcher with a path-only root, plus its credential.
-  M_L_OUT="$(dh launcher create --system --principal "$M_USER" --name mlaunch \
-    --allowed-root "$M_POLICY/sub" --no-credential 2>/dev/null || true)"
-  M_L_ID="$(printf '%s\n' "$M_L_OUT" | json_field id)"
-  if [ -n "$M_L_ID" ] \
-      && dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>/dev/null | grep -qx "$M_POLICY/sub"; then
-    acc_ok "M1 restricted path-only Launcher root seeded ($M_L_ID)"
-  else
-    acc_fail "M1 restricted Launcher root seeding failed"
-  fi
-  M_LC_OUT="$(dh launcher credential create --system --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
-  M_LC_TOKEN="$(printf '%s\n' "$M_LC_OUT" | json_field token)"
-  if [ -n "$M_LC_TOKEN" ]; then
-    printf '%s\n' "$M_LC_TOKEN" > "$M_LCRED"; chmod 600 "$M_LCRED"
-    acc_ok "M1 launcher credential issued"
-  else
-    acc_fail "M1 launcher credential issuance failed"
-  fi
-
-  # Two live Sessions: launcher-owned and principal-owned.
-  M_S1_JSON="$(dh session create --system --token-file "$M_LCRED" --workspace "$M_POLICY/sub/ws" --json 2>/dev/null || true)"
-  M_S1_ID="$(printf '%s' "$M_S1_JSON" | json_field id)"
-  M_S1_TOKEN="$(printf '%s' "$M_S1_JSON" | json_field token)"
-  M_PCREDFILE="$CRED_DIR/mig-pc.tok"
-  printf '%s\n' "$M_P_TOKEN" > "$M_PCREDFILE"; chmod 600 "$M_PCREDFILE"
-  M_S2_JSON="$(dh session create --system --token-file "$M_PCREDFILE" --workspace "$M_HOME/ws" --json 2>/dev/null || true)"
-  M_S2_ID="$(printf '%s' "$M_S2_JSON" | json_field id)"
-  if [ -n "$M_S1_ID" ] && [ -n "$M_S2_ID" ]; then
-    acc_ok "M1 live Sessions seeded (launcher=$M_S1_ID principal=$M_S2_ID)"
-  else
-    acc_fail "M1 Session seeding failed (launcher: '$M_S1_ID', principal: '$M_S2_ID')"
-  fi
-
-  # Pre-upgrade identity + config bytes recorded for the migration proofs.
-  M_CONFIG_SHA="$(sha256sum /etc/docker-helper/config.json | awk '{print $1}')"
-  M_AUTH_PRE_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
-    --unix-socket "$SOCK" -H "Authorization: Bearer $M_P_TOKEN" http://localhost/auth 2>/dev/null || true)"
-  [ "$M_AUTH_PRE_HTTP" = 200 ] \
-    && acc_ok "pre-upgrade principal credential authenticates on v2.1.1" \
-    || acc_fail "pre-upgrade principal credential broken on v2.1.1 (http=$M_AUTH_PRE_HTTP)"
-
-  # --- MF: fail-closed migration ------------------------------------------------
-  # A wrong-shaped pre-existing snapshot table is unsupported state: the
-  # candidate must refuse startup BEFORE any migration transaction, leaving
-  # the database and config untouched.
-  systemctl stop docker-helper.service >/dev/null 2>&1 || true
-  if python3 -c '
-import sqlite3, sys
-db = sqlite3.connect("/var/lib/docker-helper/docker-helper.db")
-db.execute("CREATE TABLE session_filesystem_snapshot_entries (session_id TEXT, path TEXT)")
-db.commit()
-' 2>/tmp/r2ac-m-decoy.err; then
-    acc_ok "MF decoy wrong-shaped snapshot table prepared on the pre-upgrade database"
-  else
-    acc_fail "MF decoy table preparation failed: $(cat /tmp/r2ac-m-decoy.err 2>/dev/null | tail -2)"
-  fi
-
-  if dpkg -i "$ARTIFACT_PATH_IN" >/tmp/r2ac-m-upgrade.log 2>&1 \
-      && [ "$(docker-helper version)" = "$VERSION" ]; then
-    acc_ok "upgraded to candidate DEB ($VERSION) with the decoy in place"
-  else
-    acc_fail "candidate upgrade failed (see /tmp/r2ac-m-upgrade.log)"
-  fi
-
-  # Fail-closed observation (bounded, deterministic — see
-  # observe_mf_failclosed): the expected serve_startup refusal must appear,
-  # daemon readiness must never become available in the window, and transient
-  # systemd active windows are never evidence (Type=exec completes the start
-  # job at exec, before the serve refuses; Restart=on-failure re-executes the
-  # unit until the start limit stops it).
-  systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
-  systemctl start docker-helper.service >/dev/null 2>&1 || true
-  observe_mf_failclosed
-
-  # Quiesce deterministically before the invariant checks: stop cancels any
-  # remaining auto-restart and reset-failed clears the terminal failed state.
-  systemctl stop docker-helper.service >/dev/null 2>&1 || true
-  systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
-
-  if [ -n "$MF_REFUSAL" ] && [ "$MF_HEALTH_AVAILABLE" = 0 ]; then
-    acc_ok "MF startup refused closed: serve_startup refusal observed and daemon readiness never became available (transient active windows ignored)"
-  else
-    acc_fail "MF startup not proven fail-closed (refusal: ${MF_REFUSAL:-absent}, health became available: $MF_HEALTH_AVAILABLE)"
-  fi
-
-  # No half-migrated state: config bytes unchanged, sessions schema unchanged,
-  # decoy table exactly as prepared (wrong shape, zero rows).
-  M_CONFIG_SHA_FAIL="$(sha256sum /etc/docker-helper/config.json 2>/dev/null | awk '{print $1}')"
-  if [ "$M_CONFIG_SHA_FAIL" = "$M_CONFIG_SHA" ]; then
-    acc_ok "MF refusal left config.json bytes unchanged"
-  else
-    acc_fail "MF refusal rewrote config.json (half-migrated config state)"
-  fi
-  if python3 -c '
-import sqlite3, sys
-db = sqlite3.connect("/var/lib/docker-helper/docker-helper.db")
-scols = [r[1] for r in db.execute("PRAGMA table_info(sessions)")]
-dcols = [r[1] for r in db.execute("PRAGMA table_info(session_filesystem_snapshot_entries)")]
-rows = db.execute("SELECT COUNT(*) FROM session_filesystem_snapshot_entries").fetchone()[0]
-ok = ("principal_id" not in scols and "launcher_id" in scols
-      and dcols == ["session_id", "path"] and rows == 0)
-sys.exit(0 if ok else 1)
-' 2>/dev/null; then
-    acc_ok "MF refusal left the database untouched (sessions schema final, decoy intact and empty)"
-  else
-    acc_fail "MF refusal mutated the database (half-migrated DB state)"
-  fi
-
-  # Recovery: drop the decoy; the same database migrates successfully.
-  if python3 -c '
-import sqlite3, sys
-db = sqlite3.connect("/var/lib/docker-helper/docker-helper.db")
-db.execute("DROP TABLE session_filesystem_snapshot_entries")
-db.commit()
-' 2>/dev/null; then
-    acc_ok "MF recovery precondition: decoy dropped"
-  else
-    acc_fail "MF decoy drop failed (recovery impossible)"
-  fi
-  systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
-  systemctl start docker-helper.service >/dev/null 2>&1 || true
-  for _ in $(seq 1 30); do
-    systemctl is-active --quiet docker-helper.service && break
-    sleep 1
-  done
-  if wait_health "$SOCK"; then
-    acc_ok "MF recovery: candidate started and migrated the same database"
-  else
-    acc_fail "MF recovery failed: daemon not healthy after dropping the decoy"
-  fi
-
-  # --- M2: legacy config keeps read_write authority in the legacy form ---------
-  # The default list is the 2.1-compatible one path per line; the access
-  # authority is proven through the explicit --json rich projection, parsed
-  # structurally (path and access are separate lines in the pretty JSON, so
-  # the projection is never grepped line-wise).
-  M_LIST_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"
-  M_RW_ROOT="$(printf '%s' "$M_LIST_JSON" | allowed_root_json_access "$ALLOWED_ROOT")"
-  M_RW_POLICY="$(printf '%s' "$M_LIST_JSON" | allowed_root_json_access "$M_POLICY")"
-  if [ "$M_RW_ROOT" = read_write ] && [ "$M_RW_POLICY" = read_write ]; then
-    acc_ok "M2 migrated path-only global roots carry read_write authority (--json rich projection)"
-  else
-    acc_fail "M2 global root access semantics wrong (rich projection: $M_LIST_JSON)"
-  fi
-  M_HUMAN_LIST="$(dh config allowed-root list 2>/dev/null || true)"
-  if printf '%s\n' "$M_HUMAN_LIST" | grep -qx "$ALLOWED_ROOT" \
-      && printf '%s\n' "$M_HUMAN_LIST" | grep -qx "$M_POLICY"; then
-    acc_ok "M2 default human list keeps the 2.1 one-path-per-line contract (no ACCESS column)"
-  else
-    acc_fail "M2 default human list lost the 2.1 one-path-per-line contract: $M_HUMAN_LIST"
-  fi
-  if python3 -c '
-import json, sys
-cfg = json.load(open("/etc/docker-helper/config.json"))
-roots = cfg.get("allowed_roots", [])
-sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, str) for r in roots) else 1)
-' 2>/dev/null; then
-    acc_ok "M2 config.json keeps the legacy path-only string form (no object-form rewrite)"
-  else
-    acc_fail "M2 config.json legacy path-only form not preserved"
-  fi
-
-  # --- M3/M4: Principal and Launcher roots migrated read_write -----------------
-  M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
-  M_RW_P_ROOT="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$ALLOWED_ROOT")"
-  M_RW_P_POLICY="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$M_POLICY")"
-  if [ "$M_RW_P_ROOT" = read_write ] && [ "$M_RW_P_POLICY" = read_write ]; then
-    acc_ok "M3 Principal roots migrated as read_write (--json rich projection)"
-  else
-    acc_fail "M3 Principal root migration wrong (rich projection: $M_PLIST_JSON)"
-  fi
-  M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
-  M_RW_L_SUB="$(printf '%s' "$M_LLIST_JSON" | allowed_root_json_access "$M_POLICY/sub")"
-  if [ "$M_RW_L_SUB" = read_write ]; then
-    acc_ok "M4 Launcher root migrated as read_write (--json rich projection)"
-  else
-    acc_fail "M4 Launcher root migration wrong (rich projection: $M_LLIST_JSON)"
-  fi
-
-  # --- M5: compatibility workspace/read_write snapshots ------------------------
-  M_S1_SHOW="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
-  M_S2_SHOW="$(dh session show --system --id "$M_S2_ID" 2>/dev/null || true)"
-  if printf '%s\n' "$M_S1_SHOW" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$" \
-      && printf '%s\n' "$M_S2_SHOW" | grep -Eq "^$(printf '%s' "$M_HOME/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
-    acc_ok "M5 pre-existing Sessions carry the compatibility workspace/read_write snapshot"
-  else
-    acc_fail "M5 compatibility snapshot wrong (S1: $(printf '%s\n' "$M_S1_SHOW" | tail -4 | tr '\n' '; '))"
-  fi
-
-  # --- M6: identity preservation ----------------------------------------------
-  M_AUTH_HTTP="$(curl --silent --output /tmp/r2ac-m-auth.json --write-out '%{http_code}' --max-time 5 \
-    --unix-socket "$SOCK" -H "Authorization: Bearer $M_P_TOKEN" http://localhost/auth 2>/dev/null || true)"
-  if [ "$M_AUTH_HTTP" = 200 ] && grep -q '"authority":"principal"' /tmp/r2ac-m-auth.json \
-      && grep -q "\"principal\":\"$M_USER\"" /tmp/r2ac-m-auth.json; then
-    acc_ok "M6 principal credential keeps its identity after migration"
-  else
-    acc_fail "M6 principal credential identity check failed (http=$M_AUTH_HTTP)"
-  fi
-  M_LAUNCHERS="$(dh launcher list --system --principal "$M_USER" --json 2>/dev/null || true)"
-  if printf '%s\n' "$M_LAUNCHERS" | grep -q "\"id\": \"$M_L_ID\"" \
-      && printf '%s\n' "$M_LAUNCHERS" | grep -q '"name": "mlaunch"'; then
-    acc_ok "M6 launcher identity preserved (same ID and name)"
-  else
-    acc_fail "M6 launcher identity changed after migration"
-  fi
-  M_SESSIONS="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
-  if printf '%s\n' "$M_SESSIONS" | grep -q "$M_S1_ID" \
-      && printf '%s\n' "$M_SESSIONS" | grep -q "$M_S2_ID"; then
-    acc_ok "M6 both pre-existing Session IDs preserved in the authoritative list"
-  else
-    acc_fail "M6 pre-existing Session IDs not preserved"
-  fi
-
-  # --- M7: the old Session keeps the 2.1 writable behavior ---------------------
-  if [ -n "${M_S1_TOKEN:-}" ]; then
-    M_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$M_S1_TOKEN" \
-      dh run --image alpine:3.24 --mount .:/mnt/ws -- \
-      sh -ec 'echo migrated-write > /mnt/ws/after-migration.txt && cat /mnt/ws/input.txt && echo MIG-RW-OK' 2>&1)"
-    if printf '%s\n' "$M_RUN_OUT" | grep -q 'MIG-RW-OK' \
-        && [ "$(cat "$M_POLICY/sub/ws/after-migration.txt" 2>/dev/null)" = "migrated-write" ]; then
-      acc_ok "M7 old Session still exposes its workspace writable (2.1 behavior preserved)"
-    else
-      acc_fail "M7 old Session writable behavior changed: $(printf '%s\n' "$M_RUN_OUT" | redact | tail -3)"
-    fi
-  else
-    acc_fail "M7 old Session bearer unavailable (seed failed earlier)"
-  fi
-
-  # M8 pre-restart baseline: the canonical, formatting-independent rich
-  # projection of the migrated policy (config and Principal roots). The
-  # post-restart check compares this projection, never formatted output.
-  M8_CONFIG_PROJ_BEFORE="$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_projection)"
-  M8_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null | allowed_root_json_projection)"
-
-  # --- M8: restart idempotency --------------------------------------------------
-  systemctl restart docker-helper.service >/dev/null 2>&1 || true
-  for _ in $(seq 1 30); do
-    systemctl is-active --quiet docker-helper.service && break
-    sleep 1
-  done
-  if wait_health "$SOCK"; then
-    M_S1_SHOW2="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
-    if printf '%s\n' "$M_S1_SHOW2" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
-      acc_ok "M8 snapshot stable across restart (idempotent migration)"
-    else
-      acc_fail "M8 snapshot changed after restart"
-    fi
-    M8_CONFIG_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"
-    M8_PRINCIPAL_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
-    M8_CONFIG_RW="$(printf '%s' "$M8_CONFIG_JSON" | allowed_root_json_access "$M_POLICY")"
-    M8_PRINCIPAL_RW="$(printf '%s' "$M8_PRINCIPAL_JSON" | allowed_root_json_access "$M_POLICY")"
-    if [ "$(printf '%s' "$M8_CONFIG_JSON" | allowed_root_json_projection)" = "$M8_CONFIG_PROJ_BEFORE" ] \
-        && [ "$(printf '%s' "$M8_PRINCIPAL_JSON" | allowed_root_json_projection)" = "$M8_PRINCIPAL_PROJ_BEFORE" ] \
-        && [ "$M8_CONFIG_RW" = read_write ] && [ "$M8_PRINCIPAL_RW" = read_write ]; then
-      acc_ok "M8 migrated policy stable across restart (canonical rich projection identical, read_write kept)"
-    else
-      acc_fail "M8 migrated policy changed after restart (projection before: config=[$M8_CONFIG_PROJ_BEFORE] principal=[$M8_PRINCIPAL_PROJ_BEFORE])"
-    fi
-    if python3 -c '
-import sqlite3, sys
-db = sqlite3.connect("/var/lib/docker-helper/docker-helper.db")
-scols = [r[1] for r in db.execute("PRAGMA table_info(sessions)")]
-snapcols = [r[1] for r in db.execute("PRAGMA table_info(session_filesystem_snapshot_entries)")]
-ok = ("principal_id" not in scols and "launcher_id" in scols
-      and snapcols == ["session_id", "position", "path", "access"])
-sys.exit(0 if ok else 1)
-' 2>/dev/null; then
-      acc_ok "M8 final schema after restart: sessions final, snapshot table canonical"
-    else
-      acc_fail "M8 final schema wrong after restart"
-    fi
-  else
-    acc_fail "M8 daemon not healthy after restart (idempotency not exercised)"
-  fi
-fi
-
-# ==============================================================================
 # scenario H: launcher hierarchy, isolation, rotation, and lifecycle (candidate)
 #
 # Exercised end-to-end against the installed candidate with two launchers on
@@ -1797,10 +1368,10 @@ H_SEL_DEF_JSON="$(dh launcher show --system --principal "$H_USER" 2>/dev/null ||
 H_SEL_DEF_ID="$(printf '%s' "$H_SEL_DEF_JSON" | json_field id || true)"
 H_SEL_DEF_NAME_ID="$(dh launcher show --system --principal "$H_USER" default 2>/dev/null | json_field id || true)"
 H_SEL_ALPHA_NAME_ID="$(dh launcher show --system --principal "$H_USER" alpha 2>/dev/null | json_field id || true)"
-H_SEL_UPG_DEF_ID="$(dh launcher show --system --principal "$M_USER" 2>/dev/null | json_field id || true)"
+H_SEL_UPG_DEF_ID="$(dh launcher show --system --principal "$G_USER" 2>/dev/null | json_field id || true)"
 H_SEL_FOREIGN_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
   --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
-  "http://localhost/principals/$M_USER/launchers/alpha" 2>/dev/null || true)"
+  "http://localhost/principals/$G_USER/launchers/alpha" 2>/dev/null || true)"
 H_SEL_MALFORMED_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
   --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
   "http://localhost/principals/$H_USER/launchers/Foo" 2>/dev/null || true)"

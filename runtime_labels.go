@@ -25,10 +25,6 @@ const (
 	runtimeLabelLauncherID = "com.dockerhelper.launcher.id"
 	// runtimeLabelPrincipalName carries the owning Principal name.
 	runtimeLabelPrincipalName = "com.dockerhelper.principal.name"
-	// runtimeLabelOperationID carries the server-generated run Operation ID.
-	// It correlates a container with its Operation and its helper-owned
-	// workload MAC state; the value is always server-generated.
-	runtimeLabelOperationID = "com.dockerhelper.operation.id"
 )
 
 // runtimeLabelsFor returns the reserved label set for the given Session
@@ -41,12 +37,4 @@ func runtimeLabelsFor(s *Session) []string {
 		runtimeLabelLauncherID + "=" + s.LauncherID,
 		runtimeLabelPrincipalName + "=" + s.PrincipalName,
 	}
-}
-
-// runtimeLabelsForRun returns the reserved label set for a run container: the
-// Session ownership chain plus the server-generated Operation ID. The
-// operation label is the correlation key between a container and its
-// helper-owned workload MAC state.
-func runtimeLabelsForRun(s *Session, operationID string) []string {
-	return append(runtimeLabelsFor(s), runtimeLabelOperationID+"="+operationID)
 }

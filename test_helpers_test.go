@@ -210,63 +210,6 @@ func writeTestTokenFile(t *testing.T, path, token string) {
 // testAdminToken is the admin token used in unit tests.
 const testAdminToken = "dht_test_admin_token"
 
-// initializeTestDatabase runs the startup database owners a test database
-// needs before it can create Sessions: the schema initialization followed by
-// the Session filesystem snapshot migration, mirroring the production startup
-// order for tests that build an App without the full daemon startup.
-func initializeTestDatabase(t *testing.T, db *sql.DB) {
-	t.Helper()
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
-	// Session filesystem snapshot persistence: the test database goes through
-	// the same startup migration owner, so session creation tests exercise the
-	// canonical snapshot table.
-	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
-		t.Fatalf("migrateSessionFilesystemSnapshots() error: %v", err)
-	}
-}
-
-// insertTestSessionSnapshot issues the persisted filesystem snapshot rows for
-// a directly seeded test session: the canonical issuance backfill is the
-// single-entry workspace-read_write snapshot, exactly what the startup
-// migration derives for a legacy Session. The coherent run/build authority
-// read fails closed without these rows.
-func insertTestSessionSnapshot(t *testing.T, db *sql.DB, sessionID, workspace string) {
-	t.Helper()
-	insertTestSessionSnapshotEntries(t, db, sessionID, []AllowedRootEntry{
-		{Path: workspace, Access: AllowedRootAccessReadWrite},
-	})
-}
-
-// insertTestSessionSnapshotEntries issues an exact persisted filesystem
-// snapshot for a seeded test session, replacing any rows the Session-create
-// owner already derived. Enforcement tests use it to control the issued
-// data-plane authority precisely; snapshot derivation from live parent
-// policy is separately owned by the Session-create tests.
-func insertTestSessionSnapshotEntries(t *testing.T, db *sql.DB, sessionID string, entries []AllowedRootEntry) {
-	t.Helper()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("begin snapshot insert: %v", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM session_filesystem_snapshot_entries WHERE session_id = ?`, sessionID); err != nil {
-		tx.Rollback()
-		t.Fatalf("clear snapshot for seeded session %s: %v", sessionID, err)
-	}
-	if _, err := tx.Exec(`DELETE FROM session_filesystem_snapshot_meta WHERE session_id = ?`, sessionID); err != nil {
-		tx.Rollback()
-		t.Fatalf("clear snapshot metadata for seeded session %s: %v", sessionID, err)
-	}
-	if err := insertSessionFilesystemSnapshot(tx, sessionID, entries); err != nil {
-		tx.Rollback()
-		t.Fatalf("insert snapshot for seeded session %s: %v", sessionID, err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit snapshot insert: %v", err)
-	}
-}
-
 // newTestApp creates a minimal *App with an in-memory SQLite database,
 // a valid allowed root, and a runtime directory. It does not set
 // AdminTokenHash; use newTestAppWithAdminToken for tests that require admin authorization.
@@ -281,7 +224,9 @@ func newTestApp(t *testing.T) *App {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	initializeTestDatabase(t, db)
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
 
 	allowedRoot := testAllowedRootDir(t)
 
@@ -290,7 +235,7 @@ func newTestApp(t *testing.T) *App {
 		t.Fatalf("cannot create runtime dir: %v", err)
 	}
 	cfg := &Config{
-		AllowedRoots:          []AllowedRootEntry{allowedRootEntry(allowedRoot)},
+		AllowedRoots:          []string{allowedRoot},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -418,7 +363,7 @@ func testWorkspaceDir(t *testing.T, allowedRoot string) string {
 // 'default' Launcher under the collapsed global roots). It never computes
 // effective roots or manufactures a sessionCreatePolicy.
 func createDefaultAdminSessionForTest(app *App, workspace string) (*CreatedSession, error) {
-	return app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace, nil)
+	return app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace)
 }
 
 // mockStandaloneUserInit mocks systemSocketExists and checkDockerAccess so

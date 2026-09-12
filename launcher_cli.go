@@ -521,7 +521,6 @@ var launcherAllowedRootCommand = &Command{
 	Subcommands: []*Command{
 		launcherAllowedRootAddCommand,
 		launcherAllowedRootListCommand,
-		launcherAllowedRootSetAccessCommand,
 		launcherAllowedRootRemoveCommand,
 		launcherAllowedRootInheritCommand,
 	},
@@ -530,14 +529,12 @@ var launcherAllowedRootCommand = &Command{
 var launcherAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root to a launcher",
-	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [LAUNCHER] PATH",
+	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		access := &accessFlag{}
-		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -550,7 +547,7 @@ var launcherAllowedRootAddCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				result, err := client.addLauncherAllowedRoot(username, selector, path, optionalAccessFromFlag(access))
+				result, err := client.addLauncherAllowedRoot(username, selector, path)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -558,7 +555,7 @@ var launcherAllowedRootAddCommand = &Command{
 
 				fmt.Fprintf(stdout, "added %q to launcher %s\n", path, selector)
 				if result.Message == "unchanged" {
-					fmt.Fprintf(stdout, "(already present with access %s)\n", result.Access)
+					fmt.Fprintln(stdout, "(already present)")
 				}
 				return 0
 			},
@@ -569,13 +566,12 @@ var launcherAllowedRootAddCommand = &Command{
 var launcherAllowedRootListCommand = &Command{
 	Name:       "list",
 	Summary:    "List a launcher's allowed roots",
-	Usage:      "docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -593,64 +589,8 @@ var launcherAllowedRootListCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := printAllowedRootList(stdout, l.AllowedRootEntries, *jsonOut); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
-				}
-				return 0
-			},
-		}
-	},
-}
-
-// launcherAllowedRootSetAccessCommand changes the access mode of exactly one
-// stored root: [LAUNCHER] PATH ACCESS. One positional before the path is the
-// LAUNCHER selector; the last positional is the canonical access value. The
-// daemon performs the conditional mutation, so the CLI never reads and
-// re-sends the root list.
-var launcherAllowedRootSetAccessCommand = &Command{
-	Name:       "set-access",
-	Summary:    "Change the access mode of a launcher allowed root",
-	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH read_only|read_write",
-	MinPosArgs: 2,
-	MaxPosArgs: 3,
-	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		return Invocation{
-			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				args := fs.Args()
-				path := args[0]
-				accessArg := args[1]
-				selector := defaultLauncherName
-				if len(args) == 3 {
-					selector = args[0]
-					path = args[1]
-					accessArg = args[2]
-				}
-				access, aerr := parseAllowedRootAccess(accessArg)
-				if aerr != nil {
-					fmt.Fprintf(stderr, "error: %v\n", aerr)
-					return 2
-				}
-				username, err := launcherSelectorTargetSelector(client, *principal, selector)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				result, err := client.setLauncherAllowedRootAccess(username, selector, path, access)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				fmt.Fprintf(stdout, "access of %q on launcher %s is %s\n", result.Path, selector, result.Access)
-				if result.Message == "unchanged" {
-					fmt.Fprintln(stdout, "(unchanged)")
+				for _, root := range l.AllowedRoots {
+					fmt.Fprintln(stdout, root)
 				}
 				return 0
 			},
@@ -719,7 +659,10 @@ var launcherAllowedRootInheritCommand = &Command{
 				// Returning to inherited roots is the explicit atomic
 				// replacement: the complete inherit body is sent in one
 				// request — never a read-modify-write.
-				l, err := client.replaceLauncherScope(username, selector, LauncherScopeInherit, nil)
+				l, err := client.replaceLauncherScope(username, selector, allowedRootsReplaceRequest{
+					Scope:        string(LauncherScopeInherit),
+					AllowedRoots: []string{},
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

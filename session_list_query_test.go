@@ -43,7 +43,7 @@ func setupSessionListQueryFixture(t *testing.T) *sessionListQueryFixture {
 	app := newTestAppWithAdminToken(t)
 	homes := map[string]string{}
 	for _, u := range []string{"alice", "bob"} {
-		homes[u] = filepath.Join(app.Config.AllowedRoots[0].Path, "home", u)
+		homes[u] = filepath.Join(app.Config.AllowedRoots[0], "home", u)
 		if err := os.MkdirAll(homes[u], 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -88,7 +88,7 @@ func setupSessionListQueryFixture(t *testing.T) *sessionListQueryFixture {
 	}
 
 	create := func(sel createSelector, workspace string) string {
-		result, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, sel, workspace, nil)
+		result, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, sel, workspace)
 		if err != nil {
 			t.Fatalf("createSessionAuthorized(%+v): %v", sel, err)
 		}

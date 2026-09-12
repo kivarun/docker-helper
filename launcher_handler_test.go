@@ -30,7 +30,7 @@ func installOSUserMock(t *testing.T, homes map[string]string) {
 // bearer token.
 func setupLauncherHandlerPrincipal(t *testing.T, app *App, username string) (string, string) {
 	t.Helper()
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", username)
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", username)
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 	}
 
 	// Scope replace inherit -> restricted.
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "alice")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "alice")
 	proj := filepath.Join(home, "proj")
 	if err := os.MkdirAll(proj, 0755); err != nil {
 		t.Fatal(err)
@@ -306,7 +306,7 @@ func TestLauncherHandlerRestrictedRootOutsidePrincipal(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	_, _ = setupLauncherHandlerPrincipal(t, app, "alice")
 
-	outside := filepath.Join(app.Config.AllowedRoots[0].Path, "outside")
+	outside := filepath.Join(app.Config.AllowedRoots[0], "outside")
 	if err := os.MkdirAll(outside, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestLauncherHandlerPrincipalCredentialForeignLauncher(t *testing.T) {
 	_, credToken := setupLauncherHandlerPrincipal(t, app, "alice")
 
 	// bob is a real principal with a real launcher.
-	homeBob := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "bob")
+	homeBob := filepath.Join(app.Config.AllowedRoots[0], "home", "bob")
 	if err := os.MkdirAll(homeBob, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestLauncherHandlerScopedSelectorResolution(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	_, _ = setupLauncherHandlerPrincipal(t, app, "alice")
 
-	homeBob := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "bob")
+	homeBob := filepath.Join(app.Config.AllowedRoots[0], "home", "bob")
 	if err := os.MkdirAll(homeBob, 0755); err != nil {
 		t.Fatal(err)
 	}

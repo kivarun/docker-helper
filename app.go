@@ -35,10 +35,10 @@ type App struct {
 	AdminTokenHash      [sha256.Size]byte
 	ExecCommandContext  func(context.Context, string, ...string) *exec.Cmd
 	OperationSupervisor *operationSupervisor
-	// PinMountSourceFn is a test seam for the inode-pinning primitive.
-	// Production default calls the real pinMountSource; tests can return
+	// PinWorkspaceMountSourceFn is a test seam for the inode-pinning primitive.
+	// Production default calls the real pinWorkspaceMountSource; tests can return
 	// a fake pinnedMount with controlled Cleanup behavior.
-	PinMountSourceFn func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error)
+	PinWorkspaceMountSourceFn func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error)
 	// StageBuildContextFn is a test seam for the build context staging primitive.
 	// Production default calls the real StageBuildContext; tests can return
 	// a fake stagedBuildContext with controlled Cleanup behavior.
@@ -50,16 +50,6 @@ type App struct {
 	// MACCoordinator is the session MAC coordinator owner.
 	// nil in user mode or when no MAC driver is active.
 	MACCoordinator *sessionMACCoordinator
-	// WorkloadMAC is the workload MAC coordinator owner (2.2.6). It owns
-	// operation/container-lifetime workload MAC state, separate from the
-	// session MAC coordinator's Session workspace coverage. nil in user
-	// mode or when no MAC backend is active.
-	WorkloadMAC *workloadMACCoordinator
-	// InspectOperationContainers, when set, overrides the Docker-based
-	// correlated-run container inspection used by the container-absence
-	// proof. It is a narrow test seam; production shells out to the Docker
-	// CLI with the reserved label set.
-	InspectOperationContainers func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error)
 	// InspectHelperContainers, when set, overrides the Docker-based helper
 	// container inspection used by checked Launcher/Principal deletion. It is a
 	// narrow test seam; production default shells out to the Docker CLI.
@@ -69,13 +59,13 @@ type App struct {
 	userModeDefault *userModeDefaultLauncher
 }
 
-// pinMountSource calls PinMountSourceFn if set, otherwise the
-// real pinMountSource.
-func (a *App) pinMountSource(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-	if a.PinMountSourceFn != nil {
-		return a.PinMountSourceFn(sourcePath, runtimeDir, operationID, mountIndex)
+// pinWorkspaceMountSource calls PinWorkspaceMountSourceFn if set, otherwise the
+// real pinWorkspaceMountSource.
+func (a *App) pinWorkspaceMountSource(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	if a.PinWorkspaceMountSourceFn != nil {
+		return a.PinWorkspaceMountSourceFn(workspace, sourcePath, runtimeDir, operationID, mountIndex)
 	}
-	return pinMountSource(sourcePath, runtimeDir, operationID, mountIndex)
+	return pinWorkspaceMountSource(workspace, sourcePath, runtimeDir, operationID, mountIndex)
 }
 
 // stageBuildContext calls StageBuildContextFn if set, otherwise the real StageBuildContext.

@@ -740,7 +740,7 @@ func TestHandleAuthSessionTokenRejected(t *testing.T) {
 	_, err := app.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"dhs_authtest", hex.EncodeToString(hash[:]), app.Config.AllowedRoots[0].Path,
+		"dhs_authtest", hex.EncodeToString(hash[:]), app.Config.AllowedRoots[0],
 		time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(),
 		app.userModeDefault.launcherID,
 	)
@@ -767,7 +767,7 @@ func TestHandleAuthSessionTokenRejected(t *testing.T) {
 // before revocation stops authenticating and is non-disclosing afterwards.
 func TestHandleAuthRevokedCredential(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "alice")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "alice")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -819,7 +819,7 @@ func TestHandleAuthDisabledPrincipal(t *testing.T) {
 // Launcher was enabled before disabling stops authenticating.
 func TestHandleAuthDisabledLauncher(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "alice")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "alice")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1166,15 +1166,7 @@ func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 			positional: []string{"dhl_1"},
 			wantPath:   "/principals/alice/launchers/dhl_1/allowed-roots",
 			wantMethod: http.MethodPut,
-			wantBody:   `{"scope":"inherit"}`,
-		},
-		{
-			name:       "set-access sends the targeted access mutation",
-			args:       []string{"launcher", "allowed-root", "set-access", "--principal", "alice"},
-			positional: []string{"dhl_1", "/a", "read_only"},
-			wantPath:   "/principals/alice/launchers/dhl_1/allowed-roots",
-			wantMethod: http.MethodPatch,
-			wantBody:   `{"path":"/a","access":"read_only"}`,
+			wantBody:   `{"scope":"inherit","allowed_roots":[]}`,
 		},
 	}
 	for _, tc := range tests {

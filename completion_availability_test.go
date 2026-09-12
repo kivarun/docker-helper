@@ -65,7 +65,6 @@ func TestCompletionAvailabilityMetadataAuthority(t *testing.T) {
 		principalSetCommand,
 		principalDeleteCommand,
 		principalAllowedRootAddCommand,
-		principalAllowedRootSetAccessCommand,
 		principalAllowedRootRemoveCommand,
 		principalCredentialCreateCommand,
 		principalCredentialRevokeCommand,
@@ -84,7 +83,6 @@ func TestCompletionAvailabilityMetadataAuthority(t *testing.T) {
 		principalCredentialRotateCommand,
 		mustCompletionSubcommand(credentialCommand, "list"),
 		launcherCreateCommand,
-		launcherAllowedRootListCommand,
 		launcherCredentialRotateCommand,
 		completionRootsPrincipalCommand,
 	} {

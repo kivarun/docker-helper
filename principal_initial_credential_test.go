@@ -13,7 +13,7 @@ import (
 
 func setupInitialCredentialPrincipal(t *testing.T, app *App, username string) {
 	t.Helper()
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", username)
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", username)
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestPrincipalCreateInitialCredentialAtomicRollback(t *testing.T) {
 	}
 	defer func() { generateCredentialTokenFn = orig }()
 
-	_, _, _, err := createPrincipalWithOptionalCredential(db, "s", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}, true)
+	_, _, _, err := createPrincipalWithOptionalCredential(db, "s", globalRoots, true)
 	if err == nil {
 		t.Fatal("expected credential insertion failure")
 	}
@@ -188,7 +188,7 @@ func TestPrincipalCreateProvisionsDefaultLauncherAtomically(t *testing.T) {
 		}
 		installOSUserMock(t, map[string]string{"prov": home})
 
-		if _, _, _, err := createPrincipalWithOptionalCredential(db, "prov", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}, false); err != nil {
+		if _, _, _, err := createPrincipalWithOptionalCredential(db, "prov", globalRoots, false); err != nil {
 			t.Fatalf("createPrincipalWithOptionalCredential: %v", err)
 		}
 		pid, err := findPrincipalIDByUsername(db, "prov")
@@ -236,7 +236,7 @@ func TestPrincipalCreateProvisionsDefaultLauncherAtomically(t *testing.T) {
 		}
 		defer func() { generateCredentialTokenFn = orig }()
 
-		if _, _, _, err := createPrincipalWithOptionalCredential(db, "rb", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}, true); err == nil {
+		if _, _, _, err := createPrincipalWithOptionalCredential(db, "rb", globalRoots, true); err == nil {
 			t.Fatal("expected credential insertion failure")
 		}
 
@@ -267,7 +267,7 @@ func TestMigrateDefaultLaunchersBackfillsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	installOSUserMock(t, map[string]string{"legacy": home})
-	p, _, _, err := createPrincipalWithOptionalCredential(db, "legacy", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}, false)
+	p, _, _, err := createPrincipalWithOptionalCredential(db, "legacy", globalRoots, false)
 	if err != nil {
 		t.Fatalf("createPrincipalWithOptionalCredential: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLooku
 	fq := newFailQueryAfterDB(t, path, 2, errMockQueryFail)
 	defer fq.Close()
 
-	p, cred, token, err := createPrincipalWithOptionalCredential(fq, "t", []AllowedRootEntry{allowedRootEntry(globalRoots[0])}, true)
+	p, cred, token, err := createPrincipalWithOptionalCredential(fq, "t", globalRoots, true)
 	if err != nil {
 		t.Fatalf("createPrincipalWithOptionalCredential under query failure: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLooku
 	if p.Username != "t" || !p.Enabled || p.Home != home {
 		t.Errorf("unexpected principal projection: %+v", p)
 	}
-	if len(p.AllowedRoots) != 1 || p.AllowedRoots[0].Path != home {
+	if len(p.AllowedRoots) != 1 || p.AllowedRoots[0] != home {
 		t.Errorf("expected default allowed root in projection, got %v", p.AllowedRoots)
 	}
 	if cred == nil || cred.Name != "default" || !strings.HasPrefix(token, credentialTokenPrefix) {

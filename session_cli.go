@@ -98,57 +98,12 @@ func resolveLauncherIDBySelector(client *apiClient, principal, launcher string) 
 	return result.Launchers[0].ID, nil
 }
 
-// filesystemRootFlag collects repeatable --filesystem-root PATH=ACCESS
-// values for session create. It performs syntax validation only: the value
-// is split into PATH (an absolute host path) and ACCESS, and ACCESS is
-// parsed by the existing canonical parseAllowedRootAccess owner — never a
-// second access parser. Whether the accumulated request is a valid narrowing
-// of the target Launcher's effective ceiling is a server-side
-// authorization/domain decision; the CLI never decides it locally.
-type filesystemRootFlag struct {
-	roots []sessionFilesystemRootEntry
-}
-
-func (f *filesystemRootFlag) String() string {
-	if f == nil {
-		return ""
-	}
-	parts := make([]string, 0, len(f.roots))
-	for _, root := range f.roots {
-		parts = append(parts, root.Path+"="+root.Access)
-	}
-	return strings.Join(parts, ",")
-}
-
-// Set parses one PATH=ACCESS occurrence. The separator is the last '=' so a
-// path containing '=' keeps parsing; ACCESS has no '=' (the canonical
-// vocabulary is exactly read_write or read_only). PATH must be an absolute
-// host path; an empty, relative, or unparsable value is a local syntax
-// error.
-func (f *filesystemRootFlag) Set(value string) error {
-	idx := strings.LastIndex(value, "=")
-	if idx < 0 {
-		return fmt.Errorf("--filesystem-root expects PATH=ACCESS, got %q", value)
-	}
-	path, access := value[:idx], value[idx+1:]
-	if path == "" || !filepath.IsAbs(path) {
-		return fmt.Errorf("--filesystem-root PATH must be an absolute host path, got %q", path)
-	}
-	parsed, err := parseAllowedRootAccess(access)
-	if err != nil {
-		return fmt.Errorf("--filesystem-root %q: %v", value, err)
-	}
-	f.roots = append(f.roots, sessionFilesystemRootEntry{Path: path, Access: string(parsed)})
-	return nil
-}
-
 var sessionCommand = &Command{
 	Name:    "session",
 	Summary: "Manage sessions",
 	Subcommands: []*Command{
 		sessionCreateCommand,
 		sessionListCommand,
-		sessionShowCommand,
 		sessionDeleteCommand,
 		sessionCleanupCommand,
 	},
@@ -157,7 +112,7 @@ var sessionCommand = &Command{
 var sessionCreateCommand = &Command{
 	Name:    "create",
 	Summary: "Create a new session",
-	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]",
+	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--principal USER] [--launcher LAUNCHER] [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		workspace := fs.String("workspace", "", "Workspace directory")
@@ -165,9 +120,6 @@ var sessionCreateCommand = &Command{
 		fs.Var(principal, "principal", "Principal username (admin authentication; targets the Principal's default Launcher)")
 		launcher := &explicitStringFlag{}
 		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...) to target instead of the default Launcher")
-		var filesystemRoots filesystemRootFlag
-		fs.Var(&filesystemRoots, "filesystem-root",
-			"Issuance-time Session filesystem root, repeatable PATH=ACCESS (PATH is an absolute host path inside the target Launcher's effective allowed roots; ACCESS is read_write or read_only; narrows RW to RO, never widens RO to RW; the daemon decides narrowing, the CLI validates syntax only)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
@@ -201,9 +153,6 @@ var sessionCreateCommand = &Command{
 				}
 
 				req := createSessionClientRequest{Workspace: absWorkspace}
-				if len(filesystemRoots.roots) > 0 {
-					req.FilesystemRoots = filesystemRoots.roots
-				}
 				if launcher.set || principal.set {
 					if err := resolveSessionCreateSelectors(client, principal.value, launcher.value, &req); err != nil {
 						fmt.Fprintf(stderr, "error: %v\n", err)
@@ -360,94 +309,6 @@ var sessionDeleteCommand = &Command{
 			},
 		}
 	},
-}
-
-var sessionShowCommand = &Command{
-	Name:    "show",
-	Summary: "Show one session with its issued filesystem snapshot",
-	Usage:   "docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]",
-	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		id := fs.String("id", "", "Session ID to show")
-		jsonOut := fs.Bool("json", false, "Output in JSON format")
-
-		return Invocation{
-			Validate: func() error {
-				if *id == "" || strings.HasPrefix(*id, "-") {
-					return fmt.Errorf("--id is required")
-				}
-				return nil
-			},
-			Run: func(stdout, stderr io.Writer) int {
-				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
-				})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				// The daemon authorizes the read against the authenticated
-				// bearer and loads the persisted immutable snapshot through
-				// the canonical snapshot owner; the CLI performs no
-				// client-side ownership check and never recomputes policy.
-				result, err := client.getSession(*id)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				if *jsonOut {
-					enc := json.NewEncoder(stdout)
-					enc.SetIndent("", "  ")
-					if err := enc.Encode(result); err != nil {
-						fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
-						return 1
-					}
-					return 0
-				}
-
-				printSessionShow(stdout, result)
-				return 0
-			},
-		}
-	},
-}
-
-// printSessionShow renders the compact human session-show output: the usual
-// Session metadata block and the persisted immutable filesystem snapshot as a
-// PATH/ACCESS table in its exact persisted canonical ordering. The access
-// mode is never hidden.
-func printSessionShow(w io.Writer, result *sessionShowJSON) {
-	fmt.Fprintf(w, "ID:        %s\n", result.ID)
-	fmt.Fprintf(w, "WORKSPACE: %s\n", result.Workspace)
-	principal := "-"
-	if result.Principal != nil {
-		principal = *result.Principal
-	}
-	fmt.Fprintf(w, "LAUNCHER:  %s\n", ownershipName(result.Launcher))
-	fmt.Fprintf(w, "PRINCIPAL: %s\n", principal)
-	fmt.Fprintf(w, "CREATED:   %s\n", result.CreatedAt)
-	fmt.Fprintf(w, "EXPIRES:   %s\n", result.ExpiresAt)
-
-	fmt.Fprintf(w, "\nFILESYSTEM SNAPSHOT\n")
-	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
-	fmt.Fprintln(tw, "PATH\tACCESS")
-	for _, entry := range result.FilesystemSnapshot.Entries {
-		fmt.Fprintf(tw, "%s\t%s\n", entry.Path, entry.Access)
-	}
-	tw.Flush()
-}
-
-// ownershipName renders an optional ownership name for the human session
-// output: "-" when the Session projection carries no name.
-func ownershipName(name *string) string {
-	if name == nil {
-		return "-"
-	}
-	return *name
 }
 
 func printSessionsTable(w io.Writer, sessions []sessionJSON) {

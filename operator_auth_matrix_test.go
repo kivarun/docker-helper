@@ -48,7 +48,7 @@ type operatorAuthFixture struct {
 func setupOperatorAuthFixture(t *testing.T, app *App) operatorAuthFixture {
 	t.Helper()
 	const username = "matrixuser"
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", username)
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", username)
 	workspace := filepath.Join(home, "proj")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)

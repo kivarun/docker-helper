@@ -62,25 +62,24 @@ func relToRoot(path string) (string, error) {
 	return rel, nil
 }
 
-// pinMountSource opens the source path with openat2, verifies it is a
+// pinWorkspaceMountSource opens the source path with openat2, verifies it is a
 // directory or regular file, creates a helper-owned destination, and pins the
 // inode via open_tree + move_mount.
 //
 // Parameters:
-//   - sourcePath: already-resolved absolute source path carrying issued
-//     snapshot authority (proven by the filesystem exposure resolution; this
-//     owner performs no policy decision of its own)
+//   - workspace: canonical workspace root (for containment check)
+//   - sourcePath: already-resolved absolute source path
 //   - runtimeDir: helper runtime directory
 //   - operationID: operation identifier (must be safe, no path traversal)
 //   - mountIndex: numeric index for this mount within the operation
 //
 // Returns a pinnedMount with the stable PinnedPath and Cleanup, or an error
 // with all resources cleaned up. No fallback to the original pathname.
-func pinMountSource(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-	return pinMountSourceWithSyscalls(defaultMountPinSyscalls(), sourcePath, runtimeDir, operationID, mountIndex)
+func pinWorkspaceMountSource(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	return pinWorkspaceMountSourceWithSyscalls(defaultMountPinSyscalls(), workspace, sourcePath, runtimeDir, operationID, mountIndex)
 }
 
-func pinMountSourceWithSyscalls(seam mountPinSyscalls, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+func pinWorkspaceMountSourceWithSyscalls(seam mountPinSyscalls, workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 	// Validate operationID: must not allow path traversal.
 	if !isOperationIDSafe(operationID) {
 		return nil, fmt.Errorf("invalid operation ID: %q", operationID)
@@ -92,11 +91,19 @@ func pinMountSourceWithSyscalls(seam mountPinSyscalls, sourcePath, runtimeDir, o
 	}
 
 	// Require absolute paths.
+	if !filepath.IsAbs(workspace) {
+		return nil, fmt.Errorf("workspace must be absolute: %q", workspace)
+	}
 	if !filepath.IsAbs(sourcePath) {
 		return nil, fmt.Errorf("sourcePath must be absolute: %q", sourcePath)
 	}
 	if !filepath.IsAbs(runtimeDir) {
 		return nil, fmt.Errorf("runtimeDir must be absolute: %q", runtimeDir)
+	}
+
+	// Verify sourcePath is still inside workspace.
+	if !pathWithin(workspace, sourcePath) {
+		return nil, fmt.Errorf("source escapes workspace: %s", sourcePath)
 	}
 
 	// Open / with O_PATH | O_DIRECTORY | O_CLOEXEC.

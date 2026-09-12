@@ -22,7 +22,7 @@ var errMockRotateDB = errors.New("mock_rotate_db_error")
 func principalCredentialApp(t *testing.T, username string) (*App, string, *httptest.ResponseRecorder) {
 	t.Helper()
 	app := newTestAppWithAdminToken(t)
-	home := filepath.Join(app.Config.AllowedRoots[0].Path, "home", username)
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", username)
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestPrincipalCredentialRotateNameSelector(t *testing.T) {
 // (409), launcher credential authority (401), and missing bearer (401).
 func TestPrincipalCredentialRotateErrors(t *testing.T) {
 	app, aliceToken, _ := principalCredentialApp(t, "alice")
-	bobHome := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "bob")
+	bobHome := filepath.Join(app.Config.AllowedRoots[0], "home", "bob")
 	if err := os.MkdirAll(bobHome, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestPrincipalCredentialRotateAtomicityOnFailure(t *testing.T) {
 // unauthorized.
 func TestPrincipalCredentialListScope(t *testing.T) {
 	app, aliceToken, _ := principalCredentialApp(t, "alice")
-	bobHome := filepath.Join(app.Config.AllowedRoots[0].Path, "home", "bob")
+	bobHome := filepath.Join(app.Config.AllowedRoots[0], "home", "bob")
 	if err := os.MkdirAll(bobHome, 0755); err != nil {
 		t.Fatal(err)
 	}

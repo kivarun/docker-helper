@@ -58,10 +58,7 @@
 #
 # Upgrade-baseline recovery source: the pinned baseline version and SHA-256s
 # are owned by scripts/uat-upgrade-baseline-fixture.sh and can never come from
-# GitHub variables. That fixture owner also pins the published v2.1.1 DEB/RPM
-# migration baseline for the Release-2.2 2.1.1 -> candidate migration gates
-# (DEB scenario M and the RPM guest migration stage). The optional repository
-# variables below
+# GitHub variables. The optional repository variables below
 # (UAT_UPGRADE_BASELINE_DEB_URL / UAT_UPGRADE_BASELINE_RPM_URL) may override
 # only the artifact SOURCE, so an administrator can mirror/stage the exact same
 # known bytes when the canonical URL is unavailable. Normal state (variables
@@ -75,7 +72,7 @@ on:
   workflow_call:
     inputs:
       uat_version:
-        description: 'Version string baked into the candidate artifacts (e.g. 2.2.0-uat)'
+        description: 'Version string baked into the candidate artifacts (e.g. 2.1.0-uat)'
         required: true
         type: string
       scope:
@@ -167,14 +164,11 @@ jobs:
   # ---------------------------------------------------------------------------
 
   # Ubuntu DEB / AppArmor (hosted ubuntu-24.04). Exact candidate DEB.
-  # The Release-2 acceptance includes the Release-2.2 2.1.1 -> candidate
-  # migration gate (scenario M, pinned published v2.1.1 baseline DEB) plus the
-  # fail-closed migration-refusal case.
   uat-blackbox-ubuntu:
     if: inputs.scope == 'full'
     needs: producer
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -249,7 +243,7 @@ jobs:
             UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
             UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" scripts/uat-blackbox.sh
 
-  # Ubuntu targeted regressions 3-19 (DEB/AppArmor). Exact candidate DEB; the
+  # Ubuntu targeted regressions 3-10 (DEB/AppArmor). Exact candidate DEB; the
   # runner never rebuilds when the candidate DEB is supplied.
   uat-regressions-ubuntu:
     if: inputs.scope == 'full'
@@ -277,7 +271,7 @@ jobs:
           echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
           echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
 
-      - name: Run targeted Release-2 regressions (3-19, collect-all, exact candidate DEB)
+      - name: Run targeted Release-2 regressions (3-10, collect-all, exact candidate DEB)
         run: |
           sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
             UAT_ALLOWED_ROOT=/home \
@@ -285,134 +279,12 @@ jobs:
             UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
             scripts/uat-regressions-runner-ubuntu.sh
 
-  # Ubuntu DEB / AppArmor — the canonical full Phase 2.2.7 functional
-  # access-mode matrix (exact candidate DEB). This is the ONE full functional
-  # matrix of the gate; the other install formats get the access-mode smoke
-  # inside the common black-box UAT (phase 5b).
-  uat-access-modes-ubuntu:
-    if: inputs.scope == 'full'
-    needs: producer
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install platform dependencies
-        run: |
-          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
-            scripts/uat-blackbox.sh install-deps
-
-      - name: Download candidate set
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ${{ needs.producer.outputs.candidate-name }}
-          path: /tmp/candidate
-
-      - name: Resolve exact candidate DEB from producer SHA256SUMS
-        run: |
-          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate deb)
-          echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
-          echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
-
-      - name: Run full functional access-mode UAT (exact candidate DEB)
-        run: |
-          sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
-            UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
-            UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
-            scripts/uat-access-modes.sh
-
-  # Ubuntu DEB / AppArmor — the canonical full self-introspection matrix
-  # (exact candidate DEB). This is the ONE full GET /self matrix of the
-  # gate; the other install formats get the self smoke inside the common
-  # black-box UAT (phase 3b).
-  uat-self-introspection-ubuntu:
-    if: inputs.scope == 'full'
-    needs: producer
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install platform dependencies
-        run: |
-          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
-            scripts/uat-blackbox.sh install-deps
-
-      - name: Download candidate set
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ${{ needs.producer.outputs.candidate-name }}
-          path: /tmp/candidate
-
-      - name: Resolve exact candidate DEB from producer SHA256SUMS
-        run: |
-          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate deb)
-          echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
-          echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
-
-      - name: Run full self-introspection UAT (exact candidate DEB)
-        run: |
-          sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
-            UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
-            UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
-            scripts/uat-self-introspection.sh
-
-  # Ubuntu DEB / AppArmor — the full AppArmor workload-MAC acceptance matrix on
-  # the exact candidate (docs/release-2.2-mac-enforcement.md, AppArmor matrix).
-  # The backend-only forced-writable RO proof uses the test-only live harness
-  # compiled by the acceptance script from THIS checkout; the script verifies
-  # candidate.manifest source_sha == UAT_SOURCE_SHA before use, so the proof
-  # stays bound to the same candidate source SHA and the installed candidate
-  # policy/package artifacts.
-  uat-workload-apparmor-ubuntu:
-    if: inputs.scope == 'full'
-    needs: producer
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install platform dependencies
-        run: |
-          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
-            scripts/uat-blackbox.sh install-deps
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Download candidate set
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ${{ needs.producer.outputs.candidate-name }}
-          path: /tmp/candidate
-
-      - name: Resolve exact candidate DEB from producer SHA256SUMS
-        run: |
-          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate deb)
-          echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
-          echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
-
-      - name: Run AppArmor workload-MAC acceptance (exact candidate DEB)
-        run: |
-          sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
-            UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
-            UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
-            UAT_MANIFEST_PATH=/tmp/candidate/candidate.manifest \
-            UAT_SOURCE_SHA="${{ github.sha }}" \
-            UAT_REPO_DIR="${{ github.workspace }}" \
-            scripts/uat-workload-apparmor.sh
-
   # Tumbleweed RPM / AppArmor (QEMU/KVM). Exact candidate RPM.
   uat-blackbox-opensuse-apparmor:
     if: inputs.scope == 'full'
     needs: producer
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -450,7 +322,7 @@ jobs:
     if: inputs.scope == 'full' || inputs.scope == 'selinux'
     needs: producer
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -461,14 +333,6 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
-
-      # The SELinux workload-MAC stage compiles the test-only live harness on
-      # the host from this same checkout (candidate source binding) before the
-      # guest runs the acceptance script.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-          cache: true
 
       - name: Download candidate set
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -487,8 +351,6 @@ jobs:
           UAT_REPO_DIR="${{ github.workspace }}" \
           UAT_RPM="$UAT_RPM" \
           UAT_RPM_SHA256="$UAT_RPM_SHA256" \
-          UAT_MANIFEST=/tmp/candidate/candidate.manifest \
-          UAT_SOURCE_SHA="${{ github.sha }}" \
           UAT_VERSION="${{ inputs.uat_version }}" \
           UAT_UPGRADE_BASELINE_RPM_URL="${{ vars.UAT_UPGRADE_BASELINE_RPM_URL }}" \
           scripts/uat-vm-opensuse-selinux.sh

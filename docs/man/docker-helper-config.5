@@ -32,45 +32,9 @@ System mode Unix socket (created at runtime)
 JSON object with the following fields. Two fields are required; all others are optional.
 .SH FIELDS
 .TP
-.B allowed_roots (array, required)
-Canonical absolute paths for agent workspace roots, each carrying an
-access mode. The canonical entry form is an object with both fields:
-.RS 4
-.nf
-{"path": "/srv/run-root", "access": "read_write"}
-.fi
-.RE
-.IP \(bu 4
-.B access
-is exactly
-.B read_write
-or
-.BR read_only ;
-an object entry requires it explicitly. Plain string entries are
-accepted for compatibility and mean
-.BR read_write .
-.IP \(bu 4
-This is the global authorization ceiling only; it does not own MAC state.
-.IP \(bu 4
-Within one scope the most-specific canonical path wins. Across scopes a
-lower authority (Principal, Launcher) may narrow but never widen its
-parent: the access modes meet with
-.B read_only
-dominance.
-.IP \(bu 4
-A writable exposure is admitted only when the source itself is
-.B read_write
-and covers no effective nested
-.B read_only
-region; the daemon refuses it with the
-.B read_only_root
-policy refusal and never silently downgrades the request.
-.IP \(bu 4
-A Session captures the effective filesystem policy as an immutable
-snapshot at creation time. Later allowed-root changes affect only new
-Sessions; an issued Session keeps its issued snapshot for its whole
-lifetime (visible through \fBsession show\fR).
-Each path must satisfy
+.B allowed_roots (array of strings, required)
+Canonical absolute paths for agent workspace roots. This is the global
+authorization ceiling only; it does not own MAC state. Each path must satisfy
 the following policy:
 .RS 4
 \(bu
@@ -104,18 +68,11 @@ and stored root.
 .PP
 Manage workspace roots with:
 .br
-\fBdocker-helper config allowed-root list [\-\-json]\fR \- list global allowed roots, one canonical root per line; \-\-json prints the rich entries
+\fBdocker-helper config allowed-root list\fR \- list global allowed roots
 .br
-\fBdocker-helper config allowed-root add [\-\-access ACCESS] PATH\fR \- add a global allowed root (omitted \fB\-\-access\fR is the read_write grant)
-.br
-\fBdocker-helper config allowed-root set-access PATH ACCESS\fR \- change the access mode of one stored root
+\fBdocker-helper config allowed-root add PATH\fR \- add a global allowed root
 .br
 \fBdocker-helper config allowed-root remove PATH\fR \- remove a global allowed root
-.PP
-\fBconfig show\fR projects the stored entries as
-\fBallowed_root_entries\fR (the authoritative rich projection with the
-access modes) beside the 2.x path-only \fBallowed_roots\fR compatibility
-projection; both derive from one canonical policy value.
 .PP
 Legacy scalar \fBallowed_root\fR is accepted by config loading for migration
 purposes only. The current schema uses \fBallowed_roots\fR.
@@ -284,30 +241,11 @@ The RPM contains the policy module; the DEB does not install an SELinux module.
   "session_ttl": "12h"
 }
 .fi
-The string entries are the accepted legacy compatibility form; each means
-.BR read_write .
-.SS Mixed access modes (canonical object form)
-.nf
-{
-  "allowed_roots": [
-    {"path": "/srv/run-root", "access": "read_write"},
-    {"path": "/srv/run-root/pipeline-inputs", "access": "read_only"},
-    {"path": "/srv/run-root/pipeline-outputs", "access": "read_write"}
-  ],
-  "session_ttl": "12h"
-}
-.fi
-With a Session workspace at \fI/srv/run-root\fR, a writable mount of
-\fIproject\fR or \fIpipeline-outputs\fR succeeds, a writable request for
-\fIpipeline-inputs\fR is refused with
-.BR read_only_root ,
-and a writable mount of the workspace root itself is refused because it
-would cover the nested read-only region.
 .SS Full configuration with all fields
 .nf
 {
   "allowed_roots": [
-    {"path": "/srv/workspaces", "access": "read_write"}
+    "/srv/workspaces"
   ],
   "session_ttl": "1h",
   "log_level": "debug",

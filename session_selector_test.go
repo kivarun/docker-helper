@@ -19,7 +19,7 @@ import (
 // precedence over value/lookup validation.
 func TestCreateSessionSelectorMatrix(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
+	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sessions", app.handleCreateSession)

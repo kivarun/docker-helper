@@ -549,11 +549,10 @@ func TestSystemModeCAOutsideSourceAllowsUnrelatedMutation(t *testing.T) {
 
 	// The allowed root must be added and the CA settings preserved unchanged.
 	raw := readConfigJSON(t, configPath)
-	var entries []AllowedRootEntry
-	if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
 		t.Fatal(err)
 	}
-	roots := allowedRootPaths(entries)
 	if !slices.Contains(roots, newRoot) {
 		t.Errorf("allowed_roots = %v, want it to contain %s", roots, newRoot)
 	}
@@ -910,11 +909,10 @@ func TestTrustedCAPreflightSystemStoppedUnrelatedMutationNoWarning(t *testing.T)
 		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	raw := readConfigJSON(t, configPath)
-	var entries []AllowedRootEntry
-	if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
 		t.Fatal(err)
 	}
-	roots := allowedRootPaths(entries)
 	if !slices.Contains(roots, newRoot) {
 		t.Errorf("allowed_roots = %v, want it to contain %s", roots, newRoot)
 	}

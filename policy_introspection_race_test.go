@@ -67,22 +67,12 @@ func (p *parkedQueryPoint) maybePark(query string) {
 type parkedQueryConn struct {
 	driver.Conn
 	points    []*parkedQueryPoint
-	watchers  []queryWatcher
 	keepAlive *sql.DB
-}
-
-// queryWatcher is the passively observing point contract shared with
-// counting points: it records matches without ever parking a query.
-type queryWatcher interface {
-	maybePark(query string)
 }
 
 func (c *parkedQueryConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	for _, p := range c.points {
 		p.maybePark(query)
-	}
-	for _, w := range c.watchers {
-		w.maybePark(query)
 	}
 	if queryer, ok := c.Conn.(driver.QueryerContext); ok {
 		return queryer.QueryContext(ctx, query, args)
@@ -106,8 +96,7 @@ func (c *parkedQueryConn) Close() error {
 }
 
 type parkedQueryDriver struct {
-	points   []*parkedQueryPoint
-	watchers []queryWatcher
+	points []*parkedQueryPoint
 }
 
 func (d *parkedQueryDriver) Open(dsn string) (driver.Conn, error) {
@@ -115,25 +104,16 @@ func (d *parkedQueryDriver) Open(dsn string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &parkedQueryConn{Conn: realConn, keepAlive: keepAlive, points: d.points, watchers: d.watchers}, nil
+	return &parkedQueryConn{Conn: realConn, keepAlive: keepAlive, points: d.points}, nil
 }
 
 // openParkedQueryDB reopens an already-initialized database file through the
 // parked-query driver. The fixture must have been prepared on a normal
 // connection first: park points would otherwise trip during setup.
-func openParkedQueryDB(t *testing.T, dbPath string, points ...queryWatcher) *sql.DB {
+func openParkedQueryDB(t *testing.T, dbPath string, points ...*parkedQueryPoint) *sql.DB {
 	t.Helper()
 	name := nextMockDriverName("pqp")
-	var parks []*parkedQueryPoint
-	var watch []queryWatcher
-	for _, p := range points {
-		if park, ok := p.(*parkedQueryPoint); ok {
-			parks = append(parks, park)
-		} else {
-			watch = append(watch, p)
-		}
-	}
-	sql.Register(name, &parkedQueryDriver{points: parks, watchers: watch})
+	sql.Register(name, &parkedQueryDriver{points: points})
 	db, err := sql.Open(name, dbPath)
 	if err != nil {
 		t.Fatalf("sql.Open(parked): %v", err)
@@ -158,7 +138,7 @@ func openParkedQueryDB(t *testing.T, dbPath string, points ...queryWatcher) *sql
 func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	rootA := app1.Config.AllowedRoots[0].Path
+	rootA := app1.Config.AllowedRoots[0]
 
 	// Principal rootview with stored roots [home, stale]: home sits under the
 	// narrowed global root, stale only under the wider pre-reload root A, so
@@ -279,19 +259,13 @@ func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) 
 func TestRacePrincipalRootNarrowingSerializesCreatePolicyIntrospection(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0].Path
+	root := app1.Config.AllowedRoots[0]
 
 	// Principal raceowner with stored roots [home, extra] and a credential.
-	// The extra root is a disjoint sibling under the global root, so the
-	// canonical normalized effective projection keeps both entries and the
-	// pre-/post-narrowing states remain distinguishable (a nested
-	// same-mode child would be normalized away).
 	home := filepath.Join(root, "home", "raceowner")
-	extra := filepath.Join(root, "raceowner-inputs")
-	for _, d := range []string{home, extra} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			t.Fatal(err)
-		}
+	extra := filepath.Join(home, "extra")
+	if err := os.MkdirAll(extra, 0755); err != nil {
+		t.Fatal(err)
 	}
 	installOSUserMock(t, map[string]string{"raceowner": home})
 	if _, err := createPrincipal(app1.DB, "raceowner", app1.Config.AllowedRoots); err != nil {
@@ -413,7 +387,7 @@ type narrowingResult struct {
 func TestRacePrincipalDeleteSerializesEffectiveRootsIntrospection(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0].Path
+	root := app1.Config.AllowedRoots[0]
 
 	// Principal victim with stored roots [home, extra] and a credential.
 	home := filepath.Join(root, "home", "victim")
@@ -520,7 +494,7 @@ func TestRacePrincipalDeleteSerializesEffectiveRootsIntrospection(t *testing.T) 
 func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0].Path
+	root := app1.Config.AllowedRoots[0]
 
 	home := filepath.Join(root, "home", "victim")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -536,10 +510,10 @@ func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testi
 	}
 
 	// Park the introspection at its first in-boundary Principal-roots read
-	// (SELECT root_path, access FROM principal_allowed_roots WHERE principal_id = ?),
+	// (SELECT root_path FROM principal_allowed_roots WHERE principal_id = ?),
 	// reached while it holds lifecycleMu. The pattern is distinct from every
 	// other query in the race phase.
-	introspectionPoint := newParkedQueryPoint("SELECT root_path, access FROM principal_allowed_roots WHERE principal_id")
+	introspectionPoint := newParkedQueryPoint("SELECT root_path FROM principal_allowed_roots WHERE principal_id")
 	app := &App{
 		Config:                  app1.Config,
 		DB:                      openParkedQueryDB(t, app1.Config.DatabasePath, introspectionPoint),
@@ -611,18 +585,12 @@ func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testi
 func TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0].Path
+	root := app1.Config.AllowedRoots[0]
 
-	// The extra root is a disjoint sibling under the global root, so the
-	// canonical normalized effective projection keeps both entries and the
-	// pre-/post-narrowing states remain distinguishable (a nested
-	// same-mode child would be normalized away).
 	home := filepath.Join(root, "home", "raceowner")
-	extra := filepath.Join(root, "raceowner-inputs")
-	for _, d := range []string{home, extra} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			t.Fatal(err)
-		}
+	extra := filepath.Join(home, "extra")
+	if err := os.MkdirAll(extra, 0755); err != nil {
+		t.Fatal(err)
 	}
 	installOSUserMock(t, map[string]string{"raceowner": home})
 	if _, err := createPrincipal(app1.DB, "raceowner", app1.Config.AllowedRoots); err != nil {
@@ -682,6 +650,10 @@ func TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing(t *testing.T
 		//    resumes: a serialized narrowing is blocked on the held
 		//    boundary and cannot have committed, while an unserialized
 		//    narrowing commits here.
+		// 3. The narrowing's DELETE barrier opens before the introspection
+		//    resumes: a serialized narrowing is blocked on the held
+		//    boundary and cannot have committed, while an unserialized
+		//    narrowing commits here.
 		close(mutationPoint.release)
 
 		// 4. The introspection completes with the wholly pre-narrowing
@@ -709,142 +681,6 @@ func TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing(t *testing.T
 		}
 		if !got.changed {
 			t.Fatal("removePrincipalAllowedRootWithLifecycle reported no change")
-		}
-	})
-}
-
-// TestRacePrincipalSetAccessSerializesCreatePolicyIntrospection proves the
-// Session-create policy introspection observes one coherent access-mode state
-// under the lifecycle serialization boundary. The targeted set-access
-// narrowing (read_write -> read_only on one stored root) parks inside its
-// lifecycleMu critical section before its stored-access read and UPDATE; the
-// introspection is pinned at its last pre-boundary read (its credential
-// authentication) and released into the held boundary, so it can only resolve
-// after the access change committed and its rich projection must show the
-// narrowed access wholly — the derived path-only projection cannot distinguish
-// the two states, so the rich entries are the assertion target.
-func TestRacePrincipalSetAccessSerializesCreatePolicyIntrospection(t *testing.T) {
-	app1 := newTestAppWithAdminToken(t)
-	setupTestLoggingDiscard(t)
-	root := app1.Config.AllowedRoots[0].Path
-
-	// Principal raceaccess with stored roots [home, extra], both read_write.
-	// The extra root is a disjoint sibling under the global root, so the
-	// effective projection keeps both entries and the path-only projection is
-	// identical before and after the access change.
-	home := filepath.Join(root, "home", "raceaccess")
-	extra := filepath.Join(root, "raceaccess-inputs")
-	for _, d := range []string{home, extra} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	installOSUserMock(t, map[string]string{"raceaccess": home})
-	if _, err := createPrincipal(app1.DB, "raceaccess", app1.Config.AllowedRoots); err != nil {
-		t.Fatalf("createPrincipal(raceaccess): %v", err)
-	}
-	w := launcherRequest(t, app1, http.MethodPost, "/principals/raceaccess/allowed-roots", testAdminToken, fmt.Sprintf(`{"path":%q}`, extra))
-	if w.Code != http.StatusOK {
-		t.Fatalf("add extra root: %d %s", w.Code, w.Body.String())
-	}
-	_, token, err := createPrincipalCredential(app1.DB, "raceaccess", "oc")
-	if err != nil {
-		t.Fatalf("createPrincipalCredential(raceaccess): %v", err)
-	}
-
-	// Baseline: the create-policy projection shows both roots read_write.
-	w = launcherRequest(t, app1, http.MethodGet, "/sessions/create-policy", token, "")
-	if w.Code != http.StatusOK {
-		t.Fatalf("baseline introspection: %d %s", w.Code, w.Body.String())
-	}
-	base := decodeCreatePolicy(t, w.Body.String())
-	if !base.OK || base.Principal != "raceaccess" || base.Launcher != "default" {
-		t.Fatalf("baseline response = %+v", base)
-	}
-	if len(base.AllowedRootEntries) != 2 {
-		t.Fatalf("baseline allowed_root_entries = %v, want home and extra", base.AllowedRootEntries)
-	}
-	for _, e := range base.AllowedRootEntries {
-		if e.Access != AllowedRootAccessReadWrite {
-			t.Fatalf("baseline entry %q access = %q, want read_write", e.Path, e.Access)
-		}
-	}
-
-	// Park points:
-	//   mutation      - the set-access's first in-boundary principal lookup
-	//                   (SELECT id FROM principals WHERE username = ?),
-	//                   reached before its stored-access read and UPDATE;
-	//   introspection - the credential auth's principal read (SELECT
-	//                   username, enabled FROM principals WHERE id = ?), the
-	//                   introspection's last pre-boundary read.
-	// The patterns are distinct from every other query in the race phase.
-	mutationPoint := newParkedQueryPoint("SELECT id FROM principals WHERE username")
-	introspectionPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
-	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, introspectionPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
-	}
-
-	// The race phase runs on a single P: the set-access and the
-	// introspection are ordered purely by their synchronization points, in
-	// release order.
-	runSinglePinnedP(t, func() {
-		// 1. The set-access parks inside its lifecycleMu boundary, before
-		//    its stored-access read and UPDATE commit.
-		setAccessDone := make(chan narrowingResult, 1)
-		go func() {
-			changed, _, err := app.setPrincipalAllowedRootAccessWithLifecycle("raceaccess", extra, AllowedRootAccessReadOnly)
-			setAccessDone <- narrowingResult{changed: changed, err: err}
-		}()
-		<-mutationPoint.parked
-
-		// 2. The introspection runs its pre-boundary authentication, is
-		//    pinned at its last pre-boundary read, and after release can
-		//    only proceed into the boundary the set-access still holds.
-		introspectionDone := make(chan string, 1)
-		go func() {
-			mux := http.NewServeMux()
-			registerRoutes(mux, app)
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/sessions/create-policy", nil)
-			req.Header.Set("Authorization", "Bearer "+token)
-			mux.ServeHTTP(rec, req)
-			introspectionDone <- rec.Body.String()
-		}()
-		<-introspectionPoint.parked
-		close(introspectionPoint.release)
-
-		// 3. The set-access commits and releases the boundary.
-		close(mutationPoint.release)
-		got := <-setAccessDone
-		if got.err != nil {
-			t.Fatalf("setPrincipalAllowedRootAccessWithLifecycle: %v", got.err)
-		}
-		if !got.changed {
-			t.Fatal("setPrincipalAllowedRootAccessWithLifecycle reported no change")
-		}
-
-		// 4. The introspection observes the wholly post-change projection:
-		//    both paths remain, but the changed root carries the narrowed
-		//    access. A projection resolved before or during the parked
-		//    mutation would show extra read_write.
-		resp := decodeCreatePolicy(t, <-introspectionDone)
-		if !resp.OK || resp.Principal != "raceaccess" || resp.Launcher != "default" {
-			t.Fatalf("introspection response = %+v", resp)
-		}
-		if len(resp.AllowedRootEntries) != 2 {
-			t.Fatalf("introspection allowed_root_entries = %v, want home and extra", resp.AllowedRootEntries)
-		}
-		for _, e := range resp.AllowedRootEntries {
-			want := AllowedRootAccessReadWrite
-			if e.Path == extra {
-				want = AllowedRootAccessReadOnly
-			}
-			if e.Access != want {
-				t.Fatalf("introspection observed a pre-change or mixed policy state: entry %q access = %q, want %q", e.Path, e.Access, want)
-			}
 		}
 	})
 }

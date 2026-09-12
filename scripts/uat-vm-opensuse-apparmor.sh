@@ -40,9 +40,6 @@
 #       -> install-deps (UAT_PLATFORM=opensuse)
 #       -> existing black-box UAT (UAT_PLATFORM=opensuse UAT_INSTALL=rpm
 #          UAT_MAC=apparmor, prebuilt RPM)
-#       -> RPM lifecycle, RuntimeDirectory socket regression
-#       -> 2.1.1 -> candidate RPM migration gate (pinned published v2.1.1
-#          baseline through real rpm -U with the service running)
 #
 # The image ships SELinux-active by default, so the harness switches the next
 # boot to AppArmor (`security=apparmor apparmor=1 selinux=0`) through the
@@ -59,11 +56,10 @@
 #   UAT_REPO_DIR     host checkout of docker-helper (default: repo root of this script)
 #   UAT_RPM          path to the exact prebuilt RPM artifact
 #   UAT_RPM_SHA256   expected SHA-256 produced by the build job
-#   UAT_VERSION      version string (default 2.2.0-uat)
+#   UAT_VERSION      version string (default 2.1.0-uat)
 #   UAT_KEEP         keep the VM/workdir on failure for debugging
 #
-# Exit 0 = full openSUSE/AppArmor black-box UAT + RPM lifecycle + RuntimeDirectory
-# regression + 2.1.1 -> candidate RPM migration gate passed inside the guest.
+# Exit 0 = full openSUSE/AppArmor black-box UAT passed inside the guest.
 # Nonzero = failed; serial tail + guest evidence are printed.
 
 set -euo pipefail
@@ -76,7 +72,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UAT_REPO_DIR="${UAT_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 UAT_RPM="${UAT_RPM:-}"
 UAT_RPM_SHA256="${UAT_RPM_SHA256:-}"
-VERSION="${UAT_VERSION:-2.2.0-uat}"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
 KEEP="${UAT_KEEP:-}"
 
 [ -n "$UAT_RPM" ] || fail "UAT_RPM is required (exact prebuilt RPM artifact)"
@@ -99,17 +95,6 @@ if upgrade_baseline_fetch_rpm /tmp/uat-baseline-docker-helper.rpm >/tmp/baseline
   log "v2.0.0 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
 else
   fail "could not download/verify the v2.0.0 baseline RPM (pinned fixture)"
-fi
-
-# The published v2.1.1 package is the immutable migration baseline for the
-# Release-2.2 2.1.1 -> candidate RPM migration gate (same single fixture
-# owner, same pinned-digest contract).
-BASELINE211_RPM_PATH=""
-if upgrade211_fetch_rpm /tmp/uat-baseline211-docker-helper.rpm >/tmp/baseline211-rpm.path 2>/dev/null; then
-  BASELINE211_RPM_PATH="$(cat /tmp/baseline211-rpm.path)"
-  log "v2.1.1 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
-else
-  fail "could not download/verify the v2.1.1 baseline RPM (pinned fixture)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -319,14 +304,6 @@ else
   fail "v2.0.0 baseline RPM transfer to guest failed (exit $EC)"
 fi
 
-log "copying v2.1.1 baseline RPM into guest (/opt/uat-import/docker-helper-baseline-2.1.1.rpm)"
-if vm_scp "$BASELINE211_RPM_PATH" opc@127.0.0.1:/opt/uat-import/docker-helper-baseline-2.1.1.rpm; then
-  :
-else
-  EC=$?
-  fail "v2.1.1 baseline RPM transfer to guest failed (exit $EC)"
-fi
-
 # ---------------------------------------------------------------------------
 # 7. run the existing black-box UAT inside the guest
 # ---------------------------------------------------------------------------
@@ -376,17 +353,6 @@ run_guest_uat "RuntimeDirectory socket replacement regression inside the guest" 
 log "RuntimeDirectory socket replacement regression passed inside the guest"
 
 # ---------------------------------------------------------------------------
-# 7d. Release-2.2 migration gate 2.1.1 -> candidate on the RPM path (pinned
-#     published v2.1.1 baseline, real rpm -U upgrade with the service running;
-#     the fail-closed migration-refusal case is owned by the DEB consumer job,
-#     scripts/uat-release2-acceptance.sh scenario M)
-# ---------------------------------------------------------------------------
-log "== 7d. 2.1.1 -> candidate RPM migration gate =="
-run_guest_uat "2.1.1 -> candidate RPM migration gate inside the guest" \
-  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_BASELINE211_RPM=/opt/uat-import/docker-helper-baseline-2.1.1.rpm UAT_BASELINE211_SHA256=$UPGRADE211_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-migration-rpm-211.sh"
-log "2.1.1 -> candidate RPM migration gate passed inside the guest"
-
-# ---------------------------------------------------------------------------
 # 8. Summary
 # ---------------------------------------------------------------------------
 T1="$(date +%s)"
@@ -403,7 +369,6 @@ echo "final cmdline:    $CMDLINE_FINAL"
 echo "RPM:              $UAT_RPM"
 echo "RPM sha256:       $UAT_RPM_SHA256 (producer, verified by UAT)"
 echo "v2.0.0 baseline RPM: $BASELINE_RPM_PATH (pinned fixture, verified)"
-echo "v2.1.1 baseline RPM: $BASELINE211_RPM_PATH (pinned fixture, verified)"
 echo "UAT version:      $VERSION"
 echo "total:            ${TOTAL}s"
 echo "RESULT: openSUSE/AppArmor black-box UAT + RPM lifecycle PASSED inside Tumbleweed VM"
