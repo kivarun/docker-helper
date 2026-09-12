@@ -159,6 +159,9 @@ cleanup() {
   dh principal delete --system "$SELF_PRINC" >/dev/null 2>&1 || true
   dh config allowed-root remove "$FIXTURE_ROOT" >/dev/null 2>&1 || true
   dh principal delete --system "$PRINCIPAL" >/dev/null 2>&1 || true
+  if id -u selfint-disabled >/dev/null 2>&1; then
+    userdel -r selfint-disabled >/dev/null 2>&1 || true
+  fi
   rm -rf "$FIXTURE_ROOT"
   rm -f /tmp/uat-self-principal.token /tmp/uat-self-launcher.token \
     /tmp/uat-self-session.token /tmp/uat-self-s5-resource.log \
@@ -319,9 +322,9 @@ broad = os.environ["EXPECTED_BROAD"]
 assert not any(e["path"] == broad and e["access"] == "read_write" for e in env["resource"]["effective_allowed_root_entries"]), env["resource"]["effective_allowed_root_entries"]
 print("S3-NEG-OK")
 ' >/dev/null 2>&1; then
-        fail "S3 restricted launcher effective scope still carries the broad read-write root"
-      else
         ok "S3 restricted launcher effective scope does not leak the broad read-write root"
+      else
+        fail "S3 restricted launcher effective scope still carries the broad read-write root: $(printf '%s\n' "$S3_SELF" | redact | head -2 | tr '\n' ' ')"
       fi
     else
       fail "S3 restricted launcher self CLI failed: $(printf '%s\n' "$S3_SELF" | redact | head -3)"
@@ -481,7 +484,9 @@ S7_probe "wrong scheme" "Basic c2VsZjppbnRyb3NwZWN0aW9u"
 # break the later scenarios. The disabled-principal probe therefore uses the
 # daemon-owner pattern: create a dedicated principal, disable it with its
 # credential in hand.
-dh principal create --system --no-credential selfint-disabled >/dev/null 2>&1 || true
+if id -u selfint-disabled >/dev/null 2>&1 || useradd -m selfint-disabled >/dev/null 2>&1; then
+  dh principal create --system --no-credential selfint-disabled >/dev/null 2>&1 || true
+fi
 if dh principal allowed-root add --system selfint-disabled "$FIXTURE_ROOT" >/dev/null 2>&1 \
     && S7_DIS_CRED="$(dh credential create --system --name self-disabled selfint-disabled 2>/dev/null)" \
     && S7_DIS_TOKEN="$(printf '%s\n' "$S7_DIS_CRED" | cli_line_field Token)" \
@@ -543,7 +548,7 @@ fi
 # scenario S8: audit contract (self_type, no bearer material)
 # =============================================================================
 scenario "S8: audit contract"
-S8_AUDIT_JSON="$(journalctl --utc -u docker-helper.service --since "$S6_AUDIT_SINCE" --no-pager 2>/dev/null || true)"
+S8_AUDIT_JSON="$(journalctl --utc -u docker-helper.service --since "@${S6_AUDIT_EPOCH}" --no-pager 2>/dev/null || true)"
 if [ -n "$S8_AUDIT_JSON" ]; then
   for want_type in principal launcher session; do
     if printf '%s\n' "$S8_AUDIT_JSON" | grep -q "\"event\":\"self.show\"" \
