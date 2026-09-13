@@ -190,8 +190,8 @@ func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) 
 	if w.Code != http.StatusOK {
 		t.Fatalf("baseline introspection: %d %s", w.Code, w.Body.String())
 	}
-	if got := decodePolicyRoots(t, w.Body.String()); len(got.AllowedRootEntries) != 2 {
-		t.Fatalf("baseline allowed_root_entries = %+v, want [%s %s]", got.AllowedRootEntries, home, stale)
+	if got := decodePolicyRoots(t, w.Body.String()); len(got.AllowedRoots) != 2 {
+		t.Fatalf("baseline allowed_roots = %+v, want [%s %s]", got.AllowedRoots, home, stale)
 	}
 
 	// Park the introspection at its last pre-boundary read (the credential
@@ -259,8 +259,8 @@ func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) 
 		if !resp.OK || resp.Principal != "rootview" {
 			t.Fatalf("introspection response = %+v", resp)
 		}
-		if len(resp.AllowedRootEntries) != 1 || resp.AllowedRootEntries[0].Path != home {
-			t.Fatalf("introspection observed a pre-reload or mixed policy state: allowed_root_entries = %+v, want [%s]", resp.AllowedRootEntries, home)
+		if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0].Path != home {
+			t.Fatalf("introspection observed a pre-reload or mixed policy state: allowed_roots = %+v, want [%s]", resp.AllowedRoots, home)
 		}
 	})
 }
@@ -316,13 +316,13 @@ func TestRacePrincipalRootNarrowingSerializesCreatePolicyIntrospection(t *testin
 	if !base.OK || base.Principal != "raceowner" || base.Launcher != "default" {
 		t.Fatalf("baseline response = %+v", base)
 	}
-	basePaths := allowedRootPaths(base.AllowedRootEntries)
+	basePaths := allowedRootPaths(base.AllowedRoots)
 	if len(basePaths) != 2 {
-		t.Fatalf("baseline allowed_root_entries = %+v, want [%s %s]", base.AllowedRootEntries, home, extra)
+		t.Fatalf("baseline allowed_roots = %+v, want [%s %s]", base.AllowedRoots, home, extra)
 	}
 	for _, want := range []string{home, extra} {
 		if !stringSliceContains(basePaths, want) {
-			t.Fatalf("baseline allowed_root_entries = %+v, want [%s %s]", base.AllowedRootEntries, home, extra)
+			t.Fatalf("baseline allowed_roots = %+v, want [%s %s]", base.AllowedRoots, home, extra)
 		}
 	}
 
@@ -388,9 +388,9 @@ func TestRacePrincipalRootNarrowingSerializesCreatePolicyIntrospection(t *testin
 		if !resp.OK || resp.Principal != "raceowner" || resp.Launcher != "default" {
 			t.Fatalf("introspection response = %+v", resp)
 		}
-		respPaths := allowedRootPaths(resp.AllowedRootEntries)
+		respPaths := allowedRootPaths(resp.AllowedRoots)
 		if len(respPaths) != 1 || respPaths[0] != home {
-			t.Fatalf("introspection observed a pre-narrowing or mixed policy state: allowed_root_entries = %+v, want [%s]", resp.AllowedRootEntries, home)
+			t.Fatalf("introspection observed a pre-narrowing or mixed policy state: allowed_roots = %+v, want [%s]", resp.AllowedRoots, home)
 		}
 	})
 }
@@ -508,9 +508,9 @@ func TestRacePrincipalDeleteSerializesEffectiveRootsIntrospection(t *testing.T) 
 	if !resp.OK || resp.Principal != "victim" {
 		t.Fatalf("introspection after recreation: response = %+v", resp)
 	}
-	respPaths := allowedRootPaths(resp.AllowedRootEntries)
+	respPaths := allowedRootPaths(resp.AllowedRoots)
 	if len(respPaths) != 1 || respPaths[0] != home {
-		t.Fatalf("introspection after recreation: allowed_root_entries = %+v, want the new incarnation's [%s]", resp.AllowedRootEntries, home)
+		t.Fatalf("introspection after recreation: allowed_roots = %+v, want the new incarnation's [%s]", resp.AllowedRoots, home)
 	}
 }
 
@@ -589,9 +589,9 @@ func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testi
 		if !resp.OK || resp.Principal != "victim" {
 			t.Fatalf("introspection before deletion: response = %+v", resp)
 		}
-		respPaths := allowedRootPaths(resp.AllowedRootEntries)
+		respPaths := allowedRootPaths(resp.AllowedRoots)
 		if len(respPaths) != 1 || respPaths[0] != home {
-			t.Fatalf("introspection before deletion: allowed_root_entries = %+v, want the old incarnation's [%s]", resp.AllowedRootEntries, home)
+			t.Fatalf("introspection before deletion: allowed_roots = %+v, want the old incarnation's [%s]", resp.AllowedRoots, home)
 		}
 
 		// 4. The deletion then acquires the boundary and commits.
@@ -696,13 +696,13 @@ func TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing(t *testing.T
 		if !resp.OK || resp.Principal != "raceowner" || resp.Launcher != "default" {
 			t.Fatalf("introspection response = %+v", resp)
 		}
-		respPaths := allowedRootPaths(resp.AllowedRootEntries)
+		respPaths := allowedRootPaths(resp.AllowedRoots)
 		if len(respPaths) != 2 {
-			t.Fatalf("introspection observed a post-narrowing or mixed policy state: allowed_root_entries = %+v, want [%s %s]", resp.AllowedRootEntries, home, extra)
+			t.Fatalf("introspection observed a post-narrowing or mixed policy state: allowed_roots = %+v, want [%s %s]", resp.AllowedRoots, home, extra)
 		}
 		for _, want := range []string{home, extra} {
 			if !stringSliceContains(respPaths, want) {
-				t.Fatalf("introspection observed a post-narrowing or mixed policy state: allowed_root_entries = %+v, want [%s %s]", resp.AllowedRootEntries, home, extra)
+				t.Fatalf("introspection observed a post-narrowing or mixed policy state: allowed_roots = %+v, want [%s %s]", resp.AllowedRoots, home, extra)
 			}
 		}
 
@@ -766,10 +766,10 @@ func TestRacePrincipalSetAccessSerializesCreatePolicyIntrospection(t *testing.T)
 	if !base.OK || base.Principal != "raceaccess" || base.Launcher != "default" {
 		t.Fatalf("baseline response = %+v", base)
 	}
-	if len(base.AllowedRootEntries) != 2 {
-		t.Fatalf("baseline allowed_root_entries = %v, want home and extra", base.AllowedRootEntries)
+	if len(base.AllowedRoots) != 2 {
+		t.Fatalf("baseline allowed_roots = %v, want home and extra", base.AllowedRoots)
 	}
-	for _, e := range base.AllowedRootEntries {
+	for _, e := range base.AllowedRoots {
 		if e.Access != AllowedRootAccessReadWrite {
 			t.Fatalf("baseline entry %q access = %q, want read_write", e.Path, e.Access)
 		}
@@ -839,10 +839,10 @@ func TestRacePrincipalSetAccessSerializesCreatePolicyIntrospection(t *testing.T)
 		if !resp.OK || resp.Principal != "raceaccess" || resp.Launcher != "default" {
 			t.Fatalf("introspection response = %+v", resp)
 		}
-		if len(resp.AllowedRootEntries) != 2 {
-			t.Fatalf("introspection allowed_root_entries = %v, want home and extra", resp.AllowedRootEntries)
+		if len(resp.AllowedRoots) != 2 {
+			t.Fatalf("introspection allowed_roots = %v, want home and extra", resp.AllowedRoots)
 		}
-		for _, e := range resp.AllowedRootEntries {
+		for _, e := range resp.AllowedRoots {
 			want := AllowedRootAccessReadWrite
 			if e.Path == extra {
 				want = AllowedRootAccessReadOnly

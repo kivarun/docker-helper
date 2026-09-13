@@ -46,7 +46,7 @@ func TestAllowedRootListHappyPath(t *testing.T) {
 	}
 
 	// Verify list matches config show
-	showOut, _ := runConfigCLI(t, 0, "config", "show", "allowed_root_entries")
+	showOut, _ := runConfigCLI(t, 0, "config", "show", "allowed_roots")
 	if !strings.Contains(showOut, allowedRoot) {
 		t.Errorf("config show should contain %s, got: %s", allowedRoot, showOut)
 	}

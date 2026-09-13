@@ -9612,8 +9612,8 @@ func uatLibJSONHarnessVectors() (pretty, compact string, decoys []string) {
 		"garbage",
 		// The 2.1-compatible human list: one path per line, no ACCESS.
 		"/home/uat/a\n/home/uat/ro",
-		// The launcher-show object shape (allowed_root_entries), not the list.
-		`{"id": "dhl_1", "allowed_root_entries": [{"path": "/home/uat/a", "access": "read_write"}]}`,
+		// The launcher-show object shape (allowed_roots), not the list.
+		`{"id": "dhl_1", "allowed_roots": [{"path": "/home/uat/a", "access": "read_write"}]}`,
 		// Access outside the canonical vocabulary.
 		`[{"path": "/home/uat/a", "access": "rw"}]`,
 		// Malformed entry (missing path).

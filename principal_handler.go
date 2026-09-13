@@ -47,15 +47,15 @@ type allowedRootSetAccessRequest struct {
 }
 
 type principalResponse struct {
-	OK                 bool                     `json:"ok"`
-	Username           string                   `json:"username"`
-	UID                int                      `json:"uid"`
-	GID                int                      `json:"gid"`
-	Home               string                   `json:"home"`
-	Enabled            bool                     `json:"enabled"`
-	AllowedRootEntries []AllowedRootEntry       `json:"allowed_root_entries"`
-	Credential         *principalCredentialJSON `json:"credential,omitempty"`
-	Token              string                   `json:"token,omitempty"`
+	OK           bool                     `json:"ok"`
+	Username     string                   `json:"username"`
+	UID          int                      `json:"uid"`
+	GID          int                      `json:"gid"`
+	Home         string                   `json:"home"`
+	Enabled      bool                     `json:"enabled"`
+	AllowedRoots []AllowedRootEntry       `json:"allowed_roots"`
+	Credential   *principalCredentialJSON `json:"credential,omitempty"`
+	Token        string                   `json:"token,omitempty"`
 }
 
 type principalChangedResponse struct {
@@ -69,8 +69,8 @@ type principalChangedResponse struct {
 }
 
 // principalToResponse is the single projection owner for the public
-// Principal resource document (create and show). allowed_root_entries is the
-// authoritative rich projection of the canonical stored entries and is
+// Principal resource document (create and show). allowed_roots is the
+// authoritative rich projection of the canonical stored roots and is
 // always serialized as a JSON array: zero stored roots project the empty
 // array, never null; internal nil slices are not mutated.
 func principalToResponse(p *PrincipalWithRoots) principalResponse {
@@ -79,13 +79,13 @@ func principalToResponse(p *PrincipalWithRoots) principalResponse {
 		entries = []AllowedRootEntry{}
 	}
 	return principalResponse{
-		OK:                 true,
-		Username:           p.Username,
-		UID:                p.UID,
-		GID:                p.GID,
-		Home:               p.Home,
-		Enabled:            p.Enabled,
-		AllowedRootEntries: entries,
+		OK:           true,
+		Username:     p.Username,
+		UID:          p.UID,
+		GID:          p.GID,
+		Home:         p.Home,
+		Enabled:      p.Enabled,
+		AllowedRoots: entries,
 	}
 }
 

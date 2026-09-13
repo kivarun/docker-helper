@@ -241,9 +241,8 @@ a running daemon or authentication token.
 .TP
 .B docker-helper config show [FIELD]
 Show configuration values. Without FIELD, prints complete effective config as JSON.
-\fBallowed_root_entries\fR is the authoritative rich projection of the
-stored global allowed roots (the 2.x path-only \fBallowed_roots\fR show
-projection is retired; the same name remains the config-file input field).
+\fBallowed_roots\fR is the authoritative rich projection of the
+stored global allowed roots.
 .TP
 .B docker-helper config set FIELD VALUE
 Set a configuration value. Writable fields: session_ttl, log_level,

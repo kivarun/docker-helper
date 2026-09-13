@@ -215,8 +215,8 @@ func TestStalePrincipalAuthorityEffectiveRootsNotRebound(t *testing.T) {
 	if !resp.OK || resp.Principal != "alice" {
 		t.Fatalf("admin introspection response = %+v", resp)
 	}
-	if len(resp.AllowedRootEntries) != 1 || resp.AllowedRootEntries[0].Path != f.home {
-		t.Fatalf("admin introspection allowed_root_entries = %+v, want the recreated incarnation's [%s]", resp.AllowedRootEntries, f.home)
+	if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0].Path != f.home {
+		t.Fatalf("admin introspection allowed_roots = %+v, want the recreated incarnation's [%s]", resp.AllowedRoots, f.home)
 	}
 }
 

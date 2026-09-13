@@ -119,7 +119,7 @@ func startPolicyRootsServer(t *testing.T, root string) (endpoint, tokenPath stri
 		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "alice", LauncherID: "dhl_x", Launcher: "agent",
-				AllowedRootEntries: stubEntries(root),
+				AllowedRoots: stubEntries(root),
 			})
 			return
 		}

@@ -51,7 +51,7 @@ func expectEffectiveRootsResponse(t *testing.T, body []byte) []string {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode effective roots response: %v", err)
 	}
-	return allowedRootPaths(resp.AllowedRootEntries)
+	return allowedRootPaths(resp.AllowedRoots)
 }
 
 // TestUserModeOwnerEffectiveRootsIntrospection is the completion-introspection
@@ -82,7 +82,7 @@ func TestUserModeOwnerEffectiveRootsIntrospection(t *testing.T) {
 	if err := json.Unmarshal(policy.Body.Bytes(), &policyResp); err != nil {
 		t.Fatal(err)
 	}
-	policyPaths := allowedRootPaths(policyResp.AllowedRootEntries)
+	policyPaths := allowedRootPaths(policyResp.AllowedRoots)
 	if !slices.Equal(policyPaths, roots) {
 		t.Fatalf("surfaces disagree on the daemon-owner ceiling: introspection=%v create-policy=%v", roots, policyPaths)
 	}
@@ -109,7 +109,7 @@ func TestUserModeOwnerRestrictedLauncherCreate(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Launcher.Scope != string(LauncherScopeRestricted) || !slices.Equal(allowedRootPaths(created.Launcher.AllowedRootEntries), []string{work}) {
+	if created.Launcher.Scope != string(LauncherScopeRestricted) || !slices.Equal(allowedRootPaths(created.Launcher.AllowedRoots), []string{work}) {
 		t.Fatalf("created launcher = %+v, want restricted with stored root [%s]", created.Launcher, work)
 	}
 
@@ -161,7 +161,7 @@ func TestUserModeOwnerLauncherScopeReplaceRestricted(t *testing.T) {
 	if err := json.Unmarshal(replace.Body.Bytes(), &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Scope != string(LauncherScopeRestricted) || !slices.Equal(allowedRootPaths(updated.AllowedRootEntries), []string{work}) {
+	if updated.Scope != string(LauncherScopeRestricted) || !slices.Equal(allowedRootPaths(updated.AllowedRoots), []string{work}) {
 		t.Fatalf("replaced launcher = %+v, want restricted with stored root [%s]", updated, work)
 	}
 

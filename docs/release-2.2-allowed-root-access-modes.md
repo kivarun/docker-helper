@@ -533,11 +533,11 @@ surfaces: one narrows an issuance-time Session request, the other replaces
 durable Launcher policy.
 
 The 2.1 JSON `allowed_roots: []string` projection remains available throughout
-the 2.x line so existing clients do not break. Release 2.2 adds the canonical
-rich projection:
+the 2.x line so existing clients do not break. Release 2.2 upgrades the same
+canonical `allowed_roots` field to the rich mode-bearing representation:
 
 ```json
-"allowed_root_entries": [
+"allowed_roots": [
   {"path": "/opt/work", "access": "read_write"},
   {"path": "/opt/work/pipeline-inputs", "access": "read_only"}
 ]
@@ -545,10 +545,13 @@ rich projection:
 
 For 2.2 responses:
 
-- `allowed_root_entries` is the authoritative mode-bearing representation;
-- the 2.x path-only `allowed_roots` output projection was retired by the RC5
-  legacy-surface cleanup (the same name remains the accepted config-file and
-  scope-replacement input).
+- `allowed_roots` is the one canonical field name, carrying the
+  authoritative mode-bearing `{path, access}` objects;
+- the legacy path-only string form remains the accepted config-file and
+  scope-replacement input, mapping every path to `read_write`; the
+  release-candidate `allowed_root_entries` spelling was rejected before any
+  stable release and is not an alias: a config.json carrying it fails
+  closed, and show/introspection surfaces never publish it.
 
 The global config file accepts the old string-array representation on input and
 normalizes every string to `read_write`. The canonical 2.2 representation is an

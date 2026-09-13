@@ -203,11 +203,11 @@ func startCompletionStubServer(t *testing.T, principal string, effectiveEntries,
 				Username: principal, UID: 1234, GID: 1234, Home: "/home/" + principal, Enabled: true,
 			}}})
 		case r.URL.Path == "/principals/"+principal:
-			json.NewEncoder(w).Encode(principalResponse{OK: true, Username: principal, AllowedRootEntries: storedEntries})
+			json.NewEncoder(w).Encode(principalResponse{OK: true, Username: principal, AllowedRoots: storedEntries})
 		case r.URL.Path == "/principals/"+principal+"/effective-allowed-roots":
-			json.NewEncoder(w).Encode(effectiveRootsResponse{OK: true, Principal: principal, AllowedRootEntries: effectiveEntries})
+			json.NewEncoder(w).Encode(effectiveRootsResponse{OK: true, Principal: principal, AllowedRoots: effectiveEntries})
 		case r.URL.Path == "/principals/"+principal+"/launchers/default":
-			json.NewEncoder(w).Encode(launcherJSON{ID: "dhl_live1", Principal: principal, Name: "default", Enabled: true, Scope: "restricted", AllowedRootEntries: launcherEntries})
+			json.NewEncoder(w).Encode(launcherJSON{ID: "dhl_live1", Principal: principal, Name: "default", Enabled: true, Scope: "restricted", AllowedRoots: launcherEntries})
 		case r.URL.Path == "/launchers":
 			json.NewEncoder(w).Encode(listLaunchersResponse{OK: true, Launchers: []launcherJSON{{
 				ID: "dhl_live1", Principal: principal, Name: "default", Enabled: true, Scope: "restricted",
@@ -475,7 +475,7 @@ func TestCompletionConfigShowFields(t *testing.T) {
 		t.Error("expected config show field completions")
 		return
 	}
-	expected := []string{"allowed_root_entries", "session_ttl", "log_level", "audit_enabled"}
+	expected := []string{"allowed_roots", "session_ttl", "log_level", "audit_enabled"}
 	resultsMap := make(map[string]bool)
 	for _, r := range results {
 		resultsMap[r] = true
@@ -692,13 +692,13 @@ func TestConfigShowFieldsVocabulary(t *testing.T) {
 	fields := configShowFields()
 
 	// Must contain the rich entries projection.
-	if !slices.Contains(fields, "allowed_root_entries") {
-		t.Error("config show must contain allowed_root_entries")
+	if !slices.Contains(fields, "allowed_roots") {
+		t.Error("config show must contain allowed_roots")
 	}
 
-	// Must NOT contain the retired path-only projection or the legacy scalar.
-	if slices.Contains(fields, "allowed_roots") {
-		t.Error("config show must not contain the retired allowed_roots projection")
+	// Must NOT contain the retired spelling or the legacy scalar.
+	if slices.Contains(fields, "allowed_root_entries") {
+		t.Error("config show must not contain the retired allowed_root_entries spelling")
 	}
 	if slices.Contains(fields, "allowed_root") {
 		t.Error("config show must not contain legacy allowed_root")
@@ -774,14 +774,14 @@ func TestCompletionConfigShowNoStaleAllowedRoot(t *testing.T) {
 
 	// config show must contain the rich entries projection.
 	results := runCompletion(t, script, []string{"docker-helper", "config", "show", ""})
-	if !slices.Contains(results, "allowed_root_entries") {
-		t.Error("config show completion must contain allowed_root_entries")
+	if !slices.Contains(results, "allowed_roots") {
+		t.Error("config show completion must contain allowed_roots")
 	}
 
-	// config show must NOT contain the retired path-only projection or the
-	// stale legacy scalar.
-	if slices.Contains(results, "allowed_roots") {
-		t.Error("config show completion must not contain the retired allowed_roots projection")
+	// config show must NOT contain the retired spelling or the stale legacy
+	// scalar.
+	if slices.Contains(results, "allowed_root_entries") {
+		t.Error("config show completion must not contain the retired allowed_root_entries spelling")
 	}
 	if slices.Contains(results, "allowed_root") {
 		t.Error("config show completion must not contain stale allowed_root")
@@ -1797,7 +1797,7 @@ func TestCompletionPolicyLauncherAllowedRootAnchors(t *testing.T) {
 	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA, rootB),
+				OK: true, Principal: "alice", AllowedRoots: stubEntries(rootA, rootB),
 			})
 			return
 		}
@@ -1846,7 +1846,7 @@ func TestCompletionPolicyLauncherAllowedRootConfinement(t *testing.T) {
 	endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
+				OK: true, Principal: "alice", AllowedRoots: stubEntries(rootA),
 			})
 			return
 		}
@@ -1906,7 +1906,7 @@ func TestCompletionPolicySymlinkOutsideNotSuggested(t *testing.T) {
 	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(root),
+				OK: true, Principal: "alice", AllowedRoots: stubEntries(root),
 			})
 			return
 		}
@@ -1957,7 +1957,7 @@ func TestCompletionPolicySymlinkInsideSuggested(t *testing.T) {
 	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(root),
+				OK: true, Principal: "alice", AllowedRoots: stubEntries(root),
 			})
 			return
 		}
@@ -2003,7 +2003,7 @@ func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
 		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "alice", LauncherID: "dhl_x", Launcher: "agent",
-				AllowedRootEntries: stubEntries(restricted),
+				AllowedRoots: stubEntries(restricted),
 			})
 			return
 		}
@@ -2080,7 +2080,7 @@ func TestCompletionPolicySessionSelectorsNarrowWorkspace(t *testing.T) {
 		}
 		writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 			OK: true, Principal: "michael", LauncherID: "dhl_x", Launcher: "killme2",
-			AllowedRootEntries: stubEntries(roots...),
+			AllowedRoots: stubEntries(roots...),
 		})
 	})
 
@@ -2140,7 +2140,7 @@ func TestCompletionPolicyNoDuplicateCandidates(t *testing.T) {
 	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 			OK: true, Principal: "alice", LauncherID: "dhl_x", Launcher: "default",
-			AllowedRootEntries: stubEntries(wide, nested),
+			AllowedRoots: stubEntries(wide, nested),
 		})
 	})
 
@@ -2229,7 +2229,7 @@ func startSelectorsPolicyServer(t *testing.T) (endpoint, tokenPath string, reque
 			}
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "alice", LauncherID: "dhl_alicekillme", Launcher: "killme2",
-				AllowedRootEntries: stubEntries(roots...),
+				AllowedRoots: stubEntries(roots...),
 			})
 			return
 		}
@@ -2793,7 +2793,7 @@ func TestCompletionPolicyFlagBeforeCommandWords(t *testing.T) {
 	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
+				OK: true, Principal: "alice", AllowedRoots: stubEntries(rootA),
 			})
 			return
 		}
@@ -2829,7 +2829,7 @@ func TestCompletionPolicyForwardedEndpointForm(t *testing.T) {
 		}
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
+				OK: true, Principal: "alice", AllowedRoots: stubEntries(rootA),
 			})
 			return
 		}
@@ -2875,7 +2875,7 @@ func TestCompletionPolicyForwardedValueWithSpaces(t *testing.T) {
 		}
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
+				OK: true, Principal: "alice", AllowedRoots: stubEntries(rootA),
 			})
 			return
 		}
@@ -3051,7 +3051,7 @@ func TestCompletionPolicyOwnPrincipalInference(t *testing.T) {
 			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
 		case r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet:
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
+				OK: true, Principal: "alice", AllowedRoots: stubEntries(rootA),
 			})
 		default:
 			http.NotFound(w, r)
@@ -3161,7 +3161,7 @@ func TestCompletionPrincipalShowFieldVocabulary(t *testing.T) {
 	// every word completion offers must be accepted by extractPrincipalField.
 	extractable := &principalResponse{
 		Username: "u", UID: 1, GID: 1, Home: "/home/u", Enabled: true,
-		AllowedRootEntries: stubEntries("/home/u"),
+		AllowedRoots: stubEntries("/home/u"),
 	}
 	for _, name := range results {
 		if _, ok := extractPrincipalField(extractable, name); !ok {
@@ -3169,8 +3169,8 @@ func TestCompletionPrincipalShowFieldVocabulary(t *testing.T) {
 		}
 	}
 
-	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "a"}); !slices.Equal(got, []string{"allowed_root_entries"}) {
-		t.Fatalf("principal show michael a<TAB> = %v, want [allowed_root_entries]", got)
+	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "a"}); !slices.Equal(got, []string{"allowed_roots"}) {
+		t.Fatalf("principal show michael a<TAB> = %v, want [allowed_roots]", got)
 	}
 
 	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "uid", ""}); len(got) != 0 {
@@ -3311,7 +3311,7 @@ func startWorkspaceTreeBoundaryServer(t *testing.T) (endpoint, tokenPath string,
 			}
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "michael", LauncherID: "dhl_x", Launcher: "agent",
-				AllowedRootEntries: stubEntries(roots...),
+				AllowedRoots: stubEntries(roots...),
 			})
 			return
 		}

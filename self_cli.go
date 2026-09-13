@@ -161,8 +161,8 @@ func printPrincipalSelf(w io.Writer, r *principalSelfResource) {
 	fmt.Fprintf(w, "GID:      %d\n", r.GID)
 	fmt.Fprintf(w, "HOME:     %s\n", r.Home)
 	fmt.Fprintf(w, "ENABLED:  %t\n", r.Enabled)
-	printRootEntriesTable(w, "ALLOWED ROOTS (STORED)", r.AllowedRootEntries)
-	printRootEntriesTable(w, "ALLOWED ROOTS (EFFECTIVE)", r.EffectiveAllowedRootEntries)
+	printRootEntriesTable(w, "ALLOWED ROOTS (STORED)", r.AllowedRoots)
+	printRootEntriesTable(w, "ALLOWED ROOTS (EFFECTIVE)", r.EffectiveAllowedRoots)
 }
 
 func printLauncherSelf(w io.Writer, r *launcherSelfResource) {
@@ -171,6 +171,6 @@ func printLauncherSelf(w io.Writer, r *launcherSelfResource) {
 	fmt.Fprintf(w, "PRINCIPAL: %s\n", r.Principal)
 	fmt.Fprintf(w, "ENABLED:   %t\n", r.Enabled)
 	fmt.Fprintf(w, "SCOPE:     %s\n", r.Scope)
-	printRootEntriesTable(w, "ALLOWED ROOTS (STORED)", r.AllowedRootEntries)
-	printRootEntriesTable(w, "ALLOWED ROOTS (EFFECTIVE)", r.EffectiveAllowedRootEntries)
+	printRootEntriesTable(w, "ALLOWED ROOTS (STORED)", r.AllowedRoots)
+	printRootEntriesTable(w, "ALLOWED ROOTS (EFFECTIVE)", r.EffectiveAllowedRoots)
 }

@@ -1050,13 +1050,13 @@ func TestPrincipalCredentialClientRequests(t *testing.T) {
 func TestPrincipalCredentialClientDecoding(t *testing.T) {
 	t.Run("principalResponse", func(t *testing.T) {
 		body, _ := json.Marshal(principalResponse{
-			OK:                 true,
-			Username:           "alice",
-			UID:                1001,
-			GID:                1001,
-			Home:               "/home/alice",
-			Enabled:            true,
-			AllowedRootEntries: []AllowedRootEntry{{Path: "/home/alice", Access: AllowedRootAccessReadWrite}, {Path: "/shared", Access: AllowedRootAccessReadWrite}},
+			OK:           true,
+			Username:     "alice",
+			UID:          1001,
+			GID:          1001,
+			Home:         "/home/alice",
+			Enabled:      true,
+			AllowedRoots: []AllowedRootEntry{{Path: "/home/alice", Access: AllowedRootAccessReadWrite}, {Path: "/shared", Access: AllowedRootAccessReadWrite}},
 		})
 		client, _ := newStubClient(t, http.StatusOK, string(body))
 
@@ -1070,8 +1070,8 @@ func TestPrincipalCredentialClientDecoding(t *testing.T) {
 		if result.UID != 1001 {
 			t.Errorf("uid = %d, want 1001", result.UID)
 		}
-		if len(result.AllowedRootEntries) != 2 {
-			t.Errorf("expected 2 allowed roots, got %d", len(result.AllowedRootEntries))
+		if len(result.AllowedRoots) != 2 {
+			t.Errorf("expected 2 allowed roots, got %d", len(result.AllowedRoots))
 		}
 	})
 

@@ -158,7 +158,7 @@ func TestCompletionRootsPrincipalInvocationBehavior(t *testing.T) {
 				writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
 			case r.URL.Path == "/principals/alice/effective-allowed-roots":
 				writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-					OK: true, Principal: "alice", AllowedRootEntries: stubEntries("/roots/a", "/roots/b"),
+					OK: true, Principal: "alice", AllowedRoots: stubEntries("/roots/a", "/roots/b"),
 				})
 			default:
 				http.NotFound(w, r)

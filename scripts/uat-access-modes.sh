@@ -78,9 +78,10 @@
 #   P3 principal allowed-root add with omitted --access -> read_write;
 #   P4 principal allowed-root add --access read_only;
 #   P5 principal allowed-root set-access;
-#   P6 rich Launcher scope replacement (PUT allowed_root_entries);
-#   P7 the retired 2.x path-only allowed_roots projection is absent and
-#      authoritative allowed_root_entries projection;
+#   P6 rich Launcher scope replacement (PUT allowed_roots with {path,
+#      access} entries);
+#   P7 the canonical allowed_roots projection is the only launcher roots
+#      projection; the retired allowed_root_entries spelling is absent;
 #   P8 session show renders the really-issued filesystem_snapshot entries.
 #
 # Contract for every scenario: PASS -> continue; FAIL -> gate red;
@@ -439,17 +440,16 @@ else
   acc_fail "P5 read_only verification failed"
 fi
 
-# P6: rich Launcher scope replacement through PUT allowed_root_entries.
+# P6: rich Launcher scope replacement through PUT allowed_roots.
 # A restricted launcher requires at least one allowed root at creation
 # (restricted scope requires at least one allowed root), so create with the
-# path-only single-root form (the create route carries legacy paths; rich
-# entries are the allowed-roots PUT route's own form) and let the PUT below
-# replace the whole set with the rich three-entry form.
+# path-only single-root form (the create route carries legacy paths) and let
+# the PUT below replace the whole set with the rich four-entry form.
 MAIN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
   '{"name":"main","scope":"restricted","allowed_roots":["'"$TREE"'"]}')"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher 'main' create failed: $MAIN_L_JSON" >&2; exit 1; }
-RICH_BODY="$(printf '{"scope":"restricted","allowed_root_entries":[{"path":"%s","access":"read_write"},{"path":"%s","access":"read_write"},{"path":"%s","access":"read_only"},{"path":"%s","access":"read_write"}]}' \
+RICH_BODY="$(printf '{"scope":"restricted","allowed_roots":[{"path":"%s","access":"read_write"},{"path":"%s","access":"read_write"},{"path":"%s","access":"read_only"},{"path":"%s","access":"read_write"}]}' \
   "$TREE" "$WS/project" "$WS/pipeline-inputs" "$WS/pipeline-outputs")"
 MAIN_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put.out --write-out '%{http_code}' --max-time 5 \
   --unix-socket "$SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -460,20 +460,30 @@ MAIN_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put.out --write-out '%{http_
 if [ "$MAIN_PUT_HTTP" = 200 ] \
     && dh launcher show --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null \
       | grep -A1 -F "\"path\": \"$WS/pipeline-inputs\"" | grep -q '"access": "read_only"'; then
-  acc_ok "P6 rich launcher scope replacement (PUT allowed_root_entries, access per entry)"
+  acc_ok "P6 rich launcher scope replacement (PUT allowed_roots, access per entry)"
 else
   acc_fail "P6 rich launcher scope replacement failed (http=$MAIN_PUT_HTTP: $(redact </tmp/uat-am-put.out 2>/dev/null))"
 fi
 
-# P7: the authoritative allowed_root_entries projection is the only
-# launcher roots projection; the 2.x path-only allowed_roots projection is
-# retired.
+# P7: the canonical allowed_roots projection is the only launcher roots
+# projection; the retired allowed_root_entries spelling is not an alias and
+# must be refused by the PUT route.
 MAIN_SHOW="$(dh launcher show --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null || true)"
-if printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_root_entries"' \
-    && ! printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_roots"'; then
-  acc_ok "P7 launcher projection carries allowed_root_entries only (allowed_roots retired)"
+if printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_roots"' \
+    && ! printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_root_entries"'; then
+  acc_ok "P7 launcher projection carries allowed_roots only"
 else
   acc_fail "P7 launcher projections wrong: $MAIN_SHOW"
+fi
+RETIRED_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put3.out --write-out '%{http_code}' --max-time 5 \
+  --unix-socket "$SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -X PUT \
+  -d "{\"scope\":\"restricted\",\"allowed_root_entries\":[{\"path\":\"$WS/project\",\"access\":\"read_write\"}]}" \
+  "http://localhost/principals/$PRINCIPAL/launchers/$MAIN_L_ID/allowed-roots" 2>/dev/null || true)"
+if [ "$RETIRED_PUT_HTTP" = 400 ]; then
+  acc_ok "P7 retired allowed_root_entries PUT body is refused (400)"
+else
+  acc_fail "P7 retired allowed_root_entries PUT body not refused (http=$RETIRED_PUT_HTTP: $(redact </tmp/uat-am-put3.out 2>/dev/null))"
 fi
 
 # Legacy path-only Launcher (point 9 policy owner): the 2.x path-only scope

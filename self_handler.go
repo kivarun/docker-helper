@@ -37,34 +37,34 @@ type selfResponse struct {
 // generation. It carries no credential material: no token, no hash, no
 // credential IDs, and no foreign credentials.
 type principalSelfResource struct {
-	Username                    string             `json:"username"`
-	UID                         int                `json:"uid"`
-	GID                         int                `json:"gid"`
-	Home                        string             `json:"home"`
-	Enabled                     bool               `json:"enabled"`
-	AllowedRootEntries          []AllowedRootEntry `json:"allowed_root_entries"`
-	EffectiveAllowedRootEntries []AllowedRootEntry `json:"effective_allowed_root_entries"`
+	Username              string             `json:"username"`
+	UID                   int                `json:"uid"`
+	GID                   int                `json:"gid"`
+	Home                  string             `json:"home"`
+	Enabled               bool               `json:"enabled"`
+	AllowedRoots          []AllowedRootEntry `json:"allowed_roots"`
+	EffectiveAllowedRoots []AllowedRootEntry `json:"effective_allowed_roots"`
 }
 
 // launcherSelfResource is the Launcher self document: the authenticated
-// Launcher's public identity and stored allowed-root entries (canonically
-// empty for inherit scope) plus its effective allowed-root entries (the
+// Launcher's public identity and stored allowed_roots (canonically
+// empty for inherit scope) plus its effective allowed_roots (the
 // three-level global/Principal/Launcher composition), all resolved in one
 // coherent policy generation. It carries no bearer hash and no parent
 // Principal policy beyond the owning Principal name.
 type launcherSelfResource struct {
-	ID                          string             `json:"id"`
-	Name                        string             `json:"name"`
-	Principal                   string             `json:"principal"`
-	Enabled                     bool               `json:"enabled"`
-	Scope                       string             `json:"scope"`
-	AllowedRootEntries          []AllowedRootEntry `json:"allowed_root_entries"`
-	EffectiveAllowedRootEntries []AllowedRootEntry `json:"effective_allowed_root_entries"`
+	ID                    string             `json:"id"`
+	Name                  string             `json:"name"`
+	Principal             string             `json:"principal"`
+	Enabled               bool               `json:"enabled"`
+	Scope                 string             `json:"scope"`
+	AllowedRoots          []AllowedRootEntry `json:"allowed_roots"`
+	EffectiveAllowedRoots []AllowedRootEntry `json:"effective_allowed_roots"`
 }
 
 // principalSelfSnapshot is the immutable read-only projection of one coherent
 // Principal self state: the owning Principal record plus its stored and
-// effective allowed-root entries, resolved under the same lifecycle
+// effective allowed_roots, resolved under the same lifecycle
 // serialization boundary as the other ownership-policy projections.
 type principalSelfSnapshot struct {
 	Principal Principal
@@ -74,7 +74,7 @@ type principalSelfSnapshot struct {
 
 // launcherSelfSnapshot is the immutable read-only projection of one coherent
 // Launcher self state: the ownership snapshot of the Launcher and its
-// Principal plus the Launcher's effective allowed-root entries, resolved
+// Principal plus the Launcher's effective allowed_roots, resolved
 // under the same lifecycle serialization boundary as the other
 // ownership-policy projections.
 type launcherSelfSnapshot struct {
@@ -228,13 +228,13 @@ func (a *App) handleSelf(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resource := marshalSelfResource(ctx, w, principalSelfResource{
-			Username:                    snap.Principal.Username,
-			UID:                         snap.Principal.UID,
-			GID:                         snap.Principal.GID,
-			Home:                        snap.Principal.Home,
-			Enabled:                     snap.Principal.Enabled,
-			AllowedRootEntries:          ensureRootEntries(snap.Stored),
-			EffectiveAllowedRootEntries: ensureRootEntries(snap.Effective),
+			Username:              snap.Principal.Username,
+			UID:                   snap.Principal.UID,
+			GID:                   snap.Principal.GID,
+			Home:                  snap.Principal.Home,
+			Enabled:               snap.Principal.Enabled,
+			AllowedRoots:          ensureRootEntries(snap.Stored),
+			EffectiveAllowedRoots: ensureRootEntries(snap.Effective),
 		})
 		if resource == nil {
 			return
@@ -263,13 +263,13 @@ func (a *App) handleSelf(w http.ResponseWriter, r *http.Request) {
 		}
 		ownership := snap.Ownership
 		resource := marshalSelfResource(ctx, w, launcherSelfResource{
-			ID:                          ownership.launcherID,
-			Name:                        ownership.launcherName,
-			Principal:                   ownership.principalName,
-			Enabled:                     ownership.launcherEnabled,
-			Scope:                       string(ownership.launcherScope),
-			AllowedRootEntries:          ensureRootEntries(ownership.launcherRoots),
-			EffectiveAllowedRootEntries: ensureRootEntries(snap.Effective),
+			ID:                    ownership.launcherID,
+			Name:                  ownership.launcherName,
+			Principal:             ownership.principalName,
+			Enabled:               ownership.launcherEnabled,
+			Scope:                 string(ownership.launcherScope),
+			AllowedRoots:          ensureRootEntries(ownership.launcherRoots),
+			EffectiveAllowedRoots: ensureRootEntries(snap.Effective),
 		})
 		if resource == nil {
 			return

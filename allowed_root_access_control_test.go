@@ -515,8 +515,8 @@ func TestLauncherHTTPAddAccessPresence(t *testing.T) {
 			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 		}
 		l := decodeLauncher(t, launcherRequest(t, app, http.MethodGet, "/principals/"+username+"/launchers/default", testAdminToken, ""))
-		if len(l.AllowedRootEntries) != 1 || l.AllowedRootEntries[0].Access != AllowedRootAccessReadOnly {
-			t.Errorf("stored entries = %+v, want read_only", l.AllowedRootEntries)
+		if len(l.AllowedRoots) != 1 || l.AllowedRoots[0].Access != AllowedRootAccessReadOnly {
+			t.Errorf("stored roots = %+v, want read_only", l.AllowedRoots)
 		}
 	})
 
@@ -543,8 +543,8 @@ func TestLauncherHTTPAddAccessPresence(t *testing.T) {
 			t.Errorf("body = %s, want invalid_allowed_root_access", w.Body.String())
 		}
 		l := decodeLauncher(t, launcherRequest(t, app, http.MethodGet, "/principals/"+username+"/launchers/default", testAdminToken, ""))
-		if len(l.AllowedRootEntries) != 0 {
-			t.Errorf("refused add must not mutate, stored = %+v", l.AllowedRootEntries)
+		if len(l.AllowedRoots) != 0 {
+			t.Errorf("refused add must not mutate, stored = %+v", l.AllowedRoots)
 		}
 	})
 }
@@ -568,7 +568,7 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 	}
 
 	t.Run("rich form persists mixed access and projects the rich entries", func(t *testing.T) {
-		body := fmt.Sprintf(`{"scope":"restricted","allowed_root_entries":[{"path":%q,"access":"read_write"},{"path":%q,"access":"read_only"}]}`, a, b)
+		body := fmt.Sprintf(`{"scope":"restricted","allowed_roots":[{"path":%q,"access":"read_write"},{"path":%q,"access":"read_only"}]}`, a, b)
 		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, body)
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
@@ -577,11 +577,11 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 		if l.Scope != "restricted" {
 			t.Fatalf("scope = %q, want restricted", l.Scope)
 		}
-		if len(l.AllowedRootEntries) != 2 {
-			t.Fatalf("entries = %+v, want two entries", l.AllowedRootEntries)
+		if len(l.AllowedRoots) != 2 {
+			t.Fatalf("entries = %+v, want two entries", l.AllowedRoots)
 		}
-		if l.AllowedRootEntries[0].Access != AllowedRootAccessReadWrite || l.AllowedRootEntries[1].Access != AllowedRootAccessReadOnly {
-			t.Errorf("entries = %+v, want lexical order with read_write then read_only", l.AllowedRootEntries)
+		if l.AllowedRoots[0].Access != AllowedRootAccessReadWrite || l.AllowedRoots[1].Access != AllowedRootAccessReadOnly {
+			t.Errorf("entries = %+v, want lexical order with read_write then read_only", l.AllowedRoots)
 		}
 	})
 
@@ -591,41 +591,27 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 		}
 		l := decodeLauncher(t, w)
-		if len(l.AllowedRootEntries) != 1 || l.AllowedRootEntries[0].Access != AllowedRootAccessReadWrite {
-			t.Errorf("entries = %+v, want the read_write grant", l.AllowedRootEntries)
+		if len(l.AllowedRoots) != 1 || l.AllowedRoots[0].Access != AllowedRootAccessReadWrite {
+			t.Errorf("entries = %+v, want the read_write grant", l.AllowedRoots)
 		}
 	})
 
-	t.Run("dual-form supply is refused even when one form is empty", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"restricted","allowed_roots":[`+quoteJSON(t, a)+`],"allowed_root_entries":[]}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "invalid_allowed_roots") {
-			t.Errorf("body = %s, want invalid_allowed_roots", w.Body.String())
-		}
-	})
-
-	t.Run("inherit carries no rich form", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"inherit","allowed_root_entries":[]}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "invalid_allowed_roots") {
-			t.Errorf("body = %s, want invalid_allowed_roots", w.Body.String())
-		}
-	})
-
-	t.Run("restricted with an empty supplied rich form is refused", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"restricted","allowed_root_entries":[]}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "restricted scope requires at least one allowed root") {
-			t.Errorf("body = %s", w.Body.String())
+	t.Run("the retired allowed_root_entries spelling is refused as an unknown field", func(t *testing.T) {
+		// One canonical wire field exists; the retired spelling is not an
+		// alias, so any occurrence — rich, empty, or alongside allowed_roots
+		// — is an unknown field, rejected by the strict request decode.
+		for _, body := range []string{
+			`{"scope":"restricted","allowed_root_entries":[{"path":` + quoteJSON(t, a) + `,"access":"read_write"}]}`,
+			`{"scope":"restricted","allowed_roots":[` + quoteJSON(t, a) + `],"allowed_root_entries":[]}`,
+			`{"scope":"inherit","allowed_root_entries":[]}`,
+		} {
+			w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "invalid_json") {
+				t.Errorf("body = %s, want invalid_json (unknown field)", w.Body.String())
+			}
 		}
 	})
 
@@ -646,20 +632,38 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 		}
 	})
 
-	t.Run("rich form rejects bare path strings", func(t *testing.T) {
+	t.Run("bare path string elements are the legacy read_write grant", func(t *testing.T) {
+		// The one canonical field dispatches per element: a bare path string
+		// is the 2.1 compatibility form mapping the path to read_write.
 		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"restricted","allowed_root_entries":[`+quoteJSON(t, a)+`]}`)
-		if w.Code != http.StatusBadRequest {
+			`{"scope":"restricted","allowed_roots":[`+quoteJSON(t, a)+`]}`)
+		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 		}
-		if !strings.Contains(w.Body.String(), "invalid_json") {
-			t.Errorf("body = %s, want invalid_json (strict object form)", w.Body.String())
+		l := decodeLauncher(t, w)
+		if len(l.AllowedRoots) != 1 || l.AllowedRoots[0].Access != AllowedRootAccessReadWrite {
+			t.Errorf("entries = %+v, want the read_write grant", l.AllowedRoots)
+		}
+	})
+
+	t.Run("mixed arrays dispatch per element", func(t *testing.T) {
+		body := fmt.Sprintf(`{"scope":"restricted","allowed_roots":[%s,{"path":%q,"access":"read_only"}]}`, quoteJSON(t, a), b)
+		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+		}
+		l := decodeLauncher(t, w)
+		if len(l.AllowedRoots) != 2 {
+			t.Fatalf("entries = %+v, want two entries", l.AllowedRoots)
+		}
+		if l.AllowedRoots[0].Access != AllowedRootAccessReadWrite || l.AllowedRoots[1].Access != AllowedRootAccessReadOnly {
+			t.Errorf("entries = %+v, want read_write then read_only", l.AllowedRoots)
 		}
 	})
 
 	t.Run("rich form rejects an unknown access", func(t *testing.T) {
 		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"restricted","allowed_root_entries":[{"path":`+quoteJSON(t, a)+`,"access":"ro"}]}`)
+			`{"scope":"restricted","allowed_roots":[{"path":`+quoteJSON(t, a)+`,"access":"ro"}]}`)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 		}
@@ -668,7 +672,7 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 		}
 	})
 
-	t.Run("create rejects the rich field as an unknown field", func(t *testing.T) {
+	t.Run("create rejects the retired field as an unknown field", func(t *testing.T) {
 		body := `{"scope":"restricted","allowed_root_entries":[{"path":` + quoteJSON(t, a) + `,"access":"read_only"}]}`
 		w := launcherRequest(t, app, http.MethodPost, "/principals/"+username+"/launchers", testAdminToken, body)
 		if w.Code != http.StatusBadRequest {
@@ -680,13 +684,14 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 	})
 }
 
-// TestLauncherHTTPReplaceNullPresenceForms proves the frozen dual-form rule:
-// any occurrence of allowed_roots or allowed_root_entries — an empty array,
-// JSON null, or a non-empty array — is the supplied form, so presence and
-// semantic emptiness are never conflated. The legacy field's JSON null keeps
-// its 2.1 value semantics when it is the only supplied form, while the rich
-// field's JSON null has no compatibility reason and is refused as an invalid
-// rich form.
+// TestLauncherHTTPReplaceNullPresenceForms proves the frozen presence rule of
+// the one canonical allowed_roots field and the retired-spelling refusal:
+// any occurrence of allowed_roots — an empty array, JSON null, or a
+// non-empty array — is the supplied form, so presence and semantic emptiness
+// are never conflated; JSON null keeps its 2.1 value semantics when it is the
+// only supplied form, while any occurrence of the retired
+// allowed_root_entries spelling is an unknown field rejected by the strict
+// request decode, never an alias.
 func TestLauncherHTTPReplaceNullPresenceForms(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	username := "lnullreplaceuser"
@@ -718,67 +723,26 @@ func TestLauncherHTTPReplaceNullPresenceForms(t *testing.T) {
 		}
 	})
 
-	t.Run("null allowed_root_entries with inherit is an invalid rich form", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, `{"scope":"inherit","allowed_root_entries":null}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "invalid_allowed_roots") {
-			t.Errorf("body = %s, want invalid_allowed_roots", w.Body.String())
-		}
-	})
-
-	t.Run("null allowed_root_entries with restricted is an invalid rich form", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, `{"scope":"restricted","allowed_root_entries":null}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "invalid_allowed_roots") {
-			t.Errorf("body = %s, want invalid_allowed_roots", w.Body.String())
-		}
-	})
-
-	t.Run("null allowed_roots plus supplied rich entries is the dual form", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"restricted","allowed_roots":null,"allowed_root_entries":[{"path":`+quoteJSON(t, a)+`,"access":"read_only"}]}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "provide either allowed_roots or allowed_root_entries, not both") {
-			t.Errorf("body = %s, want the dual-form refusal", w.Body.String())
-		}
-	})
-
-	t.Run("empty allowed_roots plus supplied rich entries is the dual form", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"restricted","allowed_roots":[],"allowed_root_entries":[{"path":`+quoteJSON(t, a)+`,"access":"read_only"}]}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "provide either allowed_roots or allowed_root_entries, not both") {
-			t.Errorf("body = %s, want the dual-form refusal", w.Body.String())
-		}
-	})
-
-	t.Run("supplied allowed_roots plus null allowed_root_entries is the dual form", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"restricted","allowed_roots":[`+quoteJSON(t, a)+`],"allowed_root_entries":null}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "provide either allowed_roots or allowed_root_entries, not both") {
-			t.Errorf("body = %s, want the dual-form refusal", w.Body.String())
-		}
-	})
-
-	t.Run("null both forms is the dual form", func(t *testing.T) {
-		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-			`{"scope":"inherit","allowed_roots":null,"allowed_root_entries":null}`)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-		}
-		if !strings.Contains(w.Body.String(), "provide either allowed_roots or allowed_root_entries, not both") {
-			t.Errorf("body = %s, want the dual-form refusal", w.Body.String())
+	t.Run("any retired allowed_root_entries occurrence is an unknown field", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			body string
+		}{
+			{"null with inherit", `{"scope":"inherit","allowed_root_entries":null}`},
+			{"null with restricted", `{"scope":"restricted","allowed_root_entries":null}`},
+			{"supplied array with restricted", `{"scope":"restricted","allowed_root_entries":[{"path":` + quoteJSON(t, a) + `,"access":"read_only"}]}`},
+			{"alongside allowed_roots", `{"scope":"restricted","allowed_roots":null,"allowed_root_entries":[{"path":` + quoteJSON(t, a) + `,"access":"read_only"}]}`},
+			{"null both", `{"scope":"inherit","allowed_roots":null,"allowed_root_entries":null}`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, tc.body)
+				if w.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+				}
+				if !strings.Contains(w.Body.String(), "invalid_json") {
+					t.Errorf("body = %s, want invalid_json (unknown field)", w.Body.String())
+				}
+			})
 		}
 	})
 }
@@ -795,7 +759,7 @@ func TestLauncherHTTPReplaceRichEntryStrictNested(t *testing.T) {
 	launcherPath := "/principals/" + username + "/launchers/default/allowed-roots"
 
 	w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken,
-		`{"scope":"restricted","allowed_root_entries":[{"path":`+quoteJSON(t, root)+`,"access":"read_only","typo":true}]}`)
+		`{"scope":"restricted","allowed_roots":[{"path":`+quoteJSON(t, root)+`,"access":"read_only","typo":true}]}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
@@ -810,71 +774,92 @@ func TestLauncherHTTPReplaceRichEntryStrictNested(t *testing.T) {
 	}
 }
 
-// TestAllowedRootReplaceFieldDecoders proves the presence and strictness
-// rules of the two scope-replacement roots decoders directly, so the nested
-// strictness is attributed to the custom decoders and not to an outer layer:
+// TestAllowedRootReplaceFieldDecoders proves the presence, dispatch, and
+// strictness rules of the one canonical scope-replacement roots decoder
+// directly, so the nested strictness is attributed to the custom decoder and
+// not to an outer layer:
 //
 //   - any occurrence, including JSON null, marks the field present (the
 //     frozen contract: a present key is the supplied form regardless of its
 //     value);
-//   - the rich array is decoded with unknown fields, malformed types, and
-//     trailing JSON rejected.
+//   - each array element dispatches by its shape: the legacy path string
+//     normalizes to read_write, the {"path","access"} object carries its
+//     (still unparsed) access value;
+//   - unknown fields, malformed types, and trailing JSON are rejected.
 func TestAllowedRootReplaceFieldDecoders(t *testing.T) {
-	t.Run("legacy slice is present on null", func(t *testing.T) {
-		var s optionalLauncherRootsSlice
+	t.Run("slice is present on null with no roots", func(t *testing.T) {
+		var s launcherAllowedRootsSlice
 		if err := json.Unmarshal([]byte(`null`), &s); err != nil {
 			t.Fatal(err)
 		}
 		if !s.present || s.value != nil {
-			t.Errorf("legacy null form = present=%v value=%v, want present with no roots", s.present, s.value)
+			t.Errorf("null form = present=%v value=%v, want present with no roots", s.present, s.value)
 		}
 	})
 
-	t.Run("legacy slice is present on an empty array", func(t *testing.T) {
-		var s optionalLauncherRootsSlice
+	t.Run("slice is present on an empty array", func(t *testing.T) {
+		var s launcherAllowedRootsSlice
 		if err := json.Unmarshal([]byte(`[]`), &s); err != nil {
 			t.Fatal(err)
 		}
 		if !s.present || len(s.value) != 0 {
-			t.Errorf("legacy empty form = present=%v value=%v, want present with an empty array", s.present, s.value)
+			t.Errorf("empty form = present=%v value=%v, want present with an empty array", s.present, s.value)
 		}
 	})
 
-	t.Run("rich slice is present on null", func(t *testing.T) {
-		var s allowedRootEntryInputSlice
-		if err := json.Unmarshal([]byte(`null`), &s); err != nil {
+	t.Run("mixed array dispatches per element", func(t *testing.T) {
+		var s launcherAllowedRootsSlice
+		if err := json.Unmarshal([]byte(`["/x",{"path":"/y","access":"read_only"}]`), &s); err != nil {
 			t.Fatal(err)
 		}
-		if !s.present || s.value != nil {
-			t.Errorf("rich null form = present=%v value=%v, want present with no entries", s.present, s.value)
+		if len(s.value) != 2 {
+			t.Fatalf("entries = %+v, want two", s.value)
+		}
+		if s.value[0] != (AllowedRootEntry{Path: "/x", Access: AllowedRootAccessReadWrite}) {
+			t.Errorf("legacy element = %+v, want the read_write grant", s.value[0])
+		}
+		if s.value[1] != (AllowedRootEntry{Path: "/y", Access: AllowedRootAccessReadOnly}) {
+			t.Errorf("rich element = %+v, want read_only", s.value[1])
 		}
 	})
 
-	t.Run("rich slice rejects an unknown nested field", func(t *testing.T) {
-		var s allowedRootEntryInputSlice
+	t.Run("object access values are retained unparsed", func(t *testing.T) {
+		// The decoder never classifies access spellings; the canonical
+		// parseAllowedRootAccess owner parses them at the handler boundary.
+		var s launcherAllowedRootsSlice
+		if err := json.Unmarshal([]byte(`[{"path":"/x","access":"rw"}]`), &s); err != nil {
+			t.Fatal(err)
+		}
+		if s.value[0].Access != AllowedRootAccess("rw") {
+			t.Errorf("access = %q, want the raw unparsed spelling", s.value[0].Access)
+		}
+	})
+
+	t.Run("slice rejects an unknown nested field", func(t *testing.T) {
+		var s launcherAllowedRootsSlice
 		err := json.Unmarshal([]byte(`[{"path":"/x","access":"read_only","typo":true}]`), &s)
 		if err == nil {
 			t.Fatal("unknown nested field must be rejected by the strict nested decode")
 		}
 	})
 
-	t.Run("rich slice rejects a malformed entry type", func(t *testing.T) {
-		var s allowedRootEntryInputSlice
-		if err := json.Unmarshal([]byte(`["/x"]`), &s); err == nil {
-			t.Fatal("a bare path string is not a rich entry object")
+	t.Run("slice rejects a malformed object entry", func(t *testing.T) {
+		var s launcherAllowedRootsSlice
+		if err := json.Unmarshal([]byte(`[{"path":1,"access":"read_only"}]`), &s); err == nil {
+			t.Fatal("a non-string path must be rejected by the strict nested decode")
 		}
 	})
 
-	t.Run("rich slice rejects trailing JSON after the array", func(t *testing.T) {
-		var s allowedRootEntryInputSlice
+	t.Run("slice rejects trailing JSON after the array", func(t *testing.T) {
+		var s launcherAllowedRootsSlice
 		err := s.UnmarshalJSON([]byte(`[{"path":"/x","access":"read_only"}] {"x":1}`))
 		if err == nil {
 			t.Fatal("trailing JSON after the array must be rejected by the nested decode")
 		}
 	})
 
-	t.Run("rich slice rejects a malformed trailing token after the array", func(t *testing.T) {
-		var s allowedRootEntryInputSlice
+	t.Run("slice rejects a malformed trailing token after the array", func(t *testing.T) {
+		var s launcherAllowedRootsSlice
 		// The EOF check (not a More() probe) refuses this shape: More()
 		// reports false for a trailing closing delimiter, so this exact
 		// input is the regression case.
@@ -899,8 +884,8 @@ func quoteJSON(t *testing.T, s string) string {
 // =============================================================================
 
 // TestPrincipalShowRichProjection proves the show/create projection carries
-// exactly the authoritative rich entries: the retired 2.x path-only parallel
-// projection is no longer published, the rich array is non-nil with a stable
+// exactly the canonical rich allowed_roots array: no retired parallel
+// projection name is published, the rich array is non-nil with a stable
 // ordering, and internal consumers read only the canonical representation.
 func TestPrincipalShowRichProjection(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
@@ -919,27 +904,27 @@ func TestPrincipalShowRichProjection(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rawKeys); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := rawKeys["allowed_roots"]; ok {
-		t.Error("principal show must not publish the retired allowed_roots path-only output field")
+	if _, ok := rawKeys["allowed_roots"]; !ok {
+		t.Error("principal show must publish the canonical allowed_roots projection")
 	}
-	if _, ok := rawKeys["allowed_root_entries"]; !ok {
-		t.Error("principal show must publish the canonical allowed_root_entries projection")
+	if _, ok := rawKeys["allowed_root_entries"]; ok {
+		t.Error("principal show must not publish the retired allowed_root_entries spelling")
 	}
 	var resp principalResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.AllowedRootEntries == nil {
+	if resp.AllowedRoots == nil {
 		t.Fatal("stored roots must project a non-nil rich array")
 	}
-	if len(resp.AllowedRootEntries) != 1 {
-		t.Fatalf("creation projection length = %d, want 1", len(resp.AllowedRootEntries))
+	if len(resp.AllowedRoots) != 1 {
+		t.Fatalf("creation projection length = %d, want 1", len(resp.AllowedRoots))
 	}
-	if resp.AllowedRootEntries[0].Path != home {
-		t.Errorf("creation entry = %+v, want the canonical home %q", resp.AllowedRootEntries[0], home)
+	if resp.AllowedRoots[0].Path != home {
+		t.Errorf("creation entry = %+v, want the canonical home %q", resp.AllowedRoots[0], home)
 	}
-	if resp.AllowedRootEntries[0].Access != AllowedRootAccessReadWrite {
-		t.Errorf("creation access = %q, want read_write", resp.AllowedRootEntries[0].Access)
+	if resp.AllowedRoots[0].Access != AllowedRootAccessReadWrite {
+		t.Errorf("creation access = %q, want read_write", resp.AllowedRoots[0].Access)
 	}
 
 	a := filepath.Join(home, "a")
@@ -956,22 +941,22 @@ func TestPrincipalShowRichProjection(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.AllowedRootEntries) != 3 {
-		t.Fatalf("projection length = %d, want 3", len(resp.AllowedRootEntries))
+	if len(resp.AllowedRoots) != 3 {
+		t.Fatalf("projection length = %d, want 3", len(resp.AllowedRoots))
 	}
 	stored := map[string]AllowedRootAccess{}
-	for _, e := range resp.AllowedRootEntries {
+	for _, e := range resp.AllowedRoots {
 		stored[e.Path] = e.Access
 	}
 	if stored[a] != AllowedRootAccessReadOnly || stored[b] != AllowedRootAccessReadWrite {
-		t.Errorf("entries = %+v, want a=read_only b=read_write", resp.AllowedRootEntries)
+		t.Errorf("entries = %+v, want a=read_only b=read_write", resp.AllowedRoots)
 	}
 }
 
-// TestPrincipalShowFieldAllowedRootEntries proves the CLI field extraction
-// vocabulary accepts the rich projection field and no longer offers the
-// retired path-only field.
-func TestPrincipalShowFieldAllowedRootEntries(t *testing.T) {
+// TestPrincipalShowFieldAllowedRoots proves the CLI field extraction
+// vocabulary offers exactly the canonical allowed_roots FIELD and never the
+// retired allowed_root_entries spelling.
+func TestPrincipalShowFieldAllowedRoots(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	username := "fieldprojuser"
 	setupPrincipalWithRoots(t, app, username)
@@ -979,21 +964,21 @@ func TestPrincipalShowFieldAllowedRootEntries(t *testing.T) {
 	fields := principalShowFieldNames()
 	found := false
 	for _, f := range fields {
-		if f == "allowed_root_entries" {
+		if f == "allowed_roots" {
 			found = true
 		}
-		if f == "allowed_roots" {
-			t.Errorf("principal show fields %v must not offer the retired allowed_roots projection", fields)
+		if f == "allowed_root_entries" {
+			t.Errorf("principal show fields %v must not offer the retired allowed_root_entries spelling", fields)
 		}
 	}
 	if !found {
-		t.Errorf("principal show fields %v must contain allowed_root_entries", fields)
+		t.Errorf("principal show fields %v must contain allowed_roots", fields)
 	}
 }
 
 // TestEffectiveRootsIntrospectionRichProjection proves the read-only
-// introspection responses carry exactly the authoritative rich entries: the
-// retired 2.x path-only parallel projection is no longer published.
+// introspection responses carry exactly the canonical rich allowed_roots
+// array: no retired parallel projection name is published.
 func TestEffectiveRootsIntrospectionRichProjection(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	username := "introspectuser"
@@ -1011,21 +996,21 @@ func TestEffectiveRootsIntrospectionRichProjection(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &rawKeys); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := rawKeys["allowed_roots"]; ok {
-		t.Error("effective-roots introspection must not publish the retired allowed_roots path-only output field")
+	if _, ok := rawKeys["allowed_roots"]; !ok {
+		t.Error("effective-roots introspection must publish the canonical allowed_roots projection")
 	}
-	if _, ok := rawKeys["allowed_root_entries"]; !ok {
-		t.Error("effective-roots introspection must publish the canonical allowed_root_entries projection")
+	if _, ok := rawKeys["allowed_root_entries"]; ok {
+		t.Error("effective-roots introspection must not publish the retired allowed_root_entries spelling")
 	}
 	var resp effectiveRootsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.AllowedRootEntries) == 0 {
+	if len(resp.AllowedRoots) == 0 {
 		t.Fatal("introspection entries = empty, want the effective rich entries")
 	}
-	if resp.AllowedRootEntries[0].Access != AllowedRootAccessReadWrite {
-		t.Errorf("entry access = %q, want the collapsed read_write grant", resp.AllowedRootEntries[0].Access)
+	if resp.AllowedRoots[0].Access != AllowedRootAccessReadWrite {
+		t.Errorf("entry access = %q, want the collapsed read_write grant", resp.AllowedRoots[0].Access)
 	}
 	_ = home
 }
@@ -1058,7 +1043,7 @@ func TestConfigAllowedRootSetAccessCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(entries) != 1 || entries[0] != (AllowedRootEntry{Path: root, Access: AllowedRootAccessReadOnly}) {
-			t.Errorf("stored entries = %+v, want the read_only object entry", entries)
+			t.Errorf("stored roots = %+v, want the read_only object entry", entries)
 		}
 	})
 
@@ -1166,7 +1151,7 @@ func TestConfigAllowedRootAddAccessFlag(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("stored entries = %+v, want the read_only object entry", entries)
+		t.Errorf("stored roots = %+v, want the read_only object entry", entries)
 	}
 
 	// Re-adding with the default access must not change the stored access.
@@ -1748,16 +1733,15 @@ func TestLauncherScopeReplaceRefusalAuditRetainsTargetProvenance(t *testing.T) {
 			result: "invalid_scope",
 		},
 		{
-			// Both roots keys occur — the rich key as JSON null — so the
-			// dual-form refusal also proves a null occurrence counts as
-			// present.
-			name:   "dual form",
-			body:   `{"scope":"inherit","allowed_roots":[],"allowed_root_entries":null}`,
+			// A JSON null occurrence is the supplied form: the restricted
+			// refusal proves presence without a non-empty value.
+			name:   "null occurrence with restricted",
+			body:   `{"scope":"restricted","allowed_roots":null}`,
 			result: "invalid_allowed_roots",
 		},
 		{
 			name:   "invalid rich access",
-			body:   `{"scope":"restricted","allowed_root_entries":[{"path":` + quoteJSON(t, root) + `,"access":"typo"}]}`,
+			body:   `{"scope":"restricted","allowed_roots":[{"path":` + quoteJSON(t, root) + `,"access":"typo"}]}`,
 			result: "invalid_access",
 		},
 	}

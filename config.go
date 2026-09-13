@@ -118,11 +118,10 @@ type configFieldSpec struct {
 var configFields = []configFieldSpec{
 	{name: "allowed_roots", writable: true, required: true},
 	{name: "allowed_root", writable: false, required: false},
-	// allowed_root_entries is the rich CLI show projection of the canonical
-	// stored allowed_roots; it is a show surface, never a config-file field,
-	// so the read-only classification makes a config.json carrying it a
-	// fail-closed validation error.
-	{name: "allowed_root_entries"},
+	// allowed_root is the legacy migration-only scalar: it is accepted by
+	// config loading for migration compatibility only and is never part of
+	// the show vocabulary, so the read-only classification makes a
+	// config.json carrying it a fail-closed validation error.
 	{name: "session_ttl", writable: true, required: true},
 	{name: "log_level", writable: true},
 	{name: "audit_enabled", writable: true},
@@ -155,14 +154,14 @@ func lookupConfigField(name string) (configFieldSpec, bool) {
 	return configFieldSpec{}, false
 }
 
-// configShowFields returns field names that config show accepts.
-// Excludes the config-file allowed_roots array (surfaced through
-// allowed_root_entries instead) and the legacy migration-only allowed_root.
-// Sorted deterministically.
+// configShowFields returns field names that config show accepts. allowed_roots
+// is the canonical rich show projection of the stored global roots (the same
+// canonical policy value the config file stores); the legacy migration-only
+// allowed_root scalar is not a show field. Sorted deterministically.
 func configShowFields() []string {
 	var fields []string
 	for _, f := range configFields {
-		if f.name == "allowed_roots" || f.name == "allowed_root" {
+		if f.name == "allowed_root" {
 			continue
 		}
 		fields = append(fields, f.name)
@@ -244,12 +243,27 @@ var deprecatedConfigFields = map[string]string{
 	"build_log_max_bytes": "operation_log_max_bytes",
 }
 
+// retiredConfigFields are release-candidate spellings that never shipped in a
+// stable release and are not aliases of any current field. A config.json
+// carrying one fails closed with a retired-field diagnostic instead of being
+// silently ignored as an unknown field, so a release-candidate artifact can
+// never import a configuration written against a rejected vocabulary.
+var retiredConfigFields = []string{
+	"allowed_root_entries",
+	"effective_allowed_root_entries",
+}
+
 // validateNoDeprecatedRawFields checks that no deprecated field appears in the raw config map.
 // It returns an error with a clear rename diagnostic.
 func validateNoDeprecatedRawFields(raw map[string]json.RawMessage) error {
 	for old, newField := range deprecatedConfigFields {
 		if _, ok := raw[old]; ok {
 			return fmt.Errorf("%s was renamed to %s", old, newField)
+		}
+	}
+	for _, field := range retiredConfigFields {
+		if _, ok := raw[field]; ok {
+			return fmt.Errorf("%s is a retired field and is not a valid configuration field", field)
 		}
 	}
 	return nil
@@ -560,7 +574,7 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]Allo
 // the stored entries in first-occurrence order: the stored paths keep their
 // stored spelling and every entry reports its authoritative access (a legacy
 // path-only entry is the read_write grant). The returned entries are the one
-// canonical policy value from which the rich `allowed_root_entries` show
+// canonical policy value from which the rich `allowed_roots` show
 // projection derives.
 func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
 	hasLegacy := raw["allowed_root"] != nil

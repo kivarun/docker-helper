@@ -25,8 +25,8 @@ func TestSelfCLIHumanOutput(t *testing.T) {
 			wantType: "principal",
 			resource: principalSelfResource{
 				Username: "alice", UID: 1001, GID: 1001, Home: "/home/alice", Enabled: true,
-				AllowedRootEntries:          []AllowedRootEntry{{Path: "/home/alice", Access: AllowedRootAccessReadWrite}},
-				EffectiveAllowedRootEntries: []AllowedRootEntry{{Path: "/home/alice", Access: AllowedRootAccessReadWrite}},
+				AllowedRoots:          []AllowedRootEntry{{Path: "/home/alice", Access: AllowedRootAccessReadWrite}},
+				EffectiveAllowedRoots: []AllowedRootEntry{{Path: "/home/alice", Access: AllowedRootAccessReadWrite}},
 			},
 			wantStdout: []string{
 				"TYPE: principal",
@@ -43,8 +43,8 @@ func TestSelfCLIHumanOutput(t *testing.T) {
 			wantType: "launcher",
 			resource: launcherSelfResource{
 				ID: "dhl_abc", Name: "default", Principal: "alice", Enabled: true, Scope: "inherit",
-				AllowedRootEntries:          []AllowedRootEntry{},
-				EffectiveAllowedRootEntries: []AllowedRootEntry{{Path: "/home/alice", Access: AllowedRootAccessReadWrite}},
+				AllowedRoots:          []AllowedRootEntry{},
+				EffectiveAllowedRoots: []AllowedRootEntry{{Path: "/home/alice", Access: AllowedRootAccessReadWrite}},
 			},
 			wantStdout: []string{
 				"TYPE: launcher",

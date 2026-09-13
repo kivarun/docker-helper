@@ -204,7 +204,7 @@ func TestUserModeOwnerDefaultLauncherMutationsRejected(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("no-op scope replace: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	if updated := decodeLauncher(t, w); updated.Scope != "inherit" || len(updated.AllowedRootEntries) != 0 {
+	if updated := decodeLauncher(t, w); updated.Scope != "inherit" || len(updated.AllowedRoots) != 0 {
 		t.Errorf("no-op scope replace changed the launcher: %+v", updated)
 	}
 	requireUserModeOwnerInvariant(t, app)

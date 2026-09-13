@@ -14,9 +14,10 @@
 #      silently accepted as the old meaning.
 #   C. /tmp wide namespace — the exact /tmp root is refused as too broad
 #      while a /tmp descendant is accepted by the config CLI.
-#   D. legacy projection retirement — config show, principal show, and
-#      launcher show carry only the rich allowed_root_entries projection;
-#      the 2.x path-only allowed_roots output is gone.
+#   D. canonical rich projection — config show, principal show, and
+#      launcher show carry only the rich allowed_roots projection
+#      ({path, access} values); the retired allowed_root_entries spelling
+#      is not an alias and is rejected as an unknown field.
 #   E. completion universes — flags are offered after positionals (used
 #      non-repeatables suppressed, repeatables keep being offered), the
 #      `--` sentinel stops flag completion, and every allowed-root
@@ -359,10 +360,10 @@ subcase_c() {
 }
 
 # ---------------------------------------------------------------------------
-# D. legacy projection retirement (live daemon)
+# D. canonical rich projection (live daemon)
 # ---------------------------------------------------------------------------
 subcase_d() {
-  reg_info "subcase D: legacy projection retirement"
+  reg_info "subcase D: canonical rich allowed_roots projection"
   local user="uatreg20d" home
   home="$(reg_setup_principal "$user")" || { reg_fail "D: fixture setup failed"; return; }
   mkdir -p "$home/d1"
@@ -370,36 +371,51 @@ subcase_d() {
   dh launcher create --system --principal "$user" --name legacyprobe --allowed-root "$home/d1" --no-credential >/dev/null 2>&1
 
   local out rc
-  # 1. config show carries only the rich entries projection.
+  # 1. config show carries only the canonical allowed_roots projection.
   out="$(dh config show 2>&1)"
-  if printf '%s' "$out" | grep -q '"allowed_root_entries"' && ! printf '%s' "$out" | grep -q '"allowed_roots"'; then
-    reg_ok "D: config show carries allowed_root_entries only"
+  if printf '%s' "$out" | grep -q '"allowed_roots"' && ! printf '%s' "$out" | grep -q '"allowed_root_entries"'; then
+    reg_ok "D: config show carries allowed_roots only"
   else
     reg_fail "D: config show projection: $(printf '%s' "$out" | head -3 | tr '\n' ' ' | redact)"
   fi
 
-  # 2. config show allowed_roots is an unknown field.
+  # 2. config show allowed_roots is the rich FIELD and prints the array.
+  out="$(dh config show allowed_roots 2>&1)"
+  if printf '%s' "$out" | grep -q '"path"' && printf '%s' "$out" | grep -q '"access"'; then
+    reg_ok "D: config show allowed_roots FIELD prints the rich array"
+  else
+    reg_fail "D: config show allowed_roots: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+  fi
+
+  # 3. the retired spelling is an unknown config show FIELD, never an alias.
   rc=0
-  out="$(dh config show allowed_roots 2>&1)" || rc=$?
+  out="$(dh config show allowed_root_entries 2>&1)" || rc=$?
   if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'unknown field'; then
-    reg_ok "D: config show allowed_roots is an unknown field"
+    reg_ok "D: config show allowed_root_entries is an unknown field"
   else
-    reg_fail "D: config show allowed_roots: rc=$rc out=$(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+    reg_fail "D: config show allowed_root_entries: rc=$rc out=$(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
-  # 3. principal show FIELD vocabulary has no allowed_roots.
+  # 4. principal show FIELD: allowed_roots works; allowed_root_entries is
+  #    rejected as unknown.
+  out="$(dh principal show "$user" allowed_roots 2>&1)"
+  if printf '%s' "$out" | grep -q '"'"$home/d1"'"'; then
+    reg_ok "D: principal show allowed_roots FIELD carries the stored roots"
+  else
+    reg_fail "D: principal show allowed_roots: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+  fi
   rc=0
-  out="$(dh principal show "$user" allowed_roots 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    reg_ok "D: principal show allowed_roots is no longer a FIELD"
+  out="$(dh principal show "$user" allowed_root_entries 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'unknown field'; then
+    reg_ok "D: principal show allowed_root_entries is an unknown field"
   else
-    reg_fail "D: principal show allowed_roots still succeeded: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+    reg_fail "D: principal show allowed_root_entries: rc=$rc out=$(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
-  # 4. launcher show carries the rich entries only.
+  # 5. launcher show carries the canonical allowed_roots only.
   out="$(dh launcher show --principal "$user" legacyprobe 2>&1)"
-  if printf '%s' "$out" | grep -q '"allowed_root_entries"' && ! printf '%s' "$out" | grep -q '"allowed_roots"'; then
-    reg_ok "D: launcher show carries allowed_root_entries only"
+  if printf '%s' "$out" | grep -q '"allowed_roots"' && ! printf '%s' "$out" | grep -q '"allowed_root_entries"'; then
+    reg_ok "D: launcher show carries allowed_roots only"
   else
     reg_fail "D: launcher show projection: $(printf '%s' "$out" | head -3 | tr '\n' ' ' | redact)"
   fi
