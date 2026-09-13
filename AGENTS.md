@@ -350,7 +350,14 @@ Canonical conceptual vocabulary:
         authorization narrowing only
 
     workspace
-        concrete Session capability path
+        mandatory Session path, relative-path anchor, and one
+        concrete issued tree
+
+    Session filesystem snapshot
+        the Session's complete issued filesystem authority
+
+    issued filesystem tree
+        a concrete path represented in that snapshot
 
     MAC boundary
         durable confinement resource
@@ -453,9 +460,16 @@ names.
 For workspace-backed Sessions, the workspace is canonicalized when the Session
 is created.
 
-Mount/build path validation must enforce containment after symlink resolution.
-Do not duplicate path policy across handlers when an existing invariant already
-guarantees it. Do not weaken symlink-escape protection.
+Build paths remain structurally workspace-constrained after symlink
+resolution, and workspace-relative mount sources must stay within the
+workspace after canonical resolution. A host-absolute mount form whose
+architecture authorizes it through the immutable Session filesystem
+snapshot is not universally constrained to the workspace: its authority
+comes from the canonical snapshot/policy owner, and symlink resolution
+and canonicalization still apply. Never "repair" such absolute issued-root
+forms back into workspace containment, and never weaken symlink-escape
+protection anywhere. Do not duplicate path policy across handlers when an
+existing invariant already guarantees it.
 
 When a deployment mode or operation intentionally has no local workspace,
 follow the architecture/release-plan contract for that mode instead of inventing

@@ -893,6 +893,69 @@ func TestCanonicalDocContract(t *testing.T) {
 				"workspace + issued filesystem roots) is still the only authority",
 			},
 		},
+		{
+			name: "agents workspace-vs-snapshot path rule",
+			file: "AGENTS.md",
+			mustContain: []string{
+				// The canonical snapshot-vs-workspace distinction: an
+				// authorized host-absolute mount form is not workspace
+				// containment, and must never be "repaired" into it.
+				"is not universally constrained to the workspace",
+				"Never \"repair\" such absolute issued-root forms back into workspace containment",
+				// The vocabulary block must not present the workspace as
+				// the complete Session filesystem authority.
+				"Session filesystem snapshot",
+				"the Session's complete issued filesystem authority",
+			},
+			mustNotContain: []string{
+				// The superseded universal containment rule.
+				"Mount/build path validation must enforce containment after symlink resolution.",
+			},
+		},
+		{
+			name: "architecture pending-workload startup coverage",
+			file: "docs/architecture.md",
+			mustContain: []string{
+				// The coverage gate resolves the persisted snapshot (the
+				// complete issued coverage), not merely the workspace.
+				// One diagram line: the tree-prefix character must not
+				// split the assertion.
+				"persisted Session filesystem snapshots (the complete issued",
+			},
+			mustNotContain: []string{
+				// The stale expired-workspace-only resolution wording.
+				"resolve the workspaces of expired sessions",
+			},
+		},
+		{
+			name: "architecture AppArmor MAC boundary vocabulary",
+			file: "docs/architecture.md",
+			mustContain: []string{
+				// Generalized Session MAC resources carry the canonical
+				// MAC-boundary term.
+				"managed AppArmor MAC boundaries",
+			},
+			mustNotContain: []string{
+				// The stale workspace-only generalized-MAC naming.
+				"managed workspace boundaries",
+				"workspace defense in depth",
+			},
+		},
+		{
+			name: "architecture self introspection vocabulary",
+			file: "docs/architecture.md",
+			mustContain: []string{
+				// self is classified agent-facing and read-only.
+				"the read-only credential self-introspection command",
+				// The authority table distinguishes the two introspection
+				// surfaces instead of calling GET /auth the self-inspection.
+				"authority/classification introspection",
+			},
+			mustNotContain: []string{
+				// The stale table wording that conflicted with GET /self.
+				"`GET /auth` self-inspection",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -915,6 +978,24 @@ func TestCanonicalDocContract(t *testing.T) {
 			}
 		})
 	}
+
+	// The SKILL runbook must define socket discovery before the first
+	// executable HTTP example uses the resolved $SOCKET variable.
+	t.Run("skill socket discovery before first SOCKET use", func(t *testing.T) {
+		data, err := os.ReadFile(".claude/skills/docker-helper/SKILL.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		discovery := strings.Index(content, "### Socket discovery")
+		firstUse := strings.Index(content, `--unix-socket "$SOCKET"`)
+		if discovery < 0 || firstUse < 0 {
+			t.Fatalf("socket discovery heading and first $SOCKET use must both exist (discovery=%d, firstUse=%d)", discovery, firstUse)
+		}
+		if discovery > firstUse {
+			t.Errorf("socket discovery (index %d) must appear before the first executable $SOCKET use (index %d)", discovery, firstUse)
+		}
+	})
 }
 
 // setupInstallEnv creates a minimal test environment for install.sh.
