@@ -373,9 +373,13 @@ subcase_e() {
   assert_completion "E: launcher remove PATH offers exactly the default-Launcher stored roots" "$home/e1" "$out" || true
 
   # 7. principal allowed-root mutations: USER completes from the daemon
-  #    selector introspection; PATH completes the stored Principal roots.
+  #    selector introspection; PATH completes the stored Principal roots
+  #    (derived from the authoritative list — fixture provisioning may
+  #    seed the Principal's home as a stored root too).
+  local stored_pr
+  stored_pr="$(dh principal allowed-root list --system "$user" 2>/dev/null)"
   out="$(run_completion "$script" /usr/bin/docker-helper principal allowed-root remove "$user" "")"
-  assert_completion "E: principal remove USER PATH offers the stored Principal roots" "$home/e1" "$out" || true
+  assert_completion "E: principal remove USER PATH offers the stored Principal roots" "$stored_pr" "$out" || true
 
   # 8. config allowed-root mutations complete the stored global roots.
   export DOCKER_HELPER_CONFIG="/etc/docker-helper/config.json"

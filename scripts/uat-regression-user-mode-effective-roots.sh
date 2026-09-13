@@ -139,10 +139,11 @@ WORK="$WS/work"
 uer_field() { json_field "$1"; }
 
 # uer_roots_single DOC PATH: the pretty-printed control-plane document's
-# allowed_root_entries array is exactly [PATH]. The encoder renders each
-# array element on its own line, so the match is made across line breaks.
+# allowed_root_entries array carries exactly one entry for PATH. The encoder
+# renders each array element on its own line, so the match is made across
+# line breaks.
 uer_roots_single() {
-  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[[:space:]]+\"$2\"[[:space:]]+\]"
+  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[[:space:]]*\{[[:space:]]*\"path\": \"$2\""
 }
 
 # --- A. effective-roots introspection reports the global user-mode ceiling ---
@@ -198,7 +199,7 @@ C_OUT="$(dhx launcher create --principal "$OWNER" --name conv --no-credential 2>
 if [ -n "$(printf '%s' "$C_OUT" | uer_field id || true)" ]; then
   # `launcher allowed-root add` prints a short confirmation; the committed
   # scope and root set are asserted through the launcher show document.
-  if C_ADD="$(dhx launcher allowed-root add --principal "$OWNER" conv "$WORK" 2>&1)" \
+  if C_ADD="$(dhx launcher allowed-root add --principal "$OWNER" "$WORK" conv 2>&1)" \
       && C_SHOW="$(dhx launcher show --principal "$OWNER" conv 2>&1)" \
       && [ "$(printf '%s' "$C_SHOW" | uer_field scope)" = "restricted" ] \
       && uer_roots_single "$C_SHOW" "$WORK"; then
@@ -250,7 +251,7 @@ fi
 
 # --- E. the reserved default Launcher is still not restrictable --------------
 
-E_OUT="$(dhx launcher allowed-root add --principal "$OWNER" default "$WORK" 2>&1)"
+E_OUT="$(dhx launcher allowed-root add --principal "$OWNER" "$WORK" default 2>&1)"
 if [ "$?" -ne 0 ] && printf '%s' "$E_OUT" | grep -q 'code user_mode_owner_reserved'; then
   reg_ok "E: the reserved default Launcher still refuses an allowed-root add (user_mode_owner_reserved)"
 else

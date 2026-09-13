@@ -302,7 +302,7 @@ if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
   # Restricted scope: the restricted root narrows the effective composition.
   S3_RES_DIR="$FIXTURE_ROOT/res-only"
   mkdir -p "$S3_RES_DIR"; chown "$PRINCIPAL:$PRINCIPAL" "$S3_RES_DIR"
-  if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only restricted-l "$S3_RES_DIR" >/dev/null 2>&1; then
+  if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only "$S3_RES_DIR" restricted-l >/dev/null 2>&1; then
     if S3_SELF="$(dh self --system --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
       if printf '%s\n' "$S3_SELF" | grep -q '"scope": "restricted"' \
           && printf '%s' "$S3_SELF" | EXPECTED_RO="$S3_RES_DIR" python3 -c '
