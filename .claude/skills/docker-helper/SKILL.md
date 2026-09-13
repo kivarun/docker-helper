@@ -64,6 +64,44 @@ The admin token has no self resource (`404 self_not_available`). A self
 read is read-only and grants no authority over peers: it never permits
 listing or managing other Sessions, Launchers, or Principals.
 
+## Client interfaces
+
+Docker Helper provides two first-class client interfaces — the
+`docker-helper` CLI and the HTTP API over the Docker Helper Unix socket.
+Neither is a legacy or fallback interface; use the interface selected by
+the user or environment.
+
+If none was selected, determine availability of both:
+
+- **CLI available:** `command -v docker-helper >/dev/null 2>&1`
+- **HTTP available:** a Docker Helper socket is resolvable (Socket
+  discovery below) and `curl` (or an equivalent HTTP client) is present
+
+- only one available → use it;
+- both available → either may be used, with no preference;
+- neither available → report that Docker Helper is unavailable.
+
+Use one interface consistently for the current operation when practical.
+The CLI is a convenience client for the same daemon capabilities the HTTP
+API exposes; it hides transport details (operation polling, log offsets).
+
+### Socket discovery
+
+Resolve the Docker Helper Unix socket in this order:
+
+1. `DOCKER_HELPER_SOCKET_PATH`, if set — the authoritative override;
+2. the user-mode socket
+   `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`, when
+   `XDG_RUNTIME_DIR` is set and that socket exists;
+3. the system socket `/run/docker-helper/docker-helper.sock` — the
+   system/sandbox default.
+
+The CLI resolves this order automatically. An HTTP client resolves the
+same order itself. Never declare Docker Helper unavailable only because
+the system-mode socket is absent while the daemon runs in user mode: check
+the user-mode socket first. A transport/connectivity failure on every
+resolved socket is the only unavailability evidence.
+
 ## Delegated identity
 
 Some environments provision the agent with a Docker Helper credential
@@ -141,44 +179,6 @@ Every request may only narrow the target Launcher's ceiling; a widening
 request is refused `invalid_filesystem_policy` before the Session exists.
 Omitting the flag keeps the inherited behavior. There is no post-create
 Session filesystem mutation.
-
-## Client interfaces
-
-Docker Helper provides two first-class client interfaces — the
-`docker-helper` CLI and the HTTP API over the Docker Helper Unix socket.
-Neither is a legacy or fallback interface; use the interface selected by
-the user or environment.
-
-If none was selected, determine availability of both:
-
-- **CLI available:** `command -v docker-helper >/dev/null 2>&1`
-- **HTTP available:** a Docker Helper socket is resolvable (Socket
-  discovery below) and `curl` (or an equivalent HTTP client) is present
-
-- only one available → use it;
-- both available → either may be used, with no preference;
-- neither available → report that Docker Helper is unavailable.
-
-Use one interface consistently for the current operation when practical.
-The CLI is a convenience client for the same daemon capabilities the HTTP
-API exposes; it hides transport details (operation polling, log offsets).
-
-### Socket discovery
-
-Resolve the Docker Helper Unix socket in this order:
-
-1. `DOCKER_HELPER_SOCKET_PATH`, if set — the authoritative override;
-2. the user-mode socket
-   `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`, when
-   `XDG_RUNTIME_DIR` is set and that socket exists;
-3. the system socket `/run/docker-helper/docker-helper.sock` — the
-   system/sandbox default.
-
-The CLI resolves this order automatically. An HTTP client resolves the
-same order itself. Never declare Docker Helper unavailable only because
-the system-mode socket is absent while the daemon runs in user mode: check
-the user-mode socket first. A transport/connectivity failure on every
-resolved socket is the only unavailability evidence.
 
 ## Path model
 

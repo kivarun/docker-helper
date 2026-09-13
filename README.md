@@ -1309,8 +1309,9 @@ for the SELinux policy and acceptance record.
 #### Why SELinux has no `selinux root add/remove`
 
 The AppArmor and SELinux sections are intentionally asymmetric. AppArmor
-keeps persistent backend-specific managed workspace boundaries
-(`apparmor root list/add/remove`), while SELinux MAC state is owned by the
+keeps persistent backend-specific managed AppArmor MAC boundaries
+(`apparmor root list/add/remove` — confinement resources for concrete
+issued trees), while SELinux MAC state is owned by the
 Session lifecycle (`sessionMACCoordinator`): the concrete filesystem trees
 issued in a Session's immutable snapshot (the workspace and every
 additional issued root) receive the necessary SELinux file-context

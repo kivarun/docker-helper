@@ -568,7 +568,8 @@ func (c *sessionMACCoordinator) importHelperOwnedBoundaries() error {
 // order it considers: direct boundary consumers, overlapping Session
 // bindings and session-use leases, and pending helper-owned workload
 // coverage — including the fail-closed defer-all case when a pending
-// workload session's workspace cannot be resolved (for example after the
+// workload session's persisted snapshot (its issued coverage) cannot be
+// resolved (for example after the
 // session row was deleted while its workload state is still pending). The
 // pending coverage is resolved once per removal pass through the existing
 // pendingWorkloadCoverage() owner.
@@ -758,7 +759,8 @@ func (c *sessionMACCoordinator) pendingWorkloadCoverage() (map[string]bool, bool
 // Startup coverage gate: a boundary is retained (deferred) while the
 // canonical boundaryMayBeRemoved owner blocks it — an overlapping
 // binding/lease, pending helper-owned workload coverage, or the fail-closed
-// defer-all case when a pending session cannot be resolved to a workspace.
+// defer-all case when a pending session's persisted snapshot (its issued
+// coverage) cannot be resolved.
 // This keeps the host/MAC state a crashed-but-pending workload relies on
 // intact until the workload reconciliation has proven or removed that state.
 func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
@@ -767,7 +769,8 @@ func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 		return err
 	}
 
-	// Resolve pending workload sessions to their workspaces once per pass.
+	// Resolve pending workload sessions to their issued coverage roots once
+	// per pass.
 	pendingRoots, deferAll := c.pendingWorkloadCoverage()
 
 	for _, boundary := range boundaries {
@@ -1017,9 +1020,9 @@ func pathOverlap(a, b string) pathOverlapRelation {
 	return pathDisjoint
 }
 
-// boundaryCoversTree returns true if the boundary covers the workspace.
-func boundaryCoversTree(boundary, workspace string) bool {
-	return pathWithin(boundary, workspace)
+// boundaryCoversTree returns true if the boundary covers the issued tree.
+func boundaryCoversTree(boundary, tree string) bool {
+	return pathWithin(boundary, tree)
 }
 
 // macBoundaryOverlap returns true if two boundaries overlap.
@@ -1049,14 +1052,14 @@ type appArmorMACDriver struct {
 	listManagedBoundaries func() ([]appArmorManagedBoundary, error)
 }
 
-func (d *appArmorMACDriver) ensureCoverage(workspace string) (sessionMACCoverage, bool, error) {
+func (d *appArmorMACDriver) ensureCoverage(tree string) (sessionMACCoverage, bool, error) {
 	boundaries, err := d.listManagedBoundaries()
 	if err != nil {
 		return sessionMACCoverage{}, false, fmt.Errorf("cannot list AppArmor managed boundaries: %w", err)
 	}
 
 	for _, boundary := range boundaries {
-		if appArmorBoundaryCoversTree(boundary, workspace) {
+		if appArmorBoundaryCoversTree(boundary, tree) {
 			return sessionMACCoverage{
 				Boundary:    boundary.Path,
 				HelperOwned: true,
@@ -1065,7 +1068,7 @@ func (d *appArmorMACDriver) ensureCoverage(workspace string) (sessionMACCoverage
 		}
 	}
 
-	result, err := d.addManagedBoundary(workspace)
+	result, err := d.addManagedBoundary(tree)
 	if err != nil {
 		return sessionMACCoverage{}, false, err
 	}
@@ -1076,13 +1079,13 @@ func (d *appArmorMACDriver) ensureCoverage(workspace string) (sessionMACCoverage
 	}, result.Changed, nil
 }
 
-func (d *appArmorMACDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
+func (d *appArmorMACDriver) verifyCoverage(tree string) (sessionMACCoverage, error) {
 	boundaries, err := d.listManagedBoundaries()
 	if err != nil {
 		return sessionMACCoverage{}, err
 	}
 	for _, boundary := range boundaries {
-		if appArmorBoundaryCoversTree(boundary, workspace) {
+		if appArmorBoundaryCoversTree(boundary, tree) {
 			return sessionMACCoverage{
 				Boundary:    boundary.Path,
 				HelperOwned: true,
@@ -1090,7 +1093,7 @@ func (d *appArmorMACDriver) verifyCoverage(workspace string) (sessionMACCoverage
 			}, nil
 		}
 	}
-	return sessionMACCoverage{}, fmt.Errorf("tree %s not covered by any managed AppArmor boundary", workspace)
+	return sessionMACCoverage{}, fmt.Errorf("tree %s not covered by any managed AppArmor boundary", tree)
 }
 
 // removeBoundary removes one managed boundary by its canonical path. The

@@ -236,7 +236,7 @@ target-resolution contract:
 |---|---|---|---|---|
 | Admin token | the administrator | full control plane: all Principals, Launchers, Principal and Launcher credentials, all Sessions, configuration, reload, admin-token rotation | system mode: exactly one explicit selector required (`400 missing_launcher_selector`); user mode: the local daemon-owner `default` Launcher | `?principal=USER` and/or `?launcher=LAUNCHER`; a `dhl_` Launcher ID is valid without a Principal, a Launcher name requires the Principal scope |
 | Principal credential | one Principal | that Principal's resources: its Launchers and their credentials, its own Principal credential, `principal show` on itself, and the Sessions owned by its Principal's Launchers | its Principal's `default` Launcher, or an explicit own Launcher | `?launcher=` (name or ID) inside its own scope; `--principal` is illegal, even for its own Principal |
-| Launcher credential | one Launcher | that Launcher's Sessions and `GET /auth` self-inspection | its own Launcher (forced) | none — there is no narrowing contract for this authority |
+| Launcher credential | one Launcher | that Launcher's Sessions and the credential self-introspection surfaces (`GET /auth` authority/classification introspection; `GET /self` own-resource introspection) | its own Launcher (forced) | none — there is no narrowing contract for this authority |
 | Session token | one Session | its issued filesystem snapshot's data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login`, and that Session's operation endpoints | not a control authority; not accepted by control endpoints or `GET /auth` | none |
 
 `GET /self` is the one credential self-introspection surface for all three
@@ -431,9 +431,10 @@ hardening profile of each mode.
 System mode requires exactly one supported enforcing backend:
 
 - AppArmor confines the daemon with the `/etc/apparmor.d/docker-helper-system`
-  profile and uses explicit managed workspace boundaries for path-level
-  workspace defense in depth. The profile includes the dynamic helper-owned
-  boundary state file `/var/lib/docker-helper/apparmor/managed-boundaries`;
+  profile and uses explicit managed AppArmor MAC boundaries for path-level
+  confinement of the concrete issued trees (defense in depth beneath the
+  filesystem-snapshot authorization). The profile includes the dynamic
+  helper-owned boundary state file `/var/lib/docker-helper/apparmor/managed-boundaries`;
   managed boundaries are stored there, outside config.json. These managed
   boundaries are MAC state, not authorization roots;
 - SELinux confines the daemon as `docker_helper_t` and system-mode containers
@@ -500,7 +501,8 @@ docker-helper serve
     │   sessions' MAC state (ReconcileLiveSessions)
     ├── deletes expired session rows (expires_at <= now) — after both
     │   reconciliations, so the coverage gate could still resolve the
-    │   workspaces of expired sessions with pending workload state
+    │   persisted Session filesystem snapshots (the complete issued
+    │   coverage) of expired sessions with pending workload state
     ├── removes stale session runtime directories
     └── starts HTTP server on the configured transports
 ```
@@ -1652,16 +1654,19 @@ Exit codes:
 | 1 | Runtime error (config load, API call, server failure) | `docker-helper init` with an unwritable configuration directory, `docker-helper session create` with unreachable server |
 | 2 | CLI syntax or argument validation error | unknown command, missing/unknown subcommand, missing required flag, unexpected positional argument, unknown flag |
 
-Agent-facing CLI commands are `pull`, `build`, `run`, and `registry login`
-(described under [Data-plane execution](#data-plane-execution)); operator
+Agent-facing CLI commands are `pull`, `build`, `run`, `registry login`
+(described under [Data-plane execution](#data-plane-execution)), and `self`
+— the read-only credential self-introspection command, usable with a
+Session bearer as well as Principal and Launcher credentials; operator
 commands are `serve`, `init`, `reload`, `session`, `config`, `principal`,
 `launcher`, `credential`, `admin-token`, `apparmor`, and `selinux`;
 general commands are `version` and `help`.
 
-`apparmor` — manage/check managed AppArmor workspace boundaries for an
+`apparmor` — manage/check managed AppArmor MAC boundaries for an
 AppArmor system deployment (the public `apparmor root` command spelling is
-a retained compatibility form; it manages managed workspace boundaries,
-not authorization roots).
+a retained compatibility form; it manages AppArmor MAC boundaries —
+confinement resources for concrete issued trees, not authorization roots
+and not workspace-only state).
 
 `selinux` — inspect SELinux system-policy state for a SELinux system
 deployment. Subcommand: `check` (validate that the `docker_helper` policy
