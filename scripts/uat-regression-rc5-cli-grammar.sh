@@ -387,11 +387,13 @@ subcase_e() {
   out="$(run_completion "$script" /usr/bin/docker-helper principal allowed-root remove "$user" "")"
   assert_completion "E: principal remove USER PATH offers the stored Principal roots" "$stored_pr" "$out" || true
 
-  # 8. config allowed-root mutations complete the stored global roots.
-  export DOCKER_HELPER_CONFIG="/etc/docker-helper/config.json"
+  # 8. config allowed-root mutations complete the stored global roots
+  #    (derived from the authoritative list; the global ceiling itself is
+  #    always a stored root).
+  local stored_global
+  stored_global="$(dh config allowed-root list 2>/dev/null)"
   out="$(run_completion "$script" /usr/bin/docker-helper config allowed-root remove "")"
-  assert_completion "E: config remove PATH offers exactly the stored global roots" "$home/e2" "$out" || true
-  unset DOCKER_HELPER_CONFIG
+  assert_completion "E: config remove PATH offers exactly the stored global roots" "$stored_global" "$out" || true
 
   cleanup_principal "$user"
 }
