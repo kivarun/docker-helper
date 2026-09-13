@@ -107,22 +107,22 @@ const sessionOwnershipProjection = `
 // sessionCreatePolicy contains the resolved context needed to create a session.
 // LauncherID is the resolved owning Launcher. EffectiveAllowedRoots is the
 // already-computed effective session-creation allowed-root scope (the
-// three-level evaluation result) in its derived 2.1 path-only form;
-// EffectiveAllowedRootEntries is the same scope as its authoritative rich
-// entries — both are projected from one canonical evaluation, never
+// three-level evaluation result) in its authoritative rich form;
+// EffectiveAllowedRootPaths is the same scope's derived 2.1 path-only
+// projection — both are projected from one canonical evaluation, never
 // computed twice. FilesystemRoots carries the caller-supplied
 // issuance-time Session filesystem roots (nil when the request omitted
 // filesystem_roots or carried the empty array); they are consumed by
 // createSessionWithPolicyLocked inside the same lifecycle linearization
 // boundary and are never applied as a post-create policy change.
 type sessionCreatePolicy struct {
-	Workspace                   string
-	EffectiveAllowedRoots       []string
-	EffectiveAllowedRootEntries []AllowedRootEntry
-	FilesystemRoots             []sessionFilesystemRootEntry
-	LauncherID                  string
-	LauncherName                string
-	PrincipalName               string
+	Workspace                 string
+	EffectiveAllowedRoots     []AllowedRootEntry
+	EffectiveAllowedRootPaths []string
+	FilesystemRoots           []sessionFilesystemRootEntry
+	LauncherID                string
+	LauncherName              string
+	PrincipalName             string
 }
 
 // createSessionWithPolicyLocked is the internal persistence/MAC stage beneath
@@ -156,14 +156,14 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
 	}
 
-	if len(p.EffectiveAllowedRoots) == 0 {
+	if len(p.EffectiveAllowedRootPaths) == 0 {
 		return nil, fmt.Errorf("no allowed roots configured: %w", ErrInvalidWorkspace)
 	}
 
 	// Check workspace is inside at least one allowed root and is a proper
 	// subdirectory (not the root itself).
 	inside := false
-	for _, root := range p.EffectiveAllowedRoots {
+	for _, root := range p.EffectiveAllowedRootPaths {
 		if absWorkspace == root {
 			continue
 		}
@@ -218,12 +218,12 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 				}
 			}
 		}
-		snapshotEntries, err = narrowSessionFilesystemPolicy(p.EffectiveAllowedRootEntries, absWorkspace, requested)
+		snapshotEntries, err = narrowSessionFilesystemPolicy(p.EffectiveAllowedRoots, absWorkspace, requested)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		derived, err := deriveSessionFilesystemSnapshot(p.EffectiveAllowedRootEntries, absWorkspace)
+		derived, err := deriveSessionFilesystemSnapshot(p.EffectiveAllowedRoots, absWorkspace)
 		if err != nil {
 			return nil, fmt.Errorf("cannot derive session filesystem snapshot: %w", err)
 		}

@@ -139,11 +139,11 @@ WORK="$WS/work"
 uer_field() { json_field "$1"; }
 
 # uer_roots_single DOC PATH: the pretty-printed control-plane document's
-# allowed_root_entries array carries exactly one entry for PATH. The encoder
+# allowed_roots array carries exactly one entry for PATH. The encoder
 # renders each array element on its own line, so the match is made across
 # line breaks.
 uer_roots_single() {
-  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[[:space:]]*\{[[:space:]]*\"path\": \"$2\""
+  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[[:space:]]*\{[[:space:]]*\"path\": \"$2\""
 }
 
 # --- A. effective-roots introspection reports the global user-mode ceiling ---
@@ -156,6 +156,14 @@ if A_OUT="$(dhx completion roots principal --principal "$OWNER" 2>&1)"; then
   fi
 else
   reg_fail "A: effective-roots introspection failed: $(printf '%s' "$A_OUT" | head -2 | tr '\n' ' ' | redact)"
+fi
+
+# The retired spelling is not an alias on the same surfaces: the
+# allowed_root_entries FIELD must be rejected as unknown.
+if A_RETIRED="$(dhx principal show "$OWNER" allowed_root_entries 2>&1)"; then
+  reg_fail "A: principal show allowed_root_entries unexpectedly succeeded: $(printf '%s' "$A_RETIRED" | head -2 | tr '\n' ' ' | redact)"
+else
+  reg_ok "A: principal show allowed_root_entries rejected (unknown field)"
 fi
 
 # --- B. restricted Launcher create under the daemon-owner Principal ----------

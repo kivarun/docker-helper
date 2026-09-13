@@ -204,7 +204,7 @@ func completionPTYStubHandler(rec *policyQueryRecorder, optDir, homeDir string) 
 			}
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "alice", LauncherID: "dhl_michaelkillme", Launcher: "killme",
-				AllowedRootEntries: stubEntries(roots...),
+				AllowedRoots: stubEntries(roots...),
 			})
 		default:
 			http.NotFound(w, r)
@@ -407,7 +407,7 @@ func TestCompletionInteractiveFilesystemRootTreeNavigation(t *testing.T) {
 		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "michael", LauncherID: "dhl_x", Launcher: "agent",
-				AllowedRootEntries: stubEntries(home, opt),
+				AllowedRoots: stubEntries(home, opt),
 			})
 			return
 		}

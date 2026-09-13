@@ -108,9 +108,9 @@ func TestPrincipalEffectiveRootsContractMatrix(t *testing.T) {
 	if !resp.OK || resp.Principal != "alice" {
 		t.Fatalf("response = %+v", resp)
 	}
-	respPaths := allowedRootPaths(resp.AllowedRootEntries)
+	respPaths := allowedRootPaths(resp.AllowedRoots)
 	if len(respPaths) != 1 || respPaths[0] != proj {
-		t.Fatalf("allowed_root_entries = %+v, want [%s]", resp.AllowedRootEntries, proj)
+		t.Fatalf("allowed_roots = %+v, want [%s]", resp.AllowedRoots, proj)
 	}
 
 	// Admin targets an unknown Principal: non-disclosing 404.
@@ -124,8 +124,8 @@ func TestPrincipalEffectiveRootsContractMatrix(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("own credential query: %d %s", w.Code, w.Body.String())
 	}
-	if got := decodePolicyRoots(t, w.Body.String()); len(got.AllowedRootEntries) != 1 || got.AllowedRootEntries[0].Path != proj {
-		t.Fatalf("own allowed_root_entries = %+v, want [%s]", got.AllowedRootEntries, proj)
+	if got := decodePolicyRoots(t, w.Body.String()); len(got.AllowedRoots) != 1 || got.AllowedRoots[0].Path != proj {
+		t.Fatalf("own allowed_roots = %+v, want [%s]", got.AllowedRoots, proj)
 	}
 
 	// Alice's credential targeting bob is the same non-disclosing 404 as
@@ -165,8 +165,8 @@ func TestPrincipalEffectiveRootsContractMatrix(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("zero-roots query: %d %s", w.Code, w.Body.String())
 	}
-	if body := w.Body.String(); !strings.Contains(body, `"allowed_root_entries":[]`) || strings.Contains(body, `"allowed_root_entries":null`) {
-		t.Fatalf("zero-roots allowed_root_entries = %s", body)
+	if body := w.Body.String(); !strings.Contains(body, `"allowed_roots":[]`) || strings.Contains(body, `"allowed_roots":null`) {
+		t.Fatalf("zero-roots allowed_roots = %s", body)
 	}
 }
 
@@ -198,9 +198,9 @@ func TestSessionCreatePolicyContractMatrix(t *testing.T) {
 	if !strings.HasPrefix(resp.LauncherID, launcherIDPrefix) {
 		t.Fatalf("launcher_id = %q", resp.LauncherID)
 	}
-	respPaths := allowedRootPaths(resp.AllowedRootEntries)
+	respPaths := allowedRootPaths(resp.AllowedRoots)
 	if len(respPaths) != 1 || respPaths[0] != aliceRoot {
-		t.Fatalf("allowed_root_entries = %+v, want [%s]", resp.AllowedRootEntries, aliceRoot)
+		t.Fatalf("allowed_roots = %+v, want [%s]", resp.AllowedRoots, aliceRoot)
 	}
 
 	// Restricted Launcher credential: the query must answer with the
@@ -219,9 +219,9 @@ func TestSessionCreatePolicyContractMatrix(t *testing.T) {
 	if resp.Principal != "alice" || resp.LauncherID != launcherID || resp.Launcher != "agent" {
 		t.Fatalf("response = %+v", resp)
 	}
-	respPaths = allowedRootPaths(resp.AllowedRootEntries)
+	respPaths = allowedRootPaths(resp.AllowedRoots)
 	if len(respPaths) != 1 || respPaths[0] != proj {
-		t.Fatalf("launcher-restricted allowed_root_entries = %+v, want [%s]", resp.AllowedRootEntries, proj)
+		t.Fatalf("launcher-restricted allowed_roots = %+v, want [%s]", resp.AllowedRoots, proj)
 	}
 
 	// Zero stored roots: a Principal with an empty stored set has an empty
@@ -237,8 +237,8 @@ func TestSessionCreatePolicyContractMatrix(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("zero-roots create-policy: %d %s", w.Code, w.Body.String())
 	}
-	if body := w.Body.String(); !strings.Contains(body, `"allowed_root_entries":[]`) || strings.Contains(body, `"allowed_root_entries":null`) {
-		t.Fatalf("zero-roots create-policy allowed_root_entries = %s", body)
+	if body := w.Body.String(); !strings.Contains(body, `"allowed_roots":[]`) || strings.Contains(body, `"allowed_roots":null`) {
+		t.Fatalf("zero-roots create-policy allowed_roots = %s", body)
 	}
 
 	// System-mode admin with no selector: the same missing-selector
@@ -304,9 +304,9 @@ func TestSessionCreatePolicySelectorsMatchCreate(t *testing.T) {
 			t.Fatalf("%s: %d %s", where, rec.Code, rec.Body.String())
 		}
 		resp := decodeCreatePolicy(t, rec.Body.String())
-		respPaths := allowedRootPaths(resp.AllowedRootEntries)
+		respPaths := allowedRootPaths(resp.AllowedRoots)
 		if resp.LauncherID != killme2ID || len(respPaths) != 1 || respPaths[0] != opt {
-			t.Fatalf("%s allowed_root_entries = %+v", where, resp)
+			t.Fatalf("%s allowed_roots = %+v", where, resp)
 		}
 	}
 
@@ -344,9 +344,9 @@ func TestSessionCreatePolicySelectorsMatchCreate(t *testing.T) {
 		t.Fatalf("admin + principal: %d %s", w.Code, w.Body.String())
 	}
 	resp := decodeCreatePolicy(t, w.Body.String())
-	respPaths := allowedRootPaths(resp.AllowedRootEntries)
+	respPaths := allowedRootPaths(resp.AllowedRoots)
 	if resp.Launcher != "default" || len(respPaths) != 2 || respPaths[0] != home || respPaths[1] != opt {
-		t.Fatalf("admin + principal allowed_root_entries = %+v", resp)
+		t.Fatalf("admin + principal allowed_roots = %+v", resp)
 	}
 
 	// Admin + launcher ID selector: the selected restricted Launcher.
@@ -419,9 +419,9 @@ func TestSessionCreatePolicyUserModeAdmin(t *testing.T) {
 	if resp.Principal != "dhtestowner" || resp.Launcher != "default" {
 		t.Fatalf("response = %+v", resp)
 	}
-	respPaths := allowedRootPaths(resp.AllowedRootEntries)
+	respPaths := allowedRootPaths(resp.AllowedRoots)
 	if len(respPaths) != 1 || respPaths[0] != app.Config.AllowedRoots[0].Path {
-		t.Fatalf("allowed_root_entries = %+v, want [%s]", resp.AllowedRootEntries, app.Config.AllowedRoots[0].Path)
+		t.Fatalf("allowed_roots = %+v, want [%s]", resp.AllowedRoots, app.Config.AllowedRoots[0].Path)
 	}
 }
 
@@ -438,9 +438,9 @@ func TestCompletionRootsCLIPrincipal(t *testing.T) {
 		}
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK:                 true,
-				Principal:          "alice",
-				AllowedRootEntries: stubEntries("/roots/one", "/roots/two"),
+				OK:           true,
+				Principal:    "alice",
+				AllowedRoots: stubEntries("/roots/one", "/roots/two"),
 			})
 			return
 		}
@@ -472,9 +472,9 @@ func TestCompletionRootsCLIPrincipalInferred(t *testing.T) {
 			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
 		case r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet:
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK:                 true,
-				Principal:          "alice",
-				AllowedRootEntries: stubEntries("/roots/one"),
+				OK:           true,
+				Principal:    "alice",
+				AllowedRoots: stubEntries("/roots/one"),
 			})
 		default:
 			http.NotFound(w, r)
@@ -552,11 +552,11 @@ func TestCompletionRootsCLISession(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
-				OK:                 true,
-				Principal:          "alice",
-				LauncherID:         "dhl_x",
-				Launcher:           "default",
-				AllowedRootEntries: stubEntries("/launcher/roots/only"),
+				OK:           true,
+				Principal:    "alice",
+				LauncherID:   "dhl_x",
+				Launcher:     "default",
+				AllowedRoots: stubEntries("/launcher/roots/only"),
 			})
 			return
 		}
@@ -594,7 +594,7 @@ func TestCompletionRootsCLISessionSelectors(t *testing.T) {
 			policyQueries = append(policyQueries, r.URL.RawQuery)
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "alice", LauncherID: "dhl_deadbeef01", Launcher: "killme2",
-				AllowedRootEntries: stubEntries("/opt/alice"),
+				AllowedRoots: stubEntries("/opt/alice"),
 			})
 			return
 		}

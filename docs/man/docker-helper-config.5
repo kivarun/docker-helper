@@ -112,9 +112,8 @@ Manage workspace roots with:
 \fBdocker-helper config allowed-root remove PATH\fR \- remove a global allowed root
 .PP
 \fBconfig show\fR projects the stored entries as
-\fBallowed_root_entries\fR, the authoritative rich projection with the
-access modes (the 2.x path-only \fBallowed_roots\fR show projection is
-retired; the same name remains the config-file input field).
+\fBallowed_roots\fR, the canonical rich projection with the
+access modes.
 .PP
 Legacy scalar \fBallowed_root\fR is accepted by config loading for migration
 purposes only. The current schema uses \fBallowed_roots\fR.

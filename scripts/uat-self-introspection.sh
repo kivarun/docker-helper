@@ -215,14 +215,20 @@ if S1_SELF="$(dh self --system --token-file /tmp/uat-self-principal.token --json
   else
     fail "S1 principal self identity mismatch: $(printf '%s\n' "$S1_SELF" | redact | head -8 | tr '\n' ' ')"
   fi
-  if printf '%s\n' "$S1_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[^]]*$ALLOWED_ROOT" \
-      && printf '%s\n' "$S1_SELF" | tr '\n' ' ' | grep -Eq "\"effective_allowed_root_entries\": \[[^]]*$ALLOWED_ROOT"; then
+  if printf '%s\n' "$S1_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[^]]*$ALLOWED_ROOT" \
+      && printf '%s\n' "$S1_SELF" | tr '\n' ' ' | grep -Eq "\"effective_allowed_roots\": \[[^]]*$ALLOWED_ROOT"; then
     ok "S1 stored and effective entries carry the rich canonical form with the allowed root"
   else
     fail "S1 stored/effective entries missing the allowed root: $(printf '%s\n' "$S1_SELF" | redact | tr '\n' ' ' | head -c 400)"
   fi
 else
   fail "S1 principal self CLI failed: $(printf '%s\n' "$S1_SELF" | redact | head -3 | tr '\n' ' ')"
+fi
+# The retired spelling is not an alias: no self resource may carry it.
+if printf '%s\n' "$S1_SELF" | grep -q 'allowed_root_entries'; then
+  fail "S1 self response carries the retired allowed_root_entries spelling"
+else
+  ok "S1 self response carries no retired allowed_root_entries spelling"
 fi
 
 # =============================================================================
@@ -239,8 +245,8 @@ import json, os, sys
 env = json.load(sys.stdin)
 res = env["resource"]
 ro = os.environ["EXPECTED_RO"]
-stored = res["allowed_root_entries"]
-effective = res["effective_allowed_root_entries"]
+stored = res["allowed_roots"]
+effective = res["effective_allowed_roots"]
 assert {"path": ro, "access": "read_only"} in stored, stored
 assert {"path": ro, "access": "read_only"} in effective, effective
 print("S2-JSON-OK")
@@ -285,12 +291,12 @@ if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
         && printf '%s\n' "$S3_SELF" | grep -q '"name": "restricted-l"' \
         && printf '%s\n' "$S3_SELF" | grep -q "\"principal\": \"$PRINCIPAL\"" \
         && printf '%s\n' "$S3_SELF" | grep -q '"scope": "inherit"' \
-        && printf '%s\n' "$S3_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[[:space:]]*\]"; then
+        && printf '%s\n' "$S3_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[[:space:]]*\]"; then
       ok "S3 inherit launcher self carries identity and canonically empty stored roots"
     else
       fail "S3 inherit launcher self mismatch: $(printf '%s\n' "$S3_SELF" | redact | tr '\n' ' ' | head -c 400)"
     fi
-    if printf '%s\n' "$S3_SELF" | tr '\n' ' ' | grep -Eq "\"effective_allowed_root_entries\": \[[^]]*$ALLOWED_ROOT"; then
+    if printf '%s\n' "$S3_SELF" | tr '\n' ' ' | grep -Eq "\"effective_allowed_roots\": \[[^]]*$ALLOWED_ROOT"; then
       ok "S3 inherit launcher effective roots carry the principal-scope composition"
     else
       fail "S3 inherit launcher effective roots missing the allowed root"
@@ -310,8 +316,8 @@ import json, os, sys
 env = json.load(sys.stdin)
 res = env["resource"]
 ro = os.environ["EXPECTED_RO"]
-assert {"path": ro, "access": "read_only"} in res["allowed_root_entries"], res["allowed_root_entries"]
-assert any(e["path"] == ro for e in res["effective_allowed_root_entries"]), res["effective_allowed_root_entries"]
+assert {"path": ro, "access": "read_only"} in res["allowed_roots"], res["allowed_roots"]
+assert any(e["path"] == ro for e in res["effective_allowed_roots"]), res["effective_allowed_roots"]
 print("S3-JSON-OK")
 ' >/dev/null 2>&1; then
         ok "S3 restricted launcher self carries stored entries and the narrowed effective composition"
@@ -322,7 +328,7 @@ print("S3-JSON-OK")
 import json, os, sys
 env = json.load(sys.stdin)
 broad = os.environ["EXPECTED_BROAD"]
-assert not any(e["path"] == broad and e["access"] == "read_write" for e in env["resource"]["effective_allowed_root_entries"]), env["resource"]["effective_allowed_root_entries"]
+assert not any(e["path"] == broad and e["access"] == "read_write" for e in env["resource"]["effective_allowed_roots"]), env["resource"]["effective_allowed_roots"]
 print("S3-NEG-OK")
 ' >/dev/null 2>&1; then
         ok "S3 restricted launcher effective scope does not leak the broad read-write root"
@@ -347,7 +353,7 @@ if [ -n "${S3_L_TOKEN:-}" ]; then
   if dh launcher allowed-root inherit --system --principal "$PRINCIPAL" restricted-l >/dev/null 2>&1; then
     if S4_SELF="$(dh self --system --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
       if printf '%s\n' "$S4_SELF" | grep -q '"scope": "inherit"' \
-          && printf '%s\n' "$S4_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[[:space:]]*\]"; then
+          && printf '%s\n' "$S4_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[[:space:]]*\]"; then
         ok "S4 scope replacement back to inherit is reflected in the self projection"
       else
         fail "S4 scope replacement not reflected: $(printf '%s\n' "$S4_SELF" | redact | tr '\n' ' ' | head -c 400)"

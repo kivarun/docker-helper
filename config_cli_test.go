@@ -153,20 +153,20 @@ func TestConfigShowAllJSON(t *testing.T) {
 		t.Fatalf("invalid JSON: %v, output: %s", err, stdout)
 	}
 
-	// The retired 2.x path-only parallel projection is no longer published:
-	// the canonical rich projection is the one output projection.
-	if _, ok := result["allowed_roots"]; ok {
-		t.Error("allowed_roots legacy path-only output key must not be published")
+	// The canonical rich projection is the one output projection; the
+	// retired allowed_root_entries spelling is never published.
+	if _, ok := result["allowed_root_entries"]; ok {
+		t.Error("the retired allowed_root_entries spelling must not be published")
 	}
-	// allowed_root_entries is the authoritative rich projection of the same
-	// canonical stored entries.
-	entries, ok := result["allowed_root_entries"].([]any)
+	// allowed_roots is the authoritative rich projection of the same
+	// canonical stored roots.
+	entries, ok := result["allowed_roots"].([]any)
 	if !ok || len(entries) != 1 {
-		t.Fatalf("allowed_root_entries = %v, want the rich projection of the stored entry", result["allowed_root_entries"])
+		t.Fatalf("allowed_roots = %v, want the rich projection of the stored entry", result["allowed_roots"])
 	}
 	entry, ok := entries[0].(map[string]any)
 	if !ok || entry["path"] != "/home/user/work" || entry["access"] != "read_write" {
-		t.Errorf("allowed_root_entries[0] = %v, want the {path,access} object", entries[0])
+		t.Errorf("allowed_roots[0] = %v, want the {path,access} object", entries[0])
 	}
 	if result["session_ttl"] != "12h" {
 		t.Errorf("session_ttl = %v", result["session_ttl"])
@@ -214,10 +214,10 @@ func TestConfigShowSingleField(t *testing.T) {
 		field string
 		want  string
 	}{
-		// allowed_root_entries is the authoritative rich projection of the
-		// stored entries; the retired 2.x path-only allowed_roots projection
-		// is no longer a show field.
-		{"allowed_root_entries", "[\n  {\n    \"path\": \"/home/user/work\",\n    \"access\": \"read_write\"\n  }\n]\n"},
+		// allowed_roots is the authoritative rich projection of the stored
+		// roots; the retired allowed_root_entries spelling is no longer a
+		// show field.
+		{"allowed_roots", "[\n  {\n    \"path\": \"/home/user/work\",\n    \"access\": \"read_write\"\n  }\n]\n"},
 		{"session_ttl", "12h\n"},
 		{"log_level", "warn\n"},
 	}
@@ -230,19 +230,20 @@ func TestConfigShowSingleField(t *testing.T) {
 		})
 	}
 
-	// The legacy path-only FIELD no longer exists: it is an unknown-field
-	// refusal, never a silent legacy output.
+	// The retired spelling is not an alias: it is an unknown-field refusal,
+	// never a compatibility path.
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "allowed_roots"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"config", "show", "allowed_root_entries"}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stderr.String(), "unknown field") {
-		t.Errorf("config show allowed_roots: exit = %d, stderr = %q, want the unknown-field refusal", code, stderr.String())
+		t.Errorf("config show allowed_root_entries: exit = %d, stderr = %q, want the unknown-field refusal", code, stderr.String())
 	}
 }
 
-// Req 8b: allowed_root_entries is a show-only projection, never a
-// config-file field: a config.json carrying it fails closed, and it cannot
-// be set or unset.
-func TestConfigAllowedRootEntriesIsShowOnly(t *testing.T) {
+// Req 8b: the retired allowed_root_entries spelling is not part of the
+// config-file namespace: a config.json carrying it fails closed as an
+// unknown field, and allowed_roots is managed through the structured
+// allowed-root commands, never through set/unset.
+func TestConfigAllowedRootsCanonicalShowField(t *testing.T) {
 	t.Run("config file carrying allowed_root_entries is rejected", func(t *testing.T) {
 		cfg := `{
   "allowed_roots": ["/home/user/work"],
@@ -251,16 +252,19 @@ func TestConfigAllowedRootEntriesIsShowOnly(t *testing.T) {
 }`
 		setupConfigTestWithData(t, []byte(cfg))
 		var stdout, stderr bytes.Buffer
-		code := runCommandWithWriters([]string{"config", "show", "allowed_root_entries"}, &stdout, &stderr)
+		// The canonical FIELD proves the corruption itself (not the retired
+		// spelling) causes the failure: an unrelated show field must fail
+		// closed while the configuration carries the retired key.
+		code := runCommandWithWriters([]string{"config", "show", "allowed_roots"}, &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("exit = 0, want a fail-closed validation error: stdout=%q", stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "allowed_root_entries") {
-			t.Errorf("stderr = %q, want the allowed_root_entries diagnostic", stderr.String())
+		if !strings.Contains(stderr.String(), "retired field") {
+			t.Errorf("stderr = %q, want the retired-field diagnostic", stderr.String())
 		}
 	})
 
-	t.Run("set and unset reject the projection field", func(t *testing.T) {
+	t.Run("allowed_roots is managed through the structured commands", func(t *testing.T) {
 		cfg := `{
   "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
@@ -268,15 +272,15 @@ func TestConfigAllowedRootEntriesIsShowOnly(t *testing.T) {
 		setupConfigTestWithData(t, []byte(cfg))
 
 		var stdout, stderr bytes.Buffer
-		code := runCommandWithWriters([]string{"config", "set", "allowed_root_entries", "x"}, &stdout, &stderr)
-		if code != 2 || !strings.Contains(stderr.String(), "read-only") {
-			t.Errorf("set allowed_root_entries: exit = %d, stderr = %q, want the read-only refusal", code, stderr.String())
+		code := runCommandWithWriters([]string{"config", "set", "allowed_roots", "x"}, &stdout, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "managed via structured commands") {
+			t.Errorf("set allowed_roots: exit = %d, stderr = %q, want the structured-commands refusal", code, stderr.String())
 		}
 
 		stdout, stderr = bytes.Buffer{}, bytes.Buffer{}
-		code = runCommandWithWriters([]string{"config", "unset", "allowed_root_entries"}, &stdout, &stderr)
-		if code != 2 || !strings.Contains(stderr.String(), "read-only") {
-			t.Errorf("unset allowed_root_entries: exit = %d, stderr = %q, want the read-only refusal", code, stderr.String())
+		code = runCommandWithWriters([]string{"config", "unset", "allowed_roots"}, &stdout, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "required and cannot be unset") {
+			t.Errorf("unset allowed_roots: exit = %d, stderr = %q, want the required-field refusal", code, stderr.String())
 		}
 	})
 }
@@ -565,7 +569,7 @@ func TestConfigStdoutStderrSeparation(t *testing.T) {
 	}
 
 	// Success goes to stdout, nothing to stderr
-	successOut, successErr := runConfigCLI(t, 0, "config", "show", "allowed_root_entries")
+	successOut, successErr := runConfigCLI(t, 0, "config", "show", "allowed_roots")
 	if successErr != "" {
 		t.Errorf("success should not write to stderr, got: %s", successErr)
 	}
@@ -603,7 +607,7 @@ func TestConfigNoGlobalStdio(t *testing.T) {
 
 	// 1) Successful show
 	var stdout1, stderr1 bytes.Buffer
-	code1 := runCommandWithWriters([]string{"config", "show", "allowed_root_entries"}, &stdout1, &stderr1)
+	code1 := runCommandWithWriters([]string{"config", "show", "allowed_roots"}, &stdout1, &stderr1)
 	wOut.Close()
 	wErr.Close()
 	globalStdout1 := readPipe(rOut)
@@ -1279,7 +1283,7 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 	// Fields that must validate config.json before returning a value.
 	nonBootstrapFields := []string{
-		"allowed_root_entries",
+		"allowed_roots",
 		"session_ttl",
 		"log_level",
 		"audit_enabled",

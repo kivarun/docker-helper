@@ -253,11 +253,19 @@ subcase_a() {
       reg_fail "A: FIELD extraction ($field) = '$(printf '%s' "$out" | head -1 | redact)' want '$want'"
     fi
   done
-  out="$(dh principal show --token-file "$cred_a" "$user_a" allowed_root_entries 2>&1)"
+  out="$(dh principal show --token-file "$cred_a" "$user_a" allowed_roots 2>&1)"
   if printf '%s' "$out" | grep -q '"'"$home_a"'"'; then
-    reg_ok "A: FIELD extraction (allowed_root_entries) carries the stored roots"
+    reg_ok "A: FIELD extraction (allowed_roots) carries the stored roots"
   else
-    reg_fail "A: FIELD extraction (allowed_root_entries) = $(printf '%s' "$out" | head -1 | redact)"
+    reg_fail "A: FIELD extraction (allowed_roots) = $(printf '%s' "$out" | head -1 | redact)"
+  fi
+  # The retired spelling is not an alias: it must be rejected as an unknown
+  # field, never accepted as a compatibility path.
+  out="$(dh principal show --token-file "$cred_a" "$user_a" allowed_root_entries 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    reg_ok "A: FIELD extraction (allowed_root_entries) rejected as unknown field"
+  else
+    reg_fail "A: FIELD extraction (allowed_root_entries) unexpectedly succeeded: $(printf '%s' "$out" | head -1 | redact)"
   fi
 
   # 3. foreign selector: the established non-disclosing not-found.
@@ -889,11 +897,12 @@ subcase_g() {
   #    list is LC_ALL=C sorted: assert_completion compares sorted-unique.)
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "")"
   assert_completion "G: principal show USER <TAB> offers the FIELD vocabulary" \
-    "allowed_root_entries|enabled|gid|home|uid|username" "$out" || true
+    "allowed_roots|enabled|gid|home|uid|username" "$out" || true
 
-  # 6. FIELD partial: a typed prefix filters the vocabulary.
+  # 6. FIELD partial: a typed prefix filters the vocabulary; the retired
+  #    allowed_root_entries spelling is never offered.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "a")"
-  assert_completion "G: principal show USER a<TAB> offers the allowed_ro* vocabulary" "allowed_root_entries" "$out" || true
+  assert_completion "G: principal show USER a<TAB> offers the allowed_ro* vocabulary" "allowed_roots" "$out" || true
 
   # 7. after a complete USER+FIELD pair: no further positional suggestions.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" uid "")"
@@ -902,7 +911,7 @@ subcase_g() {
   # 8. operator flags (bool and value-taking) never shift the FIELD position.
   out="$(run_completion "$script" /usr/bin/docker-helper principal show --system --token-file "$cred" "$user" "")"
   assert_completion "G: flags do not shift the FIELD position" \
-    "allowed_root_entries|enabled|gid|home|uid|username" "$out" || true
+    "allowed_roots|enabled|gid|home|uid|username" "$out" || true
 
   cleanup_principal "$user"
   cleanup_principal "$user2"

@@ -632,7 +632,7 @@ config.json. If present, configuration validation and daemon startup fail:
 | `database_path` | SQLite database path |
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
-| `allowed_root_entries` | Rich `{path, access}` projection of the canonical global allowed roots (show-only; a config.json carrying it fails validation) |
+| `allowed_roots` | Rich `{path, access}` projection of the canonical global allowed roots |
 | `mode` | `"user"` or `"system"` |
 
 ### 3. Start the daemon
@@ -1427,10 +1427,8 @@ Canonical object form in `config.json`:
 
 The legacy string array `"allowed_roots": ["/srv/run-root"]` is still
 accepted and means `read_write`; after a 2.2 write the config persists
-the canonical object form. `config show` displays the authoritative rich
-`allowed_root_entries` projection (the 2.x path-only `allowed_roots`
-output projection is retired; the same name remains the config-file
-input field).
+the canonical object form. `config show` displays the same canonical
+`allowed_roots` values as the rich `{path, access}` projection.
 
 Set the mode when adding a root and change it later:
 

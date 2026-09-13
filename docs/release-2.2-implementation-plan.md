@@ -301,14 +301,15 @@ Launcher), with the set-access mutation performed once server-side as one
 conditional mutation (no CLI read-modify-write; a missing stored root is
 refused `404 allowed_root_not_found`, a same-value request is the idempotent
 unchanged no-op, and the reserved user-mode daemon-owner Principal is refused
-like every other mutation); the rich `allowed_root_entries` projection beside
-the preserved 2.1 `allowed_roots` path-only form on Principal show, Launcher
+like every other mutation); the canonical rich `allowed_roots` representation
+on Principal show, Launcher
 show/list, effective-roots introspection, Session create-policy, and `config
 show`, with the initially shipped human allowed-root lists as PATH/ACCESS
 tables (see the final compatibility correction below) and CLI field
-extraction (`allowed_root_entries` on `principal show`) and completion sharing
-the same owners; the Launcher complete-scope PUT extended with the strict rich
-entry form while the 2.1 path-only form keeps mapping to `read_write` and the
+extraction (`allowed_roots` on `principal show`) and completion sharing
+the same owners; the Launcher complete-scope PUT carrying the canonical rich
+object elements inside the one `allowed_roots` field while the 2.1 path-only
+element form keeps mapping to `read_write` and the
 documented legacy `{"scope":"inherit","allowed_roots":[]}` shape stays valid;
 audit records for the access-bearing add/set-access mutations carry
 `requested_access` and `stored_access` so an idempotent no-op that ignores a
@@ -359,15 +360,18 @@ read-modify-write.
 
 ### Complete Launcher scope replacement
 
-Extend the existing atomic complete-scope route to accept mode-bearing entries.
-Preserve the old path-only request form as a 2.x compatibility input mapping to
-`read_write`. Reject requests that supply both old and rich forms.
+Extend the existing atomic complete-scope route to accept mode-bearing entries
+inside the one canonical `allowed_roots` field. Preserve the old path-only
+element form as a 2.x compatibility input mapping to `read_write`; each
+element dispatches by its shape, so no second wire name exists and no request
+can be ambiguous.
 
 ### Responses
 
-Preserve the 2.1 path-only `allowed_roots` projection throughout 2.x and add the
-canonical `allowed_root_entries` rich projection. Generate both from the same
-internal entries.
+Carry the canonical rich representation under the canonical `allowed_roots`
+name throughout 2.x (the release-candidate `allowed_root_entries` spelling was
+rejected before any stable release; it is not an alias and is never published).
+Generate the projection from the same internal entries.
 
 Update:
 

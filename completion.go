@@ -158,7 +158,7 @@ var completionRootsPrincipalCommand = &Command{
 						fmt.Fprintf(stderr, "error: %v\n", err)
 						return 1
 					}
-					for _, root := range allowedRootPaths(p.AllowedRootEntries) {
+					for _, root := range allowedRootPaths(p.AllowedRoots) {
 						fmt.Fprintln(stdout, root)
 					}
 					return 0
@@ -168,7 +168,7 @@ var completionRootsPrincipalCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				for _, root := range allowedRootPaths(result.AllowedRootEntries) {
+				for _, root := range allowedRootPaths(result.AllowedRoots) {
 					fmt.Fprintln(stdout, root)
 				}
 				return 0
@@ -214,7 +214,7 @@ var completionRootsSessionCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				for _, root := range allowedRootPaths(result.AllowedRootEntries) {
+				for _, root := range allowedRootPaths(result.AllowedRoots) {
 					fmt.Fprintln(stdout, root)
 				}
 				return 0
@@ -267,7 +267,7 @@ var completionRootsLauncherCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				for _, root := range allowedRootPaths(l.AllowedRootEntries) {
+				for _, root := range allowedRootPaths(l.AllowedRoots) {
 					fmt.Fprintln(stdout, root)
 				}
 				return 0

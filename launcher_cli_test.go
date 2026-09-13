@@ -1093,7 +1093,7 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 		case r.URL.Path == "/principals/alice/launchers" && r.Method == http.MethodPost:
 			writeJSONResponse(w, http.StatusCreated, createLauncherResponse{
 				OK:         true,
-				Launcher:   launcherJSON{ID: "dhl_9", Principal: "alice", Name: "default", Scope: "restricted", AllowedRootEntries: stubEntries("/a", "/b"), Enabled: true},
+				Launcher:   launcherJSON{ID: "dhl_9", Principal: "alice", Name: "default", Scope: "restricted", AllowedRoots: stubEntries("/a", "/b"), Enabled: true},
 				Credential: &launcherCredentialJSON{ID: "dhcr_9"},
 				Token:      "secret-create-once-42",
 			})

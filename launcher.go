@@ -377,9 +377,9 @@ func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error
 // 2.1 path-only form), both resolved under the same lifecycle serialization
 // boundary.
 type principalEffectiveRootsSnapshot struct {
-	Principal          string
-	AllowedRoots       []string
-	AllowedRootEntries []AllowedRootEntry
+	Principal        string
+	AllowedRootPaths []string
+	AllowedRoots     []AllowedRootEntry
 }
 
 // resolvePrincipalEffectiveRootsSnapshot is the lock-owning read form of the
@@ -412,9 +412,9 @@ func (a *App) resolvePrincipalEffectiveRootsSnapshot(auth *operatorAuthority, us
 		return nil, err
 	}
 	return &principalEffectiveRootsSnapshot{
-		Principal:          target.Name,
-		AllowedRoots:       allowedRootPaths(roots),
-		AllowedRootEntries: roots,
+		Principal:        target.Name,
+		AllowedRootPaths: allowedRootPaths(roots),
+		AllowedRoots:     roots,
 	}, nil
 }
 

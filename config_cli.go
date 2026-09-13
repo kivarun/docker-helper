@@ -108,11 +108,11 @@ With FIELD, prints only that field's value followed by a newline.
 The general JSON output redacts admin_token.
 "config show admin_token" intentionally prints the complete real token.
 
-allowed_root_entries is the rich projection of the stored global allowed
+allowed_roots is the rich projection of the stored global allowed
 roots; it derives from one canonical policy value.
 
 Fields:
-  allowed_root_entries
+  allowed_roots
   session_ttl
   log_level
   audit_enabled
@@ -694,7 +694,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
 	result := map[string]any{
-		"allowed_root_entries":    entries,
+		"allowed_roots":           entries,
 		"session_ttl":             fc.SessionTTL,
 		"log_level":               ec.LogLevel,
 		"audit_enabled":           ec.AuditEnabled,
@@ -854,7 +854,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	stateDir := getStateDirFunc()
 
 	switch field {
-	case "allowed_root_entries":
+	case "allowed_roots":
 		data, _ := json.MarshalIndent(entries, "", "  ")
 		fmt.Fprintln(stdout, string(data))
 	case "session_ttl":

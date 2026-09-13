@@ -7,13 +7,13 @@ import (
 )
 
 // effectiveRootsResponse is the read-only wire response for the Principal
-// effective allowed-roots introspection Query. allowed_root_entries is the
+// effective allowed-roots introspection Query. allowed_roots is the
 // authoritative rich projection of the effective scope, from one canonical
 // evaluation, always serialized as a JSON array (never null).
 type effectiveRootsResponse struct {
-	OK                 bool               `json:"ok"`
-	Principal          string             `json:"principal"`
-	AllowedRootEntries []AllowedRootEntry `json:"allowed_root_entries"`
+	OK           bool               `json:"ok"`
+	Principal    string             `json:"principal"`
+	AllowedRoots []AllowedRootEntry `json:"allowed_roots"`
 }
 
 // handlePrincipalEffectiveRoots answers GET
@@ -66,29 +66,29 @@ func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Reque
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	entries := snap.AllowedRootEntries
+	entries := snap.AllowedRoots
 	if entries == nil {
 		entries = []AllowedRootEntry{}
 	}
 
 	writeJSONRaw(ctx, w, http.StatusOK, effectiveRootsResponse{
-		OK:                 true,
-		Principal:          snap.Principal,
-		AllowedRootEntries: entries,
+		OK:           true,
+		Principal:    snap.Principal,
+		AllowedRoots: entries,
 	})
 }
 
 // sessionCreatePolicyResponse is the read-only wire response for the
-// Session-create policy introspection Query. allowed_root_entries is the
+// Session-create policy introspection Query. allowed_roots is the
 // authoritative rich projection of the effective session-creation scope,
 // projected from the one canonical 2.2 evaluation, always serialized as a
 // JSON array (never null).
 type sessionCreatePolicyResponse struct {
-	OK                 bool               `json:"ok"`
-	Principal          string             `json:"principal"`
-	LauncherID         string             `json:"launcher_id"`
-	Launcher           string             `json:"launcher"`
-	AllowedRootEntries []AllowedRootEntry `json:"allowed_root_entries"`
+	OK           bool               `json:"ok"`
+	Principal    string             `json:"principal"`
+	LauncherID   string             `json:"launcher_id"`
+	Launcher     string             `json:"launcher"`
+	AllowedRoots []AllowedRootEntry `json:"allowed_roots"`
 }
 
 // handleSessionCreatePolicy answers GET /sessions/create-policy: what
@@ -197,16 +197,16 @@ func (a *App) handleSessionCreatePolicy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	entries := policy.EffectiveAllowedRootEntries
+	entries := policy.EffectiveAllowedRoots
 	if entries == nil {
 		entries = []AllowedRootEntry{}
 	}
 
 	writeJSONRaw(ctx, w, http.StatusOK, sessionCreatePolicyResponse{
-		OK:                 true,
-		Principal:          policy.PrincipalName,
-		LauncherID:         policy.LauncherID,
-		Launcher:           policy.LauncherName,
-		AllowedRootEntries: entries,
+		OK:           true,
+		Principal:    policy.PrincipalName,
+		LauncherID:   policy.LauncherID,
+		Launcher:     policy.LauncherName,
+		AllowedRoots: entries,
 	})
 }

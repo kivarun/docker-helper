@@ -245,12 +245,12 @@ answers with `{"ok": true, "type": "...", "resource": {...}}` where the
 resource is that class's own canonical projection —
 
 - a Principal credential → type `principal`: username, uid, gid, home,
-  enabled, stored `allowed_root_entries`, and effective
-  `allowed_root_entries`, all resolved in one coherent policy generation
+  enabled, stored `allowed_roots`, and effective
+  `allowed_roots`, all resolved in one coherent policy generation
   under the lifecycle serialization boundary;
 - a Launcher credential → type `launcher`: id, name, owning principal,
-  enabled, scope, stored `allowed_root_entries` (canonically empty for
-  inherit scope), and the effective three-level allowed-root entries;
+  enabled, scope, stored `allowed_roots` (canonically empty for
+  inherit scope), and the effective three-level allowed roots;
 - a Session bearer → type `session`: the same body `GET /sessions/{id}`
   renders for that Session (identity, ownership, expiry, persisted
   immutable filesystem snapshot), read together with the snapshot in one
@@ -1002,12 +1002,10 @@ parent-policy mutations (see
 
 - **Global allowed roots** (config.json `allowed_roots`) — the system-wide
   authorization ceiling, managed by `config allowed-root
-  list/add/set-access/remove` (canonical rich entries; legacy string input
-  means `read_write`; `config show` projects the authoritative
-  `allowed_root_entries`, and the 2.x path-only `allowed_roots` output
-  projection is retired — the same name remains the config-file input
-  field). Changing allowed roots is a policy-only operation; it does NOT
-  prepare MAC state.
+  list/add/set-access/remove` (canonical rich `{path, access}` values;
+  legacy string input means `read_write`; `config show` projects the same
+  canonical `allowed_roots` values). Changing allowed roots is a
+  policy-only operation; it does NOT prepare MAC state.
 - **Principal allowed roots** (database) — per-principal narrowing, managed
   by `principal allowed-root add/set-access/remove`. Does not prepare MAC.
 - **Launcher allowed roots** (database, `restricted` scope only) —
@@ -1122,10 +1120,11 @@ produce a session outside the principal's allowed roots.
 
 Scope replacement remains the one complete-scope mutation:
 `PUT /principals/{username}/launchers/{launcher}/allowed-roots` accepts
-the complete scope. The canonical rich form carries mode-bearing entries
-(`{"scope": "restricted", "allowed_root_entries": [{"path": ...,
+the complete scope through the one canonical `allowed_roots` field,
+whose elements dispatch by shape: the canonical rich object
+(`{"scope": "restricted", "allowed_roots": [{"path": ...,
 "access": "read_write"|"read_only"}, ...]}`, `access` required per
-entry); the 2.x path-only compatibility form
+object entry) and the 2.x path-only compatibility string
 (`{"scope": "inherit", "allowed_roots": []}` or
 `{"scope": "restricted", "allowed_roots": [...]}`, every path a
 `read_write` grant) stays valid, and the two forms are mutually
@@ -1341,9 +1340,8 @@ the common operator flags (see [CLI conventions](#cli-conventions)).
 `principal allowed-root` mutations are authorization-only and never
 prepare MAC state; `principal allowed-root list` is a CLI projection of
 the show endpoint (`GET /principals/{username}`), not a separate HTTP
-list route. The show response carries the canonical rich
-`allowed_root_entries` projection (the 2.x path-only `allowed_roots`
-output projection is retired), and `principal allowed-root
+list route. The show response carries the canonical rich `allowed_roots`
+projection, and `principal allowed-root
 list` prints the 2.1-compatible one canonical root per line by default,
 with the explicit `--json` opt-in carrying the canonical rich entries
 for access-aware tooling.
@@ -1360,7 +1358,7 @@ credential cannot manage launchers):
 | `GET /launchers` | scope-first launcher list (authority visibility + optional `?principal=` and `?launcher=` narrowing filters) |
 | `GET /principals/{username}/launchers/{launcher}` | show launcher |
 | `PATCH /principals/{username}/launchers/{launcher}` | rename / enable / disable |
-| `PUT /principals/{username}/launchers/{launcher}/allowed-roots` | atomic complete-scope replacement (canonical rich `allowed_root_entries` entries, or the mutually exclusive 2.x path-only `allowed_roots` compatibility input mapping every path to `read_write`) |
+| `PUT /principals/{username}/launchers/{launcher}/allowed-roots` | atomic complete-scope replacement (the one canonical `allowed_roots` field: rich `{"path","access"}` object elements, or 2.x path-only string elements mapping every path to `read_write`) |
 | `POST /principals/{username}/launchers/{launcher}/allowed-roots` | add one allowed root (presence-aware `--access`; narrows an inherit launcher to restricted on the first add) |
 | `PATCH /principals/{username}/launchers/{launcher}/allowed-roots` | set-access: change the access mode of exactly one stored launcher allowed root (never changes the scope mode) |
 | `DELETE /principals/{username}/launchers/{launcher}/allowed-roots` | remove one allowed root (never changes scope mode) |
@@ -1380,10 +1378,8 @@ and a malformed, missing, or foreign selector is the same non-disclosing
 a name lookup, never a global name scan).
 
 Launcher projection: `{"id", "principal", "name", "enabled", "scope",
-"allowed_root_entries", "created_at"}` — `allowed_root_entries` is the
-authoritative rich projection of the stored restricted entries (the 2.x
-path-only `allowed_roots` output projection is retired; the same name
-remains the accepted scope-replacement input). Create response carries
+"allowed_roots", "created_at"}` — `allowed_roots` is the
+authoritative rich projection of the stored restricted roots. Create response carries
 the one-time credential token only when issuance was requested. Exactly one credential
 may exist per launcher (`launcher_credential_exists` on a second issuance;
 rotation replaces the existing credential and its token).
@@ -1643,7 +1639,7 @@ Positional completion of `principal show USER [FIELD]`: USER completes
 from the same selector-introspection owner as the `--principal` selector
 (above, with the `principal show` command context), and FIELD completes
 the canonical show-field vocabulary (`username uid gid home enabled
-allowed_root_entries`) that `extractPrincipalField` owns
+allowed_roots`) that `extractPrincipalField` owns
 — one shared vocabulary,
 so completion can never offer a field the command rejects. The FIELD word
 is a local static vocabulary (no daemon exchange), a typed prefix filters
@@ -1708,8 +1704,7 @@ Requires a subcommand: `show`, `set`, `unset`, `allowed-root`.
 `docker-helper config show [FIELD]` — without FIELD, prints the complete
 effective configuration as JSON (admin_token redacted). With FIELD, prints
 only that field's value followed by a newline; most fields are scalar, and
-`allowed_root_entries` prints its JSON array (the 2.x path-only
-`allowed_roots` show projection is retired).
+`allowed_roots` prints its rich JSON array.
 
 `docker-helper config set FIELD VALUE` — sets a writable field.
 Reports `updated` or `unchanged`. If the daemon is running, the change is

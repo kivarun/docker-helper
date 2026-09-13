@@ -197,9 +197,9 @@ var principalFields = []principalField{
 	{name: "home", extract: func(p *principalResponse) (string, bool) { return p.Home, true }},
 	{name: "enabled", extract: func(p *principalResponse) (string, bool) { return strconv.FormatBool(p.Enabled), true }},
 	{
-		name: "allowed_root_entries",
+		name: "allowed_roots",
 		extract: func(p *principalResponse) (string, bool) {
-			data, err := json.Marshal(p.AllowedRootEntries)
+			data, err := json.Marshal(p.AllowedRoots)
 			if err != nil {
 				return "", false
 			}
@@ -359,7 +359,7 @@ var principalAllowedRootListCommand = &Command{
 					return 1
 				}
 
-				if err := printAllowedRootList(stdout, result.AllowedRootEntries, *jsonOut); err != nil {
+				if err := printAllowedRootList(stdout, result.AllowedRoots, *jsonOut); err != nil {
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
 				}

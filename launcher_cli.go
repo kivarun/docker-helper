@@ -592,7 +592,7 @@ var launcherAllowedRootListCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := printAllowedRootList(stdout, l.AllowedRootEntries, *jsonOut); err != nil {
+				if err := printAllowedRootList(stdout, l.AllowedRoots, *jsonOut); err != nil {
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
 				}

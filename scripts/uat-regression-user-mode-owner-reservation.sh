@@ -136,10 +136,10 @@ WS="$U_HOME/ws"
 um_field() { json_field "$1"; }
 
 # um_roots_empty DOC: the pretty-printed control-plane document's
-# allowed_root_entries is the empty JSON array. The public wire contract
+# allowed_roots is the empty JSON array. The public wire contract
 # represents zero roots as [], never null.
 um_roots_empty() {
-  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[[:space:]]*\]"
+  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[[:space:]]*\]"
 }
 
 # assert_owner_invariant WHAT: the transparent chain still matches the

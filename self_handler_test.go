@@ -310,22 +310,22 @@ func TestSelfPrincipalProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveEffectivePrincipalRootEntries: %v", err)
 	}
-	gotStored := decodeRootEntries(t, resource["allowed_root_entries"])
-	gotEffective := decodeRootEntries(t, resource["effective_allowed_root_entries"])
+	gotStored := decodeRootEntries(t, resource["allowed_roots"])
+	gotEffective := decodeRootEntries(t, resource["effective_allowed_roots"])
 	if len(gotStored) != len(stored) {
-		t.Errorf("allowed_root_entries = %v, want %v", gotStored, stored)
+		t.Errorf("allowed_roots = %v, want %v", gotStored, stored)
 	}
 	for i := range stored {
 		if gotStored[i] != stored[i] {
-			t.Errorf("allowed_root_entries[%d] = %+v, want %+v", i, gotStored[i], stored[i])
+			t.Errorf("allowed_roots[%d] = %+v, want %+v", i, gotStored[i], stored[i])
 		}
 	}
 	if len(gotEffective) != len(effective) {
-		t.Errorf("effective_allowed_root_entries = %v, want %v", gotEffective, effective)
+		t.Errorf("effective_allowed_roots = %v, want %v", gotEffective, effective)
 	}
 	for i := range effective {
 		if gotEffective[i] != effective[i] {
-			t.Errorf("effective_allowed_root_entries[%d] = %+v, want %+v", i, gotEffective[i], effective[i])
+			t.Errorf("effective_allowed_roots[%d] = %+v, want %+v", i, gotEffective[i], effective[i])
 		}
 	}
 	if len(stored) != 2 {
@@ -362,14 +362,14 @@ func TestSelfLauncherProjection(t *testing.T) {
 	if resource["principal"] != f.principalName || resource["scope"] != "inherit" {
 		t.Errorf("inherit ownership = %v (principal %v), want inherit/%v", resource["scope"], resource["principal"], f.principalName)
 	}
-	gotStored, err := json.Marshal(resource["allowed_root_entries"])
+	gotStored, err := json.Marshal(resource["allowed_roots"])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(gotStored) != "[]" {
 		t.Errorf("inherit stored roots = %s, want []", gotStored)
 	}
-	assertEffectiveEqualsCreatePolicy(t, app, auth, resource["effective_allowed_root_entries"], "inherit")
+	assertEffectiveEqualsCreatePolicy(t, app, auth, resource["effective_allowed_roots"], "inherit")
 
 	// Restricted scope: the stored entries are the restricted roots and the
 	// effective entries are the three-level composition.
@@ -391,14 +391,14 @@ func TestSelfLauncherProjection(t *testing.T) {
 	if resource["scope"] != "restricted" {
 		t.Errorf("restricted scope = %v, want restricted", resource["scope"])
 	}
-	gotStored, err = json.Marshal(resource["allowed_root_entries"])
+	gotStored, err = json.Marshal(resource["allowed_roots"])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(gotStored), restrictedRoot) {
 		t.Errorf("restricted stored roots = %s, want %q present", gotStored, restrictedRoot)
 	}
-	assertEffectiveEqualsCreatePolicy(t, app, auth, resource["effective_allowed_root_entries"], "restricted")
+	assertEffectiveEqualsCreatePolicy(t, app, auth, resource["effective_allowed_roots"], "restricted")
 }
 
 // assertEffectiveEqualsCreatePolicy proves the launcher self effective
@@ -411,7 +411,7 @@ func assertEffectiveEqualsCreatePolicy(t *testing.T, app *App, auth *operatorAut
 		t.Fatalf("resolveCreatePolicySnapshot(%s): %v", phase, err)
 	}
 	have := decodeRootEntries(t, got)
-	want := policy.EffectiveAllowedRootEntries
+	want := policy.EffectiveAllowedRoots
 	if len(have) != len(want) {
 		t.Errorf("%s: effective entries = %v, want create-policy projection %v", phase, have, want)
 		return

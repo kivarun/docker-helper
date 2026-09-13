@@ -69,19 +69,19 @@ func writeControlAudit(ctx context.Context, rec auditRecord, auth *operatorAutho
 	writeRequestContextAudit(ctx, rec)
 }
 
-// Launcher JSON contract uses "scope" as the public term. allowed_root_entries
+// Launcher JSON contract uses "scope" as the public term. allowed_roots
 // is the authoritative rich projection of the canonical stored roots
 // (restricted scope only), always serialized as a JSON array — zero roots are
 // the empty array, never null (launcherToJSON owns the projection).
 // principal_id is never exposed as public authorization state.
 type launcherJSON struct {
-	ID                 string             `json:"id"`
-	Principal          string             `json:"principal"`
-	Name               string             `json:"name"`
-	Enabled            bool               `json:"enabled"`
-	Scope              string             `json:"scope"`
-	AllowedRootEntries []AllowedRootEntry `json:"allowed_root_entries"`
-	CreatedAt          string             `json:"created_at"`
+	ID           string             `json:"id"`
+	Principal    string             `json:"principal"`
+	Name         string             `json:"name"`
+	Enabled      bool               `json:"enabled"`
+	Scope        string             `json:"scope"`
+	AllowedRoots []AllowedRootEntry `json:"allowed_roots"`
+	CreatedAt    string             `json:"created_at"`
 }
 
 // launcherCreateName is the presence-aware "name" field of the Launcher-create
@@ -113,67 +113,40 @@ type patchLauncherRequest struct {
 	Enabled *bool   `json:"enabled,omitempty"`
 }
 
-// optionalLauncherRootsSlice is the presence-aware legacy path-only roots
-// field of the Launcher scope-replace request. Occurrence and value are
-// distinct facts: any occurrence — an empty array, JSON null, or a non-empty
-// array — is the supplied legacy form, so dual-form detection counts a
-// present key regardless of its value (presence and semantic emptiness are
-// never conflated). JSON null keeps the 2.1 value semantics of the supplied
-// legacy form: the nil slice the 2.1 Go client serializes, meaning no roots.
-type optionalLauncherRootsSlice struct {
+// launcherAllowedRootsSlice is the presence-aware roots field of the Launcher
+// scope-replace request — the one canonical `allowed_roots` wire field.
+// Occurrence and value are distinct facts: any occurrence — an empty array,
+// JSON null, or a non-empty array — is a supplied value (presence and
+// semantic emptiness are never conflated). Each array element carries its own
+// shape, decoded by the canonical allowed_roots entry vocabulary: the legacy
+// path-only string normalizes to the read_write grant (the 2.1 input
+// contract), and the canonical {"path","access"} object carries its access
+// mode; mixed arrays are legal because each element dispatches
+// independently. JSON null keeps the 2.1 value semantics of the supplied
+// form: the nil slice the 2.1 Go client serializes, meaning no roots.
+type launcherAllowedRootsSlice struct {
 	present bool
-	value   []string
+	value   []AllowedRootEntry
 }
 
 // UnmarshalJSON marks the field present on any occurrence, including JSON
-// null, which decodes as the supplied legacy form with no roots (the exact
-// 2.1 wire semantics where a nil slice serializes as null).
-func (s *optionalLauncherRootsSlice) UnmarshalJSON(data []byte) error {
+// null, which decodes as the supplied form with no roots (the exact 2.1 wire
+// semantics where a nil slice serializes as null). The array is decoded
+// element by element with the same strictness the rich form always carried:
+// the outer DisallowUnknownFields never reaches inside a custom
+// UnmarshalJSON, so every object element is decoded with unknown fields
+// rejected, malformed types rejected, and trailing JSON rejected. The access
+// values remain unparsed here; the canonical parseAllowedRootAccess owner
+// parses them at the handler boundary.
+func (s *launcherAllowedRootsSlice) UnmarshalJSON(data []byte) error {
 	s.present = true
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil
 	}
-	return json.Unmarshal(data, &s.value)
-}
-
-// allowedRootEntryInput is the strict rich form of one restricted root in a
-// Launcher scope replacement: exactly the {"path","access"} object with a
-// canonical access vocabulary value. The legacy path string is the shape of
-// the allowed_roots form and is rejected here, so the two wire forms cannot
-// be confused.
-type allowedRootEntryInput struct {
-	Path   string `json:"path"`
-	Access string `json:"access"`
-}
-
-// allowedRootEntryInputSlice is the presence-aware rich roots field of the
-// Launcher scope-replace request. Any occurrence — an empty array, JSON
-// null, or a non-empty array — is the supplied rich form, so dual-form
-// detection counts a present key regardless of its value; there is no 2.1
-// compatibility reason to treat the rich field's null as absent, and a
-// supplied empty rich form is refused by the scope rules. The occurrence
-// marks the form; the value semantics stay with the handler.
-type allowedRootEntryInputSlice struct {
-	present bool
-	value   []allowedRootEntryInput
-}
-
-// UnmarshalJSON marks the field present on any occurrence, including JSON
-// null, and strictly decodes the array with its own decoder: the outer
-// DisallowUnknownFields never reaches inside a custom UnmarshalJSON, so the
-// nested rich entries are decoded with unknown fields rejected, malformed
-// types rejected, and trailing JSON rejected. The entry access values remain
-// unparsed here; the canonical parseAllowedRootAccess owner parses them at
-// the handler boundary.
-func (s *allowedRootEntryInputSlice) UnmarshalJSON(data []byte) error {
-	s.present = true
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return nil
-	}
+	var raws []json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	var value []allowedRootEntryInput
-	if err := dec.Decode(&value); err != nil {
+	if err := dec.Decode(&raws); err != nil {
 		return err
 	}
 	// After the first successful value, the next decode must return io.EOF:
@@ -182,21 +155,44 @@ func (s *allowedRootEntryInputSlice) UnmarshalJSON(data []byte) error {
 	// trailing closing bracket such as `[ ... ] ]`.
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("trailing data after allowed_root_entries")
+		return fmt.Errorf("trailing data after allowed_roots")
+	}
+	value := make([]AllowedRootEntry, 0, len(raws))
+	for _, raw := range raws {
+		var path string
+		if err := json.Unmarshal(raw, &path); err == nil {
+			// The legacy path-only element: the canonical read_write grant.
+			value = append(value, allowedRootEntry(path))
+			continue
+		}
+		var obj struct {
+			Path   string `json:"path"`
+			Access string `json:"access"`
+		}
+		objDec := json.NewDecoder(bytes.NewReader(raw))
+		objDec.DisallowUnknownFields()
+		if err := objDec.Decode(&obj); err != nil {
+			return fmt.Errorf(`allowed_roots entry must be a path string or a {"path","access"} object: %w`, err)
+		}
+		var objExtra any
+		if err := objDec.Decode(&objExtra); err != io.EOF {
+			return fmt.Errorf("trailing data inside an allowed_roots entry")
+		}
+		value = append(value, AllowedRootEntry{Path: obj.Path, Access: AllowedRootAccess(obj.Access)})
 	}
 	s.value = value
 	return nil
 }
 
 // allowedRootsReplaceRequest is the complete-replacement request of the
-// Launcher allowed-roots PUT route. The legacy path-only form
-// (allowed_roots) and the canonical rich form (allowed_root_entries) are
-// mutually exclusive; supplying both is refused even when one of them is
-// empty, so the requested policy is never ambiguous.
+// Launcher allowed-roots PUT route. allowed_roots is the one canonical wire
+// field: each element dispatches between the legacy path-only string (the
+// 2.1 compatibility input mapping every path to read_write) and the
+// canonical rich {"path","access"} object, so the requested policy is never
+// ambiguous and no second wire name exists.
 type allowedRootsReplaceRequest struct {
-	Scope              string                     `json:"scope"`
-	AllowedRoots       optionalLauncherRootsSlice `json:"allowed_roots"`
-	AllowedRootEntries allowedRootEntryInputSlice `json:"allowed_root_entries"`
+	Scope        string                    `json:"scope"`
+	AllowedRoots launcherAllowedRootsSlice `json:"allowed_roots"`
 }
 
 type createLauncherResponse struct {
@@ -229,13 +225,13 @@ func launcherToJSON(l LauncherWithPrincipal) launcherJSON {
 		entries = []AllowedRootEntry{}
 	}
 	return launcherJSON{
-		ID:                 l.ID,
-		Principal:          l.PrincipalName,
-		Name:               l.Name,
-		Enabled:            l.Enabled,
-		Scope:              string(l.ScopeMode),
-		AllowedRootEntries: entries,
-		CreatedAt:          l.CreatedAt.Format(time.RFC3339),
+		ID:           l.ID,
+		Principal:    l.PrincipalName,
+		Name:         l.Name,
+		Enabled:      l.Enabled,
+		Scope:        string(l.ScopeMode),
+		AllowedRoots: entries,
+		CreatedAt:    l.CreatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -742,29 +738,19 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// The two roots wire forms are mutually exclusive: the 2.1 path-only
-	// form (allowed_roots) and the canonical rich form (allowed_root_entries)
-	// must never be combined — any occurrence of either key, including JSON
-	// null and the empty array, is the supplied form, so the requested
-	// policy is never ambiguous (the 2.1 Go client serializes a nil slice
-	// as null, which keeps its legacy value semantics in the legacy form
-	// alone).
-	if req.AllowedRoots.present && req.AllowedRootEntries.present {
-		writeLauncherControlAudit(ctx, auditRecord{
-			Event:      "launcher.scope_replace",
-			LauncherID: l.ID,
-			Result:     "invalid_allowed_roots",
-			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth, l)
-		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots",
-			"provide either allowed_roots or allowed_root_entries, not both")
-		return
-	}
-
+	// allowed_roots is the one canonical roots wire field: each element
+	// dispatches between the legacy path-only string (the 2.1 compatibility
+	// input mapping every path to read_write) and the canonical rich
+	// {"path","access"} object. Any occurrence — including JSON null and the
+	// empty array — is a supplied value, so the requested policy is never
+	// ambiguous (the 2.1 Go client serializes a nil slice as null, which
+	// keeps its legacy value semantics: no roots).
 	var requestedEntries []AllowedRootEntry
-	switch {
-	case req.AllowedRootEntries.present:
-		if scopeMode == LauncherScopeInherit {
+	if req.AllowedRoots.present && scopeMode == LauncherScopeInherit {
+		// An inherit replacement with any supplied root element (legacy or
+		// rich) is refused; the explicitly supplied empty array or null is
+		// the documented valid 2.1 inherit body.
+		if len(req.AllowedRoots.value) > 0 {
 			writeLauncherControlAudit(ctx, auditRecord{
 				Event:      "launcher.scope_replace",
 				LauncherID: l.ID,
@@ -774,7 +760,8 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
 			return
 		}
-		if len(req.AllowedRootEntries.value) == 0 {
+	} else if req.AllowedRoots.present {
+		if len(req.AllowedRoots.value) == 0 {
 			writeLauncherControlAudit(ctx, auditRecord{
 				Event:      "launcher.scope_replace",
 				LauncherID: l.ID,
@@ -784,12 +771,14 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
 			return
 		}
-		// The rich form is the canonical representation: every entry carries
-		// its access value, parsed here at the request boundary so an empty
-		// or unknown spelling is never silently reinterpreted as omission.
-		requestedEntries = make([]AllowedRootEntry, 0, len(req.AllowedRootEntries.value))
-		for _, in := range req.AllowedRootEntries.value {
-			access, aerr := parseAllowedRootAccess(in.Access)
+		// The rich object elements are the canonical representation: every
+		// entry carries its access value, parsed here at the request boundary
+		// so an empty or unknown spelling is never silently reinterpreted as
+		// omission. Legacy string elements carry the canonical read_write
+		// grant already.
+		requestedEntries = make([]AllowedRootEntry, 0, len(req.AllowedRoots.value))
+		for _, in := range req.AllowedRoots.value {
+			access, aerr := parseAllowedRootAccess(string(in.Access))
 			if aerr != nil {
 				writeLauncherControlAudit(ctx, auditRecord{
 					Event:      "launcher.scope_replace",
@@ -802,48 +791,15 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			}
 			requestedEntries = append(requestedEntries, AllowedRootEntry{Path: in.Path, Access: access})
 		}
-	case req.AllowedRoots.present:
-		// The legacy form preserves the 2.1 contract exactly: an inherit
-		// replacement with an explicitly supplied empty array (or null,
-		// which the 2.1 Go client serializes) is the documented valid
-		// inherit body; a restricted replacement requires at least one
-		// root. The form carries no access value, so every requested root
-		// is the canonical read_write grant.
-		if scopeMode == LauncherScopeInherit {
-			if len(req.AllowedRoots.value) > 0 {
-				writeLauncherControlAudit(ctx, auditRecord{
-					Event:      "launcher.scope_replace",
-					LauncherID: l.ID,
-					Result:     "invalid_allowed_roots",
-					Duration:   time.Since(started).Round(time.Millisecond).String(),
-				}, auth, l)
-				writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
-				return
-			}
-			break
-		}
-		if len(req.AllowedRoots.value) == 0 {
-			writeLauncherControlAudit(ctx, auditRecord{
-				Event:      "launcher.scope_replace",
-				LauncherID: l.ID,
-				Result:     "invalid_allowed_roots",
-				Duration:   time.Since(started).Round(time.Millisecond).String(),
-			}, auth, l)
-			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
-			return
-		}
-		requestedEntries = allowedRootEntriesForPaths(req.AllowedRoots.value)
-	default:
-		if scopeMode == LauncherScopeRestricted {
-			writeLauncherControlAudit(ctx, auditRecord{
-				Event:      "launcher.scope_replace",
-				LauncherID: l.ID,
-				Result:     "invalid_allowed_roots",
-				Duration:   time.Since(started).Round(time.Millisecond).String(),
-			}, auth, l)
-			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
-			return
-		}
+	} else if scopeMode == LauncherScopeRestricted {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.scope_replace",
+			LauncherID: l.ID,
+			Result:     "invalid_allowed_roots",
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
+		}, auth, l)
+		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
+		return
 	}
 
 	// The Launcher scope replacement is a policy-authority mutation: it shares
