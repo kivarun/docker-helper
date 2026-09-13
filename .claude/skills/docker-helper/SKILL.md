@@ -7,7 +7,29 @@ description: Drive Docker through Docker Helper — pull images, build images, r
 
 Docker access is provided through Docker Helper.
 
-Never:
+## Quick start
+
+Most environments provision the agent with a Session token — use it and
+skip the delegated-identity machinery:
+
+```bash
+docker-helper pull IMAGE
+docker-helper build --context . --dockerfile Dockerfile --image IMAGE
+docker-helper run --image IMAGE --mount .:/workspace -- command arg...
+```
+
+Protected operations read the Session token from
+`DOCKER_HELPER_SESSION_TOKEN` (set by your environment; never display its
+value).
+
+- No `docker-helper` binary → use the HTTP API over the Docker Helper
+  Unix socket (HTTP API interface below). Both interfaces are first-class.
+- Provisioned with a Docker Helper credential instead of a session
+  token → Delegated identity below.
+- Want to know exactly what your bearer authorizes → Introspection:
+  self below.
+
+## Never
 
 - invoke `docker` directly;
 - access `docker.sock`;
@@ -23,6 +45,24 @@ Never:
 - use administrative/operator commands: `serve`, `init`, `reload`, `config`,
   `principal`, `launcher`, `credential`, `admin-token`, `apparmor`,
   `selinux`.
+
+## Introspection: self
+
+`docker-helper self` (HTTP: `GET /self` with the same bearer) is the one
+self-introspection surface. The daemon classifies your credential and
+answers with exactly your own authority — no more:
+
+- **Session bearer** → your Session: identity, ownership, expiry, and the
+  persisted immutable filesystem snapshot (workspace plus any issued
+  filesystem roots, each with its access mode);
+- **Launcher credential** → your Launcher: id, name, owning principal,
+  scope, and stored/effective allowed-root entries;
+- **Principal credential** → your Principal: username, uid/gid, home,
+  enabled state, and stored/effective allowed-root entries.
+
+The admin token has no self resource (`404 self_not_available`). A self
+read is read-only and grants no authority over peers: it never permits
+listing or managing other Sessions, Launchers, or Principals.
 
 ## Delegated identity
 
@@ -102,61 +142,26 @@ request is refused `invalid_filesystem_policy` before the Session exists.
 Omitting the flag keeps the inherited behavior. There is no post-create
 Session filesystem mutation.
 
-## Introspection: self
-
-`docker-helper self` (HTTP: `GET /self` with the same bearer) is the one
-self-introspection surface. The daemon classifies your credential and
-answers with exactly your own authority — no more:
-
-- **Session bearer** → your Session: identity, ownership, expiry, and the
-  persisted immutable filesystem snapshot (workspace plus any issued
-  filesystem roots, each with its access mode);
-- **Launcher credential** → your Launcher: id, name, owning principal,
-  scope, and stored/effective allowed-root entries;
-- **Principal credential** → your Principal: username, uid/gid, home,
-  enabled state, and stored/effective allowed-root entries.
-
-The admin token has no self resource (`404 self_not_available`). A self
-read is read-only and grants no authority over peers: it never permits
-listing or managing other Sessions, Launchers, or Principals.
-
 ## Client interfaces
 
-Docker Helper provides two supported client interfaces:
+Docker Helper provides two first-class client interfaces — the
+`docker-helper` CLI and the HTTP API over the Docker Helper Unix socket.
+Neither is a legacy or fallback interface; use the interface selected by
+the user or environment.
 
-1. the `docker-helper` CLI;
-2. the HTTP API over the Docker Helper Unix socket.
-
-Both interfaces are first-class. Neither is a legacy or fallback interface.
-
-Use the interface selected by the user or environment.
-
-If no interface was explicitly selected, determine availability of both:
+If none was selected, determine availability of both:
 
 - **CLI available:** `command -v docker-helper >/dev/null 2>&1`
-- **HTTP available:** a Docker Helper socket is resolvable (see Socket
-  discovery) and a suitable HTTP client is present (for the documented
-  curl examples — `curl`)
+- **HTTP available:** a Docker Helper socket is resolvable (Socket
+  discovery below) and `curl` (or an equivalent HTTP client) is present
 
-Then:
-
-- if only one interface is available, use it;
-- if both are available, either may be used, with no preference;
-- if neither is available, report that Docker Helper is unavailable.
+- only one available → use it;
+- both available → either may be used, with no preference;
+- neither available → report that Docker Helper is unavailable.
 
 Use one interface consistently for the current operation when practical.
-
-The CLI is a convenience client for the same daemon capabilities exposed by
-the HTTP API. It hides transport details such as asynchronous operation
-polling and incremental log offsets.
-
-Protected operations use the session token from:
-
-```text
-DOCKER_HELPER_SESSION_TOKEN
-```
-
-Never display its value.
+The CLI is a convenience client for the same daemon capabilities the HTTP
+API exposes; it hides transport details (operation polling, log offsets).
 
 ### Socket discovery
 
@@ -248,8 +253,6 @@ rejected as `invalid_mount`.
 When the `docker-helper` command is available, its built-in help is the
 authoritative CLI reference.
 
-For discovery:
-
 ```bash
 docker-helper help
 docker-helper help pull
@@ -261,12 +264,11 @@ docker-helper help self
 docker-helper help session
 ```
 
-Do not use administrative/operator commands: `serve`, `init`, `reload`,
-`config`, `principal`, `launcher`, `credential`, `admin-token`, `apparmor`,
-`selinux`. The `session` subcommands (create, list, show,
-delete) require a Docker Helper credential (Launcher or Principal); with
-only a Session token, do not use them. `self` works with whichever bearer
-you hold, including a Session token.
+Do not use the administrative/operator commands from the Never list.
+The `session` subcommands (create, list, show, delete) require a Docker
+Helper credential (Launcher or Principal); with only a Session token, do
+not use them. `self` works with whichever bearer you hold, including a
+Session token.
 
 ## Pull
 
@@ -280,22 +282,12 @@ docker-helper pull IMAGE
 docker-helper build \
   --context . \
   --dockerfile Dockerfile \
-  --image IMAGE
-```
-
-Build arguments may be repeated:
-
-```bash
-docker-helper build \
-  --context . \
-  --dockerfile Dockerfile \
   --image IMAGE \
-  --build-arg KEY=value \
-  --build-arg OTHER=value
+  --build-arg KEY=value      # repeatable
 ```
 
-`build` waits for the daemon operation to finish and streams operation output.
-Build arguments are not a mechanism for passing secrets.
+`build` waits for the daemon operation to finish and streams operation
+output. Build arguments are not a mechanism for passing secrets.
 
 ## Run
 
@@ -305,89 +297,50 @@ docker-helper run \
   -- command arg...
 ```
 
-Optional environment variables:
+Other useful options: `--entrypoint`, `--workdir`, `--shm-size`, `--env
+KEY=value`. Use `docker-helper help run` for exact syntax. Mount sources
+follow the Path model; `run` waits for the operation to finish, streams
+its output, and propagates a non-zero container exit code.
 
-```bash
-docker-helper run \
-  --image IMAGE \
-  --env KEY=value \
-  -- command arg...
-```
-
-To pass a secret value (an API key, a credential token) without placing it
-in the `docker-helper` command line, export it in your own environment and
-use `--env-from DEST=SOURCE`, where SOURCE names your environment variable
-and DEST is the name the workload sees. The value is read locally from
-your environment; it is not placed in the `docker-helper` argv, is not
-printed in diagnostics, is not inherited from the surrounding shell, and
-the daemon does not log environment values. Known limitation: `run` starts
-the workload through the legacy Docker CLI, which receives the value as
-`--env DEST=value`, so the value can appear in that daemon-side child
-process's argv; `--env-from` guarantees nothing beyond the `docker-helper`
-process boundary. An unset SOURCE variable stops the command before any
-container operation is created.
+**Passing secrets.** Export the value in your own environment and use
+`--env-from DEST=SOURCE` (SOURCE names your environment variable, DEST is
+the name the workload sees):
 
 ```bash
 ORCHESTRATOR_LLM_KEY=secret \
-docker-helper run \
-  --image IMAGE \
+docker-helper run --image IMAGE \
   --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY \
   -- command arg...
 ```
 
-In system mode, `--helper-socket` makes the Docker Helper socket reachable
-inside the container at `/run/docker-helper/docker-helper.sock` (read-only
-projection, chosen server-side). While the projection is active, a `--mount`
-target overlapping `/run/docker-helper` — the path itself, an ancestor such
-as `/run`, or a descendant such as the socket path — is rejected. The socket
-provides transport only; the
-workload still needs a bearer credential for protected operations, which
-can be passed separately with `--env-from`. In user mode the flag is
-rejected.
+- the value is read locally; it is not placed in the `docker-helper`
+  argv, is not printed in diagnostics, is not inherited from the
+  surrounding shell, and the daemon does not log environment values;
+- an unset SOURCE stops the command (exit 2) before any container
+  operation is created;
+- known limitation: `run` starts the workload through the legacy Docker
+  CLI, which receives the value as `--env DEST=value`, so the value can
+  appear in that daemon-side child process's argv; `--env-from`
+  guarantees nothing beyond the `docker-helper` process boundary.
 
-Optional workspace mounts:
+**Helper socket (system mode only).** `--helper-socket` makes the Docker
+Helper socket reachable inside the container at
+`/run/docker-helper/docker-helper.sock` (read-only projection, chosen
+server-side; rejected in user mode). While the projection is active, a
+`--mount` target overlapping `/run/docker-helper` — the path itself, an
+ancestor such as `/run`, or a descendant such as the socket path — is
+rejected. The socket provides transport only; the workload still needs a
+bearer credential for protected operations, passed separately with
+`--env-from`.
 
-```bash
-docker-helper run \
-  --image IMAGE \
-  --mount .:/workspace \
-  -- command arg...
-```
-
-System-mode-only: mount a workspace-relative file or subdirectory:
-
-```bash
-docker-helper run \
-  --image IMAGE \
-  --mount relative/source:/container/path \
-  -- command arg...
-```
-
-System-mode-only: mount an issued absolute filesystem root (a
-`--filesystem-root` entry of the session's issued snapshot):
+**Mount examples** (rules in Path model):
 
 ```bash
-docker-helper run \
-  --image IMAGE \
-  --mount /opt/agent/cache:/cache \
-  -- command arg...
+--mount .:/workspace                # portable, both modes
+--mount relative/source:/path       # system mode: workspace-relative file or subdirectory
+--mount /opt/agent/cache:/cache     # system mode: issued absolute filesystem root
+--mount .:/workspace:ro             # read-only
 ```
-
-Read-only mount:
-
-```bash
-docker-helper run \
-  --image IMAGE \
-  --mount .:/workspace:ro \
-  -- command arg...
-```
-
-Other useful options: `--entrypoint`, `--workdir`, `--shm-size`.
-Use `docker-helper help run` for exact syntax.
-
-`run` waits for the container operation to finish and streams its output.
-If the container exits with a non-zero status, the CLI propagates the
-container exit code.
 
 ## Cancellation
 
@@ -403,12 +356,11 @@ Do not attempt manual `docker kill` or container cleanup.
 Interactive:
 
 ```bash
-docker-helper registry login \
-  --registry REGISTRY \
-  --username USER
+docker-helper registry login --registry REGISTRY --username USER
 ```
 
-Non-interactive (pipe password via stdin):
+Non-interactive (pipe password via stdin; never put registry passwords
+directly into command arguments):
 
 ```bash
 printf '%s\n' "$REGISTRY_PASSWORD" | \
@@ -418,13 +370,11 @@ printf '%s\n' "$REGISTRY_PASSWORD" | \
     --password-stdin
 ```
 
-Do not put registry passwords directly into command arguments.
-
 # HTTP API interface
 
-The HTTP API is a fully supported direct client interface.
-
-Set the socket path without displaying any secret:
+The HTTP API is a fully supported direct client interface — same
+capabilities as the CLI, different syntax only. Set the socket path
+without displaying any secret (Socket discovery order):
 
 ```bash
 if [ -n "$DOCKER_HELPER_SOCKET_PATH" ]; then
@@ -436,137 +386,84 @@ else
 fi
 ```
 
-Protected requests require:
+Protected requests require (never print the Authorization header with the
+expanded token):
 
 ```text
 Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN
 Content-Type: application/json
 ```
 
-Do not print the Authorization header with the expanded token.
-
-## Pull over HTTP
-
-`POST /pull` is synchronous.
+## Endpoints
 
 ```bash
-curl --silent --show-error \
-  --unix-socket "$SOCKET" \
+# Pull — synchronous
+curl --silent --show-error --unix-socket "$SOCKET" \
   -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"image":"alpine:3.24"}' \
   http://localhost/pull
-```
 
-## Build over HTTP
-
-`POST /build` starts an asynchronous operation.
-
-```bash
-curl --silent --show-error \
-  --unix-socket "$SOCKET" \
+# Build — async, 201 + operation_id (acceptance, not completion)
+curl --silent --show-error --unix-socket "$SOCKET" \
   -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"context":".","dockerfile":"Dockerfile","image":"myapp:test"}' \
   http://localhost/build
-```
 
-A successful start returns HTTP 201 with an `operation_id`.
-HTTP 201 means the operation was accepted, not that the build completed.
-
-Optional build arguments:
-
-```json
-{
-  "build_args": {
-    "KEY": "value"
-  }
-}
-```
-
-## Run over HTTP
-
-`POST /run` also starts an asynchronous operation.
-
-```bash
-curl --silent --show-error \
-  --unix-socket "$SOCKET" \
+# Run — async, 201 + operation_id
+curl --silent --show-error --unix-socket "$SOCKET" \
   -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "image":"alpine:3.24",
-    "command":["echo","hello"]
-  }' \
+  -d '{"image":"alpine:3.24","command":["echo","hello"]}' \
   http://localhost/run
-```
 
-Useful request fields: `image`, `entrypoint`, `command`, `workdir`,
-`environment`, `mounts`, `shm_size`, `helper_socket`.
-
-`"helper_socket": true` is the HTTP equivalent of the CLI
-`--helper-socket` (see [Run](#run)): system mode only, a server-owned
-read-only projection of the daemon's runtime directory at
-`/run/docker-helper` that provides transport reachability only — the
-workload still needs a bearer credential passed separately, and user mode
-rejects the flag.
-
-Example mount (portable — works in both user and system mode):
-
-```json
-{
-  "source": ".",
-  "target": "/workspace",
-  "read_only": true
-}
-```
-
-Example mount (system-mode-only — relative subdirectory):
-
-```json
-{
-  "source": "src",
-  "target": "/workspace/src",
-  "read_only": false
-}
-```
-
-Example mount (system-mode-only — issued absolute filesystem root; the
-same capability the CLI `--mount /opt/agent/cache:/cache` example shows):
-
-```json
-{
-  "source": "/opt/agent/cache",
-  "target": "/cache",
-  "read_only": false
-}
-```
-
-## Async operation lifecycle
-
-For HTTP `build` and `run`, follow this algorithm:
-
-1. **Start** — POST to `/build` or `/run`; retain the returned `operation_id`.
-2. **Poll** — GET `/operations/OPERATION_ID` until status is `succeeded` or `failed`.
-3. **Fetch logs** — GET `/operations/OPERATION_ID/logs?offset=OFFSET` during
-   polling and after completion. Use `next_offset` from each response for the
-   next request. When `truncated` is true, older output has been discarded.
-4. **Inspect result** — after a terminal status, check `result_code` and
-   `exit_code` in the operation status response.
-
-Do not start work that depends on a successful build until the build operation
-has reached `succeeded`.
-
-## Cancel over HTTP
-
-```bash
-curl --silent --show-error \
-  --unix-socket "$SOCKET" \
+# Cancel
+curl --silent --show-error --unix-socket "$SOCKET" \
   -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
   -X POST \
   "http://localhost/operations/OPERATION_ID/cancel"
 ```
 
-Do not use Docker directly to terminate the workload.
+Run request fields: `image`, `entrypoint`, `command`, `workdir`,
+`environment`, `mounts`, `shm_size`, `helper_socket`.
+Build request fields: `context`, `dockerfile`, `image`, `build_args`.
+
+`"helper_socket": true` is the HTTP equivalent of the CLI
+`--helper-socket` (Run, CLI interface): system mode only, server-owned
+read-only projection, user mode rejects the flag.
+
+## Mount examples (rules in Path model)
+
+```json
+{"source": ".",                "target": "/workspace",     "read_only": true}
+{"source": "src",              "target": "/workspace/src", "read_only": false}
+{"source": "/opt/agent/cache", "target": "/cache",         "read_only": false}
+```
+
+First is portable (both modes); second is a workspace-relative
+subdirectory (system mode); third is an issued absolute filesystem root
+(system mode) — the same capability as the CLI `--mount
+/opt/agent/cache:/cache` example.
+
+## Async operation lifecycle
+
+For HTTP `build` and `run`:
+
+1. **Start** — POST to `/build` or `/run`; retain the returned
+   `operation_id`.
+2. **Poll** — GET `/operations/OPERATION_ID` until status is `succeeded`
+   or `failed`.
+3. **Fetch logs** — GET `/operations/OPERATION_ID/logs?offset=OFFSET`
+   during polling and after completion. Use `next_offset` from each
+   response for the next request. When `truncated` is true, older output
+   has been discarded.
+4. **Inspect result** — after a terminal status, check `result_code` and
+   `exit_code` in the operation status response.
+
+Do not start work that depends on a successful build until the build
+operation has reached `succeeded`. Do not use Docker directly to
+terminate the workload — cancel through the endpoint above.
 
 ## Registry authentication over HTTP
 
@@ -580,12 +477,11 @@ Do not use Docker directly to terminate the workload.
 }
 ```
 
-Treat the password as a secret. Construct and send the JSON using a mechanism
-that does not print or expose the password in shell command text, logs, or
-diagnostic output.
-
-After a successful login, subsequent operations in the same Docker Helper
-session use that session's registry credentials.
+Treat the password as a secret. Construct and send the JSON using a
+mechanism that does not print or expose the password in shell command
+text, logs, or diagnostic output. After a successful login, subsequent
+operations in the same Docker Helper session use that session's registry
+credentials.
 
 # Failures
 
