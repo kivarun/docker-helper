@@ -496,6 +496,64 @@ func (m *selinuxFcontextManager) verifyActualType(path string) error {
 	return nil
 }
 
+// sameStemWorkspacePatterns returns the local fcontext patterns that map to
+// the workspace type and carry the exact literal stem of the boundary.
+func sameStemWorkspacePatterns(rules []fcontextRule, boundary string) []string {
+	var candidates []string
+	for _, rule := range rules {
+		if rule.isEquivalence || rule.fileType != selinuxWorkspaceType {
+			continue
+		}
+		if fcontextStem(rule.pattern) != boundary {
+			continue
+		}
+		candidates = append(candidates, rule.pattern)
+	}
+	return candidates
+}
+
+// proveOwnedFcontextShape resolves the durable owned-rule shape of a
+// kind-less (legacy) helper-owned boundary from the backend rule inventory.
+// The same-stem workspace rule inventory is the only ownership evidence; the
+// mutable host object kind is never consulted:
+//
+//	exactly one same-stem workspace rule -> its shape is the owned rule
+//	    shape (the established single-unambiguous-rule contract);
+//	    returns (kind, true, nil);
+//	no same-stem workspace rule        -> the owned rule is already gone
+//	    (a prior attempt's partial success); returns (Unknown, false, nil);
+//	two or more same-stem workspace rules -> the owned shape cannot be
+//	    proven; returns an error (fail closed, ownership retained for
+//	    reconciliation).
+func (m *selinuxFcontextManager) proveOwnedFcontextShape(boundary string) (macBoundaryKind, bool, error) {
+	existing, err := m.listLocalFcontextRules()
+	if err != nil {
+		return macBoundaryUnknown, false, fmt.Errorf("cannot list local fcontext rules: %w", err)
+	}
+	candidates := sameStemWorkspacePatterns(existing, boundary)
+	switch len(candidates) {
+	case 0:
+		return macBoundaryUnknown, false, nil
+	case 1:
+		pattern := candidates[0]
+		if pattern == fcontextPatternFor(boundary, macBoundaryRegularFile) {
+			return macBoundaryRegularFile, true, nil
+		}
+		if pattern == fcontextPatternFor(boundary, macBoundaryDirectory) {
+			return macBoundaryDirectory, true, nil
+		}
+		return macBoundaryUnknown, false, fmt.Errorf(
+			"boundary %s has an unclassifiable same-stem workspace fcontext pattern %s; the helper-owned shape cannot be proven; retaining ownership for reconciliation",
+			boundary, pattern,
+		)
+	default:
+		return macBoundaryUnknown, false, fmt.Errorf(
+			"boundary %s has %d same-stem workspace fcontext rules; the helper-owned shape cannot be proven; retaining ownership for reconciliation",
+			boundary, len(candidates),
+		)
+	}
+}
+
 // removeFcontextBoundary removes the exact proven helper-owned fcontext rule
 // of one docker-helper-owned boundary and relabels whatever still exists at
 // the boundary back to policy defaults. It is the backend-native removal
@@ -543,10 +601,13 @@ func (m *selinuxFcontextManager) verifyActualType(path string) error {
 // metadata for the canonical retry/reconciliation owner.
 //
 // macBoundaryUnknown is the legacy ownership row recorded by a build without
-// durable kinds: its shape falls back to the proven current object kind, and
-// a vanished tree keeps the same-stem single-unambiguous-rule contract (two
-// same-stem workspace_t rules make the owned shape unprovable and the
-// removal is refused, retaining ownership for reconciliation).
+// durable kinds. The coordinator proves the owned shape from the rule
+// inventory and converges the row into the durable-kind owner BEFORE any
+// destructive step, so a kind-less row only reaches this call when the proof
+// resolved no surviving same-stem workspace rule: the transition continues
+// without touching any rule (relabel-only completion), and any same-stem
+// workspace rule that appeared since the proof is refused — the state is no
+// longer the proven one and the owned shape is unprovable again.
 func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string, kind macBoundaryKind) error {
 	// Mount-safety preflight BEFORE deleting the persistent fcontext rule.
 	if err := m.checkTreeRelabelBoundary(boundary); err != nil {
@@ -572,57 +633,15 @@ func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string, kind ma
 			}
 		}
 	default:
-		// Legacy ownership row without a durable kind (macBoundaryUnknown).
-		legacyKind, kindErr := m.treeKind(boundary)
-		if kindErr != nil {
-			return fmt.Errorf("cannot classify boundary %s for removal: %w", boundary, kindErr)
-		}
-		if legacyKind == macBoundaryDirectory || legacyKind == macBoundaryRegularFile {
-			pattern := fcontextPatternFor(boundary, legacyKind)
-			if !fcontextRulePresent(existing, pattern, selinuxWorkspaceType) {
-				return fmt.Errorf(
-					"no persistent SELinux fcontext rule %s for boundary %s; helper ownership state mismatch",
-					pattern, boundary,
-				)
-			}
-			if err := m.removeFcontextRule(pattern); err != nil {
-				return fmt.Errorf("cannot remove fcontext rule for %s: %w", boundary, err)
-			}
-		} else {
-			// Proven absence (macBoundaryMissing): no surviving inode exists,
-			// so there is nothing left to relabel. The owned shape is not
-			// derivable from a deleted tree, so the stem's workspace_t rules
-			// decide: exactly one unambiguous rule is removed; two same-stem
-			// rules make the owned shape unprovable and the removal is
-			// refused (the coordinator retains the ownership metadata for
-			// the canonical deferred/reconciliation cleanup).
-			var candidates []string
-			for _, rule := range existing {
-				if rule.isEquivalence || rule.fileType != selinuxWorkspaceType {
-					continue
-				}
-				if fcontextStem(rule.pattern) != boundary {
-					continue
-				}
-				candidates = append(candidates, rule.pattern)
-			}
-			switch len(candidates) {
-			case 0:
-				// The durable rule is already gone; nothing helper-owned
-				// survives at the backend. The coordinator's ownership
-				// metadata cleanup is the remaining transition.
-				return nil
-			case 1:
-				if err := m.removeFcontextRule(candidates[0]); err != nil {
-					return fmt.Errorf("cannot remove fcontext rule for %s: %w", boundary, err)
-				}
-				return nil
-			default:
-				return fmt.Errorf(
-					"boundary %s has %d same-stem workspace fcontext rules; the helper-owned shape cannot be proven after the tree vanished; retaining ownership for reconciliation",
-					boundary, len(candidates),
-				)
-			}
+		// Legacy kind-less ownership row: the owned shape is never derived
+		// from the mutable host object kind. The proof-convergence step ran
+		// before this call, so the rule inventory must still show no
+		// surviving same-stem workspace rule; anything else is refused.
+		if candidates := sameStemWorkspacePatterns(existing, boundary); len(candidates) != 0 {
+			return fmt.Errorf(
+				"boundary %s has %d same-stem workspace fcontext rules; the helper-owned shape cannot be proven; retaining ownership for reconciliation",
+				boundary, len(candidates),
+			)
 		}
 	}
 

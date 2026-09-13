@@ -210,6 +210,15 @@ const (
 	appArmorBoundaryRegularFile
 )
 
+// appArmorBoundaryKindName names a boundary kind for deterministic
+// diagnostics.
+func appArmorBoundaryKindName(kind appArmorBoundaryKind) string {
+	if kind == appArmorBoundaryRegularFile {
+		return "regular file"
+	}
+	return "directory"
+}
+
 // appArmorManagedBoundary is one managed boundary with its stable kind.
 type appArmorManagedBoundary struct {
 	Path string
@@ -580,6 +589,18 @@ func (m *appArmorProfileManager) addManagedBoundary(path string) (boundaryResult
 
 	for _, r := range snap.boundaries {
 		if r.Path == canonical {
+			if r.Kind != kind {
+				// An existing boundary at the exact pathname with another
+				// persisted kind is an incompatible stale boundary: its
+				// fragment rules do not cover the requested tree kind, and
+				// neither silently keeping the old kind nor flipping the
+				// shared boundary's kind can be proven safe for its other
+				// consumers. Fail closed; the fragment is untouched.
+				return boundaryResult{}, fmt.Errorf(
+					"managed boundary %s already exists as a %s boundary; the issued tree is a %s — remove the stale boundary before re-adding it",
+					canonical, appArmorBoundaryKindName(r.Kind), appArmorBoundaryKindName(kind),
+				)
+			}
 			// The boundary is already managed with its persisted kind; the
 			// add is idempotent and never re-derives the kind from host
 			// state.
