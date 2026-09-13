@@ -399,7 +399,7 @@ subcase_d() {
   # 4. principal show FIELD: allowed_roots works; allowed_root_entries is
   #    rejected as unknown.
   out="$(dh principal show "$user" allowed_roots 2>&1)"
-  if printf '%s' "$out" | grep -q '"'"$home/d1"'"'; then
+  if printf '%s' "$out" | grep -q '"'"$home"'"'; then
     reg_ok "D: principal show allowed_roots FIELD carries the stored roots"
   else
     reg_fail "D: principal show allowed_roots: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
