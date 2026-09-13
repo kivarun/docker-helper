@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"strings"
 	"testing"
@@ -126,6 +127,23 @@ func TestManpageSynopsesMatchParser(t *testing.T) {
 		t.Fatalf("only %d launcher leaf paths walked; tree walk is incomplete", len(launcherLeaves))
 	}
 
+	// Completion leaves are machine-facing surfaces documented from the
+	// parser contract: every one of them must have a synopsis, and every
+	// parser-declared flag must appear in it.
+	completionLeaves := map[string]bool{}
+	for _, p := range walkCommandPaths(rootCommand, nil) {
+		if len(p) == 0 || p[0] != "completion" {
+			continue
+		}
+		cmd, _ := rootCommand.resolveCommandPath(p)
+		if cmd != nil && cmd.NewInvocation != nil {
+			completionLeaves[strings.Join(p, " ")] = true
+		}
+	}
+	if len(completionLeaves) < 5 {
+		t.Fatalf("only %d completion leaf paths walked; tree walk is incomplete", len(completionLeaves))
+	}
+
 	synopses := map[string]bool{}
 	for i, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -158,11 +176,77 @@ func TestManpageSynopsesMatchParser(t *testing.T) {
 				}
 			}
 		}
+		if completionLeaves[joined] {
+			cmd, _ := rootCommand.resolveCommandPath(path)
+			if cmd == nil || cmd.NewInvocation == nil {
+				continue
+			}
+			syncFS := flag.NewFlagSet("completion-man-sync", flag.ContinueOnError)
+			cmd.NewInvocation(syncFS)
+			syncFS.VisitAll(func(f *flag.Flag) {
+				roffFlag := `\-\-` + f.Name
+				if !strings.Contains(trimmed, roffFlag) {
+					t.Errorf("docs/man/docker-helper.1:%d: completion synopsis %q is missing the parser flag --%s", i+1, joined, f.Name)
+				}
+			})
+		}
 	}
 
 	for path := range launcherLeaves {
 		if !synopses[path] {
 			t.Errorf("registered launcher command %q has no man synopsis", path)
+		}
+	}
+	for path := range completionLeaves {
+		if !synopses[path] {
+			t.Errorf("registered completion command %q has no man synopsis", path)
+		}
+	}
+}
+
+// TestConfigManpageTmpPolicyMatchesProduction ties the shipped config man
+// page's namespace classification to the production workspace-path policy:
+// /tmp is a wide namespace whose exact root alone is too broad while
+// descendants are permitted — it must never be listed among the forbidden
+// root-and-descendants system trees.
+func TestConfigManpageTmpPolicyMatchesProduction(t *testing.T) {
+	data, err := os.ReadFile("docs/man/docker-helper-config.5")
+	if err != nil {
+		t.Fatalf("cannot read docs/man/docker-helper-config.5: %v", err)
+	}
+	man := string(data)
+
+	forbidden := strings.Join(forbiddenSystemTrees, " ")
+	if !strings.Contains(man, forbidden) {
+		t.Errorf("config man must list the forbidden root-and-descendants trees exactly as production does: %q", forbidden)
+	}
+	forbiddenWithTmp := strings.Join(append(append([]string{}, forbiddenSystemTrees...), "/tmp"), " ")
+	if strings.Contains(man, forbiddenWithTmp) {
+		t.Error("config man must not list /tmp among the forbidden root-and-descendants namespaces")
+	}
+
+	permitted := strings.Join(forbiddenWideNamespaces, " ")
+	if !strings.Contains(man, permitted) {
+		t.Errorf("config man must list the wide namespaces (root too broad, descendants permitted) exactly as production does: %q", permitted)
+	}
+}
+
+// TestManagedAppArmorBoundaryVocabulary guards the canonical term for the
+// generalized AppArmor MAC boundary state in the shipped operator docs: the
+// boundary state file holds managed AppArmor MAC boundaries for concrete
+// issued trees, not "managed workspace boundaries".
+func TestManagedAppArmorBoundaryVocabulary(t *testing.T) {
+	for _, path := range []string{"docs/man/docker-helper-config.5", "README.md"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", path, err)
+		}
+		content := string(data)
+		if strings.Contains(content, "managed workspace boundaries") {
+			t.Errorf("%s uses the stale 'managed workspace boundaries' vocabulary", path)
+		}
+		if !strings.Contains(content, "managed AppArmor MAC boundaries") {
+			t.Errorf("%s must name the boundary state with the canonical term 'managed AppArmor MAC boundaries'", path)
 		}
 	}
 }

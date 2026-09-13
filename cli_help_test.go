@@ -972,3 +972,28 @@ func TestHelpCanonicalPathsAndPerCommandFlag(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildContextHelpDescribesAbsoluteWithinWorkspace guards the build
+// --context help contract: production accepts BOTH a workspace-relative
+// context and an absolute context path inside the session workspace
+// (validateBuildRequest canonicalizes and enforces containment), so the
+// help text must not claim relative-only support.
+func TestBuildContextHelpDescribesAbsoluteWithinWorkspace(t *testing.T) {
+	fs := flag.NewFlagSet("build", flag.ContinueOnError)
+	buildCommand.NewInvocation(fs)
+	flagDef := fs.Lookup("context")
+	if flagDef == nil {
+		t.Fatal("the build command does not declare --context")
+	}
+	usage := flagDef.Usage
+	const relativeOnly = "Build context path relative to session workspace"
+	if usage == relativeOnly {
+		t.Errorf("build --context help still claims relative-only support: %q", usage)
+	}
+	if !strings.Contains(usage, "absolute") {
+		t.Errorf("build --context help must describe the accepted absolute-within-workspace form: %q", usage)
+	}
+	if !strings.Contains(usage, "workspace") {
+		t.Errorf("build --context help must keep the session-workspace containment scope: %q", usage)
+	}
+}

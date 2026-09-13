@@ -1225,11 +1225,13 @@ application policy remains the only owner of the access-mode decision.
 System mode uses mandatory AppArmor confinement with the
 `/etc/apparmor.d/docker-helper-system` profile. The profile includes the
 dynamic helper-owned boundary state file
-`/var/lib/docker-helper/apparmor/managed-boundaries`; managed workspace
-boundaries are stored there, outside config.json. Authorization roots do
+`/var/lib/docker-helper/apparmor/managed-boundaries`; managed AppArmor
+MAC boundaries are stored there, outside config.json. Authorization roots do
 not own MAC state.
 
-MAC preparation occurs at session creation time for the concrete workspace.
+MAC preparation occurs at session creation time for every concrete
+filesystem tree issued in the Session's immutable snapshot (the workspace
+and every additional issued root).
 `docker-helper init` does NOT prepare MAC state for the bootstrap allowed root.
 
 For read-only allowed-root exposures, each run workload additionally runs

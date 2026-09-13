@@ -106,6 +106,21 @@ func (b *testSessionMACDriver) discoverHelperOwnedBoundaries() ([]helperOwnedBou
 	return result, nil
 }
 
+// proveOwnedKind resolves a kind-less ownership row from the mock's in-memory
+// state: an exact boundary known to the mock proves its recorded kind, an
+// absent boundary proves the owned state is gone. The mock records kinds on
+// every creation, so kind-less rows are only reachable through directly
+// seeded rows, which resolve as "owned state gone".
+func (b *testSessionMACDriver) proveOwnedKind(boundary string) (macBoundaryKind, bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.helperOwnedBoundaries[boundary] {
+		return macBoundaryDirectory, true, nil
+	}
+	return macBoundaryUnknown, false, nil
+}
+
 func (b *testSessionMACDriver) backend() LSMBackend {
 	return b.boundaryBackend
 }
@@ -3324,4 +3339,16 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 // coordinator driver tests that do not exercise real path kinds.
 func fakeTreeKindDirectory(string) (macBoundaryKind, error) {
 	return macBoundaryDirectory, nil
+}
+
+func (b *failingSessionMACDriver) proveOwnedKind(boundary string) (macBoundaryKind, bool, error) {
+	return macBoundaryUnknown, false, nil
+}
+
+func (b *selinuxTestDriver) proveOwnedKind(boundary string) (macBoundaryKind, bool, error) {
+	return macBoundaryUnknown, false, nil
+}
+
+func (s *selinuxSeam) proveOwnedFcontextShape(boundary string) (macBoundaryKind, bool, error) {
+	return macBoundaryUnknown, false, nil
 }

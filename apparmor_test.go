@@ -502,6 +502,82 @@ func TestAppArmorDuplicateAdd(t *testing.T) {
 	}
 }
 
+// TestAppArmorAddBoundaryKindConflictFailsClosed proves the managed-boundary
+// add is kind-aware: an existing boundary at the same pathname with another
+// persisted kind is an incompatible stale boundary, and the add fails closed
+// instead of silently returning the old boundary — the old kind's rules do
+// not cover the requested tree kind, and the fragment is never mutated.
+func TestAppArmorAddBoundaryKindConflictFailsClosed(t *testing.T) {
+	rootDir := testAllowedRootDir(t)
+	_, mgr, _ := setupAppArmorTest(t)
+
+	// Directory boundary, then the directory is replaced by a regular file.
+	dirPath := filepath.Join(rootDir, "aa-conflict-dir")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := mgr.addManagedBoundary(dirPath)
+	if err != nil {
+		t.Fatalf("addManagedBoundary(directory): %v", err)
+	}
+	if !result.Changed || result.Kind != appArmorBoundaryDirectory {
+		t.Fatalf("result = %+v, want a changed directory boundary", result)
+	}
+	if err := os.Remove(dirPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dirPath, []byte("token"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fragmentBefore, err := os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatalf("read fragment: %v", err)
+	}
+	if _, err := mgr.addManagedBoundary(dirPath); err == nil {
+		t.Fatal("the add must refuse an existing same-path boundary with another persisted kind")
+	}
+	fragmentAfter, err := os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatalf("read fragment: %v", err)
+	}
+	if !bytes.Equal(fragmentBefore, fragmentAfter) {
+		t.Error("the refused add must not mutate the managed fragment")
+	}
+
+	// Regular-file boundary, then the file is replaced by a directory.
+	filePath := filepath.Join(rootDir, "aa-conflict-file")
+	if err := os.WriteFile(filePath, []byte("token"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	result, err = mgr.addManagedBoundary(filePath)
+	if err != nil {
+		t.Fatalf("addManagedBoundary(regular file): %v", err)
+	}
+	if !result.Changed || result.Kind != appArmorBoundaryRegularFile {
+		t.Fatalf("result = %+v, want a changed regular-file boundary", result)
+	}
+	if err := os.Remove(filePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	fragmentBefore, err = os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatalf("read fragment: %v", err)
+	}
+	if _, err := mgr.addManagedBoundary(filePath); err == nil {
+		t.Fatal("the add must refuse an existing same-path boundary with another persisted kind")
+	}
+	fragmentAfter, err = os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatalf("read fragment: %v", err)
+	}
+	if !bytes.Equal(fragmentBefore, fragmentAfter) {
+		t.Error("the refused add must not mutate the managed fragment")
+	}
+}
+
 // --- Absent remove ---
 
 func TestAppArmorAbsentRemove(t *testing.T) {

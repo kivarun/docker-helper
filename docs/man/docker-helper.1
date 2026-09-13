@@ -130,11 +130,14 @@ Show help for any command path, for example
 .B docker-helper completion bash
 Generate Bash completion.
 .TP
-.B docker-helper completion roots principal [\-\-principal USER] [\-\-authority-only] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
-Machine-facing completion query: print the target Principal's effective allowed roots, one path per line. The target is \-\-principal when given, otherwise it is inferred from the authenticated credential. The daemon authorizes the query. With \fB\-\-authority-only\fR the command instead prints only the authenticated operator authority (admin, principal, or launcher) for shell completion introspection; it changes nothing about authorization.
+.B docker-helper completion roots principal [\-\-principal USER] [\-\-stored] [\-\-authority-only] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+Machine-facing completion query: print the target Principal's effective allowed roots, one path per line. The target is \-\-principal when given, otherwise it is inferred from the authenticated credential. The daemon authorizes the query. With \fB\-\-stored\fR it instead prints the target Principal's stored roots — the universe of the Principal allowed-root existing-entity mutations (remove, set-access). With \fB\-\-authority-only\fR the command instead prints only the authenticated operator authority (admin, principal, or launcher) for shell completion introspection; it changes nothing about authorization.
 .TP
-.B docker-helper completion roots session [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
-Machine-facing completion query: print the effective allowed roots of the Launcher a Session created right now with this authority would use, one path per line.
+.B docker-helper completion roots session [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+Machine-facing completion query: print the effective allowed roots of the Launcher a Session created right now with this authority would use, one path per line. The typed \fB\-\-principal\fR/\fB\-\-launcher\fR selectors are forwarded to the daemon, which resolves the same target a real session create with those selectors would use.
+.TP
+.B docker-helper completion roots launcher [\-\-principal USER] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+Machine-facing completion query: print the stored allowed roots of the target Launcher (the default Launcher of the \fB\-\-principal\fR-named Principal, otherwise the Principal inferred from the credential), one path per line — the universe of the launcher allowed-root existing-entity mutations.
 .TP
 .B docker-helper completion selectors principal [\-\-command PATH] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Machine-facing completion query: print the Principal names the authenticated authority may target with a \-\-principal selector on the completed command path, one per line. Only an admin authority receives the daemon's Principal list; a Principal credential receives exactly its own username on the Launcher command families and on the \fBprincipal show\fR USER positional, and nothing where the selector is contractually illegal (both Session command paths); every other authority degrades silently.

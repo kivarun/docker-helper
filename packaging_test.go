@@ -822,8 +822,15 @@ func TestSkillAgentContract(t *testing.T) {
 	}
 
 	// A Session bearer introspects its own issued snapshot through self;
-	// the operator `session show` lookup must not be presented as the
-	// Session-bearer surface.
+	// the operator `session show` lookup must be documented with the real
+	// CLI syntax (`session show --id SESSION_ID`) and must not be presented
+	// as the Session-bearer surface.
+	if !strings.Contains(content, "session show --id SESSION_ID") {
+		t.Error("SKILL.md must document the real `session show --id SESSION_ID` operator lookup syntax")
+	}
+	if strings.Contains(content, "session show SESSION_ID") {
+		t.Error("SKILL.md must not teach the retired `session show SESSION_ID` syntax")
+	}
 	if !strings.Contains(content, "not a Session-bearer surface") {
 		t.Error("SKILL.md must qualify session show as the operator lookup, not the Session-bearer surface")
 	}
