@@ -39,17 +39,23 @@ func TestValidateWorkspacePathSafety(t *testing.T) {
 		{"system tree sys", "/sys", true, "forbidden system directory"},
 		{"system tree usr", "/usr", true, "forbidden system directory"},
 		{"system tree var", "/var", true, "forbidden system directory"},
-		{"system tree tmp", "/tmp", true, "forbidden system directory"},
 
 		// Under forbidden system trees
 		{"under bin", "/bin/ls", true, "under forbidden system directory"},
 		{"under etc", "/etc/passwd", true, "under forbidden system directory"},
 		{"under var", "/var/lib/docker", true, "under forbidden system directory"},
 		{"under usr", "/usr/local/bin", true, "under forbidden system directory"},
-		{"under tmp", "/tmp/work", true, "under forbidden system directory"},
 		{"under dev", "/dev/null", true, "under forbidden system directory"},
 		{"under proc", "/proc/1", true, "under forbidden system directory"},
 		{"under sys", "/sys/kernel", true, "under forbidden system directory"},
+
+		// /tmp is a wide namespace root: the namespace itself is too broad
+		// (never a forbidden descendant tree), subdirectories are ordinary
+		// candidate workspace roots subject to every other policy check.
+		{"wide namespace tmp", "/tmp", true, "too broad"},
+		{"sub of tmp", "/tmp/work", false, ""},
+		{"sub of tmp user", "/tmp/michael", false, ""},
+		{"sub of tmp deep", "/tmp/michael/workspaces", false, ""},
 
 		// Forbidden wide namespaces (exact match only) — /home and /opt
 		// are rejected for non-root; root gets admin bypass (tested separately).
@@ -119,7 +125,7 @@ func TestValidateWorkspacePathPolicy(t *testing.T) {
 		{"forbidden wide ns home", "/home", true},
 		{"forbidden wide ns opt", "/opt", true},
 		{"forbidden tmp", "/tmp", true},
-		{"forbidden under tmp", "/tmp/work", true},
+		{"tmp descendant is legal", "/tmp/work", false},
 	}
 
 	for _, tt := range tests {
@@ -361,6 +367,53 @@ func TestCanonicalSymlinkToExactWideNamespace(t *testing.T) {
 	_, err = canonicalizeWorkspacePathForAdd(linkPath2)
 	if err == nil {
 		t.Error("symlink to exact /opt should be rejected for non-root")
+	}
+}
+
+// TestCanonicalSymlinkToTmpNamespaceRejected proves the /tmp wide-namespace
+// rule applies to canonical identity, not spelling: a symlink whose resolved
+// target is exactly /tmp is the too-broad namespace itself and must be
+// rejected, while a symlink to a /tmp subdirectory is an ordinary canonical
+// descendant accepted by the same policy owner.
+func TestCanonicalSymlinkToTmpNamespaceRejected(t *testing.T) {
+	original := EffectiveUID
+	defer func() { EffectiveUID = original }()
+
+	EffectiveUID = func() int { return 1000 }
+
+	linkParent := testAllowedRootDir(t)
+
+	linkPath := filepath.Join(linkParent, "tmp-link")
+	if err := os.Symlink("/tmp", linkPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	defer os.Remove(linkPath)
+
+	_, err := canonicalizeWorkspacePathForAdd(linkPath)
+	if err == nil {
+		t.Error("symlink to exact /tmp must be rejected as the too-broad namespace")
+	} else if !strings.Contains(err.Error(), "too broad") {
+		t.Errorf("symlink to exact /tmp error = %q, want the too-broad namespace diagnostic", err.Error())
+	}
+
+	// A canonical /tmp descendant is an ordinary candidate root: the symlink
+	// is accepted with the resolved target as the stored identity.
+	if err := os.MkdirAll("/tmp/docker-helper-policy-probe", 0755); err != nil {
+		t.Skipf("cannot create /tmp probe directory: %v", err)
+	}
+	defer os.RemoveAll("/tmp/docker-helper-policy-probe")
+
+	linkPath2 := filepath.Join(linkParent, "tmp-sub-link")
+	if err := os.Symlink("/tmp/docker-helper-policy-probe", linkPath2); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	defer os.Remove(linkPath2)
+
+	canonical, err := canonicalizeWorkspacePathForAdd(linkPath2)
+	if err != nil {
+		t.Errorf("symlink to a /tmp descendant = error %v, want accepted with the canonical target", err)
+	} else if canonical != "/tmp/docker-helper-policy-probe" {
+		t.Errorf("symlink to a /tmp descendant canonicalized to %q, want the resolved target", canonical)
 	}
 }
 

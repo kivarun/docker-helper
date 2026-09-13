@@ -139,10 +139,10 @@ WORK="$WS/work"
 uer_field() { json_field "$1"; }
 
 # uer_roots_single DOC PATH: the pretty-printed control-plane document's
-# allowed_roots array is exactly [PATH]. The encoder renders each array
-# element on its own line, so the match is made across line breaks.
+# allowed_root_entries array is exactly [PATH]. The encoder renders each
+# array element on its own line, so the match is made across line breaks.
 uer_roots_single() {
-  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[[:space:]]+\"$2\"[[:space:]]+\]"
+  printf '%s' "$1" | tr '\n' ' ' | grep -Eq "\"allowed_root_entries\": \[[[:space:]]+\"$2\"[[:space:]]+\]"
 }
 
 # --- A. effective-roots introspection reports the global user-mode ceiling ---

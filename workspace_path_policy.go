@@ -26,7 +26,6 @@ var forbiddenSystemTrees = []string{
 	"/sys",
 	"/usr",
 	"/var",
-	"/tmp",
 }
 
 // forbiddenWideNamespaces are top-level namespaces that are too broad to be
@@ -37,6 +36,7 @@ var forbiddenWideNamespaces = []string{
 	"/srv",
 	"/mnt",
 	"/media",
+	"/tmp",
 }
 
 // adminWideNamespaceOverrides are namespaces that root (uid 0) may use

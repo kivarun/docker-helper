@@ -156,18 +156,31 @@ func lookupConfigField(name string) (configFieldSpec, bool) {
 }
 
 // configShowFields returns field names that config show accepts.
-// Includes all user-visible fields except the legacy migration-only allowed_root.
+// Excludes the config-file allowed_roots array (surfaced through
+// allowed_root_entries instead) and the legacy migration-only allowed_root.
 // Sorted deterministically.
 func configShowFields() []string {
 	var fields []string
 	for _, f := range configFields {
-		if f.name == "allowed_root" {
-			continue // legacy migration-only scalar
+		if f.name == "allowed_roots" || f.name == "allowed_root" {
+			continue
 		}
 		fields = append(fields, f.name)
 	}
 	sort.Strings(fields)
 	return fields
+}
+
+// showFieldAccepted reports whether config show accepts the field. The show
+// field universe is configShowFields; the config-file namespace (isKnownField)
+// is wider and would wrongly admit the path-only projections.
+func showFieldAccepted(field string) bool {
+	for _, f := range configShowFields() {
+		if f == field {
+			return true
+		}
+	}
+	return false
 }
 
 // configSetFields returns writable scalar field names that config set accepts.
@@ -548,7 +561,7 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]Allo
 // stored spelling and every entry reports its authoritative access (a legacy
 // path-only entry is the read_write grant). The returned entries are the one
 // canonical policy value from which both public `config show` projections
-// (allowed_roots and allowed_root_entries) derive; see
+// (allowed_root_entries) derives; see
 // allowedRootShowProjections.
 func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
 	hasLegacy := raw["allowed_root"] != nil

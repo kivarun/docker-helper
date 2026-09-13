@@ -219,7 +219,7 @@ func TestLauncherCreateCredentialHint(t *testing.T) {
 				issued := strings.Contains(string(body), `"issue_credential":true`)
 				resp := createLauncherResponse{
 					OK:       true,
-					Launcher: launcherJSON{ID: "dhl_9", Principal: "alice", Name: "agent", Scope: "inherit", AllowedRoots: []string{}, Enabled: true},
+					Launcher: launcherJSON{ID: "dhl_9", Principal: "alice", Name: "agent", Scope: "inherit", AllowedRootEntries: []AllowedRootEntry{}, Enabled: true},
 				}
 				if issued {
 					resp.Credential = &launcherCredentialJSON{ID: "dhcr_9"}

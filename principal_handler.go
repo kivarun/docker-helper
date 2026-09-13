@@ -53,7 +53,6 @@ type principalResponse struct {
 	GID                int                      `json:"gid"`
 	Home               string                   `json:"home"`
 	Enabled            bool                     `json:"enabled"`
-	AllowedRoots       []string                 `json:"allowed_roots"`
 	AllowedRootEntries []AllowedRootEntry       `json:"allowed_root_entries"`
 	Credential         *principalCredentialJSON `json:"credential,omitempty"`
 	Token              string                   `json:"token,omitempty"`
@@ -70,17 +69,11 @@ type principalChangedResponse struct {
 }
 
 // principalToResponse is the single projection owner for the public
-// Principal resource document (create and show). allowed_roots is the
-// 2.1 path-only projection of the canonical rich entries and is always
-// serialized as a JSON array: zero stored roots project the empty array,
-// never null. allowed_root_entries is the authoritative rich projection of
-// the same entries, with the identical ordering contract; internal nil
-// slices are not mutated.
+// Principal resource document (create and show). allowed_root_entries is the
+// authoritative rich projection of the canonical stored entries and is
+// always serialized as a JSON array: zero stored roots project the empty
+// array, never null; internal nil slices are not mutated.
 func principalToResponse(p *PrincipalWithRoots) principalResponse {
-	roots := allowedRootPaths(p.AllowedRoots)
-	if roots == nil {
-		roots = []string{}
-	}
 	entries := p.AllowedRoots
 	if entries == nil {
 		entries = []AllowedRootEntry{}
@@ -92,7 +85,6 @@ func principalToResponse(p *PrincipalWithRoots) principalResponse {
 		GID:                p.GID,
 		Home:               p.Home,
 		Enabled:            p.Enabled,
-		AllowedRoots:       roots,
 		AllowedRootEntries: entries,
 	}
 }

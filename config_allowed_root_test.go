@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -400,6 +401,84 @@ func TestConfigAllowedRootAddWritesObjectForm(t *testing.T) {
 	if entries[1].Path != newRoot || entries[1].Access != AllowedRootAccessReadWrite {
 		t.Errorf("written added entry = %+v, want read_write at %s", entries[1], newRoot)
 	}
+}
+
+// TestConfigAllowedRootTmpNamespacePolicy proves the RC5 /tmp namespace
+// classification at the real CLI add boundary: the exact /tmp namespace is
+// refused as too broad (like /mnt), a real /tmp descendant is accepted as an
+// ordinary candidate root, and a canonical alias of /tmp is refused by the
+// same classification. Truly forbidden system trees keep their refusal.
+func TestConfigAllowedRootTmpNamespacePolicy(t *testing.T) {
+	allowedRoot := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []string{allowedRoot},
+		"session_ttl":   "12h",
+	}
+	configPath := setupConfigTestWithData(t, mustMarshalIndent(t, cfg))
+
+	t.Run("exact /tmp is too broad", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", "/tmp"}, &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("exit = %d, want 2 (stderr=%q)", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "too broad") {
+			t.Errorf("stderr = %q, want the too-broad namespace diagnostic", stderr.String())
+		}
+		if strings.Contains(stderr.String(), "forbidden system directory") {
+			t.Errorf("stderr = %q, /tmp must not be classified as a forbidden descendant tree", stderr.String())
+		}
+		raw := readConfigJSON(t, configPath)
+		if rootsJSON := string(raw["allowed_roots"]); strings.Contains(rootsJSON, "\"/tmp\"") {
+			t.Errorf("config was mutated by the refused add: %s", rootsJSON)
+		}
+	})
+
+	t.Run("real /tmp descendant is accepted", func(t *testing.T) {
+		dir, err := os.MkdirTemp("/tmp", ".docker-helper-rc5-probe-*")
+		if err != nil {
+			t.Skipf("cannot create /tmp probe directory: %v", err)
+		}
+		defer os.RemoveAll(dir)
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", dir}, &stdout, &stderr)
+		if code != 0 || !strings.Contains(stdout.String(), "added "+dir) {
+			t.Fatalf("exit = %d, stdout = %q, stderr = %q, want the accepted add", code, stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("canonical alias of /tmp is too broad", func(t *testing.T) {
+		linkParent := testAllowedRootDir(t)
+		linkPath := filepath.Join(linkParent, "tmp-alias")
+		if err := os.Symlink("/tmp", linkPath); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		defer os.Remove(linkPath)
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", linkPath}, &stdout, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "too broad") {
+			t.Fatalf("exit = %d, stderr = %q, want the too-broad refusal of the canonical /tmp alias", code, stderr.String())
+		}
+	})
+
+	t.Run("truly forbidden trees stay refused", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", "/etc"}, &stdout, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "forbidden system directory") {
+			t.Fatalf("exit = %d, stderr = %q, want the forbidden system directory refusal", code, stderr.String())
+		}
+	})
+}
+
+func mustMarshalIndent(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return data
 }
 
 // TestLegacyAllowedRootSingularLoadReadWriteAuthority proves the compatibility

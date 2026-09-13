@@ -197,16 +197,6 @@ var principalFields = []principalField{
 	{name: "home", extract: func(p *principalResponse) (string, bool) { return p.Home, true }},
 	{name: "enabled", extract: func(p *principalResponse) (string, bool) { return strconv.FormatBool(p.Enabled), true }},
 	{
-		name: "allowed_roots",
-		extract: func(p *principalResponse) (string, bool) {
-			data, err := json.Marshal(p.AllowedRoots)
-			if err != nil {
-				return "", false
-			}
-			return string(data), true
-		},
-	},
-	{
 		name: "allowed_root_entries",
 		extract: func(p *principalResponse) (string, bool) {
 			data, err := json.Marshal(p.AllowedRootEntries)

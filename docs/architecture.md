@@ -1004,9 +1004,10 @@ parent-policy mutations (see
   authorization ceiling, managed by `config allowed-root
   list/add/set-access/remove` (canonical rich entries; legacy string input
   means `read_write`; `config show` projects the authoritative
-  `allowed_root_entries` beside the 2.x path-only `allowed_roots`
-  compatibility projection). Changing allowed roots is a policy-only
-  operation; it does NOT prepare MAC state.
+  `allowed_root_entries`, and the 2.x path-only `allowed_roots` output
+  projection is retired — the same name remains the config-file input
+  field). Changing allowed roots is a policy-only operation; it does NOT
+  prepare MAC state.
 - **Principal allowed roots** (database) — per-principal narrowing, managed
   by `principal allowed-root add/set-access/remove`. Does not prepare MAC.
 - **Launcher allowed roots** (database, `restricted` scope only) —
@@ -1341,8 +1342,8 @@ the common operator flags (see [CLI conventions](#cli-conventions)).
 prepare MAC state; `principal allowed-root list` is a CLI projection of
 the show endpoint (`GET /principals/{username}`), not a separate HTTP
 list route. The show response carries the canonical rich
-`allowed_root_entries` projection beside the 2.x path-only
-`allowed_roots` compatibility projection, and `principal allowed-root
+`allowed_root_entries` projection (the 2.x path-only `allowed_roots`
+output projection is retired), and `principal allowed-root
 list` prints the 2.1-compatible one canonical root per line by default,
 with the explicit `--json` opt-in carrying the canonical rich entries
 for access-aware tooling.
@@ -1379,11 +1380,11 @@ and a malformed, missing, or foreign selector is the same non-disclosing
 a name lookup, never a global name scan).
 
 Launcher projection: `{"id", "principal", "name", "enabled", "scope",
-"allowed_roots", "allowed_root_entries", "created_at"}` — `allowed_roots`
-is the 2.x path-only compatibility projection of the stored restricted
-entries and `allowed_root_entries` the authoritative rich projection of
-the same entries. Create response carries the one-time
-credential token only when issuance was requested. Exactly one credential
+"allowed_root_entries", "created_at"}` — `allowed_root_entries` is the
+authoritative rich projection of the stored restricted entries (the 2.x
+path-only `allowed_roots` output projection is retired; the same name
+remains the accepted scope-replacement input). Create response carries
+the one-time credential token only when issuance was requested. Exactly one credential
 may exist per launcher (`launcher_credential_exists` on a second issuance;
 rotation replaces the existing credential and its token).
 
@@ -1403,13 +1404,13 @@ docker-helper launcher set [--system] [--endpoint ENDPOINT]
 docker-helper launcher delete [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER]
 docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [--access ACCESS] [LAUNCHER] PATH
+    [--token-file PATH] [--principal USER] [--access ACCESS] PATH [LAUNCHER]
 docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER] PATH ACCESS
+    [--token-file PATH] [--principal USER] PATH ACCESS [LAUNCHER]
 docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER] PATH
+    [--token-file PATH] [--principal USER] PATH [LAUNCHER]
 docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [LAUNCHER]
 docker-helper launcher credential create [--system] [--endpoint ENDPOINT]
@@ -1594,30 +1595,47 @@ The daemon-backed policy completions are exactly:
 | `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
 | `session create --filesystem-root` | Session create-policy query (the same policy source as `--workspace` for the path side; the access side after the `=` delimiter completes the canonical `read_only`/`read_write` vocabulary) |
 
-Positional `[LAUNCHER] ... PATH` completion on `launcher allowed-root
-add/remove`: the first positional is grammar-ambiguous — with one
-positional the word is the PATH for the default Launcher, so a relative
-PATH without a slash is legal. A slash-free word therefore completes the
-union of the daemon-backed Launcher selectors and the generic filesystem
-candidates (directories for add, any filesystem entry for remove), a
-failed selector query never removes the PATH candidates, and a word
-containing a slash — which a Launcher name can never contain — is the
-unambiguous PATH and completes filesystem candidates without a selector
-query. Once the first positional is typed, the next position is generic
-filesystem completion. `launcher allowed-root set-access` shares the same
-grammar-aware first-positional handling for its `[LAUNCHER] PATH ACCESS`
-union, and the final ACCESS word of every `set-access` family (config,
-principal, launcher) completes the canonical `read_only`/`read_write`
-vocabulary. The daemon remains the final policy boundary and
-rejects a root outside the effective Principal ceiling at execution time.
-`config allowed-root add` and `principal allowed-root add` remain generic
-filesystem completion, as do all other path-valued flags.
+Positional completion of the allowed-root families follows the shared
+grammar-universe rule: each position completes the universe that the
+command semantics actually authorize.
+
+`launcher allowed-root add PATH [LAUNCHER]`: PATH completes from the
+effective Principal ceiling — the same policy query the `--workspace`
+flag value consumes — rendered as navigable boundary segments, with no
+generic host-filesystem fallback: the daemon stays the authorization
+authority, so an authority context with no resolvable Principal offers
+nothing. The optional trailing LAUNCHER positional completes from the
+same selector introspection as the `--launcher` flag.
+
+`launcher allowed-root remove PATH [LAUNCHER]` and `launcher allowed-root
+set-access PATH ACCESS [LAUNCHER]` are existing-entity mutations: PATH
+completes exactly the target Launcher's stored roots (`completion roots
+launcher`, the default-Launcher target of the launcher-omitted
+invocation), with no generic fallback; the ACCESS word completes the
+canonical `read_only`/`read_write` vocabulary; the optional trailing
+LAUNCHER positional completes the selector introspection.
+
+`principal allowed-root add USER PATH` completes USER from the
+`--principal` selector introspection and PATH as generic directories
+(the add creates a NEW root under the global ceiling, which is not
+authority-visible to every caller). `principal allowed-root
+remove/set-access USER PATH` complete PATH exactly from the target
+Principal's stored roots (`completion roots principal --stored`).
+
+`config allowed-root remove PATH` and `config allowed-root set-access
+PATH ACCESS` complete PATH exactly from the stored global roots (the
+local `config allowed-root list` output, no daemon exchange); add
+remains generic directory completion.
+
+The daemon remains the final policy boundary and rejects a root outside
+the effective Principal ceiling at execution time. All other path-valued
+flags keep generic filesystem completion.
 
 Positional completion of `principal show USER [FIELD]`: USER completes
 from the same selector-introspection owner as the `--principal` selector
 (above, with the `principal show` command context), and FIELD completes
 the canonical show-field vocabulary (`username uid gid home enabled
-allowed_roots allowed_root_entries`) that `extractPrincipalField` owns
+allowed_root_entries`) that `extractPrincipalField` owns
 — one shared vocabulary,
 so completion can never offer a field the command rejects. The FIELD word
 is a local static vocabulary (no daemon exchange), a typed prefix filters
@@ -1682,7 +1700,8 @@ Requires a subcommand: `show`, `set`, `unset`, `allowed-root`.
 `docker-helper config show [FIELD]` — without FIELD, prints the complete
 effective configuration as JSON (admin_token redacted). With FIELD, prints
 only that field's value followed by a newline; most fields are scalar, and
-`allowed_roots` and `allowed_root_entries` print their JSON arrays.
+`allowed_root_entries` prints its JSON array (the 2.x path-only
+`allowed_roots` show projection is retired).
 
 `docker-helper config set FIELD VALUE` — sets a writable field.
 Reports `updated` or `unchanged`. If the daemon is running, the change is

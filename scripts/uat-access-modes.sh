@@ -79,7 +79,7 @@
 #   P4 principal allowed-root add --access read_only;
 #   P5 principal allowed-root set-access;
 #   P6 rich Launcher scope replacement (PUT allowed_root_entries);
-#   P7 the 2.x path-only allowed_roots projection is retained beside the
+#   P7 the retired 2.x path-only allowed_roots projection is absent and
 #      authoritative allowed_root_entries projection;
 #   P8 session show renders the really-issued filesystem_snapshot entries.
 #
@@ -465,12 +465,13 @@ else
   acc_fail "P6 rich launcher scope replacement failed (http=$MAIN_PUT_HTTP: $(redact </tmp/uat-am-put.out 2>/dev/null))"
 fi
 
-# P7: the 2.x path-only allowed_roots projection is retained beside the
-# authoritative allowed_root_entries projection.
+# P7: the authoritative allowed_root_entries projection is the only
+# launcher roots projection; the 2.x path-only allowed_roots projection is
+# retired.
 MAIN_SHOW="$(dh launcher show --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null || true)"
 if printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_root_entries"' \
-    && printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_roots"'; then
-  acc_ok "P7 launcher projection keeps allowed_roots (2.x path-only) beside allowed_root_entries"
+    && ! printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_roots"'; then
+  acc_ok "P7 launcher projection carries allowed_root_entries only (allowed_roots retired)"
 else
   acc_fail "P7 launcher projections wrong: $MAIN_SHOW"
 fi

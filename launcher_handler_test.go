@@ -140,7 +140,7 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 		t.Fatalf("scope: expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
 	restricted := decodeLauncher(t, w)
-	if restricted.Scope != "restricted" || len(restricted.AllowedRoots) != 1 {
+	if restricted.Scope != "restricted" || len(restricted.AllowedRootEntries) != 1 {
 		t.Errorf("expected restricted with one root, got %+v", restricted)
 	}
 
@@ -350,8 +350,8 @@ func TestLauncherHandlerAllowedRootsDeterministicCanonicalOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := createdResp.Launcher
-	if got := created.AllowedRoots; len(got) != 2 || got[0] != rootA || got[1] != rootB {
-		t.Fatalf("create allowed_roots = %v, want [%s %s]", got, rootA, rootB)
+	if got := created.AllowedRootEntries; len(got) != 2 || got[0].Path != rootA || got[1].Path != rootB {
+		t.Fatalf("create allowed_root_entries = %+v, want [%s %s]", got, rootA, rootB)
 	}
 
 	// A fresh show projection of the committed state: identical order.
@@ -359,8 +359,8 @@ func TestLauncherHandlerAllowedRootsDeterministicCanonicalOrder(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("show after create: expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if got := decodeLauncher(t, w).AllowedRoots; len(got) != 2 || got[0] != rootA || got[1] != rootB {
-		t.Fatalf("show allowed_roots = %v, want [%s %s]", got, rootA, rootB)
+	if got := decodeLauncher(t, w).AllowedRootEntries; len(got) != 2 || got[0].Path != rootA || got[1].Path != rootB {
+		t.Fatalf("show allowed_root_entries = %+v, want [%s %s]", got, rootA, rootB)
 	}
 
 	// Reverse-ordered scope replacement on the same Launcher: the mutation
@@ -371,8 +371,8 @@ func TestLauncherHandlerAllowedRootsDeterministicCanonicalOrder(t *testing.T) {
 		t.Fatalf("scope replace: expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
 	replaced := decodeLauncher(t, w)
-	if got := replaced.AllowedRoots; len(got) != 2 || got[0] != rootA || got[1] != rootB {
-		t.Fatalf("scope replace allowed_roots = %v, want [%s %s]", got, rootA, rootB)
+	if got := replaced.AllowedRootEntries; len(got) != 2 || got[0].Path != rootA || got[1].Path != rootB {
+		t.Fatalf("scope replace allowed_root_entries = %+v, want [%s %s]", got, rootA, rootB)
 	}
 
 	// And the fresh projection after the replacement: identical order.
@@ -380,8 +380,69 @@ func TestLauncherHandlerAllowedRootsDeterministicCanonicalOrder(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("show after replace: expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	if got := decodeLauncher(t, w).AllowedRoots; len(got) != 2 || got[0] != rootA || got[1] != rootB {
-		t.Fatalf("show after replace allowed_roots = %v, want [%s %s]", got, rootA, rootB)
+	if got := decodeLauncher(t, w).AllowedRootEntries; len(got) != 2 || got[0].Path != rootA || got[1].Path != rootB {
+		t.Fatalf("show after replace allowed_root_entries = %+v, want [%s %s]", got, rootA, rootB)
+	}
+}
+
+// TestLauncherShowRichProjectionOnly proves the Launcher projection owner
+// publishes exactly the canonical rich entries: the retired 2.x path-only
+// parallel projection is no longer part of the public wire contract, and the
+// rich array keeps the empty-array (never null) zero-roots serialization.
+func TestLauncherShowRichProjectionOnly(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	home, _ := setupLauncherHandlerPrincipal(t, app, "alice")
+	root := filepath.Join(home, "agent-root")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	w := launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
+		fmt.Sprintf(`{"name":"agent","scope":"restricted","allowed_roots":[%q]}`, root))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d body=%s", w.Code, w.Body.String())
+	}
+	var createdResp createLauncherResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &createdResp); err != nil {
+		t.Fatal(err)
+	}
+	launcherID := createdResp.Launcher.ID
+	if launcherID == "" {
+		t.Fatalf("create response carries no launcher ID: %s", w.Body.String())
+	}
+
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+launcherID, testAdminToken, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("show: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var rawKeys map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &rawKeys); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawKeys["allowed_roots"]; ok {
+		t.Error("launcher show must not publish the retired allowed_roots path-only output field")
+	}
+	if _, ok := rawKeys["allowed_root_entries"]; !ok {
+		t.Error("launcher show must publish the canonical allowed_root_entries projection")
+	}
+	doc := decodeLauncher(t, w)
+	if len(doc.AllowedRootEntries) != 1 || doc.AllowedRootEntries[0].Path != root {
+		t.Fatalf("show entries = %+v, want the stored root %q", doc.AllowedRootEntries, root)
+	}
+
+	// The zero-roots (inherit) projection stays the empty rich array, never
+	// null and never a parallel path-only form.
+	w = launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
+		`{"name":"inheritone","scope":"inherit"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("inherit create: expected 201, got %d body=%s", w.Code, w.Body.String())
+	}
+	var inheritResp createLauncherResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &inheritResp); err != nil {
+		t.Fatal(err)
+	}
+	if inheritResp.Launcher.AllowedRootEntries == nil || len(inheritResp.Launcher.AllowedRootEntries) != 0 {
+		t.Fatalf("inherit entries = %+v, want the canonical empty array", inheritResp.Launcher.AllowedRootEntries)
 	}
 }
 
@@ -401,9 +462,12 @@ func TestLauncherToJSONZeroRootsWireArray(t *testing.T) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatal(err)
 	}
-	roots, ok := doc["allowed_roots"].([]any)
-	if !ok || len(roots) != 0 {
-		t.Fatalf("nil stored roots must serialize as the empty array, got: %s", data)
+	if _, ok := doc["allowed_roots"]; ok {
+		t.Fatalf("the retired allowed_roots output field must not serialize, got: %s", data)
+	}
+	entries, ok := doc["allowed_root_entries"].([]any)
+	if !ok || len(entries) != 0 {
+		t.Fatalf("nil stored roots must serialize as the empty rich array, got: %s", data)
 	}
 }
 

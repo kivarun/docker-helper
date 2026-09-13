@@ -495,9 +495,9 @@ var launcherDeleteCommand = &Command{
 }
 
 // launcherAllowedRootTarget resolves the CLI target for the positional
-// launcher allowed-root add/remove forms: [LAUNCHER] PATH. One positional is
+// launcher allowed-root add/remove forms: PATH [LAUNCHER]. One positional is
 // the PATH under the Principal's 'default' Launcher; two positionals are the
-// LAUNCHER selector and the PATH. The Principal resolves once through the
+// PATH and the LAUNCHER selector. The Principal resolves once through the
 // shared selector owner (launcherSelectorTargetSelector): the daemon remains
 // the authorization authority.
 func launcherAllowedRootTarget(client *apiClient, explicitPrincipal string, fs *flag.FlagSet) (username, selector, path string, err error) {
@@ -505,8 +505,7 @@ func launcherAllowedRootTarget(client *apiClient, explicitPrincipal string, fs *
 	path = args[0]
 	selector = defaultLauncherName
 	if len(args) == 2 {
-		selector = args[0]
-		path = args[1]
+		selector = args[1]
 	}
 	username, err = launcherSelectorTargetSelector(client, explicitPrincipal, selector)
 	if err != nil {
@@ -530,7 +529,7 @@ var launcherAllowedRootCommand = &Command{
 var launcherAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root to a launcher",
-	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [LAUNCHER] PATH",
+	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] PATH [LAUNCHER]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -604,14 +603,14 @@ var launcherAllowedRootListCommand = &Command{
 }
 
 // launcherAllowedRootSetAccessCommand changes the access mode of exactly one
-// stored root: [LAUNCHER] PATH ACCESS. One positional before the path is the
-// LAUNCHER selector; the last positional is the canonical access value. The
-// daemon performs the conditional mutation, so the CLI never reads and
-// re-sends the root list.
+// stored root: PATH ACCESS [LAUNCHER]. The first positional is the path, the
+// second is the canonical access value; an optional trailing positional is
+// the LAUNCHER selector. The daemon performs the conditional mutation, so the
+// CLI never reads and re-sends the root list.
 var launcherAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of a launcher allowed root",
-	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH read_only|read_write",
+	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] PATH read_only|read_write [LAUNCHER]",
 	MinPosArgs: 2,
 	MaxPosArgs: 3,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -629,9 +628,7 @@ var launcherAllowedRootSetAccessCommand = &Command{
 				accessArg := args[1]
 				selector := defaultLauncherName
 				if len(args) == 3 {
-					selector = args[0]
-					path = args[1]
-					accessArg = args[2]
+					selector = args[2]
 				}
 				access, aerr := parseAllowedRootAccess(accessArg)
 				if aerr != nil {
@@ -661,7 +658,7 @@ var launcherAllowedRootSetAccessCommand = &Command{
 var launcherAllowedRootRemoveCommand = &Command{
 	Name:       "remove",
 	Summary:    "Remove an allowed root from a launcher",
-	Usage:      "docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER] PATH",
+	Usage:      "docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] PATH [LAUNCHER]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

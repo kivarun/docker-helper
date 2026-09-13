@@ -420,8 +420,8 @@ fi
 WE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name we-multiroot --no-credential 2>/dev/null || true)"
 WE_L_ID="$(printf '%s' "$WE_L_JSON" | json_field id)"
 if [ -n "$WE_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_L_ID" "$WE_OPT" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$ALLOWED_ROOT" "$WE_L_ID" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_OPT" "$WE_L_ID" >/dev/null 2>&1; then
   acc_ok "WE setup: multiroot launcher carries both effective roots"
 else
   acc_fail "WE setup: multiroot launcher setup failed: $WE_L_JSON"

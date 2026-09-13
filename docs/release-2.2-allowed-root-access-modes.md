@@ -422,20 +422,21 @@ Existing commands remain and existing invocations default to `read_write`:
 ```text
 docker-helper config allowed-root add [--access read_write|read_only] PATH
 docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access read_write|read_only] USER PATH
-docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access read_write|read_only] [LAUNCHER] PATH
+docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access read_write|read_only] PATH [LAUNCHER]
 ```
 
-The project CLI parser requires flags to precede positional arguments, so the
-optional `--access` flag is always written before the positional PATH; an
-option-like token after a positional is rejected with
-`flags must precede positional arguments`.
+Since the RC5 CLI grammar change, the project CLI parser accepts flags
+after positional arguments (interspersed flags) until an explicit `--`;
+the canonical forms above keep every option before the positionals. A bare
+`--` always terminates flags, and `--flag=--` still parses with the value
+`--`.
 
 Changing the mode of an existing exact root is explicit:
 
 ```text
 docker-helper config allowed-root set-access PATH ACCESS
 docker-helper principal allowed-root set-access USER PATH ACCESS
-docker-helper launcher allowed-root set-access [LAUNCHER] PATH ACCESS
+docker-helper launcher allowed-root set-access PATH ACCESS [LAUNCHER]
 ```
 
 ```text
@@ -544,12 +545,10 @@ rich projection:
 
 For 2.2 responses:
 
-- `allowed_roots` is a compatibility path-only projection of the same entries;
 - `allowed_root_entries` is the authoritative mode-bearing representation;
-- both projections are generated from one internal policy value; neither is an
-  independent owner;
-- Release 3 may retire the path-only compatibility projection as a major-version
-  cleanup, but Release 2.2 does not.
+- the 2.x path-only `allowed_roots` output projection was retired by the RC5
+  legacy-surface cleanup (the same name remains the accepted config-file and
+  scope-replacement input).
 
 The global config file accepts the old string-array representation on input and
 normalizes every string to `read_write`. The canonical 2.2 representation is an

@@ -69,20 +69,17 @@ func writeControlAudit(ctx context.Context, rec auditRecord, auth *operatorAutho
 	writeRequestContextAudit(ctx, rec)
 }
 
-// Launcher JSON contract uses "scope" as the public term and "allowed_roots"
-// for the derived 2.1 path-only projection of the canonical stored roots
+// Launcher JSON contract uses "scope" as the public term. allowed_root_entries
+// is the authoritative rich projection of the canonical stored roots
 // (restricted scope only), always serialized as a JSON array — zero roots are
-// the empty array, never null. allowed_root_entries is the authoritative rich
-// projection of the same entries with the identical ordering contract
-// (launcherToJSON owns the projection). principal_id is never
-// exposed as public authorization state.
+// the empty array, never null (launcherToJSON owns the projection).
+// principal_id is never exposed as public authorization state.
 type launcherJSON struct {
 	ID                 string             `json:"id"`
 	Principal          string             `json:"principal"`
 	Name               string             `json:"name"`
 	Enabled            bool               `json:"enabled"`
 	Scope              string             `json:"scope"`
-	AllowedRoots       []string           `json:"allowed_roots"`
 	AllowedRootEntries []AllowedRootEntry `json:"allowed_root_entries"`
 	CreatedAt          string             `json:"created_at"`
 }
@@ -227,10 +224,6 @@ type launcherCredentialResponse struct {
 }
 
 func launcherToJSON(l LauncherWithPrincipal) launcherJSON {
-	allowedRoots := allowedRootPaths(l.AllowedRoots)
-	if allowedRoots == nil {
-		allowedRoots = []string{}
-	}
 	entries := l.AllowedRoots
 	if entries == nil {
 		entries = []AllowedRootEntry{}
@@ -241,7 +234,6 @@ func launcherToJSON(l LauncherWithPrincipal) launcherJSON {
 		Name:               l.Name,
 		Enabled:            l.Enabled,
 		Scope:              string(l.ScopeMode),
-		AllowedRoots:       allowedRoots,
 		AllowedRootEntries: entries,
 		CreatedAt:          l.CreatedAt.Format(time.RFC3339),
 	}

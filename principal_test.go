@@ -547,8 +547,8 @@ func TestPrincipalToResponseZeroRootsWireArray(t *testing.T) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatal(err)
 	}
-	roots, ok := doc["allowed_roots"].([]any)
-	if !ok || len(roots) != 0 {
+	entries, ok := doc["allowed_root_entries"].([]any)
+	if !ok || len(entries) != 0 {
 		t.Fatalf("nil stored roots must serialize as the empty array, got: %s", data)
 	}
 }
@@ -606,9 +606,9 @@ func TestPrincipalShowZeroRootsWireArray(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&doc); err != nil {
 		t.Fatal(err)
 	}
-	roots, ok := doc["allowed_roots"].([]any)
-	if !ok || len(roots) != 0 {
-		t.Fatalf("zero-root principal show must serialize allowed_roots as [], body: %s", w.Body.String())
+	entries, ok := doc["allowed_root_entries"].([]any)
+	if !ok || len(entries) != 0 {
+		t.Fatalf("zero-root principal show must serialize allowed_root_entries as [], body: %s", w.Body.String())
 	}
 }
 
@@ -675,8 +675,8 @@ func TestPrincipalShowSelfReadAuthority(t *testing.T) {
 	if doc.Username != "michael" || doc.UID != 1021 || doc.GID != 1021 || doc.Home != home || !doc.Enabled {
 		t.Fatalf("self show document = %+v", doc)
 	}
-	if len(doc.AllowedRoots) == 0 {
-		t.Fatalf("self show must carry the seeded allowed_roots, got %+v", doc)
+	if len(doc.AllowedRootEntries) == 0 {
+		t.Fatalf("self show must carry the seeded allowed roots, got %+v", doc)
 	}
 
 	// Principal credential + foreign username: the established non-disclosing
@@ -1106,8 +1106,7 @@ func TestExtractPrincipalField(t *testing.T) {
 		GID:                1000,
 		Home:               "/home/testuser",
 		Enabled:            true,
-		AllowedRoots:       []string{"/home/testuser", "/shared"},
-		AllowedRootEntries: []AllowedRootEntry{{Path: "/home/testuser", Access: AllowedRootAccessReadWrite}},
+		AllowedRootEntries: []AllowedRootEntry{{Path: "/home/testuser", Access: AllowedRootAccessReadWrite}, {Path: "/shared", Access: AllowedRootAccessReadWrite}},
 	}
 
 	tests := []struct {
@@ -1120,8 +1119,7 @@ func TestExtractPrincipalField(t *testing.T) {
 		{"gid", "1000", true},
 		{"home", "/home/testuser", true},
 		{"enabled", "true", true},
-		{"allowed_roots", `["/home/testuser","/shared"]`, true},
-		{"allowed_root_entries", `[{"path":"/home/testuser","access":"read_write"}]`, true},
+		{"allowed_root_entries", `[{"path":"/home/testuser","access":"read_write"},{"path":"/shared","access":"read_write"}]`, true},
 		{"unknown", "", false},
 	}
 
@@ -1139,7 +1137,7 @@ func TestExtractPrincipalField(t *testing.T) {
 // TestPrincipalShowSelfReadFieldsCLI proves the black-box CLI contract of the
 // scope-first Principal read: a Principal credential reads its own Principal
 // and every FIELD extraction consumes the same show response (username, uid,
-// gid, home, enabled, allowed_roots), while a foreign selector surfaces the
+// gid, home, enabled, allowed_root_entries), while a foreign selector surfaces the
 // non-disclosing failure exactly as the daemon returned it.
 func TestPrincipalShowSelfReadFieldsCLI(t *testing.T) {
 	endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1148,7 +1146,7 @@ func TestPrincipalShowSelfReadFieldsCLI(t *testing.T) {
 			writeJSONResponse(w, http.StatusOK, principalResponse{
 				OK: true, Username: "michael", UID: 1021, GID: 1021,
 				Home: "/home/michael", Enabled: true,
-				AllowedRoots: []string{"/home/michael"},
+				AllowedRootEntries: stubEntries("/home/michael"),
 			})
 			return
 		case r.URL.Path == "/principals/alice" && r.Method == http.MethodGet:
@@ -1161,12 +1159,12 @@ func TestPrincipalShowSelfReadFieldsCLI(t *testing.T) {
 	})
 
 	for field, want := range map[string]string{
-		"username":      "michael",
-		"uid":           "1021",
-		"gid":           "1021",
-		"home":          "/home/michael",
-		"enabled":       "true",
-		"allowed_roots": `["/home/michael"]`,
+		"username":             "michael",
+		"uid":                  "1021",
+		"gid":                  "1021",
+		"home":                 "/home/michael",
+		"enabled":              "true",
+		"allowed_root_entries": `[{"path":"/home/michael","access":"read_write"}]`,
 	} {
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters([]string{

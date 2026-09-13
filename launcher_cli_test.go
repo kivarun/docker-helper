@@ -612,7 +612,8 @@ func TestLauncherSetCLINamePresence(t *testing.T) {
 					http.NotFound(w, r)
 				}
 			})
-			// All flags must precede the positional selector.
+			// The operator flags precede the positional selector in these
+			// canonical forms.
 			args := append([]string{
 				"launcher", "set", "--principal", "alice",
 				"--endpoint", endpoint, "--token-file", tokenPath,
@@ -1092,7 +1093,7 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 		case r.URL.Path == "/principals/alice/launchers" && r.Method == http.MethodPost:
 			writeJSONResponse(w, http.StatusCreated, createLauncherResponse{
 				OK:         true,
-				Launcher:   launcherJSON{ID: "dhl_9", Principal: "alice", Name: "default", Scope: "restricted", AllowedRoots: []string{"/a", "/b"}, Enabled: true},
+				Launcher:   launcherJSON{ID: "dhl_9", Principal: "alice", Name: "default", Scope: "restricted", AllowedRootEntries: stubEntries("/a", "/b"), Enabled: true},
 				Credential: &launcherCredentialJSON{ID: "dhcr_9"},
 				Token:      "secret-create-once-42",
 			})
@@ -1126,7 +1127,11 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 
 // TestLauncherAllowedRootCLISingleRequest proves the launcher allowed-root
 // commands issue exactly one request each — no GET and no read-modify-write:
-// the daemon owns the policy mutation and its concurrency semantics.
+// the daemon owns the policy mutation and its concurrency semantics. The
+// RC5 positional grammar is PATH-first: the first positional is always the
+// PATH and the optional target Launcher is the last positional (omission
+// keeps the documented default-Launcher semantics); the old selector-first
+// interpretation is gone.
 func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1145,17 +1150,25 @@ func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 			wantBody:   `{"path":"/a"}`,
 		},
 		{
-			name:       "add two positionals are the launcher and the path",
+			name:       "add two positionals are the path and the target launcher",
 			args:       []string{"launcher", "allowed-root", "add", "--principal", "alice"},
-			positional: []string{"build-agent", "/a"},
+			positional: []string{"/a", "build-agent"},
 			wantPath:   "/principals/alice/launchers/build-agent/allowed-roots",
 			wantMethod: http.MethodPost,
 			wantBody:   `{"path":"/a"}`,
 		},
 		{
-			name:       "remove",
+			name:       "manual repro: --access after positionals targets the named launcher",
+			args:       []string{"launcher", "allowed-root", "add", "--principal", "alice", "--access", "read_only"},
+			positional: []string{"/mnt/fake/bun", "bun"},
+			wantPath:   "/principals/alice/launchers/bun/allowed-roots",
+			wantMethod: http.MethodPost,
+			wantBody:   `{"path":"/mnt/fake/bun","access":"read_only"}`,
+		},
+		{
+			name:       "remove is path-first with the optional target launcher last",
 			args:       []string{"launcher", "allowed-root", "remove", "--principal", "alice"},
-			positional: []string{"build-agent", "/a"},
+			positional: []string{"/a", "build-agent"},
 			wantPath:   "/principals/alice/launchers/build-agent/allowed-roots",
 			wantMethod: http.MethodDelete,
 			wantBody:   `{"path":"/a"}`,
@@ -1169,9 +1182,17 @@ func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 			wantBody:   `{"scope":"inherit"}`,
 		},
 		{
-			name:       "set-access sends the targeted access mutation",
+			name:       "set-access two positionals target the default launcher",
 			args:       []string{"launcher", "allowed-root", "set-access", "--principal", "alice"},
-			positional: []string{"dhl_1", "/a", "read_only"},
+			positional: []string{"/a", "read_only"},
+			wantPath:   "/principals/alice/launchers/default/allowed-roots",
+			wantMethod: http.MethodPatch,
+			wantBody:   `{"path":"/a","access":"read_only"}`,
+		},
+		{
+			name:       "set-access three positionals target the named launcher last",
+			args:       []string{"launcher", "allowed-root", "set-access", "--principal", "alice"},
+			positional: []string{"/a", "read_only", "dhl_1"},
 			wantPath:   "/principals/alice/launchers/dhl_1/allowed-roots",
 			wantMethod: http.MethodPatch,
 			wantBody:   `{"path":"/a","access":"read_only"}`,

@@ -51,7 +51,7 @@ func expectEffectiveRootsResponse(t *testing.T, body []byte) []string {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		t.Fatalf("decode effective roots response: %v", err)
 	}
-	return resp.AllowedRoots
+	return allowedRootPaths(resp.AllowedRootEntries)
 }
 
 // TestUserModeOwnerEffectiveRootsIntrospection is the completion-introspection
@@ -82,11 +82,12 @@ func TestUserModeOwnerEffectiveRootsIntrospection(t *testing.T) {
 	if err := json.Unmarshal(policy.Body.Bytes(), &policyResp); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(policyResp.AllowedRoots, roots) {
-		t.Fatalf("surfaces disagree on the daemon-owner ceiling: introspection=%v create-policy=%v", roots, policyResp.AllowedRoots)
+	policyPaths := allowedRootPaths(policyResp.AllowedRootEntries)
+	if !slices.Equal(policyPaths, roots) {
+		t.Fatalf("surfaces disagree on the daemon-owner ceiling: introspection=%v create-policy=%v", roots, policyPaths)
 	}
-	if !slices.Equal(policyResp.AllowedRoots, []string{root}) {
-		t.Fatalf("session create-policy for the daemon-owner chain = %v, want the global ceiling [%s]", policyResp.AllowedRoots, root)
+	if !slices.Equal(policyPaths, []string{root}) {
+		t.Fatalf("session create-policy for the daemon-owner chain = %v, want the global ceiling [%s]", policyPaths, root)
 	}
 }
 
@@ -108,7 +109,7 @@ func TestUserModeOwnerRestrictedLauncherCreate(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Launcher.Scope != string(LauncherScopeRestricted) || !slices.Equal(created.Launcher.AllowedRoots, []string{work}) {
+	if created.Launcher.Scope != string(LauncherScopeRestricted) || !slices.Equal(allowedRootPaths(created.Launcher.AllowedRootEntries), []string{work}) {
 		t.Fatalf("created launcher = %+v, want restricted with stored root [%s]", created.Launcher, work)
 	}
 
@@ -160,7 +161,7 @@ func TestUserModeOwnerLauncherScopeReplaceRestricted(t *testing.T) {
 	if err := json.Unmarshal(replace.Body.Bytes(), &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Scope != string(LauncherScopeRestricted) || !slices.Equal(updated.AllowedRoots, []string{work}) {
+	if updated.Scope != string(LauncherScopeRestricted) || !slices.Equal(allowedRootPaths(updated.AllowedRootEntries), []string{work}) {
 		t.Fatalf("replaced launcher = %+v, want restricted with stored root [%s]", updated, work)
 	}
 

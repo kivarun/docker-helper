@@ -234,40 +234,136 @@ func TestBlackBoxTooManyPositionalArgs(t *testing.T) {
 	}
 }
 
-// TestBlackBoxFlagAfterPositionalDiagnostic verifies that a flag typed after
-// a positional argument (which Go's flag parser silently leaves in the
-// positional args) is rejected with an explicit diagnostic instead of a
-// confusing count message.
-func TestBlackBoxFlagAfterPositionalDiagnostic(t *testing.T) {
+// TestBlackBoxFlagAfterPositionalParses proves the Unix CLI grammar of the
+// single shared parser owner: an option typed after a positional argument is
+// parsed as a flag (it reaches the command's own flag handling), never
+// silently folded into the positional arguments.
+func TestBlackBoxFlagAfterPositionalParses(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"credential", "create", "alice", "--name", "foo"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
+	// The isolated environment has no daemon: a successful parse reaches the
+	// client-resolution runtime error (exit 1); the old flags-must-precede
+	// parser refusal (exit 2) is the regression this test protects against.
+	if code == 2 {
+		t.Errorf("flag after positional must parse, got the parser refusal exit 2 (stderr=%s)", stderr.String())
 	}
-	out := stderr.String()
-	if !strings.Contains(out, "flags must precede positional arguments") {
-		t.Errorf("expected flag-after-positional diagnostic, got: %s", out)
-	}
-	if !strings.Contains(out, `"--name"`) {
-		t.Errorf("expected the offending option-like token named, got: %s", out)
+	if strings.Contains(stderr.String(), "flags must precede positional arguments") {
+		t.Errorf("the retired flags-must-precede diagnostic resurfaced: %s", stderr.String())
 	}
 
-	// A flag-like token explicitly terminated by "--" must keep the ordinary
-	// rejection message (it is an intentional positional, not a misplaced flag).
+	// A flag-like token explicitly terminated by "--" is positional data: it
+	// must never be parsed as an option.
 	var stdout2, stderr2 bytes.Buffer
 	code = runCommandWithWriters([]string{"admin-token", "rotate", "--", "-x"}, &stdout2, &stderr2)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
+	if code == 0 {
+		t.Errorf("-- sentinel must keep -x positional data, command unexpectedly succeeded")
 	}
-	if out2 := stderr2.String(); strings.Contains(out2, "flags must precede positional arguments") {
-		t.Errorf("explicit -- must not produce flag-after-positional diagnostic, got: %s", out2)
+	if out2 := stderr2.String(); strings.Contains(out2, "flag provided but not defined") {
+		t.Errorf("explicit -- must keep option-like tokens positional, got: %s", out2)
 	}
 }
 
+// TestCLIParserInterspersedFlagsGrammar is the parser regression matrix of
+// the RC5 CLI grammar change: options may appear before or after positional
+// arguments until an explicit "--"; after "--" everything is positional
+// data; option value parsing stays unambiguous; unknown options stay parse
+// errors; and the flags-first forms every existing command relies on keep
+// parsing. The matrix drives the real production parser (in-process
+// dispatch, the same code path as the binary).
+func TestCLIParserInterspersedFlagsGrammar(t *testing.T) {
+	root := testAllowedRootDir(t)
+	// The config must keep at least one allowed root, so seed `root` itself;
+	// the mutating subtests add a distinct path so they observe the real add
+	// lifecycle ("added" then "already present") through the persisted file.
+	addPath := filepath.Join(root, "added")
+	if err := os.MkdirAll(addPath, 0700); err != nil {
+		t.Fatalf("cannot create add target: %v", err)
+	}
+	data, _ := json.Marshal(map[string]any{"allowed_roots": []string{root}, "session_ttl": "12h"})
+	setupConfigTestWithData(t, data)
+
+	t.Run("flag after positional mutates", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", addPath, "--access", "read_only"}, &stdout, &stderr)
+		if code != 0 || !strings.Contains(stdout.String(), "added") {
+			t.Errorf("positional --flag value: exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("inline flag after positional mutates", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", addPath, "--access=read_only"}, &stdout, &stderr)
+		if code != 0 || !strings.Contains(stdout.String(), "already present") {
+			t.Errorf("positional --flag=value: exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("flags before positionals still parse", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", "--access", "read_only", addPath}, &stdout, &stderr)
+		if code != 0 || !strings.Contains(stdout.String(), "already present") {
+			t.Errorf("flags-first form: exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("unknown option after positional stays a parse error", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", root, "--bogus"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("unknown option after positional: exit = %d, want 2 (stderr=%q)", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "not defined") {
+			t.Errorf("unknown option after positional: stderr = %q, want the flag-undefined diagnostic", stderr.String())
+		}
+	})
+
+	t.Run("double dash keeps option-like tokens positional", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", root, "--", "--access"}, &stdout, &stderr)
+		// The sentinel turns --access into a second positional argument: the
+		// bounded positional count rejects it (exit 2), and --access is never
+		// parsed as the flag (the add either reports the stored access or
+		// fails on the argument count, never on an access vocabulary error).
+		if code != 2 {
+			t.Errorf("-- sentinel: exit = %d, want the positional-count refusal 2 (stderr=%q)", code, stderr.String())
+		}
+		if out := stderr.String(); strings.Contains(out, "access must be") {
+			t.Errorf("-- sentinel: --access leaked into flag parsing: %q", out)
+		}
+	})
+
+	t.Run("bare dash stays positional", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", root, "--", "-"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("bare dash after --: exit = %d, want the positional-count refusal 2 (stderr=%q)", code, stderr.String())
+		}
+	})
+
+	t.Run("principal add bool flag after positionals parses", func(t *testing.T) {
+		// The isolated environment has no daemon: a successful parse reaches
+		// the client-resolution runtime error (exit 1). The parser refusal
+		// (exit 2) is the regression this subtest protects against.
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"principal", "allowed-root", "add", "alice", root, "--access", "read_only"}, &stdout, &stderr)
+		if code == 2 {
+			t.Errorf("bool flag after positionals must parse, got exit 2 (stderr=%q)", stderr.String())
+		}
+	})
+
+	t.Run("launcher add flag after positionals parses", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"launcher", "allowed-root", "add", "--principal", "alice", root, "bun", "--access", "read_only"}, &stdout, &stderr)
+		if code == 2 {
+			t.Errorf("launcher add flag after positionals must parse, got exit 2 (stderr=%q)", stderr.String())
+		}
+	})
+}
+
 // TestAllowedRootAddAccessFlagSyntax proves the parser-consistent public add
-// contract: the optional --access flag is documented and accepted only before
-// the positional arguments (the project CLI parser's flags-must-precede
-// invariant), and the usage strings show --access before the positionals.
+// contract: the optional --access flag is documented on every allowed-root
+// add command and accepted in both option positions (before and after the
+// positional arguments, per the shared parser grammar).
 func TestAllowedRootAddAccessFlagSyntax(t *testing.T) {
 	t.Run("usage strings show --access before the positionals", func(t *testing.T) {
 		usage := principalAllowedRootAddCommand.Usage
@@ -278,32 +374,14 @@ func TestAllowedRootAddAccessFlagSyntax(t *testing.T) {
 		}
 		usage = launcherAllowedRootAddCommand.Usage
 		accessIdx = strings.Index(usage, "[--access ACCESS]")
-		positionsIdx = strings.Index(usage, "[LAUNCHER] PATH")
+		positionsIdx = strings.Index(usage, "] PATH")
 		if accessIdx < 0 || positionsIdx < 0 || accessIdx > positionsIdx {
-			t.Errorf("launcher add usage %q must show [--access ACCESS] before [LAUNCHER] PATH", usage)
+			t.Errorf("launcher add usage %q must show [--access ACCESS] before PATH", usage)
 		}
 		usage = configAllowedRootAddCommand.Usage
 		accessIdx = strings.Index(usage, "[--access ACCESS]")
 		if accessIdx < 0 || !strings.HasSuffix(usage, "PATH") {
 			t.Errorf("config add usage %q must show [--access ACCESS] before PATH", usage)
-		}
-	})
-
-	t.Run("access flag after a positional is the parser diagnostic", func(t *testing.T) {
-		tests := [][]string{
-			{"config", "allowed-root", "add", "/some/path", "--access", "read_only"},
-			{"principal", "allowed-root", "add", "alice", "/some/path", "--access", "read_only"},
-			{"launcher", "allowed-root", "add", "--principal", "alice", "default", "/some/path", "--access", "read_only"},
-		}
-		for _, args := range tests {
-			var stdout, stderr bytes.Buffer
-			code := runCommandWithWriters(args, &stdout, &stderr)
-			if code != 2 {
-				t.Errorf("%v: exit = %d, want the parser refusal 2", args, code)
-			}
-			if !strings.Contains(stderr.String(), "flags must precede positional arguments") {
-				t.Errorf("%v: stderr = %q, want the flags-must-precede diagnostic", args, stderr.String())
-			}
 		}
 	})
 
@@ -324,13 +402,13 @@ func TestAllowedRootAddAccessFlagSyntax(t *testing.T) {
 
 		stdout, stderr = bytes.Buffer{}, bytes.Buffer{}
 		code = runCommandWithWriters([]string{"principal", "allowed-root", "add", "--access", "read_only", "alice", root}, &stdout, &stderr)
-		if code == 2 && strings.Contains(stderr.String(), "flags must precede positional arguments") {
+		if code == 2 {
 			t.Errorf("flags-first principal add was rejected by the parser: %q", stderr.String())
 		}
 
 		stdout, stderr = bytes.Buffer{}, bytes.Buffer{}
 		code = runCommandWithWriters([]string{"launcher", "allowed-root", "add", "--principal", "alice", "--access", "read_only", "default", root}, &stdout, &stderr)
-		if code == 2 && strings.Contains(stderr.String(), "flags must precede positional arguments") {
+		if code == 2 {
 			t.Errorf("flags-first launcher add was rejected by the parser: %q", stderr.String())
 		}
 	})

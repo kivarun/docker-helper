@@ -108,13 +108,10 @@ With FIELD, prints only that field's value followed by a newline.
 The general JSON output redacts admin_token.
 "config show admin_token" intentionally prints the complete real token.
 
-allowed_roots is the 2.x path-only projection of the global allowed roots
-(a JSON array of canonical paths) and allowed_root_entries is the
-authoritative rich projection of the same stored entries; both derive from
-one canonical policy value.
+allowed_root_entries is the rich projection of the stored global allowed
+roots; it derives from one canonical policy value.
 
 Fields:
-  allowed_roots
   allowed_root_entries
   session_ttl
   log_level
@@ -670,14 +667,17 @@ func configShowAll(stdout, stderr io.Writer) int {
 	}
 
 	// Resolve effective allowed_roots (handles legacy migration). The
-	// resolved entries are the one canonical policy value both public show
-	// projections derive from.
+	// resolved entries are the one canonical policy value the public show
+	// projection derives from.
 	requestedRoots, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	roots, entries := allowedRootShowProjections(requestedRoots)
+	entries := requestedRoots
+	if entries == nil {
+		entries = []AllowedRootEntry{}
+	}
 
 	ec := resolveEffectiveConfig(*fc)
 
@@ -694,7 +694,6 @@ func configShowAll(stdout, stderr io.Writer) int {
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
 	result := map[string]any{
-		"allowed_roots":           roots,
 		"allowed_root_entries":    entries,
 		"session_ttl":             fc.SessionTTL,
 		"log_level":               ec.LogLevel,
@@ -729,23 +728,6 @@ func configShowAll(stdout, stderr io.Writer) int {
 	return 0
 }
 
-// allowedRootShowProjections derives both public `config show` projections
-// from the one canonical resolved entries value: allowed_roots is the 2.x
-// path-only projection ([]string, the frozen compatibility shape) and
-// allowed_root_entries is the authoritative rich projection. Both are always
-// serialized as JSON arrays — an empty policy projects the empty array,
-// never null — and neither projection is an independent owner.
-func allowedRootShowProjections(entries []AllowedRootEntry) ([]string, []AllowedRootEntry) {
-	roots := allowedRootPaths(entries)
-	if roots == nil {
-		roots = []string{}
-	}
-	if entries == nil {
-		entries = []AllowedRootEntry{}
-	}
-	return roots, entries
-}
-
 // resolveHTTPAddress returns the effective HTTP address.
 // If the configured value is empty, returns the default for system mode or empty for user mode.
 func resolveHTTPAddress(configured string) string {
@@ -763,7 +745,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, msg)
 		return 2
 	}
-	if !isKnownField(field) {
+	if !showFieldAccepted(field) {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
@@ -854,23 +836,24 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	}
 
 	// Resolve effective allowed_roots (handles legacy migration). The
-	// resolved entries are the one canonical policy value both public show
-	// projections derive from.
+	// resolved entries are the one canonical policy value the public show
+	// projection derives from; the projection is always a JSON array, never
+	// null.
 	requestedRoots, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	roots, entries := allowedRootShowProjections(requestedRoots)
+	entries := requestedRoots
+	if entries == nil {
+		entries = []AllowedRootEntry{}
+	}
 
 	ec := resolveEffectiveConfig(*fc)
 
 	stateDir := getStateDirFunc()
 
 	switch field {
-	case "allowed_roots":
-		data, _ := json.MarshalIndent(roots, "", "  ")
-		fmt.Fprintln(stdout, string(data))
 	case "allowed_root_entries":
 		data, _ := json.MarshalIndent(entries, "", "  ")
 		fmt.Fprintln(stdout, string(data))
