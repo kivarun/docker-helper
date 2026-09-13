@@ -150,11 +150,12 @@ _dh_uat_fake_completion() {
 complete -F _dh_uat_fake_completion docker-helper
 EOF
 
-  # assert_completion_fails EXPECTED ACTUAL runs the REAL assert_completion
-  # in a subshell (which contains the reg_fail accounting) and reports
-  # whether the assertion failed.
-  assert_completion_fails() {
+  # assertion_failed EXPECTED ACTUAL runs the REAL assert_completion in a
+  # subshell (which contains the reg_fail accounting) and returns 0 when the
+  # assertion failed (assert_completion itself returns nonzero on failure).
+  assertion_failed() {
     ( assert_completion "harness self-check" "$1" "$2" ) >/dev/null 2>&1
+    [ $? -ne 0 ]
   }
 
   local out
@@ -164,7 +165,7 @@ EOF
   export FAKE_COMPLETION_RC=0
   unset FAKE_COMPLETION_OUT || true
   out="$(run_completion "$script" docker-helper arg)" || true
-  if ( assert_completion_fails "" "$out" ); then
+  if assertion_failed "" "$out"; then
     reg_fail "F: rc=0 with empty output and empty expectation must pass the assertion"
   else
     reg_ok "F: rc=0 with empty output and empty expectation passes"
@@ -173,7 +174,7 @@ EOF
   # 2. rc=0 + matching non-empty output -> the assertion passes.
   export FAKE_COMPLETION_RC=0 FAKE_COMPLETION_OUT="--access"
   out="$(run_completion "$script" docker-helper arg)" || true
-  if ( assert_completion_fails "--access" "$out" ); then
+  if assertion_failed "--access" "$out"; then
     reg_fail "F: rc=0 with matching non-empty output must pass the assertion"
   else
     reg_ok "F: rc=0 with matching non-empty output passes"
@@ -185,7 +186,7 @@ EOF
   export FAKE_COMPLETION_RC=4
   unset FAKE_COMPLETION_OUT || true
   out="$(run_completion "$script" docker-helper arg)" || true
-  if ( assert_completion_fails "" "$out" ); then
+  if assertion_failed "" "$out"; then
     reg_ok "F: rc=4 with empty output and empty expectation fails the assertion"
   else
     reg_fail "F: rc=4 with empty output and empty expectation passed the assertion (false positive)"
@@ -195,7 +196,7 @@ EOF
   #    status is checked before any suggestion comparison.
   export FAKE_COMPLETION_RC=4 FAKE_COMPLETION_OUT="--access"
   out="$(run_completion "$script" docker-helper arg)" || true
-  if ( assert_completion_fails "--access" "$out" ); then
+  if assertion_failed "--access" "$out"; then
     reg_ok "F: rc=4 with matching-looking output fails the assertion"
   else
     reg_fail "F: rc=4 with matching-looking output passed the assertion (false positive)"
