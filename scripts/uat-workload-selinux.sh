@@ -531,8 +531,8 @@ fi
 SE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name se-multiroot --no-credential 2>/dev/null || true)"
 SE_L_ID="$(printf '%s' "$SE_L_JSON" | json_field id)"
 if [ -n "$SE_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$SE_OPT" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$ALLOWED_ROOT" "$SE_L_ID" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_OPT" "$SE_L_ID" >/dev/null 2>&1; then
   acc_ok "SE setup: multiroot launcher carries both effective roots"
 else
   acc_fail "SE setup: multiroot launcher setup failed: $SE_L_JSON"

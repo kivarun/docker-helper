@@ -153,18 +153,16 @@ func TestConfigShowAllJSON(t *testing.T) {
 		t.Fatalf("invalid JSON: %v, output: %s", err, stdout)
 	}
 
-	if result["allowed_roots"] == nil {
-		t.Error("allowed_roots is nil")
+	// The retired 2.x path-only parallel projection is no longer published:
+	// the canonical rich projection is the one output projection.
+	if _, ok := result["allowed_roots"]; ok {
+		t.Error("allowed_roots legacy path-only output key must not be published")
 	}
-	// allowed_roots is the frozen 2.x path-only projection.
-	if roots, ok := result["allowed_roots"].([]any); !ok || len(roots) != 1 || roots[0] != "/home/user/work" {
-		t.Errorf("allowed_roots = %v, want the path-only array [\"/home/user/work\"]", result["allowed_roots"])
-	}
-	// allowed_root_entries is the rich projection of the same canonical
-	// stored entries.
+	// allowed_root_entries is the authoritative rich projection of the same
+	// canonical stored entries.
 	entries, ok := result["allowed_root_entries"].([]any)
 	if !ok || len(entries) != 1 {
-		t.Fatalf("allowed_root_entries = %v, want the rich projection of the same entry", result["allowed_root_entries"])
+		t.Fatalf("allowed_root_entries = %v, want the rich projection of the stored entry", result["allowed_root_entries"])
 	}
 	entry, ok := entries[0].(map[string]any)
 	if !ok || entry["path"] != "/home/user/work" || entry["access"] != "read_write" {
@@ -216,10 +214,9 @@ func TestConfigShowSingleField(t *testing.T) {
 		field string
 		want  string
 	}{
-		// allowed_roots keeps the frozen 2.x path-only projection.
-		{"allowed_roots", "[\n  \"/home/user/work\"\n]\n"},
 		// allowed_root_entries is the authoritative rich projection of the
-		// same stored entries.
+		// stored entries; the retired 2.x path-only allowed_roots projection
+		// is no longer a show field.
 		{"allowed_root_entries", "[\n  {\n    \"path\": \"/home/user/work\",\n    \"access\": \"read_write\"\n  }\n]\n"},
 		{"session_ttl", "12h\n"},
 		{"log_level", "warn\n"},
@@ -231,6 +228,14 @@ func TestConfigShowSingleField(t *testing.T) {
 				t.Errorf("expected %q, got %q", tt.want, stdout)
 			}
 		})
+	}
+
+	// The legacy path-only FIELD no longer exists: it is an unknown-field
+	// refusal, never a silent legacy output.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show", "allowed_roots"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "unknown field") {
+		t.Errorf("config show allowed_roots: exit = %d, stderr = %q, want the unknown-field refusal", code, stderr.String())
 	}
 }
 
@@ -246,7 +251,7 @@ func TestConfigAllowedRootEntriesIsShowOnly(t *testing.T) {
 }`
 		setupConfigTestWithData(t, []byte(cfg))
 		var stdout, stderr bytes.Buffer
-		code := runCommandWithWriters([]string{"config", "show", "allowed_roots"}, &stdout, &stderr)
+		code := runCommandWithWriters([]string{"config", "show", "allowed_root_entries"}, &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("exit = 0, want a fail-closed validation error: stdout=%q", stdout.String())
 		}
@@ -358,7 +363,10 @@ func TestConfigSetValidation(t *testing.T) {
 		wantErr string
 	}{
 		{"invalid duration", []string{"config", "set", "session_ttl", "notaduration"}, "invalid"},
-		{"negative duration", []string{"config", "set", "session_ttl", "-1h"}, "positive"},
+		// A dash-leading VALUE is grammar-ambiguous with an option under
+		// the interspersed parser; the explicit -- sentinel keeps it a
+		// positional and the domain validation still refuses it.
+		{"negative duration", []string{"config", "set", "--", "session_ttl", "-1h"}, "positive"},
 		{"invalid shutdown_timeout", []string{"config", "set", "shutdown_timeout", "notaduration"}, "invalid"},
 		{"shutdown_timeout over maximum", []string{"config", "set", "shutdown_timeout", "45s"}, "exceeds the maximum"},
 		{"shutdown_timeout legacy 60s still rejected", []string{"config", "set", "shutdown_timeout", "60s"}, "exceeds the maximum"},
@@ -557,7 +565,7 @@ func TestConfigStdoutStderrSeparation(t *testing.T) {
 	}
 
 	// Success goes to stdout, nothing to stderr
-	successOut, successErr := runConfigCLI(t, 0, "config", "show", "allowed_roots")
+	successOut, successErr := runConfigCLI(t, 0, "config", "show", "allowed_root_entries")
 	if successErr != "" {
 		t.Errorf("success should not write to stderr, got: %s", successErr)
 	}
@@ -595,7 +603,7 @@ func TestConfigNoGlobalStdio(t *testing.T) {
 
 	// 1) Successful show
 	var stdout1, stderr1 bytes.Buffer
-	code1 := runCommandWithWriters([]string{"config", "show", "allowed_roots"}, &stdout1, &stderr1)
+	code1 := runCommandWithWriters([]string{"config", "show", "allowed_root_entries"}, &stdout1, &stderr1)
 	wOut.Close()
 	wErr.Close()
 	globalStdout1 := readPipe(rOut)
@@ -1271,7 +1279,7 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 	// Fields that must validate config.json before returning a value.
 	nonBootstrapFields := []string{
-		"allowed_roots",
+		"allowed_root_entries",
 		"session_ttl",
 		"log_level",
 		"audit_enabled",
@@ -1634,10 +1642,10 @@ func TestConfigShowHelp(t *testing.T) {
 		t.Error("help should mention admin_token exception")
 	}
 
-	// Check all fields from the authoritative registry are listed
-	for _, f := range configFields {
-		if !strings.Contains(out, f.name) {
-			t.Errorf("help should list field %q", f.name)
+	// Check all fields from the authoritative show registry are listed
+	for _, f := range configShowFields() {
+		if !strings.Contains(out, f) {
+			t.Errorf("help should list field %q", f)
 		}
 	}
 }

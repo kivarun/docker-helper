@@ -567,7 +567,7 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 		}
 	}
 
-	t.Run("rich form persists mixed access and projects both forms", func(t *testing.T) {
+	t.Run("rich form persists mixed access and projects the rich entries", func(t *testing.T) {
 		body := fmt.Sprintf(`{"scope":"restricted","allowed_root_entries":[{"path":%q,"access":"read_write"},{"path":%q,"access":"read_only"}]}`, a, b)
 		w := launcherRequest(t, app, http.MethodPut, launcherPath, testAdminToken, body)
 		if w.Code != http.StatusOK {
@@ -577,13 +577,8 @@ func TestLauncherHTTPReplaceRichEntries(t *testing.T) {
 		if l.Scope != "restricted" {
 			t.Fatalf("scope = %q, want restricted", l.Scope)
 		}
-		if len(l.AllowedRoots) != 2 || len(l.AllowedRootEntries) != 2 {
-			t.Fatalf("projections = %v / %v, want two entries each", l.AllowedRoots, l.AllowedRootEntries)
-		}
-		for i := range l.AllowedRootEntries {
-			if l.AllowedRoots[i] != l.AllowedRootEntries[i].Path {
-				t.Errorf("projection divergence at %d: %q vs %+v", i, l.AllowedRoots[i], l.AllowedRootEntries[i])
-			}
+		if len(l.AllowedRootEntries) != 2 {
+			t.Fatalf("entries = %+v, want two entries", l.AllowedRootEntries)
 		}
 		if l.AllowedRootEntries[0].Access != AllowedRootAccessReadWrite || l.AllowedRootEntries[1].Access != AllowedRootAccessReadOnly {
 			t.Errorf("entries = %+v, want lexical order with read_write then read_only", l.AllowedRootEntries)
@@ -904,31 +899,43 @@ func quoteJSON(t *testing.T, s string) string {
 // =============================================================================
 
 // TestPrincipalShowRichProjection proves the show/create projection carries
-// the authoritative rich entries beside the derived path-only form, with
-// identical ordering and non-nil arrays.
+// exactly the authoritative rich entries: the retired 2.x path-only parallel
+// projection is no longer published, the rich array is non-nil with a stable
+// ordering, and internal consumers read only the canonical representation.
 func TestPrincipalShowRichProjection(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	username := "projuser"
 	home := setupPrincipalWithRoots(t, app, username)
 
 	// Creation seeds exactly one stored root (the canonical home,
-	// read_write); the projection carries that rich entry beside the
-	// derived path-only form.
+	// read_write); the projection carries that rich entry.
 	w := launcherRequest(t, app, http.MethodGet, "/principals/"+username, testAdminToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("show: status = %d", w.Code)
+	}
+	// Structural key proof: the retired legacy output field must not exist
+	// at all, independent of the Go struct decoding.
+	var rawKeys map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &rawKeys); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawKeys["allowed_roots"]; ok {
+		t.Error("principal show must not publish the retired allowed_roots path-only output field")
+	}
+	if _, ok := rawKeys["allowed_root_entries"]; !ok {
+		t.Error("principal show must publish the canonical allowed_root_entries projection")
 	}
 	var resp principalResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.AllowedRoots == nil || resp.AllowedRootEntries == nil {
-		t.Fatalf("stored roots must project non-nil arrays, got %v / %v", resp.AllowedRoots, resp.AllowedRootEntries)
+	if resp.AllowedRootEntries == nil {
+		t.Fatal("stored roots must project a non-nil rich array")
 	}
-	if len(resp.AllowedRoots) != 1 || len(resp.AllowedRootEntries) != 1 {
-		t.Fatalf("creation projection lengths = %d / %d, want 1", len(resp.AllowedRoots), len(resp.AllowedRootEntries))
+	if len(resp.AllowedRootEntries) != 1 {
+		t.Fatalf("creation projection length = %d, want 1", len(resp.AllowedRootEntries))
 	}
-	if resp.AllowedRootEntries[0].Path != resp.AllowedRoots[0] || resp.AllowedRootEntries[0].Path != home {
+	if resp.AllowedRootEntries[0].Path != home {
 		t.Errorf("creation entry = %+v, want the canonical home %q", resp.AllowedRootEntries[0], home)
 	}
 	if resp.AllowedRootEntries[0].Access != AllowedRootAccessReadWrite {
@@ -949,13 +956,8 @@ func TestPrincipalShowRichProjection(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.AllowedRoots) != 3 || len(resp.AllowedRootEntries) != 3 {
-		t.Fatalf("projection lengths = %d / %d, want 3", len(resp.AllowedRoots), len(resp.AllowedRootEntries))
-	}
-	for i := range resp.AllowedRootEntries {
-		if resp.AllowedRoots[i] != resp.AllowedRootEntries[i].Path {
-			t.Errorf("projection divergence at %d: %q vs %+v", i, resp.AllowedRoots[i], resp.AllowedRootEntries[i])
-		}
+	if len(resp.AllowedRootEntries) != 3 {
+		t.Fatalf("projection length = %d, want 3", len(resp.AllowedRootEntries))
 	}
 	stored := map[string]AllowedRootAccess{}
 	for _, e := range resp.AllowedRootEntries {
@@ -967,7 +969,8 @@ func TestPrincipalShowRichProjection(t *testing.T) {
 }
 
 // TestPrincipalShowFieldAllowedRootEntries proves the CLI field extraction
-// vocabulary accepts the rich projection field.
+// vocabulary accepts the rich projection field and no longer offers the
+// retired path-only field.
 func TestPrincipalShowFieldAllowedRootEntries(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	username := "fieldprojuser"
@@ -979,6 +982,9 @@ func TestPrincipalShowFieldAllowedRootEntries(t *testing.T) {
 		if f == "allowed_root_entries" {
 			found = true
 		}
+		if f == "allowed_roots" {
+			t.Errorf("principal show fields %v must not offer the retired allowed_roots projection", fields)
+		}
 	}
 	if !found {
 		t.Errorf("principal show fields %v must contain allowed_root_entries", fields)
@@ -986,8 +992,8 @@ func TestPrincipalShowFieldAllowedRootEntries(t *testing.T) {
 }
 
 // TestEffectiveRootsIntrospectionRichProjection proves the read-only
-// introspection responses carry the authoritative rich entries beside the
-// derived path-only form.
+// introspection responses carry exactly the authoritative rich entries: the
+// retired 2.x path-only parallel projection is no longer published.
 func TestEffectiveRootsIntrospectionRichProjection(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	username := "introspectuser"
@@ -1001,17 +1007,22 @@ func TestEffectiveRootsIntrospectionRichProjection(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("introspection: status = %d, body=%s", w.Code, w.Body.String())
 	}
+	var rawKeys map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &rawKeys); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawKeys["allowed_roots"]; ok {
+		t.Error("effective-roots introspection must not publish the retired allowed_roots path-only output field")
+	}
+	if _, ok := rawKeys["allowed_root_entries"]; !ok {
+		t.Error("effective-roots introspection must publish the canonical allowed_root_entries projection")
+	}
 	var resp effectiveRootsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.AllowedRoots) == 0 || len(resp.AllowedRoots) != len(resp.AllowedRootEntries) {
-		t.Fatalf("projection lengths = %d / %d", len(resp.AllowedRoots), len(resp.AllowedRootEntries))
-	}
-	for i := range resp.AllowedRootEntries {
-		if resp.AllowedRoots[i] != resp.AllowedRootEntries[i].Path {
-			t.Errorf("projection divergence at %d", i)
-		}
+	if len(resp.AllowedRootEntries) == 0 {
+		t.Fatal("introspection entries = empty, want the effective rich entries")
 	}
 	if resp.AllowedRootEntries[0].Access != AllowedRootAccessReadWrite {
 		t.Errorf("entry access = %q, want the collapsed read_write grant", resp.AllowedRootEntries[0].Access)

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -131,6 +132,96 @@ func runCompletion(t *testing.T, script string, compWords []string) []string {
 		return nil
 	}
 	return strings.Fields(output)
+}
+
+// runCompletionLive drives the generated completion function in a Bash where
+// the real docker-helper binary (the same build that generated the script) is
+// on PATH, so the machine-facing completion queries execute the production
+// surfaces — the daemon-backed selector/policy/roots queries and the local
+// config query. extraEnv entries override environment variables for the Bash
+// process and every child it spawns.
+func runCompletionLive(t *testing.T, extraEnv []string, compWords []string) []string {
+	t.Helper()
+	cword := len(compWords) - 1
+
+	var sb strings.Builder
+	sb.WriteString(scriptFromBinary(t))
+	sb.WriteString("\n\n")
+	sb.WriteString("COMP_WORDS=(")
+	for _, w := range compWords {
+		sb.WriteString(" " + strconv.Quote(w))
+	}
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=" + strconv.Itoa(cword) + "\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	cmd := exec.Command("bash", "-c", sb.String())
+	cmd.Env = append(os.Environ(),
+		"PATH="+filepath.Dir(getCompletionBinary(t))+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(cmd.Env, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("live bash completion failed: %v\n%s", err, out)
+	}
+
+	output := strings.TrimSpace(string(out))
+	if output == "" {
+		return nil
+	}
+	return strings.Fields(output)
+}
+
+// scriptFromBinary regenerates the completion script from the cached binary.
+// The script subprocesses execute `${_docker_helper_WORDS[0]}` (the typed
+// command name), so the live harness pairs the script with the same build on
+// PATH.
+func scriptFromBinary(t *testing.T) string {
+	t.Helper()
+	binPath := getCompletionBinary(t)
+	out, err := exec.Command(binPath, "completion", "bash").Output()
+	if err != nil {
+		t.Fatalf("completion bash: %v", err)
+	}
+	return string(out)
+}
+
+// startCompletionStubServer is the shared stub operator endpoint for live
+// completion tests: an admin authority whose fixture Principal carries the
+// given effective and stored roots, and whose fixture default Launcher carries
+// the given stored roots. The bearer is whatever the test token file carries.
+func startCompletionStubServer(t *testing.T, principal string, effectiveEntries, storedEntries, launcherEntries []AllowedRootEntry) (endpoint, tokenPath string) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/auth":
+			json.NewEncoder(w).Encode(authResponse{Authority: "admin", Principal: principal})
+		case r.URL.Path == "/principals":
+			json.NewEncoder(w).Encode(listPrincipalsResponse{OK: true, Principals: []principalSummary{{
+				Username: principal, UID: 1234, GID: 1234, Home: "/home/" + principal, Enabled: true,
+			}}})
+		case r.URL.Path == "/principals/"+principal:
+			json.NewEncoder(w).Encode(principalResponse{OK: true, Username: principal, AllowedRootEntries: storedEntries})
+		case r.URL.Path == "/principals/"+principal+"/effective-allowed-roots":
+			json.NewEncoder(w).Encode(effectiveRootsResponse{OK: true, Principal: principal, AllowedRootEntries: effectiveEntries})
+		case r.URL.Path == "/principals/"+principal+"/launchers/default":
+			json.NewEncoder(w).Encode(launcherJSON{ID: "dhl_live1", Principal: principal, Name: "default", Enabled: true, Scope: "restricted", AllowedRootEntries: launcherEntries})
+		case r.URL.Path == "/launchers":
+			json.NewEncoder(w).Encode(listLaunchersResponse{OK: true, Launchers: []launcherJSON{{
+				ID: "dhl_live1", Principal: principal, Name: "default", Enabled: true, Scope: "restricted",
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	tokenPath = filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("live-completion-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	return server.URL, tokenPath
 }
 
 func TestCompletionScriptExitCode(t *testing.T) {
@@ -384,7 +475,7 @@ func TestCompletionConfigShowFields(t *testing.T) {
 		t.Error("expected config show field completions")
 		return
 	}
-	expected := []string{"allowed_roots", "session_ttl", "log_level", "audit_enabled"}
+	expected := []string{"allowed_root_entries", "session_ttl", "log_level", "audit_enabled"}
 	resultsMap := make(map[string]bool)
 	for _, r := range results {
 		resultsMap[r] = true
@@ -600,12 +691,15 @@ func TestCompletionWorksInPlainBash(t *testing.T) {
 func TestConfigShowFieldsVocabulary(t *testing.T) {
 	fields := configShowFields()
 
-	// Must contain allowed_roots.
-	if !slices.Contains(fields, "allowed_roots") {
-		t.Error("config show must contain allowed_roots")
+	// Must contain the rich entries projection.
+	if !slices.Contains(fields, "allowed_root_entries") {
+		t.Error("config show must contain allowed_root_entries")
 	}
 
-	// Must NOT contain legacy allowed_root.
+	// Must NOT contain the retired path-only projection or the legacy scalar.
+	if slices.Contains(fields, "allowed_roots") {
+		t.Error("config show must not contain the retired allowed_roots projection")
+	}
 	if slices.Contains(fields, "allowed_root") {
 		t.Error("config show must not contain legacy allowed_root")
 	}
@@ -678,13 +772,17 @@ func TestConfigUnsetFieldsVocabulary(t *testing.T) {
 func TestCompletionConfigShowNoStaleAllowedRoot(t *testing.T) {
 	script := completionScript(t)
 
-	// config show must contain allowed_roots.
+	// config show must contain the rich entries projection.
 	results := runCompletion(t, script, []string{"docker-helper", "config", "show", ""})
-	if !slices.Contains(results, "allowed_roots") {
-		t.Error("config show completion must contain allowed_roots")
+	if !slices.Contains(results, "allowed_root_entries") {
+		t.Error("config show completion must contain allowed_root_entries")
 	}
 
-	// config show must NOT contain stale allowed_root.
+	// config show must NOT contain the retired path-only projection or the
+	// stale legacy scalar.
+	if slices.Contains(results, "allowed_roots") {
+		t.Error("config show completion must not contain the retired allowed_roots projection")
+	}
 	if slices.Contains(results, "allowed_root") {
 		t.Error("config show completion must not contain stale allowed_root")
 	}
@@ -823,13 +921,14 @@ func TestCompletionAllowedRootAddDirectoryOnly(t *testing.T) {
 	}
 }
 
-func TestCompletionAllowedRootRemoveFilesystemCompletion(t *testing.T) {
+func TestCompletionAllowedRootRemoveStoredRootsScript(t *testing.T) {
 	script := completionScript(t)
 
-	// "config allowed-root remove" should complete filesystem entries.
-	// We verify the generated script contains compgen -f for the remove case.
-	if !strings.Contains(script, "compgen -f") {
-		t.Error("completion script must use 'compgen -f' for filesystem completion in 'remove' case")
+	// "config allowed-root remove" and "config allowed-root set-access"
+	// complete the stored configured roots (the existing-entity universe);
+	// they must not fall back to generic host filesystem completion.
+	if !strings.Contains(script, `config allowed-root list`) {
+		t.Error("completion script must query the canonical stored roots for the config allowed-root mutations")
 	}
 }
 
@@ -975,97 +1074,7 @@ func TestCompletionAllowedRootAddAbsolutePrefixBehavioral(t *testing.T) {
 	}
 }
 
-// TestCompletionAllowedRootRemoveAbsolutePrefixBehavioral verifies that
-// "config allowed-root remove" with an absolute prefix completes both
-// directories and files.
-func TestCompletionAllowedRootRemoveAbsolutePrefixBehavioral(t *testing.T) {
-	script := completionScript(t)
-
-	tmpDir := t.TempDir()
-	dirName := "prefix-dir"
-	fileName := "prefix-file"
-	if err := os.MkdirAll(filepath.Join(tmpDir, dirName), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, fileName), []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	absPrefix := tmpDir + "/prefix"
-
-	var sb strings.Builder
-	sb.WriteString(script)
-	sb.WriteString("\n\n")
-	sb.WriteString("COMP_WORDS=(")
-	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'remove' '" + absPrefix + "'")
-	sb.WriteString(")\n")
-	sb.WriteString("COMP_CWORD=4\n")
-	sb.WriteString("COMPREPLY=()\n")
-	sb.WriteString("_docker_helper_completion\n")
-	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
-
-	cmd := exec.Command("bash", "-c", sb.String())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bash completion failed: %v\n%s", err, out)
-	}
-
-	output := string(out)
-
-	// Must contain both directory and file.
-	if !strings.Contains(output, dirName) {
-		t.Errorf("expected directory %q in 'remove' completions, got: %s", dirName, output)
-	}
-	if !strings.Contains(output, fileName) {
-		t.Errorf("expected file %q in 'remove' completions, got: %s", fileName, output)
-	}
-}
-
-// TestCompletionAllowedRootRemoveFilesystemBehavioral verifies that
-// "config allowed-root remove" completes filesystem entries.
-func TestCompletionAllowedRootRemoveFilesystemBehavioral(t *testing.T) {
-	script := completionScript(t)
-
-	tmpDir := t.TempDir()
-	dirName := "workspaces"
-	fileName := "config.json"
-	if err := os.MkdirAll(filepath.Join(tmpDir, dirName), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, fileName), []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var sb strings.Builder
-	sb.WriteString(script)
-	sb.WriteString("\n\n")
-	sb.WriteString("COMP_WORDS=(")
-	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'remove' ''")
-	sb.WriteString(")\n")
-	sb.WriteString("COMP_CWORD=4\n")
-	sb.WriteString("COMPREPLY=()\n")
-	sb.WriteString("cd " + tmpDir + "\n")
-	sb.WriteString("_docker_helper_completion\n")
-	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
-
-	cmd := exec.Command("bash", "-c", sb.String())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bash completion failed: %v\n%s", err, out)
-	}
-
-	output := strings.TrimSpace(string(out))
-
-	// Must contain both directory and file.
-	if !strings.Contains(output, dirName) {
-		t.Errorf("expected directory %q in 'remove' completions, got: %s", dirName, output)
-	}
-	if !strings.Contains(output, fileName) {
-		t.Errorf("expected file %q in 'remove' completions, got: %s", fileName, output)
-	}
-}
-
-// TestCompletionAllowedRootListNoSuggestionsBehavioral verifies that
+// TestCompletionAllowedRootListFlagsOnlyBehavioral verifies that
 // "config allowed-root list" produces no action or path suggestions.
 func TestCompletionAllowedRootListFlagsOnlyBehavioral(t *testing.T) {
 	script := completionScript(t)
@@ -1167,16 +1176,13 @@ func TestCompletionDoubleDashStopsFlagCompletion(t *testing.T) {
 	}
 }
 
-func TestCompletionNoFlagsAfterPositional(t *testing.T) {
-	// Go flag.FlagSet stops flag parsing at the first positional argument.
-	// Completion must not suggest helper flags after a positional argument.
+func TestCompletionFlagsFollowParserGrammar(t *testing.T) {
+	// The shared parser accepts options after positional arguments, so
+	// completion must keep suggesting them there (until an explicit --).
 	script := completionScript(t)
 	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "alice", "--s"})
-	for _, r := range results {
-		if r == "--system" {
-			t.Error("--system must NOT be suggested after positional argument")
-			break
-		}
+	if !slices.Contains(results, "--system") {
+		t.Errorf("--system must be suggested after the positional argument, got: %v", results)
 	}
 }
 
@@ -1193,18 +1199,6 @@ func TestCompletionFlagsBeforePositional(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("--system must be suggested before positional argument, got: %v", results)
-	}
-}
-
-func TestCompletionFlagEqualsValueDoesNotConsumeNext(t *testing.T) {
-	// --flag=value is self-contained; the following word must not be consumed
-	// as the flag value. If the completion walk consumed the positional that
-	// follows --endpoint=VALUE, flag completion would resume after it
-	// instead of stopping at the positional argument.
-	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "session", "create", "--endpoint=http://localhost:9999", "work", "--s"})
-	if len(results) != 0 {
-		t.Errorf("--flag=value consumed the following word; positional did not stop flag completion, got: %v", results)
 	}
 }
 
@@ -1803,7 +1797,7 @@ func TestCompletionPolicyLauncherAllowedRootAnchors(t *testing.T) {
 	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{rootA, rootB},
+				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA, rootB),
 			})
 			return
 		}
@@ -1852,7 +1846,7 @@ func TestCompletionPolicyLauncherAllowedRootConfinement(t *testing.T) {
 	endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
 			})
 			return
 		}
@@ -1912,7 +1906,7 @@ func TestCompletionPolicySymlinkOutsideNotSuggested(t *testing.T) {
 	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{root},
+				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(root),
 			})
 			return
 		}
@@ -1963,7 +1957,7 @@ func TestCompletionPolicySymlinkInsideSuggested(t *testing.T) {
 	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{root},
+				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(root),
 			})
 			return
 		}
@@ -2009,7 +2003,7 @@ func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
 		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "alice", LauncherID: "dhl_x", Launcher: "agent",
-				AllowedRoots: []string{restricted},
+				AllowedRootEntries: stubEntries(restricted),
 			})
 			return
 		}
@@ -2086,7 +2080,7 @@ func TestCompletionPolicySessionSelectorsNarrowWorkspace(t *testing.T) {
 		}
 		writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 			OK: true, Principal: "michael", LauncherID: "dhl_x", Launcher: "killme2",
-			AllowedRoots: roots,
+			AllowedRootEntries: stubEntries(roots...),
 		})
 	})
 
@@ -2146,7 +2140,7 @@ func TestCompletionPolicyNoDuplicateCandidates(t *testing.T) {
 	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 			OK: true, Principal: "alice", LauncherID: "dhl_x", Launcher: "default",
-			AllowedRoots: []string{wide, nested},
+			AllowedRootEntries: stubEntries(wide, nested),
 		})
 	})
 
@@ -2235,7 +2229,7 @@ func startSelectorsPolicyServer(t *testing.T) (endpoint, tokenPath string, reque
 			}
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "alice", LauncherID: "dhl_alicekillme", Launcher: "killme2",
-				AllowedRoots: roots,
+				AllowedRootEntries: stubEntries(roots...),
 			})
 			return
 		}
@@ -2405,235 +2399,6 @@ func TestCompletionPositionalLauncherMatrix(t *testing.T) {
 		return q.path == "/launchers"
 	}) {
 		t.Fatalf("requests = %+v, want only /auth (no launcher-list disclosure)", snap)
-	}
-}
-
-// TestCompletionLauncherAllowedRootFirstPosition proves the first positional
-// of launcher allowed-root add/remove follows the [LAUNCHER] PATH grammar:
-// with one positional the word is the PATH for the default Launcher, so a
-// relative PATH without a slash is legal and a slash-free word stays
-// grammar-ambiguous — completion offers the union of the daemon-backed
-// Launcher selectors and the PATH candidates, and a failed selector query
-// never removes the PATH candidates — while a word containing a slash can
-// only be the PATH (Launcher names never contain a slash) and completes
-// filesystem candidates without a selector query. Once the first positional
-// is typed, the next position completes the PATH only.
-func TestCompletionLauncherAllowedRootFirstPosition(t *testing.T) {
-	script := completionScript(t)
-
-	dir := t.TempDir()
-	for _, sub := range []string{"work", "workspaces", "alpha", filepath.Join("foo", "bar")} {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "keepme"), []byte("x"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	previousDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(previousDir); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	// start gives each case its own selector server so request-recording
-	// assertions stay per-completion. The launcher selector "worker" shares
-	// the "wo" prefix with the relative PATH candidates, so the union cases
-	// prove neither family of candidates swallows the other.
-	start := func(t *testing.T) (endpoint, tokenPath string, requests *policyQueryRecorder) {
-		t.Helper()
-		launchers := []launcherJSON{
-			{ID: "dhl_ownworker", Principal: "alice", Name: "worker"},
-		}
-		return startAuthoritySelectorServer(t, "principal", "alice", launchers)
-	}
-
-	// First positional, empty word: Launcher selectors and filesystem
-	// candidates, deterministically unique.
-	endpoint, tokenPath, requests := start(t)
-	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
-		"",
-	})
-	if stderr != "" {
-		t.Fatalf("union completion must not write to stderr: %q", stderr)
-	}
-	if !slices.Contains(results, "worker") || !slices.Contains(results, "work") {
-		t.Fatalf("add first-positional union = %v, want the Launcher selector and the directory candidate", results)
-	}
-	if !slices.Contains(results, "workspaces") {
-		t.Fatalf("add first-positional union = %v, want the remaining directory candidates", results)
-	}
-	assertNoDuplicates(t, results)
-	snap := requests.snapshot()
-	if !slices.ContainsFunc(snap, func(q recordedRequest) bool {
-		return q.path == "/launchers"
-	}) {
-		t.Fatalf("selector query missing from %+v", snap)
-	}
-
-	// First positional, slash-free prefix "wo": the selector matching "wo"
-	// and the relative PATH candidates matching "wo" — the directory
-	// candidate must not disappear because the prefix carries no slash.
-	endpoint, tokenPath, _ = start(t)
-	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
-		"wo",
-	})
-	if !slices.Contains(results, "worker") {
-		t.Fatalf("slash-free prefix union = %v, want the matching Launcher selector", results)
-	}
-	if !slices.Contains(results, "work") || !slices.Contains(results, "workspaces") {
-		t.Fatalf("slash-free prefix union = %v, want the matching relative PATH candidates", results)
-	}
-
-	// First positional, empty word, remove: selectors and filesystem
-	// entries (remove accepts any entry, including regular files).
-	endpoint, tokenPath, _ = start(t)
-	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
-		"",
-	})
-	if !slices.Contains(results, "worker") || !slices.Contains(results, "keepme") {
-		t.Fatalf("remove first-positional union = %v, want the Launcher selector and the filesystem entries", results)
-	}
-	assertNoDuplicates(t, results)
-
-	// First positional, slash-free prefix "wo", remove: matching selector
-	// and matching filesystem entries.
-	endpoint, tokenPath, _ = start(t)
-	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
-		"wo",
-	})
-	if !slices.Contains(results, "worker") || !slices.Contains(results, "work") {
-		t.Fatalf("remove slash-free prefix union = %v, want the matching selector and PATH candidates", results)
-	}
-
-	// Slash word "./...": filesystem only, without a selector query (a
-	// Launcher name never contains a slash, so the word can only be PATH).
-	endpoint, tokenPath, requests = start(t)
-	results, stderr = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
-		"./wo",
-	})
-	if stderr != "" {
-		t.Fatalf("PATH completion must not write to stderr: %q", stderr)
-	}
-	if !slices.Contains(results, "./workspaces") {
-		t.Fatalf("slash-word PATH completion = %v, want the directory candidate", results)
-	}
-	if slices.Contains(results, "worker") {
-		t.Fatalf("slash-word completion must not offer Launcher selectors: %v", results)
-	}
-	snap = requests.snapshot()
-	if slices.ContainsFunc(snap, func(q recordedRequest) bool {
-		return q.path == "/launchers"
-	}) {
-		t.Fatalf("slash-word completion must not query selectors: %+v", snap)
-	}
-
-	// Slash word foo/bar: filesystem only, still no selector query.
-	endpoint, tokenPath, requests = start(t)
-	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
-		"foo/ba",
-	})
-	if !slices.Contains(results, "foo/bar") {
-		t.Fatalf("slash-word PATH completion = %v, want the nested directory candidate", results)
-	}
-	if slices.Contains(results, "worker") {
-		t.Fatalf("slash-word completion must not offer Launcher selectors: %v", results)
-	}
-	snap = requests.snapshot()
-	if slices.ContainsFunc(snap, func(q recordedRequest) bool {
-		return q.path == "/launchers"
-	}) {
-		t.Fatalf("slash-word completion must not query selectors: %+v", snap)
-	}
-
-	// Absolute slash word: filesystem only, still no selector query.
-	endpoint, tokenPath, requests = start(t)
-	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
-		filepath.Join(dir, "al"),
-	})
-	if want := filepath.Join(dir, "alpha"); !slices.Contains(results, want) {
-		t.Fatalf("absolute PATH completion = %v, want %v", results, want)
-	}
-	if slices.Contains(results, "worker") {
-		t.Fatalf("slash-word completion must not offer Launcher selectors: %v", results)
-	}
-	snap = requests.snapshot()
-	if slices.ContainsFunc(snap, func(q recordedRequest) bool {
-		return q.path == "/launchers"
-	}) {
-		t.Fatalf("slash-word completion must not query selectors: %+v", snap)
-	}
-
-	// Slash word, remove: any filesystem entry, still no selector query.
-	endpoint, tokenPath, requests = start(t)
-	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
-		"./wo",
-	})
-	if !slices.Contains(results, "./workspaces") {
-		t.Fatalf("remove slash-word completion = %v, want the filesystem candidate", results)
-	}
-	snap = requests.snapshot()
-	if slices.ContainsFunc(snap, func(q recordedRequest) bool {
-		return q.path == "/launchers"
-	}) {
-		t.Fatalf("remove slash-word completion must not query selectors: %+v", snap)
-	}
-
-	// First positional typed: PATH only, no selector names.
-	endpoint, tokenPath, _ = start(t)
-	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath,
-		"worker", "",
-	})
-	if slices.Contains(results, "worker") {
-		t.Fatalf("PATH completion must not re-offer the typed selector: %v", results)
-	}
-	if !slices.Contains(results, "work") {
-		t.Fatalf("add second-positional PATH completion = %v, want the directory candidates", results)
-	}
-
-	// First positional typed, remove: filesystem entries only.
-	endpoint, tokenPath, _ = start(t)
-	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath,
-		"worker", "",
-	})
-	if slices.Contains(results, "worker") {
-		t.Fatalf("PATH completion must not re-offer the typed selector: %v", results)
-	}
-	if !slices.Contains(results, "keepme") {
-		t.Fatalf("remove second-positional PATH completion = %v, want the filesystem entries", results)
-	}
-
-	// Daemon unavailable: the filesystem candidates survive the failed
-	// selector query, silently.
-	results, stderr = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
-		"docker-helper", "launcher", "allowed-root", "add", "--endpoint", "http://127.0.0.1:1", "--token-file", tokenPath,
-		"",
-	})
-	if stderr != "" {
-		t.Fatalf("degraded union completion must not write to stderr: %q", stderr)
-	}
-	if !slices.Contains(results, "work") {
-		t.Fatalf("filesystem fallback after failed selector query = %v, want the PATH candidates", results)
-	}
-	if slices.Contains(results, "worker") {
-		t.Fatalf("failed selector query must not offer selectors: %v", results)
 	}
 }
 
@@ -3028,7 +2793,7 @@ func TestCompletionPolicyFlagBeforeCommandWords(t *testing.T) {
 	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
 			})
 			return
 		}
@@ -3064,7 +2829,7 @@ func TestCompletionPolicyForwardedEndpointForm(t *testing.T) {
 		}
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
 			})
 			return
 		}
@@ -3110,7 +2875,7 @@ func TestCompletionPolicyForwardedValueWithSpaces(t *testing.T) {
 		}
 		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
 			})
 			return
 		}
@@ -3286,7 +3051,7 @@ func TestCompletionPolicyOwnPrincipalInference(t *testing.T) {
 			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
 		case r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet:
 			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
-				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+				OK: true, Principal: "alice", AllowedRootEntries: stubEntries(rootA),
 			})
 		default:
 			http.NotFound(w, r)
@@ -3349,6 +3114,15 @@ func (r *policyQueryRecorder) waitFor(t *testing.T, n int) {
 	}
 }
 
+// stubEntries projects path stubs into rich entries for response stubs.
+func stubEntries(paths ...string) []AllowedRootEntry {
+	entries := make([]AllowedRootEntry, 0, len(paths))
+	for _, p := range paths {
+		entries = append(entries, allowedRootEntry(p))
+	}
+	return entries
+}
+
 // startCompletionPolicyServer is the harness mock daemon for bash-driven
 // completion queries: it records every request through policyQueryRecorder
 // and answers via the given responder.
@@ -3387,7 +3161,7 @@ func TestCompletionPrincipalShowFieldVocabulary(t *testing.T) {
 	// every word completion offers must be accepted by extractPrincipalField.
 	extractable := &principalResponse{
 		Username: "u", UID: 1, GID: 1, Home: "/home/u", Enabled: true,
-		AllowedRoots: []string{"/home/u"},
+		AllowedRootEntries: stubEntries("/home/u"),
 	}
 	for _, name := range results {
 		if _, ok := extractPrincipalField(extractable, name); !ok {
@@ -3395,8 +3169,8 @@ func TestCompletionPrincipalShowFieldVocabulary(t *testing.T) {
 		}
 	}
 
-	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "a"}); !slices.Equal(got, []string{"allowed_roots", "allowed_root_entries"}) {
-		t.Fatalf("principal show michael a<TAB> = %v, want [allowed_roots allowed_root_entries]", got)
+	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "a"}); !slices.Equal(got, []string{"allowed_root_entries"}) {
+		t.Fatalf("principal show michael a<TAB> = %v, want [allowed_root_entries]", got)
 	}
 
 	if got := runCompletion(t, script, []string{"docker-helper", "principal", "show", "michael", "uid", ""}); len(got) != 0 {
@@ -3537,7 +3311,7 @@ func startWorkspaceTreeBoundaryServer(t *testing.T) (endpoint, tokenPath string,
 			}
 			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
 				OK: true, Principal: "michael", LauncherID: "dhl_x", Launcher: "agent",
-				AllowedRoots: roots,
+				AllowedRootEntries: stubEntries(roots...),
 			})
 			return
 		}
@@ -3824,5 +3598,301 @@ func TestCompletionFilesystemRootPathContainingEquals(t *testing.T) {
 		append(append([]string{}, baseWords...), "--filesystem-root", equalsDir+"=read_"))
 	if want := []string{equalsDir + "=read_only", equalsDir + "=read_write"}; !slices.Equal(sortedTrimmed(results), want) {
 		t.Errorf("ACCESS completion after an '=' path = %v, want %v", results, want)
+	}
+}
+
+// =============================================================================
+// RC5 CLI usability: allowed-root completion universes and flag completion
+// =============================================================================
+
+// TestCompletionConfigAllowedRootRemoveStoredRoots proves the existing-entity
+// completion universe of the mutation commands: `config allowed-root remove`
+// and `config allowed-root set-access` offer exactly the stored configured
+// roots of the canonical local config representation — never an arbitrary
+// host filesystem universe.
+func TestCompletionConfigAllowedRootRemoveStoredRoots(t *testing.T) {
+	configured := testAllowedRootDir(t)
+	other := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []string{configured, other},
+		"session_ttl":   "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	setupConfigTestWithData(t, data)
+
+	// Sentinel entries must never leak into the suggestions.
+	sentinelDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sentinelDir, "sentinel-host-dir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"remove", []string{"docker-helper", "config", "allowed-root", "remove", ""}},
+		{"set-access", []string{"docker-helper", "config", "allowed-root", "set-access", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := runCompletionLive(t, nil, tc.args)
+			if len(results) == 0 {
+				t.Fatalf("stored-root completion offered nothing, want the configured roots %q %q", configured, other)
+			}
+			if !slices.Equal(sortedTrimmed(results), sortedTrimmed([]string{configured, other})) {
+				t.Errorf("completion = %v, want exactly the stored roots [%s %s]", results, configured, other)
+			}
+		})
+	}
+}
+
+// TestCompletionConfigAllowedRootRemoveNeverHostFilesystem proves the negative
+// universe: an operator-typed environment directory that is NOT a stored root
+// never appears in the mutation completion, even though it exists on the host.
+func TestCompletionConfigAllowedRootRemoveNeverHostFilesystem(t *testing.T) {
+	configured := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []string{configured},
+		"session_ttl":   "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	setupConfigTestWithData(t, data)
+
+	hostDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(hostDir, "unrelated-host-cache"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	results := runCompletionLive(t, nil, []string{"docker-helper", "config", "allowed-root", "remove", ""})
+	if slices.Contains(results, "unrelated-host-cache") {
+		t.Errorf("host filesystem entry %q must never be suggested for remove, got %v", "unrelated-host-cache", results)
+	}
+	if !slices.Equal(sortedTrimmed(results), []string{configured}) {
+		t.Errorf("completion = %v, want exactly the stored root [%s] and no host entries", results, configured)
+	}
+}
+
+// TestCompletionPrincipalAllowedRootSelectors proves the first positional of
+// the Principal allowed-root family completes from the daemon-backed
+// Principal selector introspection (the same owner the --principal flag
+// uses), driven against the real binary and a live stub daemon.
+func TestCompletionPrincipalAllowedRootSelectors(t *testing.T) {
+	principal := "michael"
+	endpoint, tokenPath := startCompletionStubServer(t, principal, nil, nil, nil)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"add", []string{"docker-helper", "principal", "allowed-root", "add", "--endpoint", endpoint, "--token-file", tokenPath, ""}},
+		{"remove", []string{"docker-helper", "principal", "allowed-root", "remove", "--endpoint", endpoint, "--token-file", tokenPath, ""}},
+		{"set-access", []string{"docker-helper", "principal", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := runCompletionLive(t, nil, tc.args)
+			if !slices.Contains(results, principal) {
+				t.Errorf("Principal selector completion = %v, want the daemon-visible Principal %q", results, principal)
+			}
+		})
+	}
+}
+
+// TestCompletionPrincipalAllowedRootMutationsStoredRoots proves the PATH
+// phase of the existing-entity mutations (remove, set-access) completes the
+// target Principal's STORED roots through the daemon, and the set-access
+// ACCESS positional completes the canonical vocabulary.
+func TestCompletionPrincipalAllowedRootMutationsStoredRoots(t *testing.T) {
+	principal := "michael"
+	ro := AllowedRootEntry{Path: "/home/michael/inputs", Access: AllowedRootAccessReadOnly}
+	rw := AllowedRootEntry{Path: "/home/michael/work", Access: AllowedRootAccessReadWrite}
+	endpoint, tokenPath := startCompletionStubServer(t, principal, nil, []AllowedRootEntry{ro, rw}, nil)
+
+	results := runCompletionLive(t, nil, []string{
+		"docker-helper", "principal", "allowed-root", "remove",
+		"--endpoint", endpoint, "--token-file", tokenPath, principal, "",
+	})
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
+		t.Errorf("remove PATH completion = %v, want exactly the stored roots [%s %s]", results, ro.Path, rw.Path)
+	}
+
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "principal", "allowed-root", "set-access",
+		"--endpoint", endpoint, "--token-file", tokenPath, principal, "",
+	})
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
+		t.Errorf("set-access PATH completion = %v, want exactly the stored roots [%s %s]", results, ro.Path, rw.Path)
+	}
+
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "principal", "allowed-root", "set-access",
+		"--endpoint", endpoint, "--token-file", tokenPath, principal, ro.Path, "",
+	})
+	if want := allowedRootAccessVocabulary(); !slices.Equal(results, want) {
+		t.Errorf("set-access ACCESS completion = %v, want %v", results, want)
+	}
+}
+
+// TestCompletionLauncherAllowedRootAddPolicyRoots proves the add PATH
+// positional completes from the effective Principal ceiling — never the host
+// filesystem — driven through the real binary and a live stub daemon. An
+// unambiguous authority context yields the policy universe; the boundary
+// segments continue into each root.
+func TestCompletionLauncherAllowedRootAddPolicyRoots(t *testing.T) {
+	principal := "michael"
+	effective := []AllowedRootEntry{
+		{Path: "/home/michael", Access: AllowedRootAccessReadWrite},
+		{Path: "/mnt/fake", Access: AllowedRootAccessReadOnly},
+		{Path: "/opt/michael", Access: AllowedRootAccessReadWrite},
+	}
+	endpoint, tokenPath := startCompletionStubServer(t, principal, effective, nil, nil)
+
+	// The empty PATH word renders the next boundary segment toward each
+	// authorized root, and nothing else: no /bin, /etc, /proc, /usr, /var.
+	results := runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "add",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "",
+	})
+	for _, forbidden := range []string{"/bin", "/etc", "/proc", "/usr", "/var"} {
+		if slices.Contains(results, forbidden) {
+			t.Errorf("host namespace %q must never be suggested, got %v", forbidden, results)
+		}
+	}
+	if !slices.Equal(sortedTrimmed(results), []string{"/home", "/mnt", "/opt"}) {
+		t.Errorf("add PATH completion = %v, want the root boundary segments [/home /mnt /opt]", results)
+	}
+
+	// Inside a reached root the ceiling's concrete root continues.
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "add",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "/home/",
+	})
+	if !slices.Equal(results, []string{"/home/michael"}) {
+		t.Errorf("add PATH inside /home/ = %v, want the ceiling root /home/michael", results)
+	}
+}
+
+// TestCompletionLauncherAllowedRootAddAmbiguousAuthorityOffersNothing proves
+// the non-disclosure rule: an admin PATH completion with no resolvable
+// Principal context offers no filesystem universe at all (the daemon stays
+// the authorization authority; completion never falls back to the host).
+func TestCompletionLauncherAllowedRootAddAmbiguousAuthorityOffersNothing(t *testing.T) {
+	endpoint, tokenPath := startCompletionStubServer(t, "michael", nil, nil, nil)
+
+	results := runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "add",
+		"--endpoint", endpoint, "--token-file", tokenPath, "/",
+	})
+	if len(results) != 0 {
+		t.Errorf("ambiguous authority PATH completion = %v, want nothing", results)
+	}
+}
+
+// TestCompletionLauncherAllowedRootMutationsStoredRoots proves the
+// remove/set-access PATH positionals complete the target Launcher's stored
+// roots (the default-Launcher target of the launcher-omitted invocation)
+// through the daemon, and the new-grammar ACCESS/LAUNCHER positions complete
+// their canonical universes.
+func TestCompletionLauncherAllowedRootMutationsStoredRoots(t *testing.T) {
+	principal := "michael"
+	ro := AllowedRootEntry{Path: "/mnt/fake/inputs", Access: AllowedRootAccessReadOnly}
+	rw := AllowedRootEntry{Path: "/mnt/fake/work", Access: AllowedRootAccessReadWrite}
+	endpoint, tokenPath := startCompletionStubServer(t, principal, nil, nil, []AllowedRootEntry{ro, rw})
+
+	results := runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "remove",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "",
+	})
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
+		t.Errorf("remove PATH completion = %v, want exactly the stored launcher roots [%s %s]", results, ro.Path, rw.Path)
+	}
+
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "set-access",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "",
+	})
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
+		t.Errorf("set-access PATH completion = %v, want exactly the stored launcher roots [%s %s]", results, ro.Path, rw.Path)
+	}
+
+	// New grammar: pos 1 is the ACCESS vocabulary.
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "set-access",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, ro.Path, "",
+	})
+	if want := allowedRootAccessVocabulary(); !slices.Equal(results, want) {
+		t.Errorf("set-access ACCESS completion = %v, want %v", results, want)
+	}
+
+	// The final optional LAUNCHER positional completes the daemon-backed
+	// Launcher selectors of the typed --principal context.
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "remove",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, ro.Path, "",
+	})
+	if !slices.Contains(results, "default") {
+		t.Errorf("LAUNCHER positional completion = %v, want the target Launcher names", results)
+	}
+}
+
+// TestCompletionFlagsOfferedAfterPositional proves the flag completion
+// follows the parser grammar: a command that still accepts options offers
+// them after a positional argument (until an explicit --).
+func TestCompletionFlagsOfferedAfterPositional(t *testing.T) {
+	script := completionScript(t)
+
+	results := runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "add", "/mnt/fake", "--a"})
+	if !slices.Contains(results, "--access") {
+		t.Errorf("--access must be offered after the positional PATH, got %v", results)
+	}
+
+	results = runCompletion(t, script, []string{"docker-helper", "launcher", "allowed-root", "add", "/mnt/fake", "--a"})
+	if !slices.Contains(results, "--access") {
+		t.Errorf("launcher add must offer --access after the positional PATH, got %v", results)
+	}
+}
+
+// TestCompletionDoubleDashStillStopsFlags keeps the sentinel contract: after
+// an explicit --, no flags are suggested (everything is positional data).
+func TestCompletionDoubleDashStillStopsFlags(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "add", "/mnt/fake", "--", "--"})
+	if len(results) != 0 {
+		t.Errorf("after --, COMPREPLY must be empty, got: %v", results)
+	}
+}
+
+// TestCompletionUsedNonRepeatableFlagSuppressed proves the used-flag filter:
+// an already-typed non-repeatable flag is not offered again, while the
+// remaining applicable flags of the command still are.
+func TestCompletionUsedNonRepeatableFlagSuppressed(t *testing.T) {
+	script := completionScript(t)
+
+	results := runCompletion(t, script, []string{
+		"docker-helper", "launcher", "allowed-root", "add",
+		"--access", "read_only", "/mnt/fake", "--a",
+	})
+	if slices.Contains(results, "--access") {
+		t.Errorf("--access was already typed and must not be offered again, got %v", results)
+	}
+
+	results = runCompletion(t, script, []string{
+		"docker-helper", "launcher", "allowed-root", "add",
+		"--access", "read_only", "/mnt/fake", "--p",
+	})
+	if !slices.Contains(results, "--principal") {
+		t.Errorf("the remaining --principal flag must still be offered, got %v", results)
+	}
+}
+
+// TestCompletionRepeatableFlagStillOffered proves the repeatable flags keep
+// being offered after a prior occurrence.
+func TestCompletionRepeatableFlagStillOffered(t *testing.T) {
+	script := completionScript(t)
+
+	results := runCompletion(t, script, []string{
+		"docker-helper", "launcher", "create",
+		"--allowed-root", "/first", "--al",
+	})
+	if !slices.Contains(results, "--allowed-root") {
+		t.Errorf("the repeatable --allowed-root must still be offered, got %v", results)
 	}
 }

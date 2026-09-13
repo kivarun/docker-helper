@@ -1385,7 +1385,7 @@ A new workspace root must:
 Forbidden namespaces (the root itself and all descendants):
 
     /bin  /boot  /dev  /etc  /lib  /lib32  /lib64  /libx32
-    /proc /root  /run  /sbin /sys  /usr    /var    /tmp
+    /proc /root  /run  /sbin /sys  /usr    /var
 
 The following namespaces are forbidden at the root but permit descendants:
 
@@ -1394,6 +1394,7 @@ The following namespaces are forbidden at the root but permit descendants:
     /opt/projects     (allowed)
     /mnt/data         (allowed)
     /media/backup     (allowed)
+    /tmp/probe        (allowed; the exact /tmp namespace itself stays forbidden)
 
 When running as root (uid 0), `/home` and `/opt` are permitted as workspace
 roots. Non-root users cannot use these namespaces directly.
@@ -1424,9 +1425,10 @@ Canonical object form in `config.json`:
 
 The legacy string array `"allowed_roots": ["/srv/run-root"]` is still
 accepted and means `read_write`; after a 2.2 write the config persists
-the canonical object form. `config show` displays both projections of
-the same stored entries: the authoritative rich `allowed_root_entries`
-and the 2.x path-only `allowed_roots` compatibility projection.
+the canonical object form. `config show` displays the authoritative rich
+`allowed_root_entries` projection (the 2.x path-only `allowed_roots`
+output projection is retired; the same name remains the config-file
+input field).
 
 Set the mode when adding a root and change it later:
 
@@ -1711,10 +1713,10 @@ Launcher-scoped sessions use the launcher's effective roots:
 
 ```bash
 sudo docker-helper launcher allowed-root add --principal alice \
-    build-agent /srv/workspaces/alice/agent
+    /srv/workspaces/alice/agent build-agent
 sudo docker-helper launcher allowed-root list --principal alice build-agent
 sudo docker-helper launcher allowed-root remove --principal alice \
-    build-agent /srv/workspaces/alice/agent
+    /srv/workspaces/alice/agent build-agent
 sudo docker-helper launcher allowed-root inherit --principal alice build-agent
 ```
 

@@ -165,8 +165,9 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 	// Register command-specific flags
 	inv := c.NewInvocation(fs)
 
-	// Parse flags
-	if err := fs.Parse(args); err != nil {
+	// Parse flags with an interspersed grammar: flags may appear before,
+	// between, or after positional arguments.
+	if err := parseCommandFlags(fs, args); err != nil {
 		// flag.FlagSet already printed the error via SetOutput(stderr)
 		return 2
 	}
@@ -189,7 +190,7 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 		} else if c.MaxPosArgs == 0 {
 			// No positional args allowed (zero-value default behavior)
 			if nArgs > 0 {
-				c.printArgError(stderr, path, positionalArgError(args, fs.Args(), fmt.Sprintf("unexpected argument %q", fs.Arg(0))))
+				c.printArgError(stderr, path, fmt.Sprintf("unexpected argument %q", fs.Arg(0)))
 				return 2
 			}
 		} else {
@@ -199,14 +200,14 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 				return 2
 			}
 			if nArgs > c.MaxPosArgs {
-				c.printArgError(stderr, path, positionalArgError(args, fs.Args(), fmt.Sprintf("too many arguments: expected at most %d, got %d", c.MaxPosArgs, nArgs)))
+				c.printArgError(stderr, path, fmt.Sprintf("too many arguments: expected at most %d, got %d", c.MaxPosArgs, nArgs))
 				return 2
 			}
 		}
 	} else {
 		// Default: reject all positional args
 		if nArgs > 0 {
-			c.printArgError(stderr, path, positionalArgError(args, fs.Args(), fmt.Sprintf("unexpected argument %q", fs.Arg(0))))
+			c.printArgError(stderr, path, fmt.Sprintf("unexpected argument %q", fs.Arg(0)))
 			return 2
 		}
 	}
@@ -223,36 +224,65 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 	return inv.Run(stdout, stderr)
 }
 
-// positionalArgError improves the rejection diagnostic when the user placed a
-// flag after a positional argument. Go's flag package stops parsing at the
-// first non-flag token, so an option-like token typed after a positional is
-// silently left in the positional arguments and rejected with a confusing
-// count message. When such a token is present (and the user did not explicitly
-// terminate flags with "--"), explain the real cause. Otherwise keep the
-// fallback message unchanged.
-func positionalArgError(origArgs, parsedArgs []string, fallback string) string {
-	if tok := optionLikeArgAfterPositional(origArgs, parsedArgs); tok != "" {
-		return fmt.Sprintf("flags must precede positional arguments: unexpected option-like argument %q", tok)
+// parseCommandFlags parses flags with an interspersed grammar: flags may
+// appear before, between, or after positional arguments. Go's flag package
+// stops at the first positional token, so parsing runs in rounds: each round
+// consumes the flag run at the front of the remaining tokens, and a positional
+// token is set aside while parsing resumes after it. The collected positionals
+// are re-presented to the flag set behind a bare "--" terminator as a final
+// round, so fs.Args() ends up holding every positional in order and callers
+// can keep reading positionals from the flag set as before.
+//
+// A bare "--" always terminates flag parsing: it is never consumed as a flag
+// value, and tokens after it are positionals verbatim, even when they look
+// like options. "--flag=--" still parses with the value "--".
+func parseCommandFlags(fs *flag.FlagSet, args []string) error {
+	head, sentinelTail := splitAtBareDoubleDash(args)
+
+	var positionals []string
+	for len(head) > 0 {
+		if head[0] == "-" || !strings.HasPrefix(head[0], "-") {
+			positionals = append(positionals, head[0])
+			head = head[1:]
+			continue
+		}
+		if err := fs.Parse(head); err != nil {
+			return err
+		}
+		rest := fs.Args()
+		if len(rest) == len(head) {
+			// Defensive: parse consumed nothing; treat the token as a
+			// positional to guarantee progress.
+			positionals = append(positionals, rest[0])
+			head = head[1:]
+			continue
+		}
+		head = rest
 	}
-	return fallback
+
+	// Tokens after the bare "--" sentinel are positionals verbatim, even
+	// when they look like options.
+	positionals = append(positionals, sentinelTail...)
+
+	// One final round behind the bare "--" terminator makes fs.Args() hold
+	// the complete positional list; flag values parsed above are already
+	// recorded on the flag set. This round cannot fail, but keep the error
+	// contract uniform.
+	if err := fs.Parse(append([]string{"--"}, positionals...)); err != nil {
+		return err
+	}
+	return nil
 }
 
-// optionLikeArgAfterPositional returns the first option-like token the user
-// placed after a positional argument, or "" when none exists or when the user
-// explicitly terminated flags with "--" (after which option-like tokens are
-// intentional positionals).
-func optionLikeArgAfterPositional(origArgs, parsedArgs []string) string {
-	for _, a := range origArgs {
+// splitAtBareDoubleDash splits args at the first bare "--". Everything after
+// the sentinel is returned verbatim as trailing positionals.
+func splitAtBareDoubleDash(args []string) (head, tail []string) {
+	for i, a := range args {
 		if a == "--" {
-			return ""
+			return args[:i], args[i+1:]
 		}
 	}
-	for _, a := range parsedArgs {
-		if a != "-" && strings.HasPrefix(a, "-") {
-			return a
-		}
-	}
-	return ""
+	return args, nil
 }
 
 // printArgError writes a semantic argument error followed by the specific

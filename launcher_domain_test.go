@@ -587,8 +587,8 @@ func TestLauncherScopeReplaceRestrictedToInheritClearsRoots(t *testing.T) {
 	if !reflect.DeepEqual(updated, committed) {
 		t.Errorf("returned projection %+v does not match committed state %+v", updated, committed)
 	}
-	if got := launcherToJSON(*updated).AllowedRoots; len(got) != 0 || got == nil {
-		t.Errorf("inherit allowed_roots JSON = %v, want the empty canonical set", got)
+	if got := launcherToJSON(*updated).AllowedRootEntries; len(got) != 0 || got == nil {
+		t.Errorf("inherit allowed_root_entries JSON = %v, want the empty canonical set", got)
 	}
 	// Stored rows cleared.
 	var count int

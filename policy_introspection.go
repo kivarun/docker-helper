@@ -7,14 +7,12 @@ import (
 )
 
 // effectiveRootsResponse is the read-only wire response for the Principal
-// effective allowed-roots introspection Query. allowed_roots is the derived
-// 2.1 path-only projection; allowed_root_entries is the authoritative rich
-// projection of the same effective scope — both come from one canonical
-// evaluation, always serialized as JSON arrays (never null).
+// effective allowed-roots introspection Query. allowed_root_entries is the
+// authoritative rich projection of the effective scope, from one canonical
+// evaluation, always serialized as a JSON array (never null).
 type effectiveRootsResponse struct {
 	OK                 bool               `json:"ok"`
 	Principal          string             `json:"principal"`
-	AllowedRoots       []string           `json:"allowed_roots"`
 	AllowedRootEntries []AllowedRootEntry `json:"allowed_root_entries"`
 }
 
@@ -68,10 +66,6 @@ func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Reque
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	roots := snap.AllowedRoots
-	if roots == nil {
-		roots = []string{}
-	}
 	entries := snap.AllowedRootEntries
 	if entries == nil {
 		entries = []AllowedRootEntry{}
@@ -80,23 +74,20 @@ func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Reque
 	writeJSONRaw(ctx, w, http.StatusOK, effectiveRootsResponse{
 		OK:                 true,
 		Principal:          snap.Principal,
-		AllowedRoots:       roots,
 		AllowedRootEntries: entries,
 	})
 }
 
 // sessionCreatePolicyResponse is the read-only wire response for the
-// Session-create policy introspection Query. allowed_roots is the derived
-// 2.1 path-only projection of the effective session-creation scope;
-// allowed_root_entries is the authoritative rich projection of the same
-// scope — both are projected from the one canonical 2.2 evaluation, always
-// serialized as JSON arrays (never null).
+// Session-create policy introspection Query. allowed_root_entries is the
+// authoritative rich projection of the effective session-creation scope,
+// projected from the one canonical 2.2 evaluation, always serialized as a
+// JSON array (never null).
 type sessionCreatePolicyResponse struct {
 	OK                 bool               `json:"ok"`
 	Principal          string             `json:"principal"`
 	LauncherID         string             `json:"launcher_id"`
 	Launcher           string             `json:"launcher"`
-	AllowedRoots       []string           `json:"allowed_roots"`
 	AllowedRootEntries []AllowedRootEntry `json:"allowed_root_entries"`
 }
 
@@ -206,10 +197,6 @@ func (a *App) handleSessionCreatePolicy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	roots := policy.EffectiveAllowedRoots
-	if roots == nil {
-		roots = []string{}
-	}
 	entries := policy.EffectiveAllowedRootEntries
 	if entries == nil {
 		entries = []AllowedRootEntry{}
@@ -220,7 +207,6 @@ func (a *App) handleSessionCreatePolicy(w http.ResponseWriter, r *http.Request) 
 		Principal:          policy.PrincipalName,
 		LauncherID:         policy.LauncherID,
 		Launcher:           policy.LauncherName,
-		AllowedRoots:       roots,
 		AllowedRootEntries: entries,
 	})
 }

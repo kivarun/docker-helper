@@ -83,8 +83,8 @@ const completionAuthorityQueryTimeout = 250 * time.Millisecond
 var completionRootsCommand = &Command{
 	Name:        "roots",
 	Summary:     "Query effective policy roots for shell completion",
-	Usage:       "docker-helper completion roots <principal|session> [...]",
-	Subcommands: []*Command{completionRootsPrincipalCommand, completionRootsSessionCommand},
+	Usage:       "docker-helper completion roots <principal|session|launcher> [...]",
+	Subcommands: []*Command{completionRootsPrincipalCommand, completionRootsSessionCommand, completionRootsLauncherCommand},
 }
 
 // completionRootsPrincipalCommand prints the effective allowed roots of the
@@ -92,6 +92,11 @@ var completionRootsCommand = &Command{
 // when given; otherwise it is inferred from the authenticated credential with
 // the same scope-aware rule the launcher command family uses. The daemon
 // authorizes the query; this command performs no local policy computation.
+//
+// With --stored it instead prints the target Principal's STORED roots — the
+// universe of the Principal allowed-root existing-entity mutations (remove,
+// set-access) — through the same target resolution, so completion offers
+// exactly the roots a real mutation would address.
 //
 // With --authority-only it instead prints exactly one of admin, principal,
 // launcher — the authenticated operator authority for shell-completion
@@ -101,12 +106,13 @@ var completionRootsCommand = &Command{
 var completionRootsPrincipalCommand = &Command{
 	Name:       "principal",
 	Summary:    "Print a Principal's effective allowed roots",
-	Usage:      "docker-helper completion roots principal [--principal USER] [--authority-only] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion roots principal [--principal USER] [--stored] [--authority-only] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		stored := fs.Bool("stored", false, "Print the target Principal's stored roots (the existing-entity mutation universe)")
 		authorityOnly := fs.Bool("authority-only", false, "Print authenticated operator authority for shell completion")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -146,12 +152,23 @@ var completionRootsPrincipalCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
+				if *stored {
+					p, err := client.showPrincipal(username)
+					if err != nil {
+						fmt.Fprintf(stderr, "error: %v\n", err)
+						return 1
+					}
+					for _, root := range allowedRootPaths(p.AllowedRootEntries) {
+						fmt.Fprintln(stdout, root)
+					}
+					return 0
+				}
 				result, err := client.principalEffectiveRoots(username)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				for _, root := range result.AllowedRoots {
+				for _, root := range allowedRootPaths(result.AllowedRootEntries) {
 					fmt.Fprintln(stdout, root)
 				}
 				return 0
@@ -197,7 +214,60 @@ var completionRootsSessionCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				for _, root := range result.AllowedRoots {
+				for _, root := range allowedRootPaths(result.AllowedRootEntries) {
+					fmt.Fprintln(stdout, root)
+				}
+				return 0
+			},
+		}
+	},
+}
+
+// completionRootsLauncherCommand prints the stored allowed roots of the
+// target Launcher, one path per line. The target is the default Launcher of
+// the Principal the typed --principal names; without one the Principal is
+// inferred from the authenticated credential with the same scope-aware rule
+// the launcher command family uses. The launcher allowed-root existing-entity
+// mutations (remove, set-access) address exactly this universe, and the
+// launcher-omitted invocation targets the default Launcher, so completion
+// offers exactly the roots a real mutation with the typed selectors would
+// address. The daemon authorizes the query; this command performs no local
+// policy computation and a query failure degrades silently.
+var completionRootsLauncherCommand = &Command{
+	Name:       "launcher",
+	Summary:    "Print a Launcher's stored allowed roots",
+	Usage:      "docker-helper completion roots launcher [--principal USER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	MinPosArgs: 0,
+	MaxPosArgs: 0,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := &explicitStringFlag{}
+		fs.Var(principal, "principal", "Principal username (inferred from credential when omitted)")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+					Timeout:   completionQueryTimeout,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				username, err := resolveTargetPrincipalForCLI(client, principal.value,
+					errors.New("--principal is required for admin authentication"),
+					errors.New("Launcher credentials cannot query Principal policy"), nil)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				l, err := client.showLauncher(username, defaultLauncherName)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				for _, root := range allowedRootPaths(l.AllowedRootEntries) {
 					fmt.Fprintln(stdout, root)
 				}
 				return 0
@@ -412,8 +482,9 @@ func collectAllCommandPaths(cmd *Command, prefix []string) []string {
 
 // flagInfo holds flag metadata derived from the FlagSet.
 type flagInfo struct {
-	name   string
-	isBool bool
+	name         string
+	isBool       bool
+	isRepeatable bool
 }
 
 // collectFlagInfos collects all flag metadata from a command's flag set.
@@ -429,6 +500,13 @@ func collectFlagInfos(cmd *Command) []flagInfo {
 		// Check if the flag implements IsBoolFlag
 		if bf, ok := any(f.Value).(interface{ IsBoolFlag() bool }); ok {
 			info.isBool = bf.IsBoolFlag()
+		}
+		// Repeatable flags accumulate multiple occurrences, so a typed
+		// occurrence never suppresses the flag in completion. The set is
+		// derived structurally from the registered value types.
+		switch f.Value.(type) {
+		case *stringListFlag, *filesystemRootFlag, *stringSlice:
+			info.isRepeatable = true
 		}
 		infos = append(infos, info)
 	})
@@ -461,6 +539,20 @@ func collectBoolFlagNames(cmd *Command) []string {
 	}
 	// -h and --help are always boolean
 	names = append(names, "h", "help")
+	return names
+}
+
+// collectRepeatableFlagNames collects the repeatable flag names from a
+// command's flag set: flags that accumulate multiple occurrences, so a typed
+// occurrence never suppresses them in completion.
+func collectRepeatableFlagNames(cmd *Command) []string {
+	infos := collectFlagInfos(cmd)
+	var names []string
+	for _, info := range infos {
+		if info.isRepeatable {
+			names = append(names, info.name)
+		}
+	}
 	return names
 }
 
@@ -517,6 +609,10 @@ func generateBashCompletion(w io.Writer) {
 	commandBoolFlags := make(map[string][]string)
 	collectAllBoolFlags(rootCommand, []string{}, commandBoolFlags)
 
+	// Collect repeatable flags for each command path.
+	commandRepeatableFlags := make(map[string][]string)
+	collectAllRepeatableFlags(rootCommand, []string{}, commandRepeatableFlags)
+
 	// Sort command paths for deterministic output.
 	sortedPaths := make([]string, 0, len(commandFlags))
 	for path := range commandFlags {
@@ -530,6 +626,13 @@ func generateBashCompletion(w io.Writer) {
 		sortedBoolPaths = append(sortedBoolPaths, path)
 	}
 	sort.Strings(sortedBoolPaths)
+
+	// Sort repeatable flag paths too.
+	sortedRepeatablePaths := make([]string, 0, len(commandRepeatableFlags))
+	for path := range commandRepeatableFlags {
+		sortedRepeatablePaths = append(sortedRepeatablePaths, path)
+	}
+	sort.Strings(sortedRepeatablePaths)
 
 	fmt.Fprintln(w, "# Bash completion for docker-helper")
 	fmt.Fprintln(w, "# Generated automatically - do not edit")
@@ -724,11 +827,11 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    local flag_path=\"$cmd_path\"")
 	fmt.Fprintln(w, "    if [ $in_help -eq 1 ]; then flag_path=\"help\"; fi")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "    # After -- (option terminator) or after a positional argument, do")
-	fmt.Fprintln(w, "    # not suggest flags. A literal -- as the CURRENT word is an unfinished")
-	fmt.Fprintln(w, "    # long-flag word and completes below like any other dash word.")
-	fmt.Fprintln(w, "    if [ $seen_double_dash -eq 1 ] || [ $seen_positional -eq 1 ]; then")
-	fmt.Fprintln(w, "        # No flag completion after -- or positional")
+	fmt.Fprintln(w, "    # After the explicit -- (option terminator) no flags are suggested:")
+	fmt.Fprintln(w, "    # everything after it is positional data. A literal -- as the")
+	fmt.Fprintln(w, "    # CURRENT word is an unfinished long-flag word and completes")
+	fmt.Fprintln(w, "    # below like any other dash word.")
+	fmt.Fprintln(w, "    if [ $seen_double_dash -eq 1 ]; then")
 	fmt.Fprintln(w, "        case \"$cur\" in")
 	fmt.Fprintln(w, "            -*) return ;;")
 	fmt.Fprintln(w, "        esac")
@@ -749,8 +852,22 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    case \"$cur\" in")
 	fmt.Fprintln(w, "        -*)")
 	fmt.Fprintln(w, "            local flags=($(_docker_helper_flags \"$flag_path\"))")
-	fmt.Fprintln(w, "            local comp_flags=()")
+	fmt.Fprintln(w, "            local used=($(_docker_helper_used_flags))")
+	fmt.Fprintln(w, "            local repeatable=($(_docker_helper_repeatable_flags \"$flag_path\"))")
+	fmt.Fprintln(w, "            local comp_flags=() f u rep skip")
 	fmt.Fprintln(w, "            for f in \"${flags[@]}\"; do")
+	fmt.Fprintln(w, "                # A typed non-repeatable flag is not offered again;")
+	fmt.Fprintln(w, "                # a repeatable one keeps being offered.")
+	fmt.Fprintln(w, "                skip=0")
+	fmt.Fprintln(w, "                for u in \"${used[@]}\"; do")
+	fmt.Fprintln(w, "                    if [ \"$f\" != \"--$u\" ] && [ \"$f\" != \"-$u\" ]; then continue; fi")
+	fmt.Fprintln(w, "                    skip=1")
+	fmt.Fprintln(w, "                    for rep in \"${repeatable[@]}\"; do")
+	fmt.Fprintln(w, "                        if [ \"$rep\" = \"$u\" ]; then skip=0; fi")
+	fmt.Fprintln(w, "                    done")
+	fmt.Fprintln(w, "                    break")
+	fmt.Fprintln(w, "                done")
+	fmt.Fprintln(w, "                if [ \"$skip\" -eq 1 ]; then continue; fi")
 	fmt.Fprintln(w, "                case \"$f\" in")
 	fmt.Fprintln(w, "                    \"$cur\"*) comp_flags+=(\"$f\") ;;")
 	fmt.Fprintln(w, "                esac")
@@ -952,10 +1069,9 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "                # PATH already provided, no further suggestions")
 	fmt.Fprintln(w, "                return")
 	fmt.Fprintln(w, "            fi")
-	fmt.Fprintln(w, "            # Filesystem/directory completion acceptable")
-	fmt.Fprintln(w, "            compopt -o filenames 2>/dev/null || true")
-	fmt.Fprintln(w, "            COMPREPLY=( $(compgen -f -- \"$cur\") )")
-	fmt.Fprintln(w, "            _docker_helper_normalize_path_candidates")
+	fmt.Fprintln(w, "            # The existing-entity universe: exactly the stored roots,")
+	fmt.Fprintln(w, "            # never the generic host filesystem.")
+	fmt.Fprintln(w, "            _docker_helper_complete_config_stored_roots \"$cur\"")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
 	fmt.Fprintln(w, "        \"config unset\")")
@@ -1042,140 +1158,90 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            fi")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
-	fmt.Fprintln(w, `        "principal allowed-root add"|"principal allowed-root remove"|"launcher allowed-root add"|"launcher allowed-root remove")`)
-	fmt.Fprintln(w, "            # USER (principal) positionals take no suggestions; the")
-	fmt.Fprintln(w, "            # next position is the PATH. add suggests directories")
-	fmt.Fprintln(w, "            # only (a managed root must be a directory); remove")
-	fmt.Fprintln(w, "            # accepts any filesystem entry.")
-	fmt.Fprintln(w, "            local pos")
-	fmt.Fprintln(w, "            pos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
-	fmt.Fprintln(w, "            if [ \"$pos\" -eq 1 ]; then")
-	fmt.Fprintln(w, "                compopt -o filenames 2>/dev/null || true")
+	fmt.Fprintln(w, `        "principal allowed-root add"|"principal allowed-root remove"|"principal allowed-root set-access")`)
+	fmt.Fprintln(w, "            # pos 0 is the USER: the same daemon-backed scope-aware")
+	fmt.Fprintln(w, "            # Principal selector introspection the --principal flag")
+	fmt.Fprintln(w, "            # uses. add's pos 1 (PATH) completes generic directories")
+	fmt.Fprintln(w, "            # (a managed root must be a directory, and the add")
+	fmt.Fprintln(w, "            # creates a NEW root under the global ceiling, which is")
+	fmt.Fprintln(w, "            # not authority-visible to every caller). remove and")
+	fmt.Fprintln(w, "            # set-access are existing-entity mutations: their PATH")
+	fmt.Fprintln(w, "            # completes exactly the target Principal's STORED roots;")
+	fmt.Fprintln(w, "            # set-access pos 2 is the canonical access vocabulary.")
+	fmt.Fprintln(w, "            local ppos")
+	fmt.Fprintln(w, "            ppos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
+	fmt.Fprintln(w, "            if [ \"$ppos\" -eq 0 ]; then")
+	fmt.Fprintln(w, "                _docker_helper_complete_selector_value principal \"$cur\"")
+	fmt.Fprintln(w, "            elif [ \"$ppos\" -eq 1 ]; then")
 	fmt.Fprintln(w, "                case \"$cmd_path\" in")
-	fmt.Fprintln(w, `                    *add) COMPREPLY=( $(compgen -d -- "$cur") ) ;;`)
-	fmt.Fprintln(w, `                    *remove) COMPREPLY=( $(compgen -f -- "$cur") ) ;;`)
-	fmt.Fprintln(w, "                esac")
-	fmt.Fprintln(w, "                _docker_helper_normalize_path_candidates")
-	fmt.Fprintln(w, "            elif [ \"$pos\" -eq 0 ]; then")
-	fmt.Fprintln(w, "                case \"$cmd_path\" in")
-	fmt.Fprintln(w, `                "launcher allowed-root add"|"launcher allowed-root remove")`)
-	fmt.Fprintln(w, "                    # The first positional is grammar-ambiguous: with")
-	fmt.Fprintln(w, "                    # one positional the word is the PATH for the")
-	fmt.Fprintln(w, "                    # default Launcher, so a relative PATH without a")
-	fmt.Fprintln(w, "                    # slash is legal. A word containing a slash can")
-	fmt.Fprintln(w, "                    # only be the PATH (Launcher names never contain")
-	fmt.Fprintln(w, "                    # one): complete filesystem candidates without a")
-	fmt.Fprintln(w, "                    # selector query. A slash-free word stays")
-	fmt.Fprintln(w, "                    # ambiguous: offer the union of the daemon-backed")
-	fmt.Fprintln(w, "                    # Launcher selectors and the PATH candidates")
-	fmt.Fprintln(w, "                    # (directories for add, any filesystem entry for")
-	fmt.Fprintln(w, "                    # remove). The union is deterministic and unique;")
-	fmt.Fprintln(w, "                    # resolving the ambiguity stays a matter for the")
-	fmt.Fprintln(w, "                    # daemon, and a failed selector query never")
-	fmt.Fprintln(w, "                    # removes the PATH candidates.")
-	fmt.Fprintln(w, `                    case "$cur" in`)
-	fmt.Fprintln(w, "                    */*)")
-	fmt.Fprintln(w, "                        COMPREPLY=()")
+	fmt.Fprintln(w, `                    "principal allowed-root add")`)
 	fmt.Fprintln(w, "                        compopt -o filenames 2>/dev/null || true")
-	fmt.Fprintln(w, `                        case "$cmd_path" in`)
-	fmt.Fprintln(w, `                            "launcher allowed-root add") COMPREPLY=( $(compgen -d -- "$cur") ) ;;`)
-	fmt.Fprintln(w, `                            "launcher allowed-root remove") COMPREPLY=( $(compgen -f -- "$cur") ) ;;`)
-	fmt.Fprintln(w, "                        esac")
+	fmt.Fprintln(w, `                        COMPREPLY=( $(compgen -d -- "$cur") )`)
 	fmt.Fprintln(w, "                        _docker_helper_normalize_path_candidates")
 	fmt.Fprintln(w, "                        ;;")
 	fmt.Fprintln(w, "                    *)")
-	fmt.Fprintln(w, "                        local -a sel=()")
-	fmt.Fprintln(w, "                        if _docker_helper_complete_selector_value launcher \"$cur\"; then")
-	fmt.Fprintln(w, "                            sel=(\"${COMPREPLY[@]}\")")
-	fmt.Fprintln(w, "                        fi")
-	fmt.Fprintln(w, "                        COMPREPLY=()")
-	fmt.Fprintln(w, "                        compopt -o filenames 2>/dev/null || true")
-	fmt.Fprintln(w, `                        case "$cmd_path" in`)
-	fmt.Fprintln(w, `                            "launcher allowed-root add") COMPREPLY=( $(compgen -d -- "$cur") ) ;;`)
-	fmt.Fprintln(w, `                            "launcher allowed-root remove") COMPREPLY=( $(compgen -f -- "$cur") ) ;;`)
-	fmt.Fprintln(w, "                        esac")
-	fmt.Fprintln(w, "                        _docker_helper_normalize_path_candidates")
-	fmt.Fprintln(w, "                        COMPREPLY=( \"${sel[@]}\" \"${COMPREPLY[@]}\" )")
-	fmt.Fprintln(w, "                        if [ ${#COMPREPLY[@]} -gt 0 ]; then")
-	io.WriteString(w, "                            mapfile -t COMPREPLY < <(printf '%s\\n' \"${COMPREPLY[@]}\" | LC_ALL=C sort -u)\n")
+	fmt.Fprintln(w, "                        _docker_helper_complete_stored_principal_roots \"$cur\"")
+	fmt.Fprintln(w, "                        ;;")
+	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "            elif [ \"$ppos\" -eq 2 ]; then")
+	fmt.Fprintf(w, "                COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            return")
+	fmt.Fprintln(w, "            ;;")
+	fmt.Fprintln(w, `        "launcher allowed-root add"|"launcher allowed-root remove"|"launcher allowed-root set-access")`)
+	fmt.Fprintln(w, "            # PATH-first grammar: pos 0 is the PATH and the optional")
+	fmt.Fprintln(w, "            # trailing positional is the LAUNCHER selector; set-access")
+	fmt.Fprintln(w, "            # pos 1 is the canonical access vocabulary. add's PATH")
+	fmt.Fprintln(w, "            # completes from the effective Principal ceiling — the")
+	fmt.Fprintln(w, "            # same policy query the --workspace flag value uses —")
+	fmt.Fprintln(w, "            # with no generic fallback: the daemon stays the")
+	fmt.Fprintln(w, "            # authorization authority, so an ambiguous authority")
+	fmt.Fprintln(w, "            # context offers nothing. remove and set-access are")
+	fmt.Fprintln(w, "            # existing-entity mutations: their PATH completes exactly")
+	fmt.Fprintln(w, "            # the target Launcher's STORED roots (the default-Launcher")
+	fmt.Fprintln(w, "            # target of the launcher-omitted invocation).")
+	fmt.Fprintln(w, "            local lpos")
+	fmt.Fprintln(w, "            lpos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
+	fmt.Fprintln(w, "            if [ \"$lpos\" -eq 0 ]; then")
+	fmt.Fprintln(w, "                case \"$cmd_path\" in")
+	fmt.Fprintln(w, `                    "launcher allowed-root add")`)
+	fmt.Fprintln(w, "                        if ! _docker_helper_complete_policy_roots principal \"$cur\"; then")
+	fmt.Fprintln(w, "                            COMPREPLY=()")
 	fmt.Fprintln(w, "                        fi")
 	fmt.Fprintln(w, "                        ;;")
-	fmt.Fprintln(w, "                    esac")
-	fmt.Fprintln(w, "                    ;;")
+	fmt.Fprintln(w, "                    *)")
+	fmt.Fprintln(w, "                        _docker_helper_complete_stored_launcher_roots \"$cur\"")
+	fmt.Fprintln(w, "                        ;;")
+	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "            elif [ \"$lpos\" -eq 1 ]; then")
+	fmt.Fprintln(w, "                case \"$cmd_path\" in")
+	fmt.Fprintln(w, `                    "launcher allowed-root set-access")`)
+	fmt.Fprintf(w, "                        COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
+	fmt.Fprintln(w, "                        ;;")
+	fmt.Fprintln(w, "                    *)")
+	fmt.Fprintln(w, "                        # The optional trailing LAUNCHER selector.")
+	fmt.Fprintln(w, "                        _docker_helper_complete_selector_value launcher \"$cur\"")
+	fmt.Fprintln(w, "                        ;;")
+	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "            elif [ \"$lpos\" -eq 2 ]; then")
+	fmt.Fprintln(w, "                case \"$cmd_path\" in")
+	fmt.Fprintln(w, `                    "launcher allowed-root set-access")`)
+	fmt.Fprintln(w, "                        # The optional trailing LAUNCHER selector.")
+	fmt.Fprintln(w, "                        _docker_helper_complete_selector_value launcher \"$cur\"")
+	fmt.Fprintln(w, "                        ;;")
 	fmt.Fprintln(w, "                esac")
 	fmt.Fprintln(w, "            fi")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
 	fmt.Fprintln(w, `        "config allowed-root set-access")`)
-	fmt.Fprintln(w, "            # pos 0 is the PATH (any filesystem entry, matched by the")
-	fmt.Fprintln(w, "            # stored canonical identity); pos 1 is the static access")
-	fmt.Fprintln(w, "            # vocabulary.")
+	fmt.Fprintln(w, "            # Existing-entity mutations of the stored global roots:")
+	fmt.Fprintln(w, "            # pos 0 completes exactly the stored roots; pos 1 is the")
+	fmt.Fprintln(w, "            # canonical access vocabulary.")
 	fmt.Fprintln(w, "            local spos")
 	fmt.Fprintln(w, "            spos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
 	fmt.Fprintln(w, "            if [ \"$spos\" -eq 0 ]; then")
-	fmt.Fprintln(w, "                compopt -o filenames 2>/dev/null || true")
-	fmt.Fprintln(w, "                COMPREPLY=( $(compgen -f -- \"$cur\") )")
-	fmt.Fprintln(w, "                _docker_helper_normalize_path_candidates")
+	fmt.Fprintln(w, "                _docker_helper_complete_config_stored_roots \"$cur\"")
 	fmt.Fprintln(w, "            elif [ \"$spos\" -eq 1 ]; then")
-	fmt.Fprintf(w, "                COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
-	fmt.Fprintln(w, "            fi")
-	fmt.Fprintln(w, "            return")
-	fmt.Fprintln(w, "            ;;")
-	fmt.Fprintln(w, `        "principal allowed-root set-access")`)
-	fmt.Fprintln(w, "            # USER (pos 0) takes no suggestions; pos 1 is the PATH (any")
-	fmt.Fprintln(w, "            # filesystem entry, matched by the stored canonical")
-	fmt.Fprintln(w, "            # identity); pos 2 is the static access vocabulary.")
-	fmt.Fprintln(w, "            local spos")
-	fmt.Fprintln(w, "            spos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
-	fmt.Fprintln(w, "            if [ \"$spos\" -eq 1 ]; then")
-	fmt.Fprintln(w, "                compopt -o filenames 2>/dev/null || true")
-	fmt.Fprintln(w, "                COMPREPLY=( $(compgen -f -- \"$cur\") )")
-	fmt.Fprintln(w, "                _docker_helper_normalize_path_candidates")
-	fmt.Fprintln(w, "            elif [ \"$spos\" -eq 2 ]; then")
-	fmt.Fprintf(w, "                COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
-	fmt.Fprintln(w, "            fi")
-	fmt.Fprintln(w, "            return")
-	fmt.Fprintln(w, "            ;;")
-	fmt.Fprintln(w, `        "launcher allowed-root set-access")`)
-	fmt.Fprintln(w, "            # The first positional is grammar-ambiguous ([LAUNCHER]")
-	fmt.Fprintln(w, "            # PATH ACCESS, same union contract as add/remove); pos 1 is")
-	fmt.Fprintln(w, "            # the PATH (any filesystem entry); pos 2 is the static")
-	fmt.Fprintln(w, "            # access vocabulary.")
-	fmt.Fprintln(w, "            local spos")
-	fmt.Fprintln(w, "            spos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
-	fmt.Fprintln(w, "            if [ \"$spos\" -eq 0 ]; then")
-	fmt.Fprintln(w, "                local -a sel=()")
-	fmt.Fprintln(w, "                if _docker_helper_complete_selector_value launcher \"$cur\"; then")
-	fmt.Fprintln(w, "                    sel=(\"${COMPREPLY[@]}\")")
-	fmt.Fprintln(w, "                fi")
-	fmt.Fprintln(w, "                COMPREPLY=()")
-	fmt.Fprintln(w, "                compopt -o filenames 2>/dev/null || true")
-	fmt.Fprintln(w, "                COMPREPLY=( $(compgen -f -- \"$cur\") )")
-	fmt.Fprintln(w, "                _docker_helper_normalize_path_candidates")
-	fmt.Fprintln(w, "                COMPREPLY=( \"${sel[@]}\" \"${COMPREPLY[@]}\" )")
-	fmt.Fprintln(w, "                if [ ${#COMPREPLY[@]} -gt 0 ]; then")
-	io.WriteString(w, "                    mapfile -t COMPREPLY < <(printf '%s\\n' \"${COMPREPLY[@]}\" | LC_ALL=C sort -u)\n")
-	fmt.Fprintln(w, "                fi")
-	fmt.Fprintln(w, "            elif [ \"$spos\" -eq 1 ]; then")
-	fmt.Fprintln(w, "                # Grammar-ambiguous first positional ([LAUNCHER] PATH")
-	fmt.Fprintln(w, "                # ACCESS union): a first positional containing a slash")
-	fmt.Fprintln(w, "                # can only be the PATH, so the current word is the")
-	fmt.Fprintln(w, "                # ACCESS vocabulary. A slash-free first positional may")
-	fmt.Fprintln(w, "                # be the [LAUNCHER] selector, making the current word")
-	fmt.Fprintln(w, "                # the PATH.")
-	fmt.Fprintln(w, "                local first_pos")
-	fmt.Fprintln(w, "                first_pos=\"$(_docker_helper_positional_value \"$cmd_path\" 0)\"")
-	fmt.Fprintln(w, "                case \"$first_pos\" in")
-	fmt.Fprintln(w, "                    */*)")
-	fmt.Fprintf(w, "                        COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
-	fmt.Fprintln(w, "                        ;;")
-	fmt.Fprintln(w, "                    *)")
-	fmt.Fprintln(w, "                        compopt -o filenames 2>/dev/null || true")
-	fmt.Fprintln(w, "                        COMPREPLY=( $(compgen -f -- \"$cur\") )")
-	fmt.Fprintln(w, "                        _docker_helper_normalize_path_candidates")
-	fmt.Fprintln(w, "                        ;;")
-	fmt.Fprintln(w, "                esac")
-	fmt.Fprintln(w, "            elif [ \"$spos\" -eq 2 ]; then")
 	fmt.Fprintf(w, "                COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
 	fmt.Fprintln(w, "            fi")
 	fmt.Fprintln(w, "            return")
@@ -1283,6 +1349,48 @@ func generateBashCompletion(w io.Writer) {
 		}
 	}
 	fmt.Fprintln(w, "    esac")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Return the repeatable flag names for a command path: flags that")
+	fmt.Fprintln(w, "# accumulate occurrences, so a typed one never suppresses them.")
+	fmt.Fprintln(w, "_docker_helper_repeatable_flags() {")
+	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
+	fmt.Fprintln(w, "    case \"$cmd_path\" in")
+	for _, path := range sortedRepeatablePaths {
+		flags := commandRepeatableFlags[path]
+		if len(flags) > 0 {
+			fmt.Fprintf(w, "        \"%s\") echo \"%s\" ;;\n", path, strings.Join(flags, " "))
+		}
+	}
+	fmt.Fprintln(w, "    esac")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Print the flag names already typed on the current command line before")
+	fmt.Fprintln(w, "# the cursor, one per line: from --flag and --flag=VALUE tokens and")
+	fmt.Fprintln(w, "# short -f tokens. Reads the canonical normalized word view and consumes")
+	fmt.Fprintln(w, "# the value of a value-taking flag, so a value that looks like an option")
+	fmt.Fprintln(w, "# is never mistaken for a typed flag. Tokens after an explicit -- are")
+	fmt.Fprintln(w, "# positional data, not flags.")
+	fmt.Fprintln(w, "_docker_helper_used_flags() {")
+	fmt.Fprintln(w, "    local i=1")
+	fmt.Fprintln(w, "    local w clean")
+	fmt.Fprintln(w, "    while [ \"$i\" -lt \"$_docker_helper_CWORD\" ]; do")
+	fmt.Fprintln(w, "        w=\"${_docker_helper_WORDS[$i]}\"")
+	fmt.Fprintln(w, "        case \"$w\" in")
+	fmt.Fprintln(w, "            --) return ;;")
+	fmt.Fprintln(w, "            -*)")
+	fmt.Fprintln(w, "                clean=\"${w#-}\"")
+	fmt.Fprintln(w, "                case \"$w\" in --*) clean=\"${w#--}\" ;; esac")
+	fmt.Fprintln(w, "                clean=\"${clean%%=*}\"")
+	fmt.Fprintln(w, "                [ -n \"$clean\" ] && echo \"$clean\"")
+	fmt.Fprintln(w, "                if [[ \"$w\" != *=* ]] && _docker_helper_flag_takes_value \"$cmd_path\" \"$w\"; then")
+	fmt.Fprintln(w, "                    i=$((i + 2))")
+	fmt.Fprintln(w, "                    continue")
+	fmt.Fprintln(w, "                fi")
+	fmt.Fprintln(w, "                ;;")
+	fmt.Fprintln(w, "        esac")
+	fmt.Fprintln(w, "        i=$((i + 1))")
+	fmt.Fprintln(w, "    done")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Complete flag values (for flags that take values). The third argument")
@@ -1511,6 +1619,85 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    _docker_helper_complete_within_roots \"$flag\" \"$roots\" \"$prefix\"")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Filter one-path-per-line roots to the candidates matching the typed")
+	fmt.Fprintln(w, "# prefix, line-safely: a stored path is a whole line, so a path")
+	fmt.Fprintln(w, "# containing whitespace survives as a single candidate (compgen -W")
+	fmt.Fprintln(w, "# would split it).")
+	fmt.Fprintln(w, "_docker_helper_complete_exact_roots() {")
+	fmt.Fprintln(w, "    local roots=\"$1\"")
+	fmt.Fprintln(w, "    local prefix=\"$2\"")
+	fmt.Fprintln(w, "    local -a cands=()")
+	fmt.Fprintln(w, "    local r")
+	fmt.Fprintln(w, "    while IFS= read -r r; do")
+	fmt.Fprintln(w, "        [ -n \"$r\" ] || continue")
+	fmt.Fprintln(w, "        case \"$r\" in")
+	fmt.Fprintln(w, "            \"$prefix\"*) cands+=(\"$r\") ;;")
+	fmt.Fprintln(w, "        esac")
+	fmt.Fprintln(w, "    done <<< \"$roots\"")
+	fmt.Fprintln(w, "    COMPREPLY=(\"${cands[@]}\")")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Complete the stored global roots for the config allowed-root")
+	fmt.Fprintln(w, "# existing-entity mutations. The universe is the local canonical")
+	fmt.Fprintln(w, "# stored root list printed by the real CLI (config allowed-root list)")
+	fmt.Fprintln(w, "# — never the generic host filesystem. Prints nothing and fails")
+	fmt.Fprintln(w, "# silently when the list is unavailable.")
+	fmt.Fprintln(w, "_docker_helper_complete_config_stored_roots() {")
+	fmt.Fprintln(w, "    local prefix=\"$1\"")
+	fmt.Fprintln(w, "    local roots")
+	fmt.Fprintln(w, "    if ! roots=\"$(${_docker_helper_WORDS[0]} config allowed-root list 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "        return 1")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    [ -n \"$roots\" ] || return 1")
+	fmt.Fprintln(w, "    _docker_helper_complete_exact_roots \"$roots\" \"$prefix\"")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Complete the target Principal's STORED roots for the Principal")
+	fmt.Fprintln(w, "# existing-entity mutations (remove, set-access). The typed USER")
+	fmt.Fprintln(w, "# positional becomes the --principal context of the bounded query;")
+	fmt.Fprintln(w, "# the operator overrides are forwarded like every other query. Prints")
+	fmt.Fprintln(w, "# nothing and fails silently when the query is unavailable; the")
+	fmt.Fprintln(w, "# existing-entity universe has no generic fallback.")
+	fmt.Fprintln(w, "_docker_helper_complete_stored_principal_roots() {")
+	fmt.Fprintln(w, "    local prefix=\"$1\"")
+	fmt.Fprintln(w, "    local -a opargs=() rootsargs=()")
+	fmt.Fprintln(w, "    mapfile -d '' -t opargs < <(_docker_helper_operator_args \"$cmd_path\")")
+	fmt.Fprintln(w, "    local user")
+	fmt.Fprintln(w, "    user=\"$(_docker_helper_positional_value \"$cmd_path\" 0)\"")
+	fmt.Fprintln(w, "    if [ -n \"$user\" ]; then")
+	fmt.Fprintln(w, "        rootsargs+=(--principal \"$user\")")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    local roots")
+	fmt.Fprintln(w, "    if ! roots=\"$(${_docker_helper_WORDS[0]} completion roots principal --stored \"${opargs[@]}\" \"${rootsargs[@]}\" 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "        return 1")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    [ -n \"$roots\" ] || return 1")
+	fmt.Fprintln(w, "    _docker_helper_complete_exact_roots \"$roots\" \"$prefix\"")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Complete the target Launcher's STORED roots for the launcher")
+	fmt.Fprintln(w, "# existing-entity mutations (remove, set-access). The query targets")
+	fmt.Fprintln(w, "# the default Launcher of the typed --principal context; the")
+	fmt.Fprintln(w, "# operator overrides are forwarded like every other query. Prints")
+	fmt.Fprintln(w, "# nothing and fails silently when the query is unavailable; the")
+	fmt.Fprintln(w, "# existing-entity universe has no generic fallback.")
+	fmt.Fprintln(w, "_docker_helper_complete_stored_launcher_roots() {")
+	fmt.Fprintln(w, "    local prefix=\"$1\"")
+	fmt.Fprintln(w, "    local -a opargs=() rootsargs=()")
+	fmt.Fprintln(w, "    mapfile -d '' -t opargs < <(_docker_helper_operator_args \"$cmd_path\")")
+	fmt.Fprintln(w, "    local p")
+	fmt.Fprintln(w, "    p=\"$(_docker_helper_typed_flag_value principal)\"")
+	fmt.Fprintln(w, "    if [ -n \"$p\" ]; then")
+	fmt.Fprintln(w, "        rootsargs+=(--principal \"$p\")")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    local roots")
+	fmt.Fprintln(w, "    if ! roots=\"$(${_docker_helper_WORDS[0]} completion roots launcher \"${opargs[@]}\" \"${rootsargs[@]}\" 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "        return 1")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    [ -n \"$roots\" ] || return 1")
+	fmt.Fprintln(w, "    _docker_helper_complete_exact_roots \"$roots\" \"$prefix\"")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Collapse doubled separators in the current filesystem candidates.")
 	fmt.Fprintln(w, "# Bash joins a directory prefix ending in a separator with directory")
 	fmt.Fprintln(w, "# entries verbatim, so a word that already carries \"//\" (typed or")
@@ -1699,6 +1886,20 @@ func collectAllBoolFlags(cmd *Command, path []string, flags map[string][]string)
 		newPath := append([]string{}, path...)
 		newPath = append(newPath, sub.Name)
 		collectAllBoolFlags(sub, newPath, flags)
+	}
+}
+
+// collectAllRepeatableFlags recursively collects repeatable flag names for
+// each command path.
+func collectAllRepeatableFlags(cmd *Command, path []string, flags map[string][]string) {
+	if cmd.NewInvocation != nil {
+		cmdPath := strings.Join(path, " ")
+		flags[cmdPath] = collectRepeatableFlagNames(cmd)
+	}
+	for _, sub := range cmd.Subcommands {
+		newPath := append([]string{}, path...)
+		newPath = append(newPath, sub.Name)
+		collectAllRepeatableFlags(sub, newPath, flags)
 	}
 }
 

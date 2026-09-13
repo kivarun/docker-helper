@@ -9984,14 +9984,13 @@ func TestUATWorkloadSELinuxInventoryAssertionsFailClosed(t *testing.T) {
 // TestUATHarnessRichListCLIGrammar runs the rich allowed-root list forms the
 // Release-2 UAT harness uses through the REAL production CLI parser (the same
 // in-process dispatch as the binary) and proves the grammar contract directly:
-// every canonical form (all options before the positional selector) parses,
-// and the flag-after-positional form that the harness must never emit stays
-// rejected with the stable "flags must precede positional arguments" error
-// (exit 2). The runtime outcome after a successful parse (a missing token or
-// config file under an isolated XDG tree, exit 1) is acceptable evidence of
-// parsing; only the parse rejection is decisive. The content-marker tests
-// alone could not catch a grammar violation, so this test executes the
-// parser itself.
+// every canonical form (all options before the positional selector) parses.
+// Since the interspersed-flags grammar accepts options after the positional
+// selector too, the runtime outcome after a successful parse (a missing token
+// or config file under an isolated XDG tree, exit 1) is acceptable evidence of
+// parsing for either form; only the retired parse rejection is decisive. The
+// content-marker tests alone could not catch a grammar violation, so this
+// test executes the parser itself.
 func TestUATHarnessRichListCLIGrammar(t *testing.T) {
 	// Isolated XDG tree: after a successful parse the commands fail fast on
 	// the missing token/config (exit 1) and never touch host state.
@@ -10019,12 +10018,13 @@ func TestUATHarnessRichListCLIGrammar(t *testing.T) {
 		}
 	}
 
-	// The wrong form stays rejected: an option after the positional selector
-	// is a parse error, not a silent success.
+	// The flag-after-positional form parses under the interspersed grammar:
+	// it must reach the runtime failure (missing token, exit 1), never the
+	// retired parse rejection (exit 2 with "flags must precede").
 	var stdout, stderr strings.Builder
 	exit := runCommandWithWriters([]string{"principal", "allowed-root", "list", "--system", "uat-parser-principal", "--json"}, &stdout, &stderr)
-	if exit != 2 || !strings.Contains(stderr.String(), parseRejection) {
-		t.Errorf("flag-after-positional form must stay rejected (exit=%d, stderr=%q)", exit, stderr.String())
+	if exit == 2 && strings.Contains(stderr.String(), parseRejection) {
+		t.Errorf("the retired parse rejection resurfaced for the flag-after-positional form (exit=%d, stderr=%q)", exit, stderr.String())
 	}
 }
 

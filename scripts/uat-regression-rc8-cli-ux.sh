@@ -38,11 +38,11 @@
 #      completion tree reflects the real authority contract (a Principal
 #      credential sees principal show and principal allowed-root list, not
 #      the admin mutations), the positional [LAUNCHER] reuses the --launcher
-#      selector-introspection owner, the grammar-ambiguous first positional
-#      of launcher allowed-root add/remove offers both continuations as a
-#      unique union (a word containing a slash completes the PATH only,
-#      without a selector query), and the --principal selector completion is
-#      command-context aware.
+#      selector-introspection owner, launcher allowed-root add follows the
+#      PATH-first grammar (its PATH completes from the effective Principal
+#      ceiling with no generic host fallback, and the optional trailing
+#      positional is the LAUNCHER selector), and the --principal selector
+#      completion is command-context aware.
 #   G. principal show positional completion — the USER positional reuses
 #      the --principal selector-introspection owner (admin sees the
 #      daemon-visible Principal names, a Principal credential sees exactly
@@ -240,11 +240,11 @@ subcase_a() {
       reg_fail "A: FIELD extraction ($field) = '$(printf '%s' "$out" | head -1 | redact)' want '$want'"
     fi
   done
-  out="$(dh principal show --token-file "$cred_a" "$user_a" allowed_roots 2>&1)"
+  out="$(dh principal show --token-file "$cred_a" "$user_a" allowed_root_entries 2>&1)"
   if printf '%s' "$out" | grep -q '"'"$home_a"'"'; then
-    reg_ok "A: FIELD extraction (allowed_roots) carries the stored roots"
+    reg_ok "A: FIELD extraction (allowed_root_entries) carries the stored roots"
   else
-    reg_fail "A: FIELD extraction (allowed_roots) = $(printf '%s' "$out" | head -1 | redact)"
+    reg_fail "A: FIELD extraction (allowed_root_entries) = $(printf '%s' "$out" | head -1 | redact)"
   fi
 
   # 3. foreign selector: the established non-disclosing not-found.
@@ -745,44 +745,44 @@ subcase_f() {
     reg_fail "F: launcher credential create failed"
   fi
 
-  # 6. launcher allowed-root add <TAB>: the ambiguous first positional
-  #    offers both continuations, uniquely. The PATH candidates for the
-  #    default Launcher are the current directory's entries, so the union
-  #    is driven with the fixture home as the working directory.
-  out="$(cd "$home" && run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" "")"
-  if printf '%s\n' "$out" | grep -qx 'killme' && printf '%s\n' "$out" | grep -qx 'opt'; then
-    reg_ok "F: launcher allowed-root add <TAB> offers the Launcher selector and the directory candidate"
+  # 6. launcher allowed-root add <TAB>: PATH-first grammar. The PATH
+  #    completes from the credential's effective Principal ceiling — the
+  #    boundary segment toward each effective root — never the generic
+  #    host filesystem and never a Launcher selector.
+  local eff_roots expected_top
+  eff_roots="$(dh completion roots principal --token-file "$cred" 2>/dev/null)"
+  expected_top="$(printf '%s\n' "$eff_roots" | sed -n 's|^/||p' | sed 's|/.*$||' | LC_ALL=C sort -u | sed 's|^|/|')"
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" "")"
+  if [ -n "$expected_top" ] && [ "$out" = "$expected_top" ]; then
+    reg_ok "F: launcher allowed-root add <TAB> offers exactly the ceiling boundary segments"
   else
-    reg_fail "F: launcher allowed-root add <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
-  fi
-  local dups
-  dups="$(printf '%s' "$out" | LC_ALL=C sort | uniq -d)"
-  if [ -z "$dups" ]; then
-    reg_ok "F: the first-positional union is unique"
-  else
-    reg_fail "F: duplicate first-positional candidates: $(printf '%s' "$dups" | tr '\n' ' ' | redact)"
+    reg_fail "F: launcher allowed-root add <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want [$expected_top]"
   fi
 
-  # 7. launcher allowed-root add NAME <TAB>: PATH only.
-  out="$(cd "$home" && run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" killme "")"
-  if ! printf '%s\n' "$out" | grep -qx 'killme' && printf '%s\n' "$out" | grep -qx 'opt'; then
-    reg_ok "F: launcher allowed-root add NAME <TAB> completes PATH only"
-  else
-    reg_fail "F: launcher allowed-root add NAME <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
-  fi
-
-  # 8. launcher allowed-root remove equivalents.
-  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" "")"
+  # 7. launcher allowed-root add PATH <TAB>: the optional trailing
+  #    positional is the LAUNCHER selector.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" killme "")"
   if printf '%s\n' "$out" | grep -qx 'killme'; then
-    reg_ok "F: launcher allowed-root remove <TAB> offers the Launcher selector"
+    reg_ok "F: launcher allowed-root add PATH <TAB> completes the LAUNCHER selector"
   else
-    reg_fail "F: launcher allowed-root remove <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+    reg_fail "F: launcher allowed-root add PATH <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
   fi
-  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" killme "")"
-  if ! printf '%s\n' "$out" | grep -qx 'killme'; then
-    reg_ok "F: launcher allowed-root remove NAME <TAB> completes filesystem PATH only"
+
+  # 8. launcher allowed-root remove: the existing-entity universe. With no
+  #    stored roots on the default Launcher the PATH position offers
+  #    nothing (fail quiet, no host filesystem); the optional trailing
+  #    positional after a typed PATH is the LAUNCHER selector.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" "")"
+  if [ -z "$out" ]; then
+    reg_ok "F: launcher allowed-root remove <TAB> offers nothing (no default-Launcher stored roots)"
   else
-    reg_fail "F: launcher allowed-root remove NAME <TAB> re-offered the selector: [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+    reg_fail "F: launcher allowed-root remove <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want nothing"
+  fi
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" "$opt" "")"
+  if printf '%s\n' "$out" | grep -qx 'killme'; then
+    reg_ok "F: launcher allowed-root remove PATH <TAB> completes the LAUNCHER selector"
+  else
+    reg_fail "F: launcher allowed-root remove PATH <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
   fi
 
   # 9. command-context-aware --principal: the own username on the launcher
@@ -876,11 +876,11 @@ subcase_g() {
   #    list is LC_ALL=C sorted: assert_completion compares sorted-unique.)
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "")"
   assert_completion "G: principal show USER <TAB> offers the FIELD vocabulary" \
-    "allowed_root_entries|allowed_roots|enabled|gid|home|uid|username" "$out" || true
+    "allowed_root_entries|enabled|gid|home|uid|username" "$out" || true
 
   # 6. FIELD partial: a typed prefix filters the vocabulary.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" "a")"
-  assert_completion "G: principal show USER a<TAB> offers the allowed_ro* vocabulary" "allowed_root_entries|allowed_roots" "$out" || true
+  assert_completion "G: principal show USER a<TAB> offers the allowed_ro* vocabulary" "allowed_root_entries" "$out" || true
 
   # 7. after a complete USER+FIELD pair: no further positional suggestions.
   out="$(run_completion "$script" /usr/bin/docker-helper --system principal show "$user" uid "")"
@@ -889,7 +889,7 @@ subcase_g() {
   # 8. operator flags (bool and value-taking) never shift the FIELD position.
   out="$(run_completion "$script" /usr/bin/docker-helper principal show --system --token-file "$cred" "$user" "")"
   assert_completion "G: flags do not shift the FIELD position" \
-    "allowed_root_entries|allowed_roots|enabled|gid|home|uid|username" "$out" || true
+    "allowed_root_entries|enabled|gid|home|uid|username" "$out" || true
 
   cleanup_principal "$user"
   cleanup_principal "$user2"

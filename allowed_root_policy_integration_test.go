@@ -46,7 +46,7 @@ func TestAllowedRootListHappyPath(t *testing.T) {
 	}
 
 	// Verify list matches config show
-	showOut, _ := runConfigCLI(t, 0, "config", "show", "allowed_roots")
+	showOut, _ := runConfigCLI(t, 0, "config", "show", "allowed_root_entries")
 	if !strings.Contains(showOut, allowedRoot) {
 		t.Errorf("config show should contain %s, got: %s", allowedRoot, showOut)
 	}
@@ -483,11 +483,13 @@ func TestInitForbiddenUserRootFailsBeforeState(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// Use /tmp which is forbidden
-	forbiddenRoot := filepath.Join(dir, "forbidden")
-	if err := os.MkdirAll(forbiddenRoot, 0755); err != nil {
-		t.Fatal(err)
+	// /var is a forbidden system tree; a real directory under it keeps the
+	// case deterministic now that /tmp is a legal wide namespace.
+	forbiddenRoot, err := os.MkdirTemp("/var/tmp", "dh-forbidden-")
+	if err != nil {
+		t.Skipf("cannot create forbidden probe dir: %v", err)
 	}
+	defer func() { _ = os.RemoveAll(forbiddenRoot) }()
 
 	// Save and restore EffectiveUID
 	origUID := EffectiveUID
@@ -499,7 +501,7 @@ func TestInitForbiddenUserRootFailsBeforeState(t *testing.T) {
 	defer restore()
 
 	var stdout, stderr bytes.Buffer
-	err := runInit(forbiddenRoot, &stdout, &stderr)
+	err = runInit(forbiddenRoot, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error for forbidden root")
 	}
