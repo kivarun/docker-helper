@@ -61,10 +61,14 @@ inside the Launcher's effective allowed roots. The response shows the
 session token once — export it as `DOCKER_HELPER_SESSION_TOKEN` and never
 display it.
 
-HTTP (the installed credential is the Bearer; read it from the canonical
-installed credential file without displaying it):
+HTTP: the installed credential is the Bearer. Read it into a shell
+variable from the canonical installed credential file — the same file
+`docker-helper credential install` wrote and the CLI resolves — without
+printing it, and never echo the variable:
 
 ```bash
+CREDENTIAL="$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token")"
+
 curl --silent --show-error \
   --unix-socket "$SOCKET" \
   -H "Authorization: Bearer $CREDENTIAL" \
