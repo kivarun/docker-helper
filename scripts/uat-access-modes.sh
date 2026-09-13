@@ -502,7 +502,7 @@ WIDEN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
 WIDEN_L_ID="$(printf '%s' "$WIDEN_L_JSON" | json_field id)"
 [ -n "$WIDEN_L_ID" ] || { echo "error: launcher 'widen' create failed: $WIDEN_L_JSON" >&2; exit 1; }
 if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
-    "$WIDEN_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1; then
+    "$WS/pipeline-inputs" "$WIDEN_L_ID" >/dev/null 2>&1; then
   acc_ok "P7 setup: launcher stored a read_write grant on the Principal read_only region"
 else
   acc_fail "P7 setup: launcher could not store the read_write grant"
@@ -522,9 +522,9 @@ SUB_L_ID="$(printf '%s' "$SUB_L_JSON" | json_field id)"
 dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
   "$WS/pipeline-inputs/sub" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
-  "$SUB_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1 || true
+  "$WS/pipeline-inputs" "$SUB_L_ID" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
-  "$SUB_L_ID" "$WS/pipeline-inputs/sub" >/dev/null 2>&1 || true
+  "$WS/pipeline-inputs/sub" "$SUB_L_ID" >/dev/null 2>&1 || true
 acc_ok "P8 setup: launcher sub carries RW -> RO -> RW transitions"
 
 # buildro: the read-only build policy owner (snapshot with only RO). A
@@ -536,7 +536,7 @@ BUILD_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
 BUILD_L_ID="$(printf '%s' "$BUILD_L_JSON" | json_field id)"
 [ -n "$BUILD_L_ID" ] || { echo "error: launcher 'buildro' create failed: $BUILD_L_JSON" >&2; exit 1; }
 if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
-    "$BUILD_L_ID" "$BUILDROOT" read_only >/dev/null 2>&1; then
+    "$BUILDROOT" read_only "$BUILD_L_ID" >/dev/null 2>&1; then
   acc_ok "build-RO setup: launcher buildro carries a single read_only root"
 else
   acc_fail "build-RO setup failed"
@@ -1257,8 +1257,8 @@ fi
 MR_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name multiroot --no-credential 2>/dev/null || true)"
 MR_L_ID="$(printf '%s' "$MR_L_JSON" | json_field id)"
 if [ -n "$MR_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_L_ID" "$MR_HOME" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_L_ID" "$MR_OPT" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_HOME" "$MR_L_ID" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_OPT" "$MR_L_ID" >/dev/null 2>&1; then
   acc_ok "MR setup: multiroot Launcher carries $MR_HOME + $MR_OPT"
 else
   acc_fail "MR setup: multiroot Launcher setup failed: $MR_L_JSON"
@@ -1443,7 +1443,7 @@ rm -rf "$MR_OUTSIDE"
 # preserves the protected transition inside the issued snapshot and a
 # writable parent exposure of it is refused.
 if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
-    "$MR_L_ID" "$MR_OPT/repos" >/dev/null 2>&1; then
+    "$MR_OPT/repos" "$MR_L_ID" >/dev/null 2>&1; then
   acc_ok "MR4 setup: launcher carries the nested read_only repos root"
 else
   acc_fail "MR4 setup: nested read_only launcher root failed"
@@ -1498,7 +1498,7 @@ printf '%s\n' "$MR5_RO_OUT" | grep -q 'MR5-RO-OK' \
 # (flip MR_OPT to read_only, verify, flip back). The snapshot is immutable
 # and the issued RW cache stays writable.
 if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
-    "$MR_L_ID" "$MR_OPT" read_only >/dev/null 2>&1 \
+    "$MR_OPT" read_only "$MR_L_ID" >/dev/null 2>&1 \
     && [ -n "${MR1_ID:-}" ] \
     && snapshot_has "$MR1_ID" "$MR_CACHE" read_write \
     && snapshot_has "$MR1_ID" "$MR_WS" read_write; then
@@ -1515,7 +1515,7 @@ else
   acc_fail "MR6 parent-policy change or snapshot verification failed"
 fi
 dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
-  "$MR_L_ID" "$MR_OPT" read_write >/dev/null 2>&1 || true
+  "$MR_OPT" read_write "$MR_L_ID" >/dev/null 2>&1 || true
 
 # MR7: packaged completion smoke — the candidate's generated Bash completion,
 # sourced in a fresh shell, drives the daemon-backed Session create-policy
