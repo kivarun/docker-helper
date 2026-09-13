@@ -560,9 +560,8 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]Allo
 // the stored entries in first-occurrence order: the stored paths keep their
 // stored spelling and every entry reports its authoritative access (a legacy
 // path-only entry is the read_write grant). The returned entries are the one
-// canonical policy value from which both public `config show` projections
-// (allowed_root_entries) derives; see
-// allowedRootShowProjections.
+// canonical policy value from which the rich `allowed_root_entries` show
+// projection derives.
 func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
 	hasLegacy := raw["allowed_root"] != nil
 	hasNew := raw["allowed_roots"] != nil

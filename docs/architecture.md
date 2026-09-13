@@ -1574,11 +1574,19 @@ final policy boundary at execution time.
 - **`completion roots principal`** — the target Principal's effective
   allowed roots (target from `--principal` or inferred from the
   credential; the daemon authorizes the query; consumes
-  `GET /principals/{username}/effective-allowed-roots`). With
-  `--authority-only` it prints only the authenticated operator authority
-  for shell-completion introspection; completion authority introspection
-  reuses this surface so the parser tree, help tree, and completion tree
-  remain identical (no hidden command nodes).
+  `GET /principals/{username}/effective-allowed-roots`). With `--stored`
+  it instead prints the target Principal's stored roots — the universe of
+  the Principal allowed-root existing-entity mutations — through the same
+  target resolution. With `--authority-only` it prints only the
+  authenticated operator authority for shell-completion introspection;
+  completion authority introspection reuses this surface so the parser
+  tree, help tree, and completion tree remain identical (no hidden
+  command nodes).
+- **`completion roots launcher`** — the target Launcher's stored allowed
+  roots (the default Launcher of the `--principal`-named Principal, or the
+  Principal inferred from the credential; the daemon authorizes the
+  query): the universe of the launcher allowed-root existing-entity
+  mutations.
 - **`completion roots session`** — the Session-create effective allowed
   roots for the current authority (consumes `GET /sessions/create-policy`).
   The typed `--principal`/`--launcher` selectors (both `--flag VALUE` and

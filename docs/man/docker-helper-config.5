@@ -85,13 +85,12 @@ not be or descend into a system namespace.
 .PP
 Forbidden namespaces (the root itself and all descendants):
 .br
-/bin /boot /dev /etc /lib /lib32 /lib64 /libx32 /proc /root /run /sbin /sys /usr /var /tmp
+/bin /boot /dev /etc /lib /lib32 /lib64 /libx32 /proc /root /run /sbin /sys /usr /var
 .PP
 The following namespaces are forbidden at the root but permit descendants:
 .br
-/home (e.g., /home/alice/work is allowed)
-.br
-/srv /opt /mnt /media (e.g., /srv/workspaces is allowed)
+/home /opt /srv /mnt /media /tmp
+(e.g., /home/alice/work, /srv/workspaces, or /tmp/build is allowed)
 .PP
 When running as root (uid 0), /home and /opt are permitted as workspace
 roots. Non-root users cannot use these namespaces directly.
@@ -249,9 +248,9 @@ prepared at session creation time.
 AppArmor uses profile \fBdocker-helper-system\fR at
 \fI/etc/apparmor.d/docker-helper-system\fR. The profile includes the dynamic
 helper-owned boundary state file
-\fI/var/lib/docker-helper/apparmor/managed-boundaries\fR; managed workspace
-boundaries are stored there, outside \fIconfig.json\fR. Authorization roots
-do not own MAC state.
+\fI/var/lib/docker-helper/apparmor/managed-boundaries\fR; managed AppArmor MAC boundaries
+are stored there, outside \fIconfig.json\fR. Authorization roots do not own
+MAC state.
 \fBconfig allowed-root add\fR changes the authorization ceiling only;
 MAC coverage is prepared at session creation time.
 Advanced backend-specific management: \fBdocker-helper apparmor root\fR.

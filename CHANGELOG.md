@@ -4,7 +4,7 @@ This file summarizes user-visible release changes. Commit-level history remains 
 
 ## [2.2.0] (unreleased)
 
-Release 2.2 adds one complete filesystem-policy capability: every allowed root carries an explicit access mode, and system mode independently enforces read-only exposures with the mandatory MAC backend. This entry documents the implemented capability of the release line; the release is not yet tagged or published.
+Release 2.2 adds one complete filesystem-policy capability: every allowed root carries an explicit access mode, and system mode independently enforces read-only exposures with the mandatory MAC backend. This entry documents the implemented capability of the release line; the 2.2.0 stable release is not yet tagged or published (release candidates v2.2.0-rc.1 through v2.2.0-rc.4 exist).
 
 ### Highlights
 
@@ -27,7 +27,7 @@ Release 2.2 adds one complete filesystem-policy capability: every allowed root c
 - When config.json is mutated by 2.2 (`config allowed-root add/set-access`, `reload`, `init`), string roots may be normalized into rich `{"path","access"}` objects on disk. The visible representations differ by contract: `config show` projects the authoritative rich `allowed_root_entries` (the retired path-only `allowed_roots` output is no longer part of the show contract); the default `allowed-root list` output is the path-only human compatibility form and `--json` prints the canonical rich entry array; `session show` separately displays the issued immutable filesystem snapshot with each entry's access mode (it is not a global allowed-root dual projection). Reading a 2.1.1 config unchanged stays valid.
 - SELinux system-mode deployments require `bindfs` for the read-only workload projection. The RPM package declares `bindfs` as a dependency for the SELinux backend; a tarball system install on an enforcing SELinux host requires `bindfs`, and the tarball system installer aborts before any mutation when it is absent. The DEB/AppArmor packaging path does not require `bindfs`.
 
-Full changes since 2.1.1: https://github.com/kivarun/docker-helper/compare/v2.1.1...release/2.2 (release line; no tag has been created yet)
+Full changes since 2.1.1: https://github.com/kivarun/docker-helper/compare/v2.1.1...release/2.2 (release line; release candidates v2.2.0-rc.1 through v2.2.0-rc.4 exist, 2.2.0 stable is not yet tagged)
 
 ## [2.1.1]
 

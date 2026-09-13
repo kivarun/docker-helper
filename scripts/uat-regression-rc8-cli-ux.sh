@@ -50,6 +50,10 @@
 #      positional after USER offers the canonical show-field vocabulary
 #      with prefix filtering, a complete USER+FIELD pair offers nothing,
 #      and operator flags never shift the positional counting.
+#   H. completion assertion trust (self-check) — the completion process
+#      result is contractual evidence: a non-zero completion exit status
+#      fails the assertion before any suggestion comparison, including
+#      when the expected output is empty.
 #
 # Each subcase is independent (collect-all). Docker is not required.
 #
@@ -134,12 +138,21 @@ completion_harness_diag() {
   printf 'harness rc=%s trace=[%s]' "$rc" "$err"
 }
 
-# assert_completion LABEL EXPECTED ACTUAL: EXPECTED and ACTUAL are
+# assert_completion LABEL EXPECTED_ACTUAL_CSV: EXPECTED and ACTUAL are
 # '|'-separated COMPREPLY entries compared as exact ordered sets. The
+# completion PROCESS result is contractual evidence, not diagnostic-only
+# metadata: a non-zero exit status of the last run_completion fails the
+# assertion before any suggestion comparison — an empty (or even matching)
+# suggestion list from a crashed completion is never a valid PASS. The
 # harness rc/stderr from the last run_completion are reported on failure.
 assert_completion() {
   local label="$1" expected_csv="$2" actual="$3"
-  local want have
+  local want have rc
+  rc="$(cat "$TMPDIR_REG14/comp.rc" 2>/dev/null || echo none)"
+  if [ "$rc" != "0" ]; then
+    reg_fail "$label: completion process failed (rc=$rc) before suggestion comparison ($(completion_harness_diag))"
+    return 1
+  fi
   want="$(printf '%s' "$expected_csv" | tr '|' '\n')"
   have="$(printf '%s' "$actual" | LC_ALL=C sort -u)"
   if [ "$want" = "$have" ]; then
@@ -896,6 +909,82 @@ subcase_g() {
   rm -f "$cred" "$lc_file" "$script"
 }
 
+# ---------------------------------------------------------------------------
+# H. completion assertion trust (self-check)
+# ---------------------------------------------------------------------------
+subcase_h() {
+  reg_info "subcase H: completion assertion harness trust (self-check)"
+  local script="$TMPDIR_REG14/harness-fake-completion.bash"
+  cat > "$script" <<'EOF'
+# Fake docker-helper completion registration driven by exported knobs so the
+# harness self-check can prove the assertion's process-success contract:
+# FAKE_COMPLETION_RC is the function's exit status, FAKE_COMPLETION_OUT its
+# stdout.
+_dh_uat_fake_completion() {
+  if [ -n "${FAKE_COMPLETION_OUT:-}" ]; then
+    printf '%s\n' "${FAKE_COMPLETION_OUT:-}"
+  fi
+  return "${FAKE_COMPLETION_RC:-0}"
+}
+complete -F _dh_uat_fake_completion docker-helper
+EOF
+
+  # assert_completion_fails EXPECTED_CSV ACTUAL runs the REAL
+  # assert_completion in a subshell (which contains the reg_fail accounting)
+  # and reports whether the assertion failed.
+  assert_completion_fails() {
+    ( assert_completion "harness self-check" "$1" "$2" ) >/dev/null 2>&1
+  }
+
+  local out
+  # The fake's knobs must be exported: run_completion drives them through a
+  # child bash, and assignment-prefix variables do not reach it.
+  # 1. rc=0 + expected empty -> the assertion passes.
+  export FAKE_COMPLETION_RC=0
+  unset FAKE_COMPLETION_OUT || true
+  out="$(run_completion "$script" docker-helper arg)" || true
+  if ( assert_completion_fails "" "$out" ); then
+    reg_fail "H: rc=0 with empty output and empty expectation must pass the assertion"
+  else
+    reg_ok "H: rc=0 with empty output and empty expectation passes"
+  fi
+
+  # 2. rc=0 + matching non-empty output -> the assertion passes.
+  export FAKE_COMPLETION_RC=0 FAKE_COMPLETION_OUT="--principal"
+  out="$(run_completion "$script" docker-helper arg)" || true
+  if ( assert_completion_fails "--principal" "$out" ); then
+    reg_fail "H: rc=0 with matching non-empty output must pass the assertion"
+  else
+    reg_ok "H: rc=0 with matching non-empty output passes"
+  fi
+
+  # 3. rc!=0 + empty output + expected empty -> the assertion fails (a
+  #    crashed completion with empty stdout must never pass an empty
+  #    expectation).
+  export FAKE_COMPLETION_RC=4
+  unset FAKE_COMPLETION_OUT || true
+  out="$(run_completion "$script" docker-helper arg)" || true
+  if ( assert_completion_fails "" "$out" ); then
+    reg_ok "H: rc=4 with empty output and empty expectation fails the assertion"
+  else
+    reg_fail "H: rc=4 with empty output and empty expectation passed the assertion (false positive)"
+  fi
+
+  # 4. rc!=0 + matching-looking output -> the assertion fails: the exit
+  #    status is checked before any suggestion comparison.
+  export FAKE_COMPLETION_RC=4 FAKE_COMPLETION_OUT="--principal"
+  out="$(run_completion "$script" docker-helper arg)" || true
+  if ( assert_completion_fails "--principal" "$out" ); then
+    reg_ok "H: rc=4 with matching-looking output fails the assertion"
+  else
+    reg_fail "H: rc=4 with matching-looking output passed the assertion (false positive)"
+  fi
+  unset FAKE_COMPLETION_RC FAKE_COMPLETION_OUT || true
+
+  rm -f "$script"
+}
+
+subcase_h
 subcase_a
 subcase_b
 subcase_c

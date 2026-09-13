@@ -298,7 +298,7 @@ var buildCommand = &Command{
 	Help:    `SIGINT/SIGTERM cancels the running build operation.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
-		ctx := fs.String("context", "", "Build context path relative to session workspace")
+		ctx := fs.String("context", "", "Build context path, relative to or absolute within the session workspace")
 		dockerfile := fs.String("dockerfile", "", "Dockerfile path relative to context")
 		image := fs.String("image", "", "Image name and tag")
 		var buildArgs stringSlice
