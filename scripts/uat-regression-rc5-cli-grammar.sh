@@ -182,6 +182,11 @@ subcase_b() {
   home="$(reg_setup_principal "$user")" || { reg_fail "B: fixture setup failed"; return; }
   mkdir -p "$home/b1" "$home/b2"
   chown -R "$user:$user" "$home"
+  if ! dh launcher create --principal "$user" --name build-agent --no-credential >/dev/null 2>&1; then
+    reg_fail "B: launcher create failed"
+    cleanup_principal "$user"
+    return
+  fi
 
   local out rc
   # 1. add PATH LAUNCHER: the new grammar targets the named launcher.
@@ -324,7 +329,8 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   # Seed stored roots in every family through the real CLI.
-  dh config allowed-root add --system "$home/e2" >/dev/null 2>&1
+  dh launcher create --system --principal "$user" --name build-agent --no-credential >/dev/null 2>&1
+  dh config allowed-root add "$home/e2" >/dev/null 2>&1
   dh principal allowed-root add --system "$user" "$home/e1" >/dev/null 2>&1
   dh launcher allowed-root add --system --principal "$user" "$home/e2" build-agent >/dev/null 2>&1
 
