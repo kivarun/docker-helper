@@ -520,9 +520,11 @@ SELinux state. It requires root and uses the existing host MAC authority.
 Unlike the AppArmor command family, there is no
 \fBselinux root list/add/remove\fR. The asymmetry is intentional: AppArmor
 keeps persistent backend-specific managed workspace boundaries, while SELinux MAC
-state is owned by the Session lifecycle — concrete Session workspaces
-receive the necessary SELinux coverage and labels at session creation
-time, and authorization roots are not a second persistent SELinux
+state is owned by the Session lifecycle — the Session lifecycle prepares
+SELinux coverage and labels for the concrete filesystem trees issued in
+the immutable Session filesystem snapshot (the workspace is one such
+tree; in system mode additional issued roots participate in the same
+lifecycle), and authorization roots are not a second persistent SELinux
 root-management API. \fBselinux check\fR remains a read-only diagnostic.
 .SS Agent Commands
 .TP

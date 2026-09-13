@@ -1116,9 +1116,10 @@ Note: `docker-helper config show` (without a field) displays
 
 - **Host path policy** — bind-mount sources are workspace-relative paths
   or absolute host paths, both authorized only through the issued
-  immutable Session filesystem snapshot (workspace + issued filesystem
-  roots). Builds use an isolated staging copy with FD-relative traversal;
-  system-mode run mounts use inode-pinned helper-owned mounts.
+  immutable Session filesystem snapshot (the workspace plus, in system
+  mode, any issued filesystem roots). Builds use an isolated staging copy
+  with FD-relative traversal; system-mode run mounts use inode-pinned
+  helper-owned mounts.
 - **Bearer authentication** — admin token uses SHA-256 hashing with
   constant-time comparison in memory; Principal credentials and session
   tokens use SHA-256 hashes stored in SQLite and resolved through
@@ -1143,10 +1144,17 @@ Note: `docker-helper config show` (without a field) displays
 
 - docker-helper does not sandbox a coding tool that already has direct
   access to the host filesystem.
-- In user mode there is no inode pinning; the issued Session filesystem
-  snapshot (workspace + issued filesystem roots) is still the only
-  authority, and a writable mount spanning a nested read-only region is
-  refused exactly as in system mode.
+- In user mode there is no inode pinning, so the Session filesystem
+  authority remains workspace-only: omitted or empty `filesystem_roots`
+  keep the inherited workspace grant, an explicit root is accepted only
+  when its canonical path equals the canonical workspace (it may narrow
+  the workspace access, including to `read_only`), and additional,
+  disjoint, or child roots are refused before the Session exists. Run
+  mount sources must resolve to the canonical workspace — no
+  subdirectory, file, or disjoint sources — and a writable mount spanning
+  a nested read-only region is refused exactly as in system mode. The
+  pathname-stability argument is the workspace-parent write invariant:
+  the sandboxed agent cannot replace the workspace directory entry.
 - Filesystem policy is pathname-based: policy resolution canonicalizes
   paths (including symlinks), but two authorized pathnames can still
   reference the same inode through a hard link. If one alias lies under a

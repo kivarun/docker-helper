@@ -242,8 +242,9 @@ in \fIconfig.json\fR.
 System mode requires exactly one active backend: AppArmor or enforcing
 SELinux. Neither, both, and permissive SELinux fail closed.
 .PP
-\fBallowed_roots\fR is the global authorization ceiling. MAC coverage
-for a concrete workspace is prepared at session creation time.
+\fBallowed_roots\fR is the global authorization ceiling. MAC coverage for
+the concrete filesystem trees issued in a Session's immutable snapshot is
+prepared at session creation time.
 .SS AppArmor
 AppArmor uses profile \fBdocker-helper-system\fR at
 \fI/etc/apparmor.d/docker-helper-system\fR. The profile includes the dynamic

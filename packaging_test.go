@@ -829,6 +829,94 @@ func TestSkillAgentContract(t *testing.T) {
 	}
 }
 
+// TestCanonicalDocContract verifies the canonical current-design documents
+// keep the Release 2.2 contracts and do not resurrect known-stale claims:
+// the Session MAC lifecycle covers every concrete issued tree (never a
+// workspace-only scope, never preparation-after-persistence), the user-mode
+// filesystem authority stays workspace-only, and the shipped man page does
+// not reduce the SELinux MAC scope to concrete Session workspaces.
+func TestCanonicalDocContract(t *testing.T) {
+	tests := []struct {
+		name           string
+		file           string
+		mustContain    []string
+		mustNotContain []string
+	}{
+		{
+			name: "architecture session MAC lifecycle",
+			file: "docs/architecture.md",
+			mustContain: []string{
+				// The create pipeline prepares MAC coverage before the
+				// create transaction commits.
+				"prepare and verify MAC coverage for every concrete issued tree",
+				// The issued-tree scope statement.
+				"Session MAC preparation covers the concrete filesystem trees issued in",
+			},
+			mustNotContain: []string{
+				// The superseded workspace-only MAC assertion.
+				"workspace-level MAC lifecycle is unchanged",
+				// The superseded persistence-before-preparation ordering.
+				"preparation failure after persistence",
+				"preparation failed after persistence",
+			},
+		},
+		{
+			name: "man SELinux session MAC scope",
+			file: "docs/man/docker-helper.1",
+			mustContain: []string{
+				"concrete filesystem trees issued in",
+			},
+			mustNotContain: []string{
+				// The stale sole-MAC-scope claim.
+				"concrete Session workspaces",
+			},
+		},
+		{
+			name: "skill user-mode filesystem roots",
+			file: ".claude/skills/docker-helper/SKILL.md",
+			mustContain: []string{
+				// The canonical user-mode issuance rule: workspace-only.
+				"an explicit root is accepted only when its canonical path equals the canonical workspace",
+			},
+			mustNotContain: []string{},
+		},
+		{
+			name: "readme user-mode filesystem authority",
+			file: "README.md",
+			mustContain: []string{
+				// The canonical user-mode authority statement.
+				"the Session filesystem authority remains workspace-only",
+			},
+			mustNotContain: []string{
+				// The stale workspace+issued-roots impression in the
+				// user-mode limitation.
+				"workspace + issued filesystem roots) is still the only authority",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := os.ReadFile(tt.file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Prose wrapping must not decide the contract: collapse all
+			// whitespace runs to single spaces before matching.
+			content := strings.Join(strings.Fields(string(data)), " ")
+			for _, s := range tt.mustContain {
+				if !strings.Contains(content, s) {
+					t.Errorf("%s must state %q", tt.file, s)
+				}
+			}
+			for _, s := range tt.mustNotContain {
+				if strings.Contains(content, s) {
+					t.Errorf("%s must not resurrect the stale claim %q", tt.file, s)
+				}
+			}
+		})
+	}
+}
+
 // setupInstallEnv creates a minimal test environment for install.sh.
 // Returns (tempHome, scriptDir, fakeDir, callLog).
 // Each test writes its own systemctl script to fakeDir.

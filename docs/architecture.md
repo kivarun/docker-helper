@@ -608,13 +608,31 @@ derive the immutable Session filesystem snapshot
     (deriveSessionFilesystemSnapshot(effective entries, workspace) inside
      the lifecycleMu create linearization point)
     ↓
-commit Session + snapshot atomically
+derive the concrete issued MAC trees from that snapshot
+    (sessionMACBoundaries(snapshot): every concrete issued tree — the
+     workspace plus, in system mode, every additional issued root)
+    ↓
+prepare and verify MAC coverage for every concrete issued tree through
+the sessionMACCoordinator
+    (CreateSessionBinding holds the coordinator lock across preparation,
+     the create transaction, and any rollback; a preparation failure
+     issues no usable Session or bearer)
+    ↓
+only after successful MAC preparation, commit Session + snapshot
+atomically
     (session ID dhs_<32 hex>, session token dht_<64 hex>,
      SHA-256 hash stored in SQLite; snapshot entries persisted in the
      session_filesystem_snapshot_entries child table in one transaction —
-     a Session bearer becomes usable only after the snapshot commit)
+     the create transaction's commit point; on commit failure the MAC
+     coverage this create prepared is rolled back through the canonical
+     removal owner while still serialized)
+    ↓
+register the Session→MAC binding as a live consumer
+    (only after the DB commit)
     ↓
 return session + one-time token
+    (the bearer is returned only after the whole create boundary has
+     succeeded)
 ```
 
 The whole resolution, narrowing, and snapshot issuance happens inside the
@@ -674,7 +692,8 @@ post-cutover and missing/partial/corrupt snapshot state fails startup closed.
 Data-plane enforcement of the persisted access modes is the current
 Release 2.2 behavior (see
 [Data-plane filesystem authority](#data-plane-filesystem-authority)); the
-workspace-level MAC lifecycle is unchanged.
+Session MAC lifecycle covers every concrete issued tree, not only the
+workspace (see [MAC lifecycle](#mac-lifecycle)).
 
 The HTTP body of `POST /sessions` accepts
 `{"workspace", "launcher_id", "principal", "filesystem_roots"}`:
@@ -1235,10 +1254,14 @@ MAC state follows the concrete Session lifecycle, not the policy ceilings:
   physical MAC boundaries are deduplicated only after every concrete tree
   has passed preparation: several issued trees may resolve onto one
   covering boundary, and one Session contributes at most one consumer to
-  one physical boundary. A preparation failure after persistence fails
-  the creation closed (`mac_preparation_failed`), rolls back what it
-  prepared through the canonical removal owner, and leaves no usable
-  bearer;
+  one physical boundary. Preparation happens before the create
+  transaction: a preparation failure fails the creation closed
+  (`mac_preparation_failed`) and leaves no usable Session or bearer, and
+  a create-transaction failure after successful preparation rolls back
+  the prepared coverage through the canonical removal owner while still
+  serialized. The Session→MAC binding is registered as a live consumer
+  only after the DB commit, and the bearer is returned only after the
+  whole create boundary has succeeded;
 - a deleted, expired, invalidated, or migrated-away session releases its
   complete MAC binding (every issued tree) through the existing release
   paths (including startup reconciliation of stale boundaries). Startup
@@ -1736,8 +1759,14 @@ Retention cleanup
 
 Authentication validates the session token. Request validation checks
 required fields and path relativity per operation. Canonical path
-resolution resolves the workspace-relative inputs through `EvalSymlinks`.
-Boundary validation enforces workspace containment per operation.
+resolution resolves every caller path through `EvalSymlinks`. Filesystem
+authorization is snapshot-based: a relative run source must stay within
+the session workspace — the structural workspace-containment rule of the
+relative grammar — a build context stays workspace-constrained, and an
+absolute run source is authorized through the issued immutable Session
+filesystem snapshot (see [Filesystem policy](#filesystem-policy));
+workspace containment is that structural rule, not a universal
+data-plane authorization rule.
 
 Operation registration uses the operation supervisor admission path
 (`admit`), which atomically checks the shutdown gate and registers the
@@ -2800,7 +2829,7 @@ Result codes:
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
 | `invalid_filesystem_policy` | `filesystem_roots` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
-| `mac_preparation_failed` | MAC boundary preparation failed after persistence |
+| `mac_preparation_failed` | MAC boundary preparation failed before the create transaction (no Session exists) |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
 | `unknown_error` | unexpected error not classified above |
