@@ -199,3 +199,64 @@ func TestCompletionPolicyAnchorsNotPreSlashTerminated(t *testing.T) {
 		}
 	}
 }
+
+// TestCompletionSilentDegradationSucceeds proves the generated completion
+// process succeeds (exit status 0) when a machine-facing query fails or
+// answers nothing: the suggestions stay empty and the function's exit
+// status never leaks a query failure as a crashed completion (the UAT
+// completion assertion treats a non-zero completion exit status as
+// contractual failure).
+func TestCompletionSilentDegradationSucceeds(t *testing.T) {
+	script := completionScript(t)
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "stored Principal roots query unavailable",
+			args: []string{"/nonexistent/docker-helper", "principal", "allowed-root", "remove", "someuser", ""},
+		},
+		{
+			name: "stored Launcher roots query unavailable",
+			args: []string{"/nonexistent/docker-helper", "launcher", "allowed-root", "remove", "--principal", "someuser", ""},
+		},
+		{
+			name: "selector value query unavailable",
+			args: []string{"/nonexistent/docker-helper", "principal", "show", ""},
+		},
+		{
+			name: "stored global roots list unavailable",
+			args: []string{"/nonexistent/docker-helper", "config", "allowed-root", "remove", ""},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sb strings.Builder
+			sb.WriteString(script)
+			sb.WriteString("\nCOMP_WORDS=(")
+			for _, w := range tc.args {
+				sb.WriteString(" '")
+				sb.WriteString(strings.ReplaceAll(w, "'", "'\\''"))
+				sb.WriteString("'")
+			}
+			sb.WriteString(")\n")
+			sb.WriteString("COMP_CWORD=" + strconv.Itoa(len(tc.args)-1) + "\n")
+			sb.WriteString("COMPREPLY=()\n")
+			sb.WriteString("_docker_helper_completion\n")
+			sb.WriteString("printf 'RC=%s\\n' \"$?\"\n")
+			sb.WriteString("printf 'REPLY=%s\\n' \"${COMPREPLY[*]}\"\n")
+
+			out, err := exec.Command("bash", "-c", sb.String()).CombinedOutput()
+			if err != nil {
+				t.Fatalf("completion run failed: %v\n%s", err, out)
+			}
+			text := string(out)
+			if !strings.Contains(text, "RC=0") {
+				t.Errorf("the degraded completion must succeed, got:\n%s", text)
+			}
+			if !strings.Contains(text, "REPLY=\n") {
+				t.Errorf("the degraded completion must offer nothing, got:\n%s", text)
+			}
+		})
+	}
+}
