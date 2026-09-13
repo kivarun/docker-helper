@@ -372,6 +372,7 @@ var agentCommandNames = map[string]struct{}{
 	"build":    {},
 	"run":      {},
 	"registry": {},
+	"self":     {},
 }
 
 // generalCommandNames lists commands useful in any context.

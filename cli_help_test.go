@@ -683,6 +683,45 @@ func TestRootHelpAdminTokenEntry(t *testing.T) {
 	}
 }
 
+// TestRootHelpSelfUnderAgentCommands verifies the accepted CLI contract of
+// the agent-facing classification: `self` is an agent-facing/read-only
+// command (docs/architecture.md CLI conventions), so root help groups it
+// under Agent commands and never under Operator commands.
+func TestRootHelpSelfUnderAgentCommands(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	out := stdout.String()
+
+	agentSection := extractHelpSection(out, "Agent commands:")
+	if !strings.Contains(agentSection, "self") {
+		t.Errorf("root help must list 'self' under Agent commands, got:\n%s", agentSection)
+	}
+
+	opSection := extractHelpSection(out, "Operator commands:")
+	for _, line := range strings.Split(opSection, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "self ") || strings.TrimSpace(line) == "self" {
+			t.Errorf("root help must not list 'self' under Operator commands:\n%s", opSection)
+		}
+	}
+}
+
+// extractHelpSection returns one grouped section of the root help output
+// (from the section header to the next blank-line-terminated block).
+func extractHelpSection(out, header string) string {
+	start := strings.Index(out, header)
+	if start < 0 {
+		return ""
+	}
+	section := out[start:]
+	if end := strings.Index(section, "\n\n"); end >= 0 {
+		section = section[:end]
+	}
+	return section
+}
+
 // TestRootHelpNoAdminCommand verifies root help no longer contains the old
 // root-level "admin" command (the admin token is now managed via admin-token).
 func TestRootHelpNoAdminCommand(t *testing.T) {
