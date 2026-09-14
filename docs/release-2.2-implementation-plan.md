@@ -838,3 +838,36 @@ Release 2.2 is complete only when:
 - exact candidate artifacts pass the full affected acceptance matrix;
 - current docs/man/help are internally consistent;
 - compare against `v2.1.1` contains no Release 3 production feature.
+
+## Mandatory external-security-audit closure before stable promotion
+
+The September 2026 external audit of the 2.0.0 line is rebased onto current
+Release 2.2 through
+[`release-2.2-security-closure.md`](release-2.2-security-closure.md).
+That document is a mandatory release-gate overlay, not an optional hardening
+backlog.
+
+The release cycle after the current feature/RC fixes is therefore:
+
+```text
+SC0 current-line finding rebase/classification
+ -> SC1 immediate trust-boundary/parser/MAC closure
+ -> SC2 bounded-resource and liveness closure
+ -> SC3 explicit architecture dispositions
+ -> SC4 bounded adjacent hardening
+ -> hostile cross-boundary UAT on exact candidate artifacts
+ -> existing Phase 2.2.7 final gate
+ -> stable v2.2.0
+```
+
+Stable promotion is blocked while any C/H/M finding remains `VERIFY_CURRENT` or
+`BLOCKER_FIX`, or while a `BLOCKER_DECISION` lacks an accepted architecture and
+release-owner disposition. The security closure must preserve the existing
+owners and Release 2.2 contracts; it must not import Release 3 Engine, quota,
+scheduler, desired-state, or generic resource-control architecture.
+
+The existing Release 2.2 completion criteria above remain necessary but are no
+longer sufficient by themselves. The additional security exit criteria and
+required hostile exact-artifact UAT are owned by
+`release-2.2-security-closure.md`; both gates must be green on the same final
+candidate before a stable tag is created.
