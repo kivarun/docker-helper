@@ -454,6 +454,14 @@ every stored root is available on the same commands through the explicit
 HTTP/JSON projections, and `session show` separately displays the issued
 immutable filesystem snapshot with each entry's access mode.
 
+`config allowed-root list` is a recovery-safe stored inspection: a stored
+root whose directory was deleted outside docker-helper keeps its cleaned
+canonical identity in the list (and in the remove/set-access completion
+universe) even when daemon startup or reload fail closed on it, so the
+stale entry stays visible and addressable for recovery. Runtime validation
+is unchanged: startup, reload, and `add` still refuse a runtime config
+whose stored roots do not exist.
+
 Session creation exposes the issuance-time filesystem roots through one
 repeatable flag on the existing command:
 
