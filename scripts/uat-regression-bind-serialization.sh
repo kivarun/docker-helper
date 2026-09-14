@@ -16,9 +16,12 @@
 #   2. a hostile option-injection spelling stays writable at the exact
 #      intended target (the container path literally is
 #      "/mnt/dta,readonly") — the crafted data injects no option;
-#   3. a CRLF target, which the Docker mount grammar cannot represent
+#   3. a CRLF target, which the encoding/csv record cannot represent
 #      faithfully, is refused invalid_mount before any Docker state exists;
-#   4. every proof reads the real container state via docker inspect (taken
+#   4. a trailing-space target, which survives the CSV record but fails the
+#      Docker MountOpt.Set value validation, is likewise refused
+#      invalid_mount before any Docker state exists;
+#   5. every proof reads the real container state via docker inspect (taken
 #      while the container is running — run containers are removed on exit)
 #      and the real container filesystem, not helper responses alone.
 #
@@ -220,11 +223,40 @@ else
   reg_fail "Docker state was created for an unrepresentable mount request"
 fi
 
+# ---------------------------------------------------------------------------
+# 4. Trailing-space target — survives CSV but fails the Docker MountOpt.Set
+#    value validation, refused before any Docker state
+# ---------------------------------------------------------------------------
+reg_session "$cred" "$ws" || { reg_fail "fourth session create failed"; reg_result; }
+SID_SP="$REG_SESSION_ID"; TOK_SP="$REG_SESSION_TOKEN"
+
+SP_TARGET="/mnt/probe "
+RUN4_LOG="/tmp/uat-reg22-space.log"
+DOCKER_HELPER_SESSION_TOKEN="$TOK_SP" \
+  dh run --image "$IMAGE" \
+    --mount "$src:$SP_TARGET:ro" \
+    -- sh -c 'echo SHOULD-NOT-RUN' \
+  >"$RUN4_LOG" 2>&1
+RC_SP=$?
+
+if [ "$RC_SP" -ne 0 ] && grep -q 'invalid_mount' "$RUN4_LOG"; then
+  reg_ok "trailing-space target refused invalid_mount before Docker (Docker value validation)"
+else
+  reg_fail "trailing-space target was not refused invalid_mount (rc=$RC_SP, log: $(cat "$RUN4_LOG" | redact | tail -3))"
+fi
+if [ "$(session_container_count "$SID_SP")" = "0" ]; then
+  reg_ok "no container/state residue exists after the whitespace-mount refusal"
+else
+  reg_fail "Docker state was created for a whitespace-padded mount target"
+fi
+
 # Cleanup: remove the proof containers of this group.
 for sid in "$SID_RO" "$SID_RW"; do
   for cid in $(docker ps -aq --filter "label=com.dockerhelper.session.id=$sid" 2>/dev/null); do
     docker rm -f "$cid" >/dev/null 2>&1 || true
   done
 done
+# The refused sessions (CRLF, trailing space) never started a container;
+# assert their emptiness was already proven above.
 
 reg_result
