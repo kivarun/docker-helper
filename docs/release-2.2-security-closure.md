@@ -136,7 +136,7 @@ risk rather than by the audit's original severity ordering.
 | **M10** | Allowed-root symlinks are recomputed after validation without reapplying the safety policy | **CLOSED_CURRENT** | SC0 | The old raw-symlink re-resolution path is gone: current effective allowed-root policy is composed from canonical paths and the Session snapshot persists the issued canonical identity; later data-plane decisions consume that snapshot rather than re-resolving the original stored spelling. Preserve the symlink/path-policy regressions. |
 | **M11** | SELinux fcontext input escapes regex syntax but not file-format/control-character hazards | **BLOCKER_FIX** | SC1 | Current workspace/root policy does not reject newline/control characters and `escapeFcontextPath` only escapes regex metacharacters. Reject unsupported control characters at the canonical host-path policy owner, not only inside the SELinux backend. |
 | **M12** | `semanage fcontext` output parser disagrees with the producer's long-path spacing | **BLOCKER_FIX** | SC1 | Parse the real `semanage` output grammar robustly and add long-path/backend tests; do not preserve a width-dependent split rule. |
-| **M13** | Crafted bind-mount target can desynchronize Docker `--mount` CSV and lose `readonly` | **CLOSED_CURRENT** | SC1 | One canonical serializer owns every Docker bind form (user mounts, trusted CA injection, helper-socket runtime projection); the grammar is the authoritative Docker CLI parser (one CSV record read once, `key=value` fields or boolean flags) and the encoding is Go `encoding/csv` — the Docker-sanctioned quoting — so a crafted source/target stays exactly one field and cannot add an option, change the target, remove `readonly`, add `rw`, change type/source, or create a second logical field. The one unrepresentable case (CRLF normalizes to LF in the CSV reader) fails closed before any Docker state exists. Hostile real-Docker evidence proves exact target and access mode survive Docker parsing; no ad-hoc concatenation per caller remains. |
+| **M13** | Crafted bind-mount target can desynchronize Docker `--mount` CSV and lose `readonly` | **BLOCKER_FIX** | SC1 | One canonical serializer owns every Docker bind form (user mounts, trusted CA injection, helper-socket runtime projection); the grammar is the authoritative Docker CLI parser (one CSV record read once, `key=value` fields or boolean flags) and the encoding is Go `encoding/csv` — the Docker-sanctioned quoting — so a crafted source/target stays exactly one field and cannot add an option, change the target, remove `readonly`, add `rw`, change type/source, or create a second logical field. Representability is a three-boundary invariant: the value must round-trip through the CSV record, survive Docker `MountOpt.Set` value validation unchanged (non-empty, no leading/trailing whitespace), and be exec-argv representable (no NUL); failing values are refused in the one serializer owner. The Docker argv is built and serialized before the operation admission, so a serialization failure of a daemon-owned value leaves no admitted Operation. Review-round-2 blocker fixes are in progress (BLOCKER_FIX until the exact-candidate UAT on the new final SHA is GREEN). |
 
 The Low findings `L1`-`L14` remain an audit hardening backlog and do not
 independently enter the Release 2.2 stable gate unless implementation evidence
@@ -521,15 +521,30 @@ Closed with one canonical serializer owner (`dockerBindMountSpec` /
   ad-hoc concatenation (repo sweep verified);
 - the encoding is Go `encoding/csv` — the Docker-sanctioned grammar — so
   commas, quotes, newlines, lone carriage returns, `=` signs, backslashes,
-  and surrounding whitespace stay exactly one field: a crafted value
+  and internal whitespace stay exactly one field: a crafted value
   cannot add a mount option, change the target, remove `readonly`, add
   `rw`, change type/source, or create a second logical field;
-- the one unrepresentable case fails closed in the owner: the CSV reader
-  normalizes the literal CRLF pair to LF inside quoted fields, so a CRLF
-  source/target cannot round-trip and is refused `invalid_mount` before
-  any pin, operation, or Docker state exists (the container target in
-  every mode; the canonical bind source in user mode — system mode binds
-  a helper-owned pinned path);
+- representability is a three-boundary invariant owned in one place
+  (`dockerMountFieldRepresentable`), and a value that fails any boundary
+  is refused there: (1) the encoding must round-trip through the
+  `encoding/csv` record unchanged — the CSV reader normalizes the literal
+  CRLF pair to LF inside quoted fields; (2) the value must survive Docker
+  `MountOpt.Set` value validation unchanged — the CLI rejects an empty
+  value and a value with leading or trailing whitespace (ASCII or
+  Unicode); (3) the value must be exec-argv representable — a Unix exec
+  argument cannot carry an embedded NUL byte. Refusals happen before any
+  pin, operation admission, or Docker state exists (the container target
+  in every mode; the canonical bind source in user mode — system mode
+  binds a helper-owned pinned path): caller-controlled values answer
+  `invalid_mount`, daemon-owned values answer `internal_error`;
+- the Docker argv is built and serialized after the pins and the workload
+  MAC state are prepared — every actual bind source is known — and before
+  the operation admission and the `run.start` audit: a serialization
+  failure rolls the prepared state back through the canonical rollback
+  owner and answers with no admitted Operation left in the supervisor, no
+  `run.start` audit event, and no Docker process (proven RED through the
+  real user-mode trusted-CA path, where a daemon-owned prepared directory
+  carrying a CRLF sequence used to leave one running zombie Operation);
 - request validation, filesystem authorization, and Docker argv
   serialization stay separate layers: the serializer owns only the
   encoding/representability, never path policy, and the scattered
@@ -545,17 +560,27 @@ Evidence:
   (`TestRunHostileTargetKeepsIntendedBindMountThroughDockerGrammar`).
 - GREEN semantic round-trip contract (`TestDockerBindMountSpecContract`):
   ordinary values, both readonly modes, comma/newline/quote/`=`/
-  backslash/lone-CR/whitespace and hostile delimiter combinations parse
-  back to exactly the intended source/target/readonly with exactly the
-  intended key set; CRLF and empty fields fail closed.
+  backslash/lone-CR/internal-whitespace and hostile delimiter
+  combinations parse back to exactly the intended source/target/readonly
+  with exactly the intended key set; CRLF, empty, whitespace-padded
+  (ASCII and Unicode NBSP/ideographic-space edges), and NUL-carrying
+  fields fail closed.
 - GREEN hostile real-Docker evidence (regression group 22,
   `scripts/uat-regression-bind-serialization.sh`, Ubuntu/DEB/AppArmor,
   real Docker): a newline target mounts READ-ONLY at the exact intended
   target (marker readable, write attempt denied, `docker inspect`
   Destination/RW verbatim), the option-injection spelling
   (`/mnt/dta,readonly`) mounts writable at the exact intended target with
-  no injected option, and a CRLF target is refused `invalid_mount` with
-  no container/state residue.
+  no injected option, a CRLF target is refused `invalid_mount` with no
+  container/state residue, and a trailing-space target — representable
+  through CSV but rejected by the Docker `MountOpt.Set` value validation
+  — is refused `invalid_mount` before Docker with no residue.
+- GREEN admission-order evidence through the real user-mode trusted-CA
+  path (`TestRunSerializerFailureBeforeAdmissionLeavesNoOperation`): a
+  daemon-owned prepared directory carrying a CRLF sequence — reachable
+  only with trusted CA injection active — answers `internal_error` with
+  no Docker invocation, no admitted Operation left in the supervisor, and
+  no `run.start` audit event (pre-fix: one running zombie Operation).
 - Server-owned forms serialize through the same owner with unchanged
   behavior (existing CA/helper-socket argv contract tests pass
   unchanged).

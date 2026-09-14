@@ -745,37 +745,13 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		securityOpts = prepared.SecurityOpts
 	}
 
-	// Register the operation. Single admit after pins and MAC preparation.
-	if a.OperationSupervisor != nil {
-		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
-			a.rollbackRunPreparation(ctx, op)
-			if decision == admissionRefusedShutdown {
-				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
-			} else {
-				writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "run", "launcher_unavailable", "launcher is not available", session.PrincipalName)
-			}
-			return
-		}
-		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
-	}
-
-	writeRequestContextAudit(ctx, auditRecord{
-		Event:              "run.start",
-		SessionID:          session.ID,
-		OperationID:        op.ID,
-		Image:              req.Image,
-		CommandArgCount:    cmdArgCount,
-		Mounts:             mountAudit,
-		EnvKeys:            envNames,
-		ShmSize:            op.auditShmSize,
-		TrustedCAInjected:  trustedCAInjected,
-		HelperSocket:       op.auditHelperSocket,
-		WorkloadMACBackend: op.auditWorkloadMACBackend,
-		PrincipalName:      session.PrincipalName,
-		LauncherID:         session.LauncherID,
-		LauncherName:       session.LauncherName,
-	})
-
+	// Build and serialize the complete Docker argv after the pins and the
+	// workload MAC state are prepared — every actual bind source is known —
+	// and BEFORE the operation admission and the run.start audit: a Docker
+	// bind-mount serialization failure must answer internal_error with no
+	// admitted Operation left in the supervisor, no run.start audit event,
+	// and no Docker process.
+	//
 	// Container security options come from the prepared workload MAC state
 	// in system mode and from the fixed user-mode label disable otherwise.
 	args := []string{
@@ -882,6 +858,39 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	args = append(args, req.Image)
 	args = append(args, req.Command...)
+
+	// Register the operation: a single admit after the complete Docker argv
+	// — pins, workload MAC state, and every serialized mount — is built, so
+	// an admitted Operation always has a valid serialized argv.
+	if a.OperationSupervisor != nil {
+		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
+			a.rollbackRunPreparation(ctx, op)
+			if decision == admissionRefusedShutdown {
+				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
+			} else {
+				writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "run", "launcher_unavailable", "launcher is not available", session.PrincipalName)
+			}
+			return
+		}
+		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
+	}
+
+	writeRequestContextAudit(ctx, auditRecord{
+		Event:              "run.start",
+		SessionID:          session.ID,
+		OperationID:        op.ID,
+		Image:              req.Image,
+		CommandArgCount:    cmdArgCount,
+		Mounts:             mountAudit,
+		EnvKeys:            envNames,
+		ShmSize:            op.auditShmSize,
+		TrustedCAInjected:  trustedCAInjected,
+		HelperSocket:       op.auditHelperSocket,
+		WorkloadMACBackend: op.auditWorkloadMACBackend,
+		PrincipalName:      session.PrincipalName,
+		LauncherID:         session.LauncherID,
+		LauncherName:       session.LauncherName,
+	})
 
 	cmdCtx, cancel := context.WithCancel(context.Background())
 

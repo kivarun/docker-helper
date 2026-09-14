@@ -2267,22 +2267,33 @@ read once, whose fields are `key=value` pairs (first `=` splits) or
 boolean flags such as `readonly`; later duplicate keys overwrite earlier
 ones. The serializer encodes the record with Go's `encoding/csv` — the
 Docker-sanctioned encoding — so a crafted source or target stays exactly
-ONE field: commas, quotes, newlines, lone carriage returns, `=` signs,
-backslashes, and surrounding whitespace cannot add a mount option, change
-the target, remove `readonly`, add `rw`, change the type or source, or
-create a second logical field. The former scattered comma prohibitions are
-gone: a comma-carrying source or target is now safely representable and
-mounted at exactly the intended path and consumption mode.
+ONE field: commas, quotes, newlines, lone carriage returns, `=` signs, and
+backslashes cannot add a mount option, change the target, remove
+`readonly`, add `rw`, change the type or source, or create a second
+logical field. The former scattered comma prohibitions are gone: a
+comma-carrying source or target is now safely representable and mounted
+at exactly the intended path and consumption mode.
 
-Fail closed: an empty source/target, or a value the grammar cannot
-represent faithfully, is refused — the CSV reader normalizes the literal
-CRLF pair to LF inside quoted fields, so a CRLF source/target would not
-round-trip and is refused `invalid_mount` before any pin, operation, or
-Docker state exists (the container target in every mode; the canonical
-bind source in user mode, where the resolved host path itself is the bind
-source — system mode binds a helper-owned pinned path instead). This is
-the one representability boundary of the serialization; it lives in the
-serializer owner, never as scattered per-caller prohibitions, and no
+Representability is a three-boundary invariant, not a list of ad-hoc
+prohibitions: an accepted source or target must (1) round-trip through
+the `encoding/csv` record unchanged, (2) remain unchanged under Docker's
+`MountOpt.Set` value validation — the CLI rejects an empty value and a
+value with leading or trailing whitespace — and (3) be representable
+through exec argv, which cannot carry an embedded NUL byte. Whitespace
+inside a path is representable; whitespace at the edges of a source or
+target is not.
+
+Fail closed: a source/target that fails any boundary is refused — the CSV
+reader normalizes the literal CRLF pair to LF inside quoted fields, a
+whitespace-padded or empty value fails the Docker value validation, and a
+NUL byte fails exec argv. The refusal happens before any pin, operation
+admission, or Docker state exists (the container target in every mode;
+the canonical bind source in user mode, where the resolved host path
+itself is the bind source — system mode binds a helper-owned pinned path
+instead), so a refused run answers `invalid_mount` for caller-controlled
+values and `internal_error` for daemon-owned values with no residue. This
+is the one representability boundary of the serialization; it lives in
+the serializer owner, never as scattered per-caller prohibitions, and no
 shell escaping is involved (the Docker argv is structured exec argv).
 
 On top of the structural validation, the access mode of every accepted
