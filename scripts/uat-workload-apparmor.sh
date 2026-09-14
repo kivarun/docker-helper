@@ -686,7 +686,9 @@ build_hostile_image() {
   cat > "$HOSTILE_DIR/image/Dockerfile" <<'EOF'
 FROM alpine:3.24
 COPY reporter /usr/local/bin/reporter
+COPY hostile-probe.sh /usr/local/bin/hostile-probe.sh
 RUN chmod 0755 /usr/local/bin/reporter && chmod u+s /usr/local/bin/reporter
+RUN chmod 0755 /usr/local/bin/hostile-probe.sh
 RUN apk add --no-cache curl >/dev/null
 EOF
   cat > "$HOSTILE_DIR/image/hostile-probe.sh" <<'EOF'
