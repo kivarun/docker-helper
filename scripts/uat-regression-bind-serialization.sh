@@ -14,11 +14,13 @@
 #      unquoted control character truncating the CSV record so the trailing
 #      readonly flag is dropped) cannot happen;
 #   2. a hostile option-injection spelling stays writable at the exact
-#      intended target — the crafted data injects no option;
+#      intended target (the container path literally is
+#      "/mnt/dta,readonly") — the crafted data injects no option;
 #   3. a CRLF target, which the Docker mount grammar cannot represent
 #      faithfully, is refused invalid_mount before any Docker state exists;
-#   4. every proof reads the real container state via docker inspect and the
-#      real container filesystem, not helper responses alone.
+#   4. every proof reads the real container state via docker inspect (taken
+#      while the container is running — run containers are removed on exit)
+#      and the real container filesystem, not helper responses alone.
 #
 # Requires: installed docker-helper system service (active, system mode),
 # Docker reachable, root. Exits 0 = PASS, 1 = FAIL, 2 = BLOCKED.
@@ -39,20 +41,20 @@ IMAGE="alpine:3.24"
 USER="uatreg22"
 
 home="$(reg_setup_principal "$USER")" || { reg_fail "setup principal failed"; reg_result; }
-ws="$home/ws"; src="$ws/src"
-mkdir -p "$src"
+ws="$home/ws"; src="$ws/src"; ctl="$ws/ctl"
+mkdir -p "$src" "$ctl"
 printf 'CONTENT\n' > "$src/marker"
 chown -R "$USER:$USER" "$ws"
 
 cred="/tmp/uat-reg22.token"
 reg_principal_credential "$USER" "$cred" || { reg_fail "credential create failed"; reg_result; }
 
-# inspect_mounts prints, for the newest container of one session, the
-# tab-separated bind-mount facts (Destination verbatim, RW, Source, Propagation)
-# read from the real docker inspect state.
+# inspect_mounts prints, for the running container of one session, the
+# tab-separated bind-mount facts (Destination verbatim, RW, Source,
+# Propagation) read from the real docker inspect state.
 inspect_mounts() {
   local sid="$1" cid json
-  cid="$(docker ps -a -q --filter "label=com.dockerhelper.session.id=$sid" --latest 2>/dev/null | head -1)"
+  cid="$(docker ps -q --filter "label=com.dockerhelper.session.id=$sid" 2>/dev/null | head -1)"
   [ -n "$cid" ] || { echo "NO-CONTAINER"; return; }
   json="$(docker inspect "$cid" 2>/dev/null)" || { echo "INSPECT-FAILED"; return; }
   python3 -c '
@@ -68,6 +70,15 @@ session_container_count() {
   docker ps -aq --filter "label=com.dockerhelper.session.id=$1" 2>/dev/null | wc -l
 }
 
+wait_for_file() {
+  local path="$1"
+  for _ in $(seq 1 60); do
+    [ -f "$path" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
 NL=$'\n'
 TAB=$'\t'
 
@@ -80,21 +91,37 @@ SID_RO="$REG_SESSION_ID"; TOK_RO="$REG_SESSION_TOKEN"
 HOSTILE_RO_TARGET="/mnt/probe${NL}readonly-evil"
 EXPECTED_RO="${HOSTILE_RO_TARGET}${TAB}false"
 RUN_LOG="/tmp/uat-reg22-ro.log"
+# The container reads the marker through the hostile newline target, proves
+# the write attempt fails, reports both through the writable control mount,
+# and stays alive until the host inspected the real Docker state.
 DOCKER_HELPER_SESSION_TOKEN="$TOK_RO" \
   dh run --image "$IMAGE" \
     --mount "$src:$HOSTILE_RO_TARGET:ro" \
-    -- sh -c 'p=$(printf "/mnt/probe\nreadonly-evil"); cat "$p/marker" || exit 4; if touch "$p/w-probe" 2>/dev/null; then echo WRITE-SUCCEEDED; exit 3; else echo WRITE-DENIED; fi' \
-  >"$RUN_LOG" 2>&1
-RC_RO=$?
+    --mount "$ctl:/mnt/ctl" \
+    -- sh -c 'p=$(printf "/mnt/probe\nreadonly-evil"); cat "$p/marker" > /mnt/ctl/ro-read 2>/mnt/ctl/ro-read-err; if touch "$p/w-probe" 2>/dev/null; then echo WRITE-SUCCEEDED > /mnt/ctl/ro-write; else echo WRITE-DENIED > /mnt/ctl/ro-write; fi; while [ ! -f /mnt/ctl/release-ro ]; do sleep 1; done' \
+  >"$RUN_LOG" 2>&1 &
+RUN_PID=$!
 
-if [ "$RC_RO" -eq 0 ] && grep -q 'CONTENT' "$RUN_LOG" && grep -q 'WRITE-DENIED' "$RUN_LOG"; then
-  reg_ok "hostile newline RO container read the marker at the exact target and the write attempt failed"
-else
-  reg_fail "hostile newline RO run did not prove the RO semantics (rc=$RC_RO, log: $(cat "$RUN_LOG" | redact | tail -3))"
-  reg_result
-fi
-
+wait_for_file "$ctl/ro-write" || { reg_fail "hostile newline RO container did not report in 60s (log: $(tail -3 "$RUN_LOG" | redact))"; kill "$RUN_PID" 2>/dev/null; reg_result; }
 MOUNTS_RO="$(inspect_mounts "$SID_RO")"
+touch "$ctl/release-ro"
+wait "$RUN_PID" 2>/dev/null; RC_RO=$?
+
+if [ "$(cat "$ctl/ro-read" 2>/dev/null)" = "CONTENT" ]; then
+  reg_ok "hostile newline RO container read the marker at the exact intended target"
+else
+  reg_fail "marker not readable at the exact newline target (read: $(cat "$ctl/ro-read-err" 2>/dev/null | redact))"
+fi
+if [ "$(cat "$ctl/ro-write" 2>/dev/null)" = "WRITE-DENIED" ]; then
+  reg_ok "the write attempt inside the read-only mount failed"
+else
+  reg_fail "the write attempt inside the read-only mount succeeded: $(cat "$ctl/ro-write" 2>/dev/null | redact)"
+fi
+if [ "$RC_RO" -eq 0 ] || [ "$RC_RO" -eq 137 ]; then
+  reg_ok "hostile newline RO run terminated normally"
+else
+  reg_fail "hostile newline RO run exited unexpectedly (rc=$RC_RO, log: $(tail -3 "$RUN_LOG" | redact))"
+fi
 if printf '%s' "$MOUNTS_RO" | grep -F -- "$EXPECTED_RO" >/dev/null 2>&1; then
   reg_ok "docker inspect shows the exact intended newline target mounted read-only"
 else
@@ -115,21 +142,31 @@ SID_RW="$REG_SESSION_ID"; TOK_RW="$REG_SESSION_TOKEN"
 INJECT_TARGET="/mnt/dta,readonly"
 EXPECTED_RW="${INJECT_TARGET}${TAB}true"
 RUN2_LOG="/tmp/uat-reg22-rw.log"
+# The container path literally is "/mnt/dta,readonly": the marker is readable
+# at exactly that path, proving no "/mnt/data,readonly" option split happened.
 DOCKER_HELPER_SESSION_TOKEN="$TOK_RW" \
   dh run --image "$IMAGE" \
     --mount "$src:$INJECT_TARGET" \
-    -- sh -c 'cat /mnt/dta/marker; echo RW-RAN' \
-  >"$RUN2_LOG" 2>&1
-RC_RW=$?
+    --mount "$ctl:/mnt/ctl" \
+    -- sh -c 'cat "/mnt/dta,readonly/marker" > /mnt/ctl/rw-read 2>/mnt/ctl/rw-read-err; echo RW-RAN > /mnt/ctl/rw-report; while [ ! -f /mnt/ctl/release-rw ]; do sleep 1; done' \
+  >"$RUN2_LOG" 2>&1 &
+RUN2_PID=$!
 
-if [ "$RC_RW" -eq 0 ] && grep -q 'CONTENT' "$RUN2_LOG" && grep -q 'RW-RAN' "$RUN2_LOG"; then
-  reg_ok "option-injection spelling run completed writable at the crafted target"
-else
-  reg_fail "option-injection spelling run failed (rc=$RC_RW, log: $(cat "$RUN2_LOG" | redact | tail -3))"
-  reg_result
-fi
-
+wait_for_file "$ctl/rw-report" || { reg_fail "option-injection container did not report in 60s (log: $(tail -3 "$RUN2_LOG" | redact))"; kill "$RUN2_PID" 2>/dev/null; reg_result; }
 MOUNTS_RW="$(inspect_mounts "$SID_RW")"
+touch "$ctl/release-rw"
+wait "$RUN2_PID" 2>/dev/null; RC_RW=$?
+
+if [ "$(cat "$ctl/rw-read" 2>/dev/null)" = "CONTENT" ]; then
+  reg_ok "option-injection spelling container read the marker at the exact comma path (no option split)"
+else
+  reg_fail "marker not readable at the exact comma target (read: $(cat "$ctl/rw-read-err" 2>/dev/null | redact))"
+fi
+if [ "$RC_RW" -eq 0 ] || [ "$RC_RW" -eq 137 ]; then
+  reg_ok "option-injection spelling run terminated normally"
+else
+  reg_fail "option-injection spelling run exited unexpectedly (rc=$RC_RW, log: $(tail -3 "$RUN2_LOG" | redact))"
+fi
 if printf '%s' "$MOUNTS_RW" | grep -F -- "$EXPECTED_RW" >/dev/null 2>&1; then
   reg_ok "docker inspect shows the exact comma target writable — no option injected"
 else
