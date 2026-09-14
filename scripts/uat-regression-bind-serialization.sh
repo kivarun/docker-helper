@@ -66,6 +66,28 @@ for m in mounts:
 ' "$json"
 }
 
+# mount_line_exists reports whether the running container of one session has
+# a bind mount whose verbatim Destination/RW/Source/Propagation line equals
+# the expected one (exact whole-line comparison: the expected value may
+# contain newlines, which a grep pattern cannot carry). 0 = found, 1 = not
+# found, 2 = no container or inspect failure.
+mount_line_exists() {
+  local sid="$1" expected="$2" cid
+  cid="$(docker ps -q --filter "label=com.dockerhelper.session.id=$sid" 2>/dev/null | head -1)"
+  [ -n "$cid" ] || return 2
+  docker inspect "$cid" 2>/dev/null | python3 -c '
+import json, sys
+expected = sys.argv[2]
+spec = json.loads(sys.stdin.read())
+mounts = [m for m in spec[0].get("Mounts", []) if m.get("Type") == "bind"]
+for m in mounts:
+    line = "%s\t%s\t%s\t%s" % (m.get("Destination"), str(m.get("RW")).lower(), m.get("Source"), m.get("Propagation", ""))
+    if line == expected:
+        sys.exit(0)
+sys.exit(1)
+' - "$expected"
+}
+
 session_container_count() {
   docker ps -aq --filter "label=com.dockerhelper.session.id=$1" 2>/dev/null | wc -l
 }
@@ -104,6 +126,8 @@ RUN_PID=$!
 
 wait_for_file "$ctl/ro-write" || { reg_fail "hostile newline RO container did not report in 60s (log: $(tail -3 "$RUN_LOG" | redact))"; kill "$RUN_PID" 2>/dev/null; reg_result; }
 MOUNTS_RO="$(inspect_mounts "$SID_RO")"
+mount_line_exists "$SID_RO" "$EXPECTED_RO"; RO_LINE_RC=$?
+mount_line_exists "$SID_RO" "${HOSTILE_RO_TARGET}${TAB}true"; RO_WRITABLE_RC=$?
 touch "$ctl/release-ro"
 wait "$RUN_PID" 2>/dev/null; RC_RO=$?
 
@@ -122,15 +146,15 @@ if [ "$RC_RO" -eq 0 ] || [ "$RC_RO" -eq 137 ]; then
 else
   reg_fail "hostile newline RO run exited unexpectedly (rc=$RC_RO, log: $(tail -3 "$RUN_LOG" | redact))"
 fi
-if printf '%s' "$MOUNTS_RO" | grep -F -- "$EXPECTED_RO" >/dev/null 2>&1; then
+if [ "$RO_LINE_RC" -eq 0 ]; then
   reg_ok "docker inspect shows the exact intended newline target mounted read-only"
 else
   reg_fail "docker inspect does not show the exact newline target read-only: $MOUNTS_RO"
 fi
-if printf '%s' "$MOUNTS_RO" | grep -F -- "${HOSTILE_RO_TARGET}${TAB}true" >/dev/null 2>&1; then
-  reg_fail "a writable mount of the hostile spelling exists: $MOUNTS_RO"
-else
+if [ "$RO_WRITABLE_RC" -eq 1 ]; then
   reg_ok "no writable mount of the hostile spelling exists"
+else
+  reg_fail "a writable mount of the hostile spelling exists: $MOUNTS_RO"
 fi
 
 # ---------------------------------------------------------------------------
@@ -154,6 +178,7 @@ RUN2_PID=$!
 
 wait_for_file "$ctl/rw-report" || { reg_fail "option-injection container did not report in 60s (log: $(tail -3 "$RUN2_LOG" | redact))"; kill "$RUN2_PID" 2>/dev/null; reg_result; }
 MOUNTS_RW="$(inspect_mounts "$SID_RW")"
+mount_line_exists "$SID_RW" "$EXPECTED_RW"; RW_LINE_RC=$?
 touch "$ctl/release-rw"
 wait "$RUN2_PID" 2>/dev/null; RC_RW=$?
 
@@ -167,7 +192,7 @@ if [ "$RC_RW" -eq 0 ] || [ "$RC_RW" -eq 137 ]; then
 else
   reg_fail "option-injection spelling run exited unexpectedly (rc=$RC_RW, log: $(tail -3 "$RUN2_LOG" | redact))"
 fi
-if printf '%s' "$MOUNTS_RW" | grep -F -- "$EXPECTED_RW" >/dev/null 2>&1; then
+if [ "$RW_LINE_RC" -eq 0 ]; then
   reg_ok "docker inspect shows the exact comma target writable — no option injected"
 else
   reg_fail "docker inspect does not show the exact comma target writable: $MOUNTS_RW"
