@@ -674,6 +674,65 @@ func TestRunMountFileRootDescendantProbesNothing(t *testing.T) {
 	}
 }
 
+// TestRunMountIssuedFileKindReplacementDoesNotWidenAuthority proves the
+// issuance-time exactness the documented regular-file contract requires: a
+// root issued while it is a regular file stays an exact concrete capability —
+// replacing the same pathname with a directory AFTER issuance and requesting
+// a descendant mount must remain refused by the issued snapshot authority,
+// never reinterpreted through the live pathname kind.
+func TestRunMountIssuedFileKindReplacementDoesNotWidenAuthority(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0].Path
+	tree := filepath.Join(root, "runs")
+	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
+	fileRoot := filepath.Join(tree, "repos", "data.bin")
+	if err := os.WriteFile(fileRoot, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postSessionThroughMux(t, app, launcherToken, rootsRequestBody(workspace, fmt.Sprintf(`[{"path":%q,"access":"read_write"}]`, fileRoot)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("file-root create: expected 201, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID    string `json:"id"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("cannot decode create response: %v", err)
+	}
+	if created.Token == "" {
+		t.Fatal("file-root create response carries no session bearer")
+	}
+
+	// After issuance: replace the issued pathname with a directory and
+	// create a descendant under it.
+	if err := os.Remove(fileRoot); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(fileRoot, "child")
+	if err := os.MkdirAll(fileRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(child, []byte("child"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	body := fmt.Sprintf(`{"image":"alpine","mounts":[{"source":%q,"target":"/data","read_only":true}]}`, child)
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+created.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("issued file kind replaced by a directory: expected 400, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_mount") {
+		t.Fatalf("issued file kind replaced by a directory: expected invalid_mount, got %s", w.Body.String())
+	}
+}
+
 // TestFilesystemRootsAdmittedSpellingSemantics proves the second half of the
 // filesystem_roots ordering: an admitted spelling is still resolved by the
 // privileged probes (an existing directory root inside the ceiling is
