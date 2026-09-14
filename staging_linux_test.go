@@ -799,3 +799,125 @@ func TestStageBuildContextContextReplacement(t *testing.T) {
 		t.Error("operation directory should not exist after error")
 	}
 }
+
+// TestStageBuildContextStripsSetUIDAndSetGID proves the staging privilege
+// invariant: a helper-owned staged regular file carries the source's ordinary
+// permission bits but never the SUID or SGID privilege bits. The staging
+// copy is helper-owned (root-owned in system mode), so transferring a
+// source privilege bit would hand a privilege-granting setuid/setgid binary
+// to Docker's build context. The source file itself is never modified; the
+// hardlink path stages the same invariant (the linked staged entry shares
+// the first staged copy's inode and must not re-introduce privilege bits);
+// normal rwx permissions are preserved.
+func TestStageBuildContextStripsSetUIDAndSetGID(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		sourceMode os.FileMode
+		wantStaged os.FileMode
+	}{
+		{"SUID executable", os.ModeSetuid | 0o755, 0o755},
+		{"SGID executable", os.ModeSetgid | 0o755, 0o755},
+		{"SUID+SGID executable", os.ModeSetuid | os.ModeSetgid | 0o755, 0o755},
+		{"ordinary executable", 0o755, 0o755},
+		{"ordinary file", 0o644, 0o644},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, runtimeDir := setupStagingTest(t)
+			ctxDir := createBuildContext(t, workspace)
+
+			source := filepath.Join(ctxDir, tc.name+".bin")
+			if err := os.WriteFile(source, []byte("#!/bin/sh\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(source, tc.sourceMode); err != nil {
+				t.Fatal(err)
+			}
+
+			staged, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1")
+			if err != nil {
+				t.Fatalf("StageBuildContext: %v", err)
+			}
+			defer staged.Cleanup()
+
+			sourceInfo, err := os.Stat(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sourceInfo.Mode() != tc.sourceMode {
+				t.Errorf("source file changed: mode %o, want %o", sourceInfo.Mode(), tc.sourceMode)
+			}
+
+			stagedInfo, err := os.Stat(filepath.Join(staged.ContextPath, tc.name+".bin"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stagedInfo.Mode() != tc.wantStaged {
+				t.Errorf("staged file mode = %o (privilege bits %s present), want %o",
+					stagedInfo.Mode(), privilegeBits(stagedInfo.Mode()), tc.wantStaged)
+			}
+		})
+	}
+}
+
+// privilegeBits names the privilege bits still set on a staged mode, for a
+// readable failure message.
+func privilegeBits(mode os.FileMode) string {
+	var names []string
+	if mode&os.ModeSetuid != 0 {
+		names = append(names, "S_ISUID")
+	}
+	if mode&os.ModeSetgid != 0 {
+		names = append(names, "S_ISGID")
+	}
+	if mode&os.ModeSticky != 0 {
+		names = append(names, "S_ISVTX")
+	}
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, "+")
+}
+
+// TestStageBuildContextStripsSetUIDOnHardlinkedPair proves the hardlink
+// staging path keeps the same invariant: both staged names share one inode
+// and that staged inode carries no privilege bit, while the source hardlink
+// pair keeps its bits.
+func TestStageBuildContextStripsSetUIDOnHardlinkedPair(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	first := filepath.Join(ctxDir, "first.bin")
+	if err := os.WriteFile(first, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(first, os.ModeSetuid|0o755); err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(ctxDir, "second.bin")
+	if err := os.Link(first, second); err != nil {
+		t.Fatal(err)
+	}
+
+	staged, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1")
+	if err != nil {
+		t.Fatalf("StageBuildContext: %v", err)
+	}
+	defer staged.Cleanup()
+
+	stagedFirst, err := os.Stat(filepath.Join(staged.ContextPath, "first.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagedSecond, err := os.Stat(filepath.Join(staged.ContextPath, "second.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if stagedFirst.Sys().(*syscall.Stat_t).Ino != stagedSecond.Sys().(*syscall.Stat_t).Ino {
+		t.Errorf("staged hardlink pair lost its single staged inode: %d != %d",
+			stagedFirst.Sys().(*syscall.Stat_t).Ino, stagedSecond.Sys().(*syscall.Stat_t).Ino)
+	}
+	if stagedFirst.Mode() != 0o755 || stagedSecond.Mode() != 0o755 {
+		t.Errorf("staged hardlink pair modes = %o/%o, want 755/755 (no privilege bits)", stagedFirst.Mode(), stagedSecond.Mode())
+	}
+}
