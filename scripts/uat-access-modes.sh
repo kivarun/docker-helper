@@ -241,7 +241,7 @@ config_root_has() {
 
 # principal_root_has PATH ACCESS — the Principal rich list carries the pair.
 principal_root_has() {
-  json_root_has "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null || true)" "$1" "$2"
+  json_root_has "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null || true)" "$1" "$2"
 }
 
 # expect_read_only_root TOKEN SOURCE TARGET SNIPPET [BASE_RESIDUE] — runs a

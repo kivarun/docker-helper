@@ -336,14 +336,14 @@ else
   acc_fail "R4 config.json legacy path-only form not preserved"
 fi
 
-M_PLIST="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+M_PLIST="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
 if json_root_has "$M_PLIST" "$ALLOWED_ROOT" read_write \
     && json_root_has "$M_PLIST" "$M_POLICY" read_write; then
   acc_ok "R5 Principal roots migrated as read_write"
 else
   acc_fail "R5 Principal root migration wrong: $M_PLIST"
 fi
-M_LLIST="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" --json 2>/dev/null || true)"
+M_LLIST="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
 if json_root_has "$M_LLIST" "$M_POLICY/sub" read_write; then
   acc_ok "R5 Launcher root migrated as read_write"
 else
@@ -406,7 +406,7 @@ if wait_health; then
     acc_fail "R9 snapshot changed after restart"
   fi
   if json_root_has "$(dh config allowed-root list --json 2>/dev/null || true)" "$M_POLICY" read_write \
-      && json_root_has "$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)" "$M_POLICY" read_write; then
+      && json_root_has "$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)" "$M_POLICY" read_write; then
     acc_ok "R9 migrated policy stable across restart"
   else
     acc_fail "R9 migrated policy changed after restart"
