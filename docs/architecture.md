@@ -1203,9 +1203,14 @@ mount an issued-root region the Session did not request; absolute mount
 sources are authorized only through the issued snapshot (see
 [Filesystem policy](#filesystem-policy)).
 
-All paths are resolved through `filepath.EvalSymlinks` before comparison.
-This prevents symlink-based escape attacks at validation time. Note:
-`EvalSymlinks` resolves the path at a point in time. By itself it
+Path comparisons follow the canonical authorization order: structural
+request validation, then lexical capability admission of the raw caller
+spelling against its issued capability, then privileged filesystem
+resolution (`EvalSymlinks`/stat) of an admitted spelling, then the
+canonical containment/policy proof. A spelling outside the capability
+never reaches the resolver, and a symlink inside the admitted lexical
+capability that resolves outside is refused by the canonical proof.
+Note: `EvalSymlinks` resolves the path at a point in time. By itself it
 does not solve TOCTOU problems where the filesystem changes between
 validation and use. For operations that pass paths to Docker as strings,
 additional measures (such as FD-relative traversal or inode pinning) are
@@ -2214,25 +2219,32 @@ Allowed:
 - `read_only` is true or false;
 - the same `source` can be mounted to multiple `target` paths.
 
-Forbidden (refused before any host filesystem probing):
+Forbidden (structural request validation, before admission):
+
+- `target` is empty;
+- `target` is not absolute;
+- `target` is `.` or `..`, or contains a comma (mount-argv safety).
+
+Forbidden (refused before any host filesystem probing — the lexical
+capability admission):
 
 - a relative `source` whose joined spelling escapes the session workspace
   lexically — the workspace-relative grammar is a structural boundary,
   never an alternate way to reach another issued root: an absolute source
   is the only spelling for that;
 - an absolute `source` spelling outside the issued Session filesystem
-  snapshot — every mount must carry issued snapshot authority;
-- a symlink inside the lexical capability that resolves outside it
-  (refused after resolution by the canonical containment proof — the
-  escape protection is unchanged).
+  snapshot — every mount must carry issued snapshot authority.
 
-Forbidden (after resolution):
+Forbidden (after canonical resolution — the canonical proof and later
+canonical facts):
 
+- a symlink inside the lexical capability that resolves outside it — the
+  relative grammar re-proves workspace containment on the resolved path,
+  and the escape protection is unchanged;
 - `source` does not exist;
 - `source` is not a directory or regular file;
-- `target` is empty;
-- `target` is not absolute;
-- two mounts use the same `target`.
+- two mounts use the same `target` (checked once each canonical target is
+  known).
 
 The relative grammar keeps the mount scoped to the session workspace; an
 absolute source is authorized only through the issued Session filesystem
@@ -2244,8 +2256,8 @@ mount is enforced against the persisted immutable Session filesystem
 snapshot — the only data-plane filesystem authority, issued at Session
 creation. The policy decision uses only the canonical source identity
 produced by `resolveMount` (lexical capability admission, then
-`filepath.Abs`/`EvalSymlinks` + type validation, plus workspace
-containment for the relative grammar), never the caller
+`filepath.Abs`/`EvalSymlinks` + type validation of the admitted spelling,
+then the canonical containment proofs), never the caller
 spelling: a symlink spelling never selects a different access mode. A
 read-only request is permitted for either snapshot access mode; a writable
 request is permitted only through the snapshot owner's writable-parent query
@@ -3402,9 +3414,12 @@ does not write log files or implement internal rotation.
 
 ### Path traversal
 
-All paths are resolved through `filepath.Abs` and `filepath.EvalSymlinks`
-before comparison. The `pathWithin` function uses `filepath.Rel`, which
-operates on canonical paths.
+Path authorization follows the canonical order: structural request
+validation, lexical capability admission of the raw caller spelling
+against its issued capability, privileged filesystem resolution
+(`filepath.Abs`/`filepath.EvalSymlinks`) of an admitted spelling, then
+the canonical containment/policy proof. The `pathWithin` function uses
+`filepath.Rel`, which operates on canonical paths.
 
 For operations that pass paths to Docker, additional measures close the
 TOCTOU gap: builds use an isolated staging copy with FD-relative
@@ -3413,9 +3428,10 @@ helper-owned mounts via `open_tree` + `move_mount`.
 
 ### Symlink escape
 
-`EvalSymlinks` resolves all symlinks in a path at validation time.
-If a symlink inside the workspace points outside, the resolved path
-will fail the `pathWithin` check.
+An admitted spelling is resolved through `EvalSymlinks`. If a symlink
+inside the lexical capability resolves outside it, the resolved path
+fails the canonical containment proof — the second, mandatory security
+proof; a spelling outside the capability never reaches the resolver.
 
 Note: `EvalSymlinks` alone does not prevent TOCTOU attacks where the
 filesystem changes between validation and use. The specific operation
