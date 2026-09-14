@@ -527,11 +527,16 @@ covers mixed RW/RO mounts and concurrent SELinux Sessions with different
 snapshots over the same host tree without a global per-mode relabel. Production
 implementation of Phases 2.2.1-2.2.6 is complete and architecturally accepted on
 `release/2.2` (see [`docs/release-2.2-implementation-plan.md`](release-2.2-implementation-plan.md)
-for the closure evidence); what remains pending is the release closure itself —
-the Phase 2.2.7 documentation/release integration, final UAT, and artifacts.
+for the closure evidence). The feature contract is frozen; before stable
+promotion the release must now complete the mandatory external-security-audit
+closure (SC0-SC4 and hostile exact-artifact UAT) plus the existing Phase 2.2.7
+documentation/release integration, final UAT, and artifact gate.
 
 Release 2.2 deliberately does not include Managed Containers, Engine migration,
 networking, resources, durable Operations, or any other Release 3 runtime work.
+The security closure may add hard security ceilings required to remove a
+current unbounded host-resource attack, but it must not import Release 3 quota,
+scheduler, desired-state, or generic resource-control architecture.
 It is developed on `release/2.2` from `v2.1.1`; after release, the completed
 capability is deliberately forward-ported and reconciled into `main`/Release 3
 against the Release 3 architecture. A whole-branch merge is not the contract.
@@ -540,7 +545,8 @@ Release 2.2 design and execution owners:
 
 - [`release-2.2-allowed-root-access-modes.md`](release-2.2-allowed-root-access-modes.md) — policy/domain/API contract;
 - [`release-2.2-mac-enforcement.md`](release-2.2-mac-enforcement.md) — mandatory AppArmor/SELinux enforcement and feasibility gate;
-- [`release-2.2-implementation-plan.md`](release-2.2-implementation-plan.md) — implementation order, migrations, UAT, and release gates.
+- [`release-2.2-implementation-plan.md`](release-2.2-implementation-plan.md) — implementation order, migrations, UAT, and release gates;
+- [`release-2.2-security-closure.md`](release-2.2-security-closure.md) — mandatory pre-stable external-audit rebase, security closure phases, hostile UAT, and security exit criteria.
 
 ## 3.0
 
