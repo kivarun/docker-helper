@@ -37,7 +37,22 @@
 #      restart/reconciliation leaves no stale helper-owned state;
 #  13  the bounded audit window carries the attributable
 #      docker_helper_ro_projection_t write AVC and no unexpected
-#      docker_helper AVC outside the expected negative subcases.
+#      docker_helper AVC outside the expected negative subcases;
+#  14  hostile SUID source image cannot elevate (C1): the server-owned
+#      workload privilege floor (no-new-privileges + cap-drop ALL) keeps a
+#      root-owned SUID executable in the image at the workload's own
+#      execution identity with no capabilities;
+#  15  helper-created build staging strips SUID/SGID (C1): privilege bits
+#      placed in the workspace never reach the helper-owned staged context,
+#      so the built image cannot deliver them to workload execution;
+#  16  helper-socket hostile composition (H9): with the runtime projection
+#      mounted, the socket transport stays functional, an unauthenticated
+#      call is refused, helper-private runtime state (session Docker
+#      config, builds/mounts/workload-MAC machinery) stays unreadable, the
+#      runtime stays immutable, and the privilege escalation stays dead —
+#      the narrow traversal/socket-connect policy is not widened and DAC
+#      0700 is not bypassable from the strongest reachable workload
+#      privilege (Principal UID, no capabilities, no-new-privileges).
 #
 # Fail-closed contract: PASS -> continue; FAIL -> gate red; BLOCKED -> a
 # required dependency/evidence is unavailable -> gate red. Missing AVC or
@@ -1334,6 +1349,162 @@ if [ "$UNEXPECTED" -eq 0 ]; then
   acc_ok "S13 no unexpected docker_helper AVC outside the expected negative subcases"
 else
   acc_fail "S13 unexpected docker_helper AVCs in the window: $UNEXPECTED"
+fi
+
+# ==============================================================================
+# scenarios S14-S16: hostile C1/H9 privilege and helper-runtime composition
+# (placed after the S13 audit-window accounting so the mandatory AVC evidence
+# windows stay untouched; every helper-private access below is denied by
+# DAC before SELinux is reached, so no new AVC class is introduced)
+# ==============================================================================
+
+HOSTILE_DIR="/tmp/uat-wls-sec"
+HOSTILE_IMAGE="uat-hostile-suid:2.2"
+# The privilege reporter is compiled on the host from the candidate checkout
+# (scripts/uat-privilege-reporter) and transferred into the guest with the
+# exact-candidate artifacts, the same host-compile/guest-consume pattern as
+# the live workload harness; the guest has no Go toolchain on its PATH.
+REPORTER_BIN="${UAT_REPORTER_BIN:-/opt/uat-import/workload-privilege-reporter}"
+
+# build_hostile_image builds the hostile source image with plain docker
+# build: the image is attacker-controlled material by threat model, never
+# helper-mediated. The host-compiled privilege reporter is delivered as a
+# root-owned SUID executable, plus curl for the helper-socket probe.
+build_hostile_image() {
+  rm -rf "$HOSTILE_DIR"
+  mkdir -p "$HOSTILE_DIR/image"
+  if [ ! -x "$REPORTER_BIN" ]; then
+    printf '  privilege reporter unavailable at %s\n' "$REPORTER_BIN" >&2
+    return 1
+  fi
+  cp "$REPORTER_BIN" "$HOSTILE_DIR/image/reporter" || return 1
+  cat > "$HOSTILE_DIR/image/Dockerfile" <<'EOF'
+FROM alpine:3.24
+COPY reporter /usr/local/bin/reporter
+COPY hostile-probe.sh /usr/local/bin/hostile-probe.sh
+RUN chmod 0755 /usr/local/bin/reporter && chmod u+s /usr/local/bin/reporter
+RUN chmod 0755 /usr/local/bin/hostile-probe.sh
+RUN apk add --no-cache curl >/dev/null
+EOF
+  cat > "$HOSTILE_DIR/image/hostile-probe.sh" <<'EOF'
+#!/bin/sh
+# H9 hostile probe: exits nonzero with a distinct finding marker on any
+# violation; prints S16-HOSTILE-CLEAN when every check holds.
+fail() { printf 'S16-FINDING:%s\n' "$1"; exit 1; }
+# 1. the intended Unix socket transport stays reachable.
+out="$(curl -s --unix-socket /run/docker-helper/docker-helper.sock http://localhost/health)" \
+  || fail socket-unreachable
+case "$out" in *'"ok":true'*) : ;; *) fail health-not-ok ;; esac
+# 2. the transport grants no authority: an unauthenticated protected call is
+#    refused exactly as for any other API client.
+code="$(curl -s -o /dev/null -w '%{http_code}' --unix-socket \
+  /run/docker-helper/docker-helper.sock -X POST -H 'Content-Type: application/json' \
+  -d '{"image":"alpine:3.24"}' http://localhost/run)" || fail post-unreachable
+[ "$code" = "401" ] || fail "unauthenticated-post-code-$code"
+# 3. helper-private runtime machinery stays unreadable (type policy keeps the
+#    runtime files outside docker_helper_container_t beyond traversal).
+for d in sessions builds mounts workload-mac; do
+  if ls "/run/docker-helper/$d" >/dev/null 2>&1; then fail "private-dir-readable-$d"; fi
+done
+# 4. the known per-Session Docker config (registry credential store) stays
+#    unreadable even by its exact known path.
+if cat "/run/docker-helper/sessions/$TARGET_SESSION/docker/config.json" >/dev/null 2>&1; then
+  fail session-config-readable
+fi
+# 5. helper-owned runtime state stays immutable.
+if touch /run/docker-helper/hostile-probe >/dev/null 2>&1; then fail runtime-writable-top; fi
+if touch "/run/docker-helper/sessions/$TARGET_SESSION/docker/hostile-probe" >/dev/null 2>&1; then
+  fail runtime-writable-sessions
+fi
+# 6. the privilege escalation stays dead with the projection mounted.
+info="$(/usr/local/bin/reporter)" || fail reporter-failed
+case "$info" in *euid=0*) fail suid-elevated ;; esac
+printf '%s\n' "$info" | grep -q 'capEff=0000000000000000' || fail caps-not-dropped
+echo S16-HOSTILE-CLEAN
+EOF
+  chmod 0755 "$HOSTILE_DIR/image/hostile-probe.sh"
+  docker build -q -t "$HOSTILE_IMAGE" "$HOSTILE_DIR/image" >/tmp/uat-wls-sec-build.log 2>&1 || {
+    printf '  hostile image build failed: %s\n' "$(tail -3 /tmp/uat-wls-sec-build.log 2>/dev/null | redact)" >&2
+    return 1
+  }
+  return 0
+}
+
+WUID="$(id -u "$PRINCIPAL")"
+
+# --- scenario S14: hostile SUID source image cannot elevate (C1) --------------
+say "S14: hostile SUID source image cannot elevate"
+if build_hostile_image; then
+  S14_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+    dh run --image "$HOSTILE_IMAGE" -- \
+    sh -ec '/usr/local/bin/reporter' 2>&1)"
+  S14_EC=$?
+  if [ "$S14_EC" -eq 0 ] \
+      && printf '%s\n' "$S14_OUT" | grep -Fq "uid=$WUID" \
+      && printf '%s\n' "$S14_OUT" | grep -Fq "euid=$WUID" \
+      && ! printf '%s\n' "$S14_OUT" | grep -Fq 'euid=0' \
+      && printf '%s\n' "$S14_OUT" | grep -Fq 'capEff=0000000000000000'; then
+    acc_ok "S14 image SUID executable stays at the workload identity (uid/euid=$WUID, no capabilities)"
+  else
+    acc_fail "S14 hostile source image escalation not fully dead (ec=$S14_EC): $(printf '%s\n' "$S14_OUT" | redact | tail -3)"
+  fi
+else
+  acc_blocked "S14 hostile fixture build failed (source-image escalation proof impossible)"
+fi
+
+# --- scenario S15: helper-created build staging strips SUID/SGID (C1) ---------
+say "S15: helper-created build staging strips SUID/SGID"
+# The staged chain must run inside the SESSION WORKSPACE (the context
+# authorization is workspace-scoped), not merely inside the Principal tree.
+STAGE_CTX="$TREE/work/staged-proof"
+rm -rf "$STAGE_CTX"
+mkdir -p "$STAGE_CTX"
+printf '#!/bin/sh\n' > "$STAGE_CTX/suid-staged"
+printf '#!/bin/sh\n' > "$STAGE_CTX/sgid-staged"
+chown "$PRINCIPAL:$PRINCIPAL" "$STAGE_CTX/suid-staged" "$STAGE_CTX/sgid-staged"
+chmod 0755 "$STAGE_CTX/suid-staged" "$STAGE_CTX/sgid-staged"
+chmod u+s "$STAGE_CTX/suid-staged"
+chmod g+s "$STAGE_CTX/sgid-staged"
+[ -u "$STAGE_CTX/suid-staged" ] && [ -g "$STAGE_CTX/sgid-staged" ] \
+  || { acc_blocked "S15 workspace privilege-bit fixture setup failed"; }
+cat > "$STAGE_CTX/Dockerfile" <<'EOF'
+FROM alpine:3.24
+COPY suid-staged /out/suid-staged
+COPY sgid-staged /out/sgid-staged
+RUN test ! -u /out/suid-staged || (echo STAGED-SUID-DELIVERED; exit 1)
+RUN test ! -g /out/sgid-staged || (echo STAGED-SGID-DELIVERED; exit 1)
+EOF
+S15_BUILD_RC=0
+DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+  dh build --context staged-proof --dockerfile Dockerfile --image uat-staged-proof:2.2 \
+  >/tmp/uat-wls-w15-build.log 2>&1 || S15_BUILD_RC=1
+S15_RUN_OUT=""
+if [ "$S15_BUILD_RC" -eq 0 ]; then
+  S15_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+    dh run --image uat-staged-proof:2.2 -- \
+    sh -ec 'test ! -u /out/suid-staged && test ! -g /out/sgid-staged && echo S15-STAGED-CLEAN' 2>&1)"
+fi
+if [ "$S15_BUILD_RC" -eq 0 ] \
+    && printf '%s\n' "$S15_RUN_OUT" | grep -q 'S15-STAGED-CLEAN'; then
+  acc_ok "S15 helper-created staging delivered no privilege bits (build-time and workload tests hold)"
+else
+  acc_fail "S15 staged privilege-bit chain not dead: build=$(redact </tmp/uat-wls-w15-build.log | tail -3) run=$(printf '%s\n' "${S15_RUN_OUT:-absent}" | redact | tail -3)"
+fi
+
+# --- scenario S16: helper-socket hostile runtime composition (H9) -------------
+say "S16: helper-socket hostile runtime composition"
+if docker image inspect "$HOSTILE_IMAGE" >/dev/null 2>&1; then
+  S16_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+    dh run --helper-socket --env TARGET_SESSION="$WSA_ID" --image "$HOSTILE_IMAGE" -- \
+    /bin/sh /usr/local/bin/hostile-probe.sh 2>&1)"
+  S16_EC=$?
+  if [ "$S16_EC" -eq 0 ] && printf '%s\n' "$S16_OUT" | grep -q 'S16-HOSTILE-CLEAN'; then
+    acc_ok "S16 socket reachable + unauthenticated call refused + private runtime unreadable/immutable + escalation dead"
+  else
+    acc_fail "S16 hostile helper-socket composition broken (ec=$S16_EC): $(printf '%s\n' "$S16_OUT" | redact | tail -4)"
+  fi
+else
+  acc_blocked "S16 hostile image unavailable (helper-socket composition proof impossible)"
 fi
 
 # ==============================================================================

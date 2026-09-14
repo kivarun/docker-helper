@@ -25,7 +25,21 @@
 #   9  the docker-helper-system daemon profile is not widened to workload-RW
 #      policy (packaged profile bytes unchanged, separate generated profiles);
 #  10  the bounded audit window carries the attributable workload-profile
-#      DENIED record and no unexpected docker-helper-system DENIED records.
+#      DENIED record and no unexpected docker-helper-system DENIED records;
+#  11  hostile SUID source image cannot elevate (C1): the server-owned
+#      workload privilege floor (no-new-privileges + cap-drop ALL) keeps a
+#      root-owned SUID executable in the image at the workload's own
+#      execution identity with no capabilities;
+#  12  helper-created build staging strips SUID/SGID (C1): privilege bits
+#      placed in the workspace never reach the helper-owned staged context,
+#      so the built image cannot deliver them to workload execution;
+#  13  helper-socket hostile composition (H9): with the runtime projection
+#      mounted, the socket transport stays functional, an unauthenticated
+#      call is refused, helper-private runtime state (session Docker
+#      config, builds/mounts/workload-MAC machinery) stays unreadable, the
+#      runtime stays immutable, and the privilege escalation stays dead —
+#      DAC 0700 is not bypassable from the strongest reachable workload
+#      privilege (Principal UID, no capabilities, no-new-privileges).
 #
 # Candidate binding (fail closed, before any scenario):
 #   * the exact candidate DEB SHA-256 matches the gate manifest checksum;
@@ -644,6 +658,155 @@ if [ "$UNEXPECTED" -eq 0 ]; then
   acc_ok "W10 no unexpected docker-helper-system DENIED records in the window"
 else
   acc_fail "W10 unexpected docker-helper-system DENIED records: $UNEXPECTED"
+fi
+
+# ==============================================================================
+# scenarios W11-W13: hostile C1/H9 privilege and helper-runtime composition
+# (placed after the W10 audit-window accounting so the mandatory denial
+# evidence windows stay untouched; these scenarios carry their own
+# behavioral assertions)
+# ==============================================================================
+
+HOSTILE_DIR="/tmp/uat-wla-sec"
+HOSTILE_IMAGE="uat-hostile-suid:2.2"
+
+# build_hostile_image compiles the privilege reporter from the verified
+# same-SHA checkout (scripts/uat-privilege-reporter) and builds the hostile
+# source image with plain docker build: the image is attacker-controlled
+# material by threat model, never helper-mediated. The reporter prints the
+# execution identity and effective capabilities; the image delivers it as a
+# root-owned SUID executable, plus curl for the helper-socket probe.
+build_hostile_image() {
+  rm -rf "$HOSTILE_DIR"
+  mkdir -p "$HOSTILE_DIR/image"
+  if ! (cd "$REPO_DIR_IN/scripts/uat-privilege-reporter" && CGO_ENABLED=0 go build -o "$HOSTILE_DIR/image/reporter" .) >/tmp/uat-wla-sec-compile.log 2>&1; then
+    printf '  reporter compile failed: %s\n' "$(tail -3 /tmp/uat-wla-sec-compile.log 2>/dev/null | redact)" >&2
+    return 1
+  fi
+  cat > "$HOSTILE_DIR/image/Dockerfile" <<'EOF'
+FROM alpine:3.24
+COPY reporter /usr/local/bin/reporter
+COPY hostile-probe.sh /usr/local/bin/hostile-probe.sh
+RUN chmod 0755 /usr/local/bin/reporter && chmod u+s /usr/local/bin/reporter
+RUN chmod 0755 /usr/local/bin/hostile-probe.sh
+RUN apk add --no-cache curl >/dev/null
+EOF
+  cat > "$HOSTILE_DIR/image/hostile-probe.sh" <<'EOF'
+#!/bin/sh
+# H9 hostile probe: exits nonzero with a distinct finding marker on any
+# violation; prints S3-HOSTILE-CLEAN when every check holds.
+fail() { printf 'S3-FINDING:%s\n' "$1"; exit 1; }
+# 1. the intended Unix socket transport stays reachable.
+out="$(curl -s --unix-socket /run/docker-helper/docker-helper.sock http://localhost/health)" \
+  || fail socket-unreachable
+case "$out" in *'"ok":true'*) : ;; *) fail health-not-ok ;; esac
+# 2. the transport grants no authority: an unauthenticated protected call is
+#    refused exactly as for any other API client.
+code="$(curl -s -o /dev/null -w '%{http_code}' --unix-socket \
+  /run/docker-helper/docker-helper.sock -X POST -H 'Content-Type: application/json' \
+  -d '{"image":"alpine:3.24"}' http://localhost/run)" || fail post-unreachable
+[ "$code" = "401" ] || fail "unauthenticated-post-code-$code"
+# 3. helper-private runtime machinery stays unreadable.
+for d in sessions builds mounts workload-mac; do
+  if ls "/run/docker-helper/$d" >/dev/null 2>&1; then fail "private-dir-readable-$d"; fi
+done
+# 4. the known per-Session Docker config (registry credential store) stays
+#    unreadable even by its exact known path.
+if cat "/run/docker-helper/sessions/$TARGET_SESSION/docker/config.json" >/dev/null 2>&1; then
+  fail session-config-readable
+fi
+# 5. helper-owned runtime state stays immutable.
+if touch /run/docker-helper/hostile-probe >/dev/null 2>&1; then fail runtime-writable-top; fi
+if touch "/run/docker-helper/sessions/$TARGET_SESSION/docker/hostile-probe" >/dev/null 2>&1; then
+  fail runtime-writable-sessions
+fi
+# 6. the privilege escalation stays dead with the projection mounted.
+info="$(/usr/local/bin/reporter)" || fail reporter-failed
+case "$info" in *euid=0*) fail suid-elevated ;; esac
+printf '%s\n' "$info" | grep -q 'capEff=0000000000000000' || fail caps-not-dropped
+echo S3-HOSTILE-CLEAN
+EOF
+  chmod 0755 "$HOSTILE_DIR/image/hostile-probe.sh"
+  docker build -q -t "$HOSTILE_IMAGE" "$HOSTILE_DIR/image" >/tmp/uat-wla-sec-build.log 2>&1 || {
+    printf '  hostile image build failed: %s\n' "$(tail -3 /tmp/uat-wla-sec-build.log 2>/dev/null | redact)" >&2
+    return 1
+  }
+  return 0
+}
+
+WUID="$(id -u "$PRINCIPAL")"
+
+# --- scenario W11: hostile SUID source image cannot elevate (C1) --------------
+say "W11: hostile SUID source image cannot elevate"
+if build_hostile_image; then
+  W11_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+    dh run --image "$HOSTILE_IMAGE" -- \
+    sh -ec '/usr/local/bin/reporter' 2>&1)"
+  W11_EC=$?
+  if [ "$W11_EC" -eq 0 ] \
+      && printf '%s\n' "$W11_OUT" | grep -Fq "uid=$WUID" \
+      && printf '%s\n' "$W11_OUT" | grep -Fq "euid=$WUID" \
+      && ! printf '%s\n' "$W11_OUT" | grep -Fq 'euid=0' \
+      && printf '%s\n' "$W11_OUT" | grep -Fq 'capEff=0000000000000000'; then
+    acc_ok "W11 image SUID executable stays at the workload identity (uid/euid=$WUID, no capabilities)"
+  else
+    acc_fail "W11 hostile source image escalation not fully dead (ec=$W11_EC): $(printf '%s\n' "$W11_OUT" | redact | tail -3)"
+  fi
+else
+  acc_blocked "W11 hostile fixture build failed (source-image escalation proof impossible)"
+fi
+
+# --- scenario W12: helper-created build staging strips SUID/SGID (C1) ---------
+say "W12: helper-created build staging strips SUID/SGID"
+STAGE_CTX="$TREE/staged-proof"
+rm -rf "$STAGE_CTX"
+mkdir -p "$STAGE_CTX"
+printf '#!/bin/sh\n' > "$STAGE_CTX/suid-staged"
+printf '#!/bin/sh\n' > "$STAGE_CTX/sgid-staged"
+chown "$PRINCIPAL:$PRINCIPAL" "$STAGE_CTX/suid-staged" "$STAGE_CTX/sgid-staged"
+chmod 0755 "$STAGE_CTX/suid-staged" "$STAGE_CTX/sgid-staged"
+chmod u+s "$STAGE_CTX/suid-staged"
+chmod g+s "$STAGE_CTX/sgid-staged"
+[ -u "$STAGE_CTX/suid-staged" ] && [ -g "$STAGE_CTX/sgid-staged" ] \
+  || { acc_blocked "W12 workspace privilege-bit fixture setup failed"; }
+cat > "$STAGE_CTX/Dockerfile" <<'EOF'
+FROM alpine:3.24
+COPY suid-staged /out/suid-staged
+COPY sgid-staged /out/sgid-staged
+RUN test ! -u /out/suid-staged || (echo STAGED-SUID-DELIVERED; exit 1)
+RUN test ! -g /out/sgid-staged || (echo STAGED-SGID-DELIVERED; exit 1)
+EOF
+W12_BUILD_RC=0
+DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+  dh build --context staged-proof --dockerfile Dockerfile --image uat-staged-proof:2.2 \
+  >/tmp/uat-wla-w12-build.log 2>&1 || W12_BUILD_RC=1
+W12_RUN_OUT=""
+if [ "$W12_BUILD_RC" -eq 0 ]; then
+  W12_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+    dh run --image uat-staged-proof:2.2 -- \
+    sh -ec 'test ! -u /out/suid-staged && test ! -g /out/sgid-staged && echo W12-STAGED-CLEAN' 2>&1)"
+fi
+if [ "$W12_BUILD_RC" -eq 0 ] \
+    && printf '%s\n' "$W12_RUN_OUT" | grep -q 'W12-STAGED-CLEAN'; then
+  acc_ok "W12 helper-created staging delivered no privilege bits (build-time and workload tests hold)"
+else
+  acc_fail "W12 staged privilege-bit chain not dead: build=$(redact </tmp/uat-wla-w12-build.log | tail -3) run=$(printf '%s\n' "${W12_RUN_OUT:-absent}" | redact | tail -3)"
+fi
+
+# --- scenario W13: helper-socket hostile runtime composition (H9) -------------
+say "W13: helper-socket hostile runtime composition"
+if docker image inspect "$HOSTILE_IMAGE" >/dev/null 2>&1; then
+  W13_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
+    dh run --helper-socket --env TARGET_SESSION="$WSA_ID" --image "$HOSTILE_IMAGE" -- \
+    /bin/sh /usr/local/bin/hostile-probe.sh 2>&1)"
+  W13_EC=$?
+  if [ "$W13_EC" -eq 0 ] && printf '%s\n' "$W13_OUT" | grep -q 'S3-HOSTILE-CLEAN'; then
+    acc_ok "W13 socket reachable + unauthenticated call refused + private runtime unreadable/immutable + escalation dead"
+  else
+    acc_fail "W13 hostile helper-socket composition broken (ec=$W13_EC): $(printf '%s\n' "$W13_OUT" | redact | tail -4)"
+  fi
+else
+  acc_blocked "W13 hostile image unavailable (helper-socket composition proof impossible)"
 fi
 
 # ==============================================================================

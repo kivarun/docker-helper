@@ -1907,8 +1907,9 @@ is never refused because the context or Dockerfile lies in a read_only
 region, and a snapshot/integrity evaluation failure here is `500
 internal_error` before staging, operation, or Docker state exists. The
 staging owner writes only into helper-owned staging under the runtime
-directory; it never writes into the source tree (see
-[Data-plane filesystem authority](#data-plane-filesystem-authority)).
+directory; it never writes into the source tree, and the staged context
+carries no SUID/SGID privilege bits (see
+[Container security](#container-security)).
 
 ### Run
 
@@ -2467,7 +2468,15 @@ create, remove, or replace top-level runtime entries, and helper-private
 runtime state (`builds/`, `mounts/`, `sessions/`, the socket lock, and cid
 files) remains unreadable for the Principal-UID workload through the
 helper-owned directory permissions; the known entry names are not
-authority. Under enforcing SELinux the shipped policy grants the workload
+authority. The server-owned workload privilege floor
+(no-new-privileges, dropped capabilities) is what makes that DAC boundary
+non-bypassable from inside the workload: with no privilege escalation path
+left, the strongest reachable workload identity is the Principal UID:GID,
+which the helper-owned `0700` runtime state denies. Hostile live UAT on
+both mandatory MAC backends proves the composition (the socket stays
+reachable, an unauthenticated call stays refused, the private runtime
+stays unreadable and immutable, and the escalation stays dead); under
+enforcing SELinux the shipped policy grants the workload
 exactly the traversal and socket-connect permissions needed to reach the
 socket and nothing else; under AppArmor system mode the workload remains
 confined by the generated per-workload
@@ -2475,8 +2484,8 @@ confined by the generated per-workload
 is disabled with `label=disable`, which does not disable AppArmor — see
 [System-mode run mounts](#system-mode-run-mounts)), and the same isolation
 is provided by the helper-owned filesystem permissions, the read-only
-mount, and unchanged bearer authentication: reachability to the helper
-socket grants no authority.
+mount, the privilege floor, and unchanged bearer authentication:
+reachability to the helper socket grants no authority.
 
 In user mode the runtime directory is owned by the daemon owner with
 `0700` permissions, and user-mode workloads run under that same UID, so a
@@ -3312,6 +3321,14 @@ through the HTTP API.
 docker-helper applies a fixed security policy when running containers:
 
 - `--rm` — remove the container on exit;
+- the server-owned workload privilege floor — the run argv owner emits
+  `--cap-drop ALL` and `--security-opt no-new-privileges:true` for every
+  workload in every mode, before any backend option, and no request field
+  can disable or weaken them. Linux no-new-privileges and the dropped
+  capability set keep an image-delivered or build-staging-delivered
+  SUID/SGID executable at the workload's own execution identity, so the
+  strongest privilege a hostile workload can reach is its server-owned
+  `--user` identity with no container capabilities;
 - user mode and AppArmor system mode pass `--security-opt label=disable`
   (SELinux labeling disabled; this does not disable AppArmor — an AppArmor
   system-mode run workload is additionally confined by the generated
@@ -3321,7 +3338,29 @@ docker-helper applies a fixed security policy when running containers:
   `--security-opt label=type:docker_helper_container_t` and keeps MCS
   confinement;
 - `--user <uid>:<gid>` — run as the session owner principal's UID and GID,
-  or daemon UID:GID for daemon-owner (user-mode) sessions.
+  or daemon UID:GID for daemon-owner (user-mode) sessions; the execution
+  identity is server-owned and authoritative — the image `USER`/ENTRYPOINT
+  never substitutes for it and cannot weaken the privilege floor.
+
+The workload MAC backends stay additional independent confinement layers;
+they never compute or relax the privilege floor. The hostile
+AppArmor/SELinux workload UAT proves the composition: helper-private
+runtime state stays unreadable and immutable from the strongest reachable
+workload privilege (see
+[Helper socket projection](#helper-socket-projection) for the runtime
+projection boundary).
+
+### Build staging privilege bits
+
+The staging owner writes only into helper-owned staging under the runtime
+directory. Every staged regular file is created by copying content and then
+preserving the source's ordinary permission bits while stripping the SUID
+and SGID privilege bits at the single staging copy point: the staged copy is
+helper-owned (root-owned in system mode), so transferring a source privilege
+bit would deliver a privilege-granting setuid/setgid binary through Docker's
+build context. The source file itself is never modified, staged hardlink
+entries share the first staged copy's inode and inherit the same stripped
+mode, and Docker receives only the staged paths as before.
 
 ## Current limitations and non-goals
 

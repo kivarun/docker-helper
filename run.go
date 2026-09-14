@@ -281,6 +281,20 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 	}, nil
 }
 
+// workloadPrivilegeFloor is the complete server-owned Docker privilege
+// floor for every docker-helper run workload. The run argv owner emits it
+// exactly once per workload, before the workload MAC options, in every
+// mode: Linux no-new-privileges is enforced and container capabilities are
+// dropped, so no image content or helper-created build staging can deliver
+// privilege escalation to the workload's execution identity. It is not
+// caller-selectable (the run request contract carries no privilege field)
+// and the workload MAC --security-opt options stay additional independent
+// confinement layers.
+var workloadPrivilegeFloor = []string{
+	"--cap-drop", "ALL",
+	"--security-opt", "no-new-privileges:true",
+}
+
 func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	authority, ok := a.requireSessionFilesystemCapability(w, r, "run")
 	if !ok {
@@ -723,6 +737,15 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		"--rm",
 		"--user", fmt.Sprintf("%d:%d", execUID, execGID),
 	}
+	// The server-owned workload privilege floor is emitted by this argv
+	// owner for every workload in every mode, before any backend option:
+	// Linux no-new-privileges is enforced and container capabilities are
+	// dropped, so an image- or build-context-delivered SUID/SGID executable
+	// can never elevate the workload's execution identity. The run request
+	// contract has no privilege field, and the workload MAC
+	// --security-opt options appended below stay additional independent
+	// confinement layers.
+	args = append(args, workloadPrivilegeFloor...)
 	for _, opt := range securityOpts {
 		args = append(args, "--security-opt", opt)
 	}

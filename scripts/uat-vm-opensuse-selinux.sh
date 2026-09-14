@@ -214,6 +214,15 @@ REPO_HEAD="$(git -C "$UAT_REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
 vm_selinux_transfer_artifact "workload-live-proof.test" /tmp/uat-wls-proof.test
 vm_selinux_transfer_artifact "candidate.manifest" "$UAT_MANIFEST"
 
+# The hostile privilege reporter for the workload security scenarios
+# (S14/S16) compiles from the same candidate checkout on the host — the
+# guest has no Go toolchain on its PATH — and transfers with the exact
+# candidate artifacts.
+log "== 6d. compile the hostile privilege reporter (host, candidate checkout) =="
+( cd "$UAT_REPO_DIR/scripts/uat-privilege-reporter" && CGO_ENABLED=0 go build -o /tmp/uat-wls-reporter . ) \
+  || fail "hostile privilege reporter compilation failed"
+vm_selinux_transfer_artifact "workload-privilege-reporter" /tmp/uat-wls-reporter
+
 # ---------------------------------------------------------------------------
 # 6b-7a. two-stage Docker preparation + Docker SELinux health gate
 # ---------------------------------------------------------------------------
@@ -324,7 +333,7 @@ record_stage "RuntimeDirectory socket regression" "$RUNDIR_RESULT"
 log "== 8f. SELinux workload-MAC acceptance matrix (exact candidate) =="
 WLMAC_RESULT=FAIL
 if run_guest_capture "SELinux workload-MAC acceptance inside the guest" \
-  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_PROOF_BIN=/opt/uat-import/workload-live-proof.test UAT_SOURCE_SHA=$UAT_SOURCE_SHA UAT_MANIFEST=/opt/uat-import/candidate.manifest UAT_PRINCIPAL=opc scripts/uat-workload-selinux.sh"; then
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_PROOF_BIN=/opt/uat-import/workload-live-proof.test UAT_SOURCE_SHA=$UAT_SOURCE_SHA UAT_MANIFEST=/opt/uat-import/candidate.manifest UAT_REPORTER_BIN=/opt/uat-import/workload-privilege-reporter UAT_PRINCIPAL=opc scripts/uat-workload-selinux.sh"; then
   WLMAC_RESULT=PASS
   log "SELinux workload-MAC acceptance passed inside the guest"
 else
