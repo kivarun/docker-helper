@@ -111,17 +111,38 @@ func TestRunHostileTargetKeepsIntendedBindMountThroughDockerGrammar(t *testing.T
 	for _, tc := range []struct {
 		name   string
 		target string
+		// representable reports whether the Docker mount grammar can
+		// represent the crafted value faithfully: the CSV reader normalizes
+		// the literal CRLF pair to LF inside quoted fields, so a CRLF value
+		// must be refused before any Docker state exists.
+		representable bool
 	}{
-		{name: "newline target", target: "/mnt\nfoo"},
-		{name: "CRLF target", target: "/mnt\r\nfoo"},
-		{name: "quote target", target: `/mnt"foo`},
-		{name: "comma option target", target: "/data,readonly"},
+		{name: "newline target", target: "/mnt\nfoo", representable: true},
+		{name: "CRLF target", target: "/mnt\r\nfoo", representable: false},
+		{name: "quote target", target: `/mnt"foo`, representable: true},
+		{name: "comma option target", target: "/data,readonly", representable: true},
 	} {
 		body := fmt.Sprintf(`{"image":"alpine","mounts":[{"source":".","target":%q,"read_only":true}]}`, tc.target)
 		req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(body)))
 		req.Header.Set("Authorization", "Bearer "+result.Token)
 		w := httptest.NewRecorder()
 		app.handleRun(w, req)
+
+		if !tc.representable {
+			// The grammar cannot represent the value faithfully: the run is
+			// refused invalid_mount before any Docker state exists.
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%s: expected 400, got %d (body=%s)", tc.name, w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "invalid_mount") {
+				t.Fatalf("%s: expected invalid_mount, got %s", tc.name, w.Body.String())
+			}
+			if dockerArgs != nil {
+				t.Fatalf("%s: Docker was invoked for an unrepresentable mount", tc.name)
+			}
+			continue
+		}
+
 		if w.Code != http.StatusCreated {
 			t.Fatalf("%s: expected 201, got %d (body=%s)", tc.name, w.Code, w.Body.String())
 		}
@@ -149,6 +170,73 @@ func TestRunHostileTargetKeepsIntendedBindMountThroughDockerGrammar(t *testing.T
 			default:
 				t.Fatalf("%s: Docker parsed the extra mount option %q from crafted data", tc.name, key)
 			}
+		}
+	}
+}
+
+// TestDockerBindMountSpecContract proves the canonical serializer's
+// representability and semantic round-trip: for every accepted fact set the
+// serialized value parses back through the authoritative Docker CLI grammar
+// to exactly the intended source, target, and readonly semantics with no
+// extra logical field, and a value the grammar cannot represent faithfully
+// fails closed instead of being encoded approximately.
+func TestDockerBindMountSpecContract(t *testing.T) {
+	cases := []struct {
+		name string
+		in   dockerBindMount
+		// wantErr marks values the Docker mount grammar cannot represent
+		// faithfully (the CRLF normalization) or structural empties.
+		wantErr bool
+	}{
+		{name: "ordinary", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/data"}},
+		{name: "readonly true", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/data", ReadOnly: true}},
+		{name: "readonly false", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/data", ReadOnly: false}},
+		{name: "comma in source and target", in: dockerBindMount{Source: "/srv/a,b", Target: "/mnt/c,d"}},
+		{name: "newline in source and target", in: dockerBindMount{Source: "/srv/a\nb", Target: "/mnt/c\nd"}},
+		{name: "quotes in source and target", in: dockerBindMount{Source: `/srv/a"b`, Target: `/mnt/c"d`}},
+		{name: "equals in source and target", in: dockerBindMount{Source: "/srv/a=b", Target: "/mnt/c=d"}},
+		{name: "backslash in source and target", in: dockerBindMount{Source: `/srv/a\b`, Target: `/mnt/c\d`}},
+		{name: "lone carriage return", in: dockerBindMount{Source: "/srv/a\rb", Target: "/mnt/c\rd"}},
+		{name: "leading and trailing whitespace", in: dockerBindMount{Source: "/srv/ a ", Target: "/mnt/ c "}},
+		{name: "hostile delimiter combination", in: dockerBindMount{Source: `/srv/a,b"c`, Target: "/mnt/d=e\nf,g\"h"}},
+		{name: "CRLF in source", in: dockerBindMount{Source: "/srv/a\r\nb", Target: "/mnt/data"}, wantErr: true},
+		{name: "CRLF in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/c\r\nd"}, wantErr: true},
+		{name: "empty source", in: dockerBindMount{Target: "/mnt/data"}, wantErr: true},
+		{name: "empty target", in: dockerBindMount{Source: "/srv/data"}, wantErr: true},
+	}
+	for _, tc := range cases {
+		spec, err := dockerBindMountSpec(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("%s: expected a fail-closed refusal, got spec %q", tc.name, spec)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: unexpected refusal: %v", tc.name, err)
+		}
+		if strings.Contains(spec, "\n") && !strings.Contains(tc.in.Source, "\n") && !strings.Contains(tc.in.Target, "\n") {
+			t.Fatalf("%s: spec %q spans multiple records without any newline fact", tc.name, spec)
+		}
+		m := parseDockerMountSpec(t, spec)
+		if m.Type != "bind" {
+			t.Fatalf("%s: parsed type %q, want bind", tc.name, m.Type)
+		}
+		if m.Source != tc.in.Source {
+			t.Fatalf("%s: parsed source %q, want the intended source %q", tc.name, m.Source, tc.in.Source)
+		}
+		if m.Target != tc.in.Target {
+			t.Fatalf("%s: parsed target %q, want the intended target %q", tc.name, m.Target, tc.in.Target)
+		}
+		if m.ReadOnly != tc.in.ReadOnly {
+			t.Fatalf("%s: parsed readonly %v, want the intended %v", tc.name, m.ReadOnly, tc.in.ReadOnly)
+		}
+		wantKeys := []string{"type", "source", "target"}
+		if tc.in.ReadOnly {
+			wantKeys = append(wantKeys, "readonly")
+		}
+		if strings.Join(m.Keys, ",") != strings.Join(wantKeys, ",") {
+			t.Fatalf("%s: parsed keys %q, want exactly %q", tc.name, m.Keys, wantKeys)
 		}
 	}
 }

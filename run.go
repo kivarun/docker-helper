@@ -232,10 +232,6 @@ func resolveMount(mount mountRequest, workspace string, snapshot *sessionFilesys
 		return nil, fmt.Errorf("mount target is invalid: %s", mount.Target)
 	}
 
-	if strings.Contains(cleaned, ",") {
-		return nil, fmt.Errorf("mount target contains unsupported character: %s", cleaned)
-	}
-
 	// Authorization ceiling first (H3): the raw source spelling must be
 	// lexically inside the issued filesystem capability before any
 	// privileged host-filesystem probing. A spelling outside the capability
@@ -266,10 +262,6 @@ func resolveMount(mount mountRequest, workspace string, snapshot *sessionFilesys
 			return nil, fmt.Errorf("mount source does not exist: %s", mount.Source)
 		}
 		return nil, fmt.Errorf("cannot resolve mount source: %w", err)
-	}
-
-	if strings.Contains(sourcePath, ",") {
-		return nil, fmt.Errorf("mount source contains unsupported character: %s", sourcePath)
 	}
 
 	if !filepath.IsAbs(sourcePath) {
@@ -449,6 +441,31 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			}
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
+		}
+
+		// Docker bind-mount serialization (M13): the caller-visible fields of
+		// every mount must be representable through the Docker mount grammar
+		// before any pin, operation, or Docker state exists — the container
+		// target in every mode, and the canonical bind source in user mode
+		// (system mode binds a helper-owned pinned path instead of the
+		// resolved host path). The representability proof and the encoding
+		// live in the serializer owner, never as scattered per-caller
+		// prohibitions.
+		if err := dockerMountFieldRepresentable(resolved.Target); err != nil {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+			return
+		}
+		if cfg.Mode == ModeUser {
+			if err := dockerMountFieldRepresentable(resolved.SourcePath); err != nil {
+				if leaseRelease != nil {
+					leaseRelease()
+				}
+				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+				return
+			}
 		}
 
 		if targetSeen[resolved.Target] {
@@ -806,9 +823,16 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Add trusted CA injection mount (not included in user mounts audit).
 	if trustedCAInjected {
-		caMountSpec := fmt.Sprintf("type=bind,source=%s,target=%s,readonly",
-			cfg.TrustedCAPreparedDir, trustedCAContainerDir)
-		args = append(args, "--mount", caMountSpec)
+		caSpec, err := dockerBindMountSpec(dockerBindMount{
+			Source:   cfg.TrustedCAPreparedDir,
+			Target:   trustedCAContainerDir,
+			ReadOnly: true,
+		})
+		if err != nil {
+			a.failRunArgvPreparation(ctx, w, op, session, "cannot serialize trusted CA mount", err)
+			return
+		}
+		args = append(args, "--mount", caSpec)
 	}
 
 	// Add the server-owned helper runtime projection (not included in user
@@ -816,8 +840,16 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// at the fixed container target, giving the workload transport
 	// reachability to the existing helper Unix socket.
 	if req.HelperSocket && cfg.Mode == ModeSystem {
-		args = append(args, "--mount", fmt.Sprintf("type=bind,source=%s,target=%s,readonly",
-			cfg.RuntimeDir, helperSocketContainerDir))
+		socketSpec, err := dockerBindMountSpec(dockerBindMount{
+			Source:   cfg.RuntimeDir,
+			Target:   helperSocketContainerDir,
+			ReadOnly: true,
+		})
+		if err != nil {
+			a.failRunArgvPreparation(ctx, w, op, session, "cannot serialize helper socket mount", err)
+			return
+		}
+		args = append(args, "--mount", socketSpec)
 	}
 
 	// Add user mounts from the accepted exposure plan: the bind source is
@@ -825,17 +857,23 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// pin, or the helper-owned projection path for a SELinux read-only
 	// exposure) and the canonical resolved path in user mode; the readonly
 	// flag follows exactly the caller-requested consumption mode, never the
-	// snapshot access of the source.
+	// snapshot access of the source. Every bind form is serialized by the
+	// one canonical Docker bind-mount owner.
 	for i, exposure := range exposurePlan {
 		dockerBindSource := exposure.SourcePath
 		if cfg.Mode == ModeSystem {
 			dockerBindSource = op.workloadMAC.MountSources[i]
 		}
-		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", dockerBindSource, exposure.Target)
-		if exposure.RequestedReadOnly {
-			mountSpec += ",readonly"
+		spec, err := dockerBindMountSpec(dockerBindMount{
+			Source:   dockerBindSource,
+			Target:   exposure.Target,
+			ReadOnly: exposure.RequestedReadOnly,
+		})
+		if err != nil {
+			a.failRunArgvPreparation(ctx, w, op, session, "cannot serialize user mount", err)
+			return
 		}
-		args = append(args, "--mount", mountSpec)
+		args = append(args, "--mount", spec)
 	}
 
 	if shmSizeBytes > 0 {

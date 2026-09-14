@@ -28,6 +28,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os/exec"
 	"strings"
 	"time"
@@ -218,6 +219,20 @@ func (a *App) rollbackRunPreparation(ctx context.Context, op *operation) {
 		cleanupStage{name: cleanupStageCidfile, run: func() error { cleanupCidfile(op); return nil }},
 	).run()
 	logRunCleanupOutcome(ctx, "run", op.ID, outcome)
+}
+
+// failRunArgvPreparation is the fail-closed outcome of a Docker argv
+// preparation failure after run state was already prepared (a bind-mount
+// serialization failure of a server-owned value, for example): the prepared
+// workload MAC state and source pins roll back through the canonical
+// rollback owner and the run answers internal_error.
+func (a *App) failRunArgvPreparation(ctx context.Context, w http.ResponseWriter, op *operation, session *Session, stage string, err error) {
+	opLog(ctx).Error(stage,
+		slog.String("operation", "run"),
+		slog.String("error", err.Error()),
+	)
+	a.rollbackRunPreparation(ctx, op)
+	writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 }
 
 // proveRunContainerAbsent runs the canonical container-absence proof for
