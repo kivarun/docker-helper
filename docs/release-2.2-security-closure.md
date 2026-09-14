@@ -136,7 +136,7 @@ risk rather than by the audit's original severity ordering.
 | **M10** | Allowed-root symlinks are recomputed after validation without reapplying the safety policy | **CLOSED_CURRENT** | SC0 | The old raw-symlink re-resolution path is gone: current effective allowed-root policy is composed from canonical paths and the Session snapshot persists the issued canonical identity; later data-plane decisions consume that snapshot rather than re-resolving the original stored spelling. Preserve the symlink/path-policy regressions. |
 | **M11** | SELinux fcontext input escapes regex syntax but not file-format/control-character hazards | **BLOCKER_FIX** | SC1 | Current workspace/root policy does not reject newline/control characters and `escapeFcontextPath` only escapes regex metacharacters. Reject unsupported control characters at the canonical host-path policy owner, not only inside the SELinux backend. |
 | **M12** | `semanage fcontext` output parser disagrees with the producer's long-path spacing | **BLOCKER_FIX** | SC1 | Parse the real `semanage` output grammar robustly and add long-path/backend tests; do not preserve a width-dependent split rule. |
-| **M13** | Crafted bind-mount target can desynchronize Docker `--mount` CSV and lose `readonly` | **BLOCKER_FIX** | SC1 | One bind-mount serializer/encoder owns every Docker bind form; hostile target tests must prove exact target and access mode survive Docker parsing. No ad-hoc concatenation per caller. |
+| **M13** | Crafted bind-mount target can desynchronize Docker `--mount` CSV and lose `readonly` | **CLOSED_CURRENT** | SC1 | One canonical serializer owns every Docker bind form (user mounts, trusted CA injection, helper-socket runtime projection); the grammar is the authoritative Docker CLI parser (one CSV record read once, `key=value` fields or boolean flags) and the encoding is Go `encoding/csv` — the Docker-sanctioned quoting — so a crafted source/target stays exactly one field and cannot add an option, change the target, remove `readonly`, add `rw`, change type/source, or create a second logical field. The one unrepresentable case (CRLF normalizes to LF in the CSV reader) fails closed before any Docker state exists. Hostile real-Docker evidence proves exact target and access mode survive Docker parsing; no ad-hoc concatenation per caller remains. |
 
 The Low findings `L1`-`L14` remain an audit hardening backlog and do not
 independently enter the Release 2.2 stable gate unless implementation evidence
@@ -495,6 +495,71 @@ the persisted snapshot and its digest, kind-aware LookupAccess,
 persistence/digest/migration/introspection review) is an explicit
 architecture change and is deliberately NOT taken silently inside H3.
 
+### M13 — one canonical Docker bind-mount serialization owner
+
+The audit class: the Docker CLI parses one `--mount` value as ONE CSV
+record read once (`opts/mount.go`, `MountOpt.Set` — every field is a
+`key=value` pair split on the first `=` or a boolean flag, and later
+duplicate keys overwrite earlier ones), while the production run argv
+builders concatenated caller-controlled source/target into that record
+with `fmt.Sprintf` in three places (user mounts, trusted CA injection,
+helper-socket projection) with no encoding and scattered per-caller comma
+prohibitions. A crafted target containing an unquoted control character
+truncated the record the CLI parses — the trailing `readonly` flag was
+silently dropped and the workspace mounted WRITABLE at a different
+target (proven RED through the real run path with the authoritative
+grammar mirror); quote-carrying values produced a Docker parse error, and
+commas were refused scattered instead of represented safely.
+
+Closed with one canonical serializer owner (`dockerBindMountSpec` /
+`dockerMountFieldRepresentable`, `docker_mount_spec.go`):
+
+- structured facts `{source, target, readonly}` in, exactly one
+  `--mount` argument out; every production bind form (user mounts,
+  trusted CA injection, helper-socket runtime projection) builds its argv
+  value through the one owner — no second serializer, no per-caller
+  ad-hoc concatenation (repo sweep verified);
+- the encoding is Go `encoding/csv` — the Docker-sanctioned grammar — so
+  commas, quotes, newlines, lone carriage returns, `=` signs, backslashes,
+  and surrounding whitespace stay exactly one field: a crafted value
+  cannot add a mount option, change the target, remove `readonly`, add
+  `rw`, change type/source, or create a second logical field;
+- the one unrepresentable case fails closed in the owner: the CSV reader
+  normalizes the literal CRLF pair to LF inside quoted fields, so a CRLF
+  source/target cannot round-trip and is refused `invalid_mount` before
+  any pin, operation, or Docker state exists (the container target in
+  every mode; the canonical bind source in user mode — system mode binds
+  a helper-owned pinned path);
+- request validation, filesystem authorization, and Docker argv
+  serialization stay separate layers: the serializer owns only the
+  encoding/representability, never path policy, and the scattered
+  comma prohibitions in `resolveMount` were removed (a comma-carrying
+  source/target is now safely representable — an observable public
+  change recorded in the CHANGELOG).
+
+Evidence:
+
+- RED through the real run path (exec seam + authoritative grammar
+  mirror): hostile targets parsed by the Docker CLI grammar lose the
+  intended target and the `readonly` flag on the pre-fix code
+  (`TestRunHostileTargetKeepsIntendedBindMountThroughDockerGrammar`).
+- GREEN semantic round-trip contract (`TestDockerBindMountSpecContract`):
+  ordinary values, both readonly modes, comma/newline/quote/`=`/
+  backslash/lone-CR/whitespace and hostile delimiter combinations parse
+  back to exactly the intended source/target/readonly with exactly the
+  intended key set; CRLF and empty fields fail closed.
+- GREEN hostile real-Docker evidence (regression group 22,
+  `scripts/uat-regression-bind-serialization.sh`, Ubuntu/DEB/AppArmor,
+  real Docker): a newline target mounts READ-ONLY at the exact intended
+  target (marker readable, write attempt denied, `docker inspect`
+  Destination/RW verbatim), the option-injection spelling
+  (`/mnt/dta,readonly`) mounts writable at the exact intended target with
+  no injected option, and a CRLF target is refused `invalid_mount` with
+  no container/state residue.
+- Server-owned forms serialize through the same owner with unchanged
+  behavior (existing CA/helper-socket argv contract tests pass
+  unchanged).
+
 ## Release-cycle integration
 
 Security closure is inserted **after the Release 2.2 feature contract is frozen
@@ -539,8 +604,9 @@ findings merely because they came from the same audit.
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
 **Queue:** `C3`, `H6`, `M2`, `M4`, `M5`, `M11`,
-`M12`, `M13`. (C1 and H9 closed in SC1 — see the SC1 evidence ledger. H2
-and H3 closed in SC1 — see the SC1 evidence ledger below.)
+`M12`. (C1 and H9 closed in SC1 — see the SC1 evidence ledger. H2
+and H3 closed in SC1 — see the SC1 evidence ledger below. M13 closed in
+SC1 — see the SC1 evidence ledger below.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
@@ -562,7 +628,6 @@ Implementation constraints:
 - M5: one accepted Principal username grammar before OS lookup and persistence.
 - M11: host-path control-character policy belongs to the shared path owner.
 - M12: the parser follows the producer grammar, not terminal-width spacing.
-- M13: one Docker bind serializer for every bind mount form.
 
 ## SC2 — bounded-resource and liveness closure
 
