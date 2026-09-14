@@ -155,6 +155,7 @@ REGRESSIONS=(
   "18:User-mode helper_socket fail-closed:uat-regression-user-mode-helper-socket.sh"
   "19:User-mode self introspection:uat-regression-user-mode-self.sh"
   "20:RC5 CLI grammar and stored-roots completion:uat-regression-rc5-cli-grammar.sh"
+  "21:Allowed-root recovery universe:uat-regression-allowed-root-recovery.sh"
 )
 
 declare -A RESULT
