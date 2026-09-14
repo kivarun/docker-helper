@@ -242,7 +242,7 @@ except Exception:
 byp = {e.get("path"): e.get("access") for e in entries}
 survivor, stale, human = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.exit(0 if byp.get(survivor) == "read_write" and byp.get(stale) == "read_only"
-         and sorted(byp) == sorted(h.splitlines()) else 1)
+         and sorted(byp) == sorted(human.splitlines()) else 1)
 ' "$SURVIVOR" "$STALE" "$human_out"; then
   reg_ok "D: the --json projection carries the stale entry with its stored access mode"
 else
