@@ -619,14 +619,16 @@ func TestFilesystemRootsOutsideCeilingProbesNothing(t *testing.T) {
 	}
 }
 
-// TestRunMountFileRootDescendantProbesNothing proves the exact-capability
-// semantic of a regular-file issued filesystem root at the run data plane:
-// the issued root is an exact concrete boundary — the MAC backends render it
-// as an exact file boundary and the mount-pin owner binds the file itself —
-// so its lexical descendants are not issued by the snapshot. A descendant
-// mount source is refused invalid_mount, and the decision probes only the
-// ISSUED root path — never the unissued descendant spelling.
-func TestRunMountFileRootDescendantProbesNothing(t *testing.T) {
+// TestRunMountFileRootDescendantFollowsSnapshotTreeSemantics proves the
+// accepted snapshot path-tree authority semantics at the run admission: a
+// strict descendant of an issued root is admitted lexically against the
+// issued snapshot entries regardless of the governing pathname's live kind,
+// and the privileged resolver runs on it (a descendant of a regular-file
+// root that still is a regular file is refused by the live filesystem
+// mechanics — the child cannot resolve — with the stable public contract).
+// The probe recording is the regression guard: any kind-gate that refuses
+// before probing would silence the resolver for an admitted spelling.
+func TestRunMountFileRootDescendantFollowsSnapshotTreeSemantics(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
@@ -665,22 +667,28 @@ func TestRunMountFileRootDescendantProbesNothing(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "invalid_mount") {
 		t.Fatalf("file-root descendant: expected invalid_mount, got %s", w.Body.String())
 	}
+	// The admitted descendant spelling reached the privileged resolver: the
+	// refusal is the live-mechanics one (the child cannot resolve below a
+	// regular file), never an authorization short-circuit.
 	paths := probePaths()
 	if n := probes(); n != 1 {
-		t.Fatalf("file-root descendant: %d privileged probes, want exactly the one stat of the issued root", n)
+		t.Fatalf("file-root descendant: %d privileged probes, want exactly the resolver probe of the admitted spelling", n)
 	}
-	if len(paths) != 1 || paths[0] != fileRoot {
-		t.Fatalf("file-root descendant: probed paths %v, want exactly the issued root %q", paths, fileRoot)
+	if len(paths) != 1 || paths[0] != descendant {
+		t.Fatalf("file-root descendant: probed paths %v, want exactly the admitted descendant spelling %q", paths, descendant)
 	}
 }
 
-// TestRunMountIssuedFileKindReplacementDoesNotWidenAuthority proves the
-// issuance-time exactness the documented regular-file contract requires: a
-// root issued while it is a regular file stays an exact concrete capability —
-// replacing the same pathname with a directory AFTER issuance and requesting
-// a descendant mount must remain refused by the issued snapshot authority,
-// never reinterpreted through the live pathname kind.
-func TestRunMountIssuedFileKindReplacementDoesNotWidenAuthority(t *testing.T) {
+// TestRunMountIssuedFileRootKeepsSnapshotPathTreeAuthority proves the
+// accepted immutable-snapshot authority semantics the review round pinned:
+// the Session snapshot persists and digests exactly position/path/access,
+// and its authority is the issued PATH TREE — a root issued while it is a
+// regular file authorizes the same pathname subtree after the live pathname
+// is replaced by a directory, exactly as a directory issued root does. The
+// authorization decision is made only from the persisted snapshot through
+// the canonical loader (digest/integrity verified) and the snapshot
+// exposure owner — never from live kind inference.
+func TestRunMountIssuedFileRootKeepsSnapshotPathTreeAuthority(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
@@ -697,14 +705,16 @@ func TestRunMountIssuedFileKindReplacementDoesNotWidenAuthority(t *testing.T) {
 		t.Fatalf("file-root create: expected 201, got %d (body=%s)", rec.Code, rec.Body.String())
 	}
 	var created struct {
-		ID    string `json:"id"`
+		Session struct {
+			ID string `json:"id"`
+		} `json:"session"`
 		Token string `json:"token"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("cannot decode create response: %v", err)
 	}
-	if created.Token == "" {
-		t.Fatal("file-root create response carries no session bearer")
+	if created.Session.ID == "" {
+		t.Fatal("file-root create response carries no session ID")
 	}
 
 	// After issuance: replace the issued pathname with a directory and
@@ -720,17 +730,36 @@ func TestRunMountIssuedFileKindReplacementDoesNotWidenAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := fmt.Sprintf(`{"image":"alpine","mounts":[{"source":%q,"target":"/data","read_only":true}]}`, child)
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(body)))
-	req.Header.Set("Authorization", "Bearer "+created.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("issued file kind replaced by a directory: expected 400, got %d (body=%s)", w.Code, w.Body.String())
+	// The persisted immutable snapshot (digest/integrity verified by the
+	// canonical loader) authorizes the descendant: the authority is the
+	// issued path tree, independent of the live pathname kind.
+	snapshot, err := loadSessionFilesystemSnapshot(app.DB, created.Session.ID, workspace)
+	if err != nil {
+		t.Fatalf("loadSessionFilesystemSnapshot: %v", err)
 	}
-	if !strings.Contains(w.Body.String(), "invalid_mount") {
-		t.Fatalf("issued file kind replaced by a directory: expected invalid_mount, got %s", w.Body.String())
+	resolved, err := resolveMount(mountRequest{Source: child, Target: "/data", ReadOnly: true}, workspace, snapshot)
+	if err != nil {
+		t.Fatalf("descendant of the issued path tree: %v", err)
 	}
+	exposure, err := resolveSessionFilesystemExposure(snapshot, resolved.SourcePath, "/data", true)
+	if err != nil {
+		t.Fatalf("snapshot exposure of the descendant: %v", err)
+	}
+	if exposure.Access != AllowedRootAccessReadWrite {
+		t.Fatalf("descendant exposure access = %q, want the issued root's read_write", exposure.Access)
+	}
+
+	// The boundary stays the snapshot: a spelling outside the issued path
+	// tree is still refused without probing.
+	reset, probes, _ := countSessionPathProbes(t)
+	_, err = resolveMount(mountRequest{Source: filepath.Join(root, "elsewhere"), Target: "/data", ReadOnly: true}, workspace, snapshot)
+	if err == nil || !strings.Contains(err.Error(), "outside the issued session filesystem snapshot") {
+		t.Fatalf("outside-snapshot control: expected the bounded admission refusal, got %v", err)
+	}
+	if n := probes(); n != 0 {
+		t.Fatalf("outside-snapshot control: %d privileged probes before lexical admission", n)
+	}
+	reset()
 }
 
 // TestFilesystemRootsAdmittedSpellingSemantics proves the second half of the
@@ -791,85 +820,5 @@ func TestFilesystemRootsAdmittedSpellingSemantics(t *testing.T) {
 	}
 	if n := probes(); n != 3 { // 2 workspace-admission probes + 1 failed resolution
 		t.Fatalf("G missing root: %d probes, want 3", n)
-	}
-}
-
-// TestResolveMountRegularFileRootExactCapability proves the gate at the
-// resolver boundary: mounting the issued regular file itself still resolves,
-// a descendant of a directory issued root still resolves through the
-// pathname-tree capability, and only the regular-file descendant is refused
-// — decided from the issued root alone, never by probing the descendant
-// spelling.
-func TestResolveMountRegularFileRootExactCapability(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-	setupTestLoggingDiscard(t)
-	root := app.Config.AllowedRoots[0].Path
-	tree := filepath.Join(root, "runs")
-	work := filepath.Join(tree, "run-1")
-	fileRoot := filepath.Join(tree, "repos", "data.bin")
-	dirRoot := filepath.Join(tree, "cache")
-	for _, d := range []string{work, filepath.Dir(fileRoot), filepath.Join(dirRoot, "sub")} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(fileRoot, []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := newSessionFilesystemSnapshot(work, normalizeAllowedRootEntries([]AllowedRootEntry{
-		{Path: work, Access: AllowedRootAccessReadWrite},
-		{Path: fileRoot, Access: AllowedRootAccessReadWrite},
-		{Path: dirRoot, Access: AllowedRootAccessReadWrite},
-	}))
-	if err != nil {
-		t.Fatalf("newSessionFilesystemSnapshot: %v", err)
-	}
-
-	// The issued regular file itself mounts: the exact capability covers it.
-	reset, probes, probePaths := countSessionPathProbes(t)
-	resolved, err := resolveMount(mountRequest{Source: fileRoot, Target: "/data", ReadOnly: true}, work, snapshot)
-	if err != nil {
-		t.Fatalf("issued file itself: %v", err)
-	}
-	if resolved.SourcePath != fileRoot {
-		t.Fatalf("issued file itself: resolved %q, want %q", resolved.SourcePath, fileRoot)
-	}
-	if n := probes(); n != 2 {
-		t.Fatalf("issued file itself: %d probes, want 2 (resolution + stat of the issued path)", n)
-	}
-
-	// A descendant of a directory issued root still resolves through the
-	// pathname-tree capability; the gate stats the issued root and the
-	// descendant itself is probed.
-	reset()
-	resolved, err = resolveMount(mountRequest{Source: filepath.Join(dirRoot, "sub"), Target: "/data", ReadOnly: true}, work, snapshot)
-	if err != nil {
-		t.Fatalf("directory-root descendant: %v", err)
-	}
-	if resolved.SourcePath != filepath.Join(dirRoot, "sub") {
-		t.Fatalf("directory-root descendant: resolved %q, want the descendant", resolved.SourcePath)
-	}
-	if n := probes(); n != 3 {
-		t.Fatalf("directory-root descendant: %d probes, want 3 (issued-root gate stat + descendant resolution + stat)", n)
-	}
-
-	// A descendant of the regular-file issued root is refused: the only
-	// privileged probe is the stat of the ISSUED root, never the descendant
-	// spelling.
-	reset()
-	_, err = resolveMount(mountRequest{Source: filepath.Join(fileRoot, "child"), Target: "/data", ReadOnly: true}, work, snapshot)
-	if err == nil {
-		t.Fatal("regular-file-root descendant: expected a refusal")
-	}
-	if !strings.Contains(err.Error(), "outside the issued session filesystem snapshot") {
-		t.Fatalf("regular-file-root descendant: unexpected refusal %v", err)
-	}
-	if n := probes(); n != 1 {
-		t.Fatalf("regular-file-root descendant: %d probes, want exactly the one stat of the issued root", n)
-	}
-	for _, p := range probePaths() {
-		if p != fileRoot {
-			t.Fatalf("regular-file-root descendant: privileged probe of %q — the unissued descendant spelling was probed", p)
-		}
 	}
 }

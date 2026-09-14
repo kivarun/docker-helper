@@ -206,11 +206,7 @@ type resolvedMount struct {
 // Session filesystem snapshot entries for the absolute grammar — and run
 // their privileged host-filesystem probing (symlink resolution, stat) only
 // after that admission; there is no compatibility alias for a spelling
-// outside the capability that would resolve into it. A strict descendant of
-// an issued root is admitted only when the governing issued root is a
-// directory tree: a regular-file issued root is an exact concrete boundary
-// whose lexical descendants are not issued, decided from the issued root
-// alone and never by probing the descendant spelling. After resolution both
+// outside the capability that would resolve into it. After resolution both
 // forms keep their final canonical containment proof (the relative grammar's
 // workspace containment and the snapshot exposure resolution in the run
 // handler), so a symlink inside the lexical capability that resolves outside
@@ -260,14 +256,6 @@ func resolveMount(mount mountRequest, workspace string, snapshot *sessionFilesys
 		if !isWithinAnyAllowedRoot(rawSource, allowedRootPaths(snapshot.Entries)) {
 			return nil, fmt.Errorf("mount source %s is outside the issued session filesystem snapshot", mount.Source)
 		}
-		// Exact-capability gate (H3): a strict descendant of an issued root
-		// is only issued when the governing root is a directory tree — a
-		// regular-file issued root is an exact concrete boundary. The gate
-		// decides from the issued root alone and never probes the
-		// descendant spelling.
-		if err := refuseUnissuedSnapshotDescendant(mount.Source, rawSource, snapshot); err != nil {
-			return nil, err
-		}
 		sourcePath = rawSource
 	}
 
@@ -314,46 +302,6 @@ func resolveMount(mount mountRequest, workspace string, snapshot *sessionFilesys
 		Target:     cleaned,
 		ReadOnly:   mount.ReadOnly,
 	}, nil
-}
-
-// refuseUnissuedSnapshotDescendant enforces the exact-capability semantic of
-// an issued regular-file filesystem root on the mount admission: a
-// regular-file issued root is an exact concrete boundary — the MAC backends
-// render it as an exact file boundary (an exact AppArmor file rule, an exact
-// SELinux fcontext mapping without descendants) and the mount-pin owner
-// binds the file itself — so its lexical descendants are never issued by the
-// snapshot. A source that is a strict descendant of an issued root is
-// decided by the live identity of the ISSUED governing root alone: the stat
-// of the issued path is within the issued authority, while the unissued
-// descendant spelling is never probed. A directory governing root keeps the
-// pathname-tree capability; a missing governing root answers the same
-// bounded does-not-exist contract the descendant resolution would have
-// produced, and any other stat failure fails closed without probing the
-// descendant.
-func refuseUnissuedSnapshotDescendant(display, source string, snapshot *sessionFilesystemSnapshot) error {
-	governing := ""
-	for _, e := range snapshot.Entries {
-		if !pathStrictlyWithin(e.Path, source) {
-			continue
-		}
-		if governing == "" || pathStrictlyWithin(governing, e.Path) {
-			governing = e.Path
-		}
-	}
-	if governing == "" {
-		return nil
-	}
-	info, err := osStatFn(governing)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("mount source does not exist: %s", display)
-		}
-		return fmt.Errorf("cannot resolve mount source: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("mount source %s is outside the issued session filesystem snapshot", display)
-	}
-	return nil
 }
 
 // workloadPrivilegeFloor is the complete server-owned Docker privilege
