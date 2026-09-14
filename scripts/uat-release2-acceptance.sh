@@ -168,6 +168,21 @@ json_field() { # field
   grep -oP "\"$1\": \"\K[^\"]+" | head -1
 }
 
+# json_root_has JSON PATH ACCESS — true iff the rich allowed-root JSON
+# projection carries exactly PATH with ACCESS. The default allowed-root list
+# output is the 2.1-compatible one path per line (no access column); the
+# access authority is proven through the explicit --json rich projection.
+json_root_has() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any(e.get("path") == sys.argv[1] and e.get("access") == sys.argv[2] for e in entries) else 1)
+' "$2" "$3"
+}
+
 # classify_registry_failure STREAM — the single classifier for a captured
 # docker CLI failure stream in the registry scenarios. Emits one of:
 #   network — a network/backend marker is present (checked FIRST). This is
@@ -1585,10 +1600,11 @@ db.commit()
 
   # --- M2: legacy config keeps read_write authority in the legacy form ---------
   # The default list is the 2.1-compatible one path per line; the access
-  # authority is proven through the explicit --json rich projection.
+  # authority is proven through the explicit --json rich projection (exact
+  # path/access pairs, pretty-print agnostic).
   M_LIST="$(dh config allowed-root list --json 2>/dev/null || true)"
-  if printf '%s\n' "$M_LIST" | grep -F "$ALLOWED_ROOT" | grep -q 'read_write' \
-      && printf '%s\n' "$M_LIST" | grep -F "$M_POLICY" | grep -q 'read_write'; then
+  if json_root_has "$M_LIST" "$ALLOWED_ROOT" read_write \
+      && json_root_has "$M_LIST" "$M_POLICY" read_write; then
     acc_ok "M2 migrated path-only global roots carry read_write authority (--json rich list)"
   else
     acc_fail "M2 global root access semantics wrong: $M_LIST"
@@ -1605,15 +1621,15 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   fi
 
   # --- M3/M4: Principal and Launcher roots migrated read_write -----------------
-  M_PLIST="$(dh principal allowed-root list --system "$M_USER" 2>/dev/null || true)"
-  if printf '%s\n' "$M_PLIST" | grep -F "$ALLOWED_ROOT" | grep -q 'read_write' \
-      && printf '%s\n' "$M_PLIST" | grep -F "$M_POLICY" | grep -q 'read_write'; then
+  M_PLIST="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+  if json_root_has "$M_PLIST" "$ALLOWED_ROOT" read_write \
+      && json_root_has "$M_PLIST" "$M_POLICY" read_write; then
     acc_ok "M3 Principal roots migrated as read_write"
   else
     acc_fail "M3 Principal root migration wrong: $M_PLIST"
   fi
-  M_LLIST="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
-  if printf '%s\n' "$M_LLIST" | grep -F "$M_POLICY/sub" | grep -q 'read_write'; then
+  M_LLIST="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" --json 2>/dev/null || true)"
+  if json_root_has "$M_LLIST" "$M_POLICY/sub" read_write; then
     acc_ok "M4 Launcher root migrated as read_write"
   else
     acc_fail "M4 Launcher root migration wrong: $M_LLIST"
@@ -1681,8 +1697,8 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
     else
       acc_fail "M8 snapshot changed after restart"
     fi
-    if dh config allowed-root list 2>/dev/null | grep -F "$M_POLICY" | grep -q 'read_write' \
-        && dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -F "$M_POLICY" | grep -q 'read_write'; then
+    if json_root_has "$(dh config allowed-root list --json 2>/dev/null || true)" "$M_POLICY" read_write \
+        && json_root_has "$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)" "$M_POLICY" read_write; then
       acc_ok "M8 migrated policy stable across restart"
     else
       acc_fail "M8 migrated policy changed after restart"

@@ -113,6 +113,21 @@ SOCK="/run/docker-helper/docker-helper.sock"
 
 json_field() { grep -oP "\"$1\": \"\K[^\"]+" | head -1; }
 
+# json_root_has JSON PATH ACCESS — true iff the rich allowed-root JSON
+# projection carries exactly PATH with ACCESS. The default allowed-root list
+# output is the 2.1-compatible one path per line (no access column); the
+# access authority is proven through the explicit --json rich projection.
+json_root_has() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any(e.get("path") == sys.argv[1] and e.get("access") == sys.argv[2] for e in entries) else 1)
+' "$2" "$3"
+}
+
 wait_health() {
   local _i=0
   for _i in $(seq 1 100); do
@@ -300,9 +315,12 @@ acc_ok "R3 packaged restart path completed (service active, healthy)"
 # ==============================================================================
 # R4-R9: post-migration proofs
 # ==============================================================================
-M_LIST="$(dh config allowed-root list 2>/dev/null || true)"
-if printf '%s\n' "$M_LIST" | grep -F "$ALLOWED_ROOT" | grep -q 'read_write' \
-    && printf '%s\n' "$M_LIST" | grep -F "$M_POLICY" | grep -q 'read_write'; then
+# The default list is the 2.1-compatible one path per line; the access
+# authority is proven through the explicit --json rich projection (exact
+# path/access pairs, pretty-print agnostic).
+M_LIST="$(dh config allowed-root list --json 2>/dev/null || true)"
+if json_root_has "$M_LIST" "$ALLOWED_ROOT" read_write \
+    && json_root_has "$M_LIST" "$M_POLICY" read_write; then
   acc_ok "R4 migrated path-only global roots carry read_write authority"
 else
   acc_fail "R4 global root access semantics wrong: $M_LIST"
@@ -318,15 +336,15 @@ else
   acc_fail "R4 config.json legacy path-only form not preserved"
 fi
 
-M_PLIST="$(dh principal allowed-root list --system "$M_USER" 2>/dev/null || true)"
-if printf '%s\n' "$M_PLIST" | grep -F "$ALLOWED_ROOT" | grep -q 'read_write' \
-    && printf '%s\n' "$M_PLIST" | grep -F "$M_POLICY" | grep -q 'read_write'; then
+M_PLIST="$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)"
+if json_root_has "$M_PLIST" "$ALLOWED_ROOT" read_write \
+    && json_root_has "$M_PLIST" "$M_POLICY" read_write; then
   acc_ok "R5 Principal roots migrated as read_write"
 else
   acc_fail "R5 Principal root migration wrong: $M_PLIST"
 fi
-M_LLIST="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
-if printf '%s\n' "$M_LLIST" | grep -F "$M_POLICY/sub" | grep -q 'read_write'; then
+M_LLIST="$(dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" --json 2>/dev/null || true)"
+if json_root_has "$M_LLIST" "$M_POLICY/sub" read_write; then
   acc_ok "R5 Launcher root migrated as read_write"
 else
   acc_fail "R5 Launcher root migration wrong: $M_LLIST"
@@ -387,8 +405,8 @@ if wait_health; then
   else
     acc_fail "R9 snapshot changed after restart"
   fi
-  if dh config allowed-root list 2>/dev/null | grep -F "$M_POLICY" | grep -q 'read_write' \
-      && dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -F "$M_POLICY" | grep -q 'read_write'; then
+  if json_root_has "$(dh config allowed-root list --json 2>/dev/null || true)" "$M_POLICY" read_write \
+      && json_root_has "$(dh principal allowed-root list --system "$M_USER" --json 2>/dev/null || true)" "$M_POLICY" read_write; then
     acc_ok "R9 migrated policy stable across restart"
   else
     acc_fail "R9 migrated policy changed after restart"

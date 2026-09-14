@@ -159,9 +159,8 @@ wait_service_health() {
 # authorized for principal/session use.
 
 # reg_config_global_roots prints the global allowed root paths from
-# `config allowed-root list`, one per line. The 2.2 list is the human
-# PATH/ACCESS table: skip the PATH header and print the first (path) field
-# of each data row; plain path-only output stays valid.
+# `config allowed-root list`, one per line (the 2.1-compatible one path per
+# line default; the access authority lives in the --json rich projection).
 reg_config_global_roots() {
   dh config allowed-root list 2>/dev/null | awk 'NF && $1 ~ /^\// {print $1}'
 }

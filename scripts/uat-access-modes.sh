@@ -219,6 +219,31 @@ snapshot_lacks() {
   ! printf '%s' "$(show_snapshot "$1")" | grep -Fq "$2"
 }
 
+# json_root_has JSON PATH ACCESS — true iff the rich allowed-root JSON
+# projection carries exactly PATH with ACCESS. The default allowed-root list
+# output is the 2.1-compatible one path per line (no access column); the
+# access authority is proven through the explicit --json rich projection.
+json_root_has() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any(e.get("path") == sys.argv[1] and e.get("access") == sys.argv[2] for e in entries) else 1)
+' "$2" "$3"
+}
+
+# config_root_has PATH ACCESS — the global rich list carries PATH with ACCESS.
+config_root_has() {
+  json_root_has "$(dh config allowed-root list --json 2>/dev/null || true)" "$1" "$2"
+}
+
+# principal_root_has PATH ACCESS — the Principal rich list carries the pair.
+principal_root_has() {
+  json_root_has "$(dh principal allowed-root list --system "$PRINCIPAL" --json 2>/dev/null || true)" "$1" "$2"
+}
+
 # expect_read_only_root TOKEN SOURCE TARGET SNIPPET [BASE_RESIDUE] — runs a
 # writable exposure request and asserts the stable read_only_root refusal,
 # then (when a residue base is supplied) asserts no residue was created.
@@ -317,15 +342,15 @@ scenario "P: packaged control-plane surface"
 
 # P1: config allowed-root add --access read_only (rich config entry).
 if dh config allowed-root add --access read_only "$TREE/global-ro" >/dev/null 2>&1 \
-    && dh config allowed-root list 2>/dev/null | grep -F "$TREE/global-ro" | grep -q 'read_only'; then
-  acc_ok "P1 config allowed-root add --access read_only (list shows read_only)"
+    && config_root_has "$TREE/global-ro" read_only; then
+  acc_ok "P1 config allowed-root add --access read_only (rich list shows read_only)"
 else
   acc_fail "P1 config allowed-root add --access read_only failed"
 fi
 # P2: config allowed-root set-access back to read_write.
 if dh config allowed-root set-access "$TREE/global-ro" read_write >/dev/null 2>&1 \
-    && dh config allowed-root list 2>/dev/null | grep -F "$TREE/global-ro" | grep -q 'read_write'; then
-  acc_ok "P2 config allowed-root set-access (list shows read_write)"
+    && config_root_has "$TREE/global-ro" read_write; then
+  acc_ok "P2 config allowed-root set-access (rich list shows read_write)"
 else
   acc_fail "P2 config allowed-root set-access failed"
 fi
@@ -336,8 +361,7 @@ dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
 
 # P3: principal allowed-root add with omitted --access -> read_write.
 if dh principal allowed-root add --system "$PRINCIPAL" "$TREE" >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$TREE" | grep -q 'read_write'; then
+    && principal_root_has "$TREE" read_write; then
   acc_ok "P3 principal allowed-root add with omitted --access -> read_write"
 else
   acc_fail "P3 principal allowed-root add (omitted --access) failed"
@@ -345,8 +369,7 @@ fi
 
 # P4: principal allowed-root add --access read_only for the RO region.
 if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$WS/pipeline-inputs" >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$WS/pipeline-inputs" | grep -q 'read_only'; then
+    && principal_root_has "$WS/pipeline-inputs" read_only; then
   acc_ok "P4 principal allowed-root add --access read_only"
 else
   acc_fail "P4 principal allowed-root add --access read_only failed"
@@ -357,20 +380,25 @@ fi
 # existing root; it cannot reach into the parent TREE entry).
 if dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
     "$WS/project" >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$WS/project" | grep -q 'read_write'; then
+    && principal_root_has "$WS/project" read_write; then
   acc_ok "P4b principal owns the project root (read_write)"
 else
   acc_fail "P4b principal project-root add failed"
 fi
 
 # P5: principal allowed-root set-access (flip and flip back, exact contract).
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_write >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$WS/pipeline-inputs" | grep -q 'read_write' \
-    && dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1 \
-    && dh principal allowed-root list --system "$PRINCIPAL" 2>/dev/null \
-      | grep -F "$WS/pipeline-inputs" | grep -q 'read_only'; then
+# Both flips always run: a failed assertion must never leave the region
+# half-mutated (the read_only flip-back is the scenario's final state).
+P5_FAILED=0
+if ! dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_write >/dev/null 2>&1 \
+    || ! principal_root_has "$WS/pipeline-inputs" read_write; then
+  P5_FAILED=1
+fi
+if ! dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1 \
+    || ! principal_root_has "$WS/pipeline-inputs" read_only; then
+  P5_FAILED=1
+fi
+if [ "$P5_FAILED" -eq 0 ]; then
   acc_ok "P5 principal allowed-root set-access (read_write -> read_only -> read_only)"
 else
   acc_fail "P5 principal allowed-root set-access failed"
