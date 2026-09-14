@@ -116,7 +116,7 @@ risk rather than by the audit's original severity ordering.
 | **C3** | Old libselinux recursive `restorecon` can relabel path-swapped foreign files | **BLOCKER_FIX** | SC1 | Active SELinux support must prove the descriptor-safe libselinux implementation (3.11 or a verified distribution backport) or fail closed. Do not add a second home-grown recursive relabel walker. |
 | **H1** | Builder can fetch arbitrary URLs from a network position unavailable to the agent | **BLOCKER_DECISION** | SC3 | Accept an explicit builder-network threat-boundary design. Fix the network position if the supported promise excludes this access; do not parse Dockerfiles as a substitute policy engine. |
 | **H2** | Credential can be revoked after authentication but before Session issuance | **CLOSED_CURRENT** | SC1 | Closed at the existing Session-issuance linearization owner: the create transaction's conditional insert re-proves the authorizing credential (still existing, still owned, still active) in the same statement as the Session insert, so a revoke/delete committing before the Session commit prevents the Session and the refusal answers the canonical non-disclosing 401 credential classification. Winning ordering unchanged: an already-issued Session stays valid. Deterministic parked-query race evidence on both credential paths. |
-| **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **CLOSED_CURRENT** | SC1 | Authorization-gated disclosure ordering established at the Session-create workspace owner: the raw spelling is proven against the effective ceiling without host probing, and an unauthorized spelling's resolution failure is the bounded authorization-shape refusal with the diagnostic in the operational log — the unauthorized public outcome no longer depends on host filesystem state (indistinguishability matrix over existing/missing/dangling/permission-denied spellings). Run/build keep their stable non-disclosing public contracts, now proven by indistinguishability pins, with resolver diagnostics retained operationally. |
+| **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **CLOSED_CURRENT** | SC1 | Authorization-before-probing ordering established at all three session-facing admission boundaries: the raw spelling is admitted lexically against the issued filesystem capability FIRST (workspace create against the effective ceiling, absolute run mount against the issued snapshot entries, build context/Dockerfile against the workspace), and a spelling outside the capability is refused immediately WITHOUT any privileged filesystem probe — zero-probe seam evidence, not merely equal responses. The former symlink-alias admission (an outside spelling resolving into the capability) is removed as an explicit Release 2.2 security tightening. After admission the canonical `EvalSymlinks` + containment proofs remain the mandatory second security proof (inside-ceiling aliases work; inside-ceiling symlink escapes stay fail-closed); public unauthorized failures stay bounded/non-disclosing; admitted spellings keep their actionable diagnostics; run/build keep their stable public contracts with admission diagnostics retained operationally. |
 | **H4** | Build staging can consume unbounded tmpfs bytes/inodes/depth/files | **BLOCKER_FIX** | SC2 | Add measured hard ceilings for staged bytes, entries and depth, admitted/reserved before staging. Failure must be bounded and leave no residue. Do not introduce the Release 3 quota hierarchy. |
 | **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **BLOCKER_FIX** | SC2 | Bound response materialization, mounts/pins per operation, and concurrent/running operation admission at Session/global security ceilings. Measure defaults and reserve before expensive work. |
 | **H6** | Mandatory MAC policy blocks admin-token rotation | **BLOCKER_FIX** | SC1 | Narrow AppArmor/SELinux write/rename permission to the token replacement lifecycle only; live enforcing UAT proves old token rejected and new token accepted. |
@@ -383,7 +383,7 @@ Evidence:
   `session.create` record, and no bearer or secret material in the
   audit output.
 
-### H3 — authorization-gated filesystem-resolver disclosure
+### H3 — authorization-before-probing at the session-facing admission boundaries
 
 The 2.0 face was still reachable on the SC0 baseline through `POST
 /sessions`: the workspace admission resolved the caller spelling
@@ -393,38 +393,47 @@ unauthorized missing, dangling-symlink, or permission-denied spelling
 answered with `cannot resolve workspace symlinks: lstat <path>: ...`
 while an unauthorized existing directory got the bounded authorization
 message — an existence/error-class/resolution oracle over host paths
-the authority was never issued.
+the authority was never issued. The same probe-before-authorization
+ordering existed for the absolute run mount spelling (resolved and
+statted before the snapshot exposure decision) and for the build
+context/Dockerfile spellings (resolved before workspace containment).
 
-Closed by establishing the authorization-gated disclosure ordering at
-the Session-create workspace owner, without weakening symlink safety or
-the TOCTOU mitigations:
+Closed by establishing the authorization-before-probing ordering at all
+three session-facing admission boundaries, as an explicit Release 2.2
+security tightening of the symlink-alias semantics:
 
-- the raw request spelling is first proven against the effective
-  allowed-root ceiling without host filesystem probing (the existing
-  containment owner, `isWithinAnyAllowedRoot`);
-- when the spelling is not inside the ceiling, a resolution failure is
-  the typed bounded refusal answering the existing `invalid_workspace`
-  code with the same authorization-shape message as a
-  resolved-but-out-of-ceiling workspace; the internal diagnostic stays
-  in the operational log;
-- the canonical containment proof still runs on the resolved path:
-  symlink aliases resolving inside the ceiling remain issued, symlink
-  escapes remain refused, and the raw-spelling proof gates only the
-  disclosure, never the authorization — staging and inode pinning are
-  unchanged (no TOCTOU regression);
-- a spelling inside the ceiling keeps its actionable operator
-  diagnostic (an authorized operator may still learn the state of its
-  own policy space);
-- the run and build data planes already answered every unauthorized
-  filesystem state with their stable non-disclosing
-  `invalid_mount`/`invalid_build_context` contracts; the fix retains
-  their resolver diagnostics in the operational log (previously
-  dropped) and proves the indistinguishability by test instead of
-  assertion.
+- the raw caller spelling is admitted lexically against the issued
+  filesystem capability FIRST — the effective allowed-root ceiling for
+  the Session-create workspace, the issued Session filesystem snapshot
+  entries for the absolute run mount source, the canonical session
+  workspace for the build context and the resolved context for the
+  Dockerfile — without any host filesystem probing;
+- a spelling outside the capability is refused immediately WITHOUT
+  `EvalSymlinks`/`stat`: no existence, error class, path type, or
+  resolved alias of an unauthorized pathname is ever collected or
+  disclosed; the public refusals stay the existing bounded
+  authorization-shape codes (`invalid_workspace`,
+  `invalid_mount`, `invalid_build_context`) with no new error code;
+- the former alias semantics — a raw spelling outside the capability
+  that would resolve into it through a symlink — is removed: the
+  caller-controlled raw spelling must carry the lexical capability
+  admission itself. No compatibility alias is kept;
+- after admission the privileged probes run normally and the canonical
+  `EvalSymlinks` + containment proofs remain the second, mandatory
+  security proof: a symlink inside the lexical capability that resolves
+  outside is fail-closed (staging and inode pinning unchanged — no
+  TOCTOU regression); a spelling inside the capability that resolves
+  inside is issued (aliases inside the ceiling keep working); a missing
+  admitted spelling keeps its actionable operator diagnostic;
+- run/build keep their stable non-disclosing public contracts, and
+  their admission diagnostics are retained in the operational log.
 
-No new error code, no second policy owner, and no per-handler precheck:
-one refusal type owned by the Session-create workspace boundary, and
-the data-plane pins document the already-correct consumer boundary.
+No new policy owner: the admission gates live in the existing
+admission owners (`createSessionWithPolicyLocked`, `resolveMount`,
+`validateBuildRequest`) reusing the existing lexical containment
+helpers, and the privileged probes route through one test seam
+(`evalSymlinksFn`/`osStatFn`) covering exactly the three session-facing
+admission sites.
 
 Evidence:
 
@@ -435,15 +444,22 @@ Evidence:
   (where Unix DAC applies) permission-denied spellings answered with
   the raw resolver detail — distinct public outcomes for host paths
   outside the authority.
-- Post-fix the four unauthorized spellings answer one identical public
-  refusal, the operational log retains the internal diagnostic, and
-  the authorized E-H states keep their current semantics (existing
-  issued; missing-inside-ceiling operator diagnostic retained;
-  symlink alias resolving inside the ceiling issued; symlink escape
-  refused by the canonical containment proof).
-- Run/build pins prove the data-plane public boundary is identical
-  across unauthorized existing/missing/dangling sources with the
-  resolver diagnostics retained operationally.
+- GREEN zero-probe evidence on the fixed line (the property the
+  review cycle required, not merely equal responses): deterministic
+  seam/counter tests prove the privileged filesystem resolver is
+  invoked ZERO times for a workspace spelling outside the ceiling, an
+  absolute run mount spelling outside the issued snapshot, and a build
+  context spelling outside the workspace (existing, missing, dangling,
+  and relative-escape spellings) — and that an ADMITTED spelling is
+  still resolved, with an inside-ceiling symlink escape still
+  fail-closed by the canonical containment proof.
+- GREEN indistinguishability matrices (workspace create, run mounts,
+  build context) prove the public unauthorized outcomes are identical
+  across filesystem states, with the admission diagnostics retained in
+  the operational log and the authorized E-H semantics preserved
+  (existing issued; missing-inside-ceiling operator diagnostic;
+  inside-ceiling alias issued; inside-ceiling symlink escape refused;
+  outside-ceiling alias now refused without probing).
 
 ## Release-cycle integration
 

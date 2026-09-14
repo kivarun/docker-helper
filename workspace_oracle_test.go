@@ -131,9 +131,10 @@ func TestAuthorizedWorkspaceFilesystemSemanticsPreserved(t *testing.T) {
 		t.Fatalf("authorized missing workspace lost its actionable diagnostic: %q", errResp.Message)
 	}
 
-	// G: authorized symlink alias — a raw spelling outside the ceiling that
-	// resolves inside it is issued (canonical containment on the resolved
-	// path).
+	// G (Release 2.2 security tightening): a raw spelling outside the
+	// ceiling is no longer admitted even when it would resolve inside it
+	// through a symlink — bounded authorization refusal, and the resolver is
+	// never invoked for the unadmitted spelling (zero-probe proof below).
 	alias := filepath.Join(filepath.Dir(root), "oracle-authorized-alias")
 	if err := os.Symlink(home, alias); err != nil {
 		t.Fatal(err)
@@ -141,8 +142,24 @@ func TestAuthorizedWorkspaceFilesystemSemanticsPreserved(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(alias) })
 	aliasWorkspace := filepath.Join(alias, "work")
 	resp = createSessionThroughMux(app, testAdminToken, aliasWorkspace)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("outside lexical alias: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
+	}
+	if msg := decodeAPIError(t, resp.Body.Bytes()).Message; msg != "workspace must be inside an allowed root" {
+		t.Fatalf("outside lexical alias: expected the bounded authorization refusal, got %q", msg)
+	}
+
+	// G2 (preserved): a symlink spelling INSIDE the lexical ceiling that
+	// resolves inside the ceiling is still issued — the alias semantics
+	// remain for spellings that carry the lexical capability admission.
+	insideAlias := filepath.Join(home, "work-alias")
+	if err := os.Symlink(work, insideAlias); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(insideAlias) })
+	resp = createSessionThroughMux(app, testAdminToken, insideAlias)
 	if resp.Code != http.StatusCreated {
-		t.Fatalf("authorized alias: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
+		t.Fatalf("inside-ceiling alias: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
 
 	// H: authorized-spelling symlink escaping the ceiling — the resolved path
@@ -225,9 +242,14 @@ func TestUnauthorizedRunMountRefusalsAreIndistinguishable(t *testing.T) {
 		}
 	}
 
-	// The missing/dangling resolver diagnostics are retained operationally.
-	if !strings.Contains(opBuf.String(), "mount source does not exist") {
-		t.Fatalf("resolver diagnostics lost from the operational log: %s", opBuf.String())
+	// The admission diagnostics are retained operationally (the resolver is
+	// never invoked for an unadmitted spelling, so no filesystem detail
+	// exists — only the authorization fact).
+	if !strings.Contains(opBuf.String(), "outside the issued session filesystem snapshot") {
+		t.Fatalf("admission diagnostics lost from the operational log: %s", opBuf.String())
+	}
+	if strings.Contains(opBuf.String(), "no such file or directory") {
+		t.Fatalf("unadmitted spelling reached the filesystem resolver: %s", opBuf.String())
 	}
 }
 
@@ -278,32 +300,224 @@ func TestUnauthorizedBuildContextRefusalsAreIndistinguishable(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(opBuf.String(), "context does not exist") {
-		t.Fatalf("resolver diagnostics lost from the operational log: %s", opBuf.String())
+	if !strings.Contains(opBuf.String(), "context must be inside workspace") {
+		t.Fatalf("admission diagnostics lost from the operational log: %s", opBuf.String())
+	}
+	if strings.Contains(opBuf.String(), "no such file or directory") {
+		t.Fatalf("unadmitted spelling reached the filesystem resolver: %s", opBuf.String())
 	}
 }
 
 // TestUnauthorizedWorkspaceDiagnosticRetainedInOperationalLog proves the
-// bounded public refusal keeps its internal diagnostic in the operational
-// log: the full resolver cause (existence class and host pathname) is
-// operational detail, never client-facing state, and never secret material.
+// operational-log contract of the authorization-before-probing boundary:
+// an unadmitted spelling is refused with only the authorization fact (no
+// host filesystem detail exists to retain, because the resolver is never
+// invoked), while an admitted spelling keeps its full internal resolution
+// diagnostic in the operational log — the actionable cause stays where the
+// contract promises it, and no secret material is ever logged.
 func TestUnauthorizedWorkspaceDiagnosticRetainedInOperationalLog(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	auditBuf, opBuf := setupTestLogging(t)
 	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
 	root := app.Config.AllowedRoots[0].Path
 
+	// Unadmitted spellings: bounded refusals only — the resolver is never
+	// invoked, so no existence/error-class/pathname detail exists.
 	for _, tc := range workspaceOracleCases(t, root) {
 		resp := createSessionThroughMux(app, testAdminToken, tc.workspace)
 		if resp.Code != http.StatusBadRequest {
 			t.Fatalf("%s: expected 400, got %d (body=%s)", tc.name, resp.Code, resp.Body.String())
 		}
 	}
-	if !strings.Contains(opBuf.String(), "no such file or directory") {
-		t.Fatalf("internal resolution diagnostics lost from the operational log: %s", opBuf.String())
+	for _, leaked := range []string{"no such file or directory", "permission denied", "lstat "} {
+		if strings.Contains(opBuf.String(), leaked) {
+			t.Fatalf("unadmitted spelling produced a filesystem diagnostic %q: %s", leaked, opBuf.String())
+		}
 	}
-	if !strings.Contains(opBuf.String(), "permission denied") {
-		t.Fatalf("permission diagnostics lost from the operational log: %s", opBuf.String())
+
+	// An admitted spelling keeps its internal resolution diagnostic in the
+	// operational log (the authorized-missing operator mistake).
+	home := filepath.Join(root, "home", "diagretained")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(home, "not-created-yet")
+	resp := createSessionThroughMux(app, testAdminToken, missing)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("admitted missing workspace: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(opBuf.String(), "cannot resolve workspace symlinks") {
+		t.Fatalf("admitted-spelling resolution diagnostic lost from the operational log: %s", opBuf.String())
 	}
 	assertNoSecrets(t, opBuf.String(), map[string]any{}, testAdminToken, testAdminToken)
+}
+
+// countSessionPathProbes swaps the session-facing filesystem-probe seams
+// (evalSymlinksFn/osStatFn — the privileged host-filesystem probes of the
+// workspace admission, mount resolution, and build-input validation sites)
+// with counting wrappers and returns a reset and a reader for the counter.
+// Test infrastructure only; the wrapped defaults restore on cleanup.
+func countSessionPathProbes(t *testing.T) (reset func(), probes func() int) {
+	t.Helper()
+	origEval, origStat := evalSymlinksFn, osStatFn
+	var calls int
+	evalSymlinksFn = func(p string) (string, error) {
+		calls++
+		return origEval(p)
+	}
+	osStatFn = func(p string) (os.FileInfo, error) {
+		calls++
+		return origStat(p)
+	}
+	t.Cleanup(func() {
+		evalSymlinksFn, osStatFn = origEval, origStat
+	})
+	return func() { calls = 0 }, func() int { return calls }
+}
+
+// TestWorkspaceCreateOutsideCeilingProbesNothing proves the
+// authorization-before-probing ordering at the Session-create workspace
+// boundary: a raw spelling outside the effective allowed-root ceiling is
+// refused WITHOUT a single privileged filesystem probe — not merely with an
+// equal HTTP response. Any probe would collect existence/error-class/
+// alias detail for a pathname the authority was never issued.
+func TestWorkspaceCreateOutsideCeilingProbesNothing(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0].Path
+
+	reset, probes := countSessionPathProbes(t)
+	for _, tc := range workspaceOracleCases(t, root) {
+		reset()
+		resp := createSessionThroughMux(app, testAdminToken, tc.workspace)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d (body=%s)", tc.name, resp.Code, resp.Body.String())
+		}
+		if n := probes(); n != 0 {
+			t.Fatalf("%s: %d privileged filesystem probe(s) before lexical admission", tc.name, n)
+		}
+		if msg := decodeAPIError(t, resp.Body.Bytes()).Message; msg != "workspace must be inside an allowed root" {
+			t.Fatalf("%s: expected the bounded authorization refusal, got %q", tc.name, msg)
+		}
+	}
+}
+
+// TestRunMountOutsideSnapshotProbesNothing proves the run data plane's
+// ordering: an absolute mount source spelling outside the issued Session
+// filesystem snapshot is refused without a single privileged filesystem
+// probe; the resolution and stat of an admitted spelling (and the final
+// canonical containment proof) are unchanged.
+func TestRunMountOutsideSnapshotProbesNothing(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	_, token := sessionBearerWorkspace(t, app, "probefreemount")
+
+	base := filepath.Dir(app.Config.AllowedRoots[0].Path)
+	existing := filepath.Join(base, "oracle-probe-existing")
+	if err := os.MkdirAll(existing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(base, "oracle-probe-missing")
+	dangling := filepath.Join(base, "oracle-probe-dangling")
+	if err := os.Symlink(missing, dangling); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(dangling) })
+
+	reset, probes := countSessionPathProbes(t)
+	for _, source := range []string{existing, missing, dangling} {
+		reset()
+		body := fmt.Sprintf(`{"image":"alpine","mounts":[{"source":%q,"target":"/data","read_only":true}]}`, source)
+		req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		app.handleRun(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("source %q: expected 400, got %d (body=%s)", source, w.Code, w.Body.String())
+		}
+		if n := probes(); n != 0 {
+			t.Fatalf("source %q: %d privileged filesystem probe(s) before lexical admission", source, n)
+		}
+	}
+}
+
+// TestBuildContextOutsideWorkspaceProbesNothing proves the build data
+// plane's ordering: a context spelling outside the session workspace —
+// absolute outside, relative escape, or dangling-symlink alias — is refused
+// without a single privileged filesystem probe.
+func TestBuildContextOutsideWorkspaceProbesNothing(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	_, token := sessionBearerWorkspace(t, app, "probefreebuild")
+
+	base := filepath.Dir(app.Config.AllowedRoots[0].Path)
+	existing := filepath.Join(base, "oracle-bprobe-existing")
+	if err := os.MkdirAll(existing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(base, "oracle-bprobe-missing")
+	dangling := filepath.Join(base, "oracle-bprobe-dangling")
+	if err := os.Symlink(missing, dangling); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(dangling) })
+
+	reset, probes := countSessionPathProbes(t)
+	for _, context := range []string{existing, missing, dangling, "../probe-escape"} {
+		reset()
+		body := fmt.Sprintf(`{"image":"alpine","context":%q,"dockerfile":"Dockerfile"}`, context)
+		req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		app.handleBuild(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("context %q: expected 400, got %d (body=%s)", context, w.Code, w.Body.String())
+		}
+		if n := probes(); n != 0 {
+			t.Fatalf("context %q: %d privileged filesystem probe(s) before lexical admission", context, n)
+		}
+	}
+}
+
+// TestAdmittedSpellingStillProbesAndStaysContained proves the second half of
+// the ordering: after lexical admission the privileged probes still run, and
+// a symlink inside the lexical capability that resolves outside is still
+// fail-closed by the canonical containment proof (no probe-free shortcut for
+// admitted spellings).
+func TestAdmittedSpellingStillProbesAndStaysContained(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0].Path
+	home := filepath.Join(root, "home", "admitted")
+	work := filepath.Join(home, "work")
+	if err := os.MkdirAll(work, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// An admitted missing spelling still resolves: the probe count is
+	// non-zero (the resolver runs for admitted spellings).
+	reset, probes := countSessionPathProbes(t)
+	resp := createSessionThroughMux(app, testAdminToken, filepath.Join(home, "missing"))
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("admitted missing: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
+	}
+	if probes() == 0 {
+		t.Fatal("admitted spelling was not resolved by the filesystem resolver")
+	}
+	reset()
+
+	// A symlink inside the lexical ceiling that resolves outside is still
+	// refused by the canonical containment proof.
+	escape := filepath.Join(home, "escape-link")
+	if err := os.Symlink(filepath.Dir(root), escape); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(escape) })
+	resp = createSessionThroughMux(app, testAdminToken, escape)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("escape link: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
+	}
+	if msg := decodeAPIError(t, resp.Body.Bytes()).Message; msg != "workspace must be inside an allowed root" {
+		t.Fatalf("escape link: expected the containment refusal, got %q", msg)
+	}
 }
