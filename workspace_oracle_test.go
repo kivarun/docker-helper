@@ -673,3 +673,144 @@ func TestRunMountFileRootDescendantProbesNothing(t *testing.T) {
 		t.Fatalf("file-root descendant: probed paths %v, want exactly the issued root %q", paths, fileRoot)
 	}
 }
+
+// TestFilesystemRootsAdmittedSpellingSemantics proves the second half of the
+// filesystem_roots ordering: an admitted spelling is still resolved by the
+// privileged probes (an existing directory root inside the ceiling is
+// issued), the canonical ceiling proof stays fail-closed after probing (a
+// symlink inside the lexical ceiling that resolves outside is refused), and
+// an admitted missing root keeps its bounded unresolvable-root refusal — no
+// probe-free shortcut for admitted spellings.
+func TestFilesystemRootsAdmittedSpellingSemantics(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	setupTestLoggingDiscard(t)
+	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
+	root := app.Config.AllowedRoots[0].Path
+	tree := filepath.Join(root, "runs")
+	cache := filepath.Join(tree, "cache")
+
+	// E: existing directory root inside the ceiling — probed and issued.
+	reset, probes, _ := countSessionPathProbes(t)
+	rec := postSessionThroughMux(t, app, launcherToken, rootsRequestBody(workspace, fmt.Sprintf(`[{"path":%q,"access":"read_write"}]`, cache)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("E existing root: expected 201, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if n := probes(); n != 4 { // 2 workspace-admission probes + 1 resolution + 1 stat of the root
+		t.Fatalf("E existing root: %d probes, want 4", n)
+	}
+
+	// F: symlink inside the lexical ceiling resolving outside the ceiling —
+	// probed, then refused by the canonical ceiling proof.
+	reset()
+	escape := filepath.Join(workspace, "roots-escape-link")
+	if err := os.Symlink(filepath.Dir(root), escape); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(escape) })
+	rec = postSessionThroughMux(t, app, launcherToken, rootsRequestBody(workspace, fmt.Sprintf(`[{"path":%q,"access":"read_write"}]`, escape)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F escape root: expected 400, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if code := decodeAPIError(t, rec.Body.Bytes()).Code; code != "invalid_filesystem_policy" {
+		t.Fatalf("F escape root: expected invalid_filesystem_policy, got %q", code)
+	}
+	if n := probes(); n != 4 { // 2 workspace-admission probes + resolution + stat of the resolved target
+		t.Fatalf("F escape root: %d probes, want 4 (probes ran before the canonical refusal)", n)
+	}
+
+	// G: missing root inside the ceiling — probed, then the bounded
+	// unresolvable-root refusal.
+	reset()
+	missing := filepath.Join(cache, "missing-root")
+	rec = postSessionThroughMux(t, app, launcherToken, rootsRequestBody(workspace, fmt.Sprintf(`[{"path":%q,"access":"read_write"}]`, missing)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("G missing root: expected 400, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if code := decodeAPIError(t, rec.Body.Bytes()).Code; code != "invalid_filesystem_policy" {
+		t.Fatalf("G missing root: expected invalid_filesystem_policy, got %q", code)
+	}
+	if n := probes(); n != 3 { // 2 workspace-admission probes + 1 failed resolution
+		t.Fatalf("G missing root: %d probes, want 3", n)
+	}
+}
+
+// TestResolveMountRegularFileRootExactCapability proves the gate at the
+// resolver boundary: mounting the issued regular file itself still resolves,
+// a descendant of a directory issued root still resolves through the
+// pathname-tree capability, and only the regular-file descendant is refused
+// — decided from the issued root alone, never by probing the descendant
+// spelling.
+func TestResolveMountRegularFileRootExactCapability(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0].Path
+	tree := filepath.Join(root, "runs")
+	work := filepath.Join(tree, "run-1")
+	fileRoot := filepath.Join(tree, "repos", "data.bin")
+	dirRoot := filepath.Join(tree, "cache")
+	for _, d := range []string{work, filepath.Dir(fileRoot), filepath.Join(dirRoot, "sub")} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(fileRoot, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := newSessionFilesystemSnapshot(work, normalizeAllowedRootEntries([]AllowedRootEntry{
+		{Path: work, Access: AllowedRootAccessReadWrite},
+		{Path: fileRoot, Access: AllowedRootAccessReadWrite},
+		{Path: dirRoot, Access: AllowedRootAccessReadWrite},
+	}))
+	if err != nil {
+		t.Fatalf("newSessionFilesystemSnapshot: %v", err)
+	}
+
+	// The issued regular file itself mounts: the exact capability covers it.
+	reset, probes, probePaths := countSessionPathProbes(t)
+	resolved, err := resolveMount(mountRequest{Source: fileRoot, Target: "/data", ReadOnly: true}, work, snapshot)
+	if err != nil {
+		t.Fatalf("issued file itself: %v", err)
+	}
+	if resolved.SourcePath != fileRoot {
+		t.Fatalf("issued file itself: resolved %q, want %q", resolved.SourcePath, fileRoot)
+	}
+	if n := probes(); n != 2 {
+		t.Fatalf("issued file itself: %d probes, want 2 (resolution + stat of the issued path)", n)
+	}
+
+	// A descendant of a directory issued root still resolves through the
+	// pathname-tree capability; the gate stats the issued root and the
+	// descendant itself is probed.
+	reset()
+	resolved, err = resolveMount(mountRequest{Source: filepath.Join(dirRoot, "sub"), Target: "/data", ReadOnly: true}, work, snapshot)
+	if err != nil {
+		t.Fatalf("directory-root descendant: %v", err)
+	}
+	if resolved.SourcePath != filepath.Join(dirRoot, "sub") {
+		t.Fatalf("directory-root descendant: resolved %q, want the descendant", resolved.SourcePath)
+	}
+	if n := probes(); n != 3 {
+		t.Fatalf("directory-root descendant: %d probes, want 3 (issued-root gate stat + descendant resolution + stat)", n)
+	}
+
+	// A descendant of the regular-file issued root is refused: the only
+	// privileged probe is the stat of the ISSUED root, never the descendant
+	// spelling.
+	reset()
+	_, err = resolveMount(mountRequest{Source: filepath.Join(fileRoot, "child"), Target: "/data", ReadOnly: true}, work, snapshot)
+	if err == nil {
+		t.Fatal("regular-file-root descendant: expected a refusal")
+	}
+	if !strings.Contains(err.Error(), "outside the issued session filesystem snapshot") {
+		t.Fatalf("regular-file-root descendant: unexpected refusal %v", err)
+	}
+	if n := probes(); n != 1 {
+		t.Fatalf("regular-file-root descendant: %d probes, want exactly the one stat of the issued root", n)
+	}
+	for _, p := range probePaths() {
+		if p != fileRoot {
+			t.Fatalf("regular-file-root descendant: privileged probe of %q — the unissued descendant spelling was probed", p)
+		}
+	}
+}

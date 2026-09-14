@@ -227,7 +227,7 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	// against is exactly the ceiling the snapshot is committed from.
 	var snapshotEntries []AllowedRootEntry
 	if len(p.FilesystemRoots) > 0 {
-		requested, err := canonicalizeSessionFilesystemRoots(p.FilesystemRoots)
+		requested, err := canonicalizeSessionFilesystemRoots(p.FilesystemRoots, p.EffectiveAllowedRootPaths)
 		if err != nil {
 			return nil, err
 		}
@@ -482,20 +482,28 @@ func classifyStaleSessionCreateAuthority(tx *sql.Tx, p *sessionCreatePolicy) err
 // filesystem roots into canonical AllowedRootEntry values, ready for
 // narrowSessionFilesystemPolicy.
 //
-// Each root must be an absolute host path; it is cleaned, resolved through
-// symlinks, and must exist as a directory or a regular file — the resolved
-// canonical path becomes the policy identity, so a symlink alias never
-// creates a second authority identity and two spellings of one canonical
-// path are a duplicate refusal. There is no workspace-containment proof
-// here: the canonical root must be authorized by the effective Launcher
-// ceiling, which narrowSessionFilesystemPolicy proves against the resolved
-// ceiling inside the same create linearization boundary. The orchestrator
-// (or operator) creates the root before creating the Session, so an
-// unresolvable root — whose canonical identity cannot be proven — is a
-// refusal, never a guess. Every failure wraps
+// Each root must be an absolute host path; it is cleaned and must be
+// lexically inside the effective allowed-root ceiling — the raw spelling
+// carries the authorization admission itself — BEFORE any privileged
+// host-filesystem probing. A spelling outside the ceiling is refused
+// immediately without EvalSymlinks/stat: no existence, error class, path
+// type, or resolved alias of the requested pathname is ever collected or
+// disclosed, and there is no compatibility alias for a spelling outside the
+// ceiling that would resolve into it. An admitted spelling is resolved
+// through symlinks and must exist as a directory or a regular file — the
+// resolved canonical path becomes the policy identity, so a symlink alias
+// never creates a second authority identity and two spellings of one
+// canonical path are a duplicate refusal. The canonical root must still be
+// authorized by the effective Launcher ceiling: narrowSessionFilesystemPolicy
+// proves that canonical containment against the resolved ceiling inside the
+// same create linearization boundary as the second, mandatory security
+// proof, so a symlink inside the lexical ceiling that resolves outside is
+// still fail-closed. The orchestrator (or operator) creates the root before
+// creating the Session, so an unresolvable root — whose canonical identity
+// cannot be proven — is a refusal, never a guess. Every failure wraps
 // ErrInvalidSessionFilesystemPolicy: one refusal family governs the whole
 // Session filesystem request.
-func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry) ([]AllowedRootEntry, error) {
+func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceilingPaths []string) ([]AllowedRootEntry, error) {
 	canonical := make([]AllowedRootEntry, 0, len(roots))
 	for _, root := range roots {
 		if root.Path == "" || !filepath.IsAbs(root.Path) {
@@ -506,6 +514,19 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry) ([]A
 			return nil, fmt.Errorf("filesystem root %q: %v: %w", root.Path, err, ErrInvalidSessionFilesystemPolicy)
 		}
 		cleaned := filepath.Clean(root.Path)
+
+		// Authorization ceiling first (H3): the raw cleaned spelling must be
+		// lexically inside the effective allowed-root ceiling BEFORE any
+		// privileged host-filesystem probing. A spelling outside the ceiling
+		// is refused immediately without EvalSymlinks/stat.
+		if !isWithinAnyAllowedRoot(cleaned, ceilingPaths) {
+			return nil, fmt.Errorf("filesystem root %q is outside the effective launcher policy: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
+		}
+
+		// Filesystem mechanics after admission: resolution and type checks
+		// run only on an admitted spelling, and the canonical ceiling proof
+		// in narrowSessionFilesystemPolicy remains the second, mandatory
+		// security proof.
 		resolved, err := evalSymlinksFn(cleaned)
 		if err != nil {
 			return nil, fmt.Errorf("filesystem root %q cannot be resolved: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
