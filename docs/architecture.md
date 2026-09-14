@@ -588,20 +588,30 @@ resolve effective workspace policy
      launcher scopes; `read_only` dominance)
     ↓
 validate workspace inside the effective roots
+    (H3: the raw request spelling is admitted lexically against the
+     effective ceiling first — a spelling outside the ceiling is refused
+     without any privileged probing and has no resolving-alias
+     compatibility admission)
     ↓
 canonicalize the workspace
-    (the existing Session-create owner: absolute path + EvalSymlinks)
+    (the existing Session-create owner: EvalSymlinks + stat of the
+     admitted spelling; the canonical containment proof below remains
+     the second, mandatory security proof)
     ↓
 when the request carries filesystem_roots:
-    canonicalize each requested absolute host path
-    (clean, resolve symlinks, prove the resolved path exists as a
-     directory or regular file), prove the request is a narrowing-only
-     composition against the effective Launcher ceiling
-     (authorized; explicit read_write under an effective read_only
-     region refused), build the requested scope (implicit workspace
-     grant at the effective ceiling mode, replaced by an explicit
-     workspace root), and compose ceiling ∩ request through the existing
-     composition owner;
+    admit each requested absolute host path lexically against the
+    effective Launcher ceiling (clean raw spelling; a spelling outside
+    the ceiling is refused invalid_filesystem_policy immediately, with
+    zero privileged probes of the requested pathname and no
+    compatibility alias that would resolve into it), then canonicalize
+    the admitted spelling (resolve symlinks, prove the resolved path
+    exists as a directory or regular file), prove the request is a
+    narrowing-only composition against the effective Launcher ceiling
+    (authorized canonical proof — the second, mandatory security proof;
+     explicit read_write under an effective read_only region refused),
+    build the requested scope (implicit workspace grant at the effective
+    ceiling mode, replaced by an explicit workspace root), and compose
+    ceiling ∩ request through the existing composition owner;
     otherwise derive the inherited workspace-only snapshot
     (issuance-time filesystem roots; the request may only narrow, never
     widen)
@@ -737,16 +747,21 @@ The HTTP body of `POST /sessions` accepts
 - `filesystem_roots` is the optional issuance-time Session filesystem
   request: omitted or `[]` means the inherited create behavior (workspace
   only), and a non-empty array must be a well-formed list of `{path,
-  access}` objects whose `path` is an absolute host path inside the
-  effective Launcher ceiling (existing directory or regular file after
-  symlink resolution) and whose `access` is exactly `read_write` or
+  access}` objects whose `path` is an absolute host path admitted
+  lexically inside the effective Launcher ceiling before any privileged
+  probing (an admitted spelling must exist as a directory or regular file
+  after symlink resolution; the canonical ceiling proof stays the second,
+  mandatory security proof) and whose `access` is exactly `read_write` or
   `read_only`; `null` is refused `400 invalid_filesystem_policy`, as are
   malformed entries (relative or traversal paths, unresolvable paths,
   paths of no mountable type, duplicate canonical entries, explicit
   `read_write` under an effective `read_only` region, missing/unknown
   access, unknown nested fields). An explicit root whose canonical path
   equals the canonical workspace replaces the implicit workspace grant
-  under the same privilege rule.
+  under the same privilege rule. A regular-file root is issued as an
+  exact concrete capability: the MAC backends render it as an exact file
+  boundary and the mount-pin owner binds the file itself, so its lexical
+  descendants are never issued.
 
 The CLI maps its selectors onto those wire fields after authenticating
 (`GET /auth`). The two selectors are mutually exclusive on the wire: the
@@ -1214,8 +1229,15 @@ When a session is created, the workspace path is admitted lexically
 against the effective allowed-root ceiling, then resolved through
 `EvalSymlinks`, and the canonical workspace is stored in the database.
 When a build or run request specifies a path relative to the workspace,
-the resolved path is compared against the canonical workspace; if the
-resolved path escapes the workspace, the request is rejected.
+the joined spelling is admitted lexically inside the workspace before any
+probing, and the resolved path is compared against the canonical
+workspace as the second, mandatory proof; if the resolved path escapes
+the workspace, the request is rejected. The issuance-time filesystem
+roots apply the same ordering: a requested root spelling outside the
+effective Launcher ceiling is refused without probing, and an admitted
+spelling is canonicalized before the canonical ceiling proof. A
+regular-file issued root is an exact concrete capability: its lexical
+descendants are not issued and are never probed by the mount admission.
 
 Session-create workspace admission follows the authorization-before-
 probing ordering. The raw request spelling is first proven lexically
@@ -1842,9 +1864,11 @@ Authentication
     │
 Request validation
     │
-Canonical path resolution
+Lexical capability admission
     │
-Boundary validation
+Canonical filesystem resolution
+    │
+Canonical containment/policy proof
     │
 Operation registration (supervisor admission — atomic with shutdown gate)
     │
@@ -1858,15 +1882,24 @@ Retention cleanup
 ```
 
 Authentication validates the session token. Request validation checks
-required fields and path relativity per operation. Canonical path
-resolution resolves every caller path through `EvalSymlinks`. Filesystem
-authorization is snapshot-based: a relative run source must stay within
-the session workspace — the structural workspace-containment rule of the
-relative grammar — a build context stays workspace-constrained, and an
-absolute run source is authorized through the issued immutable Session
-filesystem snapshot (see [Filesystem policy](#filesystem-policy));
-workspace containment is that structural rule, not a universal
-data-plane authorization rule.
+required fields and path relativity per operation. The H3 authorization
+boundary orders every filesystem decision: the raw caller spelling is
+proven lexically against its capability first (the effective allowed-root
+ceiling at Session create, the issued Session filesystem snapshot for an
+absolute run source, the workspace for a workspace-relative run source or
+build context), and privileged host-filesystem probing — canonical
+resolution through `EvalSymlinks`, stat — runs only after that admission;
+there is no compatibility alias for a spelling outside the capability that
+would resolve into it. After resolution the canonical containment/policy
+proof runs as the second, mandatory security proof: a relative run source
+must stay within the session workspace — the structural
+workspace-containment rule of the relative grammar — a build context stays
+workspace-constrained, and an absolute run source is authorized through
+the issued immutable Session filesystem snapshot (see
+[Filesystem policy](#filesystem-policy)); workspace containment is that
+structural rule, not a universal data-plane authorization rule. A symlink
+inside the lexical capability that resolves outside stays fail-closed
+through that canonical proof.
 
 Operation registration uses the operation supervisor admission path
 (`admit`), which atomically checks the shutdown gate and registers the
@@ -1996,7 +2029,9 @@ Workdir validation
     │
 Environment validation
     │
-Mount resolution (canonical source identity)
+Mount admission (lexical capability admission)
+    │
+Canonical mount-source resolution
     │
 Filesystem exposure resolution against the persisted snapshot
     │
@@ -2020,13 +2055,23 @@ Unified terminal-path cleanup (one ordered owner: proven container
 Request validation checks that the image field is non-empty. Workdir
 validation ensures the value is an absolute path if provided.
 Environment validation ensures variable names match
-`^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
-against the workspace and checks for duplicate targets. After all
-structural validation, every mount's access mode is resolved against the
-persisted Session filesystem snapshot (see
-[Data-plane filesystem authority](#data-plane-filesystem-authority)); a
-refused writable exposure is answered `read_only_root` before any
-pin/operation/Docker state exists, and the MAC lease is released.
+`^[A-Za-z_][A-Za-z0-9_]*$`. Mount admission orders every mount decision
+authorization-first: the raw caller source spelling is admitted lexically
+against its capability before any privileged host-filesystem probing — a
+relative source through `pathWithin` against the workspace, an absolute
+source against the issued Session filesystem snapshot entries, and a
+strict descendant of an issued root only when the governing root is a
+directory tree (a regular-file issued root is an exact concrete boundary
+whose lexical descendants are not issued, decided from the issued root
+alone, never by probing the descendant spelling). Only admitted spellings
+are resolved to their canonical identity, and duplicate mount targets are
+refused once each canonical target is known. After resolution, every mount's
+access mode is resolved against the persisted Session filesystem snapshot
+(see [Data-plane filesystem authority](#data-plane-filesystem-authority))
+— the second, mandatory canonical proof, so a symlink inside the lexical
+capability that resolves outside stays fail-closed; a refused writable
+exposure is answered `read_only_root` before any pin/operation/Docker
+state exists, and the MAC lease is released.
 
 `helper_socket` validation is mode-aware: when the boolean is requested in
 user mode the request is rejected (`invalid_helper_socket`) before any
@@ -2058,9 +2103,15 @@ Validation details:
 - mount source is a relative path (workspace-relative) or an absolute host
   path;
 - mount target must be absolute;
-- source is resolved through `EvalSymlinks`; a relative source is checked
-  via `pathWithin` against the workspace, and every source is authorized
-  through the issued Session filesystem snapshot;
+- mount admission is authorization-first: a relative source is checked via
+  `pathWithin` against the workspace and an absolute source against the
+  issued Session filesystem snapshot entries before any privileged probing;
+  a strict descendant of an issued root is admitted only when the governing
+  root is a directory tree (a regular-file issued root is an exact concrete
+  boundary whose lexical descendants are not issued, decided from the issued
+  root alone); the source is resolved through `EvalSymlinks` only after
+  admission, and the issued snapshot exposure resolution stays the second,
+  mandatory canonical proof;
 - environment values are never logged (only names in `env_keys`);
 - environment names are sorted for deterministic output;
 - `helper_socket` injects the server-owned read-only runtime projection
@@ -2174,7 +2225,7 @@ Allowed:
 - `read_only` is true or false;
 - the same `source` can be mounted to multiple `target` paths.
 
-Forbidden (refused before any host filesystem probing):
+Forbidden (refused before the requested source spelling itself is probed):
 
 - a relative `source` whose joined spelling escapes the session workspace
   lexically — the workspace-relative grammar is a structural boundary,
@@ -2182,6 +2233,13 @@ Forbidden (refused before any host filesystem probing):
   is the only spelling for that;
 - an absolute `source` spelling outside the issued Session filesystem
   snapshot — every mount must carry issued snapshot authority;
+- an absolute `source` that is a strict descendant of a regular-file issued
+  root — the issued file root is an exact concrete capability (the MAC
+  backends render it as an exact file boundary and the mount-pin owner
+  binds the file itself), so its lexical descendants are not issued; the
+  refusal is decided by the live identity of the issued root alone (the
+  stat of the issued path is within issued authority) and never probes the
+  descendant spelling;
 - a symlink inside the lexical capability that resolves outside it
   (refused after resolution by the canonical containment proof — the
   escape protection is unchanged).
