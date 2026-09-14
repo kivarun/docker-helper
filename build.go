@@ -50,6 +50,13 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if leaseRelease != nil {
 			leaseRelease()
 		}
+		// The public response is the stable non-disclosing
+		// invalid_build_context contract; the resolver's host-filesystem
+		// diagnostics stay operational detail.
+		opLog(ctx).Warn("build request validation rejected",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
 		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
 		return
 	}

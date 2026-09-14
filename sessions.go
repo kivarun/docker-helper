@@ -456,7 +456,21 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			// The client receives the specific actionable cause (missing
 			// directory, not a directory, outside an allowed root, no allowed
 			// roots) with the same invalid_workspace code, without exposing
-			// internal implementation detail.
+			// internal implementation detail. A raw request spelling that was
+			// never inside the effective ceiling keeps its bounded
+			// authorization-shape refusal: the resolver's host-filesystem
+			// diagnostics for an unauthorized path are operational detail
+			// (the authorization-gated disclosure boundary), so the
+			// unauthorized outcome cannot become a filesystem oracle.
+			var wrr *workspaceResolutionRefusal
+			if errors.As(cerr, &wrr) {
+				opLog(ctx).Warn("session creation rejected",
+					slog.String("operation", "session_create"),
+					slog.String("error", wrr.cause.Error()),
+				)
+				writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", wrr.Error())
+				return
+			}
 			opLog(ctx).Warn("session creation rejected",
 				slog.String("operation", "session_create"),
 				slog.String("error", cerr.Error()),

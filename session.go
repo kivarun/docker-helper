@@ -20,6 +20,28 @@ var ErrDatabase = errors.New("database error")
 var ErrSystem = errors.New("system error")
 var ErrMAC = errors.New("MAC preparation failed")
 
+// workspaceOutsideCeilingMessage is the bounded public message of an
+// unauthorized workspace request whose host-filesystem resolution failed:
+// byte-identical to the resolved-path containment failure's message, so an
+// unauthorized workspace's public outcome does not depend on the host
+// filesystem state of the requested path (existence, error class, path
+// type, or resolved aliases stay operational detail).
+const workspaceOutsideCeilingMessage = "workspace must be inside an allowed root"
+
+// workspaceResolutionRefusal is the bounded Session-create workspace refusal
+// for a raw request spelling that is not inside the effective allowed-root
+// ceiling when host-filesystem resolution fails. The refusal carries the
+// internal diagnostic as its cause for the operational log and answers with
+// the authorization-shape message above; it satisfies errors.Is(err,
+// ErrInvalidWorkspace) through the cause so the existing handler
+// classification keeps working.
+type workspaceResolutionRefusal struct {
+	cause error
+}
+
+func (e *workspaceResolutionRefusal) Error() string { return workspaceOutsideCeilingMessage }
+func (e *workspaceResolutionRefusal) Unwrap() error { return e.cause }
+
 // The canonical issued Session ID shape: the production prefix plus exactly
 // sessionIDHexLength lowercase hex characters (16 random bytes).
 const (
@@ -160,16 +182,40 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("cannot resolve workspace path: %w: %w", err, ErrInvalidWorkspace)
 	}
 
+	// Authorization-gated resolver-detail disclosure: the RAW request
+	// spelling is first proven against the effective allowed-root ceiling
+	// WITHOUT any host filesystem probing. When the spelling is not inside
+	// the ceiling, the requested pathname was never authorized and the
+	// resolver's host-filesystem diagnostics (existence, error class, path
+	// type, resolved aliases) are operational detail only: the client
+	// receives the same bounded authorization-shape refusal as a
+	// resolved-but-out-of-ceiling workspace, so an unauthorized workspace's
+	// public outcome does not depend on host filesystem state. The
+	// canonical containment proof itself still runs on the resolved path
+	// below — symlink safety requires resolution, and the raw-spelling
+	// proof gates only the disclosure, never the authorization.
+	rawSpelling := filepath.Clean(absWorkspace)
+	withinCeiling := isWithinAnyAllowedRoot(rawSpelling, p.EffectiveAllowedRootPaths)
+
 	absWorkspace, err = filepath.EvalSymlinks(absWorkspace)
 	if err != nil {
+		if !withinCeiling {
+			return nil, &workspaceResolutionRefusal{cause: fmt.Errorf("cannot resolve workspace symlinks: %w: %w", err, ErrInvalidWorkspace)}
+		}
 		return nil, fmt.Errorf("cannot resolve workspace symlinks: %w: %w", err, ErrInvalidWorkspace)
 	}
 
 	info, err := os.Stat(absWorkspace)
 	if err != nil {
+		if !withinCeiling {
+			return nil, &workspaceResolutionRefusal{cause: fmt.Errorf("cannot access workspace: %w: %w", err, ErrInvalidWorkspace)}
+		}
 		return nil, fmt.Errorf("cannot access workspace: %w: %w", err, ErrInvalidWorkspace)
 	}
 	if !info.IsDir() {
+		if !withinCeiling {
+			return nil, &workspaceResolutionRefusal{cause: fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)}
+		}
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
 	}
 

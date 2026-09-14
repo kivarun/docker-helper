@@ -395,6 +395,13 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			if leaseRelease != nil {
 				leaseRelease()
 			}
+			// The public response is the stable non-disclosing
+			// invalid_mount contract; the resolver's host-filesystem
+			// diagnostics stay operational detail.
+			opLog(ctx).Warn("mount resolution rejected",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}

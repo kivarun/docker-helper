@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -154,4 +159,151 @@ func TestAuthorizedWorkspaceFilesystemSemanticsPreserved(t *testing.T) {
 	if msg := decodeAPIError(t, resp.Body.Bytes()).Message; msg != "workspace must be inside an allowed root" {
 		t.Fatalf("authorized escape: expected the containment refusal, got %q", msg)
 	}
+}
+
+// sessionBearerWorkspace provisions an admin-issued Session whose workspace
+// is inside the test allowed root and returns the app and session bearer.
+func sessionBearerWorkspace(t *testing.T, app *App, name string) (string, string) {
+	t.Helper()
+	root := app.Config.AllowedRoots[0].Path
+	home := filepath.Join(root, "home", name)
+	work := filepath.Join(home, "work")
+	if err := os.MkdirAll(work, 0755); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, work, nil)
+	if err != nil {
+		t.Fatalf("createSessionAuthorized(%s): %v", name, err)
+	}
+	return work, created.Token
+}
+
+// TestUnauthorizedRunMountRefusalsAreIndistinguishable proves the run data
+// plane's public boundary: mount sources outside the issued Session
+// filesystem snapshot — existing, missing, or a dangling symlink — answer
+// the same stable non-disclosing invalid_mount contract, and the resolver's
+// host-filesystem diagnostics stay in the operational log.
+func TestUnauthorizedRunMountRefusalsAreIndistinguishable(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	auditBuf, opBuf := setupTestLogging(t)
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	_, token := sessionBearerWorkspace(t, app, "mountoracle")
+
+	base := filepath.Dir(app.Config.AllowedRoots[0].Path)
+	existing := filepath.Join(base, "oracle-run-existing")
+	if err := os.MkdirAll(existing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(base, "oracle-run-missing")
+	dangling := filepath.Join(base, "oracle-run-dangling")
+	if err := os.Symlink(missing, dangling); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(dangling) })
+
+	var firstBody string
+	for _, source := range []string{existing, missing, dangling} {
+		body := fmt.Sprintf(`{"image":"alpine:latest","mounts":[{"source":%q,"target":"/data","read_only":true}]}`, source)
+		req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		app.handleRun(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("source %q: expected 400, got %d (body=%s)", source, w.Code, w.Body.String())
+		}
+		got := w.Body.String()
+		if !strings.Contains(got, "invalid_mount") {
+			t.Fatalf("source %q: expected invalid_mount, got %s", source, got)
+		}
+		if firstBody == "" {
+			firstBody = got
+			continue
+		}
+		if got != firstBody {
+			t.Fatalf("source %q: response %s differs from the first unauthorized outcome %s — host filesystem state disclosed",
+				source, got, firstBody)
+		}
+	}
+
+	// The missing/dangling resolver diagnostics are retained operationally.
+	if !strings.Contains(opBuf.String(), "mount source does not exist") {
+		t.Fatalf("resolver diagnostics lost from the operational log: %s", opBuf.String())
+	}
+}
+
+// TestUnauthorizedBuildContextRefusalsAreIndistinguishable proves the build
+// data plane's public boundary: build-context spellings outside the session
+// workspace — existing, missing, or a dangling symlink — answer the same
+// stable non-disclosing invalid_build_context contract, and the resolver's
+// host-filesystem diagnostics stay in the operational log.
+func TestUnauthorizedBuildContextRefusalsAreIndistinguishable(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	auditBuf, opBuf := setupTestLogging(t)
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	_, token := sessionBearerWorkspace(t, app, "buildoracle")
+
+	base := filepath.Dir(app.Config.AllowedRoots[0].Path)
+	existing := filepath.Join(base, "oracle-build-existing")
+	if err := os.MkdirAll(existing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(base, "oracle-build-missing")
+	dangling := filepath.Join(base, "oracle-build-dangling")
+	if err := os.Symlink(missing, dangling); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(dangling) })
+
+	var firstBody string
+	for _, context := range []string{existing, missing, dangling} {
+		body := fmt.Sprintf(`{"image":"alpine:latest","context":%q,"dockerfile":"Dockerfile"}`, context)
+		req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		app.handleBuild(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("context %q: expected 400, got %d (body=%s)", context, w.Code, w.Body.String())
+		}
+		got := w.Body.String()
+		if !strings.Contains(got, "invalid_build_context") {
+			t.Fatalf("context %q: expected invalid_build_context, got %s", context, got)
+		}
+		if firstBody == "" {
+			firstBody = got
+			continue
+		}
+		if got != firstBody {
+			t.Fatalf("context %q: response %s differs from the first unauthorized outcome %s — host filesystem state disclosed",
+				context, got, firstBody)
+		}
+	}
+
+	if !strings.Contains(opBuf.String(), "context does not exist") {
+		t.Fatalf("resolver diagnostics lost from the operational log: %s", opBuf.String())
+	}
+}
+
+// TestUnauthorizedWorkspaceDiagnosticRetainedInOperationalLog proves the
+// bounded public refusal keeps its internal diagnostic in the operational
+// log: the full resolver cause (existence class and host pathname) is
+// operational detail, never client-facing state, and never secret material.
+func TestUnauthorizedWorkspaceDiagnosticRetainedInOperationalLog(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	auditBuf, opBuf := setupTestLogging(t)
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	root := app.Config.AllowedRoots[0].Path
+
+	for _, tc := range workspaceOracleCases(t, root) {
+		resp := createSessionThroughMux(app, testAdminToken, tc.workspace)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d (body=%s)", tc.name, resp.Code, resp.Body.String())
+		}
+	}
+	if !strings.Contains(opBuf.String(), "no such file or directory") {
+		t.Fatalf("internal resolution diagnostics lost from the operational log: %s", opBuf.String())
+	}
+	if !strings.Contains(opBuf.String(), "permission denied") {
+		t.Fatalf("permission diagnostics lost from the operational log: %s", opBuf.String())
+	}
+	assertNoSecrets(t, opBuf.String(), map[string]any{}, testAdminToken, testAdminToken)
 }
