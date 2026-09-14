@@ -8,18 +8,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-// parseDockerMountSpec parses one Docker --mount value with the
-// authoritative docker/cli grammar (opts/mount.go, MountOpt.Set): the value
-// is ONE Go CSV record — docker/cli reads exactly one record — and every
-// field is a key=value pair (first '=' splits) or a boolean flag; later
-// duplicate keys overwrite earlier ones. This mirror is the semantic
-// reference the serializer contract tests are proved against; it never runs
-// in production.
+// parseDockerMountSpec is a semantic mirror of the exact MountOpt.Set
+// validation subset the serializer contract depends on (docker/cli
+// opts/mount.go): the whole --mount value is trimmed first, ONE CSV record
+// is read, and every key=value field must carry a key and a value that
+// survive Docker's whitespace validation unchanged — an empty value or a
+// value with leading/trailing whitespace is rejected ("value is empty" /
+// "value should not have whitespace"), unknown keys and unknown boolean
+// flags are rejected, and later duplicate keys overwrite earlier ones.
+// This mirror never runs in production; its only role is to prove the
+// serializer contract against the authoritative grammar.
 type dockerMountGrammar struct {
 	Type     string
 	Source   string
@@ -30,16 +34,32 @@ type dockerMountGrammar struct {
 
 func parseDockerMountSpec(t *testing.T, spec string) dockerMountGrammar {
 	t.Helper()
-	fields, err := csv.NewReader(strings.NewReader(spec)).Read()
+	value := strings.TrimSpace(spec)
+	if value == "" {
+		t.Fatal("Docker CLI grammar rejects the empty mount value")
+	}
+	fields, err := csv.NewReader(strings.NewReader(value)).Read()
 	if err != nil {
 		t.Fatalf("Docker CLI grammar cannot parse the mount value %q: %v", spec, err)
 	}
 	m := dockerMountGrammar{}
 	for _, field := range fields {
-		key, val, ok := strings.Cut(field, "=")
+		key, val, hasValue := strings.Cut(field, "=")
+		if k := strings.TrimSpace(key); k != key {
+			t.Fatalf("Docker CLI grammar rejects the whitespace-padded option %q of %q", field, spec)
+		}
+		if hasValue {
+			v := strings.TrimSpace(val)
+			if v == "" {
+				t.Fatalf("Docker CLI grammar rejects the empty value of %q in %q", field, spec)
+			}
+			if v != val {
+				t.Fatalf("Docker CLI grammar rejects the whitespace-padded value of %q in %q", field, spec)
+			}
+		}
 		key = strings.ToLower(key)
 		m.Keys = append(m.Keys, key)
-		if !ok {
+		if !hasValue {
 			switch key {
 			case "readonly", "ro":
 				m.ReadOnly = true
@@ -111,16 +131,19 @@ func TestRunHostileTargetKeepsIntendedBindMountThroughDockerGrammar(t *testing.T
 	for _, tc := range []struct {
 		name   string
 		target string
-		// representable reports whether the Docker mount grammar can
-		// represent the crafted value faithfully: the CSV reader normalizes
-		// the literal CRLF pair to LF inside quoted fields, so a CRLF value
-		// must be refused before any Docker state exists.
+		// representable reports whether the mount representability
+		// contract can represent the crafted value faithfully: the CSV
+		// reader normalizes the literal CRLF pair to LF inside quoted
+		// fields, and the Docker MountOpt.Set value validation rejects
+		// empty or whitespace-padded values, so such values must be
+		// refused before any Docker state exists.
 		representable bool
 	}{
 		{name: "newline target", target: "/mnt\nfoo", representable: true},
 		{name: "CRLF target", target: "/mnt\r\nfoo", representable: false},
 		{name: "quote target", target: `/mnt"foo`, representable: true},
 		{name: "comma option target", target: "/data,readonly", representable: true},
+		{name: "trailing space target", target: "/mnt/sp ", representable: false},
 	} {
 		body := fmt.Sprintf(`{"image":"alpine","mounts":[{"source":".","target":%q,"read_only":true}]}`, tc.target)
 		req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(body)))
@@ -184,8 +207,11 @@ func TestDockerBindMountSpecContract(t *testing.T) {
 	cases := []struct {
 		name string
 		in   dockerBindMount
-		// wantErr marks values the Docker mount grammar cannot represent
-		// faithfully (the CRLF normalization) or structural empties.
+		// wantErr marks values the mount representability contract cannot
+		// represent faithfully: the encoding/csv record normalization, the
+		// Docker MountOpt.Set value validation (empty or
+		// whitespace-padded), or the exec argv limit (NUL), plus
+		// structural empties.
 		wantErr bool
 	}{
 		{name: "ordinary", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/data"}},
@@ -197,8 +223,20 @@ func TestDockerBindMountSpecContract(t *testing.T) {
 		{name: "equals in source and target", in: dockerBindMount{Source: "/srv/a=b", Target: "/mnt/c=d"}},
 		{name: "backslash in source and target", in: dockerBindMount{Source: `/srv/a\b`, Target: `/mnt/c\d`}},
 		{name: "lone carriage return", in: dockerBindMount{Source: "/srv/a\rb", Target: "/mnt/c\rd"}},
-		{name: "leading and trailing whitespace", in: dockerBindMount{Source: "/srv/ a ", Target: "/mnt/ c "}},
+		{name: "internal whitespace in source and target", in: dockerBindMount{Source: "/srv/a b", Target: "/mnt/c d"}},
 		{name: "hostile delimiter combination", in: dockerBindMount{Source: `/srv/a,b"c`, Target: "/mnt/d=e\nf,g\"h"}},
+		{name: "trailing ASCII space in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/sp "}, wantErr: true},
+		{name: "trailing tab in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/tab\t"}, wantErr: true},
+		{name: "trailing LF in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/lf\n"}, wantErr: true},
+		{name: "trailing lone CR in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/cr\r"}, wantErr: true},
+		{name: "leading space in target", in: dockerBindMount{Source: "/srv/data", Target: " /mnt/lead"}, wantErr: true},
+		{name: "trailing Unicode NBSP in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/nbsp\u00a0"}, wantErr: true},
+		{name: "trailing Unicode ideographic space in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/ideo\u3000"}, wantErr: true},
+		{name: "leading and trailing whitespace in source and target", in: dockerBindMount{Source: "/srv/ a ", Target: "/mnt/ c "}, wantErr: true},
+		{name: "trailing whitespace in source", in: dockerBindMount{Source: "/srv/tail ", Target: "/mnt/data"}, wantErr: true},
+		{name: "leading whitespace in source", in: dockerBindMount{Source: " /srv/lead", Target: "/mnt/data"}, wantErr: true},
+		{name: "NUL byte in source", in: dockerBindMount{Source: "/srv/a\x00b", Target: "/mnt/data"}, wantErr: true},
+		{name: "NUL byte in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/a\x00b"}, wantErr: true},
 		{name: "CRLF in source", in: dockerBindMount{Source: "/srv/a\r\nb", Target: "/mnt/data"}, wantErr: true},
 		{name: "CRLF in target", in: dockerBindMount{Source: "/srv/data", Target: "/mnt/c\r\nd"}, wantErr: true},
 		{name: "empty source", in: dockerBindMount{Target: "/mnt/data"}, wantErr: true},
@@ -238,5 +276,63 @@ func TestDockerBindMountSpecContract(t *testing.T) {
 		if strings.Join(m.Keys, ",") != strings.Join(wantKeys, ",") {
 			t.Fatalf("%s: parsed keys %q, want exactly %q", tc.name, m.Keys, wantKeys)
 		}
+	}
+}
+
+// TestRunSerializerFailureBeforeAdmissionLeavesNoOperation proves the M13
+// admission-order property through the real production run path: the Docker
+// argv is built and serialized after the pins and the workload MAC state are
+// prepared — when every actual bind source is known — but BEFORE the
+// operation admission and the run.start audit. A serializer failure on a
+// daemon-owned value must therefore answer internal_error with no admitted
+// Operation left running in the supervisor, no run.start audit event, and no
+// Docker process.
+func TestRunSerializerFailureBeforeAdmissionLeavesNoOperation(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeUser
+	app.OperationSupervisor = newOperationSupervisor()
+	auditBuf, _ := setupTestLogging(t)
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// The daemon-owned trusted CA prepared directory carries an
+	// unrepresentable sequence: the CRLF pair cannot survive the encoding/csv
+	// record faithfully, so the serializer must refuse it. The value is
+	// daemon-owned — the caller cannot influence it — so the correct answer
+	// is an internal server error, not invalid_mount.
+	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca\r\nevil", "snapshot")
+	app.Config.TrustedCAInjection = "auto"
+	app.Config.TrustedCAPreparedDir = preparedDir
+
+	var dockerCalled bool
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerCalled = true
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	req := newRunRequest(map[string]any{
+		"image":   "alpine:3.24",
+		"command": []string{"echo", "hello"},
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected %d for a daemon-owned serialization failure, got %d (body=%s)",
+			http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "internal_error") {
+		t.Fatalf("expected internal_error, got %s", w.Body.String())
+	}
+	if dockerCalled {
+		t.Fatal("Docker must not be invoked when the argv cannot be serialized")
+	}
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Fatalf("supervisor retains %d admitted operation(s) after the serializer failure — a running zombie Operation", len(app.OperationSupervisor.ops))
+	}
+	if strings.Contains(auditBuf.String(), "run.start") {
+		t.Fatal("run.start audit event recorded without a valid started operation")
 	}
 }
