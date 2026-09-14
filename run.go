@@ -200,13 +200,21 @@ type resolvedMount struct {
 // facts. The source grammar is two-form: a relative source is resolved
 // against the session workspace (the existing convenience, and a structural
 // boundary — the workspace-relative spelling can never reach another issued
-// root), and an absolute source is an absolute host path. Both forms
-// canonicalize to the same identity rules: the resolved path must exist as a
-// directory or regular file, and the canonical resolved path (never the
-// caller spelling, which may name a symlink alias) is the only policy
-// identity later authorized against the issued Session filesystem snapshot
-// by resolveSessionFilesystemExposure.
-func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) {
+// root), and an absolute source is an absolute host path. Both forms admit
+// the raw caller spelling lexically against the issued filesystem capability
+// FIRST — the canonical workspace for the relative grammar, the issued
+// Session filesystem snapshot entries for the absolute grammar — and run
+// their privileged host-filesystem probing (symlink resolution, stat) only
+// after that admission; there is no compatibility alias for a spelling
+// outside the capability that would resolve into it. After resolution both
+// forms keep their final canonical containment proof (the relative grammar's
+// workspace containment and the snapshot exposure resolution in the run
+// handler), so a symlink inside the lexical capability that resolves outside
+// stays fail-closed. The canonical resolved path (never the caller spelling,
+// which may name a symlink alias) is the only policy identity later
+// authorized against the issued Session filesystem snapshot by
+// resolveSessionFilesystemExposure.
+func resolveMount(mount mountRequest, workspace string, snapshot *sessionFilesystemSnapshot) (*resolvedMount, error) {
 	if mount.Source == "" {
 		return nil, fmt.Errorf("mount source is required")
 	}
@@ -228,18 +236,31 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 		return nil, fmt.Errorf("mount target contains unsupported character: %s", cleaned)
 	}
 
-	sourcePath := mount.Source
-	if !filepath.IsAbs(sourcePath) {
-		joined := filepath.Join(workspace, sourcePath)
+	// Authorization ceiling first (H3): the raw source spelling must be
+	// lexically inside the issued filesystem capability before any
+	// privileged host-filesystem probing. A spelling outside the capability
+	// is refused immediately without EvalSymlinks/stat.
+	var sourcePath string
+	if !filepath.IsAbs(mount.Source) {
+		joined := filepath.Join(workspace, mount.Source)
 		abs, err := filepath.Abs(joined)
 		if err != nil {
 			return nil, fmt.Errorf("cannot resolve mount source: %w", err)
 		}
+		if !pathWithin(workspace, abs) {
+			return nil, fmt.Errorf("mount source escapes workspace: %s", mount.Source)
+		}
 		sourcePath = abs
+	} else {
+		rawSource := filepath.Clean(mount.Source)
+		if !isWithinAnyAllowedRoot(rawSource, allowedRootPaths(snapshot.Entries)) {
+			return nil, fmt.Errorf("mount source %s is outside the issued session filesystem snapshot", mount.Source)
+		}
+		sourcePath = rawSource
 	}
 
 	var err error
-	sourcePath, err = filepath.EvalSymlinks(sourcePath)
+	sourcePath, err = evalSymlinksFn(sourcePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("mount source does not exist: %s", mount.Source)
@@ -256,7 +277,9 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 	}
 
 	// The workspace-relative grammar keeps the mount scoped to the session
-	// workspace. An absolute source skips this proof: its authority is the
+	// workspace: the canonical containment proof after resolution stays
+	// fail-closed for a symlink inside the lexical workspace that resolves
+	// outside. An absolute source skips this proof: its authority is the
 	// issued Session filesystem snapshot alone, proven by the exposure
 	// resolution.
 	if !filepath.IsAbs(mount.Source) {
@@ -265,7 +288,7 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 		}
 	}
 
-	info, err := os.Stat(sourcePath)
+	info, err := osStatFn(sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot access mount source: %w", err)
 	}
@@ -390,11 +413,18 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	resolvedMounts := make([]resolvedMount, 0, len(req.Mounts))
 
 	for _, mount := range req.Mounts {
-		resolved, err := resolveMount(mount, session.Workspace)
+		resolved, err := resolveMount(mount, session.Workspace, authority.Snapshot)
 		if err != nil {
 			if leaseRelease != nil {
 				leaseRelease()
 			}
+			// The public response is the stable non-disclosing
+			// invalid_mount contract; the resolver's host-filesystem
+			// diagnostics stay operational detail.
+			opLog(ctx).Warn("mount resolution rejected",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}

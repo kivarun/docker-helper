@@ -400,47 +400,79 @@ func TestHTTPSessionFilesystemRefusalDoesNotDiscloseCanonicalPath(t *testing.T) 
 	}
 }
 
-// TestSessionFilesystemOutsideCeilingBranchIsCeilingCheck proves the branch
-// distinction behind the MR3 UAT proof: for an existing path outside the
-// effective Launcher ceiling, the canonicalization stage (the existence/
-// resolvability branch) succeeds, and the refusal is reached in the ceiling
-// check — the domain diagnostic names the outside-the-effective-launcher-policy
-// refusal, never an unresolvable-path canonicalization failure. The same
-// public invalid_filesystem_policy family has a different branch per cause.
-func TestSessionFilesystemOutsideCeilingBranchIsCeilingCheck(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
+// TestSessionFilesystemOutsideCeilingRefusedByCeilingAdmission proves the
+// branch structure of the authorization-before-probing filesystem_roots
+// boundary: a caller-supplied root outside the effective Launcher ceiling is
+// refused by the lexical ceiling admission with the
+// outside-the-effective-launcher-policy diagnostic and the typed refusal
+// family — never by the unresolvable-path canonicalization branch. The
+// canonical ceiling proof in narrowSessionFilesystemPolicy remains the
+// second, mandatory proof: an admitted spelling inside the lexical ceiling
+// that resolves outside is still refused there by the same diagnostic.
+func TestSessionFilesystemOutsideCeilingRefusedByCeilingAdmission(t *testing.T) {
 	setupTestLoggingDiscard(t)
+	ceilingDir := t.TempDir()
 	outside := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outside, "marker.txt"), []byte("outside"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// The existing outside path passes canonicalization: existence and
-	// resolvability are proven, so any refusal downstream is not the
-	// unresolvable-path branch.
-	canonical, err := canonicalizeSessionFilesystemRoots([]sessionFilesystemRootEntry{
-		{Path: outside, Access: "read_write"},
-	})
-	if err != nil {
-		t.Fatalf("existing outside path failed canonicalization (wrong branch): %v", err)
-	}
-	if len(canonical) != 1 || canonical[0].Path != outside {
-		t.Fatalf("canonicalization identity = %v, want [%s]", canonical, outside)
-	}
-
-	// The ceiling check is the reached branch: the refusal names the
+	// The existing outside path is resolvable, but the lexical ceiling
+	// admission refuses it before any probing: the refusal names the
 	// outside-the-effective-launcher-policy diagnostic (a stable internal
-	// fact this lower-level owner owns) and carries the typed family.
-	ceiling := []AllowedRootEntry{{Path: app.Config.AllowedRoots[0].Path, Access: AllowedRootAccessReadWrite}}
-	_, err = narrowSessionFilesystemPolicy(ceiling, app.Config.AllowedRoots[0].Path, canonical)
+	// fact this lower-level owner owns) and carries the typed family, never
+	// the unresolvable-path canonicalization branch.
+	_, err := canonicalizeSessionFilesystemRoots([]sessionFilesystemRootEntry{
+		{Path: outside, Access: "read_write"},
+	}, []string{ceilingDir})
 	if !errors.Is(err, ErrInvalidSessionFilesystemPolicy) {
 		t.Fatalf("refusal = %v, want the ErrInvalidSessionFilesystemPolicy family", err)
 	}
 	if !strings.Contains(err.Error(), "outside the effective launcher policy") {
-		t.Errorf("refusal = %v, want the ceiling-check branch diagnostic", err)
+		t.Errorf("refusal = %v, want the ceiling-admission branch diagnostic", err)
 	}
 	if strings.Contains(err.Error(), "cannot be resolved") || strings.Contains(err.Error(), "cannot be accessed") {
-		t.Errorf("refusal reached the canonicalization branch instead of the ceiling check: %v", err)
+		t.Errorf("refusal reached the canonicalization mechanics branch instead of the ceiling admission: %v", err)
+	}
+
+	// An admitted spelling inside the ceiling canonicalizes to its resolved
+	// identity.
+	inside := filepath.Join(ceilingDir, "inside")
+	if err := os.MkdirAll(inside, 0755); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := canonicalizeSessionFilesystemRoots([]sessionFilesystemRootEntry{
+		{Path: inside, Access: "read_write"},
+	}, []string{ceilingDir})
+	if err != nil {
+		t.Fatalf("admitted inside path failed canonicalization: %v", err)
+	}
+	if len(canonical) != 1 || canonical[0].Path != inside {
+		t.Fatalf("canonicalization identity = %v, want [%s]", canonical, inside)
+	}
+
+	// The canonical ceiling proof remains the second, mandatory proof: a
+	// symlink inside the lexical ceiling that resolves outside passes the
+	// admission and canonicalization and is refused by the ceiling check.
+	link := filepath.Join(inside, "outside-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err = canonicalizeSessionFilesystemRoots([]sessionFilesystemRootEntry{
+		{Path: link, Access: "read_write"},
+	}, []string{ceilingDir})
+	if err != nil {
+		t.Fatalf("admitted symlink spelling failed canonicalization: %v", err)
+	}
+	if len(canonical) != 1 || canonical[0].Path != outside {
+		t.Fatalf("canonicalization identity = %v, want [%s]", canonical, outside)
+	}
+	_, err = narrowSessionFilesystemPolicy([]AllowedRootEntry{{Path: ceilingDir, Access: AllowedRootAccessReadWrite}}, ceilingDir, canonical)
+	if !errors.Is(err, ErrInvalidSessionFilesystemPolicy) {
+		t.Fatalf("refusal = %v, want the ErrInvalidSessionFilesystemPolicy family", err)
+	}
+	if !strings.Contains(err.Error(), "outside the effective launcher policy") {
+		t.Errorf("refusal = %v, want the canonical ceiling-check branch diagnostic", err)
 	}
 }
 

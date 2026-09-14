@@ -50,6 +50,13 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if leaseRelease != nil {
 			leaseRelease()
 		}
+		// The public response is the stable non-disclosing
+		// invalid_build_context contract; the resolver's host-filesystem
+		// diagnostics stay operational detail.
+		opLog(ctx).Warn("build request validation rejected",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
 		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
 		return
 	}
@@ -495,6 +502,12 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 	var err error
 	var contextPath string
 
+	// Authorization ceiling first (H3): the raw context spelling must be
+	// lexically inside the canonical session workspace before any
+	// privileged host-filesystem probing. A spelling outside the workspace
+	// is refused immediately without EvalSymlinks/stat; there is no
+	// compatibility alias for a spelling outside the workspace that would
+	// resolve into it.
 	if filepath.IsAbs(req.Context) {
 		contextPath, err = filepath.Abs(req.Context)
 		if err != nil {
@@ -503,8 +516,15 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 	} else {
 		contextPath = filepath.Join(workspace, req.Context)
 	}
+	if !pathWithin(workspace, contextPath) {
+		return "", "", fmt.Errorf("context must be inside workspace: %s", req.Context)
+	}
 
-	contextPath, err = filepath.EvalSymlinks(contextPath)
+	// Filesystem mechanics after admission: the canonical containment proof
+	// after resolution remains the second, mandatory security proof — a
+	// symlink inside the lexical workspace that resolves outside is still
+	// fail-closed.
+	contextPath, err = evalSymlinksFn(contextPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", "", fmt.Errorf("context does not exist: %s", req.Context)
@@ -516,7 +536,7 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 		return "", "", fmt.Errorf("context must be inside workspace: %s", req.Context)
 	}
 
-	info, err := os.Stat(contextPath)
+	info, err := osStatFn(contextPath)
 	if err != nil {
 		return "", "", fmt.Errorf("cannot access context: %w", err)
 	}
@@ -524,8 +544,15 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 		return "", "", errors.New("context is not a directory")
 	}
 
+	// The Dockerfile spelling is admitted lexically inside the (already
+	// canonical) build context before probing; the canonical containment
+	// proof after resolution stays fail-closed for a symlink that resolves
+	// outside.
 	dockerfilePath := filepath.Join(contextPath, req.Dockerfile)
-	dockerfilePath, err = filepath.EvalSymlinks(dockerfilePath)
+	if !pathWithin(contextPath, dockerfilePath) {
+		return "", "", errors.New("dockerfile escapes build context")
+	}
+	dockerfilePath, err = evalSymlinksFn(dockerfilePath)
 	if err != nil {
 		return "", "", fmt.Errorf("cannot resolve dockerfile: %w", err)
 	}
@@ -534,7 +561,7 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 		return "", "", errors.New("dockerfile escapes build context")
 	}
 
-	info, err = os.Stat(dockerfilePath)
+	info, err = osStatFn(dockerfilePath)
 	if err != nil {
 		return "", "", fmt.Errorf("cannot access dockerfile: %w", err)
 	}

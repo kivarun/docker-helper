@@ -21,17 +21,24 @@ type selfFixture struct {
 
 // setupSelfFixture provisions the operator authority fixture plus one live
 // Session created with the principal credential (so the Session's owning
-// Launcher and Principal are the fixture ones).
+// Launcher and Principal are the fixture ones). The authority is resolved
+// through the production credential authenticator, so it carries the full
+// authentication provenance (including the credential ID the Session-create
+// commit boundary revalidates).
 func setupSelfFixture(t *testing.T, app *App) selfFixture {
 	t.Helper()
 	f := selfFixture{operatorAuthFixture: setupOperatorAuthFixture(t, app)}
 
+	credential, err := authenticateCredential(app.DB, f.principalToken)
+	if err != nil {
+		t.Fatalf("authenticateCredential(principal): %v", err)
+	}
+	if credential.Principal == nil {
+		t.Fatal("expected a Principal credential auth result")
+	}
+
 	created, err := app.createSessionAuthorized(
-		&operatorAuthority{class: operatorAuthorityPrincipal,
-			principal: &PrincipalCredentialAuth{
-				PrincipalID:   principalIDByName(t, app.DB, f.principalName),
-				PrincipalName: f.principalName,
-			}},
+		&operatorAuthority{class: operatorAuthorityPrincipal, principal: credential.Principal},
 		createSelector{}, f.workspace, nil,
 	)
 	if err != nil {

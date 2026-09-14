@@ -115,6 +115,9 @@ const sessionOwnershipProjection = `
 // filesystem_roots or carried the empty array); they are consumed by
 // createSessionWithPolicyLocked inside the same lifecycle linearization
 // boundary and are never applied as a post-create policy change.
+// Credential carries the commit-boundary credential revalidation facts of a
+// credential-authority create (nil for the admin authority, which
+// authenticates by in-memory token comparison and has no credential row).
 type sessionCreatePolicy struct {
 	Workspace                 string
 	EffectiveAllowedRoots     []AllowedRootEntry
@@ -123,6 +126,20 @@ type sessionCreatePolicy struct {
 	LauncherID                string
 	LauncherName              string
 	PrincipalName             string
+	Credential                *sessionCreateCredentialAuthority
+}
+
+// sessionCreateCredentialAuthority is the credential provenance a
+// credential-authority Session create revalidates at its commit boundary:
+// the exact credential row that authenticated the request and the owner
+// identity that row must still prove (principalID for a Principal
+// credential, launcherID for a Launcher credential) when the Session
+// commits. Authentication established it once; the commit transaction
+// re-proves it against the same credential store the authenticator reads.
+type sessionCreateCredentialAuthority struct {
+	credentialID string
+	principalID  int64  // Principal credential authority
+	launcherID   string // Launcher credential authority
 }
 
 // createSessionWithPolicyLocked is the internal persistence/MAC stage beneath
@@ -143,21 +160,39 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("cannot resolve workspace path: %w: %w", err, ErrInvalidWorkspace)
 	}
 
-	absWorkspace, err = filepath.EvalSymlinks(absWorkspace)
+	if len(p.EffectiveAllowedRootPaths) == 0 {
+		return nil, fmt.Errorf("no allowed roots configured: %w", ErrInvalidWorkspace)
+	}
+
+	// Authorization ceiling first (H3): the raw request spelling must be
+	// lexically inside the effective allowed-root ceiling BEFORE any
+	// privileged host-filesystem probing. A spelling outside the ceiling is
+	// refused immediately without EvalSymlinks/stat — no existence, error
+	// class, path type, or resolved alias of the requested pathname is ever
+	// collected or disclosed. There is no compatibility alias for a
+	// spelling outside the ceiling that would resolve into it: the
+	// caller-controlled raw spelling must carry the lexical capability
+	// admission itself.
+	rawSpelling := filepath.Clean(absWorkspace)
+	if !isWithinAnyAllowedRoot(rawSpelling, p.EffectiveAllowedRootPaths) {
+		return nil, fmt.Errorf("workspace must be inside an allowed root: %w", ErrInvalidWorkspace)
+	}
+
+	// Filesystem mechanics after admission: resolution and type checks run
+	// only on an admitted spelling, and the canonical containment proof
+	// below remains the second, mandatory security proof — a symlink inside
+	// the lexical ceiling that resolves outside is still fail-closed.
+	absWorkspace, err = evalSymlinksFn(absWorkspace)
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve workspace symlinks: %w: %w", err, ErrInvalidWorkspace)
 	}
 
-	info, err := os.Stat(absWorkspace)
+	info, err := osStatFn(absWorkspace)
 	if err != nil {
 		return nil, fmt.Errorf("cannot access workspace: %w: %w", err, ErrInvalidWorkspace)
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
-	}
-
-	if len(p.EffectiveAllowedRootPaths) == 0 {
-		return nil, fmt.Errorf("no allowed roots configured: %w", ErrInvalidWorkspace)
 	}
 
 	// Check workspace is inside at least one allowed root and is a proper
@@ -192,7 +227,7 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	// against is exactly the ceiling the snapshot is committed from.
 	var snapshotEntries []AllowedRootEntry
 	if len(p.FilesystemRoots) > 0 {
-		requested, err := canonicalizeSessionFilesystemRoots(p.FilesystemRoots)
+		requested, err := canonicalizeSessionFilesystemRoots(p.FilesystemRoots, p.EffectiveAllowedRootPaths)
 		if err != nil {
 			return nil, err
 		}
@@ -275,14 +310,21 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		defer tx.Rollback()
 
 		// Conditional insert: only succeeds if the owning Launcher and its
-		// Principal both exist and are enabled. This prevents a stale-auth race
-		// where the Launcher/Principal was disabled or deleted between
-		// resolution and session creation.
-		result, err := tx.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		// Principal both exist and are enabled, and — for a credential
+		// authority — if the exact authorizing credential still exists,
+		// still carries the authenticated owner identity, and is still
+		// active. The commit-boundary credential predicate is evaluated in
+		// the same statement as the insert (the create transaction's commit
+		// point), so a credential revoke/delete that commits before the
+		// Session commit prevents that Session; the pre-existing
+		// launcher/principal predicates are unchanged and the admin
+		// authority carries no credential clause (the admin token is
+		// compared in memory and has no credential row).
+		query := `INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 SELECT ?, ?, ?, ?, ?, ?
 			 FROM launchers l JOIN principals p ON p.id = l.principal_id
-			 WHERE l.id = ? AND l.enabled = 1 AND p.enabled = 1`,
+			 WHERE l.id = ? AND l.enabled = 1 AND p.enabled = 1`
+		args := []any{
 			sessionID,
 			tokenHashHex,
 			absWorkspace,
@@ -290,22 +332,39 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 			expiresAt.Unix(),
 			p.LauncherID,
 			p.LauncherID,
-		)
+		}
+		if p.Credential != nil {
+			switch {
+			case p.Credential.launcherID != "":
+				query += ` AND EXISTS (SELECT 1 FROM credentials c
+					 WHERE c.id = ? AND c.launcher_id = ? AND c.revoked_at IS NULL)`
+				args = append(args, p.Credential.credentialID, p.Credential.launcherID)
+			default:
+				query += ` AND EXISTS (SELECT 1 FROM credentials c
+					 WHERE c.id = ? AND c.principal_id = ? AND c.launcher_id IS NULL AND c.revoked_at IS NULL)`
+				args = append(args, p.Credential.credentialID, p.Credential.principalID)
+			}
+		}
+		result, err := tx.Exec(query, args...)
 		if err != nil {
 			return err
 		}
-		// Verify exactly one row was inserted. If zero, the Launcher or its
-		// Principal was disabled or deleted between authentication and this
-		// insert. Under lifecycle serialization this cannot interleave with a
-		// policy mutation, so it surfaces only as a defense-in-depth recheck;
-		// the stale-owner rejection is a deterministic typed contract
-		// (422 launcher_unavailable), never an invalid_workspace relabel.
+		// Verify exactly one row was inserted. If zero, the Launcher, its
+		// Principal, or the authorizing credential was disabled, deleted, or
+		// revoked between authentication and this insert. Under lifecycle
+		// serialization the enabled-state part cannot interleave with a
+		// policy mutation, so it surfaces only as a defense-in-depth
+		// recheck; the credential part is the commit-boundary revocation
+		// race closure. The stale-owner rejection is a deterministic typed
+		// contract (422 launcher_unavailable), the credential rejection the
+		// canonical non-disclosing 401 credential classes, never an
+		// invalid_workspace relabel.
 		inserted, err := result.RowsAffected()
 		if err != nil {
 			return fmt.Errorf("cannot check session insert result: %w", err)
 		}
 		if inserted == 0 {
-			return fmt.Errorf("launcher is no longer available: %w", ErrLauncherUnavailable)
+			return fmt.Errorf("session create stale-authority rejection: %w", classifyStaleSessionCreateAuthority(tx, p))
 		}
 
 		// The snapshot entries commit in the same transaction as the Session
@@ -322,10 +381,13 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 			return insertSession()
 		})
 		if err != nil {
-			// Classify: stale-owner recheck, MAC preparation, and DB insert
-			// errors. The stale-owner rejection keeps its typed contract.
+			// Classify: stale-owner recheck, commit-boundary credential
+			// rejection, MAC preparation, and DB insert errors. The typed
+			// stale-authority contracts keep their classes.
 			switch {
-			case errors.Is(err, ErrLauncherUnavailable):
+			case errors.Is(err, ErrLauncherUnavailable),
+				errors.Is(err, ErrCredentialRevoked),
+				errors.Is(err, ErrCredentialNotFound):
 				return nil, fmt.Errorf("cannot create session: %w", err)
 			case errors.Is(err, ErrMACPreparation):
 				return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrMAC)
@@ -335,7 +397,14 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		}
 	} else {
 		if err := insertSession(); err != nil {
-			if errors.Is(err, ErrLauncherUnavailable) {
+			switch {
+			case errors.Is(err, ErrLauncherUnavailable),
+				errors.Is(err, ErrCredentialRevoked),
+				errors.Is(err, ErrCredentialNotFound):
+				// Deterministic typed stale-authority contracts keep their
+				// classes: the launcher-shaped rejection (422
+				// launcher_unavailable) and the canonical credential
+				// rejection (the non-disclosing 401 credential classes).
 				return nil, fmt.Errorf("cannot create session: %w", err)
 			}
 			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
@@ -357,24 +426,84 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	}, nil
 }
 
+// classifyStaleSessionCreateAuthority distinguishes the zero-row outcome of
+// the conditional Session insert, inside the same create transaction the
+// insert ran in (one snapshot: the classification observes exactly the state
+// the insert predicate evaluated). The launcher/principal availability
+// recheck comes first and keeps the pre-existing typed
+// ErrLauncherUnavailable contract; a credential-authority create whose
+// launcher is still available is then classified through the same canonical
+// credential failure classes the credential authenticator produces — the
+// credential row is gone (deleted, re-owned, or otherwise no longer the
+// authenticated authority) or its revoked_at is set. Any other outcome is an
+// insert recheck inconsistency and fails closed as a database error.
+func classifyStaleSessionCreateAuthority(tx *sql.Tx, p *sessionCreatePolicy) error {
+	var launcherCount int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM launchers l JOIN principals p ON p.id = l.principal_id
+		 WHERE l.id = ? AND l.enabled = 1 AND p.enabled = 1`,
+		p.LauncherID,
+	).Scan(&launcherCount); err != nil {
+		return fmt.Errorf("cannot recheck launcher availability: %w", err)
+	}
+	if launcherCount == 0 {
+		return ErrLauncherUnavailable
+	}
+	if p.Credential == nil {
+		// Without a credential clause the insert predicate is the
+		// availability predicate alone; an available launcher with zero
+		// inserted rows is an insert recheck inconsistency.
+		return fmt.Errorf("session insert recheck inconsistency: %w", ErrDatabase)
+	}
+	var revokedAt sql.NullInt64
+	var credQuery string
+	var credArgs []any
+	if p.Credential.launcherID != "" {
+		credQuery = `SELECT revoked_at FROM credentials WHERE id = ? AND launcher_id = ?`
+		credArgs = []any{p.Credential.credentialID, p.Credential.launcherID}
+	} else {
+		credQuery = `SELECT revoked_at FROM credentials WHERE id = ? AND principal_id = ? AND launcher_id IS NULL`
+		credArgs = []any{p.Credential.credentialID, p.Credential.principalID}
+	}
+	err := tx.QueryRow(credQuery, credArgs...).Scan(&revokedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("authorizing credential no longer exists for the authenticated owner: %w", ErrCredentialNotFound)
+		}
+		return fmt.Errorf("cannot recheck credential authority: %w", err)
+	}
+	if revokedAt.Valid {
+		return fmt.Errorf("authorizing credential is revoked: %w", ErrCredentialRevoked)
+	}
+	return fmt.Errorf("session insert recheck inconsistency: %w", ErrDatabase)
+}
+
 // canonicalizeSessionFilesystemRoots converts caller-supplied absolute
 // filesystem roots into canonical AllowedRootEntry values, ready for
 // narrowSessionFilesystemPolicy.
 //
-// Each root must be an absolute host path; it is cleaned, resolved through
-// symlinks, and must exist as a directory or a regular file — the resolved
-// canonical path becomes the policy identity, so a symlink alias never
-// creates a second authority identity and two spellings of one canonical
-// path are a duplicate refusal. There is no workspace-containment proof
-// here: the canonical root must be authorized by the effective Launcher
-// ceiling, which narrowSessionFilesystemPolicy proves against the resolved
-// ceiling inside the same create linearization boundary. The orchestrator
-// (or operator) creates the root before creating the Session, so an
-// unresolvable root — whose canonical identity cannot be proven — is a
-// refusal, never a guess. Every failure wraps
+// Each root must be an absolute host path; it is cleaned and must be
+// lexically inside the effective allowed-root ceiling — the raw spelling
+// carries the authorization admission itself — BEFORE any privileged
+// host-filesystem probing. A spelling outside the ceiling is refused
+// immediately without EvalSymlinks/stat: no existence, error class, path
+// type, or resolved alias of the requested pathname is ever collected or
+// disclosed, and there is no compatibility alias for a spelling outside the
+// ceiling that would resolve into it. An admitted spelling is resolved
+// through symlinks and must exist as a directory or a regular file — the
+// resolved canonical path becomes the policy identity, so a symlink alias
+// never creates a second authority identity and two spellings of one
+// canonical path are a duplicate refusal. The canonical root must still be
+// authorized by the effective Launcher ceiling: narrowSessionFilesystemPolicy
+// proves that canonical containment against the resolved ceiling inside the
+// same create linearization boundary as the second, mandatory security
+// proof, so a symlink inside the lexical ceiling that resolves outside is
+// still fail-closed. The orchestrator (or operator) creates the root before
+// creating the Session, so an unresolvable root — whose canonical identity
+// cannot be proven — is a refusal, never a guess. Every failure wraps
 // ErrInvalidSessionFilesystemPolicy: one refusal family governs the whole
 // Session filesystem request.
-func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry) ([]AllowedRootEntry, error) {
+func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceilingPaths []string) ([]AllowedRootEntry, error) {
 	canonical := make([]AllowedRootEntry, 0, len(roots))
 	for _, root := range roots {
 		if root.Path == "" || !filepath.IsAbs(root.Path) {
@@ -385,11 +514,24 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry) ([]A
 			return nil, fmt.Errorf("filesystem root %q: %v: %w", root.Path, err, ErrInvalidSessionFilesystemPolicy)
 		}
 		cleaned := filepath.Clean(root.Path)
-		resolved, err := filepath.EvalSymlinks(cleaned)
+
+		// Authorization ceiling first (H3): the raw cleaned spelling must be
+		// lexically inside the effective allowed-root ceiling BEFORE any
+		// privileged host-filesystem probing. A spelling outside the ceiling
+		// is refused immediately without EvalSymlinks/stat.
+		if !isWithinAnyAllowedRoot(cleaned, ceilingPaths) {
+			return nil, fmt.Errorf("filesystem root %q is outside the effective launcher policy: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
+		}
+
+		// Filesystem mechanics after admission: resolution and type checks
+		// run only on an admitted spelling, and the canonical ceiling proof
+		// in narrowSessionFilesystemPolicy remains the second, mandatory
+		// security proof.
+		resolved, err := evalSymlinksFn(cleaned)
 		if err != nil {
 			return nil, fmt.Errorf("filesystem root %q cannot be resolved: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
 		}
-		info, err := os.Stat(resolved)
+		info, err := osStatFn(resolved)
 		if err != nil {
 			return nil, fmt.Errorf("filesystem root %q cannot be accessed: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
 		}

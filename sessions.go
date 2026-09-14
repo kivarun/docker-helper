@@ -398,6 +398,26 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	result, cerr := a.createSessionAuthorized(authCtx, sel, req.Workspace, req.FilesystemRoots.suppliedRoots())
 	if cerr != nil {
+		// Commit-boundary credential rejection (the authorizing credential
+		// was revoked, deleted, or lost its authenticated owner between
+		// authentication and the Session-commit linearization point):
+		// answered with the same canonical non-disclosing credential
+		// contract as entry authentication — auth.failure with the existing
+		// credential classification and 401, no new error code, and the
+		// refused creation leaves no Session.
+		if errors.Is(cerr, ErrCredentialRevoked) || errors.Is(cerr, ErrCredentialNotFound) {
+			resultCode := "credential.revoked"
+			if errors.Is(cerr, ErrCredentialNotFound) {
+				resultCode = "credential.not_found"
+			}
+			writeAuthFailure(ctx, r, resultCode)
+			opLog(ctx).Warn("session creation rejected",
+				slog.String("operation", "session_create"),
+				slog.String("error", cerr.Error()),
+			)
+			writeUnauthorizedSessionControl(ctx, w)
+			return
+		}
 		// Stale-owner/enabled rejection at final persistence carries the same
 		// deterministic typed contract as resolution-time rejection
 		// (422 launcher_unavailable); the underlying cause is preserved in the
@@ -436,7 +456,10 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			// The client receives the specific actionable cause (missing
 			// directory, not a directory, outside an allowed root, no allowed
 			// roots) with the same invalid_workspace code, without exposing
-			// internal implementation detail.
+			// internal implementation detail. A request spelling that failed
+			// lexical admission never reaches the resolver at all, so no
+			// host-filesystem detail exists to disclose for an unauthorized
+			// path (the authorization-before-probing boundary).
 			opLog(ctx).Warn("session creation rejected",
 				slog.String("operation", "session_create"),
 				slog.String("error", cerr.Error()),

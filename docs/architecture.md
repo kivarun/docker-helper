@@ -588,20 +588,30 @@ resolve effective workspace policy
      launcher scopes; `read_only` dominance)
     ↓
 validate workspace inside the effective roots
+    (H3: the raw request spelling is admitted lexically against the
+     effective ceiling first — a spelling outside the ceiling is refused
+     without any privileged probing and has no resolving-alias
+     compatibility admission)
     ↓
 canonicalize the workspace
-    (the existing Session-create owner: absolute path + EvalSymlinks)
+    (the existing Session-create owner: EvalSymlinks + stat of the
+     admitted spelling; the canonical containment proof below remains
+     the second, mandatory security proof)
     ↓
 when the request carries filesystem_roots:
-    canonicalize each requested absolute host path
-    (clean, resolve symlinks, prove the resolved path exists as a
-     directory or regular file), prove the request is a narrowing-only
-     composition against the effective Launcher ceiling
-     (authorized; explicit read_write under an effective read_only
-     region refused), build the requested scope (implicit workspace
-     grant at the effective ceiling mode, replaced by an explicit
-     workspace root), and compose ceiling ∩ request through the existing
-     composition owner;
+    admit each requested absolute host path lexically against the
+    effective Launcher ceiling (clean raw spelling; a spelling outside
+    the ceiling is refused invalid_filesystem_policy immediately, with
+    zero privileged probes of the requested pathname and no
+    compatibility alias that would resolve into it), then canonicalize
+    the admitted spelling (resolve symlinks, prove the resolved path
+    exists as a directory or regular file), prove the request is a
+    narrowing-only composition against the effective Launcher ceiling
+    (authorized canonical proof — the second, mandatory security proof;
+     explicit read_write under an effective read_only region refused),
+    build the requested scope (implicit workspace grant at the effective
+    ceiling mode, replaced by an explicit workspace root), and compose
+    ceiling ∩ request through the existing composition owner;
     otherwise derive the inherited workspace-only snapshot
     (issuance-time filesystem roots; the request may only narrow, never
     widen)
@@ -619,6 +629,16 @@ the sessionMACCoordinator
     (CreateSessionBinding holds the coordinator lock across preparation,
      the create transaction, and any rollback; a preparation failure
      issues no usable Session or bearer)
+    ↓
+revalidate the authorizing credential at the commit boundary
+    (a credential-authority create re-proves its exact credential row —
+     still existing, still carrying the authenticated owner identity,
+     still active — inside the create transaction's conditional insert,
+     evaluated in the same statement as the insert; a revoke or delete
+     that committed before the Session commit prevents that Session and
+     answers the canonical non-disclosing 401 credential classification;
+     the admin authority, which authenticates by in-memory token
+     comparison, carries no credential and no revalidation clause)
     ↓
 only after successful MAC preparation, commit Session + snapshot
 atomically
@@ -642,6 +662,24 @@ existing `lifecycleMu` create linearization boundary, so a concurrent
 parent-policy mutation linearizes wholly before or wholly after the create:
 a request is never validated against one ceiling and committed against
 another.
+
+The commit-boundary credential revalidation closes the credential
+revocation race: a Principal or Launcher credential that authenticated the
+request is re-proven inside the create transaction's conditional insert
+(still existing, still carrying the authenticated owner identity, still
+active), so a revoke or credential delete that commits before the Session
+commit prevents that Session; the winning ordering — the Session commits
+before the revoke — leaves the already-issued Session valid under the
+accepted revocation contract. The zero-row outcome is classified inside
+the same transaction (launcher/principal availability keeps the typed
+`422 launcher_unavailable` contract; a credential rejection keeps the
+canonical `ErrCredentialRevoked`/`ErrCredentialNotFound` classes), and the
+handler answers a credential rejection with the same non-disclosing 401
+credential contract as entry authentication: one `auth.failure` record
+with the existing `credential.revoked`/`credential.not_found`
+classification and no `session.create` record. No Session, bearer,
+snapshot, or MAC state exists after the rejection — a prepared MAC
+coverage rolls back through the existing create-failure path.
 
 The Session filesystem request is **issuance-time narrowing** (see
 [`release-2.2-allowed-root-access-modes.md`](release-2.2-allowed-root-access-modes.md)):
@@ -709,9 +747,11 @@ The HTTP body of `POST /sessions` accepts
 - `filesystem_roots` is the optional issuance-time Session filesystem
   request: omitted or `[]` means the inherited create behavior (workspace
   only), and a non-empty array must be a well-formed list of `{path,
-  access}` objects whose `path` is an absolute host path inside the
-  effective Launcher ceiling (existing directory or regular file after
-  symlink resolution) and whose `access` is exactly `read_write` or
+  access}` objects whose `path` is an absolute host path admitted
+  lexically inside the effective Launcher ceiling before any privileged
+  probing (an admitted spelling must exist as a directory or regular file
+  after symlink resolution; the canonical ceiling proof stays the second,
+  mandatory security proof) and whose `access` is exactly `read_write` or
   `read_only`; `null` is refused `400 invalid_filesystem_policy`, as are
   malformed entries (relative or traversal paths, unresolvable paths,
   paths of no mountable type, duplicate canonical entries, explicit
@@ -881,7 +921,13 @@ MAC/runtime cleanup owners:
 
 Revoking a Principal or Launcher credential does not invalidate issued
 sessions; deleting a Launcher credential leaves its launcher's sessions
-owned and running but removes that authentication key.
+owned and running but removes that authentication key. Revocation also
+blocks Session creation at the commit boundary: a credential revoked or
+deleted between authentication and the Session-commit linearization point
+cannot issue a new Session (the create revalidates its authorizing
+credential inside the commit transaction), and the refused create is
+answered with the same non-disclosing 401 credential contract as entry
+authentication.
 
 ### Session lifecycle
 
@@ -1157,9 +1203,14 @@ mount an issued-root region the Session did not request; absolute mount
 sources are authorized only through the issued snapshot (see
 [Filesystem policy](#filesystem-policy)).
 
-All paths are resolved through `filepath.EvalSymlinks` before comparison.
-This prevents symlink-based escape attacks at validation time. Note:
-`EvalSymlinks` resolves the path at a point in time. By itself it
+Path comparisons follow the canonical authorization order: structural
+request validation, then lexical capability admission of the raw caller
+spelling against its issued capability, then privileged filesystem
+resolution (`EvalSymlinks`/stat) of an admitted spelling, then the
+canonical containment/policy proof. A spelling outside the capability
+never reaches the resolver, and a symlink inside the admitted lexical
+capability that resolves outside is refused by the canonical proof.
+Note: `EvalSymlinks` resolves the path at a point in time. By itself it
 does not solve TOCTOU problems where the filesystem changes between
 validation and use. For operations that pass paths to Docker as strings,
 additional measures (such as FD-relative traversal or inode pinning) are
@@ -1176,11 +1227,44 @@ The canonical containment API lives in `path_containment.go`:
 Argument order is always root first, path second. These functions correctly
 handle the prefix trap: `pathWithin("/data", "/data2")` returns false.
 
-When a session is created, the workspace path is resolved through
-`EvalSymlinks` and the canonical workspace is stored in the database.
+When a session is created, the workspace path is admitted lexically
+against the effective allowed-root ceiling, then resolved through
+`EvalSymlinks`, and the canonical workspace is stored in the database.
 When a build or run request specifies a path relative to the workspace,
-the resolved path is compared against the canonical workspace; if the
-resolved path escapes the workspace, the request is rejected.
+the joined spelling is admitted lexically inside the workspace before any
+probing, and the resolved path is compared against the canonical
+workspace as the second, mandatory proof; if the resolved path escapes
+the workspace, the request is rejected. The issuance-time filesystem
+roots apply the same ordering: a requested root spelling outside the
+effective Launcher ceiling is refused without probing, and an admitted
+spelling is canonicalized before the canonical ceiling proof.
+
+Session-create workspace admission follows the authorization-before-
+probing ordering. The raw request spelling is first proven lexically
+against the effective allowed-root ceiling without any host filesystem
+probing; a spelling outside the ceiling is refused immediately with the
+bounded authorization-shape refusal (`workspace must be inside an allowed
+root`) and the resolver is never invoked for it, so no existence, error
+class, path type, or resolved alias of an unauthorized pathname is ever
+collected or disclosed. Release 2.2 tightens the former symlink-alias
+admission: a raw spelling outside the ceiling is no longer accepted even
+when it would resolve into the ceiling through a symlink — the
+caller-controlled raw spelling must carry the lexical capability
+admission itself. After admission the privileged probes run normally and
+the canonical containment proof remains the second, mandatory security
+proof: a symlink inside the lexical ceiling that resolves outside is
+still fail-closed, a spelling inside the ceiling that resolves inside is
+issued (symlink aliases inside the ceiling keep working), and a missing
+workspace inside the ceiling keeps its actionable operator diagnostic.
+The run and build data planes apply the same ordering: their raw
+spellings are admitted lexically against the issued Session filesystem
+capability (the workspace for the relative/relative grammar, the issued
+snapshot entries for the absolute mount spelling) before any privileged
+probing, the canonical containment proofs after resolution stay
+fail-closed (staging and inode pinning unchanged), and their public
+refusals (`invalid_mount`, `invalid_build_context`) are stable
+non-disclosing contracts identical across unauthorized filesystem
+states.
 
 ### Policy introspection
 
@@ -1780,9 +1864,11 @@ Authentication
     │
 Request validation
     │
-Canonical path resolution
+Lexical capability admission
     │
-Boundary validation
+Canonical filesystem resolution
+    │
+Canonical containment/policy proof
     │
 Operation registration (supervisor admission — atomic with shutdown gate)
     │
@@ -1796,15 +1882,24 @@ Retention cleanup
 ```
 
 Authentication validates the session token. Request validation checks
-required fields and path relativity per operation. Canonical path
-resolution resolves every caller path through `EvalSymlinks`. Filesystem
-authorization is snapshot-based: a relative run source must stay within
-the session workspace — the structural workspace-containment rule of the
-relative grammar — a build context stays workspace-constrained, and an
-absolute run source is authorized through the issued immutable Session
-filesystem snapshot (see [Filesystem policy](#filesystem-policy));
-workspace containment is that structural rule, not a universal
-data-plane authorization rule.
+required fields and path relativity per operation. The H3 authorization
+boundary orders every filesystem decision: the raw caller spelling is
+proven lexically against its capability first (the effective allowed-root
+ceiling at Session create, the issued Session filesystem snapshot for an
+absolute run source, the workspace for a workspace-relative run source or
+build context), and privileged host-filesystem probing — canonical
+resolution through `EvalSymlinks`, stat — runs only after that admission;
+there is no compatibility alias for a spelling outside the capability that
+would resolve into it. After resolution the canonical containment/policy
+proof runs as the second, mandatory security proof: a relative run source
+must stay within the session workspace — the structural
+workspace-containment rule of the relative grammar — a build context stays
+workspace-constrained, and an absolute run source is authorized through
+the issued immutable Session filesystem snapshot (see
+[Filesystem policy](#filesystem-policy)); workspace containment is that
+structural rule, not a universal data-plane authorization rule. A symlink
+inside the lexical capability that resolves outside stays fail-closed
+through that canonical proof.
 
 Operation registration uses the operation supervisor admission path
 (`admit`), which atomically checks the shutdown gate and registers the
@@ -1894,7 +1989,13 @@ Validation details:
 - context may be relative (joined with workspace) or absolute (must be
   inside workspace);
 - dockerfile must be relative to context;
-- all paths are resolved through `EvalSymlinks` before `pathWithin` checks;
+- authorization-before-probing: the raw context spelling is admitted
+  lexically inside the canonical session workspace, and the raw
+  Dockerfile spelling lexically inside the resolved build context,
+  before any host filesystem probing; a spelling outside is refused
+  without probing, and the canonical `EvalSymlinks` + containment proofs
+  after admission stay fail-closed (a symlink inside the lexical
+  workspace/context that resolves outside is refused);
 - build-arg names must match `^[A-Za-z_][A-Za-z0-9_]*$`;
 - build-arg keys are sorted for deterministic Docker argv;
 - build-arg values are never logged or audited (only `build_arg_keys`).
@@ -1928,7 +2029,9 @@ Workdir validation
     │
 Environment validation
     │
-Mount resolution (canonical source identity)
+Mount admission (lexical capability admission)
+    │
+Canonical mount-source resolution
     │
 Filesystem exposure resolution against the persisted snapshot
     │
@@ -1952,13 +2055,20 @@ Unified terminal-path cleanup (one ordered owner: proven container
 Request validation checks that the image field is non-empty. Workdir
 validation ensures the value is an absolute path if provided.
 Environment validation ensures variable names match
-`^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
-against the workspace and checks for duplicate targets. After all
-structural validation, every mount's access mode is resolved against the
-persisted Session filesystem snapshot (see
-[Data-plane filesystem authority](#data-plane-filesystem-authority)); a
-refused writable exposure is answered `read_only_root` before any
-pin/operation/Docker state exists, and the MAC lease is released.
+`^[A-Za-z_][A-Za-z0-9_]*$`. Mount admission orders every mount decision
+authorization-first: the raw caller source spelling is admitted lexically
+against its capability before any privileged host-filesystem probing — a
+relative source through `pathWithin` against the workspace, an absolute
+source against the issued Session filesystem snapshot entries. Only
+admitted spellings
+are resolved to their canonical identity, and duplicate mount targets are
+refused once each canonical target is known. After resolution, every mount's
+access mode is resolved against the persisted Session filesystem snapshot
+(see [Data-plane filesystem authority](#data-plane-filesystem-authority))
+— the second, mandatory canonical proof, so a symlink inside the lexical
+capability that resolves outside stays fail-closed; a refused writable
+exposure is answered `read_only_root` before any pin/operation/Docker
+state exists, and the MAC lease is released.
 
 `helper_socket` validation is mode-aware: when the boolean is requested in
 user mode the request is rejected (`invalid_helper_socket`) before any
@@ -1990,9 +2100,12 @@ Validation details:
 - mount source is a relative path (workspace-relative) or an absolute host
   path;
 - mount target must be absolute;
-- source is resolved through `EvalSymlinks`; a relative source is checked
-  via `pathWithin` against the workspace, and every source is authorized
-  through the issued Session filesystem snapshot;
+- mount admission is authorization-first: a relative source is checked via
+  `pathWithin` against the workspace and an absolute source against the
+  issued Session filesystem snapshot entries before any privileged probing;
+  the source is resolved through `EvalSymlinks` only after
+  admission, and the issued snapshot exposure resolution stays the second,
+  mandatory canonical proof;
 - environment values are never logged (only names in `env_keys`);
 - environment names are sorted for deterministic output;
 - `helper_socket` injects the server-owned read-only runtime projection
@@ -2082,42 +2195,69 @@ Each mount in a `POST /run` request specifies a `source` and a `target`
 (resolved against the session workspace, the existing convenience) or an
 absolute host path (an issued Session filesystem root).
 
+Authorization-before-probing: the raw caller spelling is admitted
+lexically against the issued filesystem capability FIRST — the canonical
+workspace for the relative grammar, the issued snapshot entries for the
+absolute grammar — and the privileged host-filesystem probing (symlink
+resolution, stat) runs only after that admission. A spelling outside the
+capability is refused immediately without probing; there is no
+compatibility alias for a spelling outside the capability that would
+resolve into it. After resolution the canonical containment proofs stay
+fail-closed: the relative grammar re-proves workspace containment on the
+resolved path (a symlink inside the workspace that resolves outside is
+refused), and the absolute grammar is authorized through the snapshot
+exposure resolution.
+
 Allowed:
 
-- `source` is a relative path inside the session workspace, or an absolute
-  host path;
+- `source` is a relative path lexically inside the session workspace, or
+  an absolute host path lexically inside the issued Session filesystem
+  snapshot;
 - `source` resolves to an existing directory or regular file;
 - `source` is `.` (the entire workspace);
 - `target` is any absolute path;
 - `read_only` is true or false;
 - the same `source` can be mounted to multiple `target` paths.
 
-Forbidden:
+Forbidden (structural request validation, before admission):
 
-- a relative `source` resolves outside the session workspace (including via
-  symlinks) — the workspace-relative grammar is a structural boundary, never
-  an alternate way to reach another issued root: an absolute source is the
-  only spelling for that;
-- `source` is empty;
-- `source` resolves outside the issued Session filesystem snapshot (absolute
-  spelling) — every mount must carry issued snapshot authority;
-- `source` does not exist;
-- `source` is not a directory or regular file;
 - `target` is empty;
 - `target` is not absolute;
-- two mounts use the same `target`.
+- `target` is `.` or `..`, or contains a comma (mount-argv safety).
+
+Forbidden (refused before any host filesystem probing — the lexical
+capability admission):
+
+- a relative `source` whose joined spelling escapes the session workspace
+  lexically — the workspace-relative grammar is a structural boundary,
+  never an alternate way to reach another issued root: an absolute source
+  is the only spelling for that;
+- an absolute `source` spelling outside the issued Session filesystem
+  snapshot — every mount must carry issued snapshot authority.
+
+Forbidden (after canonical resolution — the canonical proof and later
+canonical facts):
+
+- a symlink inside the lexical capability that resolves outside it — the
+  relative grammar re-proves workspace containment on the resolved path,
+  and the escape protection is unchanged;
+- `source` does not exist;
+- `source` is not a directory or regular file;
+- two mounts use the same `target` (checked once each canonical target is
+  known).
 
 The relative grammar keeps the mount scoped to the session workspace; an
 absolute source is authorized only through the issued Session filesystem
-snapshot, so a path the Launcher allows but this Session did not request is
-still not mountable by this Session.
+snapshot, so a path the Launcher allows but this Session did not request
+is still not mountable by this Session.
 
 On top of the structural validation, the access mode of every accepted
 mount is enforced against the persisted immutable Session filesystem
 snapshot — the only data-plane filesystem authority, issued at Session
 creation. The policy decision uses only the canonical source identity
-produced by `resolveMount` (`filepath.Abs`/`EvalSymlinks` + type validation,
-plus workspace containment for the relative grammar), never the caller
+produced by `resolveMount` (lexical capability admission, then
+`filepath.Abs`/`EvalSymlinks` + type validation of the admitted spelling,
+then the canonical containment proofs), never the caller
 spelling: a symlink spelling never selects a different access mode. A
 read-only request is permitted for either snapshot access mode; a writable
 request is permitted only through the snapshot owner's writable-parent query
@@ -2658,7 +2798,7 @@ Current error codes (non-exhaustive):
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
 | `invalid_helper_socket` | `POST /run` | helper_socket requested in user mode (unsupported there) |
-| `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause |
+| `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause for a request spelling admitted by the lexical ceiling proof, and the bounded authorization-shape refusal (`workspace must be inside an allowed root`) for a spelling outside it — an unadmitted spelling is refused without any host filesystem probing (authorization-before-probing; see [Session workspace](#session-workspace)) |
 | `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
 | `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
@@ -2850,7 +2990,14 @@ Does not include `request_id` because completion is not request-scoped.
 
 #### session.create
 
-Emitted for every `POST /sessions` request after authentication.
+Emitted for every `POST /sessions` request after authentication. A
+commit-boundary credential rejection (the authorizing credential was
+revoked, deleted, or lost its authenticated owner between authentication
+and the Session-commit linearization point) is a credential
+authentication-family outcome: it emits one `auth.failure` record with the
+existing `credential.revoked`/`credential.not_found` classification
+instead of a `session.create` record, and is answered with the shared
+non-disclosing 401 contract.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -3267,9 +3414,12 @@ does not write log files or implement internal rotation.
 
 ### Path traversal
 
-All paths are resolved through `filepath.Abs` and `filepath.EvalSymlinks`
-before comparison. The `pathWithin` function uses `filepath.Rel`, which
-operates on canonical paths.
+Path authorization follows the canonical order: structural request
+validation, lexical capability admission of the raw caller spelling
+against its issued capability, privileged filesystem resolution
+(`filepath.Abs`/`filepath.EvalSymlinks`) of an admitted spelling, then
+the canonical containment/policy proof. The `pathWithin` function uses
+`filepath.Rel`, which operates on canonical paths.
 
 For operations that pass paths to Docker, additional measures close the
 TOCTOU gap: builds use an isolated staging copy with FD-relative
@@ -3278,9 +3428,10 @@ helper-owned mounts via `open_tree` + `move_mount`.
 
 ### Symlink escape
 
-`EvalSymlinks` resolves all symlinks in a path at validation time.
-If a symlink inside the workspace points outside, the resolved path
-will fail the `pathWithin` check.
+An admitted spelling is resolved through `EvalSymlinks`. If a symlink
+inside the lexical capability resolves outside it, the resolved path
+fails the canonical containment proof — the second, mandatory security
+proof; a spelling outside the capability never reaches the resolver.
 
 Note: `EvalSymlinks` alone does not prevent TOCTOU attacks where the
 filesystem changes between validation and use. The specific operation
