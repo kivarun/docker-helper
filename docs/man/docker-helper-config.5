@@ -103,7 +103,7 @@ and stored root.
 .PP
 Manage workspace roots with:
 .br
-\fBdocker-helper config allowed-root list [\-\-json]\fR \- list global allowed roots, one canonical root per line; \-\-json prints the rich entries
+\fBdocker-helper config allowed-root list [\-\-json]\fR \- list global allowed roots, one canonical root per line; \-\-json prints the rich entries (the list is the recovery-safe stored inspection: a stale entry whose directory is gone stays visible while startup and reload fail closed)
 .br
 \fBdocker-helper config allowed-root add [\-\-access ACCESS] PATH\fR \- add a global allowed root (omitted \fB\-\-access\fR is the read_write grant)
 .br

@@ -1629,7 +1629,9 @@ Principal's stored roots (`completion roots principal --stored`).
 `config allowed-root remove PATH` and `config allowed-root set-access
 PATH ACCESS` complete PATH exactly from the stored global roots (the
 local `config allowed-root list` output, no daemon exchange); add
-remains generic directory completion.
+remains generic directory completion. The stored-root universe is the
+recovery-safe list projection, so a stale entry whose directory is gone
+stays completable and addressable.
 
 The daemon remains the final policy boundary and rejects a root outside
 the effective Principal ceiling at execution time. All other path-valued
@@ -1745,6 +1747,15 @@ the final global root. `list` prints the 2.1-compatible one canonical root
 per line by default; the explicit `--json` opt-in prints the canonical rich
 entries, so the access mode of every global root is visible to access-aware
 tooling.
+
+`list` is the recovery-safe stored-config inspection: every stored entry is
+projected to its canonical identity through the shared
+`resolveAllowedRootIdentity` owner, so a stale entry whose directory was
+deleted outside docker-helper stays visible and addressable. Runtime
+validation is unchanged — daemon startup and reload still fail closed on a
+missing stored root, and only the removal of the stale entry through
+`remove` (which works with the daemon down, like every config mutation)
+restores a startable config.
 
 `http_address` is configurable in system mode only and requires a daemon
 restart to take effect. It is not included in the reloadable field list.

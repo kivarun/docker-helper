@@ -343,8 +343,12 @@ func configAllowedRootList(jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	// Use canonical resolved roots (same as loadAndPrepareRuntimeConfig).
-	requestedRoots, err := resolveAllowedRoots(raw, fc)
+	// List the stored-config inspection universe: every stored entry is
+	// projected to its canonical identity through the shared
+	// resolveAllowedRootIdentity owner, so a stale entry whose directory was
+	// deleted outside docker-helper stays visible and addressable while
+	// daemon startup validation (resolveAllowedRoots) remains fail closed.
+	requestedRoots, err := resolveStoredAllowedRoots(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

@@ -3671,6 +3671,60 @@ func TestCompletionConfigAllowedRootRemoveNeverHostFilesystem(t *testing.T) {
 	}
 }
 
+// TestCompletionConfigAllowedRootStaleRootRecovery proves the recovery
+// invariant of the existing-entity universe: a stored root whose directory
+// was deleted outside docker-helper stays offered by the remove/set-access
+// PATH completion (the recovery-safe stored-config inspection), so the stale
+// entry that fails daemon startup stays completable and addressable. A
+// failed stored-root query still degrades silently: no suggestions and no
+// stderr, and the completion process succeeds.
+func TestCompletionConfigAllowedRootStaleRootRecovery(t *testing.T) {
+	configured := testAllowedRootDir(t)
+	stale := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []any{
+			configured,
+			map[string]any{"path": stale, "access": "read_only"},
+		},
+		"session_ttl": "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	setupConfigTestWithData(t, data)
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatalf("cannot delete the stale root directory: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"remove", []string{"docker-helper", "config", "allowed-root", "remove", ""}},
+		{"set-access", []string{"docker-helper", "config", "allowed-root", "set-access", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results := runCompletionLive(t, nil, tc.args)
+			if want := []string{configured, stale}; !slices.Equal(sortedTrimmed(results), sortedTrimmed(want)) {
+				t.Errorf("completion = %v, want exactly the stored roots %v (the stale entry must stay offered)", results, want)
+			}
+		})
+	}
+
+	t.Run("the typed stale identity completes exactly itself", func(t *testing.T) {
+		results := runCompletionLive(t, nil, []string{"docker-helper", "config", "allowed-root", "remove", stale})
+		if want := []string{stale}; !slices.Equal(sortedTrimmed(results), want) {
+			t.Errorf("typed stale prefix completion = %v, want [%s]", results, stale)
+		}
+	})
+
+	t.Run("a failed stored-root query degrades silently", func(t *testing.T) {
+		results := runCompletionLive(t, []string{"DOCKER_HELPER_CONFIG=" + filepath.Join(t.TempDir(), "missing-config.json")},
+			[]string{"docker-helper", "config", "allowed-root", "remove", ""})
+		if len(results) != 0 {
+			t.Errorf("a failed stored-root query must complete silently, got %v", results)
+		}
+	})
+}
+
 // TestCompletionPrincipalAllowedRootSelectors proves the first positional of
 // the Principal allowed-root family completes from the daemon-backed
 // Principal selector introspection (the same owner the --principal flag

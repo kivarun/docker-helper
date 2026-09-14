@@ -656,3 +656,187 @@ func TestAllowedRootPersistenceCarriesReadWrite(t *testing.T) {
 		t.Fatalf("persisted replacement roots = %+v", rEntries)
 	}
 }
+
+// TestResolveStoredAllowedRootsRecoveryUniverse proves the recovery-safe
+// stored-config inspection matrix: a missing stored root keeps its cleaned
+// absolute identity (ENOENT stays visible and addressable), an existing
+// symlink alias resolves to its target identity, a deleted symlink target
+// keeps the cleaned link identity, a regular file at the root path stays
+// shown as its resolved identity, and every other resolution failure (like a
+// symlink loop) fails closed. Legacy singular migration, same-identity
+// collapse, and the structural failure contract follow the shared
+// storedAllowedRootEntries owner.
+func TestResolveStoredAllowedRootsRecoveryUniverse(t *testing.T) {
+	base := testAllowedRootDir(t)
+
+	target := filepath.Join(base, "target")
+	other := testAllowedRootDir(t)
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	deadLink := filepath.Join(base, "deadlink")
+	if err := os.Symlink(filepath.Join(base, "gone-target"), deadLink); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(base, "missing")
+	regular := filepath.Join(base, "regular")
+	if err := os.WriteFile(regular, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	loopA := filepath.Join(base, "loopA")
+	loopB := filepath.Join(base, "loopB")
+	if err := os.Symlink(loopB, loopA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(loopA, loopB); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("missing stored root keeps its cleaned absolute identity", func(t *testing.T) {
+		raw := configRawWithAllowedRoots(t, `["`+other+`", {"path":"`+missing+`","access":"read_only"}]`)
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		entries, err := resolveStoredAllowedRoots(raw, fc)
+		if err != nil {
+			t.Fatalf("resolveStoredAllowedRoots() error: %v", err)
+		}
+		want := []AllowedRootEntry{
+			{Path: other, Access: AllowedRootAccessReadWrite},
+			{Path: missing, Access: AllowedRootAccessReadOnly},
+		}
+		if !slices.Equal(entries, want) {
+			t.Errorf("entries = %+v, want %+v (the missing root must stay visible)", entries, want)
+		}
+	})
+
+	t.Run("symlink alias resolves to its target identity", func(t *testing.T) {
+		raw := configRawWithAllowedRoots(t, `["`+alias+`"]`)
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		entries, err := resolveStoredAllowedRoots(raw, fc)
+		if err != nil {
+			t.Fatalf("resolveStoredAllowedRoots() error: %v", err)
+		}
+		want := []AllowedRootEntry{{Path: target, Access: AllowedRootAccessReadWrite}}
+		if !slices.Equal(entries, want) {
+			t.Errorf("entries = %+v, want %+v", entries, want)
+		}
+	})
+
+	t.Run("deleted symlink target keeps the cleaned link identity", func(t *testing.T) {
+		raw := configRawWithAllowedRoots(t, `["`+deadLink+`"]`)
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		entries, err := resolveStoredAllowedRoots(raw, fc)
+		if err != nil {
+			t.Fatalf("resolveStoredAllowedRoots() error: %v", err)
+		}
+		want := []AllowedRootEntry{{Path: deadLink, Access: AllowedRootAccessReadWrite}}
+		if !slices.Equal(entries, want) {
+			t.Errorf("entries = %+v, want %+v (a deleted target must stay addressable)", entries, want)
+		}
+	})
+
+	t.Run("regular file at the root path stays shown as its resolved identity", func(t *testing.T) {
+		raw := configRawWithAllowedRoots(t, `["`+regular+`"]`)
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		entries, err := resolveStoredAllowedRoots(raw, fc)
+		if err != nil {
+			t.Fatalf("resolveStoredAllowedRoots() error: %v", err)
+		}
+		want := []AllowedRootEntry{{Path: regular, Access: AllowedRootAccessReadWrite}}
+		if !slices.Equal(entries, want) {
+			t.Errorf("entries = %+v, want %+v", entries, want)
+		}
+	})
+
+	t.Run("non-ENOENT resolution failure fails closed", func(t *testing.T) {
+		raw := configRawWithAllowedRoots(t, `["`+loopA+`"]`)
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		if _, err := resolveStoredAllowedRoots(raw, fc); err == nil {
+			t.Fatal("resolveStoredAllowedRoots() = nil, want a fail-closed symlink-loop error")
+		}
+	})
+
+	t.Run("legacy singular resolves to the read_write identity", func(t *testing.T) {
+		raw := map[string]json.RawMessage{
+			"allowed_root": json.RawMessage(`"` + missing + `"`),
+			"session_ttl":  json.RawMessage(`"12h"`),
+		}
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		entries, err := resolveStoredAllowedRoots(raw, fc)
+		if err != nil {
+			t.Fatalf("resolveStoredAllowedRoots() error: %v", err)
+		}
+		want := []AllowedRootEntry{{Path: missing, Access: AllowedRootAccessReadWrite}}
+		if !slices.Equal(entries, want) {
+			t.Errorf("entries = %+v, want %+v", entries, want)
+		}
+	})
+
+	t.Run("same-identity stored entries collapse to the first occurrence", func(t *testing.T) {
+		raw := configRawWithAllowedRoots(t, `["`+missing+`", "`+missing+`"]`)
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		entries, err := resolveStoredAllowedRoots(raw, fc)
+		if err != nil {
+			t.Fatalf("resolveStoredAllowedRoots() error: %v", err)
+		}
+		want := []AllowedRootEntry{{Path: missing, Access: AllowedRootAccessReadWrite}}
+		if !slices.Equal(entries, want) {
+			t.Errorf("entries = %+v, want %+v", entries, want)
+		}
+	})
+
+	t.Run("structural failures still fail closed", func(t *testing.T) {
+		ambiguous := map[string]json.RawMessage{
+			"allowed_root":  json.RawMessage(`"` + other + `"`),
+			"allowed_roots": json.RawMessage(`["` + other + `"]`),
+			"session_ttl":   json.RawMessage(`"12h"`),
+		}
+		fc, err := decodeFileConfig(ambiguous)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		if _, err := resolveStoredAllowedRoots(ambiguous, fc); err == nil {
+			t.Fatal("resolveStoredAllowedRoots() = nil, want the ambiguous-schema failure")
+		}
+		empty := configRawWithAllowedRoots(t, `[]`)
+		fcEmpty, err := decodeFileConfig(empty)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		if _, err := resolveStoredAllowedRoots(empty, fcEmpty); err == nil {
+			t.Fatal("resolveStoredAllowedRoots() = nil, want the empty-array failure")
+		}
+		relative := configRawWithAllowedRoots(t, `["rel/path"]`)
+		fcRelative, err := decodeFileConfig(relative)
+		if err != nil {
+			t.Fatalf("decodeFileConfig() error: %v", err)
+		}
+		if _, err := resolveStoredAllowedRoots(relative, fcRelative); err == nil {
+			t.Fatal("resolveStoredAllowedRoots() = nil, want the non-absolute-path failure")
+		}
+	})
+}

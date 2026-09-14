@@ -258,6 +258,9 @@ operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 .B docker-helper config allowed-root list [\-\-json]
 List global allowed roots, one canonical root per line (authorization
 ceiling); \-\-json prints the canonical rich entries with access modes.
+The list is the recovery-safe stored inspection: a stale entry whose
+directory was deleted outside docker-helper stays visible so the operator
+can remove it, while daemon startup and reload keep failing closed on it.
 .TP
 .B docker-helper config allowed-root add [--access ACCESS] PATH
 Add a global allowed root. Changes the authorization ceiling only;
