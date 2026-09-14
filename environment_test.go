@@ -362,9 +362,11 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	}
 
 	// --config is first, then --cidfile is inserted after the reserved helper
-	// runtime labels, before other options.
+	// runtime labels, before other options. The server-owned privilege floor
+	// is emitted by the run argv owner right after --user, before any
+	// backend security option.
 	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--user", fmt.Sprintf("%d:%d", expectedUID, expectedGID), "--security-opt", "label=disable"}
+	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--user", fmt.Sprintf("%d:%d", expectedUID, expectedGID), "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--security-opt", "label=disable"}
 	for i, expected := range baseArgs {
 		if capturedArgs[i] != expected {
 			t.Fatalf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])

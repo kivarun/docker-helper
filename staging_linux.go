@@ -490,8 +490,13 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 		}
 		unix.Close(readFD)
 
-		// Preserve permissions via Fchmod on open FD.
-		if err := unix.Fchmod(createFD, uint32(st.Mode&0o7777)); err != nil {
+		// Preserve the source's ordinary permission bits on the open FD.
+		// The staged copy is helper-owned, so the SUID and SGID privilege
+		// bits must not transfer: a staged setuid/setgid binary in Docker's
+		// build context would hand image execution a privilege-granting
+		// executable. The staged hardlink entries share this copy's inode,
+		// so the same stripped mode applies along the hardlink path.
+		if err := unix.Fchmod(createFD, uint32(st.Mode&0o7777&^(unix.S_ISUID|unix.S_ISGID))); err != nil {
 			unix.Unlinkat(stagingDirFD, name, 0)
 			unix.Close(createFD)
 			return fmt.Errorf("cannot chmod %s: %w", name, err)

@@ -111,7 +111,7 @@ risk rather than by the audit's original severity ordering.
 
 | ID | Audit claim | Release 2.2 disposition | Closure phase | Stable-release requirement |
 | --- | --- | --- | --- | --- |
-| **C1** | Workload containers lack `no-new-privileges`; SUID/SGID delivery can lead to host root | **BLOCKER_FIX** | SC1 | One workload-execution privilege-floor owner enforces `no-new-privileges`, drops capabilities by default, and strips SUID/SGID from helper-created staging files. Hostile Docker UAT must prove both source-image and staged-file escalation chains are dead. |
+| **C1** | Workload containers lack `no-new-privileges`; SUID/SGID delivery can lead to host root | **CLOSED_CURRENT** | SC1 | Closed through the single server-owned workload privilege floor: the run argv owner emits `--cap-drop ALL` and `--security-opt no-new-privileges:true` for every workload in every mode before any backend option, and the caller has no privilege field. The canonical staging owner strips S_ISUID/S_ISGID from every staged regular file at its single copy point. Hostile source-image and staged-file UAT proved both escalation chains dead (see the SC1 evidence ledger). |
 | **C2** | Principal-less/admin-created Session could execute as daemon `0:0` | **CLOSED_CURRENT** | SC0 | Current system-mode Session execution resolves the proven Launcher/Principal execution identity and emits `--user UID:GID`; there is no daemon-UID fallback. Keep the execution-identity regression proof. |
 | **C3** | Old libselinux recursive `restorecon` can relabel path-swapped foreign files | **BLOCKER_FIX** | SC1 | Active SELinux support must prove the descriptor-safe libselinux implementation (3.11 or a verified distribution backport) or fail closed. Do not add a second home-grown recursive relabel walker. |
 | **H1** | Builder can fetch arbitrary URLs from a network position unavailable to the agent | **BLOCKER_DECISION** | SC3 | Accept an explicit builder-network threat-boundary design. Fix the network position if the supported promise excludes this access; do not parse Dockerfiles as a substitute policy engine. |
@@ -122,7 +122,7 @@ risk rather than by the audit's original severity ordering.
 | **H6** | Mandatory MAC policy blocks admin-token rotation | **BLOCKER_FIX** | SC1 | Narrow AppArmor/SELinux write/rename permission to the token replacement lifecycle only; live enforcing UAT proves old token rejected and new token accepted. |
 | **H7** | A local user can occupy the optional TCP port and drive the service into systemd start-limit failure | **BLOCKER_FIX** | SC2 | Current code still creates the Unix listener and then treats TCP bind failure as fatal, while the shipped service has `Restart=on-failure` plus a finite start-limit. The authoritative local Unix service must not be permanently denied by unauthenticated TCP port capture. |
 | **H8** | External MAC commands can hold shared coordination long enough to delay emergency disable | **BLOCKER_FIX** | SC2 | Existing MAC command owners gain bounded cancellation/timeouts and the lifecycle lock path is reviewed so untrusted-size work cannot indefinitely hold administrative disable. Avoid a new queue/framework unless evidence requires it. |
-| **H9** | Agent container can receive the helper runtime directory and steal registry secrets/replace CA state | **BLOCKER_FIX** | SC1 | The 2.0 chain changed but is not fully dead on AppArmor while C1 remains: current `--helper-socket` is server-owned, read-only and Principal-UID, but the generated AppArmor workload profile has broad file mediation and DAC `0700` is bypassable after a C1 root escalation. Close C1 and prove with hostile helper-socket UAT on both MAC backends that private runtime/session Docker config remains unreadable and immutable even from the strongest workload privilege still reachable. Do not create a second socket transport owner. |
+| **H9** | Agent container can receive the helper runtime directory and steal registry secrets/replace CA state | **CLOSED_CURRENT** | SC1 | Closed by composition with C1, without a second socket transport owner: with the privilege floor in place the strongest reachable workload privilege is the Principal UID:GID with no capabilities and no-new-privileges, which the root-owned `0700` helper-private runtime state denies; the read-only projection and unchanged bearer authentication are unchanged. Hostile helper-socket UAT on enforcing AppArmor and enforcing SELinux proved the socket transport functional, unauthenticated calls refused, private runtime/session Docker config unreadable, runtime immutable, and escalation dead (see the SC1 evidence ledger). |
 | **H10** | An allowed root lets the root daemon read files the Principal could not read under Unix DAC | **BLOCKER_DECISION** | SC3 | Decide whether a filesystem capability intentionally grants helper-mediated read independent of DAC or must additionally preserve Principal DAC/group/ACL semantics. Do **not** implement an owner-UID check as a fake Unix permission model. |
 | **M1** | Environment/build secret values appear in the Docker CLI process argv | **BLOCKER_DECISION** | SC3 | Inventory each secret-bearing channel and choose a supported transport/mitigation. `--env-file` is not assumed equivalent for arbitrary current values. Any residual `/proc` exposure must be explicit in threat/operations docs. |
 | **M2** | Documentation puts bearer tokens directly in `curl` argv | **BLOCKER_FIX** | SC1 | Rewrite shipped examples to token-file/stdin/environment patterns that do not expand the secret into process argv; keep examples executable. |
@@ -243,6 +243,84 @@ the canonical host-path policy boundary.
   Docker authority; system mode owns the stronger pathname/inode-pinning
   boundary.
 
+## SC1 evidence ledger
+
+### C1 — workload privilege floor and staging privilege bits
+
+Implemented on the current release line through two existing owners, with no
+new abstraction:
+
+- **Privilege floor (run argv owner).** `run.go` composes every docker-helper
+  `docker run` argv in one production path for both modes. It now emits the
+  server-owned `workloadPrivilegeFloor` — `--cap-drop ALL` and
+  `--security-opt no-new-privileges:true` — for every workload, before any
+  backend `--security-opt` option. The run request contract carries no
+  privilege field (strict request decoding rejects unknown fields), so the
+  caller cannot disable or weaken the floor, and user mode and system mode
+  share the same floor owner (no divergent paths).
+- **Staging privilege bits (staging owner).** The canonical staging copier
+  creates every staged regular file once and applies the source's ordinary
+  permission bits with `S_ISUID`/`S_ISGID` stripped at that single site; no
+  second copier or post-processing walk exists. Staged hardlink entries share
+  the first staged copy's inode and inherit the stripped mode; the source
+  file is never modified.
+
+Evidence:
+
+- RED unit tests on the pre-fix release line proved the docker argv carried
+  no floor in user mode and either system backend, and that helper-created
+  staging copied `S_ISUID`/`S_ISGID` from the source (including through the
+  hardlink path) into Docker's build context.
+- Post-fix targeted tests prove the floor flags appear exactly once and
+  precede the MAC options, that `--privileged`/`--cap-add` never reach the
+  argv, that a privilege-shaped request field is refused, and that staged
+  modes are stripped while ordinary bits and the source mode are preserved.
+- Hostile live UAT (exact candidate, AppArmor scenario W11, SELinux
+  scenario S14): a locally built attacker image with a root-owned SUID
+  reporter executed through docker-helper reports `uid=euid=<workload UID>`
+  with `CapEff=0000000000000000` — the source-image escalation chain is dead.
+- Hostile staged-chain live UAT (AppArmor scenario W12, SELinux scenario
+  S15): SUID/SGID executables in the workspace go through the real
+  `build` staging into a built image whose build-time `test ! -u`/`test ! -g`
+  checks and post-build workload tests hold — the staged-file escalation
+  chain is dead.
+
+### H9 — helper runtime confidentiality under the privilege floor
+
+No transport/runtime ownership change: `--helper-socket` remains the one
+server-owned projection, the workload runs under the Principal UID:GID, the
+projection stays read-only, and no Session bearer is injected. With C1
+closed, the strongest workload privilege reachable from image or staging
+material is the server-owned `--user` identity without capabilities and
+without privilege escalation, so the root-owned `0700` helper-private
+runtime state (`sessions/<id>/docker/`, `builds/`, `mounts/`,
+`workload-mac/`, the socket lock) is no longer bypassable by DAC, and the
+read-only bind keeps the runtime immutable. On enforcing SELinux the shipped
+policy grants the workload only runtime traversal and socket connect — no
+`file` read on `docker_helper_runtime_t` — independently of DAC.
+
+Evidence (hostile helper-socket UAT, exact candidate; AppArmor scenario
+W13, SELinux scenario S16, one baked hostile probe with distinct finding
+codes):
+
+- the intended Unix socket stays reachable and `GET /health` succeeds
+  through the injected projection;
+- an unauthenticated protected call through the socket is refused with
+  HTTP 401 — the transport grants no authority and no bearer is injected;
+- enumeration and open of `sessions/`, `builds/`, `mounts/`, and
+  `workload-mac/` fail, including an exact known-path read of
+  `sessions/<session-id>/docker/config.json` (the registry credential
+  store addressed by finding M3's condition);
+- mutation attempts against the runtime top level and the session Docker
+  directory fail;
+- the privilege escalation stays dead with the projection mounted
+  (`euid` never 0, effective capabilities empty).
+
+The M3 `DEFER_HARDENING` condition is demonstrated at SC1 for this
+candidate; the release gate still re-proves it on the final stable
+candidate artifact. A skip in either backend's required UAT job is a gate
+failure, per the mandatory hostile UAT contract.
+
 ## Release-cycle integration
 
 Security closure is inserted **after the Release 2.2 feature contract is frozen
@@ -286,8 +364,8 @@ findings merely because they came from the same audit.
 
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
-**Queue:** `C1`, `C3`, `H2`, `H3`, `H6`, `H9`, `M2`, `M4`, `M5`, `M11`,
-`M12`, `M13`.
+**Queue:** `C3`, `H2`, `H3`, `H6`, `M2`, `M4`, `M5`, `M11`,
+`M12`, `M13`. (C1 and H9 closed in SC1 — see the SC1 evidence ledger.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
