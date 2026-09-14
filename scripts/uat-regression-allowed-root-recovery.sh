@@ -229,17 +229,21 @@ fi
 # --- D. the rich --json projection keeps the stale entry ----------------------
 
 json_out="$(dh config allowed-root list --json 2>/dev/null || true)"
+human_out="$(dh config allowed-root list 2>/dev/null || true)"
+# The JSON path set is exactly the default human list's path set (the same
+# recovery-safe universe, two representations) and the fixture entries keep
+# their stored access modes.
 if printf '%s' "$json_out" | python3 -c '
 import json, sys
 try:
     entries = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
-want = {sys.argv[1], sys.argv[2]}
-got = {e.get("path") for e in entries}
-stale = [e for e in entries if e.get("path") == sys.argv[2]]
-sys.exit(0 if want <= got and len(entries) == 2 and stale and stale[0].get("access") == "read_only" else 1)
-' "$SURVIVOR" "$STALE"; then
+byp = {e.get("path"): e.get("access") for e in entries}
+survivor, stale, human = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.exit(0 if byp.get(survivor) == "read_write" and byp.get(stale) == "read_only"
+         and sorted(byp) == sorted(h.splitlines()) else 1)
+' "$SURVIVOR" "$STALE" "$human_out"; then
   reg_ok "D: the --json projection carries the stale entry with its stored access mode"
 else
   reg_fail "D: the --json projection lost the stale entry or its stored access: $(printf '%s' "$json_out" | tr '\n' ' ' | redact)"
@@ -247,8 +251,17 @@ fi
 
 # --- E. remove completion offers the stored-root universe --------------------
 
+# The expected universe is the recovery-safe list projection itself (the same
+# owner the completion queries); it contains the stale entry plus any valid
+# global roots of the environment.
+universe="$(reg_config_global_roots)"
+if printf '%s\n' "$universe" | grep -Fxq "$STALE" && printf '%s\n' "$universe" | grep -Fxq "$SURVIVOR"; then
+  :
+else
+  reg_fail "E: the recovery-safe list universe lost the fixture roots: [$(printf '%s' "$universe" | tr '\n' ' ' | redact)]"
+fi
 out="$(run_completion "$script" /usr/bin/docker-helper config allowed-root remove "")"
-assert_completion "E: config allowed-root remove <TAB> offers the stored roots including the stale entry" "$(printf '%s\n%s\n' "$SURVIVOR" "$STALE")" "$out" || true
+assert_completion "E: config allowed-root remove <TAB> offers the stored roots including the stale entry" "$universe" "$out" || true
 
 # A typed stale prefix completes exactly that stored identity.
 out="$(run_completion "$script" /usr/bin/docker-helper config allowed-root remove "$STALE")"
@@ -257,7 +270,7 @@ assert_completion "E: the typed stale identity completes exactly itself" "$STALE
 # --- F. set-access completion shares the same universe -----------------------
 
 out="$(run_completion "$script" /usr/bin/docker-helper config allowed-root set-access "")"
-assert_completion "F: config allowed-root set-access <TAB> offers the same stored-root universe" "$(printf '%s\n%s\n' "$SURVIVOR" "$STALE")" "$out" || true
+assert_completion "F: config allowed-root set-access <TAB> offers the same stored-root universe" "$universe" "$out" || true
 out="$(run_completion "$script" /usr/bin/docker-helper config allowed-root set-access "$STALE" "")"
 assert_completion "F: after PATH the ACCESS positional completes the canonical vocabulary" "$(printf 'read_write\nread_only\n')" "$out" || true
 
