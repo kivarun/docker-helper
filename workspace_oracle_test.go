@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -354,25 +355,29 @@ func TestUnauthorizedWorkspaceDiagnosticRetainedInOperationalLog(t *testing.T) {
 
 // countSessionPathProbes swaps the session-facing filesystem-probe seams
 // (evalSymlinksFn/osStatFn — the privileged host-filesystem probes of the
-// workspace admission, mount resolution, and build-input validation sites)
-// with counting wrappers and returns a reset and a reader for the counter.
+// workspace admission, filesystem-roots canonicalization, mount resolution,
+// and build-input validation sites) with counting wrappers and returns a
+// reset, a counter reader, and a reader for the probed pathname arguments.
 // Test infrastructure only; the wrapped defaults restore on cleanup.
-func countSessionPathProbes(t *testing.T) (reset func(), probes func() int) {
+func countSessionPathProbes(t *testing.T) (reset func(), probes func() int, probePaths func() []string) {
 	t.Helper()
 	origEval, origStat := evalSymlinksFn, osStatFn
 	var calls int
+	var paths []string
 	evalSymlinksFn = func(p string) (string, error) {
 		calls++
+		paths = append(paths, p)
 		return origEval(p)
 	}
 	osStatFn = func(p string) (os.FileInfo, error) {
 		calls++
+		paths = append(paths, p)
 		return origStat(p)
 	}
 	t.Cleanup(func() {
 		evalSymlinksFn, osStatFn = origEval, origStat
 	})
-	return func() { calls = 0 }, func() int { return calls }
+	return func() { calls = 0; paths = nil }, func() int { return calls }, func() []string { return paths }
 }
 
 // TestWorkspaceCreateOutsideCeilingProbesNothing proves the
@@ -386,7 +391,7 @@ func TestWorkspaceCreateOutsideCeilingProbesNothing(t *testing.T) {
 	setupTestLoggingDiscard(t)
 	root := app.Config.AllowedRoots[0].Path
 
-	reset, probes := countSessionPathProbes(t)
+	reset, probes, _ := countSessionPathProbes(t)
 	for _, tc := range workspaceOracleCases(t, root) {
 		reset()
 		resp := createSessionThroughMux(app, testAdminToken, tc.workspace)
@@ -424,7 +429,7 @@ func TestRunMountOutsideSnapshotProbesNothing(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(dangling) })
 
-	reset, probes := countSessionPathProbes(t)
+	reset, probes, _ := countSessionPathProbes(t)
 	for _, source := range []string{existing, missing, dangling} {
 		reset()
 		body := fmt.Sprintf(`{"image":"alpine","mounts":[{"source":%q,"target":"/data","read_only":true}]}`, source)
@@ -462,7 +467,7 @@ func TestBuildContextOutsideWorkspaceProbesNothing(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(dangling) })
 
-	reset, probes := countSessionPathProbes(t)
+	reset, probes, _ := countSessionPathProbes(t)
 	for _, context := range []string{existing, missing, dangling, "../probe-escape"} {
 		reset()
 		body := fmt.Sprintf(`{"image":"alpine","context":%q,"dockerfile":"Dockerfile"}`, context)
@@ -496,7 +501,7 @@ func TestAdmittedSpellingStillProbesAndStaysContained(t *testing.T) {
 
 	// An admitted missing spelling still resolves: the probe count is
 	// non-zero (the resolver runs for admitted spellings).
-	reset, probes := countSessionPathProbes(t)
+	reset, probes, _ := countSessionPathProbes(t)
 	resp := createSessionThroughMux(app, testAdminToken, filepath.Join(home, "missing"))
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("admitted missing: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
@@ -519,5 +524,152 @@ func TestAdmittedSpellingStillProbesAndStaysContained(t *testing.T) {
 	}
 	if msg := decodeAPIError(t, resp.Body.Bytes()).Message; msg != "workspace must be inside an allowed root" {
 		t.Fatalf("escape link: expected the containment refusal, got %q", msg)
+	}
+}
+
+// filesystemRootsOracleCases builds the issuance-time filesystem_roots
+// fixtures outside the effective launcher ceiling: an existing directory, a
+// missing path, a dangling symlink, and an outside symlink alias resolving
+// into the ceiling. Every spelling is outside the ceiling, so the public
+// outcomes must not depend on the host filesystem state of the requested
+// root.
+func filesystemRootsOracleCases(t *testing.T, root, tree string) []struct {
+	name string
+	path string
+} {
+	t.Helper()
+	base := filepath.Dir(root)
+	outsideExisting := filepath.Join(base, "oracle-roots-existing")
+	if err := os.MkdirAll(outsideExisting, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outsideMissing := filepath.Join(base, "oracle-roots-missing")
+	dangling := filepath.Join(base, "oracle-roots-dangling-link")
+	if err := os.Symlink(outsideMissing, dangling); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(dangling) })
+
+	// The outside alias resolves INTO the ceiling: the pre-tightening
+	// canonicalization admitted it through its resolution. The lexical
+	// admission must refuse it without probing (no compatibility alias).
+	alias := filepath.Join(base, "oracle-roots-alias")
+	if err := os.Symlink(tree, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(alias) })
+
+	return []struct {
+		name string
+		path string
+	}{
+		{name: "existing outside ceiling", path: outsideExisting},
+		{name: "missing outside ceiling", path: outsideMissing},
+		{name: "dangling symlink outside ceiling", path: dangling},
+		{name: "outside alias into ceiling", path: alias},
+	}
+}
+
+// TestFilesystemRootsOutsideCeilingProbesNothing proves the
+// authorization-before-probing ordering at the issuance-time filesystem_roots
+// boundary: a caller-supplied root spelling outside the effective launcher
+// ceiling is refused invalid_filesystem_policy without a single privileged
+// filesystem probe of the requested pathname — existing, missing, dangling
+// symlink, or an outside alias resolving into the ceiling (the same alias
+// tightening as the workspace boundary: no compatibility admission through
+// resolution). No Session state exists after any refusal, only the two
+// workspace-admission probes run, and no probe argument names the requested
+// root spelling.
+func TestFilesystemRootsOutsideCeilingProbesNothing(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	setupTestLoggingDiscard(t)
+	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
+	root := app.Config.AllowedRoots[0].Path
+	tree := filepath.Join(root, "runs")
+
+	reset, probes, probePaths := countSessionPathProbes(t)
+	for _, tc := range filesystemRootsOracleCases(t, root, tree) {
+		reset()
+		rec := postSessionThroughMux(t, app, launcherToken, rootsRequestBody(workspace, fmt.Sprintf(`[{"path":%q,"access":"read_write"}]`, tc.path)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d (body=%s)", tc.name, rec.Code, rec.Body.String())
+		}
+		errResp := decodeAPIError(t, rec.Body.Bytes())
+		if errResp.Code != "invalid_filesystem_policy" {
+			t.Fatalf("%s: expected invalid_filesystem_policy, got %q (body=%s)", tc.name, errResp.Code, rec.Body.String())
+		}
+		if errResp.Message != sessionFilesystemPolicyMessage {
+			t.Fatalf("%s: message %q, want the bounded non-disclosing message %q", tc.name, errResp.Message, sessionFilesystemPolicyMessage)
+		}
+		if n := countLiveSessions(t, app); n != 0 {
+			t.Fatalf("%s: %d live session(s) exist after the refusal", tc.name, n)
+		}
+		// Zero privileged probes of the requested root: exactly the two
+		// workspace-admission probes run, and no probe argument names the
+		// requested root spelling.
+		if n := probes(); n != 2 {
+			t.Fatalf("%s: %d privileged filesystem probe(s) before lexical admission (want exactly the 2 workspace-admission probes)", tc.name, n)
+		}
+		for _, p := range probePaths() {
+			if strings.Contains(p, tc.path) {
+				t.Fatalf("%s: privileged probe of the unadmitted root spelling %q", tc.name, p)
+			}
+		}
+	}
+}
+
+// TestRunMountFileRootDescendantProbesNothing proves the exact-capability
+// semantic of a regular-file issued filesystem root at the run data plane:
+// the issued root is an exact concrete boundary — the MAC backends render it
+// as an exact file boundary and the mount-pin owner binds the file itself —
+// so its lexical descendants are not issued by the snapshot. A descendant
+// mount source is refused invalid_mount, and the decision probes only the
+// ISSUED root path — never the unissued descendant spelling.
+func TestRunMountFileRootDescendantProbesNothing(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0].Path
+	tree := filepath.Join(root, "runs")
+	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
+	fileRoot := filepath.Join(tree, "repos", "data.bin")
+	if err := os.WriteFile(fileRoot, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postSessionThroughMux(t, app, launcherToken, rootsRequestBody(workspace, fmt.Sprintf(`[{"path":%q,"access":"read_write"}]`, fileRoot)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("file-root create: expected 201, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("cannot decode create response: %v", err)
+	}
+	if created.Token == "" {
+		t.Fatal("file-root create response carries no session bearer")
+	}
+
+	descendant := filepath.Join(fileRoot, "child")
+	_, probes, probePaths := countSessionPathProbes(t)
+	body := fmt.Sprintf(`{"image":"alpine","mounts":[{"source":%q,"target":"/data","read_only":true}]}`, descendant)
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+created.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("file-root descendant: expected 400, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_mount") {
+		t.Fatalf("file-root descendant: expected invalid_mount, got %s", w.Body.String())
+	}
+	paths := probePaths()
+	if n := probes(); n != 1 {
+		t.Fatalf("file-root descendant: %d privileged probes, want exactly the one stat of the issued root", n)
+	}
+	if len(paths) != 1 || paths[0] != fileRoot {
+		t.Fatalf("file-root descendant: probed paths %v, want exactly the issued root %q", paths, fileRoot)
 	}
 }

@@ -506,11 +506,11 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry) ([]A
 			return nil, fmt.Errorf("filesystem root %q: %v: %w", root.Path, err, ErrInvalidSessionFilesystemPolicy)
 		}
 		cleaned := filepath.Clean(root.Path)
-		resolved, err := filepath.EvalSymlinks(cleaned)
+		resolved, err := evalSymlinksFn(cleaned)
 		if err != nil {
 			return nil, fmt.Errorf("filesystem root %q cannot be resolved: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
 		}
-		info, err := os.Stat(resolved)
+		info, err := osStatFn(resolved)
 		if err != nil {
 			return nil, fmt.Errorf("filesystem root %q cannot be accessed: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
 		}
