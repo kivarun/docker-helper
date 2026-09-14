@@ -670,39 +670,16 @@ fi
 HOSTILE_DIR="/tmp/uat-wla-sec"
 HOSTILE_IMAGE="uat-hostile-suid:2.2"
 
-# build_hostile_image compiles the privilege reporter and builds the hostile
+# build_hostile_image compiles the privilege reporter from the verified
+# same-SHA checkout (scripts/uat-privilege-reporter) and builds the hostile
 # source image with plain docker build: the image is attacker-controlled
 # material by threat model, never helper-mediated. The reporter prints the
 # execution identity and effective capabilities; the image delivers it as a
 # root-owned SUID executable, plus curl for the helper-socket probe.
 build_hostile_image() {
   rm -rf "$HOSTILE_DIR"
-  mkdir -p "$HOSTILE_DIR/reporter" "$HOSTILE_DIR/image"
-  cat > "$HOSTILE_DIR/reporter/main.go" <<'EOF'
-package main
-
-import (
-	"bufio"
-	"fmt"
-	"os"
-	"strings"
-)
-
-func main() {
-	caps := ""
-	if f, err := os.Open("/proc/self/status"); err == nil {
-		s := bufio.NewScanner(f)
-		for s.Scan() {
-			t := s.Text()
-			if strings.HasPrefix(t, "CapEff:") {
-				caps = strings.TrimSpace(strings.TrimPrefix(t, "CapEff:"))
-			}
-		}
-	}
-	fmt.Printf("uid=%d euid=%d capEff=%s\n", os.Getuid(), os.Geteuid(), caps)
-}
-EOF
-  if ! (cd "$HOSTILE_DIR/reporter" && CGO_ENABLED=0 go build -o "$HOSTILE_DIR/image/reporter" .) >/tmp/uat-wla-sec-compile.log 2>&1; then
+  mkdir -p "$HOSTILE_DIR/image"
+  if ! (cd "$REPO_DIR_IN/scripts/uat-privilege-reporter" && CGO_ENABLED=0 go build -o "$HOSTILE_DIR/image/reporter" .) >/tmp/uat-wla-sec-compile.log 2>&1; then
     printf '  reporter compile failed: %s\n' "$(tail -3 /tmp/uat-wla-sec-compile.log 2>/dev/null | redact)" >&2
     return 1
   fi

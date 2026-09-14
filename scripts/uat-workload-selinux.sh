@@ -1360,43 +1360,24 @@ fi
 
 HOSTILE_DIR="/tmp/uat-wls-sec"
 HOSTILE_IMAGE="uat-hostile-suid:2.2"
+# The privilege reporter is compiled on the host from the candidate checkout
+# (scripts/uat-privilege-reporter) and transferred into the guest with the
+# exact-candidate artifacts, the same host-compile/guest-consume pattern as
+# the live workload harness; the guest has no Go toolchain on its PATH.
+REPORTER_BIN="${UAT_REPORTER_BIN:-/opt/uat-import/workload-privilege-reporter}"
 
-# build_hostile_image compiles the privilege reporter and builds the hostile
-# source image with plain docker build: the image is attacker-controlled
-# material by threat model, never helper-mediated. The reporter prints the
-# execution identity and effective capabilities; the image delivers it as a
+# build_hostile_image builds the hostile source image with plain docker
+# build: the image is attacker-controlled material by threat model, never
+# helper-mediated. The host-compiled privilege reporter is delivered as a
 # root-owned SUID executable, plus curl for the helper-socket probe.
 build_hostile_image() {
   rm -rf "$HOSTILE_DIR"
-  mkdir -p "$HOSTILE_DIR/reporter" "$HOSTILE_DIR/image"
-  cat > "$HOSTILE_DIR/reporter/main.go" <<'EOF'
-package main
-
-import (
-	"bufio"
-	"fmt"
-	"os"
-	"strings"
-)
-
-func main() {
-	caps := ""
-	if f, err := os.Open("/proc/self/status"); err == nil {
-		s := bufio.NewScanner(f)
-		for s.Scan() {
-			t := s.Text()
-			if strings.HasPrefix(t, "CapEff:") {
-				caps = strings.TrimSpace(strings.TrimPrefix(t, "CapEff:"))
-			}
-		}
-	}
-	fmt.Printf("uid=%d euid=%d capEff=%s\n", os.Getuid(), os.Geteuid(), caps)
-}
-EOF
-  if ! (cd "$HOSTILE_DIR/reporter" && CGO_ENABLED=0 go build -o "$HOSTILE_DIR/image/reporter" .) >/tmp/uat-wls-sec-compile.log 2>&1; then
-    printf '  reporter compile failed: %s\n' "$(tail -3 /tmp/uat-wls-sec-compile.log 2>/dev/null | redact)" >&2
+  mkdir -p "$HOSTILE_DIR/image"
+  if [ ! -x "$REPORTER_BIN" ]; then
+    printf '  privilege reporter unavailable at %s\n' "$REPORTER_BIN" >&2
     return 1
   fi
+  cp "$REPORTER_BIN" "$HOSTILE_DIR/image/reporter" || return 1
   cat > "$HOSTILE_DIR/image/Dockerfile" <<'EOF'
 FROM alpine:3.24
 COPY reporter /usr/local/bin/reporter
@@ -1471,7 +1452,9 @@ fi
 
 # --- scenario S15: helper-created build staging strips SUID/SGID (C1) ---------
 say "S15: helper-created build staging strips SUID/SGID"
-STAGE_CTX="$TREE/staged-proof"
+# The staged chain must run inside the SESSION WORKSPACE (the context
+# authorization is workspace-scoped), not merely inside the Principal tree.
+STAGE_CTX="$TREE/work/staged-proof"
 rm -rf "$STAGE_CTX"
 mkdir -p "$STAGE_CTX"
 printf '#!/bin/sh\n' > "$STAGE_CTX/suid-staged"
