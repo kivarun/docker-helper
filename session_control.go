@@ -440,7 +440,31 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 		LauncherID:                snap.launcherID,
 		LauncherName:              snap.launcherName,
 		PrincipalName:             snap.principalName,
+		Credential:                sessionCreateCredentialAuthorityOf(auth),
 	}, nil
+}
+
+// sessionCreateCredentialAuthorityOf projects the commit-boundary credential
+// revalidation facts from an authenticated operator authority: a Principal
+// credential revalidates its exact credential row under its authenticated
+// Principal ID, a Launcher credential its row under its Launcher ID, and the
+// admin authority — which authenticates by in-memory token comparison and
+// has no credential row — carries none.
+func sessionCreateCredentialAuthorityOf(auth *operatorAuthority) *sessionCreateCredentialAuthority {
+	switch {
+	case auth != nil && auth.class == operatorAuthorityPrincipal:
+		return &sessionCreateCredentialAuthority{
+			credentialID: auth.principal.CredentialID,
+			principalID:  auth.principal.PrincipalID,
+		}
+	case auth != nil && auth.class == operatorAuthorityLauncher:
+		return &sessionCreateCredentialAuthority{
+			credentialID: auth.launcher.CredentialID,
+			launcherID:   auth.launcher.LauncherID,
+		}
+	default:
+		return nil
+	}
 }
 
 // resolveCreatePolicySnapshot is the lock-owning read form of

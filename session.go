@@ -115,6 +115,9 @@ const sessionOwnershipProjection = `
 // filesystem_roots or carried the empty array); they are consumed by
 // createSessionWithPolicyLocked inside the same lifecycle linearization
 // boundary and are never applied as a post-create policy change.
+// Credential carries the commit-boundary credential revalidation facts of a
+// credential-authority create (nil for the admin authority, which
+// authenticates by in-memory token comparison and has no credential row).
 type sessionCreatePolicy struct {
 	Workspace                 string
 	EffectiveAllowedRoots     []AllowedRootEntry
@@ -123,6 +126,20 @@ type sessionCreatePolicy struct {
 	LauncherID                string
 	LauncherName              string
 	PrincipalName             string
+	Credential                *sessionCreateCredentialAuthority
+}
+
+// sessionCreateCredentialAuthority is the credential provenance a
+// credential-authority Session create revalidates at its commit boundary:
+// the exact credential row that authenticated the request and the owner
+// identity that row must still prove (principalID for a Principal
+// credential, launcherID for a Launcher credential) when the Session
+// commits. Authentication established it once; the commit transaction
+// re-proves it against the same credential store the authenticator reads.
+type sessionCreateCredentialAuthority struct {
+	credentialID string
+	principalID  int64  // Principal credential authority
+	launcherID   string // Launcher credential authority
 }
 
 // createSessionWithPolicyLocked is the internal persistence/MAC stage beneath
@@ -275,14 +292,21 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		defer tx.Rollback()
 
 		// Conditional insert: only succeeds if the owning Launcher and its
-		// Principal both exist and are enabled. This prevents a stale-auth race
-		// where the Launcher/Principal was disabled or deleted between
-		// resolution and session creation.
-		result, err := tx.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		// Principal both exist and are enabled, and — for a credential
+		// authority — if the exact authorizing credential still exists,
+		// still carries the authenticated owner identity, and is still
+		// active. The commit-boundary credential predicate is evaluated in
+		// the same statement as the insert (the create transaction's commit
+		// point), so a credential revoke/delete that commits before the
+		// Session commit prevents that Session; the pre-existing
+		// launcher/principal predicates are unchanged and the admin
+		// authority carries no credential clause (the admin token is
+		// compared in memory and has no credential row).
+		query := `INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 SELECT ?, ?, ?, ?, ?, ?
 			 FROM launchers l JOIN principals p ON p.id = l.principal_id
-			 WHERE l.id = ? AND l.enabled = 1 AND p.enabled = 1`,
+			 WHERE l.id = ? AND l.enabled = 1 AND p.enabled = 1`
+		args := []any{
 			sessionID,
 			tokenHashHex,
 			absWorkspace,
@@ -290,22 +314,39 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 			expiresAt.Unix(),
 			p.LauncherID,
 			p.LauncherID,
-		)
+		}
+		if p.Credential != nil {
+			switch {
+			case p.Credential.launcherID != "":
+				query += ` AND EXISTS (SELECT 1 FROM credentials c
+					 WHERE c.id = ? AND c.launcher_id = ? AND c.revoked_at IS NULL)`
+				args = append(args, p.Credential.credentialID, p.Credential.launcherID)
+			default:
+				query += ` AND EXISTS (SELECT 1 FROM credentials c
+					 WHERE c.id = ? AND c.principal_id = ? AND c.launcher_id IS NULL AND c.revoked_at IS NULL)`
+				args = append(args, p.Credential.credentialID, p.Credential.principalID)
+			}
+		}
+		result, err := tx.Exec(query, args...)
 		if err != nil {
 			return err
 		}
-		// Verify exactly one row was inserted. If zero, the Launcher or its
-		// Principal was disabled or deleted between authentication and this
-		// insert. Under lifecycle serialization this cannot interleave with a
-		// policy mutation, so it surfaces only as a defense-in-depth recheck;
-		// the stale-owner rejection is a deterministic typed contract
-		// (422 launcher_unavailable), never an invalid_workspace relabel.
+		// Verify exactly one row was inserted. If zero, the Launcher, its
+		// Principal, or the authorizing credential was disabled, deleted, or
+		// revoked between authentication and this insert. Under lifecycle
+		// serialization the enabled-state part cannot interleave with a
+		// policy mutation, so it surfaces only as a defense-in-depth
+		// recheck; the credential part is the commit-boundary revocation
+		// race closure. The stale-owner rejection is a deterministic typed
+		// contract (422 launcher_unavailable), the credential rejection the
+		// canonical non-disclosing 401 credential classes, never an
+		// invalid_workspace relabel.
 		inserted, err := result.RowsAffected()
 		if err != nil {
 			return fmt.Errorf("cannot check session insert result: %w", err)
 		}
 		if inserted == 0 {
-			return fmt.Errorf("launcher is no longer available: %w", ErrLauncherUnavailable)
+			return fmt.Errorf("session create stale-authority rejection: %w", classifyStaleSessionCreateAuthority(tx, p))
 		}
 
 		// The snapshot entries commit in the same transaction as the Session
@@ -322,10 +363,13 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 			return insertSession()
 		})
 		if err != nil {
-			// Classify: stale-owner recheck, MAC preparation, and DB insert
-			// errors. The stale-owner rejection keeps its typed contract.
+			// Classify: stale-owner recheck, commit-boundary credential
+			// rejection, MAC preparation, and DB insert errors. The typed
+			// stale-authority contracts keep their classes.
 			switch {
-			case errors.Is(err, ErrLauncherUnavailable):
+			case errors.Is(err, ErrLauncherUnavailable),
+				errors.Is(err, ErrCredentialRevoked),
+				errors.Is(err, ErrCredentialNotFound):
 				return nil, fmt.Errorf("cannot create session: %w", err)
 			case errors.Is(err, ErrMACPreparation):
 				return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrMAC)
@@ -335,7 +379,14 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		}
 	} else {
 		if err := insertSession(); err != nil {
-			if errors.Is(err, ErrLauncherUnavailable) {
+			switch {
+			case errors.Is(err, ErrLauncherUnavailable),
+				errors.Is(err, ErrCredentialRevoked),
+				errors.Is(err, ErrCredentialNotFound):
+				// Deterministic typed stale-authority contracts keep their
+				// classes: the launcher-shaped rejection (422
+				// launcher_unavailable) and the canonical credential
+				// rejection (the non-disclosing 401 credential classes).
 				return nil, fmt.Errorf("cannot create session: %w", err)
 			}
 			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
@@ -355,6 +406,58 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		Token:              token,
 		FilesystemSnapshot: snapshot,
 	}, nil
+}
+
+// classifyStaleSessionCreateAuthority distinguishes the zero-row outcome of
+// the conditional Session insert, inside the same create transaction the
+// insert ran in (one snapshot: the classification observes exactly the state
+// the insert predicate evaluated). The launcher/principal availability
+// recheck comes first and keeps the pre-existing typed
+// ErrLauncherUnavailable contract; a credential-authority create whose
+// launcher is still available is then classified through the same canonical
+// credential failure classes the credential authenticator produces — the
+// credential row is gone (deleted, re-owned, or otherwise no longer the
+// authenticated authority) or its revoked_at is set. Any other outcome is an
+// insert recheck inconsistency and fails closed as a database error.
+func classifyStaleSessionCreateAuthority(tx *sql.Tx, p *sessionCreatePolicy) error {
+	var launcherCount int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM launchers l JOIN principals p ON p.id = l.principal_id
+		 WHERE l.id = ? AND l.enabled = 1 AND p.enabled = 1`,
+		p.LauncherID,
+	).Scan(&launcherCount); err != nil {
+		return fmt.Errorf("cannot recheck launcher availability: %w", err)
+	}
+	if launcherCount == 0 {
+		return ErrLauncherUnavailable
+	}
+	if p.Credential == nil {
+		// Without a credential clause the insert predicate is the
+		// availability predicate alone; an available launcher with zero
+		// inserted rows is an insert recheck inconsistency.
+		return fmt.Errorf("session insert recheck inconsistency: %w", ErrDatabase)
+	}
+	var revokedAt sql.NullInt64
+	var credQuery string
+	var credArgs []any
+	if p.Credential.launcherID != "" {
+		credQuery = `SELECT revoked_at FROM credentials WHERE id = ? AND launcher_id = ?`
+		credArgs = []any{p.Credential.credentialID, p.Credential.launcherID}
+	} else {
+		credQuery = `SELECT revoked_at FROM credentials WHERE id = ? AND principal_id = ? AND launcher_id IS NULL`
+		credArgs = []any{p.Credential.credentialID, p.Credential.principalID}
+	}
+	err := tx.QueryRow(credQuery, credArgs...).Scan(&revokedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("authorizing credential no longer exists for the authenticated owner: %w", ErrCredentialNotFound)
+		}
+		return fmt.Errorf("cannot recheck credential authority: %w", err)
+	}
+	if revokedAt.Valid {
+		return fmt.Errorf("authorizing credential is revoked: %w", ErrCredentialRevoked)
+	}
+	return fmt.Errorf("session insert recheck inconsistency: %w", ErrDatabase)
 }
 
 // canonicalizeSessionFilesystemRoots converts caller-supplied absolute
