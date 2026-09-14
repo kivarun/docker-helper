@@ -66,26 +66,25 @@ for m in mounts:
 ' "$json"
 }
 
-# mount_line_exists reports whether the running container of one session has
-# a bind mount whose verbatim Destination/RW/Source/Propagation line equals
-# the expected one (exact whole-line comparison: the expected value may
-# contain newlines, which a grep pattern cannot carry). 0 = found, 1 = not
-# found, 2 = no container or inspect failure.
-mount_line_exists() {
-  local sid="$1" expected="$2" cid
+# mount_dest_rw_exists reports whether the running container of one session
+# has a bind mount with the verbatim Destination and the exact RW mode (the
+# remaining fields — the helper-owned pinned Source and the propagation — are
+# daemon-owned and not part of the M13 property). 0 = found, 1 = not found,
+# 2 = no container or inspect failure.
+mount_dest_rw_exists() {
+  local sid="$1" dest="$2" rw="$3" cid
   cid="$(docker ps -q --filter "label=com.dockerhelper.session.id=$sid" 2>/dev/null | head -1)"
   [ -n "$cid" ] || return 2
   docker inspect "$cid" 2>/dev/null | python3 -c '
 import json, sys
-expected = sys.argv[2]
+dest, rw = sys.argv[2], sys.argv[3]
 spec = json.loads(sys.stdin.read())
 mounts = [m for m in spec[0].get("Mounts", []) if m.get("Type") == "bind"]
 for m in mounts:
-    line = "%s\t%s\t%s\t%s" % (m.get("Destination"), str(m.get("RW")).lower(), m.get("Source"), m.get("Propagation", ""))
-    if line == expected:
+    if m.get("Destination") == dest and str(m.get("RW")).lower() == rw:
         sys.exit(0)
 sys.exit(1)
-' - "$expected"
+' - "$dest" "$rw"
 }
 
 session_container_count() {
@@ -102,7 +101,6 @@ wait_for_file() {
 }
 
 NL=$'\n'
-TAB=$'\t'
 
 # ---------------------------------------------------------------------------
 # 1. Hostile newline target + :ro — the historical M13 desync class
@@ -111,7 +109,6 @@ reg_session "$cred" "$ws" || { reg_fail "session create failed"; reg_result; }
 SID_RO="$REG_SESSION_ID"; TOK_RO="$REG_SESSION_TOKEN"
 
 HOSTILE_RO_TARGET="/mnt/probe${NL}readonly-evil"
-EXPECTED_RO="${HOSTILE_RO_TARGET}${TAB}false"
 RUN_LOG="/tmp/uat-reg22-ro.log"
 # The container reads the marker through the hostile newline target, proves
 # the write attempt fails, reports both through the writable control mount,
@@ -126,8 +123,8 @@ RUN_PID=$!
 
 wait_for_file "$ctl/ro-write" || { reg_fail "hostile newline RO container did not report in 60s (log: $(tail -3 "$RUN_LOG" | redact))"; kill "$RUN_PID" 2>/dev/null; reg_result; }
 MOUNTS_RO="$(inspect_mounts "$SID_RO")"
-mount_line_exists "$SID_RO" "$EXPECTED_RO"; RO_LINE_RC=$?
-mount_line_exists "$SID_RO" "${HOSTILE_RO_TARGET}${TAB}true"; RO_WRITABLE_RC=$?
+mount_dest_rw_exists "$SID_RO" "$HOSTILE_RO_TARGET" "false"; RO_LINE_RC=$?
+mount_dest_rw_exists "$SID_RO" "$HOSTILE_RO_TARGET" "true"; RO_WRITABLE_RC=$?
 touch "$ctl/release-ro"
 wait "$RUN_PID" 2>/dev/null; RC_RO=$?
 
@@ -164,7 +161,6 @@ reg_session "$cred" "$ws" || { reg_fail "second session create failed"; reg_resu
 SID_RW="$REG_SESSION_ID"; TOK_RW="$REG_SESSION_TOKEN"
 
 INJECT_TARGET="/mnt/dta,readonly"
-EXPECTED_RW="${INJECT_TARGET}${TAB}true"
 RUN2_LOG="/tmp/uat-reg22-rw.log"
 # The container path literally is "/mnt/dta,readonly": the marker is readable
 # at exactly that path, proving no "/mnt/data,readonly" option split happened.
@@ -178,7 +174,7 @@ RUN2_PID=$!
 
 wait_for_file "$ctl/rw-report" || { reg_fail "option-injection container did not report in 60s (log: $(tail -3 "$RUN2_LOG" | redact))"; kill "$RUN2_PID" 2>/dev/null; reg_result; }
 MOUNTS_RW="$(inspect_mounts "$SID_RW")"
-mount_line_exists "$SID_RW" "$EXPECTED_RW"; RW_LINE_RC=$?
+mount_dest_rw_exists "$SID_RW" "$INJECT_TARGET" "true"; RW_LINE_RC=$?
 touch "$ctl/release-rw"
 wait "$RUN2_PID" 2>/dev/null; RC_RW=$?
 
