@@ -758,10 +758,7 @@ The HTTP body of `POST /sessions` accepts
   `read_write` under an effective `read_only` region, missing/unknown
   access, unknown nested fields). An explicit root whose canonical path
   equals the canonical workspace replaces the implicit workspace grant
-  under the same privilege rule. A regular-file root is issued as an
-  exact concrete capability: the MAC backends render it as an exact file
-  boundary and the mount-pin owner binds the file itself, so its lexical
-  descendants are never issued.
+  under the same privilege rule.
 
 The CLI maps its selectors onto those wire fields after authenticating
 (`GET /auth`). The two selectors are mutually exclusive on the wire: the
@@ -1235,9 +1232,7 @@ workspace as the second, mandatory proof; if the resolved path escapes
 the workspace, the request is rejected. The issuance-time filesystem
 roots apply the same ordering: a requested root spelling outside the
 effective Launcher ceiling is refused without probing, and an admitted
-spelling is canonicalized before the canonical ceiling proof. A
-regular-file issued root is an exact concrete capability: its lexical
-descendants are not issued and are never probed by the mount admission.
+spelling is canonicalized before the canonical ceiling proof.
 
 Session-create workspace admission follows the authorization-before-
 probing ordering. The raw request spelling is first proven lexically
@@ -2059,11 +2054,8 @@ Environment validation ensures variable names match
 authorization-first: the raw caller source spelling is admitted lexically
 against its capability before any privileged host-filesystem probing — a
 relative source through `pathWithin` against the workspace, an absolute
-source against the issued Session filesystem snapshot entries, and a
-strict descendant of an issued root only when the governing root is a
-directory tree (a regular-file issued root is an exact concrete boundary
-whose lexical descendants are not issued, decided from the issued root
-alone, never by probing the descendant spelling). Only admitted spellings
+source against the issued Session filesystem snapshot entries. Only
+admitted spellings
 are resolved to their canonical identity, and duplicate mount targets are
 refused once each canonical target is known. After resolution, every mount's
 access mode is resolved against the persisted Session filesystem snapshot
@@ -2106,10 +2098,7 @@ Validation details:
 - mount admission is authorization-first: a relative source is checked via
   `pathWithin` against the workspace and an absolute source against the
   issued Session filesystem snapshot entries before any privileged probing;
-  a strict descendant of an issued root is admitted only when the governing
-  root is a directory tree (a regular-file issued root is an exact concrete
-  boundary whose lexical descendants are not issued, decided from the issued
-  root alone); the source is resolved through `EvalSymlinks` only after
+  the source is resolved through `EvalSymlinks` only after
   admission, and the issued snapshot exposure resolution stays the second,
   mandatory canonical proof;
 - environment values are never logged (only names in `env_keys`);
@@ -2225,7 +2214,7 @@ Allowed:
 - `read_only` is true or false;
 - the same `source` can be mounted to multiple `target` paths.
 
-Forbidden (refused before the requested source spelling itself is probed):
+Forbidden (refused before any host filesystem probing):
 
 - a relative `source` whose joined spelling escapes the session workspace
   lexically — the workspace-relative grammar is a structural boundary,
@@ -2233,13 +2222,6 @@ Forbidden (refused before the requested source spelling itself is probed):
   is the only spelling for that;
 - an absolute `source` spelling outside the issued Session filesystem
   snapshot — every mount must carry issued snapshot authority;
-- an absolute `source` that is a strict descendant of a regular-file issued
-  root — the issued file root is an exact concrete capability (the MAC
-  backends render it as an exact file boundary and the mount-pin owner
-  binds the file itself), so its lexical descendants are not issued; the
-  refusal is decided by the live identity of the issued root alone (the
-  stat of the issued path is within issued authority) and never probes the
-  descendant spelling;
 - a symlink inside the lexical capability that resolves outside it
   (refused after resolution by the canonical containment proof — the
   escape protection is unchanged).
