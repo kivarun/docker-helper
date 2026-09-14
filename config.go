@@ -488,16 +488,13 @@ func resolveTrustedCAInjection(s string) string {
 	return s
 }
 
-// resolveAllowedRoots resolves the canonical rich allowed_roots entries from
-// raw config with legacy migration. canonicalize=true means full
-// canonicalization (for loading config); canonicalize=false means just
-// resolve legacy migration (for config show).
-//
-// Legacy string entries and the legacy scalar allowed_root normalize to
-// read_write. Repeated canonical paths with the same access keep the first
-// occurrence (the current duplicate semantics); the same canonical path with
-// conflicting access is a fail-closed error, never a silent choice.
-func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
+// storedAllowedRootEntries selects the stored allowed-root entries from a raw
+// config document. It is the shared legacy-migration selection owner every
+// allowed-root projection consumes (the load resolver, the config show
+// projection, and the stored-config inspection universe): the ambiguity
+// refusal, the legacy singular normalization (read_write), and the
+// required/non-empty rules are owned here once.
+func storedAllowedRootEntries(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
 	hasLegacy := raw["allowed_root"] != nil
 	hasNew := raw["allowed_roots"] != nil
 	if hasLegacy && hasNew {
@@ -513,6 +510,24 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]Allo
 	}
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	}
+	return entries, nil
+}
+
+// resolveAllowedRoots resolves the canonical rich allowed_roots entries from
+// raw config with legacy migration. It is the runtime/load projection: full
+// canonicalization through canonicalizeWorkspacePathForAdd, so a stored root
+// whose directory no longer exists (or is no longer a directory) fails the
+// load — daemon startup and reload stay fail closed on a stale entry.
+//
+// Legacy string entries and the legacy scalar allowed_root normalize to
+// read_write. Repeated canonical paths with the same access keep the first
+// occurrence (the current duplicate semantics); the same canonical path with
+// conflicting access is a fail-closed error, never a silent choice.
+func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
+	entries, err := storedAllowedRootEntries(raw, fc)
+	if err != nil {
+		return nil, err
 	}
 	seen := make(map[string]AllowedRootAccess)
 	result := make([]AllowedRootEntry, 0, len(entries))
@@ -551,21 +566,9 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]Allo
 // (allowed_roots and allowed_root_entries) derive; see
 // allowedRootShowProjections.
 func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
-	hasLegacy := raw["allowed_root"] != nil
-	hasNew := raw["allowed_roots"] != nil
-	if hasLegacy && hasNew {
-		return nil, fmt.Errorf("ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
-	}
-	var entries []AllowedRootEntry
-	if hasNew {
-		entries = fc.AllowedRoots
-	} else if hasLegacy {
-		entries = []AllowedRootEntry{allowedRootEntry(fc.AllowedRootLegacy)}
-	} else {
-		return nil, fmt.Errorf("allowed_roots is required")
-	}
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	entries, err := storedAllowedRootEntries(raw, fc)
+	if err != nil {
+		return nil, err
 	}
 	seen := make(map[string]bool)
 	result := make([]AllowedRootEntry, 0, len(entries))
@@ -584,6 +587,48 @@ func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) 
 	}
 	if len(result) == 0 {
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	}
+	return result, nil
+}
+
+// resolveStoredAllowedRoots resolves the stored-config inspection universe of
+// the global allowed roots (`config allowed-root list`, the existing-entity
+// universe the remove/set-access completion offers): every stored entry is
+// projected to its canonical identity through the shared
+// resolveAllowedRootIdentity owner — symlink-resolved when the target still
+// exists on the filesystem, the cleaned absolute form when the filesystem
+// reports the path as nonexistent — so a stale stored entry stays visible and
+// addressable for recovery instead of failing the inspection. Structural
+// failures (the ambiguous-schema and required/empty rules, empty or
+// non-absolute entries) and non-ENOENT resolution failures (a symlink loop, a
+// permission error) still fail closed through the same owners. Same-identity
+// stored entries collapse to the first occurrence in stored order;
+// conflicting access for one identity is not re-detected here — daemon
+// startup validation (resolveAllowedRoots) remains the fail-closed authority
+// for the runtime policy this inspection never replaces.
+func resolveStoredAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]AllowedRootEntry, error) {
+	entries, err := storedAllowedRootEntries(raw, fc)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	result := make([]AllowedRootEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.Path == "" {
+			return nil, fmt.Errorf("allowed_roots contains an empty entry")
+		}
+		if !filepath.IsAbs(e.Path) {
+			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", e.Path)
+		}
+		identity, err := resolveAllowedRootIdentity(e.Path)
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed_roots entry %q: %w", e.Path, err)
+		}
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		result = append(result, AllowedRootEntry{Path: identity, Access: e.Access})
 	}
 	return result, nil
 }

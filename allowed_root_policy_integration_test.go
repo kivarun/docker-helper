@@ -94,6 +94,91 @@ func TestAllowedRootListOutputShapes(t *testing.T) {
 	}
 }
 
+// TestConfigAllowedRootListShowsMissingStoredRoot proves the recovery-safe
+// inspection contract: when a stored root's directory is deleted outside
+// docker-helper, `config allowed-root list` still exits 0 and still shows the
+// stale stored root (the cleaned absolute stored identity) alongside the
+// surviving roots — the operator must be able to see the entry that broke
+// daemon startup in order to address it. Runtime validation stays fail
+// closed; only the stored-config inspection is recovery-safe.
+func TestConfigAllowedRootListShowsMissingStoredRoot(t *testing.T) {
+	survivor := testAllowedRootDir(t)
+	stale := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []any{
+			survivor,
+			map[string]any{"path": stale, "access": "read_only"},
+		},
+		"session_ttl": "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	setupConfigTestWithData(t, data)
+
+	// Delete the stale root outside docker-helper: this is exactly the state
+	// that makes daemon startup fail closed.
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatalf("cannot delete the stale root: %v", err)
+	}
+
+	stdout, stderr := runConfigCLI(t, 0, "config", "allowed-root", "list")
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if !slices.Contains(lines, stale) || !slices.Contains(lines, survivor) {
+		t.Errorf("list must show the stale stored root %q alongside %q, got %v (stderr %q)", stale, survivor, lines, stderr)
+	}
+
+	jsonOut, _ := runConfigCLI(t, 0, "config", "allowed-root", "list", "--json")
+	var entries []AllowedRootEntry
+	if err := json.Unmarshal([]byte(jsonOut), &entries); err != nil {
+		t.Fatalf("--json list must decode as the canonical rich entries: %v (%s)", err, jsonOut)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("--json entries = %+v, want both stored roots", entries)
+	}
+	if entries[0].Path != survivor || entries[0].Access != AllowedRootAccessReadWrite {
+		t.Errorf("first entry = %+v, want the surviving read_write root", entries[0])
+	}
+	if entries[1].Path != stale || entries[1].Access != AllowedRootAccessReadOnly {
+		t.Errorf("second entry = %+v, want the stale root keeping its stored access", entries[1])
+	}
+}
+
+// TestConfigAllowedRootRemoveMissingStoredRoot proves the recovery mutation:
+// with the daemon down and a stored root whose directory is gone, `config
+// allowed-root remove` still resolves the missing root through the shared
+// identity owner (ENOENT keeps the cleaned absolute identity), removes
+// exactly that entry, and leaves a valid stored config.
+func TestConfigAllowedRootRemoveMissingStoredRoot(t *testing.T) {
+	survivor := testAllowedRootDir(t)
+	stale := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []string{survivor, stale},
+		"session_ttl":   "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	configPath := setupConfigTestWithData(t, data)
+
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatalf("cannot delete the stale root: %v", err)
+	}
+
+	stdout, stderr := runConfigCLI(t, 0, "config", "allowed-root", "remove", stale)
+	if !strings.Contains(stdout, "removed") {
+		t.Errorf("expected the removal success report, got stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	raw := readConfigJSON(t, configPath)
+	roots := parseStoredAllowedRootPaths(t, raw)
+	if len(roots) != 1 || roots[0] != survivor {
+		t.Errorf("stored roots after recovery = %v, want exactly [%s]", roots, survivor)
+	}
+
+	// The recovered config is inspectable again and lists only the survivor.
+	stdout, _ = runConfigCLI(t, 0, "config", "allowed-root", "list")
+	if strings.TrimSpace(stdout) != survivor {
+		t.Errorf("recovered list = %q, want exactly %q", stdout, survivor)
+	}
+}
+
 func TestAllowedRootAddHappyPath(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
 	cfg := map[string]any{

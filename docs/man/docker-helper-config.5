@@ -106,12 +106,21 @@ Manage workspace roots with:
 .br
 \fBdocker-helper config allowed-root list [\-\-json]\fR \- list global allowed roots, one canonical root per line; \-\-json prints the rich entries
 .br
+This is the stored-config inspection: a stored root whose directory no
+longer exists is still listed at its cleaned absolute identity, so the
+stale entry stays discoverable and addressable for recovery (daemon
+startup stays fail closed until it is removed or restored).
+.br
 \fBdocker-helper config allowed-root add [\-\-access ACCESS] PATH\fR \- add a global allowed root (omitted \fB\-\-access\fR is the read_write grant)
 .br
 \fBdocker-helper config allowed-root set-access PATH ACCESS\fR \- change the access mode of one stored root
 .br
 \fBdocker-helper config allowed-root remove PATH\fR \- remove a global allowed root
 .PP
+\fBconfig allowed-root remove\fR and \fBconfig allowed-root
+set-access\fR match the PATH by the stored canonical identity; a stored
+root whose directory is gone keeps its cleaned absolute identity, so a
+stale entry remains removable with the daemon down.
 \fBconfig show\fR projects the stored entries as
 \fBallowed_root_entries\fR (the authoritative rich projection with the
 access modes) beside the 2.x path-only \fBallowed_roots\fR compatibility

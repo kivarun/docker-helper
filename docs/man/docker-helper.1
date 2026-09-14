@@ -222,6 +222,10 @@ operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 .B docker-helper config allowed-root list [\-\-json]
 List global allowed roots, one canonical root per line (authorization
 ceiling); \-\-json prints the canonical rich entries with access modes.
+This is the stored-config inspection: a stored root whose directory no
+longer exists is still listed at its cleaned absolute identity, so the
+stale entry stays discoverable and addressable for recovery (daemon
+startup stays fail closed until it is removed or restored).
 .TP
 .B docker-helper config allowed-root add [--access ACCESS] PATH
 Add a global allowed root. Changes the authorization ceiling only;
@@ -234,7 +238,9 @@ Change the access mode (read_write or read_only) of one stored global
 allowed root, matched by the stored canonical identity.
 .TP
 .B docker-helper config allowed-root remove PATH
-Remove a global allowed root.
+Remove a global allowed root. The PATH is matched by the stored canonical
+identity; a stored root whose directory is gone keeps its cleaned absolute
+identity, so a stale entry remains removable with the daemon down.
 .SS Principal Commands
 .TP
 .B docker-helper principal create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-issue-credential | \-\-no-credential] USER

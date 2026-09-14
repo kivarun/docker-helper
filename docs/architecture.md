@@ -1394,8 +1394,17 @@ union, and the final ACCESS word of every `set-access` family (config,
 principal, launcher) completes the canonical `read_only`/`read_write`
 vocabulary. The daemon remains the final policy boundary and
 rejects a root outside the effective Principal ceiling at execution time.
-`config allowed-root add` and `principal allowed-root add` remain generic
-filesystem completion, as do all other path-valued flags.
+`config allowed-root remove` and the PATH positional of `config allowed-root
+set-access` complete from the stored global allowed-root identities — the
+recovery-safe `config allowed-root list` universe, never generic filesystem
+completion: both targeted mutations match only stored identities, so a
+stored root whose directory was deleted outside docker-helper stays
+offered and completable (the stale entry that fails daemon startup keeps
+its cleaned absolute identity), and a failed stored-root query degrades
+silently to no suggestions. `config allowed-root add`, `principal
+allowed-root add`, and the Principal/Launcher allowed-root add/remove PATH
+positions remain generic filesystem completion, as do all other path-valued
+flags.
 
 Positional completion of `principal show USER [FIELD]`: USER completes
 from the same selector-introspection owner as the `--principal` selector
@@ -1504,6 +1513,18 @@ the final global root. `list` prints the 2.1-compatible one canonical root
 per line by default; the explicit `--json` opt-in prints the canonical rich
 entries, so the access mode of every global root is visible to access-aware
 tooling.
+
+`list` is the recovery-safe stored-config inspection: every stored entry is
+projected to its canonical identity through the shared
+`resolveAllowedRootIdentity` owner — symlink-resolved when the target still
+exists, the cleaned absolute form when the filesystem reports the path as
+nonexistent — so a stale stored entry stays visible and addressable
+alongside the surviving roots. Non-ENOENT resolution failures (a symlink
+loop, a permission error) still fail closed. This inspection universe never
+replaces runtime validation: the load boundary (`resolveAllowedRoots`)
+keeps requiring a canonical directory, so a missing stored root still fails
+daemon startup and reload closed while `remove`/`set-access` keep matching
+and repairing it through the same identity owner.
 
 `http_address` is configurable in system mode only and requires a daemon
 restart to take effect. It is not included in the reloadable field list.

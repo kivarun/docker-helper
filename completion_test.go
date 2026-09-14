@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -823,16 +824,6 @@ func TestCompletionAllowedRootAddDirectoryOnly(t *testing.T) {
 	}
 }
 
-func TestCompletionAllowedRootRemoveFilesystemCompletion(t *testing.T) {
-	script := completionScript(t)
-
-	// "config allowed-root remove" should complete filesystem entries.
-	// We verify the generated script contains compgen -f for the remove case.
-	if !strings.Contains(script, "compgen -f") {
-		t.Error("completion script must use 'compgen -f' for filesystem completion in 'remove' case")
-	}
-}
-
 // TestCompletionPathValuedFlagsFilesystemCompletion verifies the generated
 // script completes filesystem paths for the path-valued flags surfaced in UAT.
 func TestCompletionPathValuedFlagsFilesystemCompletion(t *testing.T) {
@@ -975,93 +966,125 @@ func TestCompletionAllowedRootAddAbsolutePrefixBehavioral(t *testing.T) {
 	}
 }
 
-// TestCompletionAllowedRootRemoveAbsolutePrefixBehavioral verifies that
-// "config allowed-root remove" with an absolute prefix completes both
-// directories and files.
-func TestCompletionAllowedRootRemoveAbsolutePrefixBehavioral(t *testing.T) {
+// TestCompletionConfigAllowedRootStoredRootUniverse proves the PATH
+// positional completion of `config allowed-root remove` and `config
+// allowed-root set-access` offers the stored global allowed-root identities —
+// the recovery-safe `config allowed-root list` universe, not the runtime-valid
+// policy and not generic filesystem noise. A stored root whose directory was
+// deleted outside docker-helper stays offered, so the operator can complete
+// and address the stale entry that fails daemon startup; the two targeted
+// mutations share this one existing-entity universe.
+func TestCompletionConfigAllowedRootStoredRootUniverse(t *testing.T) {
+	rootA := testAllowedRootDir(t)
+	rootB := testAllowedRootDir(t)
+	if err := os.RemoveAll(rootB); err != nil {
+		t.Fatalf("cannot delete the stale root directory: %v", err)
+	}
+	cfg := map[string]any{
+		"allowed_roots": []any{
+			rootA,
+			map[string]any{"path": rootB, "access": "read_only"},
+		},
+		"session_ttl": "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+
 	script := completionScript(t)
+	preamble := completionPATHPreamble(t)
 
-	tmpDir := t.TempDir()
-	dirName := "prefix-dir"
-	fileName := "prefix-file"
-	if err := os.MkdirAll(filepath.Join(tmpDir, dirName), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, fileName), []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	t.Run("remove offers the stored identities including the deleted root", func(t *testing.T) {
+		results, stderr := runCompletionWithPreamble(t, script, preamble,
+			[]string{"docker-helper", "config", "allowed-root", "remove", ""})
+		if stderr != "" {
+			t.Fatalf("completion must not write to stderr: %q", stderr)
+		}
+		if want := []string{rootA, rootB}; !sameMembers(results, want) {
+			t.Errorf("remove <TAB> = %v, want exactly the stored identities %v (the deleted root must stay offered)", results, want)
+		}
+	})
 
-	absPrefix := tmpDir + "/prefix"
+	t.Run("set-access shares the same stored-root universe", func(t *testing.T) {
+		results, stderr := runCompletionWithPreamble(t, script, preamble,
+			[]string{"docker-helper", "config", "allowed-root", "set-access", ""})
+		if stderr != "" {
+			t.Fatalf("completion must not write to stderr: %q", stderr)
+		}
+		if want := []string{rootA, rootB}; !sameMembers(results, want) {
+			t.Errorf("set-access <TAB> = %v, want exactly the stored identities %v", results, want)
+		}
+	})
 
-	var sb strings.Builder
-	sb.WriteString(script)
-	sb.WriteString("\n\n")
-	sb.WriteString("COMP_WORDS=(")
-	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'remove' '" + absPrefix + "'")
-	sb.WriteString(")\n")
-	sb.WriteString("COMP_CWORD=4\n")
-	sb.WriteString("COMPREPLY=()\n")
-	sb.WriteString("_docker_helper_completion\n")
-	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+	t.Run("a valid stored root completes by a typed prefix", func(t *testing.T) {
+		results, _ := runCompletionWithPreamble(t, script, preamble,
+			[]string{"docker-helper", "config", "allowed-root", "remove", rootA})
+		if want := []string{rootA}; !slices.Equal(results, want) {
+			t.Errorf("remove %q<TAB> = %v, want [%s]", rootA, results, rootA)
+		}
+	})
 
-	cmd := exec.Command("bash", "-c", sb.String())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bash completion failed: %v\n%s", err, out)
-	}
+	t.Run("the deleted stored root completes by a typed prefix", func(t *testing.T) {
+		results, _ := runCompletionWithPreamble(t, script, preamble,
+			[]string{"docker-helper", "config", "allowed-root", "set-access", rootB})
+		if want := []string{rootB}; !slices.Equal(results, want) {
+			t.Errorf("set-access %q<TAB> = %v, want [%s] (the stale identity must be completable)", rootB, results, rootB)
+		}
+	})
 
-	output := string(out)
-
-	// Must contain both directory and file.
-	if !strings.Contains(output, dirName) {
-		t.Errorf("expected directory %q in 'remove' completions, got: %s", dirName, output)
-	}
-	if !strings.Contains(output, fileName) {
-		t.Errorf("expected file %q in 'remove' completions, got: %s", fileName, output)
-	}
+	t.Run("set-access ACCESS positional completes the canonical vocabulary", func(t *testing.T) {
+		results, _ := runCompletionWithPreamble(t, script, preamble,
+			[]string{"docker-helper", "config", "allowed-root", "set-access", rootA, ""})
+		if want := []string{"read_write", "read_only"}; !sameMembers(results, want) {
+			t.Errorf("set-access PATH <TAB> = %v, want the access vocabulary %v", results, want)
+		}
+	})
 }
 
-// TestCompletionAllowedRootRemoveFilesystemBehavioral verifies that
-// "config allowed-root remove" completes filesystem entries.
-func TestCompletionAllowedRootRemoveFilesystemBehavioral(t *testing.T) {
+// sameMembers reports whether the suggestion list equals the wanted members
+// ignoring order, so the assertions express the universe, not incidental
+// ordering.
+func sameMembers(results, want []string) bool {
+	if len(results) != len(want) {
+		return false
+	}
+	sortedResults := slices.Clone(results)
+	slices.Sort(sortedResults)
+	sortedWant := slices.Clone(want)
+	slices.Sort(sortedWant)
+	return slices.Equal(sortedResults, sortedWant)
+}
+
+// TestCompletionConfigAllowedRootStoredRootQuerySilentDegradation proves the
+// failure contract of the stored-root universe query: when the stored-config
+// inspection cannot run (the configured config path is unreadable), the
+// completion of the remove/set-access PATH positional is silent — no
+// suggestions, no stderr — and it terminates, never blocking the shell.
+func TestCompletionConfigAllowedRootStoredRootQuerySilentDegradation(t *testing.T) {
+	base := t.TempDir()
+	sentinel := filepath.Join(base, "sentinel-file")
+	if err := os.WriteFile(sentinel, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A config path that cannot be read makes the stored-root query fail;
+	// without stored roots nothing is addressable, so nothing may be offered.
+	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(t.TempDir(), "missing-config.json"))
+	preamble := completionPATHPreamble(t) + "; cd " + base
+
 	script := completionScript(t)
-
-	tmpDir := t.TempDir()
-	dirName := "workspaces"
-	fileName := "config.json"
-	if err := os.MkdirAll(filepath.Join(tmpDir, dirName), 0755); err != nil {
-		t.Fatal(err)
+	results, stderr, harnessErr := runCompletionWithDeadline(t, script, preamble,
+		[]string{"docker-helper", "config", "allowed-root", "remove", ""}, 10*time.Second)
+	if harnessErr != nil {
+		t.Fatalf("completion did not terminate on its own: %v", harnessErr)
 	}
-	if err := os.WriteFile(filepath.Join(tmpDir, fileName), []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
+	if stderr != "" {
+		t.Errorf("degraded completion must not write to stderr: %q", stderr)
 	}
-
-	var sb strings.Builder
-	sb.WriteString(script)
-	sb.WriteString("\n\n")
-	sb.WriteString("COMP_WORDS=(")
-	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'remove' ''")
-	sb.WriteString(")\n")
-	sb.WriteString("COMP_CWORD=4\n")
-	sb.WriteString("COMPREPLY=()\n")
-	sb.WriteString("cd " + tmpDir + "\n")
-	sb.WriteString("_docker_helper_completion\n")
-	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
-
-	cmd := exec.Command("bash", "-c", sb.String())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bash completion failed: %v\n%s", err, out)
-	}
-
-	output := strings.TrimSpace(string(out))
-
-	// Must contain both directory and file.
-	if !strings.Contains(output, dirName) {
-		t.Errorf("expected directory %q in 'remove' completions, got: %s", dirName, output)
-	}
-	if !strings.Contains(output, fileName) {
-		t.Errorf("expected file %q in 'remove' completions, got: %s", fileName, output)
+	if len(results) != 0 {
+		t.Errorf("a failed stored-root query must complete silently, got %v", results)
 	}
 }
 
@@ -1365,10 +1388,11 @@ func treeCommandFlagWords(cmd *Command) []string {
 }
 
 // treeProviderLeafPaths lists leaf commands whose positional completion is
-// semantic: config FIELD/VALUE and filesystem PATH providers, and the help
-// navigation command whose unlimited positionals walk the command tree
-// itself. Their empty-word behavior is provider-owned, not the generic flag
-// fallback.
+// semantic: config FIELD/VALUE, filesystem PATH, and stored-root universe
+// providers (the config allowed-root remove/set-access PATH completes the
+// stored global allowed-root identities), and the help navigation command
+// whose unlimited positionals walk the command tree itself. Their empty-word
+// behavior is provider-owned, not the generic flag fallback.
 var treeProviderLeafPaths = []string{
 	"config show",
 	"config set",

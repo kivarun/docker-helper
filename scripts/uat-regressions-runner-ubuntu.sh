@@ -153,6 +153,7 @@ REGRESSIONS=(
   "16:helper_socket runtime projection:uat-regression-helper-socket.sh"
   "17:env-from + helper-socket dogfood:uat-regression-dogfood-env-socket.sh"
   "18:User-mode helper_socket fail-closed:uat-regression-user-mode-helper-socket.sh"
+  "19:Allowed-root recovery universe:uat-regression-allowed-root-recovery.sh"
 )
 
 declare -A RESULT

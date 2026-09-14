@@ -294,6 +294,15 @@ every stored root is available on the same commands through the explicit
 HTTP/JSON projections, and `session show` separately displays the issued
 immutable filesystem snapshot with each entry's access mode.
 
+The global `config allowed-root list` is additionally the recovery-safe
+stored-config inspection: a stored root whose directory no longer exists is
+still listed at its cleaned absolute identity (the shared stored-identity
+owner), so the stale entry stays discoverable and addressable while daemon
+startup and reload stay fail closed on it. The existing-entity completion of
+`config allowed-root remove`/`set-access` offers this same stored-root
+universe — never generic filesystem completion — and a failed query degrades
+silently.
+
 Completion treats `read_write` and `read_only` as one canonical vocabulary and
 completes them only where an access value is accepted.
 

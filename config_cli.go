@@ -273,7 +273,12 @@ var configAllowedRootListCommand = &Command{
 	Usage:      "docker-helper config allowed-root list [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
-	Help:       `List all allowed roots, one canonical root per line; --json prints the canonical rich entries with their access modes.`,
+	Help: `List all allowed roots, one canonical root per line; --json prints the canonical rich entries with their access modes.
+
+The listing is the stored-config inspection universe: a stored root whose
+directory no longer exists is still listed at its cleaned absolute identity,
+so the stale entry stays discoverable and addressable for recovery (removing
+it is the repair; daemon startup stays fail closed until then).`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -346,8 +351,12 @@ func configAllowedRootList(jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	// Use canonical resolved roots (same as loadAndPrepareRuntimeConfig).
-	requestedRoots, err := resolveAllowedRoots(raw, fc)
+	// The stored-config inspection universe: the canonical identity of every
+	// stored entry (recovery-safe — a missing stored root keeps its cleaned
+	// absolute identity and stays listed and addressable), the same universe
+	// the remove/set-access existing-entity completion offers. Runtime
+	// validation stays fail closed at the load boundary, not here.
+	requestedRoots, err := resolveStoredAllowedRoots(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
