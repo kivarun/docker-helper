@@ -620,6 +620,16 @@ the sessionMACCoordinator
      the create transaction, and any rollback; a preparation failure
      issues no usable Session or bearer)
     ↓
+revalidate the authorizing credential at the commit boundary
+    (a credential-authority create re-proves its exact credential row —
+     still existing, still carrying the authenticated owner identity,
+     still active — inside the create transaction's conditional insert,
+     evaluated in the same statement as the insert; a revoke or delete
+     that committed before the Session commit prevents that Session and
+     answers the canonical non-disclosing 401 credential classification;
+     the admin authority, which authenticates by in-memory token
+     comparison, carries no credential and no revalidation clause)
+    ↓
 only after successful MAC preparation, commit Session + snapshot
 atomically
     (session ID dhs_<32 hex>, session token dht_<64 hex>,
@@ -642,6 +652,24 @@ existing `lifecycleMu` create linearization boundary, so a concurrent
 parent-policy mutation linearizes wholly before or wholly after the create:
 a request is never validated against one ceiling and committed against
 another.
+
+The commit-boundary credential revalidation closes the credential
+revocation race: a Principal or Launcher credential that authenticated the
+request is re-proven inside the create transaction's conditional insert
+(still existing, still carrying the authenticated owner identity, still
+active), so a revoke or credential delete that commits before the Session
+commit prevents that Session; the winning ordering — the Session commits
+before the revoke — leaves the already-issued Session valid under the
+accepted revocation contract. The zero-row outcome is classified inside
+the same transaction (launcher/principal availability keeps the typed
+`422 launcher_unavailable` contract; a credential rejection keeps the
+canonical `ErrCredentialRevoked`/`ErrCredentialNotFound` classes), and the
+handler answers a credential rejection with the same non-disclosing 401
+credential contract as entry authentication: one `auth.failure` record
+with the existing `credential.revoked`/`credential.not_found`
+classification and no `session.create` record. No Session, bearer,
+snapshot, or MAC state exists after the rejection — a prepared MAC
+coverage rolls back through the existing create-failure path.
 
 The Session filesystem request is **issuance-time narrowing** (see
 [`release-2.2-allowed-root-access-modes.md`](release-2.2-allowed-root-access-modes.md)):
@@ -881,7 +909,13 @@ MAC/runtime cleanup owners:
 
 Revoking a Principal or Launcher credential does not invalidate issued
 sessions; deleting a Launcher credential leaves its launcher's sessions
-owned and running but removes that authentication key.
+owned and running but removes that authentication key. Revocation also
+blocks Session creation at the commit boundary: a credential revoked or
+deleted between authentication and the Session-commit linearization point
+cannot issue a new Session (the create revalidates its authorizing
+credential inside the commit transaction), and the refused create is
+answered with the same non-disclosing 401 credential contract as entry
+authentication.
 
 ### Session lifecycle
 
@@ -1181,6 +1215,27 @@ When a session is created, the workspace path is resolved through
 When a build or run request specifies a path relative to the workspace,
 the resolved path is compared against the canonical workspace; if the
 resolved path escapes the workspace, the request is rejected.
+
+Session-create workspace admission follows the authorization-gated
+disclosure ordering. The raw request spelling is first proven against the
+effective allowed-root ceiling without host filesystem probing; when the
+spelling is not inside the ceiling, the requested pathname was never
+authorized and a resolution failure is the bounded authorization-shape
+refusal (`workspace must be inside an allowed root`) — byte-identical to
+the resolved-but-out-of-ceiling containment failure — so an unauthorized
+workspace's public outcome does not depend on host filesystem state
+(existence, error class, path type, and resolved aliases stay operational
+detail in the operational log). The canonical containment proof itself
+still runs on the resolved path: symlink aliases resolving inside the
+ceiling are issued, symlink escapes are refused, and the raw-spelling
+proof gates only the disclosure, never the authorization (the TOCTOU
+mitigations — staging and inode pinning — are unchanged). A spelling
+inside the ceiling keeps its actionable operator diagnostic (for example
+a missing workspace inside the operator's own ceiling). The run and build
+data planes keep the same principle at their existing boundary: their
+public refusals (`invalid_mount`, `invalid_build_context`) are stable
+non-disclosing contracts identical across unauthorized filesystem states,
+and the resolver diagnostics stay in the operational log.
 
 ### Policy introspection
 
@@ -2658,7 +2713,7 @@ Current error codes (non-exhaustive):
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
 | `invalid_helper_socket` | `POST /run` | helper_socket requested in user mode (unsupported there) |
-| `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause |
+| `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause for a request spelling inside the effective allowed-root ceiling, and the bounded authorization-shape refusal (`workspace must be inside an allowed root`) for a spelling outside it — the host-filesystem resolution diagnostics of an unauthorized path stay operational detail (authorization-gated disclosure; see [Session workspace](#session-workspace)) |
 | `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
 | `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
@@ -2850,7 +2905,14 @@ Does not include `request_id` because completion is not request-scoped.
 
 #### session.create
 
-Emitted for every `POST /sessions` request after authentication.
+Emitted for every `POST /sessions` request after authentication. A
+commit-boundary credential rejection (the authorizing credential was
+revoked, deleted, or lost its authenticated owner between authentication
+and the Session-commit linearization point) is a credential
+authentication-family outcome: it emits one `auth.failure` record with the
+existing `credential.revoked`/`credential.not_found` classification
+instead of a `session.create` record, and is answered with the shared
+non-disclosing 401 contract.
 
 | Field | Type | Description |
 |-------|------|-------------|

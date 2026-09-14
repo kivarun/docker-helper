@@ -115,8 +115,8 @@ risk rather than by the audit's original severity ordering.
 | **C2** | Principal-less/admin-created Session could execute as daemon `0:0` | **CLOSED_CURRENT** | SC0 | Current system-mode Session execution resolves the proven Launcher/Principal execution identity and emits `--user UID:GID`; there is no daemon-UID fallback. Keep the execution-identity regression proof. |
 | **C3** | Old libselinux recursive `restorecon` can relabel path-swapped foreign files | **BLOCKER_FIX** | SC1 | Active SELinux support must prove the descriptor-safe libselinux implementation (3.11 or a verified distribution backport) or fail closed. Do not add a second home-grown recursive relabel walker. |
 | **H1** | Builder can fetch arbitrary URLs from a network position unavailable to the agent | **BLOCKER_DECISION** | SC3 | Accept an explicit builder-network threat-boundary design. Fix the network position if the supported promise excludes this access; do not parse Dockerfiles as a substitute policy engine. |
-| **H2** | Credential can be revoked after authentication but before Session issuance | **BLOCKER_FIX** | SC1 | Revalidate the credential/owner authority at the existing Session issuance linearization point. Existing already-issued Sessions remain unchanged. |
-| **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **BLOCKER_FIX** | SC1 | Authorization/lexical ceiling checks precede privileged probing where possible; public workspace failures are bounded/stable while operational logs retain diagnostics. |
+| **H2** | Credential can be revoked after authentication but before Session issuance | **CLOSED_CURRENT** | SC1 | Closed at the existing Session-issuance linearization owner: the create transaction's conditional insert re-proves the authorizing credential (still existing, still owned, still active) in the same statement as the Session insert, so a revoke/delete committing before the Session commit prevents the Session and the refusal answers the canonical non-disclosing 401 credential classification. Winning ordering unchanged: an already-issued Session stays valid. Deterministic parked-query race evidence on both credential paths. |
+| **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **CLOSED_CURRENT** | SC1 | Authorization-gated disclosure ordering established at the Session-create workspace owner: the raw spelling is proven against the effective ceiling without host probing, and an unauthorized spelling's resolution failure is the bounded authorization-shape refusal with the diagnostic in the operational log — the unauthorized public outcome no longer depends on host filesystem state (indistinguishability matrix over existing/missing/dangling/permission-denied spellings). Run/build keep their stable non-disclosing public contracts, now proven by indistinguishability pins, with resolver diagnostics retained operationally. |
 | **H4** | Build staging can consume unbounded tmpfs bytes/inodes/depth/files | **BLOCKER_FIX** | SC2 | Add measured hard ceilings for staged bytes, entries and depth, admitted/reserved before staging. Failure must be bounded and leave no residue. Do not introduce the Release 3 quota hierarchy. |
 | **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **BLOCKER_FIX** | SC2 | Bound response materialization, mounts/pins per operation, and concurrent/running operation admission at Session/global security ceilings. Measure defaults and reserve before expensive work. |
 | **H6** | Mandatory MAC policy blocks admin-token rotation | **BLOCKER_FIX** | SC1 | Narrow AppArmor/SELinux write/rename permission to the token replacement lifecycle only; live enforcing UAT proves old token rejected and new token accepted. |
@@ -321,6 +321,130 @@ candidate; the release gate still re-proves it on the final stable
 candidate artifact. A skip in either backend's required UAT job is a gate
 failure, per the mandatory hostile UAT contract.
 
+### H2 — credential revocation race closed at the Session commit boundary
+
+The 2.0 chain was still reachable on the SC0 baseline: `POST /sessions`
+authenticated the credential once at entry and the create transaction's
+conditional insert re-checked only the Launcher/Principal enabled state,
+so a revoke or credential delete committing between authentication and
+the Session commit still issued a new Session behind the revoked
+authority.
+
+Closed at the existing Session-issuance linearization owner, with no new
+auth path, owner, or error contract:
+
+- `resolveCreatePolicy` projects the authenticated operator authority's
+  commit-boundary credential revalidation facts (credential ID plus the
+  owner identity the row must still prove) into the resolved create
+  policy; the admin authority — which authenticates by in-memory token
+  comparison — carries no credential and no revalidation clause, so the
+  admin path does not accidentally depend on a credential it does not
+  have.
+- The create transaction's conditional insert (the existing
+  defense-in-depth stale-owner recheck owner, evaluated in the same
+  statement as the Session insert) requires the authorizing credential
+  row to still exist, still carry the authenticated owner identity, and
+  be active (`revoked_at IS NULL`), so a revoke/delete committing before
+  the Session commit prevents that Session; SQLite's write-lock
+  serialization makes the predicate atomic with the commit, and a losing
+  concurrent writer fails closed.
+- The zero-row outcome is classified inside the same transaction: the
+  launcher/principal availability recheck keeps the pre-existing typed
+  `422 launcher_unavailable` contract, and a credential rejection keeps
+  the canonical `ErrCredentialRevoked`/`ErrCredentialNotFound` classes.
+  The handler answers with the same non-disclosing 401 credential
+  contract as entry authentication (one `auth.failure` record with the
+  existing `credential.revoked`/`credential.not_found` classification,
+  no `session.create` record). No new error code.
+- The winning ordering is unchanged: the Session commit before the
+  revoke leaves the issued Session valid (accepted revocation contract,
+  M8 semantics untouched), and a rejected create leaves no partial
+  Session, snapshot, MAC, or credential state (the MAC create binding
+  rolls back through the existing insert-failure path).
+
+Evidence:
+
+- RED deterministic race tests on the pre-fix release line, using the
+  existing parked-query test seam (test infrastructure on the SQL
+  connection seam, no production hook): the create is parked at its
+  last pre-boundary authentication read and inside its `lifecycleMu`
+  critical section, the concurrent revoke/delete commits while parked,
+  and the resumed create issued the Session (201) behind the
+  already-revoked/deleted credential — on both the Principal-credential
+  path and the Launcher-credential (physical delete) path.
+- Post-fix the same parked sequences refuse with 401 `unauthorized` and
+  leave no Session row; the mirror parked sequence proves the winning
+  ordering (Session commits before the revoke commits) keeps the issued
+  Session valid and its bearer authenticating; an unrelated credential
+  revoke inside the parked window does not block the create; a
+  synthetic ownership-provenance change between authentication and the
+  commit is refused; the admin path is unaffected; the audit contract
+  test proves exactly one `auth.failure credential.revoked` record, no
+  `session.create` record, and no bearer or secret material in the
+  audit output.
+
+### H3 — authorization-gated filesystem-resolver disclosure
+
+The 2.0 face was still reachable on the SC0 baseline through `POST
+/sessions`: the workspace admission resolved the caller spelling
+(`EvalSymlinks`/`stat`) before the ceiling containment proof and
+returned the resolver's detail as the actionable cause, so an
+unauthorized missing, dangling-symlink, or permission-denied spelling
+answered with `cannot resolve workspace symlinks: lstat <path>: ...`
+while an unauthorized existing directory got the bounded authorization
+message — an existence/error-class/resolution oracle over host paths
+the authority was never issued.
+
+Closed by establishing the authorization-gated disclosure ordering at
+the Session-create workspace owner, without weakening symlink safety or
+the TOCTOU mitigations:
+
+- the raw request spelling is first proven against the effective
+  allowed-root ceiling without host filesystem probing (the existing
+  containment owner, `isWithinAnyAllowedRoot`);
+- when the spelling is not inside the ceiling, a resolution failure is
+  the typed bounded refusal answering the existing `invalid_workspace`
+  code with the same authorization-shape message as a
+  resolved-but-out-of-ceiling workspace; the internal diagnostic stays
+  in the operational log;
+- the canonical containment proof still runs on the resolved path:
+  symlink aliases resolving inside the ceiling remain issued, symlink
+  escapes remain refused, and the raw-spelling proof gates only the
+  disclosure, never the authorization — staging and inode pinning are
+  unchanged (no TOCTOU regression);
+- a spelling inside the ceiling keeps its actionable operator
+  diagnostic (an authorized operator may still learn the state of its
+  own policy space);
+- the run and build data planes already answered every unauthorized
+  filesystem state with their stable non-disclosing
+  `invalid_mount`/`invalid_build_context` contracts; the fix retains
+  their resolver diagnostics in the operational log (previously
+  dropped) and proves the indistinguishability by test instead of
+  assertion.
+
+No new error code, no second policy owner, and no per-handler precheck:
+one refusal type owned by the Session-create workspace boundary, and
+the data-plane pins document the already-correct consumer boundary.
+
+Evidence:
+
+- RED black-box indistinguishability matrix on the pre-fix release
+  line, through the real `POST /sessions` route: an unauthorized
+  existing directory answered `workspace must be inside an allowed
+  root` while the unauthorized missing, dangling-symlink, and
+  (where Unix DAC applies) permission-denied spellings answered with
+  the raw resolver detail — distinct public outcomes for host paths
+  outside the authority.
+- Post-fix the four unauthorized spellings answer one identical public
+  refusal, the operational log retains the internal diagnostic, and
+  the authorized E-H states keep their current semantics (existing
+  issued; missing-inside-ceiling operator diagnostic retained;
+  symlink alias resolving inside the ceiling issued; symlink escape
+  refused by the canonical containment proof).
+- Run/build pins prove the data-plane public boundary is identical
+  across unauthorized existing/missing/dangling sources with the
+  resolver diagnostics retained operationally.
+
 ## Release-cycle integration
 
 Security closure is inserted **after the Release 2.2 feature contract is frozen
@@ -364,8 +488,9 @@ findings merely because they came from the same audit.
 
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
-**Queue:** `C3`, `H2`, `H3`, `H6`, `M2`, `M4`, `M5`, `M11`,
-`M12`, `M13`. (C1 and H9 closed in SC1 — see the SC1 evidence ledger.)
+**Queue:** `C3`, `H6`, `M2`, `M4`, `M5`, `M11`,
+`M12`, `M13`. (C1 and H9 closed in SC1 — see the SC1 evidence ledger. H2
+and H3 closed in SC1 — see the SC1 evidence ledger below.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
