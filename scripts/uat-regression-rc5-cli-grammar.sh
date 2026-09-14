@@ -500,6 +500,11 @@ subcase_e() {
   out="$(run_completion "$script" /usr/bin/docker-helper config allowed-root remove "")"
   assert_completion "E: config remove PATH offers exactly the stored global roots" "$stored_global" "$out" || true
 
+  # E stored "$home/e2" as a global root; remove it while the user (and the
+  # directory) still exist — deleting the user first would leave a stale
+  # global root that makes later groups' runtime-strict config mutations
+  # fail closed.
+  dh config allowed-root remove "$home/e2" >/dev/null 2>&1 || true
   cleanup_principal "$user"
 }
 

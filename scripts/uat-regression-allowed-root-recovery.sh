@@ -59,6 +59,21 @@ SERVICE=docker-helper.service
 # shellcheck disable=SC2034  # consumed by the shared wait_service_health owner
 SOCK=/run/docker-helper/docker-helper.sock
 
+# Recovery preparation: drop stale stored global roots left by earlier
+# fixture lifecycles. A stored root whose path no longer exists makes every
+# runtime-strict config transaction (add, set-access, reload, daemon
+# startup) fail closed — that is the required runtime contract, and the
+# recovery group must seed its fixture into a valid runtime config. Only
+# entries whose path is gone are dropped, through the same recovery mutation
+# this group asserts (remove resolves the missing path through the identity
+# owner); valid roots are never touched.
+while IFS= read -r stale_global; do
+  [ -n "$stale_global" ] || continue
+  if [ ! -e "$stale_global" ]; then
+    dh config allowed-root remove "$stale_global" >/dev/null 2>&1 || true
+  fi
+done < <(reg_config_global_roots)
+
 # stale is the stored root whose directory is deleted; survivor stays on disk
 # so the config always keeps at least one valid global root (remove refuses
 # the final root, and the repaired config must stay valid). The tree lives
