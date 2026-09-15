@@ -23,6 +23,10 @@ func newTestManager(active func() (bool, bool, error)) *selinuxFcontextManager {
 		},
 		readMountinfo: func() ([]byte, error) { return []byte{}, nil },
 		treeKind:      func(string) (macBoundaryKind, error) { return macBoundaryDirectory, nil },
+		// Healthy-environment default: tests exercise the procfs-gated
+		// fail-closed branch by overriding this seam, not by defaulting to
+		// the failure.
+		procfsUsable: func() error { return nil },
 	}
 }
 
@@ -472,6 +476,110 @@ func TestEnsureWorkspaceFcontextNewRule(t *testing.T) {
 	}
 	if !reflect.DeepEqual(addCall, []string{"fcontext", "-a", "-t", selinuxWorkspaceType, "/data(/.*)?"}) {
 		t.Errorf("add argv = %v", addCall)
+	}
+}
+
+// TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission is the C3
+// defect demonstration: an enforcing manager walks a Principal-mutable
+// workspace all the way to the recursive restorecon invocation, with no
+// descriptor-safe-implementation admission proof anywhere on the path. The
+// only commands between the SELinux status probe and the recursive relabel
+// are the fcontext inventory/add calls — nothing establishes that the
+// installed libselinux restorecon implementation is descriptor safe against
+// the pathname-replacement race, and nothing establishes that the runtime has
+// a real procfs for the descriptor-backed /proc/self/fd labeling the safe
+// implementation depends on. After the C3 gate exists this demonstration
+// stays green (the relabel legitimately proceeds once the procfs prerequisite
+// holds), and the fail-closed refusal is proven by
+// TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs.
+func TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission(t *testing.T) {
+	var trace [][]string
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.semanagePath = semanagePath
+	mgr.restoreconPath = restoreconPath
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		trace = append(trace, append([]string{cmd}, args...))
+		return []byte{}, nil
+	}
+	mgr.readPathCon = func(path string) (string, error) {
+		return selinuxWorkspaceType, nil
+	}
+
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
+	if err != nil {
+		t.Fatalf("expected the enforcing manager to reach the recursive relabel, got error: %v", err)
+	}
+	if !created {
+		t.Error("expected newly created mapping")
+	}
+
+	restoreconIdx := -1
+	for i, c := range trace {
+		if strings.Contains(c[0], "restorecon") {
+			restoreconIdx = i
+			break
+		}
+	}
+	if restoreconIdx < 0 {
+		t.Fatal("recursive restorecon must be reached for a new workspace boundary")
+	}
+	if !reflect.DeepEqual(trace[restoreconIdx], append([]string{restoreconPath}, "-R", "-m", "-x", "/data")) {
+		t.Errorf("recursive relabel argv = %v", trace[restoreconIdx])
+	}
+	// The commands before the relabel are exactly the fcontext lifecycle
+	// calls: no admission command exists between the boundary guard and the
+	// recursive walk.
+	for _, c := range trace[:restoreconIdx] {
+		if c[0] != semanagePath {
+			t.Errorf("unexpected pre-relabel command %v; no admission step exists before the recursive relabel", c)
+		}
+	}
+}
+
+// TestC3RestoreconTreeInvokedForEveryWorkspaceRelabelShape proves the C3
+// hostile surface is the one recursive relabel owner: the idempotent
+// existing-boundary relabel and the removal rollback relabel both reach
+// restoreconTree's recursive form for directory boundaries (the fresh-boundary
+// relabel is covered by TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission),
+// so the C3 admission gate must live on that owner (never a per-call-site
+// variant).
+func TestC3RestoreconTreeInvokedForEveryWorkspaceRelabelShape(t *testing.T) {
+	var restoreconArgv [][]string
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.semanagePath = semanagePath
+	mgr.restoreconPath = restoreconPath
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if strings.Contains(cmd, "restorecon") {
+			restoreconArgv = append(restoreconArgv, append([]string{cmd}, args...))
+		}
+		if len(args) > 0 && args[0] == "fcontext" {
+			if args[1] == "-l" {
+				return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
+			}
+		}
+		return []byte{}, nil
+	}
+	mgr.readPathCon = func(path string) (string, error) {
+		return selinuxWorkspaceType, nil
+	}
+
+	// Idempotent path: the exact workspace rule already exists, so the
+	// relabel runs without a new rule.
+	if _, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory); err != nil {
+		t.Fatalf("idempotent relabel failed: %v", err)
+	}
+	// Removal rollback path: a durable directory boundary releases its rule
+	// and relabels the surviving tree back to the default types.
+	if err := mgr.removeFcontextBoundary("/data", macBoundaryDirectory); err != nil {
+		t.Fatalf("removal relabel failed: %v", err)
+	}
+	if len(restoreconArgv) < 2 {
+		t.Fatalf("expected both the idempotent and the removal relabel to reach the recursive form, got: %v", restoreconArgv)
+	}
+	for _, argv := range restoreconArgv {
+		if !reflect.DeepEqual(argv, append([]string{restoreconPath}, "-R", "-m", "-x", "/data")) {
+			t.Errorf("recursive relabel argv = %v", argv)
+		}
 	}
 }
 
@@ -2080,6 +2188,7 @@ func TestSELinuxRootSlashConflictingFcontext(t *testing.T) {
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
+		procfsUsable: func() error { return nil },
 	}
 
 	// /data is a proper descendant of "/". The "/" rule must conflict.
@@ -2114,6 +2223,7 @@ func TestSELinuxRootSlashEquivalenceOverlap(t *testing.T) {
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
+		procfsUsable: func() error { return nil },
 	}
 
 	// /data must conflict with the equivalence at "/".
@@ -2148,6 +2258,7 @@ func TestSELinuxRootSlashEquivalenceSourceOverlap(t *testing.T) {
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
+		procfsUsable: func() error { return nil },
 	}
 
 	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
@@ -2692,5 +2803,119 @@ func TestSELinuxPolicyAdminTokenReplacement(t *testing.T) {
 		if strings.Contains(foundDirOps, extra) {
 			t.Errorf("config directory must not receive %q beyond the token replacement namespace operations", extra)
 		}
+	}
+}
+
+// TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs is the C3
+// fail-closed proof for the runtime prerequisite: when /proc is not provably
+// real procfs (the filesystem-identity seam refuses), the recursive workspace
+// relabel is refused BEFORE the restorecon command — zero restorecon
+// invocations — no workspace label transition is reported successful, and the
+// fresh-boundary path never adds an fcontext rule (no half-applied ownership
+// state). The refusal error is bounded and actionable. The idempotent
+// existing-rule path and the removal rollback path are refused at the same
+// owner without touching any state.
+func TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs(t *testing.T) {
+	procfsErr := errors.New("/proc is not procfs (filesystem type 0x9fa2)")
+
+	t.Run("fresh boundary: zero restorecon calls, no rule added", func(t *testing.T) {
+		var runCalls [][]string
+		mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+		mgr.semanagePath = semanagePath
+		mgr.restoreconPath = restoreconPath
+		mgr.procfsUsable = func() error { return procfsErr }
+		mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+			runCalls = append(runCalls, append([]string{cmd}, args...))
+			return []byte{}, nil
+		}
+		mgr.readPathCon = func(path string) (string, error) {
+			t.Error("verifyActualType must not run when the relabel is refused")
+			return selinuxWorkspaceType, nil
+		}
+
+		created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
+		if err == nil {
+			t.Fatal("workspace label transition must not succeed without real procfs")
+		}
+		if created {
+			t.Error("no successful transition may be reported")
+		}
+		for _, c := range runCalls {
+			if strings.Contains(c[0], "restorecon") {
+				t.Errorf("recursive restorecon must not be invoked, got: %v", c)
+			}
+			if c[0] == semanagePath && len(c) > 2 && c[2] == "-a" {
+				t.Errorf("no fcontext rule may be added without real procfs (no half-applied state), got: %v", c)
+			}
+		}
+		if !strings.Contains(err.Error(), "procfs") || !strings.Contains(err.Error(), "/data") {
+			t.Errorf("refusal must be bounded and actionable (procfs + the tree), got: %v", err)
+		}
+	})
+
+	t.Run("existing rule: refusal leaves the rule untouched", func(t *testing.T) {
+		var runCalls [][]string
+		mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+		mgr.semanagePath = semanagePath
+		mgr.restoreconPath = restoreconPath
+		mgr.procfsUsable = func() error { return procfsErr }
+		mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+			runCalls = append(runCalls, append([]string{cmd}, args...))
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+				return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
+			}
+			return []byte{}, nil
+		}
+		mgr.readPathCon = func(path string) (string, error) {
+			return selinuxWorkspaceType, nil
+		}
+
+		created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
+		if err == nil {
+			t.Fatal("idempotent relabel must be refused without real procfs")
+		}
+		if created {
+			t.Error("no successful transition may be reported")
+		}
+		for _, c := range runCalls {
+			if strings.Contains(c[0], "restorecon") {
+				t.Errorf("recursive restorecon must not be invoked, got: %v", c)
+			}
+		}
+	})
+
+	t.Run("removal rollback relabel: refusal without relabel", func(t *testing.T) {
+		var runCalls [][]string
+		mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+		mgr.semanagePath = semanagePath
+		mgr.restoreconPath = restoreconPath
+		mgr.procfsUsable = func() error { return procfsErr }
+		mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+			runCalls = append(runCalls, append([]string{cmd}, args...))
+			return []byte{}, nil
+		}
+
+		err := mgr.removeFcontextBoundary("/data", macBoundaryDirectory)
+		if err == nil {
+			t.Fatal("removal rollback relabel must be refused without real procfs")
+		}
+		for _, c := range runCalls {
+			if strings.Contains(c[0], "restorecon") {
+				t.Errorf("recursive restorecon must not be invoked, got: %v", c)
+			}
+		}
+		if !strings.Contains(err.Error(), "procfs") {
+			t.Errorf("refusal must be bounded and actionable, got: %v", err)
+		}
+	})
+}
+
+// TestC3ProcfsUsableForRestoreconAcceptsRealProcfs proves the real procfs
+// owner accepts the normal Linux runtime (statfs filesystem identity
+// PROC_SUPER_MAGIC) and is the single function the workspace relabel owner
+// consumes.
+func TestC3ProcfsUsableForRestoreconAcceptsRealProcfs(t *testing.T) {
+	if err := procfsUsableForRestorecon(); err != nil {
+		t.Fatalf("real procfs must be accepted, got: %v", err)
 	}
 }

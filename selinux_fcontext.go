@@ -65,6 +65,13 @@ type selinuxFcontextManager struct {
 	// Returns a release function and an error. The release function must be
 	// called to release the lock.
 	acquireLock func() (func() error, error)
+	// procfsUsable establishes the C3 runtime prerequisite for the
+	// descriptor-safe recursive relabel: /proc must be a real procfs mount
+	// (statfs filesystem identity), so the libselinux restorecon
+	// implementation actually labels through /proc/self/fd paths instead of
+	// falling back to pathname labeling. Defaults to
+	// procfsUsableForRestorecon; injectable in tests.
+	procfsUsable func() error
 }
 
 func newSELinuxFcontextManager() *selinuxFcontextManager {
@@ -82,7 +89,30 @@ func newSELinuxFcontextManager() *selinuxFcontextManager {
 		readMountinfo:  readSelfMountinfo,
 		treeKind:       macBoundaryKindFor,
 		acquireLock:    acquireSELinuxFcontextLock,
+		procfsUsable:   procfsUsableForRestorecon,
 	}
+}
+
+// procfsUsableForRestorecon establishes that /proc is a real procfs mount —
+// the runtime prerequisite for the descriptor-safe recursive relabel (C3).
+// The libselinux 3.11 selinux_restorecon implementation labels each inode
+// through /proc/self/fd/<fd> paths so a hostile pathname replacement during
+// the tree walk cannot redirect a relabel to a foreign inode; when /proc is
+// not available it silently falls back to pathname lgetfilecon/lsetfilecon
+// labeling, which restores the pre-3.11 TOCTOU behavior. The kernel
+// filesystem identity is checked with statfs(2) against PROC_SUPER_MAGIC,
+// mirroring upstream probe_proc() in libselinux 3.11. This is the one owner
+// of the recursive-restorecon procfs prerequisite; callers of the workspace
+// relabel owner must not reimplement it.
+func procfsUsableForRestorecon() error {
+	var st unix.Statfs_t
+	if err := unix.Statfs("/proc", &st); err != nil {
+		return fmt.Errorf("cannot classify /proc: %w", err)
+	}
+	if st.Type != unix.PROC_SUPER_MAGIC {
+		return fmt.Errorf("/proc is not procfs (filesystem type 0x%x)", uint32(st.Type))
+	}
+	return nil
 }
 
 // readSelfMountinfo reads the current process mount namespace's mount info.
@@ -293,6 +323,16 @@ func (m *selinuxFcontextManager) ensureTreeFcontext(tree string, kind macBoundar
 	// avoids creating or modifying any fcontext rule for an unsafe boundary.
 	if err := m.checkTreeRelabelBoundary(tree); err != nil {
 		return false, err
+	}
+
+	// Fail-closed C3 admission, before any fcontext state is read or mutated:
+	// without a real procfs the descriptor-safe restorecon implementation
+	// would silently fall back to pathname labeling (the pre-3.11 TOCTOU
+	// behavior), so no rule is ever created for a tree docker-helper cannot
+	// relabel descriptor-safely. The authoritative re-check runs inside
+	// restoreconTree immediately before the recursive command.
+	if err := m.procfsUsable(); err != nil {
+		return false, fmt.Errorf("refusing workspace fcontext setup for %s: %w", tree, err)
 	}
 
 	// Acquire global SELinux workspace management lock.
@@ -1009,6 +1049,16 @@ func (m *selinuxFcontextManager) checkTreeRelabelBoundary(workspace string) erro
 // runs. This relabel is therefore only ever invoked on a boundary with no
 // mount point at or below it.
 //
+// Mount-point safety and pathname-TOCTOU safety are separate invariants: the
+// mount-boundary guard above cannot close the C3 pathname-replacement race
+// (a hostile Principal can swap pathnames DURING the walk). That race is
+// closed by delegating the walk to the descriptor-safe libselinux 3.11
+// restorecon implementation (packaged floor libselinux1 >= 3.11), which is
+// safe ONLY when it labels through /proc/self/fd paths — so the recursive
+// form refuses to run without a real procfs (procfsUsableForRestorecon,
+// fail-closed BEFORE the command; a plain file operand has no walk and no
+// race surface).
+//
 // Type-only: restorecon is never passed -F, so user/role/MLS/MCS range are
 // not forcibly reset.
 func (m *selinuxFcontextManager) restoreconTree(path string, kind macBoundaryKind) error {
@@ -1021,6 +1071,12 @@ func (m *selinuxFcontextManager) restoreconTree(path string, kind macBoundaryKin
 			return fmt.Errorf("restorecon -m: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 		return nil
+	}
+	// C3 admission for the recursive walk: the descriptor-safe
+	// implementation requires a real procfs; without one it falls back
+	// to pathname labeling and the relabel must not run.
+	if err := m.procfsUsable(); err != nil {
+		return fmt.Errorf("refusing recursive workspace relabel of %s: %w", path, err)
 	}
 	out, err := m.runCommand(m.restoreconPath, "-R", "-m", "-x", path)
 	if err != nil {

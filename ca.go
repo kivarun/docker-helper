@@ -666,6 +666,15 @@ var trustedCARestorecon = func(args ...string) ([]byte, error) {
 // -m prevents restorecon from reading /proc/mounts to build the list of
 // non-seclabel mounts excluded from relabel checks. The trusted CA tree
 // is helper-owned and is not expected to contain nested mounts.
+//
+// C3 trust boundary: this tree is helper-owned runtime material created and
+// maintained only by the confined daemon; no hostile Principal can create or
+// replace pathnames inside it, so the libselinux pathname-labeling fallback
+// (used when /proc is not real procfs) cannot be raced there and the
+// recursive relabel does not consume the workspace procfs prerequisite owner.
+// The descriptor-safe libselinux floor is established for the whole
+// deployment by packaging (RPM floor libselinux1 >= 3.11, tarball installer
+// admission).
 func restoreconTrustedCATree(baseDir string) error {
 	active, _, err := selinuxEnabled()
 	if err != nil {

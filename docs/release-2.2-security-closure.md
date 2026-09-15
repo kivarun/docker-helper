@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-**Status: SC0 CLOSED; SC1 NEXT (2026-09-14).**
+**Status: SC0 CLOSED; SC1 CLOSED; SC2 NEXT (2026-09-15).**
 
 The external audit that triggered this closure reviewed docker-helper 2.0.0 at
 commit `7e9762576327b625acde45934a15216d1ff0a56b`. Its finding identifiers are
@@ -113,7 +113,7 @@ risk rather than by the audit's original severity ordering.
 | --- | --- | --- | --- | --- |
 | **C1** | Workload containers lack `no-new-privileges`; SUID/SGID delivery can lead to host root | **CLOSED_CURRENT** | SC1 | Closed through the single server-owned workload privilege floor: the run argv owner emits `--cap-drop ALL` and `--security-opt no-new-privileges:true` for every workload in every mode before any backend option, and the caller has no privilege field. The canonical staging owner strips S_ISUID/S_ISGID from every staged regular file at its single copy point. Hostile source-image and staged-file UAT proved both escalation chains dead (see the SC1 evidence ledger). |
 | **C2** | Principal-less/admin-created Session could execute as daemon `0:0` | **CLOSED_CURRENT** | SC0 | Current system-mode Session execution resolves the proven Launcher/Principal execution identity and emits `--user UID:GID`; there is no daemon-UID fallback. Keep the execution-identity regression proof. |
-| **C3** | Old libselinux recursive `restorecon` can relabel path-swapped foreign files | **BLOCKER_FIX** | SC1 | Active SELinux support must prove the descriptor-safe libselinux implementation (3.11 or a verified distribution backport) or fail closed. Do not add a second home-grown recursive relabel walker. |
+| **C3** | Old libselinux recursive `restorecon` can relabel path-swapped foreign files | **CLOSED_CURRENT** | SC1 | Recursive workspace relabeling is admitted only in the proven descriptor-safe composition: the RPM hard-requires `libselinux1 >= 3.11` (the upstream `selinux_restorecon` rewrite that labels each inode through `/proc/self/fd` paths, closing the pathname-replacement TOCTOU), the tarball SELinux installer re-proves the installed implementation from rpm package metadata before any SELinux mutation (restorecon must link `libselinux.so.1`, the resolved library must be owned by `libselinux1`, its version must satisfy the floor; older/foreign-owned/unverifiable/unparseable provenance fails closed with actionable diagnostics), and one runtime owner refuses the recursive relabel without a real procfs (statfs `PROC_SUPER_MAGIC`, mirroring upstream `probe_proc()` — without procfs libselinux silently falls back to pathname labeling), fail-closed before any fcontext mutation. Mount-boundary safety (`checkTreeRelabelBoundary`) stays the separate mount-point invariant owner; no home-grown recursive relabel walker exists. See the SC1 evidence ledger. |
 | **H1** | Builder can fetch arbitrary URLs from a network position unavailable to the agent | **BLOCKER_DECISION** | SC3 | Accept an explicit builder-network threat-boundary design. Fix the network position if the supported promise excludes this access; do not parse Dockerfiles as a substitute policy engine. |
 | **H2** | Credential can be revoked after authentication but before Session issuance | **CLOSED_CURRENT** | SC1 | Closed at the existing Session-issuance linearization owner: the create transaction's conditional insert re-proves the authorizing credential (still existing, still owned, still active) in the same statement as the Session insert, so a revoke/delete committing before the Session commit prevents the Session and the refusal answers the canonical non-disclosing 401 credential classification. Winning ordering unchanged: an already-issued Session stays valid. Deterministic parked-query race evidence on both credential paths. |
 | **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **CLOSED_CURRENT** | SC1 | Authorization-before-probing ordering established at all four session-facing admission boundaries: the raw spelling is admitted lexically against the issued filesystem capability FIRST (workspace create against the effective ceiling, absolute run mount against the issued snapshot entries, build context/Dockerfile against the workspace, issuance-time `filesystem_roots` against the effective Launcher ceiling), and a spelling outside the capability is refused immediately WITHOUT any privileged filesystem probe — zero-probe seam evidence, not merely equal responses. The former symlink-alias admission (an outside spelling resolving into the capability) is removed as an explicit Release 2.2 security tightening. After admission the canonical `EvalSymlinks` + containment proofs remain the mandatory second security proof (inside-ceiling aliases work; inside-ceiling symlink escapes stay fail-closed); public unauthorized failures stay bounded/non-disclosing; admitted spellings keep their actionable diagnostics; run/build keep their stable public contracts with admission diagnostics retained operationally. The issued snapshot's authority remains the persisted path tree (position/path/access + digest) — a review-round retraction of a live-kind exact-capability inference is recorded below. |
@@ -1262,15 +1262,143 @@ one owner, establish RED evidence before the production fix where practical,
 and run the affected exact-artifact/live-MAC gate. Do not batch unrelated
 findings merely because they came from the same audit.
 
+## SC1 — C3: descriptor-safe recursive SELinux restorecon
+
+The audit class: old libselinux recursive `restorecon` walks a tree by
+pathname and relabels whatever a path resolves to at relabel time; a hostile
+Principal who can replace pathnames DURING the walk (rename/symlink swap of a
+workspace path component) can redirect the relabel to a foreign inode outside
+the issued workspace. `selinuxFcontextManager.restoreconTree` is the primary
+surface: the recursive relabel of Principal-mutable workspace trees.
+
+Recursive-restorecon owner inventory (complete, with classification):
+
+- `selinuxFcontextManager.restoreconTree` (workspace/issued-tree relabel;
+  fresh, idempotent, and removal-rollback shapes) — recursive,
+  Principal-mutable, executed by the confined `docker_helper_t` daemon.
+  THE C3 hostile surface; gated below.
+- `restoreconTrustedCATree` (`ca.go`) — recursive over the trusted-CA
+  runtime tree; helper/root-owned runtime material in the confined daemon;
+  no hostile Principal can create or replace pathnames inside it, so the C3
+  race cannot cross the trust boundary there; covered by the same
+  packaged/install-time libselinux guarantee.
+- `relabelDeploymentConfigState` (`selinux_deploy.go`) — recursive over
+  `/etc/docker-helper` and `/var/lib/docker-helper`; helper/root-owned
+  deployment state, executed by `init` before the service exists; no
+  Principal-mutable content; same guarantee.
+- `install-system.sh` / rpm `postinstall.sh` recursive deployment
+  restorecons — root package/install context, run after the package
+  dependency gate (RPM) or the installer admission gate (tarball);
+  helper/root-owned paths only. Exact-path restorecon calls (Docker CLI,
+  bindfs, admin token, `/run/docker-helper` dir) are not recursive and are
+  not C3 work.
+
+Accepted libselinux implementation rule (Phase A evidence, exact candidate
+enforcing Tumbleweed): upstream 3.11+ when proven. Source evidence: the
+libselinux 3.11 `selinux_restorecon` rewrite labels every inode through
+`/proc/self/fd/<fd>` paths (`fd_path_getfilecon`/`fd_path_setfilecon` over a
+pinned directory/file descriptor, eliminating the TOCTOU between label
+lookup, context query, and context write) and probes `/proc` once with
+`statfs("/proc")` + `PROC_SUPER_MAGIC` (`probe_proc()`); when real procfs is
+unavailable it falls back to pathname `lgetfilecon_raw`/`lsetfilecon_raw`
+labeling — the pre-3.11 TOCTOU composition. The official 3.11 release notes
+state the rewrite ("Rewrote libselinux selinux_restorecon(3) to eliminate
+TOCTOU issues in file relabeling if /proc is available ... If /proc is not
+available, selinux_restorecon(3) falls back to just passing the full pathname
+each time"). The 2022 `7e979b56fd2cee28f647376a7233d2ac2d12ca50` attempt
+("pin file to avoid TOCTOU issues") and its revert
+`de285252a1801397306032e070793889c9466845` document both the fd-based
+mechanism and WHY the pathname fallback exists (chroot environments without
+/proc) — which is exactly why the runtime procfs prerequisite is separate and
+mandatory for hostile trees. The command frontend (`restorecon(8)`) version
+is NOT accepted as proof of the loaded implementation: the finding lives in
+libselinux, so the proof target is the libselinux package the restorecon
+frontend links against. Package evidence on the supported environment:
+Tumbleweed ships `libselinux1-3.11-2.1` and `policycoreutils-3.11-2.2`
+(the restorecon frontend, owned by policycoreutils, linking
+`libselinux.so.1`); `/proc` is real procfs (fstype `proc`, statfs magic
+`0x9fa0`) with usable `/proc/self/fd`. No <3.11 backport exception exists on
+the currently supported SELinux path, so no backport table was built.
+
+Closure (three owners, one per responsibility; no second workspace relabel
+abstraction, no second fcontext lifecycle):
+
+- Packaging (RPM): the RPM hard-depends on `libselinux1 >= 3.11`
+  (`policycoreutils` stays the restorecon frontend dependency; it was NOT
+  turned into a version-floor substitute for libselinux). The floor is
+  asserted from the BUILT RPM metadata (`rpm -qp --requires` shows
+  `libselinux1 >= 3.11`), not merely the nfpm source text; the AppArmor-only
+  DEB must not gain libselinux dependencies. With a versioned hard Requires,
+  rpm dependency resolution refuses installation against an older installed
+  libselinux1 (downgrade refusal is inherent to the floor expression).
+- Packaging (tarball): `check_libselinux_floor` in `install-system.sh` runs
+  inside `check_selected_mac_tools` — BEFORE any SELinux installation
+  mutation — and establishes the installed implementation from the rpm
+  package database on the supported openSUSE SELinux path: restorecon must
+  link `libselinux.so.1` (ldd), the resolved library must be owned by
+  `libselinux1` (rpm -qf on the readlink-resolved path), and that package's
+  version must satisfy the floor (bounded numeric compare). Missing rpm
+  authority, missing ldd, missing linkage, foreign owning package, older
+  version, and unparseable version all fail closed with actionable
+  diagnostics before any mutation; no generic-distro version heuristic
+  exists and the AppArmor path invokes neither ldd nor rpm.
+- Runtime (procfs prerequisite): ONE owner,
+  `procfsUsableForRestorecon` (statfs `/proc` vs `PROC_SUPER_MAGIC`,
+  mirroring upstream `probe_proc()`), consumed by the recursive workspace
+  relabel owner `restoreconTree` immediately before the recursive command,
+  and by `ensureTreeFcontext` BEFORE any fcontext state is read or mutated
+  (a fresh boundary never adds a rule it may not be able to relabel
+  descriptor-safely — no half-applied ownership state; the existing
+  restorecon-failure rollback semantics are unchanged). Without real procfs
+  the refusal is bounded and actionable and the restorecon command count is
+  zero. Mount-boundary safety (`checkTreeRelabelBoundary`) remains the
+  separate mount-point invariant owner and was not reinterpreted.
+
+RED evidence (commit `ceeea4b`, tests against the pre-fix code): the defect
+demonstrations (`TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission`,
+`TestC3RestoreconTreeInvokedForEveryWorkspaceRelabelShape`) proved an
+enforcing manager walks a Principal-mutable workspace all the way to the
+recursive restorecon invocation with nothing between the fcontext lifecycle
+calls and the recursive walk — no descriptor-safe-implementation admission
+and no procfs consultation anywhere on the path (pre-fix the manager had no
+procfs logic at all, so a non-proc /proc was indistinguishable and the
+relabel still ran). The installer fake-tool suite
+(`TestInstallSystemSelinuxLibselinuxFloor`) and the nfpm floor assertion
+(`TestNfpmConfigFile`) failed as designed pre-fix: the tarball SELinux path
+accepted old/unverifiable/missing/malformed libselinux provenance and the
+RPM declared no floor. The runtime refusal branch did not exist pre-fix, so
+its fail-closed behavior is pinned together with the seam in the fix commit
+(`TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs`: zero
+restorecon invocations, no rule add, bounded actionable error, on the fresh,
+idempotent, and removal shapes; the real owner accepts real procfs,
+`TestC3ProcfsUsableForRestoreconAcceptsRealProcfs`).
+
+GREEN exact-candidate enforcing UAT (new regression group 7,
+`scripts/uat-regression-selinux-c3-restorecon-race.sh`, registered in
+`uat-regressions-runner-selinux.sh`): prerequisite evidence on the live
+guest (libselinux1 floor satisfied, policycoreutils frontend, restorecon
+ownership and linkage, resolved library owned by libselinux1, `/proc` real
+procfs with usable `/proc/self/fd`); bounded hostile race — three rounds of
+session create/delete while a Principal-owned process (sudo, unprivileged)
+swaps the workspace path component `rw/swap` between the real directory and
+a symlink to a Principal-owned victim tree OUTSIDE the issued workspace
+(4000 swaps per round; the victim starts with a non-workspace type and
+`docker_helper_t` holds the `fowner` capability grant, so a labeling escape
+WOULD have been observable): the victim file and inner tree never received
+`docker_helper_workspace_t` and never changed inode identity, the workspace
+relabel completed or failed safely each round, no stale helper-owned
+fcontext ownership survived release, the service stayed healthy, and the
+normal session/workspace lifecycle (rule creation, workspace type, container
+RW, delete) still worked afterward. The host /proc is never altered to
+manufacture the negative case; the zero-command refusal is proven at the
+runtime seam (section 9). The tarball path additionally exercises the
+installer admission live in the tarball/SELinux VM job on real Tumbleweed
+(`libselinux1-3.11` present → proceeds).
+
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
-**Queue:** `C3`. (C1 and H9 closed in SC1 — see the SC1 evidence
-ledger. H2 and H3 closed in SC1 — see the SC1 evidence ledger below. M13
-closed in SC1 — see the SC1 evidence ledger below. H6 closed in SC1 — see
-the SC1 evidence ledger below. M11 and M12 closed in SC1 — see the SC1
-evidence ledger below. M4 closed in SC1 — see the SC1 evidence ledger
-below. M5 closed in SC1 — see the SC1 evidence ledger below. M2 closed in
-SC1 — see the SC1 evidence ledger below.)
+**Queue:** none — SC1 is CLOSED. (C1, H9, H2, H3, M13, H6, M11, M12, M4,
+M5, M2, and C3 are all closed — see the SC1 evidence ledger below.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
@@ -1282,7 +1410,10 @@ Implementation constraints:
   across `run.go`, MAC backends and tests. Staging strips privilege bits at the
   staging owner.
 - C3: prove a safe lower-layer libselinux implementation or fail closed; no
-  second recursive traversal implementation.
+  second recursive traversal implementation. (Closed: RPM floor
+  `libselinux1 >= 3.11` proven from the built package, tarball installer
+  package-metadata admission before any SELinux mutation, one runtime procfs
+  owner gating the recursive relabel owner; see the SC1 evidence ledger.)
 - H2: reuse the Session issuance/lifecycle linearization owner.
 - H3: preserve rich diagnostics in operational logs while bounding public
   errors.
