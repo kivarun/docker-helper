@@ -23,6 +23,10 @@ func newTestManager(active func() (bool, bool, error)) *selinuxFcontextManager {
 		},
 		readMountinfo: func() ([]byte, error) { return []byte{}, nil },
 		treeKind:      func(string) (macBoundaryKind, error) { return macBoundaryDirectory, nil },
+		// Healthy-environment default: tests exercise the procfs-gated
+		// fail-closed branch by overriding this seam, not by defaulting to
+		// the failure.
+		procfsUsable: func() error { return nil },
 	}
 }
 
@@ -2184,6 +2188,7 @@ func TestSELinuxRootSlashConflictingFcontext(t *testing.T) {
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
+		procfsUsable: func() error { return nil },
 	}
 
 	// /data is a proper descendant of "/". The "/" rule must conflict.
@@ -2218,6 +2223,7 @@ func TestSELinuxRootSlashEquivalenceOverlap(t *testing.T) {
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
+		procfsUsable: func() error { return nil },
 	}
 
 	// /data must conflict with the equivalence at "/".
@@ -2252,6 +2258,7 @@ func TestSELinuxRootSlashEquivalenceSourceOverlap(t *testing.T) {
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
+		procfsUsable: func() error { return nil },
 	}
 
 	_, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
@@ -2796,5 +2803,119 @@ func TestSELinuxPolicyAdminTokenReplacement(t *testing.T) {
 		if strings.Contains(foundDirOps, extra) {
 			t.Errorf("config directory must not receive %q beyond the token replacement namespace operations", extra)
 		}
+	}
+}
+
+// TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs is the C3
+// fail-closed proof for the runtime prerequisite: when /proc is not provably
+// real procfs (the filesystem-identity seam refuses), the recursive workspace
+// relabel is refused BEFORE the restorecon command — zero restorecon
+// invocations — no workspace label transition is reported successful, and the
+// fresh-boundary path never adds an fcontext rule (no half-applied ownership
+// state). The refusal error is bounded and actionable. The idempotent
+// existing-rule path and the removal rollback path are refused at the same
+// owner without touching any state.
+func TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs(t *testing.T) {
+	procfsErr := errors.New("/proc is not procfs (filesystem type 0x9fa2)")
+
+	t.Run("fresh boundary: zero restorecon calls, no rule added", func(t *testing.T) {
+		var runCalls [][]string
+		mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+		mgr.semanagePath = semanagePath
+		mgr.restoreconPath = restoreconPath
+		mgr.procfsUsable = func() error { return procfsErr }
+		mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+			runCalls = append(runCalls, append([]string{cmd}, args...))
+			return []byte{}, nil
+		}
+		mgr.readPathCon = func(path string) (string, error) {
+			t.Error("verifyActualType must not run when the relabel is refused")
+			return selinuxWorkspaceType, nil
+		}
+
+		created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
+		if err == nil {
+			t.Fatal("workspace label transition must not succeed without real procfs")
+		}
+		if created {
+			t.Error("no successful transition may be reported")
+		}
+		for _, c := range runCalls {
+			if strings.Contains(c[0], "restorecon") {
+				t.Errorf("recursive restorecon must not be invoked, got: %v", c)
+			}
+			if c[0] == semanagePath && len(c) > 2 && c[2] == "-a" {
+				t.Errorf("no fcontext rule may be added without real procfs (no half-applied state), got: %v", c)
+			}
+		}
+		if !strings.Contains(err.Error(), "procfs") || !strings.Contains(err.Error(), "/data") {
+			t.Errorf("refusal must be bounded and actionable (procfs + the tree), got: %v", err)
+		}
+	})
+
+	t.Run("existing rule: refusal leaves the rule untouched", func(t *testing.T) {
+		var runCalls [][]string
+		mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+		mgr.semanagePath = semanagePath
+		mgr.restoreconPath = restoreconPath
+		mgr.procfsUsable = func() error { return procfsErr }
+		mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+			runCalls = append(runCalls, append([]string{cmd}, args...))
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+				return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
+			}
+			return []byte{}, nil
+		}
+		mgr.readPathCon = func(path string) (string, error) {
+			return selinuxWorkspaceType, nil
+		}
+
+		created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
+		if err == nil {
+			t.Fatal("idempotent relabel must be refused without real procfs")
+		}
+		if created {
+			t.Error("no successful transition may be reported")
+		}
+		for _, c := range runCalls {
+			if strings.Contains(c[0], "restorecon") {
+				t.Errorf("recursive restorecon must not be invoked, got: %v", c)
+			}
+		}
+	})
+
+	t.Run("removal rollback relabel: refusal without relabel", func(t *testing.T) {
+		var runCalls [][]string
+		mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+		mgr.semanagePath = semanagePath
+		mgr.restoreconPath = restoreconPath
+		mgr.procfsUsable = func() error { return procfsErr }
+		mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+			runCalls = append(runCalls, append([]string{cmd}, args...))
+			return []byte{}, nil
+		}
+
+		err := mgr.removeFcontextBoundary("/data", macBoundaryDirectory)
+		if err == nil {
+			t.Fatal("removal rollback relabel must be refused without real procfs")
+		}
+		for _, c := range runCalls {
+			if strings.Contains(c[0], "restorecon") {
+				t.Errorf("recursive restorecon must not be invoked, got: %v", c)
+			}
+		}
+		if !strings.Contains(err.Error(), "procfs") {
+			t.Errorf("refusal must be bounded and actionable, got: %v", err)
+		}
+	})
+}
+
+// TestC3ProcfsUsableForRestoreconAcceptsRealProcfs proves the real procfs
+// owner accepts the normal Linux runtime (statfs filesystem identity
+// PROC_SUPER_MAGIC) and is the single function the workspace relabel owner
+// consumes.
+func TestC3ProcfsUsableForRestoreconAcceptsRealProcfs(t *testing.T) {
+	if err := procfsUsableForRestorecon(); err != nil {
+		t.Fatalf("real procfs must be accepted, got: %v", err)
 	}
 }

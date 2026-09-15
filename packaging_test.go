@@ -2223,17 +2223,25 @@ exit 0
 	}
 	// Standard ldd/rpm pair for the SELinux libselinux admission: restorecon
 	// links libselinux.so.1, and the resolved library is owned by a
-	// floor-satisfying libselinux1 3.11 package record. Backend-selection and
-	// floor-refusal tests override or remove these fakes; the AppArmor path
-	// must never invoke either tool.
+	// floor-satisfying libselinux1 3.11 package record. The linked path is a
+	// real fixture file so readlink -f resolution behaves like the installed
+	// library. Backend-selection and floor-refusal tests override or remove
+	// these fakes; the AppArmor path must never invoke either tool.
+	libFixture := filepath.Join(e.destDir, "lib64", "libselinux.so.1")
+	if err := os.MkdirAll(filepath.Dir(libFixture), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(libFixture, []byte("fixture libselinux.so.1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	e.fakeLdd(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
 echo "$0 $@" >> "$log_file"
 case "$1" in
-  */restorecon) echo "	libselinux.so.1 => /lib64/libselinux.so.1 (0x00007f0000000000)" ;;
+  */restorecon) echo "	libselinux.so.1 => %s (0x00007f0000000000)" ;;
 esac
 exit 0
-`, logFile))
+`, logFile, libFixture))
 	e.fakeRpm(t, fmt.Sprintf(`#!/bin/bash
 log_file="%s"
 echo "$0 $@" >> "$log_file"
@@ -3059,7 +3067,13 @@ exit 0
 			}
 		}
 		if strings.Contains(c, "restorecon") {
-			restoreconSeen = true
+			first := c
+			if idx := strings.IndexByte(c, ' '); idx >= 0 {
+				first = c[:idx]
+			}
+			if strings.HasSuffix(first, "/restorecon") {
+				restoreconSeen = true
+			}
 		}
 		if strings.Contains(c, "apparmor_parser") {
 			t.Errorf("SELinux path must not invoke apparmor_parser: %q", c)
@@ -3319,7 +3333,11 @@ exit 0
 
 	var restoreconCalls []string
 	for _, c := range env.calls(t) {
-		if strings.Contains(c, "restorecon") {
+		first := c
+		if idx := strings.IndexByte(c, ' '); idx >= 0 {
+			first = c[:idx]
+		}
+		if strings.HasSuffix(first, "/restorecon") {
 			restoreconCalls = append(restoreconCalls, c)
 		}
 	}
@@ -3397,7 +3415,11 @@ exit 0
 	callsOf := func(t *testing.T, env *systemScriptEnv, name string) []string {
 		var found []string
 		for _, c := range env.calls(t) {
-			if strings.Contains(c, "/"+name) {
+			first := c
+			if idx := strings.IndexByte(c, ' '); idx >= 0 {
+				first = c[:idx]
+			}
+			if strings.HasSuffix(first, "/"+name) {
 				found = append(found, c)
 			}
 		}
