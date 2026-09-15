@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -2355,6 +2356,122 @@ func TestSELinuxPolicyNoUnprovenClassRelabel(t *testing.T) {
 		}
 		if r.target == "usr_t" && r.class == "lnk_file" && strings.Contains(r.perms, "getattr") {
 			t.Error("policy must NOT grant usr_t:lnk_file getattr (not proven needed by an enforcing run)")
+		}
+	}
+}
+
+// TestSELinuxAdminTokenFileContexts proves the exact admin-token replacement
+// labeling contract: only the canonical admin.token and the ONE fixed
+// staging pathname carry docker_helper_admin_token_t, both exact rules
+// precede the generic config-tree rule (file_contexts match first), and the
+// generic rule keeps every other config path — config.json included — on
+// docker_helper_config_t.
+func TestSELinuxAdminTokenFileContexts(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.fc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	genericRule := "/etc/docker-helper(/.*)?"
+	genericIndex := strings.Index(content, genericRule)
+	if genericIndex < 0 {
+		t.Fatalf("generic config-tree rule missing from %s", "packaging/selinux/docker-helper.fc")
+	}
+	exactRe := map[string]*regexp.Regexp{
+		"/etc/docker-helper/admin.token":      regexp.MustCompile(`(?m)^/etc/docker-helper/admin\.token\s+--\s+system_u:object_r:docker_helper_admin_token_t:s0$`),
+		"/etc/docker-helper/.admin-token.new": regexp.MustCompile(`(?m)^/etc/docker-helper/\.admin-token\.new\s+--\s+system_u:object_r:docker_helper_admin_token_t:s0$`),
+	}
+	for _, exact := range []string{"/etc/docker-helper/admin.token", "/etc/docker-helper/.admin-token.new"} {
+		loc := exactRe[exact].FindStringIndex(content)
+		if loc == nil {
+			t.Fatalf("exact admin-token file-context rule missing: %s", exact)
+		}
+		if loc[0] > genericIndex {
+			t.Errorf("exact admin-token rule must precede the generic config-tree rule: %s", exact)
+		}
+	}
+
+	// The exact rules must be the ONLY admin_token_t file-context rules.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(line, "docker_helper_admin_token_t") &&
+			!strings.Contains(line, "/etc/docker-helper/admin.token") &&
+			!strings.Contains(line, "/etc/docker-helper/.admin-token.new") {
+			t.Errorf("unexpected admin-token file-context rule beyond the exact pathnames: %s", line)
+		}
+	}
+}
+
+// TestSELinuxPolicyAdminTokenReplacement proves the SC1/H6 policy contract
+// on the daemon domain: the token replacement lifecycle is expressed as
+// permissions on the dedicated docker_helper_admin_token_t type plus the
+// exact filename transition for the fixed staging pathname, while
+// docker_helper_config_t:file stays strictly read-only and the config
+// directory receives only the namespace operations the staged replacement
+// requires.
+func TestSELinuxPolicyAdminTokenReplacement(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "type docker_helper_admin_token_t, file_type;") {
+		t.Error("policy must define docker_helper_admin_token_t as file_type")
+	}
+
+	// The token type carries the full replacement lifecycle.
+	wantAllow := "allow docker_helper_t docker_helper_admin_token_t:file { create open read write getattr setattr rename unlink };"
+	if !strings.Contains(content, wantAllow) {
+		t.Errorf("policy must grant the token replacement lifecycle: %s", wantAllow)
+	}
+
+	// The staging object is labeled through the exact filename transition only.
+	wantTransition := `type_transition docker_helper_t docker_helper_config_t:file docker_helper_admin_token_t ".admin-token.new";`
+	if !strings.Contains(content, wantTransition) {
+		t.Errorf("policy must use the exact filename transition: %s", wantTransition)
+	}
+	if strings.Contains(content, `type_transition docker_helper_t docker_helper_config_t:file docker_helper_admin_token_t;`) {
+		t.Error("policy must not add a generic (unnamed) transition of config-dir files to the token type")
+	}
+
+	// docker_helper_config_t:file stays strictly read-only: no create,
+	// write, rename, unlink, or append on config_t files.
+	for _, fileLine := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(fileLine)
+		if !strings.HasPrefix(trimmed, "allow docker_helper_t docker_helper_config_t:file ") {
+			continue
+		}
+		if strings.Contains(trimmed, "create") || strings.Contains(trimmed, "write") ||
+			strings.Contains(trimmed, "rename") || strings.Contains(trimmed, "unlink") ||
+			strings.Contains(trimmed, "append") {
+			t.Errorf("docker_helper_config_t:file must stay read-only, got: %s", trimmed)
+		}
+	}
+
+	// The config directory receives only the namespace operations the staged
+	// replacement requires: the pre-existing search plus exactly
+	// write/add_name/remove_name, and nothing beyond that.
+	foundDirOps := ""
+	for _, dirLine := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(dirLine)
+		if strings.HasPrefix(trimmed, "allow docker_helper_t docker_helper_config_t:dir ") {
+			foundDirOps += " " + trimmed
+		}
+	}
+	if !strings.Contains(foundDirOps, "{ search }") {
+		t.Error("policy must keep the config directory search permission")
+	}
+	if !strings.Contains(foundDirOps, "{ write add_name remove_name };") {
+		t.Errorf("policy must grant exactly the config-directory namespace operations, got: %s", foundDirOps)
+	}
+	for _, extra := range []string{"create", "rmdir", "rename", "relabelto", "relabelfrom"} {
+		if strings.Contains(foundDirOps, extra) {
+			t.Errorf("config directory must not receive %q beyond the token replacement namespace operations", extra)
 		}
 	}
 }

@@ -112,13 +112,29 @@ func (a *App) setConfig(newCfg *Config) {
 	a.Config = &merged
 }
 
+// adminTokenStagingName is the one fixed staging pathname of the admin-token
+// replacement lifecycle, a sibling of the token file. A fixed staging name —
+// not a random tempfile — is what the shipped confined policy can express as
+// a narrow per-pathname contract: AppArmor grants write/rename access to
+// exactly this pathname, and the SELinux policy labels exactly this pathname
+// as the token replacement object through an exact filename transition.
+// It is an internal implementation pathname, not a config/API/CLI surface.
+const adminTokenStagingName = ".admin-token.new"
+
 // rotateAdminToken generates a new admin token, writes it to the token file
 // atomically, and updates the in-memory hash. The old token is immediately
 // invalidated. Returns the new token (never logged).
 //
 // The caller must have already authorized with the current admin token.
-// The function verifies that the authorizing token is still current before
-// committing the rotation, preventing stale concurrent rotations.
+// The whole replacement lifecycle runs under the existing admin-token hash
+// commit lock (a.mu): the authorizing token is verified current BEFORE the
+// staging pathname is touched, so a stale concurrent rotation fails without
+// touching the winner's state or the staging pathname. The staging file is
+// created, written, chmod'd 0600, fsynced, and closed at the fixed staging
+// pathname, then atomically renamed onto the token file. Every failure —
+// including a failed rename — leaves the current token file and the runtime
+// hash unchanged, removes the staging file, and returns an error; crash
+// residue at the exact staging pathname is cleaned by the next rotation.
 func (a *App) rotateAdminToken(authorizingHash [sha256.Size]byte) (string, error) {
 	// Generate a new admin token.
 	newToken, err := generateAdminToken()
@@ -127,62 +143,71 @@ func (a *App) rotateAdminToken(authorizingHash [sha256.Size]byte) (string, error
 	}
 	newHash := sha256.Sum256([]byte(newToken))
 
-	// Get a snapshot of the config for the token path.
+	// Resolve the token file and the fixed staging pathname before taking
+	// the commit lock. The admin token path is preserved across config
+	// reloads, so the snapshot is stable for the whole lifecycle.
 	cfg := a.getConfig()
 	tokenPath := cfg.AdminTokenPath
+	stagingPath := filepath.Join(filepath.Dir(tokenPath), adminTokenStagingName)
 
-	// Prepare temp file in the same directory as the target.
-	dir := filepath.Dir(tokenPath)
-	tmpFile, err := os.CreateTemp(dir, ".admin-token-*")
-	if err != nil {
-		return "", fmt.Errorf("cannot create temp token file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	cleanup := func() {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-	}
-
-	// Write token + newline.
-	if _, err := tmpFile.WriteString(newToken + "\n"); err != nil {
-		cleanup()
-		return "", fmt.Errorf("cannot write token file: %w", err)
-	}
-	// Set permissions before closing.
-	if err := tmpFile.Chmod(0600); err != nil {
-		cleanup()
-		return "", fmt.Errorf("cannot set token file permissions: %w", err)
-	}
-	// Sync to disk.
-	if err := tmpFile.Sync(); err != nil {
-		cleanup()
-		return "", fmt.Errorf("cannot sync token file: %w", err)
-	}
-	// Close the file.
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		return "", fmt.Errorf("cannot close temp token file: %w", err)
-	}
-
-	// Atomic commit: verify authorizing token is still current,
-	// then rename and update runtime hash under write lock.
+	// Commit under the existing rotation/hash lock: verify, stage, replace,
+	// update the runtime hash as one serialized lifecycle.
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Verify the authorizing token is still the current one.
+	// Verify the authorizing token is still the current one BEFORE touching
+	// the staging pathname: a stale concurrent rotation commits nothing and
+	// must not observe or mutate the winner's staging state.
 	if a.AdminTokenHash != authorizingHash {
-		// Stale concurrent rotation: another rotation already committed.
-		os.Remove(tmpPath)
 		return "", ErrStaleRotation
 	}
 
-	// Atomic rename.
+	// Clean crash residue from a previous rotation that died between staging
+	// and rename, so the exact staging pathname cannot permanently prevent a
+	// later valid rotation. Any other removal failure is fatal to this
+	// rotation: writing over unremovable residue is not a safe replacement.
+	if err := os.Remove(stagingPath); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("cannot clean stale token staging file: %w", err)
+	}
+
+	// Create the exact staging pathname, never a random tempfile.
+	f, err := os.OpenFile(stagingPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", fmt.Errorf("cannot create token staging file: %w", err)
+	}
+	cleanupStaging := func() {
+		f.Close()
+		os.Remove(stagingPath)
+	}
+
+	// Write token + newline.
+	if _, err := f.WriteString(newToken + "\n"); err != nil {
+		cleanupStaging()
+		return "", fmt.Errorf("cannot write token file: %w", err)
+	}
+	// Set permissions explicitly (also proves the MAC setattr permission).
+	if err := f.Chmod(0600); err != nil {
+		cleanupStaging()
+		return "", fmt.Errorf("cannot set token file permissions: %w", err)
+	}
+	// Sync to disk.
+	if err := f.Sync(); err != nil {
+		cleanupStaging()
+		return "", fmt.Errorf("cannot sync token file: %w", err)
+	}
+	// Close the file.
+	if err := f.Close(); err != nil {
+		os.Remove(stagingPath)
+		return "", fmt.Errorf("cannot close token staging file: %w", err)
+	}
+
+	// Atomic replacement through the deterministic test seam or os.Rename.
 	rename := os.Rename
 	if a.RotateRenameFn != nil {
 		rename = a.RotateRenameFn
 	}
-	if err := rename(tmpPath, tokenPath); err != nil {
-		os.Remove(tmpPath)
+	if err := rename(stagingPath, tokenPath); err != nil {
+		os.Remove(stagingPath)
 		return "", fmt.Errorf("cannot replace token file: %w", err)
 	}
 

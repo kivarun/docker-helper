@@ -3342,3 +3342,59 @@ func TestManagedFragmentLegacyParseIsDirectory(t *testing.T) {
 		t.Fatal("malformed metadata must fail closed")
 	}
 }
+
+// TestSystemProfileAdminTokenReplacementSurface proves the shipped system
+// profile expresses the SC1/H6 admin-token replacement lifecycle as the
+// narrowest possible file contract: the ONLY writable config-namespace
+// objects are the canonical admin token file and the ONE fixed staging
+// pathname the daemon renames onto it. config.json and every other config
+// path stay read-only; no broader write glob is granted.
+func TestSystemProfileAdminTokenReplacementSurface(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
+	}
+	content := string(data)
+
+	// The exact token-replacement rules must be present.
+	for _, rule := range []string{
+		"/etc/docker-helper/admin.token rw,",
+		"/etc/docker-helper/.admin-token.new rw,",
+	} {
+		if !strings.Contains(content, rule) {
+			t.Errorf("system profile missing exact admin-token rule: %s", rule)
+		}
+	}
+
+	// The generic config tree stays read-only.
+	if !strings.Contains(content, "/etc/docker-helper/** r,") {
+		t.Error("system profile must keep the generic config tree read-only")
+	}
+	for _, broad := range []string{"/etc/docker-helper/** rw,", "/etc/docker-helper/** w,"} {
+		if strings.Contains(content, broad) {
+			t.Errorf("system profile must not grant a broad config write glob: %s", broad)
+		}
+	}
+
+	// Sweep every /etc/docker-helper rule: a write-capable permission set is
+	// allowed only on the two exact token-replacement pathnames.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 || !strings.HasPrefix(fields[0], "/etc/docker-helper") {
+			continue
+		}
+		path, perms := fields[0], strings.TrimSuffix(fields[len(fields)-1], ",")
+		if !strings.ContainsAny(perms, "wa") {
+			continue
+		}
+		switch path {
+		case "/etc/docker-helper/admin.token", "/etc/docker-helper/.admin-token.new":
+		default:
+			t.Errorf("system profile grants write on a config path beyond the token replacement: %s", trimmed)
+		}
+	}
+}

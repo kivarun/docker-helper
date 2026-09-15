@@ -675,13 +675,13 @@ func TestInitSystemSELinuxRelabelsDeploymentPaths(t *testing.T) {
 
 	origRC := deploymentRestorecon
 	var calls [][]string
-	tokenAtRelabel := "unset"
+	var tokenAtCall []string
 	deploymentRestorecon = func(args ...string) ([]byte, error) {
 		calls = append(calls, args)
 		if _, err := os.Stat(filepath.Join(dir, "admin.token")); os.IsNotExist(err) {
-			tokenAtRelabel = "absent"
+			tokenAtCall = append(tokenAtCall, "absent")
 		} else {
-			tokenAtRelabel = "present"
+			tokenAtCall = append(tokenAtCall, "present")
 		}
 		return nil, nil
 	}
@@ -693,15 +693,26 @@ func TestInitSystemSELinuxRelabelsDeploymentPaths(t *testing.T) {
 		t.Fatalf("initCore failed: %v", err)
 	}
 
+	// The tree relabels and the Docker CLI relabel run BEFORE the admin
+	// token is created; the exact admin-token relabel runs AFTER the token
+	// is written (SC1/H6 post-create relabel) so the fresh token carries the
+	// dedicated token replacement type.
 	want := [][]string{
 		{"-R", "-m", "/etc/docker-helper", "/var/lib/docker-helper"},
 		{"-m", "/usr/bin/docker"},
+		{"-m", filepath.Join(dir, "admin.token")},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("deployment restorecon calls = %v, want %v", calls, want)
 	}
-	if tokenAtRelabel != "absent" {
-		t.Errorf("deployment relabel must run before the admin token is created, got %q", tokenAtRelabel)
+	if len(tokenAtCall) != 3 {
+		t.Fatalf("expected 3 restorecon calls, got %d", len(tokenAtCall))
+	}
+	if tokenAtCall[0] != "absent" || tokenAtCall[1] != "absent" {
+		t.Errorf("deployment tree relabel must run before the admin token is created, got %v", tokenAtCall)
+	}
+	if tokenAtCall[2] != "present" {
+		t.Errorf("the admin-token relabel must run after the token is written, got %q", tokenAtCall[2])
 	}
 	for _, call := range calls {
 		for _, a := range call {

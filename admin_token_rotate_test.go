@@ -168,6 +168,11 @@ func TestRotateAdminTokenRenameFailure(t *testing.T) {
 			t.Errorf("temp file left behind: %s", entry.Name())
 		}
 	}
+
+	// The exact staging pathname is absent after the failed replacement.
+	if _, err := os.Stat(filepath.Join(dir, ".admin-token.new")); !os.IsNotExist(err) {
+		t.Error("staging file left behind after a failed rotation")
+	}
 }
 
 // TestRotateAdminTokenStaleCommit verifies that a rotation whose
@@ -811,5 +816,87 @@ func TestRotateAdminTokenCrashResidueRecovery(t *testing.T) {
 	}
 	if string(data) != newToken+"\n" {
 		t.Errorf("token file content = %q, want %q", string(data), newToken+"\n")
+	}
+}
+
+// TestRotateAdminTokenStaleDoesNotTouchStaging proves the serialized
+// replacement order: a stale concurrent rotation is rejected BEFORE the
+// staging pathname is touched, so the winner's staging state — including
+// crash residue the stale loser must never clean — stays untouched.
+func TestRotateAdminTokenStaleDoesNotTouchStaging(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	oldHash := app.getAdminTokenHash()
+
+	winner, err := app.rotateAdminToken(oldHash)
+	if err != nil {
+		t.Fatalf("winner rotateAdminToken() error: %v", err)
+	}
+
+	tokenPath := app.getConfig().AdminTokenPath
+	stagingPath := filepath.Join(filepath.Dir(tokenPath), ".admin-token.new")
+	// Sentinel residue at the exact staging pathname: the stale loser must
+	// not observe or clean it — only a later VALID rotation may.
+	if err := os.WriteFile(stagingPath, []byte("winner-staging-residue\n"), 0600); err != nil {
+		t.Fatalf("cannot stage sentinel residue: %v", err)
+	}
+
+	if _, err := app.rotateAdminToken(oldHash); !errors.Is(err, ErrStaleRotation) {
+		t.Fatalf("expected ErrStaleRotation, got %v", err)
+	}
+
+	// The staging pathname is untouched, the winner's state is untouched.
+	residue, err := os.ReadFile(stagingPath)
+	if err != nil {
+		t.Fatalf("stale rotation touched the staging pathname: %v", err)
+	}
+	if string(residue) != "winner-staging-residue\n" {
+		t.Errorf("staging residue changed by the stale rotation: %q", string(residue))
+	}
+	if app.getAdminTokenHash() != sha256.Sum256([]byte(winner)) {
+		t.Error("runtime hash changed by the stale rotation")
+	}
+
+	// A later VALID rotation cleans the residue and commits.
+	newToken, err := app.rotateAdminToken(app.getAdminTokenHash())
+	if err != nil {
+		t.Fatalf("recovery rotateAdminToken() error: %v", err)
+	}
+	if _, err := os.Stat(stagingPath); !os.IsNotExist(err) {
+		t.Errorf("staging residue still present after the valid rotation")
+	}
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("cannot read token file: %v", err)
+	}
+	if string(data) != newToken+"\n" {
+		t.Errorf("token file content = %q, want %q", string(data), newToken+"\n")
+	}
+}
+
+// TestRotateAdminTokenConfigJSONUnchanged proves the replacement lifecycle
+// touches only the token file and its staging pathname: an unrelated
+// config.json in the same directory is byte-for-byte unchanged across
+// rotation.
+func TestRotateAdminTokenConfigJSONUnchanged(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+
+	dir := filepath.Dir(app.getConfig().AdminTokenPath)
+	configPath := filepath.Join(dir, "config.json")
+	before := []byte(`{"allowed_roots":[],"session_ttl":"12h"}
+`)
+	if err := os.WriteFile(configPath, before, 0600); err != nil {
+		t.Fatalf("cannot stage config.json: %v", err)
+	}
+
+	if _, err := app.rotateAdminToken(app.getAdminTokenHash()); err != nil {
+		t.Fatalf("rotateAdminToken() error: %v", err)
+	}
+
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("cannot read config.json: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("config.json changed across the admin-token rotation")
 	}
 }
