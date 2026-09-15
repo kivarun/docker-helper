@@ -921,14 +921,36 @@ The HTTP API is the direct protocol interface and is fully supported for
 agent integrations, custom clients, and environments where the CLI binary
 is not installed.
 
-The `curl` examples below demonstrate direct HTTP use.
+The `curl` examples below demonstrate direct HTTP use. They feed the
+Authorization header to curl through its header-from-stdin form (`-H @-`),
+so the bearer value never appears in any process argument — a shell-expanded
+Bearer header argument would expose the value via `/proc/<curl>/cmdline`.
+Define these two header producers once; every example below is then
+copy-paste executable:
+
+```bash
+# Environment-held Session bearer (see the CLI quick start above).
+docker_helper_session_header() {
+  printf '%s' 'Authorization: Bearer '
+  printf '%s' "$DOCKER_HELPER_SESSION_TOKEN"
+  printf '\n'
+}
+
+# File-backed bearer (admin token, Principal/Launcher credential).
+docker_helper_header_from_file() {
+  printf '%s' 'Authorization: Bearer '
+  tr -d '\r\n' < "$1"
+  printf '\n'
+}
+```
 
 ### Pull
 
 ```bash
+docker_helper_session_header | \
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H @- \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
   -d '{"image":"alpine:3.24"}' \
   http://localhost/pull
 ```
@@ -939,9 +961,10 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 with an `operation_id`. The build runs in the background.
 
 ```bash
+docker_helper_session_header | \
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H @- \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
   -d '{"context":".","dockerfile":"Dockerfile","image":"myapp:v1"}' \
   http://localhost/build
 ```
@@ -950,9 +973,10 @@ Optional `build_args` (map of string keys to string values) passes
 build-time variables to Docker:
 
 ```bash
+docker_helper_session_header | \
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H @- \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
   -d '{"context":".","dockerfile":"Dockerfile","image":"myapp:v1","build_args":{"FOO":"bar","VERSION":"1.2.3"}}' \
   http://localhost/build
 ```
@@ -971,16 +995,18 @@ Response (HTTP 201):
 **Poll status** until `status` is `succeeded` or `failed`:
 
 ```bash
+docker_helper_session_header | \
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H @- \
   http://localhost/operations/op_abcdef1234567890abcdef1234567890
 ```
 
 **Read incremental logs** using the `offset` parameter:
 
 ```bash
+docker_helper_session_header | \
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H @- \
   'http://localhost/operations/op_abcdef1234567890abcdef1234567890/logs?offset=0'
 ```
 
@@ -994,9 +1020,10 @@ the bounded retention limit, `operation_log_max_bytes`).
 with an `operation_id`. The container runs in the background.
 
 ```bash
+docker_helper_session_header | \
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H @- \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
   -d '{"image":"alpine:3.24","command":["echo","hello"]}' \
   http://localhost/run
 ```
@@ -1016,16 +1043,18 @@ Track progress using the same operation workflow as build:
 - **Poll status** until `status` is `succeeded` or `failed`:
 
   ```bash
+  docker_helper_session_header | \
   curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-    -H "Authorization: Bearer $SESSION_TOKEN" \
+    -H @- \
     http://localhost/operations/op_abcdef1234567890abcdef1234567890
   ```
 
 - **Read incremental logs** using the `offset` parameter:
 
   ```bash
+  docker_helper_session_header | \
   curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-    -H "Authorization: Bearer $SESSION_TOKEN" \
+    -H @- \
     'http://localhost/operations/op_abcdef1234567890abcdef1234567890/logs?offset=0'
   ```
 
@@ -1047,8 +1076,9 @@ filesystem policy fails before any container starts with the
 Cancel a running build or run operation:
 
 ```bash
+docker_helper_session_header | \
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H @- \
   -X POST 'http://localhost/operations/op_abcdef1234567890abcdef1234567890/cancel'
 ```
 
@@ -1060,8 +1090,9 @@ Cancelling an already-terminal operation is idempotent (returns current state).
 Authenticate with a private registry before pulling images:
 
 ```bash
+docker_helper_session_header | \
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H @- \
   -H "Content-Type: application/json" \
   -d '{
     "registry": "registry.example.com",
@@ -1102,9 +1133,10 @@ Use `config show` to retrieve paths and tokens for scripting:
 SOCKET=$(docker-helper config show socket_path)
 curl --unix-socket "$SOCKET" http://localhost/health
 
-ADMIN_TOKEN=$(docker-helper config show admin_token)
+ADMIN_TOKEN_FILE="$(docker-helper config show admin_token_path)"
+docker_helper_header_from_file "$ADMIN_TOKEN_FILE" | \
 curl --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H @- \
   http://localhost/sessions
 ```
 
