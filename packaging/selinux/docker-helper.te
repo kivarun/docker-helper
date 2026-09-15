@@ -223,13 +223,31 @@ allow docker_helper_t docker_helper_config_t:file { read open getattr };
 # replacement requires (write/add_name/remove_name) — never a generic dir
 # write beyond that, and docker_helper_config_t:file keeps exactly
 # read/open/getattr (read-only): no create/write/rename/unlink on config_t
-# files. Arbitrary new config-dir names cannot become writable token
-# objects: the staging object is labeled through the exact filename
-# transition for ".admin-token.new" only. The deployment relabel of the
-# token pathnames (fresh-install post-create relabel and the
-# upgrade/reinstall migration) runs from the unconfined operator/packaging
-# context — the daemon never relabels the token, so no relabel permission
-# is granted here.
+# files, and existing config_t objects cannot be overwritten by a token
+# rename (the destination-object unlink permission is not granted).
+#
+# The token type is CREATION-constrained: a newly created staging file
+# receives docker_helper_admin_token_t only through the exact filename
+# transition for ".admin-token.new" (no generic config-dir transition), and
+# direct creation of an arbitrary fresh config-dir name stays denied (no
+# transition applies, so the new file inherits docker_helper_config_t and
+# create is not granted).
+#
+# ACCEPTED SELinux backend mechanic (proven at runtime, release-owner
+# ruling on PR #57 review round 2): SELinux does NOT provide
+# AppArmor-equivalent destination-basename mediation for rename. Once a
+# token_t inode exists, the granted directory namespace
+# (write/add_name/remove_name) plus the inode permissions (rename/unlink)
+# allow it to be renamed to an otherwise unused basename in the config
+# directory. This is a backend mechanic, not additional product authority:
+# the rotation lifecycle has ONE production rename (.admin-token.new ->
+# admin.token), and no API/CLI/config surface can request any other
+# config-directory rename.
+#
+# The deployment relabel of the token pathnames (fresh-install post-create
+# relabel and the upgrade/reinstall migration) runs from the unconfined
+# operator/packaging context — the daemon never relabels the token, so no
+# relabel permission is granted here.
 allow docker_helper_t docker_helper_config_t:dir { write add_name remove_name };
 allow docker_helper_t docker_helper_admin_token_t:file { create open read write getattr setattr rename unlink };
 

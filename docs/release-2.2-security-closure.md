@@ -119,7 +119,7 @@ risk rather than by the audit's original severity ordering.
 | **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **CLOSED_CURRENT** | SC1 | Authorization-before-probing ordering established at all four session-facing admission boundaries: the raw spelling is admitted lexically against the issued filesystem capability FIRST (workspace create against the effective ceiling, absolute run mount against the issued snapshot entries, build context/Dockerfile against the workspace, issuance-time `filesystem_roots` against the effective Launcher ceiling), and a spelling outside the capability is refused immediately WITHOUT any privileged filesystem probe — zero-probe seam evidence, not merely equal responses. The former symlink-alias admission (an outside spelling resolving into the capability) is removed as an explicit Release 2.2 security tightening. After admission the canonical `EvalSymlinks` + containment proofs remain the mandatory second security proof (inside-ceiling aliases work; inside-ceiling symlink escapes stay fail-closed); public unauthorized failures stay bounded/non-disclosing; admitted spellings keep their actionable diagnostics; run/build keep their stable public contracts with admission diagnostics retained operationally. The issued snapshot's authority remains the persisted path tree (position/path/access + digest) — a review-round retraction of a live-kind exact-capability inference is recorded below. |
 | **H4** | Build staging can consume unbounded tmpfs bytes/inodes/depth/files | **BLOCKER_FIX** | SC2 | Add measured hard ceilings for staged bytes, entries and depth, admitted/reserved before staging. Failure must be bounded and leave no residue. Do not introduce the Release 3 quota hierarchy. |
 | **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **BLOCKER_FIX** | SC2 | Bound response materialization, mounts/pins per operation, and concurrent/running operation admission at Session/global security ceilings. Measure defaults and reserve before expensive work. |
-| **H6** | Mandatory MAC policy blocks admin-token rotation | **CLOSED_CURRENT** | SC1 | The admin-token replacement lifecycle is rewritten around ONE fixed staging pathname (`.admin-token.new`, internal implementation pathname, not a config/API/CLI surface), serialized by the existing admin-token hash commit lock with the stale-rotation check BEFORE the staging pathname is touched, crash-residue recovery, and failure-safe cleanup (current token file and runtime hash unchanged, staging removed). The shipped MAC policy is narrowed to the token replacement lifecycle only: AppArmor grants write/rename on exactly the two token pathnames (the generic config tree and config.json stay read-only, no broader write glob); SELinux introduces the dedicated `docker_helper_admin_token_t` file type (MAC implementation state) with exact fcontext rules listed before the generic config-tree rule, the full replacement lifecycle granted on the token type only, an EXACT filename transition for `.admin-token.new` (no generic config-dir transition), `docker_helper_config_t:file` strictly read-only, and config-dir namespace operations limited to write/add_name/remove_name. Deployment labeling stays under the selinux_deploy owner: an exact post-create relabel after the initial token is written (the tree relabel runs before the token exists) and the packaged restorecon migrates a pre-H6 token on upgrade/reinstall without changing its value. Live enforcing UAT on the exact candidate proves rotation through the shipped confined service with old token rejected, new token accepted, no restart, 0600, no staging residue, config.json unchanged, no broader writable config surface, and no unexpected H6-policy denial on both backends. |
+| **H6** | Mandatory MAC policy blocks admin-token rotation | **CLOSED_CURRENT** | SC1 | The admin-token replacement lifecycle is rewritten around ONE fixed staging pathname (`.admin-token.new`, internal implementation pathname, not a config/API/CLI surface), serialized by the existing admin-token hash commit lock with the stale-rotation check BEFORE the staging pathname is touched, crash-residue recovery, and failure-safe cleanup (current token file and runtime hash unchanged, staging removed). The shipped MAC policy is narrowed to the token replacement lifecycle only: AppArmor (pathname-mediating) grants write/rename on exactly the two token pathnames (the generic config tree and config.json stay read-only, no broader write glob); SELinux (type-based) introduces the dedicated `docker_helper_admin_token_t` file type (MAC implementation state) with exact fcontext rules listed before the generic config-tree rule, the full replacement lifecycle granted on the token type only, an EXACT filename transition for `.admin-token.new` (no generic config-dir transition), `docker_helper_config_t:file` strictly read-only, and config-dir namespace operations limited to write/add_name/remove_name. ACCEPTED SELinux backend mechanic (release-owner ruling, PR #57 review round 2): SELinux does NOT provide AppArmor-equivalent destination-basename mediation for rename — once a token_t inode exists, the granted directory namespace + inode permissions may allow it to be renamed to an otherwise unused basename in the config directory; creation stays exact-name constrained, existing `docker_helper_config_t` objects stay immutable, and this is a backend mechanic, not additional product authority (no path-policy framework, token subdirectory architecture, or rename broker; see the H6 evidence ledger). Deployment labeling stays under the selinux_deploy owner: an exact post-create relabel after the initial token is written (the tree relabel runs before the token exists) with failed-relabel recovery (the just-created token file is removed, no partial initialization), and the packaged restorecon migrates a pre-H6 token on upgrade/reinstall without changing its value. Live enforcing UAT on the exact candidate proves rotation through the shipped confined service with old token rejected, new token accepted, no restart, 0600, no staging residue, config.json unchanged, no broader writable config surface, and no unexpected H6-policy denial on both backends. |
 | **H7** | A local user can occupy the optional TCP port and drive the service into systemd start-limit failure | **BLOCKER_FIX** | SC2 | Current code still creates the Unix listener and then treats TCP bind failure as fatal, while the shipped service has `Restart=on-failure` plus a finite start-limit. The authoritative local Unix service must not be permanently denied by unauthenticated TCP port capture. |
 | **H8** | External MAC commands can hold shared coordination long enough to delay emergency disable | **BLOCKER_FIX** | SC2 | Existing MAC command owners gain bounded cancellation/timeouts and the lifecycle lock path is reviewed so untrusted-size work cannot indefinitely hold administrative disable. Avoid a new queue/framework unless evidence requires it. |
 | **H9** | Agent container can receive the helper runtime directory and steal registry secrets/replace CA state | **CLOSED_CURRENT** | SC1 | Closed by composition with C1, without a second socket transport owner: with the privilege floor in place the strongest reachable workload privilege is the Principal UID:GID with no capabilities and no-new-privileges, which the root-owned `0700` helper-private runtime state denies; the read-only projection and unchanged bearer authentication are unchanged. Hostile helper-socket UAT on enforcing AppArmor and enforcing SELinux proved the socket transport functional, unauthenticated calls refused, private runtime/session Docker config unreadable, runtime immutable, and escalation dead (see the SC1 evidence ledger). |
@@ -641,11 +641,30 @@ hash commit lock) plus narrowed shipped policy:
   and the config directory limited to write/add_name/remove_name; no
   relabel permission granted to the daemon (deployment relabels run from
   the unconfined operator/packaging context);
+- ACCEPTED SELinux backend mechanic (release-owner ruling, PR #57 review
+  round 2, proven at runtime — see the evidence below): SELinux does NOT
+  provide AppArmor-equivalent destination-basename mediation for rename.
+  The token type is CREATION-constrained — a newly created staging file
+  receives `docker_helper_admin_token_t` only through the exact
+  `.admin-token.new` filename transition, and direct creation of an
+  arbitrary fresh config-dir name stays denied — but once a token_t inode
+  exists, the granted directory namespace
+  (write/add_name/remove_name) plus the inode permissions (rename/unlink)
+  allow it to be renamed to an otherwise unused basename in the config
+  directory. This is an accepted SELinux backend mechanic, NOT additional
+  product authority: the rotation lifecycle has ONE production rename
+  (`.admin-token.new` -> admin.token) serialized by the existing hash
+  commit lock, and no API/CLI/config surface can request an arbitrary
+  config-directory rename. No path-policy framework, token subdirectory
+  architecture, or rename broker is added to emulate AppArmor pathname
+  mediation;
 - deployment labeling under the existing selinux_deploy owner: system
   init applies the exact admin-token restorecon immediately after the
   initial token is written (the tree relabel runs before the token
   exists), so a fresh token carries the dedicated type before the first
-  daemon start; the packaged `restorecon -R /etc/docker-helper` migrates
+  daemon start; a failed fresh-init token relabel removes the just-created
+  token file (no partial initialization, retry init succeeds; round-2
+  blocker fix); the packaged `restorecon -R /etc/docker-helper` migrates
   a pre-H6 token on upgrade/reinstall without changing its value.
 
 Evidence:
@@ -708,6 +727,43 @@ Evidence:
     succeeded; old token → 401; new token → accepted; 0600; staging
     pathname absent; no restart; config.json unchanged; no AVC on the
     successful lifecycle.
+- SELinux rename-destination scope proof (run 34955703357,
+  uat-blackbox-opensuse-selinux, Tumbleweed enforcing VM, kernel 7.2.4,
+  candidate RPM sha256 `eebc701a…`): a controlled exact-policy probe
+  executed inside the ENFORCING `docker_helper_t` domain through the
+  shipped `SELinuxContext=` transient-service mechanism (operator relabel
+  of the probe binary to `docker_helper_exec_t`; no policy change)
+  measured the review-round-2 hypothesis and produced the runtime evidence
+  behind the ACCEPTED backend limitation above:
+  - probe context `system_u:system_r:docker_helper_t:s0`, enforcing;
+  - creating `/etc/docker-helper/.admin-token.new` as `docker_helper_t` →
+    inode labeled `system_u:object_r:docker_helper_admin_token_t:s0`
+    (exact filename transition proven on the create side);
+  - VERDICT: renaming that token_t inode to the UNUSED pathname
+    `/etc/docker-helper/h6-unused-name` was ALLOWED (and the rename back
+    to the staging pathname also allowed) — the exact filename transition
+    constrains the CREATED type, not a later rename destination. This
+    matches the kernel `may_rename` semantics
+    (`security/selinux/hooks.c`): the required permissions are
+    `remove_name|search` on the old dir, `rename` on the source inode,
+    `add_name|search` on the new dir — all granted; no dir-level `rename`
+    permission is checked;
+  - existing config objects remain immutable — every negative DENIED
+    (EACCES): write-open of config.json, unlink of config.json,
+    rename-away of config.json, rename of the token inode ONTO the
+    existing config.json (needs unlink on `docker_helper_config_t:file`),
+    and creation of an arbitrary fresh config-dir name (no transition →
+    inherits `docker_helper_config_t`, create denied). `sesearch` on the
+    live policy matched the shipped rules exactly: token file
+    `{create getattr open read rename setattr unlink write}`; config dir
+    `{add_name remove_name search write}`;
+  - admin.token/config.json SHAs and labels unchanged by the probe; the
+    probe cleaned up every object it created.
+  This investigation machinery (probe + fail-closed UAT stage) was removed
+  after the ruling: an ALLOWED rename to an unused basename is NOT a
+  permanent required behavior, and a future stricter SELinux/kernel/policy
+  would be fine and must not fail UAT. The evidence above is retained as
+  the reason the backend limitation is explicitly documented.
 
 ## Release-cycle integration
 
@@ -775,7 +831,9 @@ Implementation constraints:
 - H6: MAC changes are as narrow as the token replacement lifecycle; no write
   grant to the whole config directory. (Closed: one fixed staging pathname,
   exact-path AppArmor grants, a dedicated SELinux token type with an exact
-  filename transition, config tree read-only; see the SC1 evidence ledger.)
+  CREATE filename transition, config tree read-only; the accepted SELinux
+  rename-destination limitation is a backend mechanic, not a product write
+  grant — see the SC1 evidence ledger.)
 - M4: one config grammar/decoder owner.
 - M5: one accepted Principal username grammar before OS lookup and persistence.
 - M11: host-path control-character policy belongs to the shared path owner.
