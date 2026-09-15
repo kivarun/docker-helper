@@ -244,17 +244,26 @@ mac_h6_precheck() {
 # lifecycle (any .admin-token* spelling). It is the H6 RED discriminator: a
 # rotation failure without such a denial is not H6 evidence.
 mac_h6_denial_evidence() {
-  local staging="$1" token_file="$2"
-  # The kernel audit pipeline (kauditd) may hold AVC records briefly before
-  # they reach the kernel ring buffer, so the discriminator polls the fresh
-  # audit window bounded instead of assuming instant visibility.
-  local attempt=0 records
+  # The auditd userspace log (ausearch) is flushed asynchronously and can
+  # lag the kernel ring buffer by tens of seconds on this guest, so the
+  # discriminator polls BOTH the adapter audit source and the raw kernel
+  # ring buffer. This is an existence check — a single record can never be
+  # counted twice — and every candidate record is window-filtered.
+  local attempt=0 ts line filtered
+  local raws
   while [ "$attempt" -lt 30 ]; do
-    records="$(collect_denials)"
-    printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 && return 0
-    printf '%s\n' "$records" | grep -F "$(basename "$token_file")" >/dev/null 2>&1 && return 0
-    printf '%s\n' "$records" \
-      | grep 'denied' | grep -F 'docker_helper_config_t' | grep -F 'tclass=dir' >/dev/null 2>&1 && return 0
+    raws="$(collect_denials)
+$(journalctl -k --since "@${SE_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true)"
+    filtered="$(printf '%s\n' "$raws" \
+      | grep 'denied' | grep -E 'docker_helper_config_t|admin-token|admin\\.token' || true)"
+    if [ -n "$filtered" ]; then
+      while IFS= read -r line; do
+        ts="$(printf '%s\n' "$line" | audit_ts)"
+        if [ -n "$ts" ] && [ "$ts" -ge "$SE_AUDIT_START_EPOCH" ]; then
+          return 0
+        fi
+      done <<< "$filtered"
+    fi
     attempt=$((attempt + 1))
     sleep 2
   done
