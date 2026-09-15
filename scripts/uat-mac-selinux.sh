@@ -134,9 +134,17 @@ audit_ts() {
 audit_records() {
   local filter="$1" line ts raw ausearch_out
   if command -v ausearch >/dev/null 2>&1; then
-    ausearch_out="$(ausearch -m AVC -m USER_AVC -ts "$SE_AUDIT_START_AUSEARCH" 2>/dev/null || true)"
+    # No -ts filter: its date parsing is locale-dependent and mis-parses on
+    # this guest, silently emptying the source. The window filter is applied
+    # locally from the audit record timestamps instead.
+    ausearch_out="$(ausearch -m AVC -m USER_AVC 2>/dev/null | grep -E "$filter" || true)"
     if [ -n "$ausearch_out" ]; then
-      printf '%s\n' "$ausearch_out" | grep -E "$filter" | sort -u
+      printf '%s\n' "$ausearch_out" | while IFS= read -r line; do
+        ts="$(printf '%s\n' "$line" | audit_ts)"
+        if [ -n "$ts" ] && [ "$ts" -ge "$SE_AUDIT_START_EPOCH" ]; then
+          printf '%s\n' "$line"
+        fi
+      done | sort -u
       return 0
     fi
   fi
