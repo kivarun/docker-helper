@@ -2103,21 +2103,62 @@ fi
 scenario "M5: principal username grammar (raw JSON control spellings)"
 
 M5_USER="uatr2m5"
-M5_ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
-[ -n "$M5_ADMIN_TOKEN" ] || { echo "error: cannot read admin token for M5 scenario" >&2; exit 1; }
+[ -r /etc/docker-helper/admin.token ] || { echo "error: admin token file unreadable for M5 scenario" >&2; exit 1; }
+
+# m5_admin_header emits the Authorization header for the M5 curl calls ON
+# STDOUT. The bearer value is fed to curl through the header-from-stdin form
+# (`-H @-`): the header transits a pipe into curl's memory and never enters
+# any process argv, no plaintext header file is created, and the value is
+# never printed (curl argv carries only the literal `@-`).
+m5_admin_header() {
+    printf 'Authorization: Bearer '
+    tr -d '\r\n' < /etc/docker-helper/admin.token
+    printf '\n'
+}
 
 m5_post_principals() { # BODY OUTFILE -> sets M5_HTTP; writes the response to OUTFILE
-  M5_HTTP="$(curl --silent --output "$2" --write-out '%{http_code}' --max-time 5 \
-    --unix-socket "$SOCK" -H "Authorization: Bearer $M5_ADMIN_TOKEN" \
+  M5_HTTP="$(m5_admin_header | curl --silent --output "$2" --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H @- \
     -H 'Content-Type: application/json' -d "$1" \
     "http://localhost/principals" 2>/dev/null || true)"
 }
 
 m5_list_principals() { # OUTFILE -> sets M5_LIST_HTTP
-  M5_LIST_HTTP="$(curl --silent --output "$1" --write-out '%{http_code}' --max-time 5 \
-    --unix-socket "$SOCK" -H "Authorization: Bearer $M5_ADMIN_TOKEN" \
+  M5_LIST_HTTP="$(m5_admin_header | curl --silent --output "$1" --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H @- \
     "http://localhost/principals" 2>/dev/null || true)"
 }
+
+# M5 argv-secret self-proof: a bounded M5-style curl is deterministically held
+# alive (its header producer emits the header and keeps stdin open, so curl
+# blocks reading the `-H @-` header before any request is sent), and while it
+# is alive its /proc/<pid>/cmdline is inspected: the argv must carry the `-H`
+# `@-` header transport and must contain NO admin bearer value. The check
+# itself never places the token in a process argv (grep matches against the
+# token FILE, never a value argument) and never prints the inspected argv.
+M5_PROOF_DEADLINE=6
+{
+  m5_admin_header
+  sleep "$M5_PROOF_DEADLINE"
+} | curl --silent --max-time "$M5_PROOF_DEADLINE" -o /dev/null -H @- \
+    -d '{"username":"argv-proof"}' --unix-socket "$SOCK" \
+    "http://localhost/principals" >/dev/null 2>&1 &
+M5_PROOF_PID=$!
+sleep 1
+M5_PROOF_ALIVE=0
+kill -0 "$M5_PROOF_PID" 2>/dev/null && M5_PROOF_ALIVE=1
+M5_PROOF_CMDLINE="/proc/$M5_PROOF_PID/cmdline"
+if [ "$M5_PROOF_ALIVE" = "1" ] \
+    && tr '\0' '\n' <"$M5_PROOF_CMDLINE" 2>/dev/null | grep -qx -- '-H' \
+    && tr '\0' '\n' <"$M5_PROOF_CMDLINE" 2>/dev/null | grep -qx -- '@-' \
+    && ! grep -qF -f <(grep -v '^$' /etc/docker-helper/admin.token) \
+        <(tr '\0' '\n' <"$M5_PROOF_CMDLINE" 2>/dev/null); then
+  acc_ok "M5 curl argv carries the @- header form and no admin bearer (live /proc proof; argv content withheld)"
+else
+  acc_fail "M5 argv-secret self-proof failed (alive=$M5_PROOF_ALIVE; argv content withheld)"
+fi
+kill "$M5_PROOF_PID" 2>/dev/null || true
+wait "$M5_PROOF_PID" 2>/dev/null || true
 
 # json_field_compact extracts a field value from a COMPACT JSON document read
 # on the given file (the daemon's raw HTTP responses; the suite's json_field
