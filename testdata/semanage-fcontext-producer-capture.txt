@@ -1,0 +1,8 @@
+/m12-evidence/short(/.*)?                          all files          system_u:object_r:docker_helper_workspace_t:s0 
+/m12-evidence/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(/.*)? all files          system_u:object_r:docker_helper_workspace_t:s0 
+/m12-evidence/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb(/.*)? all files          system_u:object_r:docker_helper_workspace_t:s0 
+/m12-evidence/meta\.test\+file\[1\](/.*)?          all files          system_u:object_r:docker_helper_workspace_t:s0 
+/m12-evidence/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc all files          system_u:object_r:docker_helper_workspace_t:s0 
+/m12-evidence/none-probe                           all files          <<None>>
+/m12-evidence/trail                                all files          system_u:object_r:docker_helper_workspace_t:s0 
+/m12-evidence/eq-dest = /m12-evidence/eq-src

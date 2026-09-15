@@ -958,6 +958,225 @@ func TestParseFcontextLine(t *testing.T) {
 	}
 }
 
+// --- SC1/M12: the real semanage producer grammar (captured evidence) ---
+//
+// The M12 tests parse the EXACT bytes of a real producer capture:
+// `semanage fcontext -l -C -n` over local rules created through the real
+// `semanage fcontext -a` on the supported Tumbleweed/SELinux UAT guest
+// (policycoreutils 3.11-2.2, selinux-policy-targeted 20260910-1.1; capture
+// machinery scripts/uat-semanage-grammar-evidence.sh, evidence run
+// 34964280124, byte-verified against the run's od/base64 dumps). The fixture
+// keeps the producer's exact whitespace: the pattern column is padded to a
+// display width and the type column (e.g. "all files") is padded to
+// another, so a pattern at or beyond the pattern column's width is followed
+// by a SINGLE separator space while a short pattern carries a wide padding
+// run. Ordinary records end with one trailing space before the newline; the
+// <<None>> and equivalence records do not.
+//
+// The real producer refuses space-carrying file specifications at add time
+// ("File specification can not include spaces", captured evidence), so the
+// pattern column never contains an ordinary space and every interior
+// whitespace run in a record is a column separator — including the
+// padding-collapsed run after a long pattern.
+
+// producerCaptureRecords loads the real producer capture fixture and proves
+// the fixture identity has not drifted (8 records).
+func producerCaptureRecords(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/semanage-fcontext-producer-capture.txt")
+	if err != nil {
+		t.Fatalf("producer capture fixture unreadable: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) != 8 {
+		t.Fatalf("producer capture fixture changed: %d records, want 8", len(lines))
+	}
+	return lines
+}
+
+// findCaptureRecord selects one captured record by a distinctive marker.
+func findCaptureRecord(t *testing.T, lines []string, marker string) string {
+	t.Helper()
+	for _, line := range lines {
+		if strings.Contains(line, marker) {
+			return line
+		}
+	}
+	t.Fatalf("capture record with marker %q not found", marker)
+	return ""
+}
+
+// TestParseFcontextLineRealProducerRecords parses each captured producer
+// record and asserts the semantic result: the EXACT pattern byte-for-byte
+// and the EXACT SELinux type / equivalence identity — not merely a parser
+// match. The long records go beyond the producer's pattern-column padding
+// width, where the old double-space split misclassified the record by
+// folding " all files" into the pattern.
+func TestParseFcontextLineRealProducerRecords(t *testing.T) {
+	const wsType = "docker_helper_workspace_t"
+	long55 := "/m12-evidence/" + strings.Repeat("a", 55) + "(/.*)?"
+	long200 := "/m12-evidence/" + strings.Repeat("b", 200) + "(/.*)?"
+	long80 := "/m12-evidence/" + strings.Repeat("c", 80)
+
+	tests := []struct {
+		name   string
+		marker string
+		want   fcontextRule
+	}{
+		{
+			name:   "short ordinary rule (padded columns)",
+			marker: "/m12-evidence/short(",
+			want:   fcontextRule{pattern: "/m12-evidence/short(/.*)?", fileType: wsType},
+		},
+		{
+			name:   "long rule beyond the producer padding width",
+			marker: "aaaa",
+			want:   fcontextRule{pattern: long55, fileType: wsType},
+		},
+		{
+			name:   "substantially longer rule",
+			marker: "bbbb",
+			want:   fcontextRule{pattern: long200, fileType: wsType},
+		},
+		{
+			name:   "escaped regex metacharacters exactly as docker-helper emits",
+			marker: "meta\\.",
+			want:   fcontextRule{pattern: `/m12-evidence/meta\.test\+file\[1\](/.*)?`, fileType: wsType},
+		},
+		{
+			name:   "long exact-file rule (regular-file shape)",
+			marker: "cccc",
+			want:   fcontextRule{pattern: long80, fileType: wsType},
+		},
+		{
+			name:   "<<None>> record (real shape with the type column)",
+			marker: "none-probe",
+			want:   fcontextRule{pattern: "/m12-evidence/none-probe", fileType: "", isEquivalence: true},
+		},
+		{
+			name:   "ordinary rule spelled with a trailing-space-resistant boundary",
+			marker: "trail",
+			want:   fcontextRule{pattern: "/m12-evidence/trail", fileType: wsType},
+		},
+	}
+	lines := producerCaptureRecords(t)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			line := findCaptureRecord(t, lines, tc.marker)
+			got, matched := parseFcontextLine(line)
+			if !matched {
+				t.Fatalf("parseFcontextLine(%q) did not match the real producer record", line)
+			}
+			if got.pattern != tc.want.pattern {
+				t.Errorf("pattern = %q, want %q (byte-for-byte)", got.pattern, tc.want.pattern)
+			}
+			if got.fileType != tc.want.fileType {
+				t.Errorf("fileType = %q, want %q", got.fileType, tc.want.fileType)
+			}
+			if got.isEquivalence != tc.want.isEquivalence {
+				t.Errorf("isEquivalence = %v, want %v", got.isEquivalence, tc.want.isEquivalence)
+			}
+		})
+	}
+
+	// The equivalence redirect record keeps its exact identity.
+	t.Run("equivalence redirect record", func(t *testing.T) {
+		line := findCaptureRecord(t, lines, "eq-dest")
+		got, matched := parseFcontextLine(line)
+		if !matched {
+			t.Fatalf("parseFcontextLine(%q) did not match the equivalence record", line)
+		}
+		if got.pattern != line {
+			t.Errorf("pattern = %q, want the full record line %q", got.pattern, line)
+		}
+		if !got.isEquivalence {
+			t.Errorf("isEquivalence = false, want true")
+		}
+		if got.equivalenceDest != "/m12-evidence/eq-dest" || got.equivalenceSource != "/m12-evidence/eq-src" {
+			t.Errorf("equivalence identity = (%q, %q), want (/m12-evidence/eq-dest, /m12-evidence/eq-src)",
+				got.equivalenceDest, got.equivalenceSource)
+		}
+	})
+}
+
+// TestParseFcontextLineFailClosedRealistic proves unrecognized non-empty
+// records still fail closed under the real-producer grammar, including
+// realistic malformed shapes (a type column without a context, a context
+// that is not the final token, and a single-token line).
+func TestParseFcontextLineFailClosedRealistic(t *testing.T) {
+	tests := []string{
+		"/m12-evidence/short(/.*)? all files",         // type column only, no context
+		"/m12-evidence/short(/.*)? all files garbage", // context is not the final token
+		"/m12-evidence/short(/.*)? all files ",        // trailing padding only
+		"<<None>>",                                    // single token
+		"/m12-evidence/x all",                         // no context column
+	}
+	for _, line := range tests {
+		t.Run(line, func(t *testing.T) {
+			if got, matched := parseFcontextLine(line); matched {
+				t.Errorf("parseFcontextLine(%q) = matched (%+v), want fail closed", line, got)
+			}
+		})
+	}
+}
+
+// TestListLocalFcontextRulesRealProducerCapture feeds the WHOLE real producer
+// capture through listLocalFcontextRules and proves the semantic result: all
+// eight records classified, in captured order, with exact patterns, exact
+// types, and exact equivalence identities — and that a second inspection
+// observes the SAME rules (no loss, no reordering, no width dependence).
+func TestListLocalFcontextRulesRealProducerCapture(t *testing.T) {
+	capture, err := os.ReadFile("testdata/semanage-fcontext-producer-capture.txt")
+	if err != nil {
+		t.Fatalf("producer capture fixture unreadable: %v", err)
+	}
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		return capture, nil
+	}
+
+	long55 := "/m12-evidence/" + strings.Repeat("a", 55) + "(/.*)?"
+	long200 := "/m12-evidence/" + strings.Repeat("b", 200) + "(/.*)?"
+	long80 := "/m12-evidence/" + strings.Repeat("c", 80)
+	want := []fcontextRule{
+		{pattern: "/m12-evidence/short(/.*)?", fileType: "docker_helper_workspace_t"},
+		{pattern: long55, fileType: "docker_helper_workspace_t"},
+		{pattern: long200, fileType: "docker_helper_workspace_t"},
+		{pattern: `/m12-evidence/meta\.test\+file\[1\](/.*)?`, fileType: "docker_helper_workspace_t"},
+		{pattern: long80, fileType: "docker_helper_workspace_t"},
+		{pattern: "/m12-evidence/none-probe", fileType: "", isEquivalence: true},
+		{pattern: "/m12-evidence/trail", fileType: "docker_helper_workspace_t"},
+		{pattern: "/m12-evidence/eq-dest = /m12-evidence/eq-src", isEquivalence: true,
+			equivalenceDest: "/m12-evidence/eq-dest", equivalenceSource: "/m12-evidence/eq-src"},
+	}
+
+	for round := 1; round <= 2; round++ {
+		rules, err := mgr.listLocalFcontextRules()
+		if err != nil {
+			t.Fatalf("round %d: listLocalFcontextRules failed on the real producer capture: %v", round, err)
+		}
+		if len(rules) != len(want) {
+			t.Fatalf("round %d: %d rules, want %d; got %+v", round, len(rules), len(want), rules)
+		}
+		for i, r := range rules {
+			if r != want[i] {
+				t.Errorf("round %d: rule %d = %+v, want %+v", round, i, r, want[i])
+			}
+		}
+	}
+
+	// The long rules feed the SAME ownership model: the exact long directory
+	// pattern is present with the workspace type through the shared
+	// fcontextRulePresent owner, and the long exact-file stem classifies
+	// through the shared stem authority (no parallel long-rule path).
+	if !fcontextRulePresent(want, long55, "docker_helper_workspace_t") {
+		t.Errorf("the exact long rule must be present through the shared rule inventory")
+	}
+	if stem := fcontextStem(long55); stem != "/m12-evidence/"+strings.Repeat("a", 55) {
+		t.Errorf("fcontextStem(long rule) = %q, want the exact literal boundary", stem)
+	}
+}
+
 // --- Fcontext argv tests ---
 
 func TestFcontextAddExactArgv(t *testing.T) {
