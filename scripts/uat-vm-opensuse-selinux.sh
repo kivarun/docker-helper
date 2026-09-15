@@ -68,6 +68,10 @@
 #       -> existing black-box UAT (UAT_PLATFORM=opensuse UAT_INSTALL=rpm
 #          UAT_MAC=selinux, prebuilt RPM)            [result recorded, collect-all]
 #       -> SELinux mount-pin / RPM postinstall regression  [result recorded]
+#       -> SC1/H6 SELinux rename-destination proof (exact-policy probe inside
+#          the enforcing docker_helper_t domain; an ALLOWED unused-name rename
+#          fails the stage as an architecture warning, a DENIED rename is
+#          recorded with its AVC)                   [result recorded, collect-all]
 #       -> Release-2 SELinux targeted regression groups 1-6 (collect-all runner)
 #       -> RPM/SELinux lifecycle                  [result recorded, collect-all]
 #       -> RuntimeDirectory socket replacement regression
@@ -223,6 +227,15 @@ log "== 6d. compile the hostile privilege reporter (host, candidate checkout) ==
   || fail "hostile privilege reporter compilation failed"
 vm_selinux_transfer_artifact "workload-privilege-reporter" /tmp/uat-wls-reporter
 
+# The H6 rename-destination probe (PR review round 2 architecture-warning
+# check) compiles from the same candidate checkout on the host and runs inside
+# the enforcing docker_helper_t domain through the shipped SELinuxContext
+# mechanism (no policy change involved).
+log "== 6e. compile the H6 rename-destination probe (host, candidate checkout) =="
+( cd "$UAT_REPO_DIR/scripts/uat-h6-rename-proof" && CGO_ENABLED=0 go build -o /tmp/uat-h6-rename-proof . ) \
+  || fail "H6 rename-destination probe compilation failed"
+vm_selinux_transfer_artifact "h6-rename-proof" /tmp/uat-h6-rename-proof
+
 # ---------------------------------------------------------------------------
 # 6b-7a. two-stage Docker preparation + Docker SELinux health gate
 # ---------------------------------------------------------------------------
@@ -255,6 +268,34 @@ else
   log "docker-helper selinux check FAILED inside the guest (recorded)"
 fi
 record_stage "SELinux check diagnostic" "$SELCHECK_RESULT"
+
+# ---------------------------------------------------------------------------
+# 7c. SC1/H6 SELinux rename-destination proof (PR review round 2 architecture
+#     warning check). Runs the host-compiled probe inside the enforcing
+#     docker_helper_t domain through the shipped SELinuxContext mechanism and
+#     measures whether a created token_t inode can be renamed to an otherwise
+#     unused config-dir pathname, plus the config.json immutability negatives.
+#     GATE SEMANTICS: an ALLOWED rename fails the stage (architecture warning;
+#     the release owner must accept the backend limitation before canonical
+#     docs change); a DENIED rename is recorded with its AVC as regression
+#     evidence.
+# ---------------------------------------------------------------------------
+log "== 7c. SC1/H6 SELinux rename-destination proof =="
+H6RP_RESULT=FAIL
+if run_guest_capture "SC1/H6 SELinux rename-destination proof inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_H6_PROOF_BIN=/opt/uat-import/h6-rename-proof scripts/uat-selinux-h6-rename-proof.sh"; then
+  H6RP_RESULT=PASS
+  log "SC1/H6 SELinux rename-destination proof passed inside the guest"
+else
+  H6RP_EC=$?
+  if [ "$H6RP_EC" = 2 ]; then
+    H6RP_RESULT=BLOCKED
+    log "SC1/H6 SELinux rename-destination proof BLOCKED inside the guest (required scenario not exercised; fails the job)"
+  else
+    log "SC1/H6 SELinux rename-destination proof FAILED inside the guest (recorded; see the stage output for the measured verdict)"
+  fi
+fi
+record_stage "H6 rename-destination proof" "$H6RP_RESULT"
 
 # ---------------------------------------------------------------------------
 # 8. SELinux mount-pin / RPM postinstall regression
@@ -400,7 +441,7 @@ echo "============================="
 # is not acceptable for Release-2 — the historical docker socket blocker that
 # once justified treating BLOCKED as success is closed, so it must not remain
 # encoded as acceptance semantics.
-if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT"; then
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT" "$WLMAC_RESULT" "$MIG211_RESULT" "$H6RP_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"
