@@ -178,6 +178,13 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("workspace must be inside an allowed root: %w", ErrInvalidWorkspace)
 	}
 
+	// Shared host-path text grammar (SC1/M11): an admitted spelling carrying
+	// a control character is refused before any privileged filesystem
+	// probing — the raw validation suffices, no resolver or stat runs.
+	if err := validateHostPathText(rawSpelling); err != nil {
+		return nil, fmt.Errorf("workspace: %v: %w", err, ErrInvalidWorkspace)
+	}
+
 	// Filesystem mechanics after admission: resolution and type checks run
 	// only on an admitted spelling, and the canonical containment proof
 	// below remains the second, mandatory security proof — a symlink inside
@@ -193,6 +200,13 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
+	}
+
+	// Shared host-path text grammar after symlink resolution (SC1/M11): a
+	// harmless-looking caller spelling that resolves into a pathname
+	// containing a control character is rejected after resolution.
+	if err := validateHostPathText(absWorkspace); err != nil {
+		return nil, fmt.Errorf("workspace: %v: %w", err, ErrInvalidWorkspace)
 	}
 
 	// Check workspace is inside at least one allowed root and is a proper
@@ -523,6 +537,13 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceil
 			return nil, fmt.Errorf("filesystem root %q is outside the effective launcher policy: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
 		}
 
+		// Shared host-path text grammar (SC1/M11): an admitted spelling
+		// carrying a control character is refused before any privileged
+		// filesystem probing — the raw validation suffices.
+		if err := validateHostPathText(cleaned); err != nil {
+			return nil, fmt.Errorf("filesystem root %q: %v: %w", root.Path, err, ErrInvalidSessionFilesystemPolicy)
+		}
+
 		// Filesystem mechanics after admission: resolution and type checks
 		// run only on an admitted spelling, and the canonical ceiling proof
 		// in narrowSessionFilesystemPolicy remains the second, mandatory
@@ -537,6 +558,11 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceil
 		}
 		if !info.IsDir() && !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("filesystem root %q is not a directory or regular file: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
+		}
+		// Shared host-path text grammar after symlink resolution (SC1/M11):
+		// the resolved canonical path becomes the persisted policy identity.
+		if err := validateHostPathText(resolved); err != nil {
+			return nil, fmt.Errorf("filesystem root %q: %v: %w", root.Path, err, ErrInvalidSessionFilesystemPolicy)
 		}
 		canonical = append(canonical, AllowedRootEntry{Path: resolved, Access: access})
 	}

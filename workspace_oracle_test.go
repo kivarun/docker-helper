@@ -822,3 +822,146 @@ func TestFilesystemRootsAdmittedSpellingSemantics(t *testing.T) {
 		t.Fatalf("G missing root: %d probes, want 3", n)
 	}
 }
+
+// --- SC1/M11: the shared host-path text grammar at the Session admission ---
+
+// TestSessionCreateControlCharacterTextGrammar proves the shared host-path
+// text grammar at the Session-create admission boundary with its existing
+// canonical error class: a REAL directory inside the ceiling whose pathname
+// carries a control character that Unix permits (LF, TAB, DEL, C1) is
+// refused invalid_workspace without a single privileged filesystem probe
+// (the raw admitted spelling suffices), and a harmless-looking symlink
+// spelling that resolves into a control-character pathname is refused after
+// resolution by the post-resolution grammar check. No Session exists after
+// either refusal. (DEL and the other C0/C1 runes are JSON-escaped
+// explicitly: the transport-level encoding of such spellings is not the
+// subject here — the grammar refusal is.)
+func TestSessionCreateControlCharacterTextGrammar(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0].Path
+	home := filepath.Join(root, "home", "m11ws")
+	mux := http.NewServeMux()
+	registerRoutes(mux, app)
+	post := func(workspace string) *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]string{"workspace": workspace})
+		if err != nil {
+			t.Fatalf("cannot encode the workspace request: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+testAdminToken)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	raw := []struct {
+		name string
+		path string
+	}{
+		{"LF", filepath.Join(home, "with\nlf")},
+		{"TAB", filepath.Join(home, "with\ttab")},
+		{"DEL", filepath.Join(home, "with\x7fdel")},
+		{"C1", filepath.Join(home, "with\u0085c1")},
+	}
+	for _, r := range raw {
+		if err := os.MkdirAll(r.path, 0755); err != nil {
+			t.Fatalf("%s: cannot create the real control-character directory: %v", r.name, err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(r.path) })
+	}
+
+	reset, probes, _ := countSessionPathProbes(t)
+	for _, r := range raw {
+		reset()
+		resp := post(r.path)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d (body=%s)", r.name, resp.Code, resp.Body.String())
+		}
+		errResp := decodeAPIError(t, resp.Body.Bytes())
+		if errResp.Code != "invalid_workspace" {
+			t.Fatalf("%s: expected invalid_workspace, got %q (body=%s)", r.name, errResp.Code, resp.Body.String())
+		}
+		if !strings.Contains(errResp.Message, "control character") {
+			t.Fatalf("%s: message %q, want the host-path text-grammar diagnostic", r.name, errResp.Message)
+		}
+		if n := probes(); n != 0 {
+			t.Fatalf("%s: %d privileged filesystem probe(s) for a spelling the text grammar refuses", r.name, n)
+		}
+		if n := countLiveSessions(t, app); n != 0 {
+			t.Fatalf("%s: %d live session(s) exist after the refusal", r.name, n)
+		}
+	}
+
+	// Symlink spelling without controls resolving into a control-character
+	// pathname: refused after resolution (probes ran — the spelling was
+	// admitted — and the resolved canonical identity is refused).
+	reset()
+	target := filepath.Join(home, "resolved\ncontrol")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(target) })
+	link := filepath.Join(home, "clean-alias")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+	symResp := post(link)
+	if symResp.Code != http.StatusBadRequest {
+		t.Fatalf("symlink alias: expected 400, got %d (body=%s)", symResp.Code, symResp.Body.String())
+	}
+	if errResp := decodeAPIError(t, symResp.Body.Bytes()); !strings.Contains(errResp.Message, "control character") {
+		t.Fatalf("symlink alias: message %q, want the post-resolution text-grammar diagnostic", errResp.Message)
+	}
+	if probes() == 0 {
+		t.Fatal("symlink alias: the admitted spelling was never resolved")
+	}
+	if n := countLiveSessions(t, app); n != 0 {
+		t.Fatalf("symlink alias: %d live session(s) exist after the refusal", n)
+	}
+}
+
+// TestFilesystemRootsControlCharacterTextGrammar proves the shared host-path
+// text grammar at the issuance-time filesystem_roots boundary: a REAL
+// directory root inside the ceiling whose pathname carries a control
+// character is refused with the existing bounded invalid_filesystem_policy
+// class and message, with no privileged probe of the requested root spelling
+// and no Session state.
+func TestFilesystemRootsControlCharacterTextGrammar(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	setupTestLoggingDiscard(t)
+	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
+	root := app.Config.AllowedRoots[0].Path
+	tree := filepath.Join(root, "runs")
+	controlRoot := filepath.Join(tree, "cache\nlf")
+	if err := os.MkdirAll(controlRoot, 0755); err != nil {
+		t.Fatalf("cannot create the real control-character filesystem root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(controlRoot) })
+
+	_, probes, probePaths := countSessionPathProbes(t)
+	rec := postSessionThroughMux(t, app, launcherToken, rootsRequestBody(workspace, fmt.Sprintf(`[{"path":%q,"access":"read_write"}]`, controlRoot)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	errResp := decodeAPIError(t, rec.Body.Bytes())
+	if errResp.Code != "invalid_filesystem_policy" {
+		t.Fatalf("expected invalid_filesystem_policy, got %q (body=%s)", errResp.Code, rec.Body.String())
+	}
+	if errResp.Message != sessionFilesystemPolicyMessage {
+		t.Fatalf("message %q, want the bounded non-disclosing message %q", errResp.Message, sessionFilesystemPolicyMessage)
+	}
+	if n := countLiveSessions(t, app); n != 0 {
+		t.Fatalf("%d live session(s) exist after the refusal", n)
+	}
+	if n := probes(); n != 2 {
+		t.Fatalf("%d privileged filesystem probe(s) (want exactly the 2 workspace-admission probes)", n)
+	}
+	for _, p := range probePaths() {
+		if strings.Contains(p, controlRoot) {
+			t.Fatalf("privileged probe of the control-character root spelling %q", p)
+		}
+	}
+}

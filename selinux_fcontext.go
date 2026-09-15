@@ -713,30 +713,51 @@ func (m *selinuxFcontextManager) listLocalFcontextRules() ([]fcontextRule, error
 	return rules, nil
 }
 
-// parseFcontextLine parses a single line from semanage fcontext output.
-// Returns the rule and whether it was successfully parsed.
+// parseFcontextLine parses a single line from `semanage fcontext -l -C -n`
+// output (the real producer grammar, seobject.py fcontextRecords):
 //
-// Handles:
-// - Ordinary fcontext records: PATTERN  gen_context(...) or PATTERN  user:role:type:range
-// - Equivalence records (None): PATTERN  <<None>>
-// - Equivalence records (redirect): DEST = SOURCE
-// - Lines that cannot be classified return (fcontextRule{}, false).
+//   - Ordinary fcontext record: PATTERN<SP+>TYPE<SP+>CONTEXT — the producer
+//     pads the pattern column to a display width and the type column to
+//     another, so short patterns carry wide padding runs while a pattern at
+//     or beyond the pattern column's width is followed by a single
+//     separator space (captured Tumbleweed policycoreutils 3.11-2.2
+//     evidence, testdata/semanage-fcontext-producer-capture.txt); no fixed
+//     column width may be assumed. The context is `user:role:type[:range]`
+//     (plain) or `gen_context(...)` (accepted shape), followed by one
+//     trailing space; the middle TYPE column (e.g. "all files",
+//     "character device") may itself contain spaces.
+//   - Equivalence records (None): PATTERN<SP+>TYPE<SP+><<None>> and the
+//     redirect form DEST = SOURCE.
+//
+// The pattern column cannot contain a space: the real producer refuses
+// space-carrying file specifications at add time ("File specification can
+// not include spaces", captured evidence), and a SELinux context is one
+// token. The record's FIRST whitespace token is therefore the complete
+// pattern and its LAST whitespace token is the complete context — whatever
+// the padding runs collapsed to — without a width assumption and without
+// whole-line tokenization semantics that would fold a column into another.
+// Lines that cannot be classified return (fcontextRule{}, false).
 func parseFcontextLine(line string) (fcontextRule, bool) {
+	line = strings.TrimSpace(line)
+
 	// Check for equivalence redirect: "DEST = SOURCE"
 	if eq := parseEquivalenceRedirect(line); eq != nil {
 		return *eq, true
 	}
 
-	// Find the context part by looking for the double-space separator.
-	idx := strings.Index(line, "  ")
-	if idx < 0 {
+	// Split the record at its boundary whitespace runs: the first token is
+	// the complete pattern, the last token is the complete context, and
+	// everything between them is the producer's type column (padded, may
+	// contain spaces, and is not needed for classification).
+	first := strings.IndexByte(line, ' ')
+	if first <= 0 {
 		return fcontextRule{}, false
 	}
+	pattern := line[:first]
+	last := strings.LastIndexByte(line, ' ')
+	ctxPart := line[last+1:]
 
-	pattern := strings.TrimSpace(line[:idx])
-	ctxPart := strings.TrimSpace(line[idx+2:])
-
-	if pattern == "" {
+	if pattern == "" || ctxPart == "" {
 		return fcontextRule{}, false
 	}
 

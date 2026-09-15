@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -89,6 +88,9 @@ type boundaryResult struct {
 
 // validateBoundaryLexical checks a path string without filesystem access.
 // It is the authoritative lexical validator for stored managed boundaries.
+// Control characters are the shared host-path text grammar (SC1/M11); the
+// shared owner validates them, and this validator wraps the diagnostic in
+// the boundary input-error class.
 func validateBoundaryLexical(path string) error {
 	if !utf8.ValidString(path) {
 		return &inputError{msg: "path is not valid UTF-8"}
@@ -110,9 +112,9 @@ func validateBoundaryLexical(path string) error {
 		case '*', '?', '[', ']', '{', '}':
 			return &inputError{msg: fmt.Sprintf("path contains invalid character %q", string(c))}
 		}
-		if unicode.IsControl(c) {
-			return &inputError{msg: fmt.Sprintf("path contains control character %q", string(c))}
-		}
+	}
+	if err := validateHostPathText(path); err != nil {
+		return &inputError{msg: err.Error()}
 	}
 	return nil
 }

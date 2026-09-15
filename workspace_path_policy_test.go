@@ -431,3 +431,160 @@ func TestInitRejectsExactOptNonRoot(t *testing.T) {
 		t.Error("non-root resolveAllowedRoot(/opt) should be rejected")
 	}
 }
+
+// --- M11: host capability path text grammar ---
+//
+// A host capability path must not contain control characters that can
+// desynchronize line-oriented/tool output (the SELinux fcontext record is a
+// line-oriented producer artifact) or be unrepresentable as a host pathname.
+// Control characters are outside the Release 2.2 host-path capability text
+// grammar; ordinary printable characters — spaces inside a component, regex
+// metacharacters, ordinary Unicode — remain supported.
+
+// TestCanonicalizeWorkspacePathForAddRejectsControlCharacters creates REAL
+// filesystem objects whose final component carries a control character and
+// proves the common host-path canonicalization owner rejects them. A control
+// character on a NONEXISTENT path must be rejected with the text-grammar
+// diagnostic rather than the existence error, proving the caller spelling is
+// refused before any filesystem probe.
+func TestCanonicalizeWorkspacePathForAddRejectsControlCharacters(t *testing.T) {
+	base := testAllowedRootDir(t)
+
+	controls := []struct {
+		name  string
+		final string
+	}{
+		{"LF", "with\nlf"},
+		{"CR", "with\rcr"},
+		{"TAB", "with\ttab"},
+		{"C0 SOH", "with\x01control"},
+		{"DEL", "with\x7fdel"},
+		{"C1 NEL", "with\u0085nel"},
+	}
+	for _, c := range controls {
+		t.Run(c.name, func(t *testing.T) {
+			full := filepath.Join(base, c.final)
+			if err := os.MkdirAll(full, 0755); err != nil {
+				t.Fatalf("cannot create the real control-character directory: %v", err)
+			}
+			t.Cleanup(func() { os.RemoveAll(full) })
+
+			_, err := canonicalizeWorkspacePathForAdd(full)
+			if err == nil {
+				t.Fatalf("canonicalizeWorkspacePathForAdd(%q) accepted a control-character path", full)
+			}
+			if !strings.Contains(err.Error(), "control character") {
+				t.Fatalf("canonicalizeWorkspacePathForAdd(%q) error = %q, want the control-character diagnostic", full, err)
+			}
+		})
+
+		t.Run(c.name+" nonexistent", func(t *testing.T) {
+			nonexistent := filepath.Join(base, "absent", c.final)
+			_, err := canonicalizeWorkspacePathForAdd(nonexistent)
+			if err == nil {
+				t.Fatalf("canonicalizeWorkspacePathForAdd(%q) accepted a nonexistent control-character spelling", nonexistent)
+			}
+			if !strings.Contains(err.Error(), "control character") {
+				t.Fatalf("canonicalizeWorkspacePathForAdd(%q) error = %q, want the control-character diagnostic (not the existence error): the caller spelling must be refused before any filesystem probe", nonexistent, err)
+			}
+			if strings.Contains(err.Error(), "does not exist") {
+				t.Fatalf("canonicalizeWorkspacePathForAdd(%q) error = %q: the control character must be rejected before the existence probe", nonexistent, err)
+			}
+		})
+	}
+}
+
+// TestCanonicalizeIssuedTreePathForAddRejectsControlCharacters covers the
+// issued-tree MAC hand-off owner for both kinds: a directory with a control
+// character and a regular file with a control character must both be refused.
+func TestCanonicalizeIssuedTreePathForAddRejectsControlCharacters(t *testing.T) {
+	base := testAllowedRootDir(t)
+
+	dir := filepath.Join(base, "issued\ndir")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(base, "issued\tfile")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range []string{dir, file} {
+		if _, err := canonicalizeIssuedTreePathForAdd(p); err == nil {
+			t.Errorf("canonicalizeIssuedTreePathForAdd(%q) accepted a control-character path", p)
+		} else if !strings.Contains(err.Error(), "control character") {
+			t.Errorf("canonicalizeIssuedTreePathForAdd(%q) error = %q, want the control-character diagnostic", p, err)
+		}
+	}
+}
+
+// TestCanonicalizeWorkspacePathForAddControlViaSymlink proves the canonical
+// path is re-checked after symlink resolution: a harmless-looking caller
+// spelling that resolves into a pathname containing a control character is
+// rejected after resolution.
+func TestCanonicalizeWorkspacePathForAddControlViaSymlink(t *testing.T) {
+	base := testAllowedRootDir(t)
+
+	target := filepath.Join(base, "resolved\ncontrol")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "clean-alias")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := canonicalizeWorkspacePathForAdd(link)
+	if err == nil {
+		t.Fatal("canonicalizeWorkspacePathForAdd accepted a caller spelling that resolves into a control-character pathname")
+	}
+	if !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("canonicalizeWorkspacePathForAdd(%q) error = %q, want the post-resolution control-character diagnostic", link, err)
+	}
+}
+
+// TestValidateWorkspacePathPolicyTextGrammar covers the pure policy boundary,
+// including embedded NUL, which Unix path syscalls cannot represent: it is
+// rejected at the text-grammar boundary even though no real file with NUL can
+// exist.
+func TestValidateWorkspacePathPolicyTextGrammar(t *testing.T) {
+	rejected := []struct {
+		name    string
+		path    string
+		diagSub string
+	}{
+		{"NUL embedded", "/data/with\x00nul", "NUL"},
+		{"LF", "/data/with\nlf", "control"},
+		{"VT", "/data/with\x0bvt", "control"},
+		{"DEL", "/data/with\x7fdel", "control"},
+		{"C1 CSI", "/data/with\u009bcsi", "control"},
+	}
+	for _, c := range rejected {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateWorkspacePathPolicy(c.path)
+			if err == nil {
+				t.Fatalf("validateWorkspacePathPolicy(%q) accepted a control path", c.path)
+			}
+			if !strings.Contains(err.Error(), c.diagSub) {
+				t.Errorf("validateWorkspacePathPolicy(%q) error = %q, want a %q diagnostic", c.path, err, c.diagSub)
+			}
+		})
+	}
+
+	accepted := []struct {
+		name string
+		path string
+	}{
+		{"ASCII space inside component", "/data/with space/inside"},
+		{"regex metacharacters", "/data/we.rd+name[x]{1}(y)"},
+		{"ordinary unicode", "/data/ünïcode-目"},
+		{"punctuation", "/data/with!@#$%^&()-_=.,;'+"},
+	}
+	for _, c := range accepted {
+		t.Run(c.name, func(t *testing.T) {
+			if err := validateWorkspacePathPolicy(c.path); err != nil {
+				t.Errorf("validateWorkspacePathPolicy(%q) = %v, want accepted (ordinary printable text stays inside the grammar)", c.path, err)
+			}
+		})
+	}
+}
