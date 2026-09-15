@@ -251,7 +251,7 @@ mac_h6_denial_evidence() {
   # counted twice — and every candidate record is window-filtered.
   local attempt=0 ts line filtered
   local raws
-  while [ "$attempt" -lt 30 ]; do
+  while [ "$attempt" -lt 45 ]; do
     raws="$(collect_denials)
 $(journalctl -k --since "@${SE_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true)"
     filtered="$(printf '%s\n' "$raws" \
@@ -265,7 +265,7 @@ $(journalctl -k --since "@${SE_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || tru
       done <<< "$filtered"
     fi
     attempt=$((attempt + 1))
-    sleep 2
+    sleep 3
   done
   return 1
 }
