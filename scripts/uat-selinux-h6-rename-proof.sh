@@ -46,7 +46,22 @@ done
 
 echo "== preflight =="
 [ "$(getenforce)" = "Enforcing" ] || fail "guest is not enforcing (getenforce=$(getenforce))"
-systemctl is-active --quiet docker-helper.service || fail "docker-helper.service is not running"
+# The common black-box UAT may have stopped the service in its later phases;
+# the SELinux regression runner re-ensures it for the same reason. The probe
+# operates on the token/config files and does not call the daemon, but the
+# confined service must be startable under the installed policy before the
+# proof records anything.
+systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do
+  systemctl is-active --quiet docker-helper.service && break
+  sleep 1
+done
+systemctl is-active --quiet docker-helper.service \
+  || fail "docker-helper.service is not running (and did not start under the installed policy)"
+DH_PID="$(systemctl show -p MainPID --value docker-helper.service)"
+DH_DOMAIN="$(cut -d: -f3 "/proc/$DH_PID/attr/current" 2>/dev/null || true)"
+[ "$DH_DOMAIN" = "docker_helper_t" ] \
+  || fail "running daemon is not docker_helper_t (got '$DH_DOMAIN')"
 [ -f /etc/docker-helper/config.json ] || fail "config.json missing"
 [ -f /etc/docker-helper/admin.token ] || fail "admin.token missing"
 if [ -e /etc/docker-helper/.admin-token.new ]; then
