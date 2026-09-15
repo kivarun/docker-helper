@@ -245,17 +245,20 @@ mac_h6_precheck() {
 # rotation failure without such a denial is not H6 evidence.
 mac_h6_denial_evidence() {
   local staging="$1" token_file="$2"
-  local records
-  records="$(collect_denials)"
-  # The pre-fix denial manifests either on the created/replaced token
-  # pathname itself (name/path carries an .admin-token* spelling or the
-  # canonical token file name) or on the config-directory write the staged
-  # creation requires — for a directory write the kernel audit record
-  # carries the directory name, not the created file name.
-  printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 && return 0
-  printf '%s\n' "$records" | grep -F "$(basename "$token_file")" >/dev/null 2>&1 && return 0
-  printf '%s\n' "$records" \
-    | grep 'denied' | grep -F 'docker_helper_config_t' | grep -F 'tclass=dir' >/dev/null 2>&1
+  # The kernel audit pipeline (kauditd) may hold AVC records briefly before
+  # they reach the kernel ring buffer, so the discriminator polls the fresh
+  # audit window bounded instead of assuming instant visibility.
+  local attempt=0 records
+  while [ "$attempt" -lt 15 ]; do
+    records="$(collect_denials)"
+    printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 && return 0
+    printf '%s\n' "$records" | grep -F "$(basename "$token_file")" >/dev/null 2>&1 && return 0
+    printf '%s\n' "$records" \
+      | grep 'denied' | grep -F 'docker_helper_config_t' | grep -F 'tclass=dir' >/dev/null 2>&1 && return 0
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
 }
 
 # mac_h6_postcheck re-verifies the labels after a successful rotation and
