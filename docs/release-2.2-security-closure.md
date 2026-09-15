@@ -128,7 +128,7 @@ risk rather than by the audit's original severity ordering.
 | **M2** | Documentation puts bearer tokens directly in `curl` argv | **BLOCKER_FIX** | SC1 | Rewrite shipped examples to token-file/stdin/environment patterns that do not expand the secret into process argv; keep examples executable. |
 | **M3** | Registry credentials are plaintext in the per-Session Docker config | **DEFER_HARDENING** | SC4 | Plaintext storage remains, but the current independent boundary is the root-owned runtime plus per-Session `0700` directory and mandatory MAC. Do not add a keychain/encryption subsystem without demonstrated need. This disposition is conditional: C1/H9 hostile UAT must prove the file remains unreachable from a hostile workload; otherwise promote M3 back to a blocker. |
 | **M4** | Raw-config validation and `json.Unmarshal` accept different key grammar; bad values can reach panic-prone consumers | **CLOSED_CURRENT** | SC1 | ONE strict config-document ingest boundary owns JSON object grammar (one object, no trailing tokens), duplicate-member refusal (never last-wins), exact case-sensitive key recognition (case variants refused as unknown, never folded by encoding/json struct matching), the existing value validations, and the fileConfig projection from the proven exact-key map — the original untrusted byte stream is never struct-decoded after raw validation. Malformed config never reaches effective Config or runtime side effects; mutations refuse a malformed document without rewriting it. |
-| **M5** | NUL-containing Principal name can resolve through libc as one OS user but persist as a distinct DB identity | **BLOCKER_FIX** | SC1 | Current creation checks only non-empty input, resolves it through `user.Lookup`, then persists the original request string. Add one canonical username validation boundary before OS lookup/persistence; reject NUL/control aliases rather than creating a second name grammar. |
+| **M5** | NUL-containing Principal name can resolve through libc as one OS user but persist as a distinct DB identity | **CLOSED_CURRENT** | SC1 | One Principal username text grammar owner (`validatePrincipalUsername`) refuses empty and control-bearing spellings (C0 including LF/CR/TAB, DEL, the C1 controls; embedded NUL) BEFORE OS lookup, home resolution, persistence, and credential issuance — for the created Principal and the user-mode daemon-owner identity alike. Every other spelling is persisted exactly as supplied (no trim/fold/normalization, no invented useradd regex); the OS resolver remains the existence authority. RED alias proof, zero-lookup refusal, and exact-candidate raw-JSON UAT (see the SC1 evidence ledger). |
 | **M6** | Audit write failure does not abort the protected operation | **ACCEPTED_CONTRACT** | SC0/SC4 | Current Release 2.x audit is best-effort observability, not a fail-stop transaction boundary. Do not change operation success semantics merely to match the audit recommendation. Improve failure observability only if useful; a new fail-stop audit contract requires separate architecture acceptance. |
 | **M7** | Cancellation can leave an untracked running container when cidfile timing loses the race | **CLOSED_CURRENT** | SC0 | System-mode ownership no longer depends on cidfile timing: every run has server-owned operation/session labels, post-run cleanup first proves the correlated container absent through label provenance, and failed cleanup retains durable state for startup reconciliation. Preserve that single cleanup/provenance owner. |
 | **M8** | Principal disable/delete or Session deletion does not stop already-started work | **ACCEPTED_CONTRACT** | SC0 | Current 2.x lifecycle deliberately allows an already-started operation to finish after the authority/Session change; future requests are rejected. Existing exact-artifact regression group 3 proves this contract. |
@@ -1033,6 +1033,116 @@ Evidence:
   (N); duplicate-member startup refusal (O); the canonical config still
   starts, reloads, and mutates normally after all refusals (P).
 
+## SC1 — M5: one Principal username text grammar before OS identity resolution
+
+The audit class: system-mode Principal creation checked only non-empty
+input, resolved the supplied string through the libc-backed `user.Lookup`,
+and persisted the ORIGINAL request string with the resolved UID/GID/home.
+Under the C-string OS resolver ABI, the lookup of a NUL-bearing spelling is
+interpreted as the truncated canonical spelling, so one OS account answered
+for two distinct text identities while SQLite persisted BOTH as Principals
+(the NUL-alias create succeeded end to end — 201 with an issued credential
+— while `principals.username` kept a value no valid OS account spelling
+corresponds to). The user-mode daemon-owner path
+(`ensureUserModeOwnership` → `OSUserLookupByUID` →
+`insertDaemonOwnerPrincipal`) had the same shape for an OS-returned
+username.
+
+Closed with ONE grammar owner, `validatePrincipalUsername`
+(`principal.go`), owning the Release 2.2 Principal username text grammar:
+non-empty, and no Unicode control rune (`unicode.IsControl` — the C0
+controls including LF/CR/TAB, DEL, the C1 controls; an embedded NUL is a
+C0 control). Every other spelling is accepted EXACTLY as supplied — no
+trim, no case-fold, no Unicode normalization, no alphabet, case, or length
+rule, no invented useradd regex — and passed unchanged to the OS account
+resolver, which remains the authority for account existence. The refused
+class is one domain error (`ErrInvalidPrincipalUsername`); the public
+contract is `400 invalid_username` with the bounded message "invalid
+username" (the hostile spelling is never echoed into the public error),
+keeping the existing `missing_username`, `os_user_not_found`, and
+`409 principal_exists` contracts unchanged.
+
+Production wiring (both Principal INSERT paths; no second validator):
+
+- `createPrincipalWithOptionalCredential` runs the grammar FIRST — before
+  `OSUserLookup`, before home canonicalization and the global-ceiling
+  proof, before the transaction, the Principal INSERT, the default
+  Launcher provisioning, and the optional initial credential. The handler
+  only maps the domain result to the wire contract and classifies the
+  refused create distinctly in the audit (`invalid_username`), retaining
+  the supplied PrincipalName through the existing structured-audit JSON
+  escaping (no second log sanitizer).
+- `ensureUserModeOwnership` runs the same owner on the
+  `OSUserLookupByUID`-returned username before that value is used as a
+  Principal DB identity: a control-bearing resolved spelling fails
+  startup closed, inserting no Principal row and no default Launcher, and
+  daemon startup aborts before the ownership migration, so no migration
+  runs under that identity. OS resolver semantics are unchanged, and a
+  valid resolved spelling remains the stored identity — no
+  OS-returned-username substitution in either path.
+
+Evidence:
+
+- Real libc/NSS backend reproduction: the shipped static candidate is
+  `CGO_ENABLED=1`, so `os/user` resolves through the libc getpwnam ABI.
+  On the musl 1.2.6 evidence environment, a cgo build's
+  `user.Lookup("root\x00alias")` returned username "root", uid 0 — the
+  NUL-bearing spelling resolved AS the canonical account while remaining a
+  distinct Go string; the same aliasing was reproduced with a direct
+  `getpwnam("root\0alias")` C probe (the C string terminates at the first
+  NUL). The pure-Go backend (`CGO_ENABLED=0`) instead errors on the
+  spelling — a backend-dependent interpretation, which is exactly why the
+  grammar removes the resolver spelling question from the trust boundary
+  entirely rather than trusting either backend's accident.
+- RED (commit `8b47725`, tests through the existing entry points against
+  the pre-fix code): with the OSUserLookup seam aliasing the NUL spelling
+  to the canonical identity (the same uid/gid/home), the NUL-alias create
+  answered 201 through the real `POST /principals` route with an issued
+  credential and bearer token in the response, the resolver was consulted
+  with the hostile spelling, and SQLite persisted two distinct username
+  TEXT identities for one OS identity
+  (`TestPrincipalCreateNULAliasPersistsDistinctIdentity`, defect
+  demonstration); the desired-behavior tests (refusal matrix, distinct
+  audit classification, user-mode fail-closed) failed as designed.
+- GREEN: the direct grammar matrix (`TestValidatePrincipalUsernameGrammar`);
+  the wire refusal matrix through the real handler for NUL-alias, bare
+  NUL, LF, CR, TAB, SOH, DEL, and C1 NEL spellings with `issue_credential`
+  false and true — every refusal answers `400 invalid_username` with the
+  bounded message, consults `OSUserLookup` ZERO times, and leaves no
+  Principal, principal_allowed_roots, Launcher, or credential row and no
+  token in the response
+  (`TestPrincipalCreateControlUsernameRefusedBeforeOSUserLookup`); the
+  alias can no longer coexist with the canonical Principal (exactly one
+  identity; the canonical create with `issue_credential=true` keeps its
+  credential; `TestPrincipalCreateNULAliasCannotCoexistWithCanonical`);
+  the domain create path refuses with the typed error class and zero
+  resolver calls
+  (`TestPrincipalCreateRefusesInvalidUsernameDomainError`); printable
+  spellings (spaces, punctuation, printable non-ASCII) are NOT rejected
+  and reach the resolver with the exact supplied spelling
+  (`TestPrincipalCreatePrintableUsernamePassesToResolverUnchanged`);
+  unchanged contracts (`missing_username`, `os_user_not_found`,
+  `principal_exists`) plus the audit classification with the
+  PrincipalName round-trip and no secret keys
+  (`TestPrincipalCreateInvalidUsernameAuditClassified`); the user-mode
+  path refuses a control-bearing resolved username before any DB identity
+  use and with no ownership state
+  (`TestEnsureUserModeOwnershipRefusesControlUsernameBeforeDBIdentity`),
+  with the valid user-mode ownership suites unchanged.
+- GREEN exact-candidate raw-JSON UAT (Release-2 acceptance suite,
+  scenario M5, Ubuntu/DEB/AppArmor, real system service): real disposable
+  OS account; raw authenticated `POST /principals` with
+  `M5_USER\u0000alias` and `issue_credential=true` → `400
+  invalid_username`, no token/credential in the response, no alias row in
+  the Principal list, no Launcher for an alias Principal, service healthy;
+  canonical create succeeds with the real OS user's UID/GID/home and
+  exactly one Principal; the alias retry after the canonical create stays
+  `invalid_username` (not `principal_exists`, `os_user_not_found`, or
+  `internal_error`), proving grammar admission precedes OS resolution and
+  DB uniqueness; LF/TAB/DEL raw-JSON spellings answer the same bounded
+  refusal with no residue; ordinary Principal create/lifecycle still works
+  afterward; the CLI surfaces the daemon refusal (no local CLI grammar).
+
 ## Release-cycle integration
 
 Security closure is inserted **after the Release 2.2 feature contract is frozen
@@ -1076,12 +1186,12 @@ findings merely because they came from the same audit.
 
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
-**Queue:** `C3`, `M2`, `M5`. (C1 and H9 closed in SC1 — see the SC1
-evidence ledger. H2 and H3 closed in SC1 — see the SC1 evidence ledger
-below. M13 closed in SC1 — see the SC1 evidence ledger below. H6 closed in
-SC1 — see the SC1 evidence ledger below. M11 and M12 closed in SC1 — see
-the SC1 evidence ledger below. M4 closed in SC1 — see the SC1 evidence
-ledger below.)
+**Queue:** `C3`, `M2`. (C1 and H9 closed in SC1 — see the SC1 evidence
+ledger. H2 and H3 closed in SC1 — see the SC1 evidence ledger below. M13
+closed in SC1 — see the SC1 evidence ledger below. H6 closed in SC1 — see
+the SC1 evidence ledger below. M11 and M12 closed in SC1 — see the SC1
+evidence ledger below. M4 closed in SC1 — see the SC1 evidence ledger
+below. M5 closed in SC1 — see the SC1 evidence ledger below.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
@@ -1104,7 +1214,11 @@ Implementation constraints:
   rename-destination limitation is a backend mechanic, not a product write
   grant — see the SC1 evidence ledger.)
 - M4: one config grammar/decoder owner.
-- M5: one accepted Principal username grammar before OS lookup and persistence.
+- M5: one accepted Principal username grammar before OS lookup and
+  persistence. (Closed: one grammar owner, `validatePrincipalUsername`,
+  refusing empty and control-bearing spellings before the resolver on both
+  Principal write paths; every other spelling is persisted exactly as
+  supplied — no second name grammar, see the SC1 evidence ledger.)
 - M11: host-path control-character policy belongs to the shared path owner.
 - M12: the parser follows the producer grammar, not terminal-width spacing.
 
