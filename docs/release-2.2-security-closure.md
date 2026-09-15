@@ -125,7 +125,7 @@ risk rather than by the audit's original severity ordering.
 | **H9** | Agent container can receive the helper runtime directory and steal registry secrets/replace CA state | **CLOSED_CURRENT** | SC1 | Closed by composition with C1, without a second socket transport owner: with the privilege floor in place the strongest reachable workload privilege is the Principal UID:GID with no capabilities and no-new-privileges, which the root-owned `0700` helper-private runtime state denies; the read-only projection and unchanged bearer authentication are unchanged. Hostile helper-socket UAT on enforcing AppArmor and enforcing SELinux proved the socket transport functional, unauthenticated calls refused, private runtime/session Docker config unreadable, runtime immutable, and escalation dead (see the SC1 evidence ledger). |
 | **H10** | An allowed root lets the root daemon read files the Principal could not read under Unix DAC | **BLOCKER_DECISION** | SC3 | Decide whether a filesystem capability intentionally grants helper-mediated read independent of DAC or must additionally preserve Principal DAC/group/ACL semantics. Do **not** implement an owner-UID check as a fake Unix permission model. |
 | **M1** | Environment/build secret values appear in the Docker CLI process argv | **BLOCKER_DECISION** | SC3 | Inventory each secret-bearing channel and choose a supported transport/mitigation. `--env-file` is not assumed equivalent for arbitrary current values. Any residual `/proc` exposure must be explicit in threat/operations docs. |
-| **M2** | Documentation puts bearer tokens directly in `curl` argv | **BLOCKER_FIX** | SC1 | Rewrite shipped examples to token-file/stdin/environment patterns that do not expand the secret into process argv; keep examples executable. |
+| **M2** | Documentation puts bearer tokens directly in `curl` argv | **CLOSED_CURRENT** | SC1 | Every executable shipped HTTP example (README quick start, shipped agent skill) now feeds the Authorization header to curl through the header-from-stdin form (`-H @-`) via one environment-backed and one file-backed header producer — the bearer value never appears in any process argv. The admin example uses the existing `config show admin_token_path` path surface. RED synthetic-bearer `/proc` proof, GREEN argv-absence proof, exact-header delivery proof, and a static shipped-guidance regression (see the SC1 evidence ledger). |
 | **M3** | Registry credentials are plaintext in the per-Session Docker config | **DEFER_HARDENING** | SC4 | Plaintext storage remains, but the current independent boundary is the root-owned runtime plus per-Session `0700` directory and mandatory MAC. Do not add a keychain/encryption subsystem without demonstrated need. This disposition is conditional: C1/H9 hostile UAT must prove the file remains unreachable from a hostile workload; otherwise promote M3 back to a blocker. |
 | **M4** | Raw-config validation and `json.Unmarshal` accept different key grammar; bad values can reach panic-prone consumers | **CLOSED_CURRENT** | SC1 | ONE strict config-document ingest boundary owns JSON object grammar (one object, no trailing tokens), duplicate-member refusal (never last-wins), exact case-sensitive key recognition (case variants refused as unknown, never folded by encoding/json struct matching), the existing value validations, and the fileConfig projection from the proven exact-key map — the original untrusted byte stream is never struct-decoded after raw validation. Malformed config never reaches effective Config or runtime side effects; mutations refuse a malformed document without rewriting it. |
 | **M5** | NUL-containing Principal name can resolve through libc as one OS user but persist as a distinct DB identity | **CLOSED_CURRENT** | SC1 | One Principal username text grammar owner (`validatePrincipalUsername`) refuses empty and control-bearing spellings (C0 including LF/CR/TAB, DEL, the C1 controls; embedded NUL) BEFORE OS lookup, home resolution, persistence, and credential issuance — for the created Principal and the user-mode daemon-owner identity alike. Every other spelling is persisted exactly as supplied (no trim/fold/normalization, no invented useradd regex); the OS resolver remains the existence authority. RED alias proof, zero-lookup refusal, and exact-candidate raw-JSON UAT (see the SC1 evidence ledger). |
@@ -1139,9 +1139,87 @@ Evidence:
   exactly one Principal; the alias retry after the canonical create stays
   `invalid_username` (not `principal_exists`, `os_user_not_found`, or
   `internal_error`), proving grammar admission precedes OS resolution and
-  DB uniqueness; LF/TAB/DEL raw-JSON spellings answer the same bounded
+  DB uniqueness;   LF/TAB/DEL raw-JSON spellings answer the same bounded
   refusal with no residue; ordinary Principal create/lifecycle still works
   afterward; the CLI surfaces the daemon refusal (no local CLI grammar).
+
+## SC1 — M2: shipped bearer-token examples never expand the bearer into curl argv
+
+The audit class: shipped executable examples constructed the Authorization
+header by shell-expanding the real bearer value into curl's argv
+(`-H "Authorization: Bearer $TOKEN"`), exposing the secret through
+`/proc/<curl>/cmdline` to an observer with sufficient process visibility.
+The HTTP protocol itself (`Authorization: Bearer <token>`) is unchanged and
+stays unchanged: M2 is a shipped-guidance fix, not an auth/API change.
+
+Inventory (complete sweep of shipped current guidance: README.md,
+`.claude/skills/docker-helper/SKILL.md`, docs/agent-integration.md,
+docs/man/*, packaging/README.release.md, and the current architecture text;
+searched for curl/Authorization/Bearer/token-variable combinations):
+
+- Class A (executable current shell examples — fixed): README.md carried
+  ten Session examples (pull, build, build with build_args, operation
+  status, operation logs, run, run status, run logs, cancel, registry
+  login) spelling `-H "Authorization: Bearer $SESSION_TOKEN"`, plus the
+  admin raw-HTTP session listing that read the real token with
+  `ADMIN_TOKEN=$(docker-helper config show admin_token)` and expanded it
+  into curl argv; SKILL.md carried the delegated-credential Session
+  creation reading the credential file into `CREDENTIAL` and expanding it,
+  plus four Session examples spelling
+  `-H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN"`.
+- Deliberately unchanged: conceptual protocol notation (`Authorization:
+  Bearer <token>` in architecture.md, the README Bearer-authentication
+  security bullet, the agent-integration guide's conceptual Bearer
+  mention); historical/plan/audit documents; and internal test/UAT
+  scripts (class D, not the audit finding's documentation surface). The
+  man pages carried no executable bearer example and were not given one.
+
+Closed with ONE canonical safe pattern for all shipped Bash examples: a
+header producer piped into curl's header-from-stdin form (`-H @-`), so the
+bearer transits stdin and never enters a process argument:
+
+- `docker_helper_session_header` — the environment-held Session bearer
+  (`DOCKER_HELPER_SESSION_TOKEN`, the existing canonical environment name;
+  the former unexplained `$SESSION_TOKEN` alias is gone);
+- `docker_helper_header_from_file` — a file-backed bearer whose argument
+  is only the FILE PATH; the admin example now uses the existing computed
+  path surface `ADMIN_TOKEN_FILE="$(docker-helper config show
+  admin_token_path)"` (preserving relocated `DOCKER_HELPER_CONFIG`
+  behavior); `config show admin_token` product behavior is unchanged.
+- No derived Authorization-header temp file, no token printed, no command
+  substitution that puts the bearer back into a curl argument, and the
+  examples stay copy-paste executable (both producers are defined once per
+  guide).
+
+Evidence:
+
+- RED synthetic-bearer argv proof (pre-fix docs, deterministic, no
+  daemon, no real secret): with a synthetic marker held in the
+  environment, the old executable shape `-H "Authorization: Bearer
+  $TOKEN"` places `Bearer <marker>` in the live curl
+  `/proc/<pid>/cmdline` (executed and recorded as part of
+  `TestShippedHeaderProducersDeliverBearerWithoutArgvExpansion`'s
+  detector-sensitivity case, which asserts the leak IS detected). The
+  static regression failing on the pre-fix tree is the companion RED
+  (first failure: README.md:931).
+- GREEN argv-absence proof: executing the shipped environment-backed and
+  file-backed producer shapes with the synthetic marker shows the live
+  curl argv carrying exactly the literal `-H` and `@-` elements and NOT
+  the bearer value (in-memory comparison; the marker never appears in any
+  helper process argument).
+- Exact-header delivery proof: the same executed pipelines deliver the
+  exact `Authorization: Bearer <marker>` header to a local HTTP receiver,
+  and the file-backed helper leaves no derived header file (its argument
+  is only the token path).
+- Static regression owner: `release_2_2_security_hygiene_test.go` —
+  `TestShippedDocsNeverExpandBearerIntoCurlArgv` scans the explicit
+  shipped current-guidance file set (README.md, SKILL.md,
+  docs/agent-integration.md, both man pages) for the failure class
+  (`Authorization: Bearer $...`, `$(...)`, backtick forms) and does not
+  match conceptual `<token>` notation;
+  `TestShippedHeaderProducersDeliverBearerWithoutArgvExpansion` owns the
+  executable synthetic-bearer proofs above. No generic documentation
+  framework was created.
 
 ## Release-cycle integration
 
@@ -1186,12 +1264,13 @@ findings merely because they came from the same audit.
 
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
-**Queue:** `C3`, `M2`. (C1 and H9 closed in SC1 — see the SC1 evidence
+**Queue:** `C3`. (C1 and H9 closed in SC1 — see the SC1 evidence
 ledger. H2 and H3 closed in SC1 — see the SC1 evidence ledger below. M13
 closed in SC1 — see the SC1 evidence ledger below. H6 closed in SC1 — see
 the SC1 evidence ledger below. M11 and M12 closed in SC1 — see the SC1
 evidence ledger below. M4 closed in SC1 — see the SC1 evidence ledger
-below. M5 closed in SC1 — see the SC1 evidence ledger below.)
+below. M5 closed in SC1 — see the SC1 evidence ledger below. M2 closed in
+SC1 — see the SC1 evidence ledger below.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
