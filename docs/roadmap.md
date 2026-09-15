@@ -548,6 +548,67 @@ Release 2.2 design and execution owners:
 - [`release-2.2-implementation-plan.md`](release-2.2-implementation-plan.md) — implementation order, migrations, UAT, and release gates;
 - [`release-2.2-security-closure.md`](release-2.2-security-closure.md) — mandatory pre-stable external-audit rebase, security closure phases, hostile UAT, and security exit criteria.
 
+## 2.3
+
+### Main goal: remove user-mode daemon support
+
+Release 2.3 is an architectural simplification release. It removes the
+user-mode daemon before further runtime capabilities are added.
+
+The supported daemon becomes the root-owned system service protected by the
+mandatory AppArmor-or-enforcing-SELinux boundary. Non-root clients and agents
+remain first-class through Principal, Launcher, and Session credentials.
+
+This cutover removes the per-user daemon/service/socket/state path, transparent
+daemon-owner Principal/default-Launcher bootstrap, user/system daemon
+selection, user-mode MAC behavior, and the supported rootless-Docker deployment
+contract tied to user mode. Dead compatibility branches are deleted rather than
+left disabled.
+
+Earlier planning placed this already accepted simplification after Release 3
+(at one point around 3.1, and later as the first Release 4 work package). The
+2.3 decision pulls it forward so subsequent security/runtime design has one
+deployment model.
+
+Tarball removal is no longer coupled to daemon-mode removal. If the project
+continues to publish a tarball, it must become system-mode-only; native DEB/RPM
+packages remain the canonical installation path.
+
+The accepted cutover and migration/acceptance boundary are recorded in
+[`release-2.3-system-mode-only.md`](release-2.3-system-mode-only.md).
+
+## 2.4
+
+### Main goal: isolate Docker build execution
+
+Release 2.4 gives agent-controlled Dockerfile execution an explicit build
+sandbox.
+
+Ordinary `run` already executes under the Principal UID:GID with the
+server-owned privilege floor. Docker build has a different execution model:
+Dockerfile `RUN` instructions commonly execute as UID 0 inside the builder.
+That is not automatically host root, but the current rootful builder boundary
+is weaker than the normal workload contract.
+
+Release 2.4 fixes the boundary around the builder rather than filtering or
+rewriting Dockerfiles. Dockerfile semantics remain owned by Docker/BuildKit;
+docker-helper must not become a shell/Dockerfile security parser. The accepted
+outcome is that build-root cannot exercise host-root authority, with the exact
+rootless/user-namespace/dedicated-builder mechanism selected by a mandatory
+feasibility pass on supported distributions.
+
+Builder networking is an explicit part of that sandbox contract. The caller
+must not be able to escalate silently to host networking or privileged builder
+entitlements. Domain/IP allowlists, image allowlists, and generic egress policy
+remain separate capabilities rather than substitutes for build isolation.
+
+The external-audit H1 builder-network concern is intentionally not solved by
+Dockerfile inspection; Release 2.4 is the planned architecture point for the
+broader builder execution/network boundary.
+
+The accepted direction is recorded in
+[`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md).
+
 ## 3.0
 
 ### Main goal: managed-container runtime
@@ -562,22 +623,16 @@ Release 3 is reserved for the larger runtime architecture:
 - narrow Launcher-governed TCP port publishing on host IPv4 loopback;
 - explicit CPU, memory, and related resource limits.
 
-Release 3 is the LTS line and the final major release supporting the user-mode
-daemon, its supported rootless Docker configuration, and the project-produced
-installation tarball. All three remain fully supported and release-gated in
-3.x but are deprecated; system mode installed from the native DEB or RPM is the
-recommended deployment. Non-root clients and agents using the system service
-remain first-class and are not deprecated.
-
-After Release 4.0, the 3.x line is maintenance-only: security, critical
-correctness/data-integrity, and critical packaging/upgrade fixes, without
-Release 4 feature or architecture backports. Maintenance lasts for at least
-twelve months after Release 4.0; the exact end-of-support date is published no
-later than the Release 4.0 release.
+Release 3 is the LTS line. It starts from the system-mode-only deployment model
+established by Release 2.3 and the build-execution boundary established by
+Release 2.4. User-mode daemon compatibility and its rootless deployment model
+are not Release 3 acceptance surfaces. Non-root clients and agents using the
+system service remain first-class.
 
 Release 3 uses the Docker Engine API behind a docker-helper-owned backend
 boundary. Workload output remains a bounded direct client result and is not
-copied into daemon logs, audit, or journald.
+copied into daemon logs, audit, or journald. Engine/API migration must preserve
+the Release 2.4 build-sandbox contract rather than weakening it.
 
 Managed-container creation is synchronous and returns a stopped container with
 its effective Session-local name and DNS alias. State-changing start, stop,
@@ -616,6 +671,10 @@ Release 3 foundation documents:
 - [`release-3-security-and-test-plan.md`](release-3-security-and-test-plan.md) — cross-cutting threat boundaries, verification matrix, and release gates;
 - [`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md) — canonical terms and the current-to-target code map.
 
+The binding Release 3 scope supersedes older subordinate Release 3 planning
+text that still assumes user-mode deprecation during 3.x. Those records must be
+reconciled before their implementation work begins.
+
 ## 3.1
 
 ### Candidate: bounded Session leases for delegated orchestration
@@ -632,30 +691,17 @@ Release 3.1 semantics, API, persistence, migration, and acceptance work remain
 deferred until Release 3 is complete. The feature concept is recorded in
 [`release-3.1-session-lease-concept.md`](release-3.1-session-lease-concept.md).
 
-## 4.0
+User-mode removal is no longer part of the 3.1/post-3.0 plan; Release 2.3 owns
+that cutover.
 
-### First step: system-mode-only cutover
-
-Release 4 begins by removing the user-mode daemon and the project-produced
-installation tarball. This is the mandatory first Release 4 work package and
-must be completed and reviewed before any new Release 4 capability begins.
-After the cutover, the daemon has one supported deployment: the root-owned
-system service, installed from the native DEB or RPM and protected by the
-existing mandatory system-mode MAC boundary.
-
-The cutover removes user-mode service/runtime paths, transparent daemon-owner
-bootstrap, user socket selection, rootless-only support, tarball installers and
-bundle production, and their current-contract documentation and tests. It does
-not remove non-root CLI or agent access to the system service. Existing
-user-mode deployments either remain on the Release 3 LTS line or migrate
-explicitly; Release 4 does not adopt or silently transfer active user-mode
-Sessions or state.
-
-The short accepted direction and the later design/acceptance boundary are
-recorded in
-[`release-4-system-mode-only.md`](release-4-system-mode-only.md).
+## 4.0 and later
 
 ### Later capabilities: use-case driven
+
+Release 4 no longer begins with a deployment-mode cutover. The former
+system-mode-only Release 4 plan is superseded by Release 2.3; the historical
+pointer remains in
+[`release-4-system-mode-only.md`](release-4-system-mode-only.md).
 
 If concrete use cases justify remote capabilities, they remain a later,
 separate architecture problem:
