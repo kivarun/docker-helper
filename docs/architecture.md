@@ -1219,6 +1219,45 @@ Application acceptance of a root does not by itself prove MAC access. AppArmor
 requires the corresponding managed boundary rule. SELinux requires a permitted
 workspace file type.
 
+### Host-path capability text grammar
+
+Every stored host capability identity — a global/Principal/Launcher allowed
+root, an issued Session filesystem tree, a managed MAC boundary — is canonical
+text the daemon persists and feeds to line-oriented artifacts (config
+serialization, AppArmor managed fragments, persistent SELinux fcontext
+records). Control characters are outside the Release 2.2 host-path capability
+text grammar: one shared text-grammar owner (`validateHostPathText` in the
+shared workspace-path policy) refuses every Unicode control rune — the C0
+controls (including LF, CR, TAB), the C1 controls, and DEL — and embedded NUL
+explicitly (a host pathname cannot represent an embedded NUL). Control
+characters can desynchronize line-oriented tool output, and a tool
+synchronization hazard must be excluded before the text becomes a persisted
+authorization or MAC identity. Ordinary printable characters — including ASCII
+space inside a component, regex metacharacters, and ordinary Unicode — remain
+supported; the invariant is tool-synchronization safety, not "reject weird
+filenames".
+
+The grammar is applied by the canonical host-path owners, twice: the caller
+spelling is refused before any filesystem probing where the canonicalization
+owner owns caller syntax, and the resolved canonical path is re-checked after
+symlink resolution (a harmless-looking spelling may resolve into a pathname
+containing a control character). Every calling surface keeps its existing
+canonical error classification (invalid workspace, invalid session filesystem
+policy, invalid allowed root / config error, boundary input error). Backends,
+handlers, and the CLI duplicate no control-character list.
+
+The authorization path grammar and backend serialization stay separate
+concerns. The SELinux `escapeFcontextPath` remains regex-metacharacter
+escaping, not a second validator, and the local-fcontext-rule inventory is a
+backend mechanic, not product authority: it is parsed from the real
+`semanage fcontext -l -C -n` producer grammar, whose pattern column cannot
+contain an ordinary space because semanage itself refuses space-carrying file
+specifications at add time (captured Tumbleweed policycoreutils 3.11
+evidence); unrecognized non-empty records still fail closed. Container target
+paths are a different grammar: Docker `--mount` representability is owned by
+the bind-mount serializer (see
+[Docker bind-mount serialization](#docker-bind-mount-serialization)).
+
 ### Launcher scope
 
 Launcher scope narrows the Principal authorization ceiling for sessions
@@ -1443,7 +1482,10 @@ MAC state follows the concrete Session lifecycle, not the policy ceilings:
   shape derived from the proven boundary kind (a directory boundary owns
   its exact recursive pattern, a regular-file boundary its exact file
   pattern) — and never claims or deletes a compatible operator-owned rule
-  sharing the stem.   All fallible facts (boundary kind, mount safety, the
+  sharing the stem. The rule inventory behind the removal and overlap
+  decisions is parsed from the real `semanage fcontext -l -C -n` producer
+  grammar with no width-dependent split rule (backend mechanics; see
+  [Host-path capability text grammar](#host-path-capability-text-grammar)).   All fallible facts (boundary kind, mount safety, the
   owned rule's presence) are proven before the durable rule is deleted; a
   failure after the deletion is an error, never a falsely complete
   transition, and the canonical removal owner retains the ownership

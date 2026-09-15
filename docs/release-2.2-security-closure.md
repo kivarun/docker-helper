@@ -134,8 +134,8 @@ risk rather than by the audit's original severity ordering.
 | **M8** | Principal disable/delete or Session deletion does not stop already-started work | **ACCEPTED_CONTRACT** | SC0 | Current 2.x lifecycle deliberately allows an already-started operation to finish after the authority/Session change; future requests are rejected. Existing exact-artifact regression group 3 proves this contract. |
 | **M9** | User-mode pathname race exists because Docker resolves a path again without the system-mode pinning boundary | **ACCEPTED_CONTRACT** | SC0/SC4 | User mode does not claim isolation from another process running as the same OS user and Docker authority. System mode owns the stronger inode-pinning guarantee. Keep documentation aligned; extending user-mode pinning is optional hardening, not an implicit contract change. |
 | **M10** | Allowed-root symlinks are recomputed after validation without reapplying the safety policy | **CLOSED_CURRENT** | SC0 | The old raw-symlink re-resolution path is gone: current effective allowed-root policy is composed from canonical paths and the Session snapshot persists the issued canonical identity; later data-plane decisions consume that snapshot rather than re-resolving the original stored spelling. Preserve the symlink/path-policy regressions. |
-| **M11** | SELinux fcontext input escapes regex syntax but not file-format/control-character hazards | **BLOCKER_FIX** | SC1 | Current workspace/root policy does not reject newline/control characters and `escapeFcontextPath` only escapes regex metacharacters. Reject unsupported control characters at the canonical host-path policy owner, not only inside the SELinux backend. |
-| **M12** | `semanage fcontext` output parser disagrees with the producer's long-path spacing | **BLOCKER_FIX** | SC1 | Parse the real `semanage` output grammar robustly and add long-path/backend tests; do not preserve a width-dependent split rule. |
+| **M11** | SELinux fcontext input escapes regex syntax but not file-format/control-character hazards | **CLOSED_CURRENT** | SC1 | One shared host-path text-grammar owner (`validateHostPathText`, in the shared workspace-path policy) refuses every Unicode control rune (C0 including LF/CR/TAB, C1, DEL) and embedded NUL explicitly at every host-path policy/canonicalization owner that persists a host capability identity or hands one to a MAC backend — before filesystem probing on the caller spelling and again after symlink resolution. Ordinary printable spelling (spaces inside a component, regex metacharacters, ordinary Unicode) stays supported; no backend, handler, or CLI duplicates the list; `escapeFcontextPath` stays regex escaping. |
+| **M12** | `semanage fcontext` output parser disagrees with the producer's long-path spacing | **CLOSED_CURRENT** | SC1 | The record parser follows the captured REAL `semanage fcontext -l -C -n` producer grammar (Tumbleweed policycoreutils 3.11-2.2, exact bytes committed as the test fixture): the record's first whitespace token is the complete pattern (semanage refuses space-carrying file specifications at add time) and its last whitespace token is the complete context; no fixed display width, no whole-line Fields tokenization, no width-dependent split rule. Same-stem/ownership/overlap semantics, `<<None>>` semantics, equivalence parsing, and fail-closed handling of unrecognized records are unchanged. |
 | **M13** | Crafted bind-mount target can desynchronize Docker `--mount` CSV and lose `readonly` | **CLOSED_CURRENT** | SC1 | One canonical serializer owns every Docker bind form (user mounts, trusted CA injection, helper-socket runtime projection); the grammar is the authoritative Docker CLI parser (one CSV record read once, `key=value` fields or boolean flags) and the encoding is Go `encoding/csv` — the Docker-sanctioned quoting — so a crafted source/target stays exactly one field and cannot add an option, change the target, remove `readonly`, add `rw`, change type/source, or create a second logical field. Representability is a three-boundary invariant: the value must round-trip through the CSV record, survive Docker `MountOpt.Set` value validation unchanged (non-empty, no leading/trailing whitespace), and be exec-argv representable (no NUL); failing values are refused in the one serializer owner. The Docker argv is built and serialized before the operation admission, so a serialization failure of a daemon-owned value leaves no admitted Operation. Review-round-2 blocker fixes closed with exact-candidate real-Docker evidence (group 22 including the Docker value-validation boundary case, admission-order lifecycle regression). |
 
 The Low findings `L1`-`L14` remain an audit hardening backlog and do not
@@ -765,6 +765,177 @@ Evidence:
   would be fine and must not fail UAT. The evidence above is retained as
   the reason the backend limitation is explicitly documented.
 
+## SC1 — M11/M12: host-path text grammar and the real semanage producer grammar
+
+### M11 — control characters are outside the host capability path text grammar
+
+The audit class: the canonical workspace/root policy rejected broad and
+forbidden roots but accepted any byte sequence a Unix pathname can carry —
+including the control characters that persistent SELinux fcontext records,
+AppArmor fragments, and config serialization treat as line-oriented
+structure. `escapeFcontextPath` owns only regex-metacharacter escaping, so it
+was never the right owner for supported host-path spelling.
+
+Closed at ONE shared text-grammar owner, `validateHostPathText`
+(`workspace_path_policy.go`), the single owner of the invariant: a host
+capability path must not contain control characters that can desynchronize
+line-oriented/tool output or be unrepresentable as a host pathname. The
+canonical rule: every rune with `unicode.IsControl` — the C0 controls
+(including LF, CR, TAB), the C1 controls, and DEL — is outside the Release
+2.2 host-path capability text grammar; embedded NUL is rejected explicitly
+for a clearer diagnostic (Unix path syscalls cannot represent an embedded
+NUL at all). Ordinary printable characters — ASCII space inside a component,
+regex metacharacters, ordinary Unicode — remain supported. It is a
+tool-synchronization invariant, not "reject weird filenames".
+
+Owners swept (each consumes the shared owner; no duplicate list in the
+SELinux backend, AppArmor backend, handlers, or CLI):
+
+- `canonicalizeWorkspacePathForAdd` — caller spelling refused before any
+  filesystem probing; resolved canonical path re-checked through
+  `validateWorkspacePathSafety` after symlink resolution;
+- `canonicalizeIssuedTreePathForAdd` — caller spelling + resolved canonical
+  path (issued-tree MAC hand-off; directory and regular-file kinds both
+  covered);
+- `validateWorkspacePathPolicy` / `validateWorkspacePathSafety` — the pure
+  policy boundary re-checks;
+- Session-create admission and `canonicalizeSessionFilesystemRoots` — after
+  the H3 lexical ceiling admission (outside-ceiling spellings keep the
+  bounded authorization refusal unchanged) and before any privileged probe,
+  plus the post-resolution check; every failure keeps its existing canonical
+  class (`invalid_workspace` / `invalid_filesystem_policy`);
+- `validateBoundaryLexical` delegates the control-character rule to the
+  shared owner and keeps only the AppArmor fragment-format grammar;
+- every config/CLI/Principal/ownership allowed-root entry point funnels
+  through the two canonicalization owners, so no additional surface needed a
+  local check.
+
+NUL is special: Unix path syscalls cannot represent an embedded NUL, so NUL
+is tested at the pure text-grammar boundary (no real file with NUL can
+exist). DEL and other C0/C1 controls are additionally caught at the HTTP JSON
+transport boundary for spellings whose JSON encoding the transport itself
+rejects — a layered outcome, not the owner.
+
+Evidence:
+
+- RED (commit `637dab6` on the SC1 series, tests run against the pre-fix
+  code): 27 failing assertions — real filesystem objects whose final
+  component carries LF / CR / TAB / C0 SOH / DEL / C1 NEL accepted by
+  `canonicalizeWorkspacePathForAdd`, `canonicalizeIssuedTreePathForAdd`
+  (directory and regular-file kinds), and `validateWorkspacePathPolicy`
+  (including embedded NUL at the pure boundary); the nonexistent-spelling
+  cases prove the pre-fix code answered with the existence error, i.e. the
+  unsupported spelling reached the filesystem probe; and the three M12
+  real-producer failures below.
+- GREEN: the control-character cases are refused with the text-grammar
+  diagnostic; the nonexistent control-character spelling is refused with the
+  grammar diagnostic and without the existence probe; a symlink spelling
+  without controls resolving into a control-character pathname is refused
+  after resolution; printable spaces, regex metacharacters, punctuation, and
+  ordinary Unicode stay accepted.
+- GREEN at the Session boundaries (`TestSessionCreateControlCharacterTextGrammar`,
+  `TestFilesystemRootsControlCharacterTextGrammar`): a real control-character
+  directory inside the ceiling is refused `invalid_workspace` with zero
+  privileged filesystem probes, a harmless symlink alias is refused after
+  resolution, and an issuance-time `filesystem_roots` control-character root
+  keeps the existing bounded `invalid_filesystem_policy` class and message;
+  no live Session exists after any refusal.
+- GREEN exact-candidate enforcing-SELinux UAT (regression group 1,
+  `scripts/uat-regression-selinux-workspace-lifecycle.sh`): a real directory
+  whose pathname carries LF is refused through the public Session-create API
+  with the text-grammar diagnostic, the semanage fcontext inventory is
+  byte-identical before and after (no semanage mutation, no fcontext
+  residue), and the session inventory is unchanged (no Session/MAC
+  ownership residue).
+
+### M12 — the fcontext record parser follows the real semanage producer grammar
+
+The audit class: `parseFcontextLine` discovered an ordinary record with
+`strings.Index(line, "  ")` — a width-dependent assumption. The real producer
+pads the pattern column to a display width and the type column to another;
+sufficiently long patterns collapse their padding to the single separator
+space and invalidate the assumption.
+
+Closed against the REAL producer, not a synthetic guess. Evidence capture on
+the supported Tumbleweed/SELinux UAT guest (policycoreutils 3.11-2.2,
+selinux-policy-targeted 20260910-1.1; capture machinery
+`scripts/uat-semanage-grammar-evidence.sh` committed with the RED
+infrastructure and removed after the evidence was committed): local rules
+created through the real `semanage fcontext -a` for a short pattern, a
+pattern beyond the display width, a substantially longer one, a long exact
+(regular-file) pattern, regex metacharacters escaped exactly as docker-helper
+emits them, an equivalence record, and a `<<none>>` probe; the RAW
+`semanage fcontext -l -C -n` bytes preserved exactly (printable + `od -c` +
+base64) and committed as `testdata/semanage-fcontext-producer-capture.txt`
+(byte-verified against the run dumps). The producer source grammar
+(`seobject.py` `fcontextRecords`: `"%-50s %-18s %s"` forms) confirms the
+record shape.
+
+Real-producer findings:
+
+- an ordinary record's pattern column never contains an ordinary space:
+  semanage itself refuses space-carrying file specifications at add time
+  ("File specification can not include spaces", captured). A space-carrying
+  host path on enforcing SELinux therefore fails closed at backend mechanics
+  (unchanged behavior), and the format is NOT ambiguous for any
+  docker-helper-supported fcontext spelling — including the trailing-space
+  boundary, which the producer refuses at add time as well (captured). No
+  new public path restriction was added, so no architecture stop applies;
+- the middle type column (e.g. `all files`) may itself contain spaces and is
+  padded, so the parser must not tokenize the whole line.
+
+Old-parser failures proven against the captured records (RED, same commit
+`637dab6`): for a record whose pattern is at or beyond the pattern column's
+padding width, `strings.Index(line, "  ")` lands in the type column's
+padding, folding ` all files` into the parsed pattern — the helper's own
+rule becomes unfindable (the second ensure re-adds/fails closed as
+"unclassifiable") and its removal leaves the rule behind (ownership "proves"
+absence for a present rule); and the real-shape `<<None>>` record (with the
+type column) failed closed as unparseable, breaking every fcontext operation
+while such an operator rule exists.
+
+New parser grammar (one owner, `parseFcontextLine`; no parallel long-rule
+path): after the unchanged equivalence-redirect check (`DEST = SOURCE`),
+the record's FIRST whitespace token is the complete pattern and its LAST
+whitespace token is the complete context — whatever the padding runs
+collapsed to — with the padded middle type column ignored for
+classification. No fixed display width is encoded, no `strings.Fields`
+whole-line tokenization is used, parsing is not dependent on today's path
+lengths, and the context classification (`<<None>>`, `object_r:` extraction
+covering both the plain and the accepted `gen_context(...)` context shapes)
+is byte-for-byte the existing logic. `listLocalFcontextRules` still trims
+each line, skips empties, and fails closed on any non-empty unclassifiable
+record; the parsed rules feed the SAME `fcontextRule` model and the SAME
+overlap/ownership owners (`-C -n` local customizations only; operator
+overlap fail-closed; equivalence records checked; regex-literal round-trip
+still the authority for literal stems; helper-owned vs operator-compatible
+ownership unchanged; removal never deletes an unproven operator rule).
+
+Evidence:
+
+- RED (commit `637dab6`): the three long captured records parse with the
+  polluted pattern (`…(/.*)? all files`) and the real-shape `<<None>>`
+  record fails closed through `listLocalFcontextRules`.
+- GREEN deterministic tests from the captured bytes
+  (`TestParseFcontextLineRealProducerRecords`,
+  `TestParseFcontextLineFailClosedRealistic`,
+  `TestListLocalFcontextRulesRealProducerCapture`): every captured record
+  parses to the exact pattern byte-for-byte, the exact type, and the exact
+  equivalence identity; the whole capture yields all eight records in
+  captured order across two inspections (no loss, no reordering); realistic
+  malformed records (type column without a context, context not the final
+  token, single token) still fail closed.
+- GREEN exact-candidate enforcing-SELinux UAT (regression group 1): a
+  workspace whose directory pattern exceeds the producer's padding width
+  runs the normal lifecycle twice — create (rule created, raw producer
+  record and actual type asserted), second create on the SAME path
+  (re-observing the SAME rule through the parser — the RED behavior was the
+  "unclassifiable" refusal), consumer-count release (the rule is kept while
+  the first consumer still holds the boundary), and final removal (rule
+  removed, tree relabeled back) — with no false overlap, no unparseable
+  error, and no unexpected AVC in the lifecycle window. The long proof path
+  is spelled without spaces per the captured producer evidence above.
+
 ## Release-cycle integration
 
 Security closure is inserted **after the Release 2.2 feature contract is frozen
@@ -808,11 +979,11 @@ findings merely because they came from the same audit.
 
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
-**Queue:** `C3`, `M2`, `M4`, `M5`, `M11`,
-`M12`. (C1 and H9 closed in SC1 — see the SC1 evidence ledger. H2
-and H3 closed in SC1 — see the SC1 evidence ledger below. M13 closed in
-SC1 — see the SC1 evidence ledger below. H6 closed in SC1 — see the SC1
-evidence ledger below.)
+**Queue:** `C3`, `M2`, `M4`, `M5`. (C1 and H9 closed in SC1 — see the SC1
+evidence ledger. H2 and H3 closed in SC1 — see the SC1 evidence ledger
+below. M13 closed in SC1 — see the SC1 evidence ledger below. H6 closed in
+SC1 — see the SC1 evidence ledger below. M11 and M12 closed in SC1 — see
+the SC1 evidence ledger below.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
