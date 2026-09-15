@@ -249,14 +249,14 @@ mac_h6_denial_evidence() {
   # they reach the kernel ring buffer, so the discriminator polls the fresh
   # audit window bounded instead of assuming instant visibility.
   local attempt=0 records
-  while [ "$attempt" -lt 15 ]; do
+  while [ "$attempt" -lt 30 ]; do
     records="$(collect_denials)"
     printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 && return 0
     printf '%s\n' "$records" | grep -F "$(basename "$token_file")" >/dev/null 2>&1 && return 0
     printf '%s\n' "$records" \
       | grep 'denied' | grep -F 'docker_helper_config_t' | grep -F 'tclass=dir' >/dev/null 2>&1 && return 0
     attempt=$((attempt + 1))
-    sleep 1
+    sleep 2
   done
   return 1
 }
