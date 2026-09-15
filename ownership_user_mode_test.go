@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -251,8 +252,8 @@ func TestEnsureUserModeOwnershipRefusesControlUsernameBeforeDBIdentity(t *testin
 	defer restore()
 
 	owner, err := ensureUserModeOwnership(db, ModeUser)
-	if err == nil {
-		t.Fatalf("ensureUserModeOwnership accepted the control-bearing daemon-owner username %q as a Principal DB identity", owner.username)
+	if !errors.Is(err, ErrInvalidPrincipalUsername) {
+		t.Fatalf("ensureUserModeOwnership error = %v, want ErrInvalidPrincipalUsername for the control-bearing daemon-owner username (owner=%v)", err, owner)
 	}
 
 	var principals int

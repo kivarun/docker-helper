@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -127,79 +128,74 @@ func TestPrincipalCreateControlUsernameRefusedBeforeOSUserLookup(t *testing.T) {
 	}
 }
 
-// TestPrincipalCreateNULAliasPersistsDistinctIdentity is the RED defect
-// demonstration for M5: with the OSUserLookup seam aliasing a NUL-bearing
-// spelling to the canonical account's identity (exactly what the C-string ABI
-// does to getpwnam on the shipped cgo backend), the pre-fix creation path
-// consults the resolver with the hostile spelling, succeeds, and persists the
-// original spelling as a SECOND Principal identity for one OS account.
-func TestPrincipalCreateNULAliasPersistsDistinctIdentity(t *testing.T) {
+// TestPrincipalCreateNULAliasCannotCoexistWithCanonical proves the M5
+// identity invariant on the fixed line: the canonical spelling is created
+// (with its optional credential) and the NUL-bearing alias spelling — which
+// the seam resolves to the SAME OS identity — is refused 400 invalid_username
+// BEFORE the resolver, so SQLite never sees a second Principal TEXT identity
+// for one OS account and the alias attempt issues no credential or token.
+func TestPrincipalCreateNULAliasCannotCoexistWithCanonical(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	home := principalUsernameGrammarDB(t, app, "alice")
 	calls := installRecordingOSUserLookup(t, "2001", "2001", home)
 
-	canonicalBody := `{"username":"alice","issue_credential":false}`
-	w := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken, canonicalBody)
+	w := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken,
+		`{"username":"alice","issue_credential":true}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("canonical create: expected 201, got %d (body=%s)", w.Code, w.Body.String())
 	}
-
-	aliasBody := `{"username":"alice\u0000alias","issue_credential":false}`
-	w2 := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken, aliasBody)
-	if w2.Code != http.StatusCreated {
-		t.Fatalf("NUL alias create: expected 201 (defect), got %d (body=%s)", w2.Code, w2.Body.String())
+	var created map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode canonical create response: %v", err)
+	}
+	if created["uid"] != float64(2001) || created["gid"] != float64(2001) {
+		t.Fatalf("canonical create carried uid/gid %v/%v, want the aliased OS identity 2001/2001", created["uid"], created["gid"])
 	}
 
-	lookupConsulted := false
+	w2 := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken,
+		`{"username":"alice\u0000alias","issue_credential":true}`)
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("NUL alias create: expected 400 invalid_username, got %d (body=%s)", w2.Code, w2.Body.String())
+	}
+	var refused map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &refused); err != nil {
+		t.Fatalf("decode alias refusal: %v", err)
+	}
+	if refused["code"] != "invalid_username" {
+		t.Fatalf("alias refusal code = %v, want invalid_username", refused["code"])
+	}
+	for _, secretKey := range []string{"token", "credential"} {
+		if _, ok := refused[secretKey]; ok {
+			t.Fatalf("alias refusal leaked %q in the response", secretKey)
+		}
+	}
+
+	// The alias attempt must never have consulted the OS resolver: the only
+	// lookup is the canonical create's own.
 	for _, spelling := range *calls {
 		if strings.ContainsRune(spelling, 0) {
-			lookupConsulted = true
+			t.Fatalf("OS resolver was consulted with the NUL-bearing spelling: %v", *calls)
 		}
 	}
-	if !lookupConsulted {
-		t.Fatalf("OS resolver was never consulted with the NUL-bearing spelling; calls=%v", *calls)
+	if _, err := findPrincipalByUsername(app.DB, "alice\x00alias"); !errors.Is(err, ErrPrincipalNotFound) {
+		t.Fatalf("NUL alias persisted as a Principal row: %v", err)
 	}
-
-	var usernames []string
-	rows, err := app.DB.Query(
-		`SELECT username, uid, gid, home FROM principals
-		 WHERE username IN (?, ?) ORDER BY username`,
-		"alice", "alice\x00alias",
-	)
+	p, err := findPrincipalByUsername(app.DB, "alice")
 	if err != nil {
-		t.Fatalf("list principals: %v", err)
+		t.Fatalf("canonical principal missing after alias refusal: %v", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var u string
-		var uid, gid int
-		var homeStored string
-		if err := rows.Scan(&u, &uid, &gid, &homeStored); err != nil {
-			t.Fatalf("scan principal: %v", err)
-		}
-		usernames = append(usernames, u)
-		if uid != 2001 || gid != 2001 || homeStored != home {
-			t.Fatalf("principal %q persisted identity uid=%d gid=%d home=%q, want the aliased OS identity 2001/2001/%q",
-				u, uid, gid, homeStored, home)
-		}
+	if p.Username != "alice" {
+		t.Fatalf("stored canonical username = %q, want the exact supplied spelling", p.Username)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate principals: %v", err)
+	var count int
+	if err := app.DB.QueryRow(
+		`SELECT COUNT(*) FROM principals WHERE username IN ('alice', ?)`,
+		"alice\x00alias",
+	).Scan(&count); err != nil {
+		t.Fatalf("count aliased identities: %v", err)
 	}
-	if len(usernames) != 2 {
-		t.Fatalf("expected TWO persisted Principal TEXT identities for one OS account, got %v", usernames)
-	}
-	hasCanonical, hasAlias := false, false
-	for _, u := range usernames {
-		switch u {
-		case "alice":
-			hasCanonical = true
-		case "alice\x00alias":
-			hasAlias = true
-		}
-	}
-	if !hasCanonical || !hasAlias {
-		t.Fatalf("expected canonical alice and NUL alias as distinct stored identities, got %v", usernames)
+	if count != 1 {
+		t.Fatalf("expected exactly one Principal identity for one OS account, got %d", count)
 	}
 }
 
@@ -236,4 +232,197 @@ func TestPrincipalCreateInvalidUsernameAuditClassified(t *testing.T) {
 		t.Fatalf("refusal audit carries a secret-shaped key: %s", raw)
 	}
 	assertNoSecrets(t, raw, m, "", testAdminToken)
+}
+
+// TestValidatePrincipalUsernameGrammar is the direct matrix for the one
+// Principal username grammar owner: every control-bearing spelling (C0
+// including LF/CR/TAB, SOH, DEL, C1 NEL/CSI, embedded NUL) and the empty
+// string are refused with the single ErrInvalidPrincipalUsername class,
+// while ordinary printable spellings — ASCII, mixed case, spaces,
+// punctuation, printable Unicode — are passed to the OS resolver unchanged.
+func TestValidatePrincipalUsernameGrammar(t *testing.T) {
+	accepted := []string{
+		"alice",
+		"Alice",
+		"root",
+		"0",
+		"-",
+		"a b",                    // ordinary space
+		"user.name-1_2",          // punctuation outside any invented regex
+		"pünctuation.semi;colon", // printable non-ASCII
+		"Ω-user",                 // printable Unicode
+		"operation ✔",            // printable symbol + space
+	}
+	refused := []string{
+		"",               // empty
+		"\x00",           // bare NUL
+		"alice\x00alias", // embedded NUL alias
+		"\n",             // LF
+		"\r",             // CR
+		"\t",             // TAB
+		"\x01",           // SOH (C0)
+		"ali\nce",        // embedded LF
+		"\x7f",           // DEL
+		"\u0085",         // C1 NEL
+		"\u009b",         // C1 CSI
+	}
+	for _, username := range accepted {
+		if err := validatePrincipalUsername(username); err != nil {
+			t.Fatalf("validatePrincipalUsername(%q) = %v, want accepted unchanged", username, err)
+		}
+	}
+	for _, username := range refused {
+		err := validatePrincipalUsername(username)
+		if !errors.Is(err, ErrInvalidPrincipalUsername) {
+			t.Fatalf("validatePrincipalUsername(%q) = %v, want ErrInvalidPrincipalUsername", username, err)
+		}
+	}
+}
+
+// TestPrincipalCreateRefusesInvalidUsernameDomainError proves the domain
+// create path itself (the owner of the ordering) refuses a control-bearing
+// username with the single ErrInvalidPrincipalUsername class and without
+// consulting the OS account resolver.
+func TestPrincipalCreateRefusesInvalidUsernameDomainError(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	home := principalUsernameGrammarDB(t, app, "alice")
+	calls := installRecordingOSUserLookup(t, "2001", "2001", home)
+
+	for _, username := range []string{"alice\x00alias", "ali\nce", "\x7f", ""} {
+		p, cred, token, err := createPrincipalWithOptionalCredential(app.DB, username, app.Config.AllowedRoots, true)
+		if !errors.Is(err, ErrInvalidPrincipalUsername) {
+			t.Fatalf("create(%q) = %v, want ErrInvalidPrincipalUsername", username, err)
+		}
+		if p != nil || cred != nil || token != "" {
+			t.Fatalf("refused create(%q) returned state (principal=%v credential=%v token=%q)", username, p, cred, token)
+		}
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("OSUserLookup consulted for refused spelling(s): %v", *calls)
+	}
+}
+
+// TestPrincipalCreatePrintableUsernamePassesToResolverUnchanged proves the
+// grammar does not invent a wider username regex: ordinary printable
+// spellings that look unusual (spaces, punctuation, printable non-ASCII) are
+// NOT rejected by the text owner and reach the OS resolver with the exact
+// supplied spelling — no trim, no case-fold, no rewrite. The OS resolver
+// (here the seam) remains the authority for existence.
+func TestPrincipalCreatePrintableUsernamePassesToResolverUnchanged(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	home := principalUsernameGrammarDB(t, app, "alice")
+	orig := OSUserLookup
+	t.Cleanup(func() { OSUserLookup = orig })
+	calls := []string{}
+	OSUserLookup = func(username string) (string, string, string, error) {
+		calls = append(calls, username)
+		return "2002", "2002", home, nil
+	}
+
+	for _, username := range []string{"has space", "pünctuation.semi;colon", "Ω-user"} {
+		w := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken,
+			fmt.Sprintf(`{"username":%s,"issue_credential":false}`, mustJSONUsername(username)))
+		if w.Code != http.StatusCreated {
+			t.Fatalf("printable username %q: expected 201, got %d (body=%s)", username, w.Code, w.Body.String())
+		}
+	}
+	want := []string{"has space", "pünctuation.semi;colon", "Ω-user"}
+	if len(calls) != len(want) {
+		t.Fatalf("resolver calls = %v, want exactly %v", calls, want)
+	}
+	for i, spelling := range want {
+		if calls[i] != spelling {
+			t.Fatalf("resolver call %d = %q, want the exact supplied spelling %q (no trim/fold/rewrite)", i, calls[i], spelling)
+		}
+	}
+}
+
+// mustJSONUsername encodes a username as the JSON string literal it must
+// travel as on the wire (JSON escapes for control-bearing spellings).
+func mustJSONUsername(username string) string {
+	encoded, err := json.Marshal(username)
+	if err != nil {
+		panic(fmt.Sprintf("marshal username: %v", err))
+	}
+	return string(encoded)
+}
+
+// TestPrincipalCreateMissingUsernameStaysMissingUsername proves the empty
+// username keeps its established public contract.
+func TestPrincipalCreateMissingUsernameStaysMissingUsername(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	home := principalUsernameGrammarDB(t, app, "alice")
+	calls := installRecordingOSUserLookup(t, "2001", "2001", home)
+
+	w := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken,
+		`{"issue_credential":true}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["code"] != "missing_username" {
+		t.Fatalf("code = %v, want missing_username", resp["code"])
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("OSUserLookup consulted for an empty username: %v", *calls)
+	}
+}
+
+// TestPrincipalCreateUnknownOSUserStaysOSUserNotFound proves a grammar-valid
+// spelling still reaches the OS resolver and keeps the established
+// os_user_not_found contract when the account does not exist.
+func TestPrincipalCreateUnknownOSUserStaysOSUserNotFound(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	orig := OSUserLookup
+	t.Cleanup(func() { OSUserLookup = orig })
+	calls := []string{}
+	OSUserLookup = func(username string) (string, string, string, error) {
+		calls = append(calls, username)
+		return "", "", "", fmt.Errorf("no such user %q", username)
+	}
+
+	w := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken,
+		`{"username":"ghost","issue_credential":false}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["code"] != "os_user_not_found" {
+		t.Fatalf("code = %v, want os_user_not_found", resp["code"])
+	}
+	if len(calls) != 1 || calls[0] != "ghost" {
+		t.Fatalf("resolver calls = %v, want exactly one call with the supplied spelling", calls)
+	}
+}
+
+// TestPrincipalCreateDuplicateStillPrincipalExists proves the established
+// 409 principal_exists contract is unchanged for grammar-valid spellings.
+func TestPrincipalCreateDuplicateStillPrincipalExists(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	home := principalUsernameGrammarDB(t, app, "alice")
+	installRecordingOSUserLookup(t, "2001", "2001", home)
+
+	w := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken,
+		`{"username":"alice","issue_credential":false}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("first create: expected 201, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	w2 := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken,
+		`{"username":"alice","issue_credential":false}`)
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("duplicate create: expected 409, got %d (body=%s)", w2.Code, w2.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["code"] != "principal_exists" {
+		t.Fatalf("code = %v, want principal_exists", resp["code"])
+	}
 }

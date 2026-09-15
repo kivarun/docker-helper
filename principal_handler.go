@@ -134,14 +134,24 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
+		// A grammar-refused username is classified distinctly in the audit;
+		// every other refusal keeps the generic error result. The supplied
+		// PrincipalName is retained: the structured audit JSON escaping owns
+		// the representation of the refused spelling.
+		auditResult := "error"
+		if errors.Is(err, ErrInvalidPrincipalUsername) {
+			auditResult = "invalid_username"
+		}
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.create",
 			PrincipalName: req.Username,
-			Result:        "error",
+			Result:        auditResult,
 			Duration:      duration,
 		})
 
 		switch {
+		case errors.Is(err, ErrInvalidPrincipalUsername):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_username", "invalid username")
 		case isErrOSUserNotFound(err):
 			writeError(ctx, w, http.StatusBadRequest, "os_user_not_found", "OS user not found")
 		case isErrPrincipalExists(err):
