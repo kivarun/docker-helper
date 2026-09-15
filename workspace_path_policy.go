@@ -5,7 +5,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
+
+// validateHostPathText is the shared host capability path text-grammar check
+// (SC1/M11). A host capability path must not contain control characters that
+// can desynchronize line-oriented tool output (persistent SELinux fcontext
+// records, AppArmor fragments, and config serialization are line-oriented
+// artifacts the path text feeds) or be unrepresentable as a host pathname.
+//
+// The rule is Unicode-control based: every rune with unicode.IsControl — the
+// C0 controls (including LF, CR, TAB), the C1 controls, and DEL — is outside
+// the Release 2.2 host-path capability text grammar. Embedded NUL is rejected
+// explicitly for a clearer diagnostic: Unix path syscalls cannot represent an
+// embedded NUL at all. Ordinary printable characters, including ASCII space
+// inside a component, remain supported.
+//
+// This is the ONE owner of that invariant. Backends (SELinux fcontext,
+// AppArmor fragments), handlers, and the CLI must not duplicate a
+// control-character list: they consume canonical paths this grammar has
+// already been applied to. escapeFcontextPath remains regex escaping, not a
+// second validator.
+func validateHostPathText(path string) error {
+	if strings.ContainsRune(path, 0) {
+		return fmt.Errorf("host path contains NUL; a host pathname cannot represent an embedded NUL")
+	}
+	for _, c := range path {
+		if unicode.IsControl(c) {
+			return fmt.Errorf("host path contains control character %q; control characters are outside the supported host-path text grammar", c)
+		}
+	}
+	return nil
+}
 
 // forbiddenSystemTrees are absolute paths that workspace paths must never
 // equal or descend from. These are system directories that contain
@@ -56,11 +87,17 @@ func isAdminWideNamespaceOverride(ns string) bool {
 }
 
 // validateWorkspacePathSafety validates a canonical host path against the shared
-// workspace-path policy. It rejects the filesystem root, forbidden system trees
-// and everything under them, and forbidden wide namespaces (the namespace
-// itself only, not subdirectories). When running as root (uid 0), /home and
-// /opt are permitted via the admin override.
+// workspace-path policy. It applies the shared text grammar first (a canonical
+// path containing a control character is refused, including a harmless-looking
+// caller spelling that resolved into one through symlinks), then rejects the
+// filesystem root, forbidden system trees, and forbidden wide namespaces (the
+// namespace itself is too broad to be a workspace path, while subdirectories
+// are allowed). When running as root, /home and /opt are permitted via the
+// admin override.
 func validateWorkspacePathSafety(canonical string) error {
+	if err := validateHostPathText(canonical); err != nil {
+		return err
+	}
 	if canonical == "/" {
 		return fmt.Errorf("workspace root cannot be the filesystem root /")
 	}
@@ -93,18 +130,26 @@ func validateWorkspacePathSafety(canonical string) error {
 
 // canonicalizeWorkspacePathForAdd validates and canonicalizes a workspace path for addition.
 // It:
+//   - applies the shared host-path text grammar to the caller spelling before
+//     any filesystem probing (the canonicalization owner owns caller syntax;
+//     the text check is pure, so an unsupported spelling is refused without
+//     stat/EvalSymlinks)
 //   - expands ~ to the user's home directory
 //   - resolves to an absolute path
 //   - verifies the path exists and is a directory (authorization ceilings
 //     are directory trees; an issued Session filesystem root may also be a
 //     regular file and is validated by its own canonical tree-kind owner)
 //   - resolves all symlinks
-//   - applies the workspace-path policy
+//   - applies the workspace-path policy, which re-checks the text grammar on
+//     the resolved canonical path
 //
 // Returns the canonical path on success.
 func canonicalizeWorkspacePathForAdd(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("workspace root must be a non-empty path")
+	}
+	if err := validateHostPathText(path); err != nil {
+		return "", err
 	}
 
 	path = expandTilde(path)
@@ -143,12 +188,17 @@ func canonicalizeWorkspacePathForAdd(path string) (string, error) {
 // boundary candidate). It receives an already canonical concrete path: the
 // Session lifecycle owns caller syntax (absolute path, symlink resolution,
 // dir/regular-file kind), so no MAC backend reinterprets "~", relative
-// syntax, or another caller grammar. The validation proves the concrete
-// identity (exists, directory or regular file, symlink-resolved) and
-// applies the workspace-path safety policy.
+// syntax, or another caller grammar. The validation applies the shared
+// host-path text grammar to the concrete identity, then proves it (exists,
+// directory or regular file, symlink-resolved) and applies the
+// workspace-path safety policy, which re-checks the text grammar on the
+// resolved canonical path.
 func canonicalizeIssuedTreePathForAdd(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("issued tree must be a non-empty path")
+	}
+	if err := validateHostPathText(path); err != nil {
+		return "", err
 	}
 
 	if !filepath.IsAbs(path) {
@@ -180,11 +230,15 @@ func canonicalizeIssuedTreePathForAdd(path string) (string, error) {
 }
 
 // validateWorkspacePathPolicy checks a canonical path against the workspace-path
-// policy without filesystem access. This is the pure policy check that
-// can be tested deterministically.
+// policy without filesystem access. It applies the shared host-path text
+// grammar first, then the absolute and safety checks. This is the pure policy
+// check that can be tested deterministically.
 func validateWorkspacePathPolicy(canonical string) error {
 	if canonical == "" {
 		return fmt.Errorf("workspace root must be a non-empty path")
+	}
+	if err := validateHostPathText(canonical); err != nil {
+		return err
 	}
 	if !filepath.IsAbs(canonical) {
 		return fmt.Errorf("workspace root must be an absolute path: %s", canonical)
