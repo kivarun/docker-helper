@@ -204,7 +204,8 @@ source "$MAC_FILE"
 # Every MAC adapter must implement the contract below. Verify it now so a
 # misbehaving adapter fails loudly instead of deep inside a phase.
 for fn in mac_name mac_audit_start mac_preflight mac_reset_policy \
-  mac_verify_confinement mac_audit_check mac_diagnostics; do
+  mac_verify_confinement mac_audit_check mac_diagnostics \
+  mac_h6_precheck mac_h6_denial_evidence mac_h6_postcheck; do
   if ! declare -F "$fn" >/dev/null 2>&1; then
     echo "error: UAT MAC adapter '$MAC' is missing required function $fn" >&2
     exit 1
@@ -814,6 +815,98 @@ TLS_OUT="$(docker-helper run --image uat-curl:alpine3.24 -- sh -ec "curl -fsS ht
 printf '%s\n' "$TLS_OUT" | grep -q 'TLS-OK' \
   || fail_uat "trusted TLS request did not reach TLS-OK: $TLS_OUT"
 info "trusted-CA E2E passed (no --cacert/--capath/-k, no manual CA env overrides)"
+
+# ==============================================================================
+# Phase 7c: H6 admin-token rotation under confinement (SC1/H6)
+# ==============================================================================
+# The admin-token replacement lifecycle must work through the shipped confined
+# service: rotate via the public CLI, the old token is rejected immediately,
+# the new token is accepted immediately, no daemon restart occurs, the token
+# file stays 0600 at its canonical pathname with no staging residue, and
+# config.json is unchanged. On a failed rotation the failure must be caused by
+# a mandatory MAC denial of the token replacement lifecycle (the H6 RED
+# state) — a failure without such a denial is not H6 evidence.
+
+say "phase 7c: H6 admin-token rotation under confinement"
+
+ADMIN_TOKEN_FILE="/etc/docker-helper/admin.token"
+STAGING_FILE="/etc/docker-helper/.admin-token.new"
+[ -e "$ADMIN_TOKEN_FILE" ] || fail_uat "admin.token not found at $ADMIN_TOKEN_FILE"
+
+OLD_ADMIN_TOKEN="$(cat "$ADMIN_TOKEN_FILE")"
+printf '%s' "$OLD_ADMIN_TOKEN" | grep -q '^dht_[0-9a-f]\{64\}$' \
+  || fail_uat "admin.token is not a dht_ admin token"
+H6_CONFIG_SHA_BEFORE="$(sha256sum /etc/docker-helper/config.json | awk '{print $1}')"
+H6_PID_BEFORE="$(systemctl show -p MainPID --value docker-helper.service)"
+[ -n "$H6_PID_BEFORE" ] && [ "$H6_PID_BEFORE" != "0" ] \
+  || fail_uat "daemon MainPID is empty before the H6 rotation"
+
+# Backend-specific pre-rotation state (labels / installed write surface).
+mac_h6_precheck "$ADMIN_TOKEN_FILE" "/etc/docker-helper/config.json"
+
+say "phase 7c: rotate the admin token through the shipped confined service"
+H6_ROTATE_OUT="$(docker-helper admin-token rotate --system 2>&1)"
+H6_ROTATE_RC=$?
+
+if [ "$H6_ROTATE_RC" -ne 0 ]; then
+  # Discriminate the RED state: the failure must be a mandatory MAC denial of
+  # the token replacement lifecycle, not a harness/config failure. The rotate
+  # output carries no bearer token (the rotation failed), but it is redacted
+  # before it reaches the log anyway.
+  say "phase 7c: rotation failed on the exact candidate — collecting MAC denial evidence"
+  printf '%s\n' "$H6_ROTATE_OUT" | redact_tokens | head -5 >&2
+  if mac_h6_denial_evidence "$STAGING_FILE" "$ADMIN_TOKEN_FILE"; then
+    fail_uat "H6 RED: mandatory MAC blocks admin-token rotation (denial records in diagnostics)"
+  fi
+  fail_uat "rotation failed without a MAC denial on the token replacement lifecycle — not H6 evidence (rotate output above, redacted)"
+fi
+
+NEW_ADMIN_TOKEN="$(printf '%s\n' "$H6_ROTATE_OUT" | tail -n 1)"
+printf '%s' "$NEW_ADMIN_TOKEN" | grep -q '^dht_[0-9a-f]\{64\}$' \
+  || fail_uat "rotated token is not a dht_ admin token"
+[ "$NEW_ADMIN_TOKEN" != "$OLD_ADMIN_TOKEN" ] \
+  || fail_uat "rotation returned the unchanged old token"
+
+# admin.token: canonical path, exact content, 0600, no staging residue.
+H6_FILE_TOKEN="$(cat "$ADMIN_TOKEN_FILE")"
+[ "$H6_FILE_TOKEN" = "$NEW_ADMIN_TOKEN" ] \
+  || fail_uat "admin.token does not contain the rotated token"
+[ "$(stat -c '%a' "$ADMIN_TOKEN_FILE")" = "600" ] \
+  || fail_uat "admin.token mode is not 0600 after rotation"
+[ ! -e "$STAGING_FILE" ] \
+  || fail_uat "staging pathname exists after successful rotation"
+
+# Old token rejected immediately; new token accepted immediately, through the
+# canonical admin-authenticated operator CLI against the system daemon. The
+# new token is proven accepted FIRST so a later old-token failure is an
+# authorization result, not a broken daemon. Token values live only in
+# root-owned 0600 temp files that are removed immediately.
+H6_NEW_FILE="$(mktemp /tmp/uat-h6-new.XXXXXX)"
+chmod 600 "$H6_NEW_FILE"
+printf '%s' "$NEW_ADMIN_TOKEN" > "$H6_NEW_FILE"
+if ! docker-helper session list --system --token-file "$H6_NEW_FILE" >/dev/null 2>&1; then
+  rm -f "$H6_NEW_FILE"
+  fail_uat "new admin token rejected after rotation"
+fi
+H6_OLD_FILE="$(mktemp /tmp/uat-h6-old.XXXXXX)"
+chmod 600 "$H6_OLD_FILE"
+printf '%s' "$OLD_ADMIN_TOKEN" > "$H6_OLD_FILE"
+H6_OLD_OUT="$(docker-helper session list --system --token-file "$H6_OLD_FILE" 2>&1)"
+rm -f "$H6_OLD_FILE" "$H6_NEW_FILE"
+printf '%s\n' "$H6_OLD_OUT" | grep -q 'unauthorized' \
+  || fail_uat "old admin token failure was not an authorization result: $(printf '%s\n' "$H6_OLD_OUT" | redact_tokens | head -3)"
+
+# No restart; config.json untouched.
+H6_PID_AFTER="$(systemctl show -p MainPID --value docker-helper.service)"
+[ "$H6_PID_AFTER" = "$H6_PID_BEFORE" ] \
+  || fail_uat "daemon PID changed across the rotation ($H6_PID_BEFORE -> $H6_PID_AFTER)"
+H6_CONFIG_SHA_AFTER="$(sha256sum /etc/docker-helper/config.json | awk '{print $1}')"
+[ "$H6_CONFIG_SHA_AFTER" = "$H6_CONFIG_SHA_BEFORE" ] \
+  || fail_uat "config.json changed across the rotation"
+
+# Backend-specific post-rotation checks (labels, no unexpected H6 denials).
+mac_h6_postcheck "$ADMIN_TOKEN_FILE" "/etc/docker-helper/config.json" "$STAGING_FILE"
+info "H6 admin-token rotation ok (old rejected, new accepted, no restart, no residue)"
 
 # ==============================================================================
 # Phase 8: MAC audit check

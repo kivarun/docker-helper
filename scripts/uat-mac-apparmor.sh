@@ -189,6 +189,65 @@ mac_audit_check() {
   info "$(mac_name) audit check passed (allowlisted=$allowlisted unexpected=0)"
 }
 
+# mac_h6_precheck verifies the installed profile gives no generic writable
+# config surface before the rotation is attempted: every /etc/docker-helper
+# rule must be read-only except the two exact token-replacement pathnames
+# (the canonical admin.token and the fixed staging pathname).
+mac_h6_precheck() {
+  local token_file="$1" config_file="$2"
+  local profile="/etc/apparmor.d/docker-helper-system"
+  [ -e "$profile" ] || fail_uat "installed AppArmor profile not found at $profile"
+  local line path perms bad=""
+  while IFS= read -r line; do
+    printf '%s' "$line" | grep -q '^[[:space:]]*#' && continue
+    path="$(printf '%s' "$line" | awk '{print $1}')"
+    printf '%s' "$path" | grep -q '^/etc/docker-helper' || continue
+    perms="$(printf '%s' "$line" | awk '{print $NF}' | tr -d ',')"
+    printf '%s' "$perms" | grep -qE '[wa]' || continue
+    case "$path" in
+      /etc/docker-helper/admin.token|/etc/docker-helper/.admin-token.new) ;;
+      *) bad+="$line"$'\n' ;;
+    esac
+  done < "$profile"
+  if [ -n "$bad" ]; then
+    printf '\n[UAT] write-capable /etc/docker-helper rules beyond the token replacement pathnames:\n%s\n' "$bad" >&2
+    fail_uat "installed AppArmor profile grants a generic writable config surface"
+  fi
+  info "installed profile config write surface: only the admin-token replacement pathnames"
+}
+
+# mac_h6_denial_evidence succeeds only when the fresh audit window holds an
+# AppArmor DENIED record for the docker-helper-system profile that mentions
+# the admin-token replacement lifecycle (any .admin-token* spelling). It is
+# the H6 RED discriminator: a rotation failure without such a denial is not
+# H6 evidence.
+mac_h6_denial_evidence() {
+  local staging="$1" token_file="$2"
+  local records
+  records="$(collect_denials)"
+  # The denial name carries the created/replaced token pathname (any
+  # .admin-token* spelling: the historical random tempfile or the fixed
+  # staging pathname, or the canonical token file at rename time).
+  printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 \
+    || printf '%s\n' "$records" | grep -F "$(basename "$token_file")" >/dev/null 2>&1
+}
+
+# mac_h6_postcheck re-verifies the installed write surface after a successful
+# rotation and fails on any fresh AppArmor denial that mentions the token
+# replacement lifecycle (a successful lifecycle must produce none).
+mac_h6_postcheck() {
+  local token_file="$1" config_file="$2" staging="$3"
+  [ ! -e "$staging" ] || fail_uat "staging pathname exists after the rotation"
+  mac_h6_precheck "$token_file" "$config_file"
+  local records
+  records="$(collect_denials | grep -F 'admin-token' || true)"
+  if [ -n "$records" ]; then
+    printf '\n[UAT] AppArmor DENIED records on the token replacement lifecycle:\n%s\n' "$records" >&2
+    fail_uat "unexpected AppArmor denials on the successful admin-token rotation"
+  fi
+  info "AppArmor H6 postcheck ok (no token-replacement denials)"
+}
+
 # mac_diagnostics appends AppArmor-specific evidence to print_diagnostics.
 mac_diagnostics() {
   echo "--- AppArmor status (aa-status) ---"

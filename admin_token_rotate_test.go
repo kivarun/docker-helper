@@ -739,3 +739,77 @@ func TestAdminTokenRotationConcurrentSessionAuth(t *testing.T) {
 		t.Error("admin token hash must not be zero after rotations")
 	}
 }
+
+// TestRotateAdminTokenFixedStagingPath proves the admin-token replacement
+// lifecycle uses ONE fixed helper-owned staging pathname —
+// ".admin-token.new" in the token file's directory — as the rename source.
+// The random ".admin-token-*" tempfile spelling is the historical
+// MAC-hostile implementation the shipped confined policy cannot express as a
+// narrow file contract: it must be gone from the replacement lifecycle.
+func TestRotateAdminTokenFixedStagingPath(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+
+	var capturedOld, capturedNew string
+	app.RotateRenameFn = func(oldpath, newpath string) error {
+		capturedOld, capturedNew = oldpath, newpath
+		return os.Rename(oldpath, newpath)
+	}
+
+	newToken, err := app.rotateAdminToken(app.getAdminTokenHash())
+	if err != nil {
+		t.Fatalf("rotateAdminToken() error: %v", err)
+	}
+
+	tokenPath := app.getConfig().AdminTokenPath
+	wantStaging := filepath.Join(filepath.Dir(tokenPath), ".admin-token.new")
+	if capturedOld != wantStaging {
+		t.Fatalf("rename source = %q, want the one fixed staging pathname %q", capturedOld, wantStaging)
+	}
+	if capturedNew != tokenPath {
+		t.Fatalf("rename target = %q, want the token file %q", capturedNew, tokenPath)
+	}
+
+	// The staging pathname is absent after the successful replacement.
+	if _, err := os.Stat(wantStaging); !os.IsNotExist(err) {
+		t.Errorf("staging file exists after successful rotation")
+	}
+
+	// The replacement is the real one: the token file holds the new token.
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("cannot read token file: %v", err)
+	}
+	if string(data) != newToken+"\n" {
+		t.Errorf("token file content = %q, want %q", string(data), newToken+"\n")
+	}
+}
+
+// TestRotateAdminTokenCrashResidueRecovery proves that crash residue at the
+// exact staging pathname — a staging file left behind by an earlier crashed
+// rotation — does not permanently prevent a later valid rotation: the next
+// rotation cleans the residue and commits successfully.
+func TestRotateAdminTokenCrashResidueRecovery(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+
+	tokenPath := app.getConfig().AdminTokenPath
+	stagingPath := filepath.Join(filepath.Dir(tokenPath), ".admin-token.new")
+	if err := os.WriteFile(stagingPath, []byte("residue-from-crashed-rotation\n"), 0600); err != nil {
+		t.Fatalf("cannot stage crash residue: %v", err)
+	}
+
+	newToken, err := app.rotateAdminToken(app.getAdminTokenHash())
+	if err != nil {
+		t.Fatalf("rotateAdminToken() with staged crash residue error: %v", err)
+	}
+
+	if _, err := os.Stat(stagingPath); !os.IsNotExist(err) {
+		t.Errorf("crash residue still present after a valid rotation")
+	}
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("cannot read token file: %v", err)
+	}
+	if string(data) != newToken+"\n" {
+		t.Errorf("token file content = %q, want %q", string(data), newToken+"\n")
+	}
+}

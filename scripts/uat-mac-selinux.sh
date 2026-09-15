@@ -179,6 +179,88 @@ mac_audit_check() {
   fail_uat "fresh $(mac_name) AVC denies relevant to docker-helper"
 }
 
+# mac_h6_precheck verifies the SELinux labeling state around the admin-token
+# replacement lifecycle before the rotation is attempted:
+#   * fresh-install contract: the canonical admin.token carries the dedicated
+#     docker_helper_admin_token_t type and config.json stays
+#     docker_helper_config_t;
+#   * migration/reinstall contract: an existing token formerly labeled
+#     docker_helper_config_t (pre-H6 policy) is migrated to the dedicated
+#     type by the shipped packaging restorecon owner with the token VALUE
+#     unchanged;
+#   * docker_helper_t holds NO write permission on docker_helper_config_t:file
+#     (sesearch, when setools are installed).
+mac_h6_precheck() {
+  local token_file="$1" config_file="$2"
+  local tok_ctx cfg_ctx value_before
+  tok_ctx="$(stat -c '%C' "$token_file" 2>/dev/null)" \
+    || fail_uat "cannot stat the admin token context"
+  printf '%s' "$tok_ctx" | grep -q 'docker_helper_admin_token_t' \
+    || fail_uat "fresh-install labeling: admin.token is not docker_helper_admin_token_t (got '$tok_ctx')"
+  cfg_ctx="$(stat -c '%C' "$config_file" 2>/dev/null)" \
+    || fail_uat "cannot stat config.json context"
+  printf '%s' "$cfg_ctx" | grep -q 'docker_helper_config_t' \
+    || fail_uat "config.json is not docker_helper_config_t (got '$cfg_ctx')"
+  info "fresh-install labeling: admin.token=docker_helper_admin_token_t, config.json=docker_helper_config_t"
+
+  value_before="$(cat "$token_file")"
+  [ -n "$value_before" ] || fail_uat "admin.token is empty"
+  if command -v chcon >/dev/null 2>&1; then
+    chcon -t docker_helper_config_t "$token_file" \
+      || fail_uat "cannot stage the pre-upgrade token label (chcon)"
+    [ "$(cat "$token_file")" = "$value_before" ] \
+      || fail_uat "label staging changed the token value"
+    /usr/sbin/restorecon -R /etc/docker-helper \
+      || fail_uat "packaging restorecon failed during the label migration"
+    printf '%s' "$(stat -c '%C' "$token_file")" | grep -q 'docker_helper_admin_token_t' \
+      || fail_uat "packaging restorecon did not migrate admin.token to docker_helper_admin_token_t (got '$(stat -c '%C' "$token_file")')"
+    [ "$(cat "$token_file")" = "$value_before" ] \
+      || fail_uat "label migration changed the token value"
+    info "migration labeling: docker_helper_config_t -> docker_helper_admin_token_t via the packaging restorecon, value unchanged"
+  fi
+
+  if command -v sesearch >/dev/null 2>&1; then
+    if sesearch -A -s docker_helper_t -t docker_helper_config_t -c file -p write 2>/dev/null | grep -q 'allow'; then
+      fail_uat "docker_helper_t holds a write permission on docker_helper_config_t:file"
+    fi
+    info "sesearch: no write permission on docker_helper_config_t:file"
+  fi
+}
+
+# mac_h6_denial_evidence succeeds only when the fresh audit window holds an
+# AVC deny for docker_helper_t that mentions the admin-token replacement
+# lifecycle (any .admin-token* spelling). It is the H6 RED discriminator: a
+# rotation failure without such a denial is not H6 evidence.
+mac_h6_denial_evidence() {
+  local staging="$1" token_file="$2"
+  local records
+  records="$(collect_denials)"
+  # The AVC path/name carries the created/replaced token pathname (any
+  # .admin-token* spelling: the historical random tempfile or the fixed
+  # staging pathname, or the canonical token file at rename time).
+  printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 \
+    || printf '%s\n' "$records" | grep -F "$(basename "$token_file")" >/dev/null 2>&1
+}
+
+# mac_h6_postcheck re-verifies the labels after a successful rotation and
+# fails on any fresh AVC deny that mentions the token replacement lifecycle
+# (a successful lifecycle must produce none).
+mac_h6_postcheck() {
+  local token_file="$1" config_file="$2" staging="$3"
+  [ ! -e "$staging" ] || fail_uat "staging pathname exists after the rotation"
+  printf '%s' "$(stat -c '%C' "$token_file" 2>/dev/null)" | grep -q 'docker_helper_admin_token_t' \
+    || fail_uat "post-rotation: admin.token is not docker_helper_admin_token_t"
+  printf '%s' "$(stat -c '%C' "$config_file" 2>/dev/null)" | grep -q 'docker_helper_config_t' \
+    || fail_uat "post-rotation: config.json is not docker_helper_config_t"
+  local records
+  records="$(collect_denials | grep -F 'admin-token' || true)"
+  if [ -n "$records" ]; then
+    printf '\n[UAT] SELinux AVC denies on the token replacement lifecycle:\n%s\n' "$records" >&2
+    fail_uat "unexpected SELinux AVCs on the successful admin-token rotation"
+  fi
+  info "SELinux H6 postcheck ok (labels stable, no token-replacement AVCs)"
+}
+
 # mac_diagnostics appends SELinux-specific evidence to print_diagnostics.
 mac_diagnostics() {
   echo "--- sestatus ---"
