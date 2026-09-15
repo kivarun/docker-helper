@@ -113,26 +113,32 @@ audit_ts() {
 
 # audit_records returns unique kernel audit records that match the given grep
 # filter AND fall inside the UAT audit window. It deliberately uses a SINGLE
-# source with fallback — never both — so one kernel audit event can never be
+# source per call — never several combined — so one audit event is never
 # counted twice.
 #
-# Preference order:
-#  1. ausearch (AVC/USER_AVC), only when the audit daemon is genuinely
-#     present AND running (it can then never fail silently);
-#  2. dmesg (kernel ring buffer), the operative source on the minimal
-#     Tumbleweed guest (auditd is not running there);
-#  3. journalctl -k, only when dmesg yields no output (unreadable/restricted
-#     or empty ring buffer, e.g. kernel.dmesg_restrict=1).
+# Source preference (first source that yields output wins):
+#   1. ausearch (AVC/USER_AVC from the audit daemon's userspace log), when
+#      the tool is available and yields records. Presence of the audit
+#      daemon is NOT probed with pgrep: on this guest auditd consumes the
+#      netlink records and they never reach the kernel ring buffer, while
+#      the audit.log flush is asynchronous, so ausearch is the correct
+#      source whenever it produces output for the window;
+#   2. dmesg (kernel ring buffer) when ausearch is unavailable or yields
+#      nothing for the window;
+#   3. journalctl -k, only when dmesg yields no output (unreadable or
+#      restricted ring buffer, e.g. kernel.dmesg_restrict=1).
 #
 # dmesg is read exactly once into a variable and its availability is decided
 # from that single read, so a readable, non-empty dmesg is never probed
 # through an early-closing reader.
 audit_records() {
-  local filter="$1" line ts raw
-  if command -v ausearch >/dev/null 2>&1 && pgrep -x auditd >/dev/null 2>&1; then
-    ausearch -m AVC -m USER_AVC -ts "$SE_AUDIT_START_AUSEARCH" 2>/dev/null \
-      | grep -E "$filter" | sort -u
-    return 0
+  local filter="$1" line ts raw ausearch_out
+  if command -v ausearch >/dev/null 2>&1; then
+    ausearch_out="$(ausearch -m AVC -m USER_AVC -ts "$SE_AUDIT_START_AUSEARCH" 2>/dev/null || true)"
+    if [ -n "$ausearch_out" ]; then
+      printf '%s\n' "$ausearch_out" | grep -E "$filter" | sort -u
+      return 0
+    fi
   fi
   raw="$(dmesg 2>/dev/null || true)"
   if [ -z "$raw" ]; then
