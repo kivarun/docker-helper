@@ -2,7 +2,7 @@
 #
 # uat-regressions-runner-ubuntu.sh — collect-all runner for the Release-2
 # targeted UAT regression groups on the Ubuntu / DEB / AppArmor profile
-# (groups 3-20).
+# (groups 3-22).
 #
 # The runner installs a docker-helper .deb and starts the system service, then
 # runs every regression group, capturing rc and recording PASS / FAIL / BLOCKED
@@ -156,6 +156,7 @@ REGRESSIONS=(
   "19:User-mode self introspection:uat-regression-user-mode-self.sh"
   "20:RC5 CLI grammar and stored-roots completion:uat-regression-rc5-cli-grammar.sh"
   "21:Allowed-root recovery universe:uat-regression-allowed-root-recovery.sh"
+  "22:M13 Docker bind-mount serialization:uat-regression-bind-serialization.sh"
 )
 
 declare -A RESULT

@@ -854,7 +854,13 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 	}
 }
 
-func TestMountCommaInTarget(t *testing.T) {
+// TestMountCommaTargetRoundTripsThroughDockerGrammar proves the M13
+// serializer property at the handler boundary: a crafted target carrying the
+// option-injection spelling is now safely representable through the Docker
+// mount grammar — the Docker CLI parses it as exactly ONE field, so the
+// intended target survives verbatim, no readonly option is injected, and
+// the requested consumption mode is unchanged.
+func TestMountCommaTargetRoundTripsThroughDockerGrammar(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -862,9 +868,9 @@ func TestMountCommaInTarget(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	called := false
+	var dockerArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		called = true
+		dockerArgs = append([]string(nil), args...)
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -882,47 +888,57 @@ func TestMountCommaInTarget(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d (body=%s)", http.StatusCreated, w.Code, w.Body.String())
 	}
 
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
+	specs := dockerMountValues(t, dockerArgs)
+	if len(specs) != 1 {
+		t.Fatalf("expected exactly one --mount value, got %q", specs)
 	}
-
-	if resp.Code != "invalid_mount" {
-		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	m := parseDockerMountSpec(t, specs[0])
+	if m.Type != "bind" {
+		t.Errorf("parsed type %q, want bind", m.Type)
 	}
-
-	if called {
-		t.Error("ExecCommand should not be called with comma in target")
+	if m.Source != result.Session.Workspace {
+		t.Errorf("parsed source %q, want the workspace", m.Source)
+	}
+	if m.Target != "/data,readonly" {
+		t.Errorf("parsed target %q, want the intended crafted target verbatim", m.Target)
+	}
+	if m.ReadOnly {
+		t.Error("the crafted target must not flip the intended writable consumption mode")
 	}
 }
 
-func TestMountCommaInSource(t *testing.T) {
+// TestMountCommaWorkspaceSourceRoundTripsThroughDockerGrammar proves the
+// serializer property for a comma-carrying canonical workspace source: the
+// Docker CLI parses the source as exactly ONE field, the intended source
+// and target survive verbatim, and the requested consumption mode is
+// unchanged.
+func TestMountCommaWorkspaceSourceRoundTripsThroughDockerGrammar(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	commaDir := filepath.Join(app.Config.AllowedRoots[0].Path, "dir,with,commas")
-	if err := os.MkdirAll(commaDir, 0755); err != nil {
-		t.Fatalf("cannot create comma dir: %v", err)
+	commaWorkspace := filepath.Join(app.Config.AllowedRoots[0].Path, "dir,with,commas")
+	if err := os.MkdirAll(commaWorkspace, 0755); err != nil {
+		t.Fatalf("cannot create comma workspace: %v", err)
 	}
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	result, err := createDefaultAdminSessionForTest(app, commaWorkspace)
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	called := false
+	var dockerArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		called = true
+		dockerArgs = append([]string(nil), args...)
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
 		"image": "alpine:latest",
 		"mounts": []map[string]any{
-			{"source": "dir,with,commas", "target": "/data"},
+			{"source": ".", "target": "/data"},
 		},
 	}
 	body, _ := json.Marshal(reqBody)
@@ -933,21 +949,26 @@ func TestMountCommaInSource(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d (body=%s)", http.StatusCreated, w.Code, w.Body.String())
 	}
 
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
+	specs := dockerMountValues(t, dockerArgs)
+	if len(specs) != 1 {
+		t.Fatalf("expected exactly one --mount value, got %q", specs)
 	}
-
-	if resp.Code != "invalid_mount" {
-		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	m := parseDockerMountSpec(t, specs[0])
+	if m.Type != "bind" {
+		t.Errorf("parsed type %q, want bind", m.Type)
 	}
-
-	if called {
-		t.Error("ExecCommand should not be called with comma in source")
+	if m.Source != commaWorkspace {
+		t.Errorf("parsed source %q, want the comma workspace verbatim", m.Source)
+	}
+	if m.Target != "/data" {
+		t.Errorf("parsed target %q, want /data", m.Target)
+	}
+	if m.ReadOnly {
+		t.Error("the mount must stay writable as requested")
 	}
 }
 

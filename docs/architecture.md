@@ -2223,7 +2223,7 @@ Forbidden (structural request validation, before admission):
 
 - `target` is empty;
 - `target` is not absolute;
-- `target` is `.` or `..`, or contains a comma (mount-argv safety).
+- `target` is `.` or `..`.
 
 Forbidden (refused before any host filesystem probing — the lexical
 capability admission):
@@ -2250,6 +2250,60 @@ The relative grammar keeps the mount scoped to the session workspace; an
 absolute source is authorized only through the issued Session filesystem
 snapshot, so a path the Launcher allows but this Session did not request
 is still not mountable by this Session.
+
+#### Docker bind-mount serialization
+
+One canonical production owner serializes every Docker bind-mount form —
+user mounts, the trusted CA injection, and the helper-socket runtime
+projection — into exactly one `--mount` argument
+(`dockerBindMountSpec`, from the structured facts `{source, target,
+readonly}`). Request validation, filesystem authorization, and Docker argv
+serialization stay separate layers: the serializer owns only the encoding
+and the safe representability of a `--mount` value, never path policy.
+
+The grammar is the authoritative Docker CLI grammar
+(`opts/mount.go`, `MountOpt.Set`): one `--mount` value is ONE CSV record
+read once, whose fields are `key=value` pairs (first `=` splits) or
+boolean flags such as `readonly`; later duplicate keys overwrite earlier
+ones. The serializer encodes the record with Go's `encoding/csv` — the
+Docker-sanctioned encoding — so a crafted source or target stays exactly
+ONE field: commas, quotes, newlines, lone carriage returns, `=` signs, and
+backslashes cannot add a mount option, change the target, remove
+`readonly`, add `rw`, change the type or source, or create a second
+logical field. The former scattered comma prohibitions are gone: a
+comma-carrying source or target is now safely representable and mounted
+at exactly the intended path and consumption mode.
+
+Representability is a three-boundary invariant, not a list of ad-hoc
+prohibitions: an accepted source or target must (1) round-trip through
+the `encoding/csv` record unchanged, (2) remain unchanged under Docker's
+`MountOpt.Set` value validation — the CLI rejects an empty value and a
+value with leading or trailing whitespace — and (3) be representable
+through exec argv, which cannot carry an embedded NUL byte. Whitespace
+inside a path is representable; whitespace at the edges of a source or
+target is not.
+
+Fail closed: a source/target that fails any boundary is refused — the CSV
+reader normalizes the literal CRLF pair to LF inside quoted fields, a
+whitespace-padded or empty value fails the Docker value validation, and a
+NUL byte fails exec argv. Refusal timing follows the two value classes.
+Caller-controlled bind facts — the container target in every mode and the
+canonical resolved source in user mode, where the resolved host path
+itself is the bind source — are proven representable at request
+validation: before pinning, before workload-MAC preparation, before the
+operation admission, before `run.start`, and before any Docker state, and
+such a refusal answers `invalid_mount`. Actual daemon-owned or prepared
+bind sources — the system-mode pinned source, the trusted-CA prepared
+source, and the helper-socket runtime projection source — become known
+only after the pins and the workload MAC state are prepared, so a
+serialization failure of one of them surfaces after that preparation but
+before the operation admission, before `run.start`, and before Docker
+execution and container creation: the prepared state rolls back through
+the canonical rollback owner and the run answers `internal_error` with no
+admitted Operation. This is the one representability boundary of the
+serialization; it lives in the serializer owner, never as scattered
+per-caller prohibitions, and no shell escaping is involved (the Docker
+argv is structured exec argv).
 
 On top of the structural validation, the access mode of every accepted
 mount is enforced against the persisted immutable Session filesystem
