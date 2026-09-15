@@ -67,7 +67,15 @@ active backend from kernel state and configures it:
   `selinux/docker_helper.pp` module with `semodule`, installs the policy
   artifact to `/usr/share/selinux/docker_helper.pp`, and applies the narrow
   restorecon behavior (never recursively relabeling `/run/docker-helper`, never
-  relabeling the Docker daemon/socket).
+  relabeling the Docker daemon/socket). The installer first establishes the
+  installed libselinux implementation is the descriptor-safe floor
+  (`libselinux1 >= 3.11`, proven through the rpm package database: restorecon
+  links `libselinux.so.1`, the resolved library is owned by `libselinux1`, and
+  its version satisfies the floor) and refuses before any SELinux mutation
+  when the implementation is older, foreign-owned, or unverifiable — the
+  recursive workspace relabeling the daemon performs is delegated to that
+  upstream implementation. The RPM expresses the same floor as a hard
+  `libselinux1 >= 3.11` dependency.
 - No active backend: the installer fails before changing anything — system mode
   must not install unconfined.
 - Both AppArmor and enforcing SELinux active: the installer fails before

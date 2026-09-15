@@ -4316,9 +4316,12 @@ func TestRPMSelinuxDependencies(t *testing.T) {
 
 	// policycoreutils provides both semodule and restorecon on openSUSE.
 	// With this hard dependency, both tools are guaranteed present.
-	// restorecon failures remain best-effort because context restoration
-	// is not strictly required for first-run functionality: the binary is
-	// installed with default context and systemd handles the runtime directory.
+	// The restorecon IMPLEMENTATION floor is a separate contract owned by
+	// libselinux1 >= 3.11 (the descriptor-safe selinux_restorecon rewrite,
+	// C3): recursive workspace relabeling is delegated to that upstream
+	// implementation and is fail-closed at the runtime procfs prerequisite,
+	// not best-effort. Exact-path packaging restorecon calls (binary, bindfs,
+	// deployment trees) remain best-effort for labels only.
 }
 
 // TestRPMBackendDependencies verifies that the RPM retains both AppArmor

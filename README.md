@@ -312,11 +312,16 @@ sudo ./install-system.sh --yes --allowed-root /srv/workspaces
 `install-system.sh` requires the runtime tooling of the active MAC backend:
 the AppArmor parser on an AppArmor host, and `semodule`, `restorecon`, and
 `bindfs` on an enforcing SELinux host (`bindfs` implements the SELinux
-read-only workload projection). The RPM package declares `bindfs` as a
-dependency for the SELinux backend; a tarball system install on an
-enforcing SELinux host requires `bindfs`, and `install-system.sh` fails
-before mutating the system when it is absent. The DEB/AppArmor packaging
-path does not require `bindfs`.
+read-only workload projection). On an enforcing SELinux host the installer
+also proves the installed libselinux implementation is the descriptor-safe
+floor (`libselinux1 >= 3.11`, through the rpm package database) BEFORE any
+SELinux installation mutation — recursive workspace relabeling is delegated
+to that upstream implementation, and an older, foreign-owned, or unverifiable
+libselinux fails closed with an actionable diagnostic. The RPM package
+declares `bindfs` and `libselinux1 >= 3.11` as dependencies for the SELinux
+backend; a tarball system install on an enforcing SELinux host requires
+`bindfs`, and `install-system.sh` fails before mutating the system when it is
+absent. The DEB/AppArmor packaging path does not require `bindfs`.
 
 Unlike native packages, extracting or running the normal tarball installer does
 not provision system mode. `install-system.sh` is the explicit manual
