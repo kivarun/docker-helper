@@ -8,40 +8,34 @@ The release adds long-lived managed containers while preserving the authorizatio
 
 Release 3 does **not** turn docker-helper into a container orchestrator.
 
-## Release line and deployment compatibility
+## Release line and deployment baseline
 
-Release 3 is the docker-helper **LTS line** and the final major release that
-supports the user-mode daemon, the supported rootless Docker configuration,
-and the project-produced installation tarball.
+Release 3 is the docker-helper **LTS line** and starts from the
+system-mode-only deployment model established by Release 2.3.
 
-System mode with native DEB or RPM packaging is the recommended deployment for
-all new Release 3 installations. The following surfaces remain fully supported
-and release-gated throughout the 3.x line, but are deprecated for removal in
-Release 4:
+Release 3 does not support a user-mode daemon, transparent daemon-owner
+bootstrap, or the user-mode/rootless deployment contract. Non-root clients and
+agents remain first-class: they use the root-owned system service through
+Principal, Launcher, and Session credentials.
 
-- the user-mode daemon and its per-user service, socket, configuration, state,
-  and transparent daemon-owner ownership bootstrap;
-- the supported rootless Docker configuration that depends on user-mode daemon
-  operation;
-- the project-produced release tarball and its user/system installation
-  scripts.
+Native DEB/RPM packages are the canonical installation path. If a
+project-produced tarball remains supported after Release 2.3, it is
+system-mode-only and must satisfy the same daemon/MAC contract; Release 3 does
+not reintroduce a user daemon through packaging.
 
-Deprecation does not weaken Release 3 compatibility or acceptance. User mode,
-rootless operation, and tarball installation must pass the same Release 3
-security, upgrade, packaging, and lifecycle gates as supported features. No
-Release 4 removal may be pulled into a 3.x release.
+Release 3 also assumes the build-execution boundary established by Release
+2.4. Engine/API migration and managed-container work must preserve that build
+sandbox and must not silently fall back to the older rootful builder execution
+model.
 
-Non-root clients and agents are not deprecated. They continue to use the
-system service through Principal, Launcher, and Session credentials. Source
-code and GitHub-generated source archives also remain available; they are not
-the project-produced installation tarball.
+This section is binding for Release 3 deployment compatibility. Older Release
+3 design records that still discuss deprecating user mode or removing it in a
+later major release describe a superseded roadmap assumption and must be
+reconciled before their implementation work begins.
 
-Compatible feature work, including a possible Release 3.1, may land before
-Release 4. Once Release 4.0 is published, the 3.x line receives security fixes,
-critical correctness and data-integrity fixes, and critical packaging or
-upgrade fixes, but no Release 4 features or architectural backports. Release 3
-will be maintained for at least twelve months after Release 4.0; its exact
-end-of-support date must be published no later than the Release 4.0 release.
+Compatible feature work, including the bounded Session-lease candidate for
+Release 3.1, remains separate from deployment-mode removal; user-mode removal
+is complete before Release 3 begins.
 
 ## Scope
 
@@ -139,7 +133,8 @@ Container-local ports may be used freely inside that network without host public
 
 The network retains ordinary Docker outbound connectivity. Release 3 adds no special host alias, host-access grant, or firewall layer. Its isolation guarantee separates Session networks; it does not claim to be a complete outbound or host-network sandbox.
 
-Build execution does not attach to the Session network.
+Build execution does not attach to the Session network. Its execution and
+network boundary remain owned by the Release 2.4 build-sandbox contract.
 
 The complete contract is `release-3-session-networking.md`.
 
@@ -207,6 +202,10 @@ restart, stop, or removal.
 
 Release 3 uses the official `github.com/moby/moby/client` Go module behind a narrow docker-helper-owned backend boundary. API-version negotiation is enabled, a tested minimum Engine API version is enforced, and daemon socket selection comes from docker-helper deployment configuration rather than arbitrary process environment. The adapter preserves the existing Session-scoped private-registry behavior by supplying the required credentials explicitly to pull and build calls; Engine API migration must not expose credentials to container creation, durable state, logs, audit, or errors. Moby request and stream representations are implementation details and do not become the public API.
 
+The Engine/API adapter must preserve the Release 2.4 build-sandbox boundary;
+backend migration is not authority to return build execution to a weaker
+rootful path.
+
 Managed containers are an extension of the existing session model, not a parallel management plane.
 
 Request and Response remain transport concepts. Command and Query are application concepts. Operation is a durable execution record created only by selected asynchronous Commands; it is not a mandatory wrapper around every action.
@@ -242,6 +241,24 @@ Release 2.1 provides launcher delegation and the additional authorization layer 
 
 Release 3 builds on that model rather than introducing another delegation mechanism.
 
+### Release 2.2
+
+Release 2.2 provides access-mode-aware filesystem capabilities, mandatory
+system-mode MAC parity, and the security-closure baseline that Release 3 must
+preserve.
+
+### Release 2.3
+
+Release 2.3 removes the user-mode daemon and collapses deployment onto the
+root-owned system service. Release 3 therefore has no user-mode compatibility
+matrix or transparent daemon-owner bootstrap to preserve.
+
+### Release 2.4
+
+Release 2.4 establishes the isolated build-execution boundary. Release 3 may
+change Docker backend mechanics, but it must preserve that build security
+contract.
+
 ## Explicit non-goals
 
 Release 3 does not provide:
@@ -273,10 +290,15 @@ docker-helper is responsible for controlled access to container functionality, n
 
 Release 3 is complete when docker-helper can safely manage the lifecycle, execution, logs, networking exposure, and basic resource constraints of session-owned containers without weakening the authorization and isolation guarantees established by previous releases.
 
-Release integration must also mark user-mode daemon operation, the supported
-rootless configuration, and the project-produced installation tarball as
-deprecated while retaining their complete Release 3 behavior and acceptance
-coverage. System mode and native packages are the recommended path; non-root
-clients of the system service remain first-class.
+Release integration assumes one supported daemon deployment: the root-owned
+system service with mandatory MAC, plus non-root clients authenticated through
+Principal, Launcher, and Session credentials. User-mode daemon compatibility,
+user-mode/rootless deployment, and transparent daemon-owner bootstrap are not
+Release 3 acceptance surfaces because Release 2.3 removes them before Release
+3 begins.
+
+Any subordinate Release 3 design record that still carries the superseded
+"deprecate in 3.x, remove later" deployment assumption must be reconciled to
+this binding scope before implementation of that record.
 
 Features that require reconciliation, scheduling, autonomous recovery, or a broader orchestration model belong outside Release 3.
