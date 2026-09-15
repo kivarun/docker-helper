@@ -475,6 +475,110 @@ func TestEnsureWorkspaceFcontextNewRule(t *testing.T) {
 	}
 }
 
+// TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission is the C3
+// defect demonstration: an enforcing manager walks a Principal-mutable
+// workspace all the way to the recursive restorecon invocation, with no
+// descriptor-safe-implementation admission proof anywhere on the path. The
+// only commands between the SELinux status probe and the recursive relabel
+// are the fcontext inventory/add calls — nothing establishes that the
+// installed libselinux restorecon implementation is descriptor safe against
+// the pathname-replacement race, and nothing establishes that the runtime has
+// a real procfs for the descriptor-backed /proc/self/fd labeling the safe
+// implementation depends on. After the C3 gate exists this demonstration
+// stays green (the relabel legitimately proceeds once the procfs prerequisite
+// holds), and the fail-closed refusal is proven by
+// TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs.
+func TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission(t *testing.T) {
+	var trace [][]string
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.semanagePath = semanagePath
+	mgr.restoreconPath = restoreconPath
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		trace = append(trace, append([]string{cmd}, args...))
+		return []byte{}, nil
+	}
+	mgr.readPathCon = func(path string) (string, error) {
+		return selinuxWorkspaceType, nil
+	}
+
+	created, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory)
+	if err != nil {
+		t.Fatalf("expected the enforcing manager to reach the recursive relabel, got error: %v", err)
+	}
+	if !created {
+		t.Error("expected newly created mapping")
+	}
+
+	restoreconIdx := -1
+	for i, c := range trace {
+		if strings.Contains(c[0], "restorecon") {
+			restoreconIdx = i
+			break
+		}
+	}
+	if restoreconIdx < 0 {
+		t.Fatal("recursive restorecon must be reached for a new workspace boundary")
+	}
+	if !reflect.DeepEqual(trace[restoreconIdx], append([]string{restoreconPath}, "-R", "-m", "-x", "/data")) {
+		t.Errorf("recursive relabel argv = %v", trace[restoreconIdx])
+	}
+	// The commands before the relabel are exactly the fcontext lifecycle
+	// calls: no admission command exists between the boundary guard and the
+	// recursive walk.
+	for _, c := range trace[:restoreconIdx] {
+		if c[0] != semanagePath {
+			t.Errorf("unexpected pre-relabel command %v; no admission step exists before the recursive relabel", c)
+		}
+	}
+}
+
+// TestC3RestoreconTreeInvokedForEveryWorkspaceRelabelShape proves the C3
+// hostile surface is the one recursive relabel owner: the idempotent
+// existing-boundary relabel and the removal rollback relabel both reach
+// restoreconTree's recursive form for directory boundaries (the fresh-boundary
+// relabel is covered by TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission),
+// so the C3 admission gate must live on that owner (never a per-call-site
+// variant).
+func TestC3RestoreconTreeInvokedForEveryWorkspaceRelabelShape(t *testing.T) {
+	var restoreconArgv [][]string
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.semanagePath = semanagePath
+	mgr.restoreconPath = restoreconPath
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if strings.Contains(cmd, "restorecon") {
+			restoreconArgv = append(restoreconArgv, append([]string{cmd}, args...))
+		}
+		if len(args) > 0 && args[0] == "fcontext" {
+			if args[1] == "-l" {
+				return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
+			}
+		}
+		return []byte{}, nil
+	}
+	mgr.readPathCon = func(path string) (string, error) {
+		return selinuxWorkspaceType, nil
+	}
+
+	// Idempotent path: the exact workspace rule already exists, so the
+	// relabel runs without a new rule.
+	if _, err := mgr.ensureTreeFcontext("/data", macBoundaryDirectory); err != nil {
+		t.Fatalf("idempotent relabel failed: %v", err)
+	}
+	// Removal rollback path: a durable directory boundary releases its rule
+	// and relabels the surviving tree back to the default types.
+	if err := mgr.removeFcontextBoundary("/data", macBoundaryDirectory); err != nil {
+		t.Fatalf("removal relabel failed: %v", err)
+	}
+	if len(restoreconArgv) < 2 {
+		t.Fatalf("expected both the idempotent and the removal relabel to reach the recursive form, got: %v", restoreconArgv)
+	}
+	for _, argv := range restoreconArgv {
+		if !reflect.DeepEqual(argv, append([]string{restoreconPath}, "-R", "-m", "-x", "/data")) {
+			t.Errorf("recursive relabel argv = %v", argv)
+		}
+	}
+}
+
 func TestEnsureWorkspaceFcontextIdempotent(t *testing.T) {
 	var addCalled bool
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
