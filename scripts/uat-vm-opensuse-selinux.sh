@@ -257,6 +257,19 @@ fi
 record_stage "SELinux check diagnostic" "$SELCHECK_RESULT"
 
 # ---------------------------------------------------------------------------
+# 7d. INVESTIGATION-ONLY: SC1/M12 real-producer grammar evidence (temporary;
+#     removed once the evidence is committed as the parser fixture).
+# ---------------------------------------------------------------------------
+log "== 7d. SC1/M12 semanage producer grammar evidence (investigation) =="
+if vm_ssh "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-semanage-grammar-evidence.sh" > /tmp/m12-evidence.log 2>&1; then
+  log "SC1/M12 semanage grammar evidence captured (/tmp/m12-evidence.log)"
+else
+  EC=$?
+  log "SC1/M12 semanage grammar evidence FAILED (exit $EC; recorded, non-gating)"
+fi
+sed -n '1,4000p' /tmp/m12-evidence.log || true
+
+# ---------------------------------------------------------------------------
 # 8. SELinux mount-pin / RPM postinstall regression
 # ---------------------------------------------------------------------------
 log "== 8. SELinux mount-pin / RPM postinstall regression =="
