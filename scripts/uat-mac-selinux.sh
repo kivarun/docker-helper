@@ -134,14 +134,14 @@ audit_ts() {
 audit_records() {
   local filter="$1" line ts raw ausearch_out
   if command -v ausearch >/dev/null 2>&1; then
-    # No -ts filter: its date parsing is locale-dependent and mis-parses on
-    # this guest, silently emptying the source. No -m filter either: ausearch
-    # treats repeated -m options as an override (last wins), so the combined
-    # "-m AVC -m USER_AVC" form silently selected only USER_AVC and never
-    # yielded AVC records. The message filtering is owned by the caller's
-    # grep filter; the window filter is applied locally from the audit
-    # record timestamps instead.
-    ausearch_out="$(ausearch 2>/dev/null | grep -E "$filter" || true)"
+    # The exact proven invocation: this ausearch build requires at least one
+    # search criterion (a bare "ausearch" prints the usage text), accepts
+    # message types as ONE comma-separated -m list (repeated -m options are
+    # an override — last wins), and its absolute -ts date parsing is
+    # locale-dependent. Message filtering beyond the -m list is owned by the
+    # caller's grep filter; the audit window is applied locally from the
+    # record timestamps.
+    ausearch_out="$(ausearch -m AVC,USER_AVC --start recent </dev/null 2>/dev/null | grep -E "$filter" || true)"
     if [ -n "$ausearch_out" ]; then
       printf '%s\n' "$ausearch_out" | while IFS= read -r line; do
         ts="$(printf '%s\n' "$line" | audit_ts)"
