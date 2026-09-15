@@ -382,6 +382,10 @@ Endpoint and token resolution for default (no `--system`) mode:
  4. Once selected, an unavailable/failing endpoint is returned as an error;
     the client does not retry another daemon.
 
+Direct shell HTTP examples in the shipped documentation feed bearer
+headers to curl through stdin/file-backed input (the header-from-stdin
+form) and never expand bearer values into process argv.
+
 ## Deployment
 
 ### User mode

@@ -139,17 +139,24 @@ inside the Launcher's effective allowed roots. The response shows the
 session token once — export it as `DOCKER_HELPER_SESSION_TOKEN` and never
 display it.
 
-HTTP: the installed credential is the Bearer. Read it into a shell
-variable from the canonical installed credential file — the same file
-`docker-helper credential install` wrote and the CLI resolves — without
-printing it, and never echo the variable:
+HTTP: the installed credential is the Bearer. Keep the credential file as
+the only source of the value and feed the Authorization header to curl
+through its header-from-stdin form (`-H @-`) — the token must never appear
+in any process argument and is never printed. Define the file-backed header
+producer once and pipe it into curl:
 
 ```bash
-CREDENTIAL="$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token")"
+docker_helper_header_from_file() {
+  printf '%s' 'Authorization: Bearer '
+  tr -d '\r\n' < "$1"
+  printf '\n'
+}
 
+docker_helper_header_from_file \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token" | \
 curl --silent --show-error \
   --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $CREDENTIAL" \
+  -H @- \
   -H "Content-Type: application/json" \
   -d '{"workspace":"/host/path/inside/effective/roots"}' \
   http://localhost/sessions
@@ -386,41 +393,58 @@ else
 fi
 ```
 
-Protected requests require (never print the Authorization header with the
-expanded token):
+Protected requests require two headers (never print the Authorization
+header with the real token; the examples below feed the bearer to curl
+through its header-from-stdin form, so the value never appears in any
+process argument):
 
 ```text
-Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN
+Authorization: Bearer <token>
 Content-Type: application/json
+```
+
+Define the environment-backed header producer once; every example below is
+then copy-paste executable:
+
+```bash
+docker_helper_session_header() {
+  printf '%s' 'Authorization: Bearer '
+  printf '%s' "$DOCKER_HELPER_SESSION_TOKEN"
+  printf '\n'
+}
 ```
 
 ## Endpoints
 
 ```bash
 # Pull — synchronous
+docker_helper_session_header | \
 curl --silent --show-error --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  -H @- \
   -H "Content-Type: application/json" \
   -d '{"image":"alpine:3.24"}' \
   http://localhost/pull
 
 # Build — async, 201 + operation_id (acceptance, not completion)
+docker_helper_session_header | \
 curl --silent --show-error --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  -H @- \
   -H "Content-Type: application/json" \
   -d '{"context":".","dockerfile":"Dockerfile","image":"myapp:test"}' \
   http://localhost/build
 
 # Run — async, 201 + operation_id
+docker_helper_session_header | \
 curl --silent --show-error --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  -H @- \
   -H "Content-Type: application/json" \
   -d '{"image":"alpine:3.24","command":["echo","hello"]}' \
   http://localhost/run
 
 # Cancel
+docker_helper_session_header | \
 curl --silent --show-error --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  -H @- \
   -X POST \
   "http://localhost/operations/OPERATION_ID/cancel"
 ```
