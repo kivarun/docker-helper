@@ -127,7 +127,7 @@ risk rather than by the audit's original severity ordering.
 | **M1** | Environment/build secret values appear in the Docker CLI process argv | **BLOCKER_DECISION** | SC3 | Inventory each secret-bearing channel and choose a supported transport/mitigation. `--env-file` is not assumed equivalent for arbitrary current values. Any residual `/proc` exposure must be explicit in threat/operations docs. |
 | **M2** | Documentation puts bearer tokens directly in `curl` argv | **BLOCKER_FIX** | SC1 | Rewrite shipped examples to token-file/stdin/environment patterns that do not expand the secret into process argv; keep examples executable. |
 | **M3** | Registry credentials are plaintext in the per-Session Docker config | **DEFER_HARDENING** | SC4 | Plaintext storage remains, but the current independent boundary is the root-owned runtime plus per-Session `0700` directory and mandatory MAC. Do not add a keychain/encryption subsystem without demonstrated need. This disposition is conditional: C1/H9 hostile UAT must prove the file remains unreachable from a hostile workload; otherwise promote M3 back to a blocker. |
-| **M4** | Raw-config validation and `json.Unmarshal` accept different key grammar; bad values can reach panic-prone consumers | **BLOCKER_FIX** | SC1 | One strict config decoding/validation path owns key recognition and bounds; malformed/case-variant input fails closed before effective config exists. |
+| **M4** | Raw-config validation and `json.Unmarshal` accept different key grammar; bad values can reach panic-prone consumers | **CLOSED_CURRENT** | SC1 | ONE strict config-document ingest boundary owns JSON object grammar (one object, no trailing tokens), duplicate-member refusal (never last-wins), exact case-sensitive key recognition (case variants refused as unknown, never folded by encoding/json struct matching), the existing value validations, and the fileConfig projection from the proven exact-key map — the original untrusted byte stream is never struct-decoded after raw validation. Malformed config never reaches effective Config or runtime side effects; mutations refuse a malformed document without rewriting it. |
 | **M5** | NUL-containing Principal name can resolve through libc as one OS user but persist as a distinct DB identity | **BLOCKER_FIX** | SC1 | Current creation checks only non-empty input, resolves it through `user.Lookup`, then persists the original request string. Add one canonical username validation boundary before OS lookup/persistence; reject NUL/control aliases rather than creating a second name grammar. |
 | **M6** | Audit write failure does not abort the protected operation | **ACCEPTED_CONTRACT** | SC0/SC4 | Current Release 2.x audit is best-effort observability, not a fail-stop transaction boundary. Do not change operation success semantics merely to match the audit recommendation. Improve failure observability only if useful; a new fail-stop audit contract requires separate architecture acceptance. |
 | **M7** | Cancellation can leave an untracked running container when cidfile timing loses the race | **CLOSED_CURRENT** | SC0 | System-mode ownership no longer depends on cidfile timing: every run has server-owned operation/session labels, post-run cleanup first proves the correlated container absent through label provenance, and failed cleanup retains durable state for startup reconciliation. Preserve that single cleanup/provenance owner. |
@@ -936,6 +936,103 @@ Evidence:
   error, and no unexpected AVC in the lifecycle window. The long proof path
   is spelled without spaces per the captured producer evidence above.
 
+## SC1 — M4: one strict config document ingest boundary
+
+The audit class: startup/load validated the raw document (exact canonical
+keys) and then decoded the ORIGINAL untrusted byte stream into `fileConfig`
+with `encoding/json`, whose struct matching also accepts case-insensitive
+matches against the json tag. The two consumers did not share one key
+grammar: a later case-variant member silently overwrote a validated
+canonical value, and the folded value was never revalidated — reaching
+`operationSupervisor.pruneCompleted(..., maxCompleted)`, whose negative cap
+deterministically panics at the slice boundary.
+
+Closed with ONE strict ingest boundary and no second decode:
+
+- `decodeStrictConfigDocument` owns the JSON object grammar: exactly one
+  top-level object, no trailing tokens, and duplicate top-level members
+  fail-closed (the persisted config is security policy/state: one JSON
+  member maps to one config identity, never last-wins; no compatibility
+  mode). Member names are preserved byte-for-byte.
+- `validateConfigMemberGrammar` owns exact key recognition: computed fields
+  keep the computed diagnostic, deprecated fields the rename diagnostic,
+  retired fields the retired diagnostic, and every other member must be a
+  known config-file key with EXACT spelling — `Operation_Max_Completed`,
+  `Session_TTL`, `SESSION_TTL`, `Audit_Enabled`, `Allowed_Roots` are refused
+  as unknown, never aliases. No case normalization, no alias map.
+- `validateRawConfig` composes member grammar + the unchanged value
+  validations (one value authority: `parseSessionTTL`, `parseLogLevel`,
+  duration/integer bounds, trusted-CA values, `validateHTTPAddress`, the
+  `allowed_roots` schema with the exact nested `{"path","access"}` object
+  grammar).
+- `decodeAndValidateConfigDocument` composes the above and projects
+  `fileConfig` from the proven exact-key map — the original untrusted byte
+  stream is never struct-decoded after raw validation. Production consumers
+  migrated: `loadAndPrepareRuntimeConfig` (startup + reload),
+  `initSystem`'s existing-config inspection, `loadRawConfigFile` (all
+  config CLI surfaces), and the config transaction preflights. No
+  production `json.Unmarshal(originalConfigBytes, &fileConfig)` remains.
+- Side-effect ordering: the refusal happens before the runtime-directory
+  creation and before trusted-CA preparation; a reload failure leaves the
+  previous effective configuration authoritative (the existing reload
+  owner unchanged).
+- Mutation semantics: a config transaction on an existing document carrying
+  an unknown, case-variant, or duplicate member is refused BEFORE any
+  mutation, without rewriting the file — no mutation erases the evidence of
+  malformed input as a side effect. Invalid member VALUES keep their
+  existing repair semantics (setting/unsetting the invalid field itself is
+  the documented operator recovery — `TestRegressionRepairInvalidField`
+  unchanged).
+- Compatibility sweep: no documented stable Release 2.x spelling is rejected.
+  The exact legacy `allowed_root` migration input keeps its contract; the
+  former silent preservation of unknown members (pinned only by the
+  incidental `TestConfigPreservesUnknownMembers`, never documented in any
+  man page, architecture, or changelog) is the explicit strict-grammar
+  change of this closure.
+
+Evidence:
+
+- RED (commit `262f563`, tests through the existing entry points against the
+  pre-fix code): `validateRawConfig` accepted case-variant members and
+  unknown top-level members silently; `loadRawConfigFile` accepted duplicate
+  top-level members (map decode collapses them, last wins); and the exact
+  RED payload — canonical `operation_max_completed: 200` followed by
+  `Operation_Max_Completed: -1` — LOADED SUCCESSFULLY through the real
+  production ingest (`loadAndPrepareRuntimeConfig`) with an effective
+  `OperationMaxCompleted` of -1, while the reverse member ordering yielded
+  200 (acceptance depended on JSON member order). A contained
+  `pruneCompleted` consumer proof shows the negative cap deterministically
+  panics at the slice boundary.
+- GREEN: the full key table (every canonical key accepted at its exact
+  spelling; a case variant of every key refused as unknown), the exact
+  legacy `allowed_root` behavior, deprecated/retired/computed exact-spelling
+  diagnostics (case variants answered with the unknown diagnostic),
+  structural JSON cases (null/array/scalar/malformed/trailing second value/
+  duplicates), and order-independence (a case variant refused before AND
+  after its canonical spelling).
+- GREEN security regressions: the RED payload is refused; no negative value
+  ever reaches effective Config (either the document is refused or the
+  effective value is canonical); the refusal occurs with zero runtime-dir
+  resolutions (`TestStrictIngestRefusalBeforeRuntimeSideEffects`), so no
+  MAC/CA/runtime state can derive from a malformed value.
+- GREEN config CLI: `config show` and `config show FIELD` refuse duplicate/
+  unknown/case-variant/trailing documents; `config set`, `config unset`,
+  and `config allowed-root add` refuse a malformed existing document and
+  leave config.json byte-for-byte unchanged; canonical documents keep their
+  normal show/set/unset/reload behavior (existing suites unchanged).
+- GREEN exact-candidate black-box UAT (regression group 21,
+  `scripts/uat-regression-allowed-root-recovery.sh`, Ubuntu/DEB/AppArmor,
+  real system service): startup fails closed on the injected RED payload in
+  the real `/etc/docker-helper/config.json` with the bounded journal
+  diagnostic and no panic evidence (J); restoring the canonical bytes
+  restores normal startup (K); reload refuses the malformed document while
+  the running daemon keeps serving the previous effective config, and
+  reload succeeds again after the restore (L); `config set` and
+  `config allowed-root add` refuse the malformed document with the file
+  bytes unchanged (sha256 before/after) (M); unknown-member startup refusal
+  (N); duplicate-member startup refusal (O); the canonical config still
+  starts, reloads, and mutates normally after all refusals (P).
+
 ## Release-cycle integration
 
 Security closure is inserted **after the Release 2.2 feature contract is frozen
@@ -979,11 +1076,12 @@ findings merely because they came from the same audit.
 
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
-**Queue:** `C3`, `M2`, `M4`, `M5`. (C1 and H9 closed in SC1 — see the SC1
+**Queue:** `C3`, `M2`, `M5`. (C1 and H9 closed in SC1 — see the SC1
 evidence ledger. H2 and H3 closed in SC1 — see the SC1 evidence ledger
 below. M13 closed in SC1 — see the SC1 evidence ledger below. H6 closed in
 SC1 — see the SC1 evidence ledger below. M11 and M12 closed in SC1 — see
-the SC1 evidence ledger below.)
+the SC1 evidence ledger below. M4 closed in SC1 — see the SC1 evidence
+ledger below.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
