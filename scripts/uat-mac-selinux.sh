@@ -285,6 +285,15 @@ $(journalctl -k --since "@${SE_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || tru
     attempt=$((attempt + 1))
     sleep 3
   done
+  # Diagnostic dump for the unprovable-failure case: the exact raw output of
+  # the audit sources in the adapter context.
+  printf '\n[UAT] H6 discriminator debug dump (audit sources in adapter context):\n' >&2
+  printf -- '--- ausearch (plain) ---\n' >&2
+  ausearch 2>&1 | tail -12 >&2 || true
+  printf -- '--- ausearch -m AVC,USER_AVC --start recent ---\n' >&2
+  ausearch -m AVC,USER_AVC --start recent </dev/null 2>&1 | tail -12 >&2 || true
+  printf -- '--- dmesg AVC tail ---\n' >&2
+  dmesg 2>/dev/null | grep -i 'avc' | tail -6 >&2 || true
   return 1
 }
 
