@@ -852,13 +852,18 @@ if [ "$H6_ROTATE_RC" -ne 0 ]; then
   # Discriminate the RED state: the failure must be a mandatory MAC denial of
   # the token replacement lifecycle, not a harness/config failure. The rotate
   # output carries no bearer token (the rotation failed), but it is redacted
-  # before it reaches the log anyway.
+  # before it reaches the log anyway. On the SELinux guest the auditd
+  # userspace log (the ausearch source) is flushed asynchronously and can lag
+  # the event by well over a minute, so an unprovable failure here is
+  # deferred to the phase 8c discrimination after the audit log has had time
+  # to flush — it is NOT immediately classified as harness/config failure.
   say "phase 7c: rotation failed on the exact candidate — collecting MAC denial evidence"
   printf '%s\n' "$H6_ROTATE_OUT" | redact_tokens | head -5 >&2
   if mac_h6_denial_evidence "$STAGING_FILE" "$ADMIN_TOKEN_FILE"; then
     fail_uat "H6 RED: mandatory MAC blocks admin-token rotation (denial records in diagnostics)"
   fi
-  fail_uat "rotation failed without a MAC denial on the token replacement lifecycle — not H6 evidence (rotate output above, redacted)"
+  H6_ROTATE_FAILED=1
+  info "rotation failed; H6 RED discrimination deferred to phase 8c (audit log flush latency)"
 fi
 
 NEW_ADMIN_TOKEN="$(printf '%s\n' "$H6_ROTATE_OUT" | tail -n 1)"
@@ -977,6 +982,21 @@ fi
 rm -rf "$DENIED_WS"
 docker-helper session delete --system --id "$HTTP_SESS_ID" >/dev/null 2>&1 || true
 info "loopback HTTP acceptance ok"
+
+# ==============================================================================
+# Phase 8c: deferred H6 RED discrimination (SC1/H6)
+# ==============================================================================
+# Reached only when the phase 7c rotation failed and the immediate denial
+# evidence was not yet visible: by now the audit log has flushed, so the
+# token-replacement MAC denial is either provable (H6 RED) or the failure
+# was genuinely not an H6 MAC block.
+if [ "${H6_ROTATE_FAILED:-0}" = "1" ]; then
+  say "phase 8c: H6 RED discrimination (rotation failed earlier; audit log flushed)"
+  if mac_h6_denial_evidence "$STAGING_FILE" "$ADMIN_TOKEN_FILE"; then
+    fail_uat "H6 RED: mandatory MAC blocks admin-token rotation (denial records in diagnostics)"
+  fi
+  fail_uat "rotation failed without a MAC denial on the token replacement lifecycle — not H6 evidence (phase 7c rotate output above, redacted)"
+fi
 
 # ==============================================================================
 # Summary
