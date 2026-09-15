@@ -2286,15 +2286,24 @@ target is not.
 Fail closed: a source/target that fails any boundary is refused — the CSV
 reader normalizes the literal CRLF pair to LF inside quoted fields, a
 whitespace-padded or empty value fails the Docker value validation, and a
-NUL byte fails exec argv. The refusal happens before any pin, operation
-admission, or Docker state exists (the container target in every mode;
-the canonical bind source in user mode, where the resolved host path
-itself is the bind source — system mode binds a helper-owned pinned path
-instead), so a refused run answers `invalid_mount` for caller-controlled
-values and `internal_error` for daemon-owned values with no residue. This
-is the one representability boundary of the serialization; it lives in
-the serializer owner, never as scattered per-caller prohibitions, and no
-shell escaping is involved (the Docker argv is structured exec argv).
+NUL byte fails exec argv. Refusal timing follows the two value classes.
+Caller-controlled bind facts — the container target in every mode and the
+canonical resolved source in user mode, where the resolved host path
+itself is the bind source — are proven representable at request
+validation: before pinning, before workload-MAC preparation, before the
+operation admission, before `run.start`, and before any Docker state, and
+such a refusal answers `invalid_mount`. Actual daemon-owned or prepared
+bind sources — the system-mode pinned source, the trusted-CA prepared
+source, and the helper-socket runtime projection source — become known
+only after the pins and the workload MAC state are prepared, so a
+serialization failure of one of them surfaces after that preparation but
+before the operation admission, before `run.start`, and before Docker
+execution and container creation: the prepared state rolls back through
+the canonical rollback owner and the run answers `internal_error` with no
+admitted Operation. This is the one representability boundary of the
+serialization; it lives in the serializer owner, never as scattered
+per-caller prohibitions, and no shell escaping is involved (the Docker
+argv is structured exec argv).
 
 On top of the structural validation, the access mode of every accepted
 mount is enforced against the persisted immutable Session filesystem

@@ -532,11 +532,20 @@ Closed with one canonical serializer owner (`dockerBindMountSpec` /
   `MountOpt.Set` value validation unchanged — the CLI rejects an empty
   value and a value with leading or trailing whitespace (ASCII or
   Unicode); (3) the value must be exec-argv representable — a Unix exec
-  argument cannot carry an embedded NUL byte. Refusals happen before any
-  pin, operation admission, or Docker state exists (the container target
-  in every mode; the canonical bind source in user mode — system mode
-  binds a helper-owned pinned path): caller-controlled values answer
-  `invalid_mount`, daemon-owned values answer `internal_error`;
+  argument cannot carry an embedded NUL byte. Refusal timing follows the
+  two value classes. Caller-controlled bind facts — the container target
+  in every mode and the canonical resolved source in user mode — are
+  proven at request validation: refused `invalid_mount` before pinning,
+  before workload-MAC preparation, before the operation admission,
+  before `run.start`, and before any Docker state. Actual daemon-owned
+  or prepared bind sources — the system-mode pinned source, the
+  trusted-CA prepared source, and the helper-socket runtime projection
+  source — become known only after the pins and the workload MAC state
+  are prepared, so their serialization failure happens after that
+  preparation but before the operation admission, before `run.start`,
+  and before Docker execution and container creation: the prepared state
+  rolls back through the canonical rollback owner and the run answers
+  `internal_error` with no admitted Operation;
 - the Docker argv is built and serialized after the pins and the workload
   MAC state are prepared — every actual bind source is known — and before
   the operation admission and the `run.start` audit: a serialization
