@@ -119,7 +119,7 @@ risk rather than by the audit's original severity ordering.
 | **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **CLOSED_CURRENT** | SC1 | Authorization-before-probing ordering established at all four session-facing admission boundaries: the raw spelling is admitted lexically against the issued filesystem capability FIRST (workspace create against the effective ceiling, absolute run mount against the issued snapshot entries, build context/Dockerfile against the workspace, issuance-time `filesystem_roots` against the effective Launcher ceiling), and a spelling outside the capability is refused immediately WITHOUT any privileged filesystem probe — zero-probe seam evidence, not merely equal responses. The former symlink-alias admission (an outside spelling resolving into the capability) is removed as an explicit Release 2.2 security tightening. After admission the canonical `EvalSymlinks` + containment proofs remain the mandatory second security proof (inside-ceiling aliases work; inside-ceiling symlink escapes stay fail-closed); public unauthorized failures stay bounded/non-disclosing; admitted spellings keep their actionable diagnostics; run/build keep their stable public contracts with admission diagnostics retained operationally. The issued snapshot's authority remains the persisted path tree (position/path/access + digest) — a review-round retraction of a live-kind exact-capability inference is recorded below. |
 | **H4** | Build staging can consume unbounded tmpfs bytes/inodes/depth/files | **BLOCKER_FIX** | SC2 | Add measured hard ceilings for staged bytes, entries and depth, admitted/reserved before staging. Failure must be bounded and leave no residue. Do not introduce the Release 3 quota hierarchy. |
 | **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **BLOCKER_FIX** | SC2 | Bound response materialization, mounts/pins per operation, and concurrent/running operation admission at Session/global security ceilings. Measure defaults and reserve before expensive work. |
-| **H6** | Mandatory MAC policy blocks admin-token rotation | **BLOCKER_FIX** | SC1 | Narrow AppArmor/SELinux write/rename permission to the token replacement lifecycle only; live enforcing UAT proves old token rejected and new token accepted. |
+| **H6** | Mandatory MAC policy blocks admin-token rotation | **CLOSED_CURRENT** | SC1 | The admin-token replacement lifecycle is rewritten around ONE fixed staging pathname (`.admin-token.new`, internal implementation pathname, not a config/API/CLI surface), serialized by the existing admin-token hash commit lock with the stale-rotation check BEFORE the staging pathname is touched, crash-residue recovery, and failure-safe cleanup (current token file and runtime hash unchanged, staging removed). The shipped MAC policy is narrowed to the token replacement lifecycle only: AppArmor grants write/rename on exactly the two token pathnames (the generic config tree and config.json stay read-only, no broader write glob); SELinux introduces the dedicated `docker_helper_admin_token_t` file type (MAC implementation state) with exact fcontext rules listed before the generic config-tree rule, the full replacement lifecycle granted on the token type only, an EXACT filename transition for `.admin-token.new` (no generic config-dir transition), `docker_helper_config_t:file` strictly read-only, and config-dir namespace operations limited to write/add_name/remove_name. Deployment labeling stays under the selinux_deploy owner: an exact post-create relabel after the initial token is written (the tree relabel runs before the token exists) and the packaged restorecon migrates a pre-H6 token on upgrade/reinstall without changing its value. Live enforcing UAT on the exact candidate proves rotation through the shipped confined service with old token rejected, new token accepted, no restart, 0600, no staging residue, config.json unchanged, no broader writable config surface, and no unexpected H6-policy denial on both backends. |
 | **H7** | A local user can occupy the optional TCP port and drive the service into systemd start-limit failure | **BLOCKER_FIX** | SC2 | Current code still creates the Unix listener and then treats TCP bind failure as fatal, while the shipped service has `Restart=on-failure` plus a finite start-limit. The authoritative local Unix service must not be permanently denied by unauthenticated TCP port capture. |
 | **H8** | External MAC commands can hold shared coordination long enough to delay emergency disable | **BLOCKER_FIX** | SC2 | Existing MAC command owners gain bounded cancellation/timeouts and the lifecycle lock path is reviewed so untrusted-size work cannot indefinitely hold administrative disable. Avoid a new queue/framework unless evidence requires it. |
 | **H9** | Agent container can receive the helper runtime directory and steal registry secrets/replace CA state | **CLOSED_CURRENT** | SC1 | Closed by composition with C1, without a second socket transport owner: with the privilege floor in place the strongest reachable workload privilege is the Principal UID:GID with no capabilities and no-new-privileges, which the root-owned `0700` helper-private runtime state denies; the read-only projection and unchanged bearer authentication are unchanged. Hostile helper-socket UAT on enforcing AppArmor and enforcing SELinux proved the socket transport functional, unauthenticated calls refused, private runtime/session Docker config unreadable, runtime immutable, and escalation dead (see the SC1 evidence ledger). |
@@ -595,9 +595,119 @@ Evidence:
   head SHA): 11/11 jobs success, FAILS 0 / BLOCKED 0, regression groups
   3–22 PASS including group 22 with the Docker value-validation boundary
   case.
-- Server-owned forms serialize through the same owner with unchanged
+ - Server-owned forms serialize through the same owner with unchanged
   behavior (existing CA/helper-socket argv contract tests pass
   unchanged).
+
+## H6 — admin-token rotation through the shipped confined MAC policy
+
+The audit class: `rotateAdminToken` staged the replacement through a
+random `os.CreateTemp(configDir, ".admin-token-*")` tempfile. The shipped
+confined policy cannot express that lifecycle as a narrow file contract:
+AppArmor (`/etc/docker-helper/** r`) denied the tempfile creation
+(`apparmor="DENIED" operation="mknod" ... name="/etc/docker-helper/.admin-token-NNN"
+requested_mask="c"`) and SELinux denied the config-directory write
+(`avc: denied { write } ... tcontext=...docker_helper_config_t:s0
+tclass=dir` with `scontext=...docker_helper_t`) — every rotation through
+the shipped service failed with `internal_error` (proven RED on the exact
+candidate on both backends, 2.2.0-uat).
+
+Closed with a rewritten replacement lifecycle (one owner, the existing
+hash commit lock) plus narrowed shipped policy:
+
+- ONE fixed staging pathname `.admin-token.new`, a sibling of the token
+  file; an internal implementation pathname, not a config/API/CLI
+  surface; no compat path for the old random tempfile spelling;
+- the whole lifecycle runs under the existing admin-token hash commit
+  lock (no new mutex): the authorizing hash is verified current BEFORE
+  the staging pathname is touched — a stale concurrent rotation commits
+  nothing and never observes or cleans the winner's staging state;
+- crash residue at the exact staging pathname is cleaned by the next
+  rotation; create/write/chmod 0600/fsync/close, then the atomic rename
+  onto admin.token; every failure — rename included — leaves the current
+  token file and the runtime hash unchanged and removes the staging file;
+- AppArmor: the ONLY writable config-namespace objects are
+  `/etc/docker-helper/admin.token` and `/etc/docker-helper/.admin-token.new`;
+  the generic config tree and config.json stay read-only; no broader
+  write glob (static regression sweeps every config rule);
+- SELinux: dedicated `docker_helper_admin_token_t` file type (MAC
+  implementation state, not a domain noun); exact fcontext rules for both
+  token pathnames listed before the generic config-tree rule; the full
+  replacement lifecycle (create/write/setattr/rename/unlink plus the
+  startup read/open/getattr) granted on the token type only; the staging
+  object labeled through the EXACT filename transition for
+  `.admin-token.new` (no generic config-dir transition);
+  `docker_helper_config_t:file` strictly read-only (read/open/getattr)
+  and the config directory limited to write/add_name/remove_name; no
+  relabel permission granted to the daemon (deployment relabels run from
+  the unconfined operator/packaging context);
+- deployment labeling under the existing selinux_deploy owner: system
+  init applies the exact admin-token restorecon immediately after the
+  initial token is written (the tree relabel runs before the token
+  exists), so a fresh token carries the dedicated type before the first
+  daemon start; the packaged `restorecon -R /etc/docker-helper` migrates
+  a pre-H6 token on upgrade/reinstall without changing its value.
+
+Evidence:
+
+- RED AppArmor enforcing (run 34931077818, jobs uat-blackbox-ubuntu,
+  uat-blackbox-ubuntu-tarball, uat-blackbox-opensuse-apparmor, exact
+  2.2.0-uat artifacts): rotation → `admin_token.rotate result:"error"` /
+  500 `internal_error`; `apparmor="DENIED" operation="mknod"
+  profile="docker-helper-system" name="/etc/docker-helper/.admin-token-NNN"
+  requested_mask="c" denied_mask="c"` captured from the fresh kernel
+  audit window.
+- RED SELinux enforcing (run 34945281206, job uat-blackbox-opensuse-selinux,
+  exact RPM/service in docker_helper_t): rotation → 500 with the daemon
+  operational error `cannot create temp token file: open
+  /etc/docker-helper/.admin-token-NNN: permission denied`;
+  `avc: denied { write } for comm="docker-helper"
+  scontext=system_u:system_r:docker_helper_t:s0
+  tcontext=unconfined_u:object_r:docker_helper_config_t:s0 tclass=dir`
+  captured. Run 34931077818 (uat-blackbox-opensuse-tarball-selinux)
+  additionally proved the fresh-install labeling defect of the pre-H6
+  artifact: a fresh admin.token inherited
+  `unconfined_u:object_r:docker_helper_config_t:s0`.
+- GREEN lifecycle regressions: fixed staging pathname as the rename
+  source (`TestRotateAdminTokenFixedStagingPath`), crash-residue
+  recovery (`TestRotateAdminTokenCrashResidueRecovery`), stale rotation
+  never touches the staging pathname
+  (`TestRotateAdminTokenStaleDoesNotTouchStaging`), failure cleanup,
+  config.json byte-for-byte unchanged
+  (`TestRotateAdminTokenConfigJSONUnchanged`); the format/success/mode/
+  hash/old-rejected/new-accepted/rename-failure/stale-commit/HTTP-auth/
+  audit-leak suites pass unchanged.
+- Static policy regressions: AppArmor write-capable config rules only on
+  the two exact token pathnames (`TestSystemProfileAdminTokenReplacementSurface`);
+  SELinux exact token fcontext rules before the generic rule
+  (`TestSELinuxAdminTokenFileContexts`), the token type with the exact
+  filename transition, config_t:file read-only, config-dir namespace
+  operations limited to write/add_name/remove_name
+  (`TestSELinuxPolicyAdminTokenReplacement`); the shipped policy module
+  compiles (`scripts/check-selinux-policy.sh`).
+- GREEN exact-candidate live enforcing UAT on the final closure SHA
+  (full `uat-blackbox.yml` scope, producer manifest `source_sha` =
+  workflow head SHA; 11/11 jobs, FAILS 0 / BLOCKED 0):
+  - AppArmor (uat-blackbox-ubuntu, uat-blackbox-ubuntu-tarball,
+    uat-blackbox-opensuse-apparmor): confinement verified
+    `docker-helper-system (enforce)`; installed profile write surface
+    asserted = only the two token pathnames; rotation through the public
+    CLI succeeded; old token → 401; new token → accepted admin
+    operation; admin.token 0600; staging pathname absent; no daemon
+    restart (PID unchanged); config.json unchanged; no unexpected
+    AppArmor denial on the successful lifecycle.
+  - SELinux (uat-blackbox-opensuse-selinux RPM,
+    uat-blackbox-opensuse-tarball-selinux): daemon verified
+    `docker_helper_t` enforcing; fresh-install labeling proven
+    (admin.token=`docker_helper_admin_token_t`,
+    config.json=`docker_helper_config_t`); migration/reinstall labeling
+    proven (token relabeled `docker_helper_config_t` →
+    `docker_helper_admin_token_t` by the exact packaging restorecon
+    command, value unchanged); `sesearch` proven no write permission on
+    `docker_helper_config_t:file`; rotation through the public CLI
+    succeeded; old token → 401; new token → accepted; 0600; staging
+    pathname absent; no restart; config.json unchanged; no AVC on the
+    successful lifecycle.
 
 ## Release-cycle integration
 
@@ -642,10 +752,11 @@ findings merely because they came from the same audit.
 
 ## SC1 — immediate trust-boundary, parser and MAC closure
 
-**Queue:** `C3`, `H6`, `M2`, `M4`, `M5`, `M11`,
+**Queue:** `C3`, `M2`, `M4`, `M5`, `M11`,
 `M12`. (C1 and H9 closed in SC1 — see the SC1 evidence ledger. H2
 and H3 closed in SC1 — see the SC1 evidence ledger below. M13 closed in
-SC1 — see the SC1 evidence ledger below.)
+SC1 — see the SC1 evidence ledger below. H6 closed in SC1 — see the SC1
+evidence ledger below.)
 
 SC1 contains defects that are locally actionable through existing owners and
 whose fixes do not require the larger resource-control or architecture
@@ -662,7 +773,9 @@ Implementation constraints:
 - H3: preserve rich diagnostics in operational logs while bounding public
   errors.
 - H6: MAC changes are as narrow as the token replacement lifecycle; no write
-  grant to the whole config directory.
+  grant to the whole config directory. (Closed: one fixed staging pathname,
+  exact-path AppArmor grants, a dedicated SELinux token type with an exact
+  filename transition, config tree read-only; see the SC1 evidence ledger.)
 - M4: one config grammar/decoder owner.
 - M5: one accepted Principal username grammar before OS lookup and persistence.
 - M11: host-path control-character policy belongs to the shared path owner.
@@ -743,7 +856,8 @@ At minimum:
    container creation.
 3. **H6 admin-token rotation under enforcing MAC.** Rotate through the shipped
    package/service on AppArmor and SELinux; prove old token fails and the new
-   token succeeds with no broader writable config surface.
+   token succeeds with no broader writable config surface. (Closed: see the
+   SC1 evidence ledger, H6.)
 4. **H2 parked revoke/create race.** Park Session issuance across the
    authorization linearization point, revoke/rotate the credential, and prove
    the losing ordering cannot issue a new Session.
