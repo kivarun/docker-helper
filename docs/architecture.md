@@ -445,6 +445,43 @@ workspace access is type-based and does not reproduce AppArmor's per-path
 managed-boundary rule; canonical application-level allowed-root validation
 remains authoritative in both modes.
 
+The admin-token replacement lifecycle is the one narrow write surface in the
+config directory, and it is NOT a generic writable config grant — the two
+backends treat config paths differently by their mechanics:
+
+- AppArmor is pathname-mediating: it grants write/rename on exactly two
+  pathnames — the canonical `/etc/docker-helper/admin.token` and the fixed
+  staging pathname `/etc/docker-helper/.admin-token.new`. The generic
+  `/etc/docker-helper/**` rule stays read-only: config.json and every other
+  config path remain immutable to the confined daemon, and no broader write
+  glob is granted.
+- SELinux is type-based and does NOT reproduce AppArmor's per-pathname
+  mediation. A dedicated `docker_helper_admin_token_t` file type (MAC
+  implementation state, not a domain noun) carries the full replacement
+  lifecycle (create/write/setattr/rename/unlink plus the daemon's startup
+  read/open/getattr of the token file). Exact fcontext rules assign that
+  type to the two token pathnames and are listed before the generic
+  config-tree rule, so config.json and every other config path stay
+  `docker_helper_config_t` — which remains read-only/immutable for the
+  daemon (read/open/getattr): no write, unlink, rename-away, or overwrite
+  by a token rename. The token type is CREATION-constrained: a newly
+  created staging file receives it only through the EXACT filename
+  transition for `.admin-token.new` (no generic config-dir transition), and
+  direct creation of an arbitrary fresh config-dir name stays denied (the
+  new file would inherit `docker_helper_config_t`, whose create is not
+  granted). ACCEPTED SELinux backend mechanic (proven at runtime, release
+  owner ruling): SELinux does NOT provide AppArmor-equivalent
+  destination-basename mediation for rename — once a token_t inode exists,
+  the granted directory namespace permissions may allow it to be renamed to
+  an otherwise unused basename in the config directory. This is a backend
+  mechanic, not additional product authority: the rotation lifecycle has
+  ONE production rename (`.admin-token.new` → `admin.token`), and no
+  API/CLI/config surface can request any other config-directory rename.
+  The daemon receives only the config-directory namespace operations the
+  staged replacement requires (write/add_name/remove_name) and never a
+  relabel permission: the deployment relabels of the token pathnames run
+  from the unconfined operator/packaging context.
+
 ## Trust model
 
 ### Trusted
@@ -478,10 +515,17 @@ every agent input before passing it to Docker.
 ```
 docker-helper init
     │
-    ├── creates config directory (0700)
+    ├── creates config directory (system mode 0755, user mode 0700)
     ├── creates state directory (0700)
+    ├── applies the deployment SELinux relabel to the config/state trees
+    │   (system mode, enforcing SELinux; before any file is written)
     ├── writes config.json
-    └── generates admin token (dht_<64 hex chars>)
+    ├── generates admin token (dht_<64 hex chars>)
+    ├── applies the exact admin-token relabel to the token file
+    │   (system mode, enforcing SELinux; after the token is written)
+    └── on relabel failure removes the just-created token file, so no
+        partial initialization is left behind (the next init is not
+        poisoned by the existing-token preflight)
     │
 docker-helper serve
     │
@@ -917,7 +961,20 @@ MAC/runtime cleanup owners:
 - **Admin token** rotation (`admin-token rotate`; HTTP
   `POST /admin/token/rotate`) requires the current
   token; the new token is shown once, the old token is invalid
-  immediately, and no restart is required.
+  immediately, and no restart is required. The replacement lifecycle is
+  serialized by the existing admin-token hash commit lock: the
+  authorizing hash is verified current before the staging pathname is
+  touched, so a stale concurrent rotation commits nothing and never
+  touches the winner's staging state. The staging pathname is the ONE
+  fixed helper-owned name `.admin-token.new` beside the token file — an
+  internal implementation pathname, not a config/API/CLI surface —
+  written, chmod'd 0600, fsynced, and atomically renamed onto the token
+  file; every failure leaves the current token file and the runtime hash
+  unchanged and removes the staging file, and crash residue at the exact
+  staging pathname is cleaned by the next rotation. This fixed pathname
+  is what the shipped confined MAC policy expresses as a narrow
+  file contract (see Mandatory access control); the historical random
+  tempfile spelling is gone.
 
 Revoking a Principal or Launcher credential does not invalidate issued
 sessions; deleting a Launcher credential leaves its launcher's sessions
@@ -1123,13 +1180,26 @@ own deployment state: the helper-owned `/etc/docker-helper/**` (config) and
 `/var/lib/docker-helper/**` (state) trees are relabeled to
 `docker_helper_config_t` / `docker_helper_state_t` immediately after they are
 created and before the admin token is written, so the first daemon start can
-open its database. Init also runs an exact-path restorecon on the Docker CLI
-executable the daemon will exec (resolved over the same PATH the service uses),
-so the confined `docker_helper_t` domain can execute it with the
+open its database. Because the tree relabel runs before the token exists, a
+freshly written admin token would otherwise inherit the generic config
+directory type — so init additionally applies an EXACT admin-token relabel
+immediately after the token is written (the same selinux_deploy owner; the
+token pathnames are the only exact-path additions, never a recursive or
+whole-tree relabel), so the fresh token carries the dedicated
+`docker_helper_admin_token_t` type before the first daemon start and the
+first confined rotation succeeds. A relabel failure aborts init (no partial
+initialization): on a failed fresh-init token relabel init removes the
+just-created token file, so the next init is not poisoned by the
+existing-token preflight. Init also runs an exact-path restorecon on the
+Docker CLI
+executable the daemon will exec (resolved over the same PATH the service
+uses), so the confined `docker_helper_t` domain can execute it with the
 `container_runtime_exec_t` type the distro/container-selinux fcontext rules
 already define — never a recursive `/usr/bin` relabel and never a `bin_t`
-execute grant. A relabel failure aborts init (no partial initialization).
-AppArmor system mode and user mode perform no SELinux relabel.
+execute grant. AppArmor system mode and user mode perform no SELinux
+relabel; on upgrade/reinstall the packaged `restorecon -R
+/etc/docker-helper` migrates an existing pre-H6 admin token to the
+dedicated type without changing its value.
 
 Initialization defaults follow the selected deployment identity:
 

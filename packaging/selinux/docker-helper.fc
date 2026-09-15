@@ -6,7 +6,16 @@
 # Workspace paths under /home retain their normal host labels (user_home_type).
 # Non-home system allowed_roots are persistently managed as
 # docker_helper_workspace_t via semanage fcontext + restorecon by docker-helper.
+#
+# The exact admin-token replacement pathnames are listed BEFORE the generic
+# config-tree rule: file_contexts match first, so only these two exact
+# pathnames carry docker_helper_admin_token_t and every other config path
+# (config.json included) stays docker_helper_config_t. admin.token carries the
+# dedicated token type because the daemon renames the staging object onto it
+# and the SELinux type travels with the inode across rename.
 
+/etc/docker-helper/.admin-token.new  --  system_u:object_r:docker_helper_admin_token_t:s0
+/etc/docker-helper/admin.token       --  system_u:object_r:docker_helper_admin_token_t:s0
 /usr/bin/docker-helper              --  system_u:object_r:docker_helper_exec_t:s0
 /usr/bin/bindfs                     --  system_u:object_r:docker_helper_bindfs_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0

@@ -93,6 +93,43 @@ func relabelDockerCLI() error {
 	return nil
 }
 
+// relabelAdminTokenFile applies the installed fcontext rules to the exact
+// admin token pathname. It is the exact-path complement to
+// relabelDeploymentConfigState: the tree relabel runs BEFORE the admin token
+// is written, so a freshly written token would otherwise inherit the generic
+// config directory type instead of the dedicated token replacement type and
+// the first rotation under confinement would fail. Never recursive, never
+// the whole config tree, never any other config pathname.
+func relabelAdminTokenFile(adminTokenPath string) error {
+	out, err := deploymentRestorecon("-m", adminTokenPath)
+	if err != nil {
+		return fmt.Errorf("admin token relabel failed (restorecon -m %s): %w: %s",
+			adminTokenPath, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// applyAdminTokenDeploymentRelabel is invoked by system init immediately
+// after the initial admin token is written, so the token carries the
+// dedicated token replacement type before the first daemon start. Under
+// system mode with enforcing SELinux an inability to relabel the token is
+// fatal: init must not complete with deployment state the confined daemon
+// cannot use (no misleading partial initialization). AppArmor system mode
+// and user mode have no SELinux dependency and no relabel behavior.
+func applyAdminTokenDeploymentRelabel(mode DeploymentMode, adminTokenPath string) error {
+	if mode != ModeSystem {
+		return nil
+	}
+	backend, err := detectLSM()
+	if err != nil {
+		return fmt.Errorf("cannot determine MAC backend for the admin token relabel: %w", err)
+	}
+	if backend != LSMSELinux {
+		return nil
+	}
+	return relabelAdminTokenFile(adminTokenPath)
+}
+
 // applyDeploymentSELinuxRelabel is invoked by system init immediately after
 // the helper-owned config/state directories are created and before the config
 // / admin token are written, so the created files inherit the correct labels

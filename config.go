@@ -999,6 +999,24 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 		return nil, fmt.Errorf("cannot write admin token: %w", err)
 	}
 
+	// Under enforcing SELinux system mode, apply the installed fcontext rule
+	// to the exact admin token pathname immediately after it is written. The
+	// deployment relabel above ran BEFORE the token existed, so a fresh token
+	// would otherwise inherit the generic config directory type and the
+	// first admin-token rotation under confinement would fail. Relabel
+	// failure is fatal (no misleading partial initialization). AppArmor
+	// system mode and user mode never invoke SELinux relabel.
+	if err := applyAdminTokenDeploymentRelabel(mode, adminTokenPath); err != nil {
+		// The token file was just created by this initCore call (an existing
+		// token is rejected above): a failed relabel must not leave it on
+		// disk, or the next init is poisoned by the "admin.token already
+		// exists" preflight (no partial initialization left behind).
+		if rmErr := os.Remove(adminTokenPath); rmErr != nil {
+			return nil, fmt.Errorf("%w; additionally, removing the just-created admin token failed: %w", err, rmErr)
+		}
+		return nil, err
+	}
+
 	fmt.Fprintln(stdout, "Docker Helper initialized successfully.")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Admin token:")

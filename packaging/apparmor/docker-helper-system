@@ -20,6 +20,15 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/docker-helper/ r,
 	/etc/docker-helper/** r,
 
+	# Admin-token replacement lifecycle (SC1/H6): the ONLY writable config
+	# namespace objects are the canonical admin token file and the ONE fixed
+	# staging pathname the daemon renames onto it. The staging pathname is an
+	# internal implementation pathname, not a config/API/CLI surface.
+	# config.json and every other config path stay read-only: the generic
+	# rule above grants no write, and no broader write glob is granted.
+	/etc/docker-helper/admin.token rw,
+	/etc/docker-helper/.admin-token.new rw,
+
 	# State directory (database, persistent state).
 	# SQLite requires file-locking (k) permission for WAL mode.
 	# Grant rwk only on the specific database files, not the entire directory.

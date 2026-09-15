@@ -675,13 +675,13 @@ func TestInitSystemSELinuxRelabelsDeploymentPaths(t *testing.T) {
 
 	origRC := deploymentRestorecon
 	var calls [][]string
-	tokenAtRelabel := "unset"
+	var tokenAtCall []string
 	deploymentRestorecon = func(args ...string) ([]byte, error) {
 		calls = append(calls, args)
 		if _, err := os.Stat(filepath.Join(dir, "admin.token")); os.IsNotExist(err) {
-			tokenAtRelabel = "absent"
+			tokenAtCall = append(tokenAtCall, "absent")
 		} else {
-			tokenAtRelabel = "present"
+			tokenAtCall = append(tokenAtCall, "present")
 		}
 		return nil, nil
 	}
@@ -693,15 +693,26 @@ func TestInitSystemSELinuxRelabelsDeploymentPaths(t *testing.T) {
 		t.Fatalf("initCore failed: %v", err)
 	}
 
+	// The tree relabels and the Docker CLI relabel run BEFORE the admin
+	// token is created; the exact admin-token relabel runs AFTER the token
+	// is written (SC1/H6 post-create relabel) so the fresh token carries the
+	// dedicated token replacement type.
 	want := [][]string{
 		{"-R", "-m", "/etc/docker-helper", "/var/lib/docker-helper"},
 		{"-m", "/usr/bin/docker"},
+		{"-m", filepath.Join(dir, "admin.token")},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("deployment restorecon calls = %v, want %v", calls, want)
 	}
-	if tokenAtRelabel != "absent" {
-		t.Errorf("deployment relabel must run before the admin token is created, got %q", tokenAtRelabel)
+	if len(tokenAtCall) != 3 {
+		t.Fatalf("expected 3 restorecon calls, got %d", len(tokenAtCall))
+	}
+	if tokenAtCall[0] != "absent" || tokenAtCall[1] != "absent" {
+		t.Errorf("deployment tree relabel must run before the admin token is created, got %v", tokenAtCall)
+	}
+	if tokenAtCall[2] != "present" {
+		t.Errorf("the admin-token relabel must run after the token is written, got %q", tokenAtCall[2])
 	}
 	for _, call := range calls {
 		for _, a := range call {
@@ -894,6 +905,136 @@ func TestInitSystemSELinuxDockerCLINotFoundFatal(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "admin.token")); !os.IsNotExist(statErr) {
 		t.Error("admin.token must not be created when the Docker CLI cannot be located (no partial init)")
+	}
+}
+
+// TestInitSystemSELinuxTokenRelabelFailureRemovesFreshToken verifies the
+// fresh-init recovery contract for the exact post-create admin-token relabel:
+// a relabel failure after the fresh token write is fatal AND the just-created
+// token file is removed, so the failed token is never printed as a success
+// result and a retry init with the same requested root is not poisoned by the
+// "admin.token already exists" preflight (no partial initialization left
+// behind). The existing config.json written before the failure remains valid.
+func TestInitSystemSELinuxTokenRelabelFailureRemovesFreshToken(t *testing.T) {
+	dir := setupInitSystemMode(t)
+
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+	defer func() { detectLSM = origLSM }()
+
+	origDockerCLI := dockerCLIExecutable
+	dockerCLIExecutable = func() (string, error) { return "/usr/bin/docker", nil }
+	defer func() { dockerCLIExecutable = origDockerCLI }()
+
+	tokenPath := filepath.Join(dir, "admin.token")
+	origRC := deploymentRestorecon
+	call := 0
+	deploymentRestorecon = func(args ...string) ([]byte, error) {
+		call++
+		// Calls 1 (config/state trees) and 2 (docker CLI) precede the token
+		// write; call 3 is the exact admin-token relabel after the write.
+		if call == 3 {
+			return []byte("restorecon: permission denied"), errors.New("restorecon exit status 1")
+		}
+		return nil, nil
+	}
+	defer func() { deploymentRestorecon = origRC }()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	_, err := initCore(rootDir, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected init to fail when the exact admin-token relabel fails")
+	}
+	if !strings.Contains(err.Error(), "admin token relabel failed") {
+		t.Errorf("expected admin token relabel error, got: %v", err)
+	}
+	if call != 3 {
+		t.Fatalf("init must reach the exact admin-token relabel, restorecon calls = %d", call)
+	}
+	if _, statErr := os.Stat(tokenPath); !os.IsNotExist(statErr) {
+		t.Fatal("failed fresh-init token relabel must not leave admin.token behind (poisoned partial init)")
+	}
+	if strings.Contains(stdout.String(), "initialized successfully") || strings.Contains(stdout.String(), "Admin token:") {
+		t.Error("failed init must not print the token as a successful init result")
+	}
+
+	// The config written before the failure may remain valid.
+	data, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("config.json must remain after the failed token relabel: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("existing config.json must remain valid JSON: %v", err)
+	}
+	if err := validateRawConfig(raw); err != nil {
+		t.Fatalf("existing config.json must remain semantically valid: %v", err)
+	}
+
+	// A retry init with the same requested root must succeed.
+	var retryStdout, retryStderr bytes.Buffer
+	if err := initSystem(rootDir, &retryStdout, &retryStderr, nil,
+		func(ar string, so, se io.Writer) error {
+			_, err := initCore(ar, so, se)
+			return err
+		}); err != nil {
+		t.Fatalf("retry init after a failed fresh-init token relabel must succeed: %v", err)
+	}
+	if call != 6 {
+		t.Fatalf("retry init must run the full relabel lifecycle again, restorecon calls = %d", call)
+	}
+	if _, statErr := os.Stat(tokenPath); statErr != nil {
+		t.Fatalf("retry init must leave a working admin.token: %v", statErr)
+	}
+}
+
+// TestInitSystemSELinuxTokenRelabelFailureCleanupFailureReportsBoth verifies
+// that when the post-relabel cleanup of the just-created token file itself
+// fails, the returned error reports the original relabel failure AND the
+// cleanup failure instead of hiding either.
+func TestInitSystemSELinuxTokenRelabelFailureCleanupFailureReportsBoth(t *testing.T) {
+	dir := setupInitSystemMode(t)
+
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+	defer func() { detectLSM = origLSM }()
+
+	origDockerCLI := dockerCLIExecutable
+	dockerCLIExecutable = func() (string, error) { return "/usr/bin/docker", nil }
+	defer func() { dockerCLIExecutable = origDockerCLI }()
+
+	// Narrow fault injection: at the exact admin-token relabel (call 3) the
+	// restorecon fails AND the config directory loses its write permission,
+	// so the post-failure removal of the just-created token file fails.
+	origRC := deploymentRestorecon
+	call := 0
+	deploymentRestorecon = func(args ...string) ([]byte, error) {
+		call++
+		if call == 3 {
+			if err := os.Chmod(dir, 0500); err != nil {
+				t.Fatalf("cannot stage the unremovable token state: %v", err)
+			}
+			return []byte("restorecon: permission denied"), errors.New("restorecon exit status 1")
+		}
+		return nil, nil
+	}
+	defer func() {
+		deploymentRestorecon = origRC
+		os.Chmod(dir, 0700)
+	}()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	_, err := initCore(rootDir, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected init to fail when the admin-token relabel and its cleanup fail")
+	}
+	if !strings.Contains(err.Error(), "admin token relabel failed") {
+		t.Errorf("error must report the original relabel failure, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "removing the just-created admin token failed") {
+		t.Errorf("error must report the cleanup failure, got: %v", err)
 	}
 }
 
