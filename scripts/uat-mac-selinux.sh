@@ -193,32 +193,44 @@ mac_audit_check() {
 mac_h6_precheck() {
   local token_file="$1" config_file="$2"
   local tok_ctx cfg_ctx value_before
-  tok_ctx="$(stat -c '%C' "$token_file" 2>/dev/null)" \
-    || fail_uat "cannot stat the admin token context"
-  printf '%s' "$tok_ctx" | grep -q 'docker_helper_admin_token_t' \
-    || fail_uat "fresh-install labeling: admin.token is not docker_helper_admin_token_t (got '$tok_ctx')"
-  cfg_ctx="$(stat -c '%C' "$config_file" 2>/dev/null)" \
-    || fail_uat "cannot stat config.json context"
-  printf '%s' "$cfg_ctx" | grep -q 'docker_helper_config_t' \
-    || fail_uat "config.json is not docker_helper_config_t (got '$cfg_ctx')"
-  info "fresh-install labeling: admin.token=docker_helper_admin_token_t, config.json=docker_helper_config_t"
 
-  value_before="$(cat "$token_file")"
-  [ -n "$value_before" ] || fail_uat "admin.token is empty"
-  if command -v chcon >/dev/null 2>&1; then
-    chcon -t docker_helper_config_t "$token_file" \
-      || fail_uat "cannot stage the pre-upgrade token label (chcon)"
-    [ "$(cat "$token_file")" = "$value_before" ] \
-      || fail_uat "label staging changed the token value"
-    /usr/sbin/restorecon -R /etc/docker-helper \
-      || fail_uat "packaging restorecon failed during the label migration"
-    printf '%s' "$(stat -c '%C' "$token_file")" | grep -q 'docker_helper_admin_token_t' \
-      || fail_uat "packaging restorecon did not migrate admin.token to docker_helper_admin_token_t (got '$(stat -c '%C' "$token_file")')"
-    [ "$(cat "$token_file")" = "$value_before" ] \
-      || fail_uat "label migration changed the token value"
-    info "migration labeling: docker_helper_config_t -> docker_helper_admin_token_t via the packaging restorecon, value unchanged"
+  # Discriminate the installed policy generation: a pre-H6 policy module does
+  # not define the dedicated token type at all, so the fresh-install label
+  # contract cannot hold on such an artifact — the stage proceeds to the
+  # rotation to capture the H6 RED AVC instead. On a policy that defines the
+  # type, the label contract is strict.
+  if semanage fcontext -l 2>/dev/null | grep -q 'docker_helper_admin_token_t'; then
+    tok_ctx="$(stat -c '%C' "$token_file" 2>/dev/null)" \
+      || fail_uat "cannot stat the admin token context"
+    printf '%s' "$tok_ctx" | grep -q 'docker_helper_admin_token_t' \
+      || fail_uat "fresh-install labeling: admin.token is not docker_helper_admin_token_t (got '$tok_ctx')"
+    cfg_ctx="$(stat -c '%C' "$config_file" 2>/dev/null)" \
+      || fail_uat "cannot stat config.json context"
+    printf '%s' "$cfg_ctx" | grep -q 'docker_helper_config_t' \
+      || fail_uat "config.json is not docker_helper_config_t (got '$cfg_ctx')"
+    info "fresh-install labeling: admin.token=docker_helper_admin_token_t, config.json=docker_helper_config_t"
+
+    value_before="$(cat "$token_file")"
+    [ -n "$value_before" ] || fail_uat "admin.token is empty"
+    if command -v chcon >/dev/null 2>&1; then
+      chcon -t docker_helper_config_t "$token_file" \
+        || fail_uat "cannot stage the pre-upgrade token label (chcon)"
+      [ "$(cat "$token_file")" = "$value_before" ] \
+        || fail_uat "label staging changed the token value"
+      /usr/sbin/restorecon -R /etc/docker-helper \
+        || fail_uat "packaging restorecon failed during the label migration"
+      printf '%s' "$(stat -c '%C' "$token_file")" | grep -q 'docker_helper_admin_token_t' \
+        || fail_uat "packaging restorecon did not migrate admin.token to docker_helper_admin_token_t (got '$(stat -c '%C' "$token_file")')"
+      [ "$(cat "$token_file")" = "$value_before" ] \
+        || fail_uat "label migration changed the token value"
+      info "migration labeling: docker_helper_config_t -> docker_helper_admin_token_t via the packaging restorecon, value unchanged"
+    fi
+  else
+    info "pre-H6 policy module: docker_helper_admin_token_t is not defined — fresh-install/migration labeling deferred to the rotation evidence"
   fi
 
+  # config.json stays non-writable for docker_helper_t in EVERY policy
+  # generation (sesearch, when setools are installed).
   if command -v sesearch >/dev/null 2>&1; then
     if sesearch -A -s docker_helper_t -t docker_helper_config_t -c file -p write 2>/dev/null | grep -q 'allow'; then
       fail_uat "docker_helper_t holds a write permission on docker_helper_config_t:file"
