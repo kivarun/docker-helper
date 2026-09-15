@@ -559,8 +559,32 @@ it only consumes it.
 
 #### Principal provisioning
 
-`POST /principals` (admin token) is one ownership transaction. It resolves
-the OS user (`uid`, `gid`, `home`) and atomically creates:
+`POST /principals` (admin token) is one ownership transaction. The request's
+`username` is an OS-account identity spelling, and `validatePrincipalUsername`
+owns the Release 2.2 Principal username text grammar: the spelling must be
+non-empty and must carry no Unicode control rune (`unicode.IsControl` — the
+C0 controls including LF/CR/TAB, DEL, the C1 controls; an embedded NUL is a
+C0 control). Every other spelling is accepted exactly as supplied — no trim,
+no case-fold, no Unicode normalization, no alphabet, case, or length rule —
+and passed unchanged to the OS account resolver, which remains the authority
+for whether the account exists. The grammar runs before OS lookup, before
+home/path resolution, before the provisioning transaction (Principal row,
+default allowed root, `default` Launcher), and before the optional initial
+credential, so a control-bearing alias spelling can never resolve through
+the OS resolver to one account while persisting a distinct Principal
+identity. A refused spelling answers `400 invalid_username` with the bounded
+message "invalid username" (the refused spelling is never echoed into the
+public error); an empty username keeps `missing_username`; OS account
+absence remains `os_user_not_found`; an existing Principal remains
+`409 principal_exists`; the structured audit classifies the refused create
+`invalid_username` and retains the supplied PrincipalName through its JSON
+escaping. The user-mode daemon-owner username (resolved by UID at startup)
+passes through the same grammar before it is used as a Principal DB
+identity: a control-bearing resolved spelling fails startup closed with no
+ownership state inserted and no ownership migration run.
+
+The create resolves the OS user (`uid`, `gid`, `home`) and atomically
+creates:
 
 - the Principal row;
 - its initial (default) Principal allowed root — the canonicalized OS home
@@ -3031,6 +3055,7 @@ Current error codes (non-exhaustive):
 | `registry_login_failed` | `POST /registry/login` | docker login failed and the failure is not classified |
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
 | `user_mode_owner_reserved` | Principal/Launcher mutation endpoints (user mode) | the target is the reserved transparent user-mode owner chain (daemon-owner Principal or its `default` Launcher) and the mutation would violate the startup contract |
+| `invalid_username` | `POST /principals` | the supplied username is outside the Principal username text grammar (refused before OS lookup; an empty username is `missing_username`, OS account absence is `os_user_not_found`) |
 
 After successful session authentication, every `POST /pull`,
 `POST /build`, and `POST /run` request produces exactly one of:

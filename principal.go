@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -15,6 +16,12 @@ var (
 	ErrPrincipalExists    = errors.New("principal already exists")
 	ErrOSUserNotFound     = errors.New("OS user not found")
 	ErrInvalidAllowedRoot = errors.New("invalid allowed root")
+
+	// ErrInvalidPrincipalUsername is the single domain refusal for a username
+	// outside the Release 2.2 Principal username text grammar. There is one
+	// error class for every grammar refusal (empty or control-bearing); the
+	// OS account resolver keeps the separate authority for account existence.
+	ErrInvalidPrincipalUsername = errors.New("invalid username")
 )
 
 type Principal struct {
@@ -38,6 +45,31 @@ var OSUserLookup = func(username string) (uid, gid, home string, err error) {
 		return "", "", "", err
 	}
 	return u.Uid, u.Gid, u.HomeDir, nil
+}
+
+// validatePrincipalUsername is the ONE owner of the Release 2.2 Principal
+// username text grammar. A Principal username is an OS-account identity
+// spelling, not a docker-helper-invented identifier: it is accepted exactly
+// as supplied (no trim, no case-fold, no Unicode normalization, no alphabet,
+// case, or length rule) and passed unchanged to the OS account resolver,
+// which remains the authority for whether the account exists. The grammar
+// refuses only spellings that are not representable as one unambiguous
+// identifier: the empty string and any spelling carrying a Unicode control
+// rune (unicode.IsControl: the C0 controls including LF/CR/TAB, DEL, the C1
+// controls; an embedded NUL is a C0 control). A control-bearing spelling can
+// alias to a different account spelling in the C-string OS resolver while
+// remaining a distinct text identity, so it is refused before the resolver
+// and before persistence.
+func validatePrincipalUsername(username string) error {
+	if username == "" {
+		return fmt.Errorf("username is required: %w", ErrInvalidPrincipalUsername)
+	}
+	for _, r := range username {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("username contains a control character: %w", ErrInvalidPrincipalUsername)
+		}
+	}
+	return nil
 }
 
 func resolveOSUser(username string) (uid int, gid int, home string, err error) {
@@ -152,8 +184,12 @@ func createPrincipal(db *sql.DB, username string, globalAllowedRoots []AllowedRo
 // the Launcher-owned Session model, so a freshly created Principal must never
 // lack its default ownership anchor.
 func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []AllowedRootEntry, issueCredential bool) (*PrincipalWithRoots, *PrincipalCredential, string, error) {
-	if username == "" {
-		return nil, nil, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
+	// The username text grammar is the first admission gate: a refused
+	// spelling never reaches the OS account resolver, the home/path
+	// resolution, the transaction, the Principal INSERT, the default
+	// Launcher, or the initial credential.
+	if err := validatePrincipalUsername(username); err != nil {
+		return nil, nil, "", err
 	}
 
 	uid, gid, home, err := resolveOSUser(username)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -234,5 +235,39 @@ func TestEnsureUserModeOwnershipSymlinkedHomeIdempotent(t *testing.T) {
 	// raw-vs-canonical home mismatch.
 	if _, err := ensureUserModeOwnership(db, ModeUser); err != nil {
 		t.Fatalf("restart with symlinked home must be idempotent, got %v", err)
+	}
+}
+
+// TestEnsureUserModeOwnershipRefusesControlUsernameBeforeDBIdentity proves
+// the user-mode daemon-owner path obeys the same Release 2.2 Principal
+// username grammar BEFORE the resolved spelling is used as a Principal DB
+// identity: when OSUserLookupByUID returns a control-bearing username, the
+// startup ownership provisioning fails closed and inserts no Principal row
+// and no default Launcher. Because daemon startup aborts between
+// ensureUserModeOwnership and migrateSessionOwnership (main.go ordering), no
+// ownership migration can run under that invalid identity.
+func TestEnsureUserModeOwnershipRefusesControlUsernameBeforeDBIdentity(t *testing.T) {
+	db, home := userModeOwnershipDB(t)
+	restore := setUserModeDaemonOSSeams(t, 1007, 1007, "dho\x00alias", home)
+	defer restore()
+
+	owner, err := ensureUserModeOwnership(db, ModeUser)
+	if !errors.Is(err, ErrInvalidPrincipalUsername) {
+		t.Fatalf("ensureUserModeOwnership error = %v, want ErrInvalidPrincipalUsername for the control-bearing daemon-owner username (owner=%v)", err, owner)
+	}
+
+	var principals int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM principals`).Scan(&principals); err != nil {
+		t.Fatalf("count principals: %v", err)
+	}
+	if principals != 0 {
+		t.Fatalf("control-bearing daemon-owner username persisted %d principal row(s)", principals)
+	}
+	var launchers int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM launchers`).Scan(&launchers); err != nil {
+		t.Fatalf("count launchers: %v", err)
+	}
+	if launchers != 0 {
+		t.Fatalf("control-bearing daemon-owner username persisted %d launcher row(s)", launchers)
 	}
 }

@@ -158,6 +158,14 @@ func ensureUserModeOwnership(db *sql.DB, mode DeploymentMode) (*userModeDefaultL
 	if username == "" {
 		return nil, errors.New("cannot resolve daemon-owner OS username")
 	}
+	// The resolved spelling becomes a persisted Principal DB identity: it must
+	// obey the same Principal username grammar as a created Principal. A
+	// control-bearing resolved spelling fails startup closed before any
+	// ownership state is inserted and before any ownership migration runs
+	// under that identity.
+	if err := validatePrincipalUsername(username); err != nil {
+		return nil, err
+	}
 	if home == "" || !filepath.IsAbs(home) {
 		return nil, fmt.Errorf("daemon-owner OS user %q has invalid home %q", username, home)
 	}

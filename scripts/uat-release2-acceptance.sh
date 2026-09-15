@@ -2091,6 +2091,210 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
 fi
 
 # ==============================================================================
+# scenario M5: principal username text grammar (raw JSON control spellings)
+# ==============================================================================
+# Security closure SC1 finding M5 on the exact candidate: a Principal
+# username is admitted through the daemon's canonical text grammar BEFORE the
+# OS account resolver is consulted or anything is persisted. The raw-JSON
+# wire case is the proof shell argv cannot represent: a NUL-bearing alias of
+# a real OS account (spelled with the JSON \u0000 escape) must answer
+# 400 invalid_username with no credential/token and no residue, before and
+# after the canonical account has a Principal.
+scenario "M5: principal username grammar (raw JSON control spellings)"
+
+M5_USER="uatr2m5"
+[ -r /etc/docker-helper/admin.token ] || { echo "error: admin token file unreadable for M5 scenario" >&2; exit 1; }
+
+# m5_admin_header emits the Authorization header for the M5 curl calls ON
+# STDOUT. The bearer value is fed to curl through the header-from-stdin form
+# (`-H @-`): the header transits a pipe into curl's memory and never enters
+# any process argv, no plaintext header file is created, and the value is
+# never printed (curl argv carries only the literal `@-`).
+m5_admin_header() {
+    printf 'Authorization: Bearer '
+    tr -d '\r\n' < /etc/docker-helper/admin.token
+    printf '\n'
+}
+
+m5_post_principals() { # BODY OUTFILE -> sets M5_HTTP; writes the response to OUTFILE
+  M5_HTTP="$(m5_admin_header | curl --silent --output "$2" --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H @- \
+    -H 'Content-Type: application/json' -d "$1" \
+    "http://localhost/principals" 2>/dev/null || true)"
+}
+
+m5_list_principals() { # OUTFILE -> sets M5_LIST_HTTP
+  M5_LIST_HTTP="$(m5_admin_header | curl --silent --output "$1" --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H @- \
+    "http://localhost/principals" 2>/dev/null || true)"
+}
+
+# M5 argv-secret self-proof: a bounded M5-style curl is deterministically held
+# alive (its header producer emits the header and keeps stdin open, so curl
+# blocks reading the `-H @-` header before any request is sent), and while it
+# is alive its /proc/<pid>/cmdline is inspected: the argv must carry the `-H`
+# `@-` header transport and must contain NO admin bearer value. The check
+# itself never places the token in a process argv (grep matches against the
+# token FILE, never a value argument) and never prints the inspected argv.
+M5_PROOF_DEADLINE=6
+{
+  m5_admin_header
+  sleep "$M5_PROOF_DEADLINE"
+} | curl --silent --max-time "$M5_PROOF_DEADLINE" -o /dev/null -H @- \
+    -d '{"username":"argv-proof"}' --unix-socket "$SOCK" \
+    "http://localhost/principals" >/dev/null 2>&1 &
+M5_PROOF_PID=$!
+sleep 1
+M5_PROOF_ALIVE=0
+kill -0 "$M5_PROOF_PID" 2>/dev/null && M5_PROOF_ALIVE=1
+M5_PROOF_CMDLINE="/proc/$M5_PROOF_PID/cmdline"
+if [ "$M5_PROOF_ALIVE" = "1" ] \
+    && tr '\0' '\n' <"$M5_PROOF_CMDLINE" 2>/dev/null | grep -qx -- '-H' \
+    && tr '\0' '\n' <"$M5_PROOF_CMDLINE" 2>/dev/null | grep -qx -- '@-' \
+    && ! grep -qF -f <(grep -v '^$' /etc/docker-helper/admin.token) \
+        <(tr '\0' '\n' <"$M5_PROOF_CMDLINE" 2>/dev/null); then
+  acc_ok "M5 curl argv carries the @- header form and no admin bearer (live /proc proof; argv content withheld)"
+else
+  acc_fail "M5 argv-secret self-proof failed (alive=$M5_PROOF_ALIVE; argv content withheld)"
+fi
+kill "$M5_PROOF_PID" 2>/dev/null || true
+wait "$M5_PROOF_PID" 2>/dev/null || true
+
+# json_field_compact extracts a field value from a COMPACT JSON document read
+# on the given file (the daemon's raw HTTP responses; the suite's json_field
+# helper expects the CLI's indented form).
+json_field_compact() { # FIELD FILE
+  grep -oP "\"$1\": ?\K[^,}]+" "$2" | head -1 | sed -E 's/^"//; s/"$//'
+}
+
+# A: provision the disposable real OS account.
+if ! getent passwd "$M5_USER" >/dev/null 2>&1; then
+  useradd -m -s /bin/bash "$M5_USER" || acc_blocked "cannot create disposable OS account $M5_USER"
+fi
+getent passwd "$M5_USER" >/dev/null 2>&1 \
+  && acc_ok "disposable real OS account $M5_USER provisioned" \
+  || acc_fail "disposable OS account $M5_USER missing"
+M5_UID_OS="$(getent passwd "$M5_USER" | cut -d: -f3)"
+M5_GID_OS="$(getent passwd "$M5_USER" | cut -d: -f4)"
+M5_HOME_OS="$(getent passwd "$M5_USER" | cut -d: -f6)"
+
+m5_list_principals /tmp/r2ac-m5-list-pre.json
+printf '%s\n' "$(cat /tmp/r2ac-m5-list-pre.json 2>/dev/null)" | grep -q '"username":"uatr2m5' \
+  && acc_blocked "principal $M5_USER already exists before the M5 scenario" \
+  || acc_ok "no $M5_USER Principal before the M5 scenario"
+
+# B: raw authenticated POST /principals with the NUL-bearing alias spelling
+#    (the JSON \u0000 escape is the wire form shell argv cannot carry).
+m5_post_principals '{"username":"uatr2m5\u0000alias","issue_credential":true}' /tmp/r2ac-m5-alias.json
+M5_ALIAS_JSON="$(cat /tmp/r2ac-m5-alias.json 2>/dev/null || true)"
+if [ "$M5_HTTP" = "400" ] \
+    && printf '%s\n' "$M5_ALIAS_JSON" | grep -q '"code":"invalid_username"' \
+    && ! printf '%s\n' "$M5_ALIAS_JSON" | grep -qE '"(token|credential)"' \
+    && ! printf '%s\n' "$M5_ALIAS_JSON" | grep -q 'uatr2m5'; then
+  acc_ok "NUL alias create refused 400 invalid_username, no token/credential, spelling not echoed"
+else
+  acc_fail "NUL alias refusal (http=$M5_HTTP): $M5_ALIAS_JSON"
+fi
+m5_list_principals /tmp/r2ac-m5-list-b.json
+if [ "$M5_LIST_HTTP" = "200" ] && ! grep -q 'uatr2m5' /tmp/r2ac-m5-list-b.json; then
+  acc_ok "no alias Principal row in the Principal list after the NUL alias refusal"
+else
+  acc_fail "Principal list changed after the NUL alias refusal (http=$M5_LIST_HTTP)"
+fi
+if wait_health "$SOCK"; then
+  acc_ok "service healthy after the NUL alias refusal"
+else
+  acc_fail "service unhealthy after the NUL alias refusal"
+fi
+
+# C: the canonical Principal create succeeds with the real OS identity.
+m5_post_principals "{\"username\":\"$M5_USER\",\"issue_credential\":false}" /tmp/r2ac-m5-canonical.json
+M5_UID_API="$(json_field_compact uid /tmp/r2ac-m5-canonical.json)"
+M5_GID_API="$(json_field_compact gid /tmp/r2ac-m5-canonical.json)"
+M5_HOME_API="$(json_field_compact home /tmp/r2ac-m5-canonical.json)"
+if [ "$M5_HTTP" = "201" ] \
+    && [ "$M5_UID_API" = "$M5_UID_OS" ] && [ -n "$M5_UID_API" ] \
+    && [ "$M5_GID_API" = "$M5_GID_OS" ] && [ -n "$M5_GID_API" ] \
+    && [ "$M5_HOME_API" = "$M5_HOME_OS" ] && [ -n "$M5_HOME_API" ]; then
+  acc_ok "canonical Principal created with the real OS identity (uid/gid/home match getent)"
+else
+  acc_fail "canonical Principal create (http=$M5_HTTP): uid_api=$M5_UID_API uid_os=$M5_UID_OS gid_api=$M5_GID_API gid_os=$M5_GID_OS home_api=$M5_HOME_API home_os=$M5_HOME_OS"
+fi
+m5_list_principals /tmp/r2ac-m5-list-c.json
+M5_ROWS_CANON="$(grep -o '"username":"uatr2m5"' /tmp/r2ac-m5-list-c.json 2>/dev/null | wc -l)"
+if [ "$M5_LIST_HTTP" = "200" ] && [ "$M5_ROWS_CANON" = "1" ]; then
+  acc_ok "exactly one Principal row exists for $M5_USER"
+else
+  acc_fail "Principal list rows for $M5_USER: $M5_ROWS_CANON (http=$M5_LIST_HTTP)"
+fi
+
+# D: retry the NUL alias AFTER the canonical create: still the grammar
+#    refusal (never principal_exists / os_user_not_found / internal_error),
+#    proving grammar admission precedes OS resolution and DB uniqueness.
+m5_post_principals '{"username":"uatr2m5\u0000alias","issue_credential":true}' /tmp/r2ac-m5-alias2.json
+M5_ALIAS2_JSON="$(cat /tmp/r2ac-m5-alias2.json 2>/dev/null || true)"
+if [ "$M5_HTTP" = "400" ] \
+    && printf '%s\n' "$M5_ALIAS2_JSON" | grep -q '"code":"invalid_username"' \
+    && ! printf '%s\n' "$M5_ALIAS2_JSON" | grep -qE 'principal_exists|os_user_not_found|internal_error'; then
+  acc_ok "alias retry after canonical create still invalid_username (grammar precedes resolution/uniqueness)"
+else
+  acc_fail "alias retry after canonical create (http=$M5_HTTP): $M5_ALIAS2_JSON"
+fi
+
+# E: further raw-JSON control spellings (LF, TAB, DEL): same bounded refusal,
+#    no residue.
+for M5_SPELLING in 'uatr2m5\nlf' 'uatr2m5\ttab' 'uatr2m5\u007fdel'; do
+  m5_post_principals "{\"username\":\"$M5_SPELLING\",\"issue_credential\":true}" /tmp/r2ac-m5-ctl.json
+  M5_CTL_JSON="$(cat /tmp/r2ac-m5-ctl.json 2>/dev/null || true)"
+  if [ "$M5_HTTP" = "400" ] && printf '%s\n' "$M5_CTL_JSON" | grep -q '"code":"invalid_username"'; then
+    acc_ok "control spelling $M5_SPELLING refused 400 invalid_username"
+  else
+    acc_fail "control spelling $M5_SPELLING (http=$M5_HTTP): $M5_CTL_JSON"
+  fi
+done
+m5_list_principals /tmp/r2ac-m5-list-e.json
+M5_ROWS_E="$(grep -o '"username":"uatr2m5' /tmp/r2ac-m5-list-e.json 2>/dev/null | wc -l)"
+if [ "$M5_ROWS_E" = "1" ]; then
+  acc_ok "no control-spelling residue in the Principal list"
+else
+  acc_fail "Principal list rows spelling uatr2m5 after control refusals: $M5_ROWS_E"
+fi
+
+# CLI surfacing: the CLI has no local grammar and must surface the daemon's
+# refusal (the LF spelling is argv-representable; NUL is not, which is why
+# the wire case above is the authoritative one).
+M5_CLI_OUT="$(dh principal create --system --no-credential $'uatr2m5\nlf' 2>&1)" && M5_CLI_RC=0 || M5_CLI_RC=$?
+if [ "$M5_CLI_RC" != "0" ] && printf '%s\n' "$M5_CLI_OUT" | grep -q 'invalid_username'; then
+  acc_ok "CLI surfaces the daemon invalid_username refusal without a local grammar"
+else
+  acc_fail "CLI create with an LF spelling (rc=$M5_CLI_RC): $(printf '%s\n' "$M5_CLI_OUT" | redact | head -2)"
+fi
+
+# F: ordinary Principal lifecycle still works afterward (show, default
+#    Launcher, allowed-root, credential create/revoke).
+dh principal show --system "$M5_USER" >/tmp/r2ac-m5-show.json 2>&1 \
+  && grep -q '"username": "uatr2m5"' /tmp/r2ac-m5-show.json \
+  && acc_ok "principal show works after all refusals" \
+  || acc_fail "principal show failed after the M5 refusals: $(head -2 /tmp/r2ac-m5-show.json)"
+dh launcher list --system --principal "$M5_USER" --json >/tmp/r2ac-m5-launchers.json 2>&1 \
+  && grep -qE '"name": *"default"' /tmp/r2ac-m5-launchers.json \
+  && acc_ok "canonical Principal has its default Launcher (no alias Launcher exists)" \
+  || acc_fail "launcher list for $M5_USER: $(head -2 /tmp/r2ac-m5-launchers.json)"
+dh principal allowed-root add --system "$M5_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+  && acc_ok "allowed-root add works for the canonical Principal" \
+  || acc_fail "allowed-root add failed for $M5_USER"
+M5_CRED_OUT="$(dh credential create --system --name m5 "$M5_USER" 2>/dev/null)"
+M5_CRED_ID="$(printf '%s\n' "$M5_CRED_OUT" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
+if [ -n "$M5_CRED_ID" ]; then
+  acc_ok "ordinary Principal credential create works after the refusals"
+else
+  acc_fail "credential create for $M5_USER failed"
+fi
+[ -n "$M5_CRED_ID" ] && dh credential revoke --system "$M5_CRED_ID" >/dev/null 2>&1 \
+  && acc_ok "ordinary Principal credential revoke works after the refusals" \
+  || acc_fail "credential revoke for $M5_USER failed"
+
+# ==============================================================================
 # scenario F: DEB lifecycle install(upgrade baseline v2.0.0) -> upgrade
 #             (candidate) -> reinstall(candidate) -> remove -> purge
 # ==============================================================================
