@@ -247,11 +247,15 @@ mac_h6_denial_evidence() {
   local staging="$1" token_file="$2"
   local records
   records="$(collect_denials)"
-  # The AVC path/name carries the created/replaced token pathname (any
-  # .admin-token* spelling: the historical random tempfile or the fixed
-  # staging pathname, or the canonical token file at rename time).
-  printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 \
-    || printf '%s\n' "$records" | grep -F "$(basename "$token_file")" >/dev/null 2>&1
+  # The pre-fix denial manifests either on the created/replaced token
+  # pathname itself (name/path carries an .admin-token* spelling or the
+  # canonical token file name) or on the config-directory write the staged
+  # creation requires — for a directory write the kernel audit record
+  # carries the directory name, not the created file name.
+  printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 && return 0
+  printf '%s\n' "$records" | grep -F "$(basename "$token_file")" >/dev/null 2>&1 && return 0
+  printf '%s\n' "$records" \
+    | grep 'denied' | grep -F 'docker_helper_config_t' | grep -F 'tclass=dir' >/dev/null 2>&1
 }
 
 # mac_h6_postcheck re-verifies the labels after a successful rotation and
@@ -265,10 +269,13 @@ mac_h6_postcheck() {
   printf '%s' "$(stat -c '%C' "$config_file" 2>/dev/null)" | grep -q 'docker_helper_config_t' \
     || fail_uat "post-rotation: config.json is not docker_helper_config_t"
   local records
-  records="$(collect_denials | grep -F 'admin-token' || true)"
-  if [ -n "$records" ]; then
+  records="$(collect_denials)"
+  local bad=""
+  printf '%s\n' "$records" | grep -F 'admin-token' >/dev/null 2>&1 && bad+="token replacement pathnames"$'\n'
+  printf '%s\n' "$records" | grep 'denied' | grep -F 'docker_helper_config_t' >/dev/null 2>&1 && bad+="docker_helper_config_t objects"$'\n'
+  if [ -n "$bad" ]; then
     printf '\n[UAT] SELinux AVC denies on the token replacement lifecycle:\n%s\n' "$records" >&2
-    fail_uat "unexpected SELinux AVCs on the successful admin-token rotation"
+    fail_uat "unexpected SELinux AVCs on the successful admin-token rotation ($bad)"
   fi
   info "SELinux H6 postcheck ok (labels stable, no token-replacement AVCs)"
 }
