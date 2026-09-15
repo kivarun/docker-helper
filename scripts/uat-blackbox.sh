@@ -866,6 +866,10 @@ if [ "$H6_ROTATE_RC" -ne 0 ]; then
   info "rotation failed; H6 RED discrimination deferred to phase 8c (audit log flush latency)"
 fi
 
+# The GREEN verification block runs only for a successful rotation; a
+# deferred RED failure is discriminated in phase 8c.
+if [ "${H6_ROTATE_FAILED:-0}" != "1" ]; then
+
 NEW_ADMIN_TOKEN="$(printf '%s\n' "$H6_ROTATE_OUT" | tail -n 1)"
 printf '%s' "$NEW_ADMIN_TOKEN" | grep -q '^dht_[0-9a-f]\{64\}$' \
   || fail_uat "rotated token is not a dht_ admin token"
@@ -912,6 +916,8 @@ H6_CONFIG_SHA_AFTER="$(sha256sum /etc/docker-helper/config.json | awk '{print $1
 # Backend-specific post-rotation checks (labels, no unexpected H6 denials).
 mac_h6_postcheck "$ADMIN_TOKEN_FILE" "/etc/docker-helper/config.json" "$STAGING_FILE"
 info "H6 admin-token rotation ok (old rejected, new accepted, no restart, no residue)"
+
+fi
 
 # ==============================================================================
 # Phase 8: MAC audit check
