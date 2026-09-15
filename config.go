@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -335,6 +336,35 @@ func getStateDir() string {
 	return filepath.Join(xdgState, "docker-helper")
 }
 
+// decodeAndValidateConfigDocument is the ONE strict ingest boundary of a
+// config.json document for consumers that require a fully valid effective
+// configuration (daemon startup/reload, init's existing-config inspection):
+//
+//  1. strict JSON object grammar (one object, no trailing tokens, no
+//     duplicate members) — decodeStrictConfigDocument;
+//  2. exact member-name recognition and value validation on the document's
+//     exact spelling — validateRawConfig;
+//  3. only then the fileConfig projection from the proven exact-key map.
+//
+// The projection decodes the sanitized exact-key map, never the original
+// untrusted byte stream: every member name has been proven a canonical exact
+// config-file key, so no case-variant or unknown member can fold onto a
+// struct field, and no value enters fileConfig unvalidated.
+func decodeAndValidateConfigDocument(data []byte) (map[string]json.RawMessage, *fileConfig, error) {
+	raw, err := decodeStrictConfigDocument(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateRawConfig(raw); err != nil {
+		return nil, nil, err
+	}
+	fc, err := decodeFileConfig(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot parse config: %w", err)
+	}
+	return raw, fc, nil
+}
+
 func loadAndPrepareRuntimeConfig() (*Config, error) {
 	configPath := getConfigPathFunc()
 
@@ -343,18 +373,12 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 		return nil, fmt.Errorf("cannot read config: %w", err)
 	}
 
-	// Validate the raw config document before decoding into fileConfig.
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("cannot parse config: %w", err)
-	}
-	if err := validateRawConfig(raw); err != nil {
+	// One strict ingest boundary: JSON object grammar, exact member
+	// recognition, duplicate-member refusal, and value validation all happen
+	// before any fileConfig value or runtime side effect exists.
+	raw, fc, err := decodeAndValidateConfigDocument(data)
+	if err != nil {
 		return nil, err
-	}
-
-	var fc fileConfig
-	if err := json.Unmarshal(data, &fc); err != nil {
-		return nil, fmt.Errorf("cannot parse config: %w", err)
 	}
 
 	ttl, err := parseSessionTTL(fc.SessionTTL)
@@ -363,12 +387,12 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 	}
 
 	// Resolve allowed_roots with legacy migration.
-	allowedRoots, err := resolveAllowedRoots(raw, &fc)
+	allowedRoots, err := resolveAllowedRoots(raw, fc)
 	if err != nil {
 		return nil, err
 	}
 
-	ec := resolveEffectiveConfig(fc)
+	ec := resolveEffectiveConfig(*fc)
 
 	level, err := parseLogLevel(ec.LogLevel)
 	if err != nil {
@@ -1090,17 +1114,11 @@ func initSystem(allowedRoot string, stdout, stderr io.Writer,
 			return fmt.Errorf("cannot read existing configuration: %w", err)
 		}
 
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("cannot parse existing configuration: %w", err)
-		}
-		if err := validateRawConfig(raw); err != nil {
+		// One strict ingest boundary: the existing document must satisfy the
+		// same grammar a running daemon would enforce before init inspects it.
+		_, fc, err := decodeAndValidateConfigDocument(data)
+		if err != nil {
 			return fmt.Errorf("existing configuration is invalid: %w", err)
-		}
-
-		var fc fileConfig
-		if err := json.Unmarshal(data, &fc); err != nil {
-			return fmt.Errorf("cannot decode existing configuration: %w", err)
 		}
 
 		existingRoots = allowedRootPaths(fc.AllowedRoots)
@@ -1320,7 +1338,78 @@ func promptAllowedRoot(defaultPath string, stdin io.Reader, stderr io.Writer) (s
 // validateRawConfig validates the known fields in a raw config map.
 // It does not require XDG_RUNTIME_DIR and does not create directories.
 // Returns an error if the document is malformed or known fields are invalid.
-func validateRawConfig(raw map[string]json.RawMessage) error {
+// decodeStrictConfigDocument is the strict document-decode stage of the ONE
+// config.json ingest boundary. It requires exactly one top-level JSON object
+// with no trailing tokens, and rejects duplicate top-level members fail-closed
+// (the persisted config is security policy/state: one JSON member must map to
+// one config identity, never "last wins"). The returned map keeps every member
+// name byte-for-byte — no key normalization, no case folding — so the
+// member-name grammar is checked on the document's exact spelling.
+//
+// The semantic stages (member-name grammar, value validation, fileConfig
+// projection) are separate owners: decodeStrictConfigDocument owns the JSON
+// object grammar, validateRawConfig owns member recognition and values, and
+// decodeFileConfig projects from a proven exact-key map only.
+func decodeStrictConfigDocument(data []byte) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse config: %w", err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, fmt.Errorf("configuration is not a JSON object")
+	}
+
+	raw := make(map[string]json.RawMessage)
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse config: %w", err)
+		}
+		name, ok := keyTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("cannot parse config: object keys must be strings")
+		}
+		if _, dup := raw[name]; dup {
+			return nil, fmt.Errorf("duplicate configuration key %q; one JSON member must map to one configuration identity", name)
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, fmt.Errorf("cannot parse config: %w", err)
+		}
+		raw[name] = value
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, fmt.Errorf("cannot parse config: %w", err)
+	}
+
+	// Exactly one top-level JSON value: any trailing token (a second document
+	// or garbage) fails closed.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("trailing data after the configuration object")
+	}
+
+	return raw, nil
+}
+
+// validateConfigMemberGrammar is the member-name authority of the config
+// ingest boundary. Every top-level member name is matched by EXACT spelling
+// against the config-file vocabulary:
+//
+//   - a computed/read-only field keeps its existing diagnostic;
+//   - a deprecated field keeps its existing rename diagnostic;
+//   - a retired field keeps its existing diagnostic;
+//   - any other name that is not a known config-file key — including a CASE
+//     VARIANT of a canonical key such as Operation_Max_Completed — is
+//     refused as unknown. encoding/json struct matching would accept a
+//     case-insensitive fold of such a member onto a canonical field, so the
+//     refusal must happen HERE, before any fileConfig projection.
+//
+// No case normalization and no alias map exist: a malformed external spelling
+// is never rewritten into a canonical one.
+func validateConfigMemberGrammar(raw map[string]json.RawMessage) error {
 	if raw == nil {
 		return fmt.Errorf("configuration is not a JSON object")
 	}
@@ -1337,6 +1426,24 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 
 	// Reject deprecated config keys with a clear rename diagnostic.
 	if err := validateNoDeprecatedRawFields(raw); err != nil {
+		return err
+	}
+
+	// Exact config-key recognition: unknown and case-variant spellings fail
+	// closed. A deprecated/retired spelling has already been answered with
+	// its specific diagnostic above; everything else must be a known
+	// config-file key spelled exactly.
+	for field := range raw {
+		if isKnownField(field) {
+			continue
+		}
+		return fmt.Errorf("unknown configuration field %q: config-file keys are exact case-sensitive snake_case (see `config show` for the recognized keys)", field)
+	}
+	return nil
+}
+
+func validateRawConfig(raw map[string]json.RawMessage) error {
+	if err := validateConfigMemberGrammar(raw); err != nil {
 		return err
 	}
 
