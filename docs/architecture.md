@@ -504,14 +504,17 @@ every agent input before passing it to Docker.
 ```
 docker-helper init
     │
-    ├── creates config directory (0700)
+    ├── creates config directory (system mode 0755, user mode 0700)
     ├── creates state directory (0700)
     ├── applies the deployment SELinux relabel to the config/state trees
     │   (system mode, enforcing SELinux; before any file is written)
     ├── writes config.json
     ├── generates admin token (dht_<64 hex chars>)
-    └── applies the exact admin-token relabel to the token file
-        (system mode, enforcing SELinux; after the token is written)
+    ├── applies the exact admin-token relabel to the token file
+    │   (system mode, enforcing SELinux; after the token is written)
+    └── on relabel failure removes the just-created token file, so no
+        partial initialization is left behind (the next init is not
+        poisoned by the existing-token preflight)
     │
 docker-helper serve
     │
