@@ -1007,6 +1007,13 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	// failure is fatal (no misleading partial initialization). AppArmor
 	// system mode and user mode never invoke SELinux relabel.
 	if err := applyAdminTokenDeploymentRelabel(mode, adminTokenPath); err != nil {
+		// The token file was just created by this initCore call (an existing
+		// token is rejected above): a failed relabel must not leave it on
+		// disk, or the next init is poisoned by the "admin.token already
+		// exists" preflight (no partial initialization left behind).
+		if rmErr := os.Remove(adminTokenPath); rmErr != nil {
+			return nil, fmt.Errorf("%w; additionally, removing the just-created admin token failed: %w", err, rmErr)
+		}
 		return nil, err
 	}
 
