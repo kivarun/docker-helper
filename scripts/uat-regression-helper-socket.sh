@@ -282,8 +282,15 @@ fi
 # Capture the orphan's container ID while the daemon is still serving: it is
 # the deterministic removal target of startup reconciliation. Earlier group
 # workloads have already exited, so the only running session workload is the
-# orphan probe itself.
-ORPHAN_CIDS="$(docker ps -q --filter "label=com.dockerhelper.session.id=$REG_SESSION_ID" 2>/dev/null || true)"
+# orphan probe itself. A transient docker CLI failure must not be read as
+# probe absence, so the query retries within a bounded window; the probe
+# sleeps for the whole window.
+ORPHAN_CIDS=""
+for _ in $(seq 1 10); do
+  ORPHAN_CIDS="$(docker ps -q --filter "label=com.dockerhelper.session.id=$REG_SESSION_ID" 2>/dev/null || true)"
+  [ -n "$ORPHAN_CIDS" ] && break
+  sleep 1
+done
 if [ -z "$ORPHAN_CIDS" ]; then
   reg_fail "orphan probe container not found before the daemon crash"
   kill -9 "$ORPHAN_CLI_PID" 2>/dev/null || true

@@ -403,9 +403,11 @@ else
 fi
 
 # --- L. reload refuses the malformed document; the running daemon keeps ------
-#     serving the previous effective config
+#     serving the previous effective config. The daemon stays up on the good
+#     effective config while the FILE on disk is malformed: startup would
+#     (correctly) refuse this document, so the fixture only rewrites the file
+#     under the running daemon.
 
-systemctl stop "$SERVICE" >/dev/null 2>&1 || true
 python3 - "$M4_CONFIG" <<'PY' || reg_fail "M4 L: cannot inject the case-variant member for the reload refusal"
 import json, sys
 path = sys.argv[1]
@@ -418,9 +420,6 @@ with open(path, "w") as f:
     json.dump(doc, f, indent=2)
     f.write("\n")
 PY
-systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-systemctl start "$SERVICE" >/dev/null 2>&1 || true
-wait_service_health || reg_fail "M4 L: fixture daemon did not become healthy before the reload refusal"
 if dh reload >/dev/null 2>&1; then
   reg_fail "L: reload accepted a case-variant config document (must fail closed)"
 else
