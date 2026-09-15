@@ -583,22 +583,19 @@ func loadRawConfig() (map[string]json.RawMessage, string, error) {
 	return raw, configPath, nil
 }
 
-// loadRawConfigFile reads config.json from the given path as a raw JSON map.
+// loadRawConfigFile reads config.json from the given path through the strict
+// document-decode stage of the one config ingest boundary: exactly one
+// top-level JSON object, no trailing tokens, and duplicate top-level members
+// fail closed (a map decode would silently collapse them with "last wins",
+// erasing the duplicate-member evidence before any grammar check could see
+// it). Member-name grammar and value validation remain the
+// validateRawConfig stages.
 func loadRawConfigFile(configPath string) (map[string]json.RawMessage, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, err
 	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-	if raw == nil {
-		return nil, fmt.Errorf("configuration is not a JSON object")
-	}
-
-	return raw, nil
+	return decodeStrictConfigDocument(data)
 }
 
 // decodeFileConfig decodes a raw config map into a fileConfig struct.
@@ -1230,6 +1227,18 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 	// Read current config under lock.
 	raw, err := loadRawConfigFile(configPath)
 	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Strict member-name grammar BEFORE any mutation: an existing document
+	// carrying an unknown, case-variant, or duplicate member is refused
+	// without rewriting it — a mutation must not erase the evidence of
+	// malformed input as a side effect, and no "repair" semantics exists for
+	// the document grammar. (Invalid member VALUES keep their existing
+	// repair semantics: setting or unsetting the invalid field itself
+	// remains the documented operator recovery.)
+	if err := validateConfigMemberGrammar(raw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}

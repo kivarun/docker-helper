@@ -1967,6 +1967,54 @@ not running, the command fails with a non-zero exit code. If the new
 configuration is invalid, the daemon keeps its current configuration and
 the command returns an error.
 
+### Strict config document grammar
+
+Every read of config.json goes through ONE strict ingest boundary
+(`decodeStrictConfigDocument` + `validateConfigMemberGrammar` +
+`validateRawConfig` + the `fileConfig` projection from the proven map;
+composed for fully-validating consumers as `decodeAndValidateConfigDocument`):
+
+- exactly one top-level JSON object; a top-level `null`, array, scalar,
+  malformed JSON, or trailing second JSON value fails closed;
+- duplicate top-level members fail closed — the persisted config is
+  security policy/state, so one JSON member must map to one config
+  identity, never "last wins";
+- member names are matched by EXACT spelling against the config-file
+  vocabulary (`allowed_roots`, `session_ttl`, `log_level`, `audit_enabled`,
+  `shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
+  `operation_log_max_bytes`, `trusted_ca_path`, `trusted_ca_injection`,
+  `http_address`, and the exact legacy migration input `allowed_root`):
+  a case variant such as `Operation_Max_Completed` or `Session_TTL` is
+  refused as unknown, never treated as an alias — `encoding/json` struct
+  matching would silently fold it onto the canonical field, so the refusal
+  happens before any `fileConfig` projection. There is no case
+  normalization and no alias map;
+- computed fields keep the computed diagnostic, deprecated fields the
+  rename diagnostic, and retired fields the retired diagnostic — by exact
+  spelling only;
+- all value semantics stay with their existing owners (`parseSessionTTL`,
+  `parseLogLevel`, duration bounds, positive-integer bounds, trusted-CA
+  values, `validateHTTPAddress`, the `allowed_roots` schema with the exact
+  nested `{"path","access"}` object grammar); the document boundary adds
+  no parallel value rules.
+
+Malformed config never reaches effective `Config`: the refusal happens
+before the runtime-directory creation, trusted-CA preparation, or any other
+runtime side effect, and a reload failure leaves the previous effective
+configuration authoritative. The strict boundary serves daemon startup,
+reload, `config show`/`show FIELD`, the config transaction preflights, and
+`init`'s existing-config inspection alike. A config mutation on an existing
+document carrying an unknown, case-variant, or duplicate member is refused
+without rewriting the file (a mutation never erases the evidence of
+malformed input as a side effect); invalid member VALUES keep their
+existing repair semantics — setting or unsetting the invalid field itself
+is the documented operator recovery.
+
+The CLI field-selection vocabulary (`config show/set/unset FIELD`) is
+already exact and case-sensitive and is unchanged; this grammar is about
+the config-file document members, which are the same canonical snake_case
+names.
+
 ## Data-plane execution
 
 ### Operation lifecycle

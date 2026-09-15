@@ -473,8 +473,11 @@ func TestConfigUnsetLogLevelRestoresInfo(t *testing.T) {
 	}
 }
 
-// Req 16: unknown JSON members survive set/unset
-func TestConfigPreservesUnknownMembers(t *testing.T) {
+// M4: an existing config.json carrying an unknown member is refused by every
+// config mutation — the document grammar is strict, and a mutation must not
+// erase the evidence of malformed input as a side effect. The file bytes stay
+// unchanged after the refusal.
+func TestConfigMutationRefusesUnknownMemberWithoutRewrite(t *testing.T) {
 	cfg := `{
   "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
@@ -482,24 +485,27 @@ func TestConfigPreservesUnknownMembers(t *testing.T) {
   "nested": {"key": "val"}
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
-
-	runConfigCLI(t, 0, "config", "set", "log_level", "debug")
-	raw := readConfigJSON(t, configPath)
-	if _, ok := raw["custom_field"]; !ok {
-		t.Error("custom_field should be preserved after set")
-	}
-	if _, ok := raw["nested"]; !ok {
-		t.Error("nested should be preserved after set")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// Now unset log_level and check preservation
-	runConfigCLI(t, 0, "config", "unset", "log_level")
-	raw = readConfigJSON(t, configPath)
-	if _, ok := raw["custom_field"]; !ok {
-		t.Error("custom_field should be preserved after unset")
+	_, stderr := runConfigCLI(t, 1, "config", "set", "log_level", "debug")
+	if !strings.Contains(stderr, "unknown configuration field") {
+		t.Errorf("stderr = %q, want the unknown-member refusal", stderr)
 	}
-	if _, ok := raw["nested"]; !ok {
-		t.Error("nested should be preserved after unset")
+
+	_, stderr = runConfigCLI(t, 1, "config", "unset", "log_level")
+	if !strings.Contains(stderr, "unknown configuration field") {
+		t.Errorf("stderr = %q, want the unknown-member refusal", stderr)
+	}
+
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("the refused mutation rewrote config.json: before %q, after %q", before, after)
 	}
 }
 

@@ -315,5 +315,202 @@ else
   reg_ok "I: the recovered global roots no longer contain the stale entry"
 fi
 
+# --- J-O. M4: strict config document grammar (exact keys, duplicates) ---------
+#
+# The persisted config.json is security policy/state, so its document grammar
+# is strict and fail-closed at the ONE ingest boundary: exactly one top-level
+# JSON object, no trailing tokens, duplicate top-level members refused, and
+# every member matched by EXACT spelling (case variants such as
+# Operation_Max_Completed are refused as unknown instead of being silently
+# folded onto the canonical field by encoding/json case-insensitive struct
+# matching — the pre-M4 fold could deliver a negative operation_max_completed
+# to the operation supervisor's completed-cap consumer). All rejection
+# happens before effective config and before runtime side effects.
+
+M4_CONFIG=/etc/docker-helper/config.json
+M4_SNAP="$TMPDIR_REG21/config.m4.bak"
+M4_J_START="$(date '+%Y-%m-%d %H:%M:%S')"
+if ! cp "$M4_CONFIG" "$M4_SNAP"; then
+  reg_blocked "M4: cannot snapshot $M4_CONFIG"
+fi
+m4_restore_config() {
+  cp "$M4_SNAP" "$M4_CONFIG"
+}
+
+# m4_start_fails LABEL: start the service and prove it does NOT become healthy.
+m4_start_fails() {
+  local label="$1" failed=1
+  systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+  systemctl start "$SERVICE" >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    if ! systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+      failed=0
+      break
+    fi
+    sleep 1
+  done
+  if [ "$failed" -eq 0 ]; then
+    reg_ok "$label"
+  else
+    reg_fail "$label: the service stayed active for 30s — startup did not fail closed"
+  fi
+}
+
+# m4_journal_asserts LABEL: the refusal window must contain the bounded
+# actionable config diagnostic and no Go panic / runtime crash evidence.
+m4_journal_asserts() {
+  local label="$1" window
+  window="$(journalctl -u "$SERVICE" --since "$M4_J_START" --no-pager 2>/dev/null || true)"
+  if printf '%s' "$window" | grep -q 'unknown configuration field'; then
+    reg_ok "$label: journal contains the bounded config-grammar diagnostic"
+  else
+    reg_fail "$label: no config-grammar diagnostic in the journal window"
+  fi
+  if printf '%s' "$window" | grep -qiE '^panic|runtime error:|goroutine [0-9]+ \['; then
+    reg_fail "$label: panic/crash evidence in the journal window: $(printf '%s' "$window" | grep -iE '^panic|runtime error:' | head -2 | redact)"
+  else
+    reg_ok "$label: no panic or runtime crash in the journal window"
+  fi
+}
+
+# --- J. startup fails closed on the case-variant negative override ----------
+
+systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+python3 - "$M4_CONFIG" <<'PY' || reg_fail "M4 J: cannot inject the case-variant members"
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    doc = json.load(f)
+doc.pop("operation_max_completed", None)
+doc["operation_max_completed"] = 200
+doc["Operation_Max_Completed"] = -1
+with open(path, "w") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+PY
+m4_start_fails "J: daemon startup fails closed on the case-variant negative override (canonical 200 stays valid; the case variant is a grammar refusal)"
+m4_journal_asserts "J"
+
+# --- K. recovery: restore the canonical config, startup succeeds -------------
+
+m4_restore_config
+systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+systemctl start "$SERVICE" >/dev/null 2>&1 || true
+if wait_service_health; then
+  reg_ok "K: daemon startup succeeds again after restoring the canonical config"
+else
+  reg_fail "K: the service did not become healthy after the config restore"
+fi
+
+# --- L. reload refuses the malformed document; the running daemon keeps ------
+#     serving the previous effective config. The daemon stays up on the good
+#     effective config while the FILE on disk is malformed: startup would
+#     (correctly) refuse this document, so the fixture only rewrites the file
+#     under the running daemon.
+
+python3 - "$M4_CONFIG" <<'PY' || reg_fail "M4 L: cannot inject the case-variant member for the reload refusal"
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    doc = json.load(f)
+doc.pop("operation_max_completed", None)
+doc["operation_max_completed"] = 200
+doc["Operation_Max_Completed"] = -1
+with open(path, "w") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+PY
+if dh reload >/dev/null 2>&1; then
+  reg_fail "L: reload accepted a case-variant config document (must fail closed)"
+else
+  reg_ok "L: reload fails closed on the case-variant document"
+fi
+if wait_service_health; then
+  reg_ok "L: the daemon keeps serving the previous effective config after the refused reload"
+else
+  reg_fail "L: the daemon is not healthy after the refused reload"
+fi
+m4_restore_config
+if dh reload >/dev/null 2>&1; then
+  reg_ok "L: reload succeeds again after restoring the canonical config"
+else
+  reg_fail "L: reload failed after the canonical restore"
+fi
+
+# --- M. config mutation refuses the malformed document, bytes unchanged ------
+
+systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+python3 - "$M4_CONFIG" <<'PY' || reg_fail "M4 M: cannot inject the case-variant member for the mutation refusal"
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    doc = json.load(f)
+doc.pop("operation_max_completed", None)
+doc["operation_max_completed"] = 200
+doc["Operation_Max_Completed"] = -1
+with open(path, "w") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+PY
+M4_SHA_BEFORE="$(sha256sum "$M4_CONFIG" | cut -d' ' -f1)"
+M4_EXTRA_ROOT="$BASE/m4-extra-root"
+mkdir -p "$M4_EXTRA_ROOT"
+if dh config set operation_max_completed 300 >/dev/null 2>&1; then
+  reg_fail "M: config set accepted a case-variant document (must refuse without rewriting)"
+else
+  reg_ok "M: config set refuses the case-variant document"
+fi
+if dh config allowed-root add "$M4_EXTRA_ROOT" >/dev/null 2>&1; then
+  reg_fail "M: config allowed-root add accepted a case-variant document (must refuse without rewriting)"
+else
+  reg_ok "M: config allowed-root add refuses the case-variant document"
+fi
+M4_SHA_AFTER="$(sha256sum "$M4_CONFIG" | cut -d' ' -f1)"
+if [ "$M4_SHA_BEFORE" = "$M4_SHA_AFTER" ]; then
+  reg_ok "M: the refused mutations left config.json byte-for-byte unchanged"
+else
+  reg_fail "M: a refused mutation rewrote config.json (before $M4_SHA_BEFORE, after $M4_SHA_AFTER)"
+fi
+m4_restore_config
+
+# --- N. unknown-member startup refusal ---------------------------------------
+
+systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+python3 - "$M4_CONFIG" <<'PY' || reg_fail "M4 N: cannot inject the unknown member"
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    doc = json.load(f)
+doc["unknown_m4_field"] = 1
+with open(path, "w") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+PY
+m4_start_fails "N: daemon startup fails closed on an unknown top-level member"
+m4_restore_config
+
+# --- O. duplicate-member startup refusal --------------------------------------
+
+systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+printf '{\n  "allowed_roots": ["%s"],\n  "session_ttl": "12h",\n  "session_ttl": "1h"\n}\n' "$SURVIVOR" > "$M4_CONFIG" \
+  || reg_fail "M4 O: cannot write the duplicate-member fixture"
+m4_start_fails "O: daemon startup fails closed on duplicate top-level members (never last-wins)"
+m4_restore_config
+
+# --- P. the canonical config still starts, reloads, and mutates normally ------
+
+systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+systemctl start "$SERVICE" >/dev/null 2>&1 || true
+if wait_service_health; then
+  reg_ok "P: the canonical config starts the daemon normally after the M4 refusals"
+else
+  reg_fail "P: the service did not become healthy on the restored canonical config"
+fi
+if dh config set session_ttl "12h" >/dev/null 2>&1; then
+  reg_ok "P: config set still works on the canonical config"
+else
+  reg_fail "P: config set failed on the canonical config"
+fi
+
 rm -rf "$TMPDIR_REG21"
 reg_result
