@@ -212,11 +212,15 @@ mac_h6_precheck() {
   local tok_ctx cfg_ctx value_before
 
   # Discriminate the installed policy generation: a pre-H6 policy module does
-  # not define the dedicated token type at all, so the fresh-install label
-  # contract cannot hold on such an artifact — the stage proceeds to the
-  # rotation to capture the H6 RED AVC instead. On a policy that defines the
-  # type, the label contract is strict.
-  if semanage fcontext -l 2>/dev/null | grep -q 'docker_helper_admin_token_t'; then
+  # not define the dedicated token type, so the fresh-install label contract
+  # cannot hold on such an artifact — the stage proceeds to the rotation to
+  # capture the H6 RED AVC instead. On a policy that defines the type, the
+  # label contract is strict. The generation is detected from the SYSTEM
+  # fcontext database (matchpathcon on the canonical token pathname):
+  # semanage fcontext -l does not reliably list module-shipped file-context
+  # entries on this guest.
+  if command -v matchpathcon >/dev/null 2>&1 \
+    && matchpathcon "$token_file" 2>/dev/null | grep -q 'docker_helper_admin_token_t'; then
     tok_ctx="$(stat -c '%C' "$token_file" 2>/dev/null)" \
       || fail_uat "cannot stat the admin token context"
     printf '%s' "$tok_ctx" | grep -q 'docker_helper_admin_token_t' \
