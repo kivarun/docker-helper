@@ -680,6 +680,7 @@ func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
+		procfsUsable: func() error { return nil },
 	}
 
 	driver := &selinuxMACDriver{mgr: mgr, treeKind: fakeTreeKindDirectory}
