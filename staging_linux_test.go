@@ -1616,6 +1616,108 @@ func TestStagingBudgetEnumerationRefusesShallowSiblingsByEntries(t *testing.T) {
 	requireNoOperationTree(t, runtimeDir, "op1")
 }
 
+// TestStagingBudgetEnumerationBudgetIsGlobal proves the enumeration
+// admission consumes ONE global entry budget across parent and child
+// directories: a parent's enumeration slice stays live during the recursive
+// descent into its children, so a child must not be able to admit entries
+// beyond the same ceiling. The fixture makes every root entry an identical
+// directory with identical children, so the assertion holds under any
+// directory iteration order.
+func TestStagingBudgetEnumerationBudgetIsGlobal(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(ctxDir, "Dockerfile")); err != nil {
+		t.Fatal(err)
+	}
+
+	const maxEntries = 3
+	for d := 0; d < maxEntries; d++ {
+		sub := filepath.Join(ctxDir, fmt.Sprintf("d%d", d))
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for f := 0; f < 2; f++ {
+			if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("f%d", f)), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// The root's Dockerfile plus its directories alone exhaust the global
+	// entry budget; each directory's children must then be refused at
+	// enumeration admission instead of drawing a second budget.
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: maxEntries + 1, MaxDepth: 4}
+
+	created := map[string]bool{}
+	hooks := &stagingHooks{
+		afterCreateDest: func(name string) error {
+			created[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
+	ceilingErr := requireCeilingError(t, err, "entries")
+
+	if ceilingErr.Ceiling != maxEntries+1 {
+		t.Errorf("entries ceiling = %d, want %d", ceilingErr.Ceiling, maxEntries+1)
+	}
+	if ceilingErr.Attempted != maxEntries+2 {
+		t.Errorf("attempted global admission = %d, want %d", ceilingErr.Attempted, maxEntries+2)
+	}
+	for f := 0; f < 2; f++ {
+		if created[fmt.Sprintf("f%d", f)] {
+			t.Errorf("child entry f%d was materialized beyond the one global entry budget", f)
+		}
+	}
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetNestedEntriesExactlyAtLimitSucceeds proves the global
+// entry reservation is single-owner end to end: a nested context whose
+// total entry count across parent and child is exactly the ceiling stages
+// successfully, so an entry is never reserved twice (once at enumeration
+// admission and again at materialization).
+func TestStagingBudgetNestedEntriesExactlyAtLimitSucceeds(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	sub := filepath.Join(ctxDir, "d")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for f := 0; f < 2; f++ {
+		if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("f%d", f)), []byte(fmt.Sprintf("payload-%d", f)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Exactly the nested total: Dockerfile + one directory + its two files.
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: 4, MaxDepth: 4}
+	staged, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	if err != nil {
+		t.Fatalf("nested context at the exact global entry budget must succeed: %v", err)
+	}
+	defer staged.Cleanup()
+
+	for f := 0; f < 2; f++ {
+		got, err := os.ReadFile(filepath.Join(staged.ContextPath, "d", fmt.Sprintf("f%d", f)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != fmt.Sprintf("payload-%d", f) {
+			t.Errorf("staged child content mismatch: %q", string(got))
+		}
+	}
+}
+
 // TestStagingBudgetDepthExactlyAtLimitSucceeds proves the depth ceiling
 // accepts a directory chain that reaches exactly the ceiling: the context
 // root is depth 0 and a direct child is depth 1, so directories up to

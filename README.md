@@ -1006,15 +1006,20 @@ mode or session:
   below the context root; the context root itself is not counted);
 - directory depth: 64 (the context root is depth 0, a direct child is 1).
 
-A context beyond a ceiling is refused before anything is staged — the
-request fails with HTTP 400 and the code `build_context_too_large` (the
-message names only the exhausted dimension: `bytes`, `entries` or
-`depth`); the CLI prints `API error (status 400, code
-build_context_too_large) ...` and exits 1. No Docker build is started and
-no staging residue remains. If a legitimate context hits a ceiling, shrink
-what the context delivers (for example a `.dockerignore`-style split of
-build outputs out of the context directory); there is no override, because
-the ceilings are a hard host-protection boundary, not a quota.
+A context beyond a ceiling is refused: the entry or resource that would
+cross the ceiling is refused before its corresponding expensive
+materialization, and any staging prefix created up to that point is
+removed before the response. The request fails with HTTP 400 and the code
+`build_context_too_large` (the message names only the exhausted
+dimension: `bytes`, `entries` or `depth`); the CLI prints `API error
+(status 400, code build_context_too_large) ...` and exits 1. No Docker
+build is started and no staging residue remains. If a legitimate context
+hits a ceiling, move generated, cache and output trees outside the
+selected context directory or select a smaller context — docker-helper
+stages the selected host context before Docker sees it, so a
+`.dockerignore` inside the context does not reduce what staging copies;
+there is no override, because the ceilings are a hard host-protection
+boundary, not a quota.
 
 Response (HTTP 201):
 

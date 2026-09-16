@@ -2730,8 +2730,17 @@ descriptor-relative walker (`productionBuildStagingCeilings` in
 - **entries: 50000.** "Entry" means every attacker-controlled source
   entry staging would materialize below the context root — regular
   files, hardlink directory entries, symlinks and directories; the
-  context root itself is not an attacker-variable entry. Each entry is
-  reserved before the corresponding destination entry is created. A
+  context root itself is not an attacker-variable entry. Enumeration
+  admission is the one reservation owner of every entry: a source name
+  is reserved against the single global entry budget when it is
+  admitted into a directory enumeration slice, before the append and
+  before any materialization, and materialization paths never reserve
+  an entry again — every materialized entry has exactly one
+  reservation, taken before its corresponding destination entry is
+  created. Because a parent's enumeration slice stays live during the
+  recursive descent into its children, the sum of all simultaneously
+  admitted enumeration entries of one staging operation can never
+  exceed the ceiling, whatever the directory iteration order. A
   hardlink consumes another entry even though it does not duplicate the
   file payload inode. The Dockerfile is included in the accounting like
   any other staged file.
@@ -2741,13 +2750,14 @@ descriptor-relative walker (`productionBuildStagingCeilings` in
   both destination nesting and the walker's Go recursive stack depth.
   Files may sit one level deeper than the deepest admitted directory.
 
-Enumeration itself is bounded: directory enumeration is budget-aware and
-refuses appending an entry beyond the remaining global entry budget, so
-a hostile directory is refused during enumeration, before any of its
-entries is materialized and before the enumeration slice can grow past
-the budget. There is no pre-scan or second filesystem walker: the same
-descriptor-relative traversal measures and reserves as it copies, before
-each corresponding expensive destination action.
+Enumeration itself is bounded: directory enumeration draws from the
+same single global entry budget, so a hostile directory is refused
+during enumeration — before any of its entries is materialized — and
+the daemon can never hold more than the ceiling's number of admitted
+names across all live enumeration slices of one staging operation.
+There is no pre-scan or second filesystem walker: the same
+descriptor-relative traversal measures and reserves as it copies,
+before each corresponding expensive destination action.
 
 The ceilings are measured production constants, not configuration:
 there is no config.json key, CLI knob, or Principal/Launcher/Session

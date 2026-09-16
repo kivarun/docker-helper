@@ -165,6 +165,22 @@ func generateOperationID() string {
 	return operationIDPrefix + hex.EncodeToString(b)
 }
 
+// isOperationIDSafe checks that the operation ID cannot be used for path traversal.
+func isOperationIDSafe(id string) bool {
+	if id == "" {
+		return false
+	}
+	if len(id) > 0 && (id[0] == '.' || id[0] == '/') {
+		return false
+	}
+	for _, r := range id {
+		if r == '/' || r == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
 type operationSupervisor struct {
 	mu       sync.RWMutex
 	ops      map[string]*operation

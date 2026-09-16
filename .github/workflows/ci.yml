@@ -38,6 +38,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Non-Linux compile ownership gate
+        run: bash scripts/check-nonlinux-compile.sh
+
       - name: Whitespace errors
         run: git diff --check
 

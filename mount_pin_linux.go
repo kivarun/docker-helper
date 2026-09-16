@@ -270,21 +270,5 @@ func cleanupPinnedMount(seam mountPinSyscalls, pinnedPath, mountsDir string) err
 	return nil
 }
 
-// isOperationIDSafe checks that the operation ID cannot be used for path traversal.
-func isOperationIDSafe(id string) bool {
-	if id == "" {
-		return false
-	}
-	if len(id) > 0 && (id[0] == '.' || id[0] == '/') {
-		return false
-	}
-	for _, r := range id {
-		if r == '/' || r == '\\' {
-			return false
-		}
-	}
-	return true
-}
-
 // Ensure linuxMountPinSyscalls implements mountPinSyscalls at compile time.
 var _ mountPinSyscalls = (*linuxMountPinSyscalls)(nil)

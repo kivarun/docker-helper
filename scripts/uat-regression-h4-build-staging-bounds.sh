@@ -119,11 +119,21 @@ mac_state_inventory() {
   printf '%s\n' "$(( $(inventory_count "$RUNTIME_DIR/workload-mac") + $(inventory_count /var/lib/docker-helper/workload-mac) ))"
 }
 
-run_fs() { # df-like usage evidence of the filesystem backing the runtime dir
+run_fs() { # used-KB evidence of the filesystem backing the runtime dir
   df -k --output=used "$RUNTIME_DIR" 2>/dev/null | tail -1 | tr -d ' '
 }
-run_inodes() {
-  df -i --output=iused "$RUNTIME_DIR" 2>/dev/null | tail -1 | tr -d ' '
+run_inodes() { # used-inode evidence of the filesystem backing the runtime dir
+  df --output=iused "$RUNTIME_DIR" 2>/dev/null | tail -1 | tr -d ' '
+}
+
+# require_number exits nonzero when VALUE is not a plain non-negative
+# integer. Measurements are never claimed as evidence from empty or
+# non-numeric output.
+require_number() { # VALUE LABEL
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # --- case 1: bytes — sparse payload just over the byte ceiling -----------------
@@ -149,19 +159,27 @@ else
 fi
 require_healthy_after_refusal "bytes case" "$MARK"
 
-FS_USED_AFTER="$(run_fs)"
-FS_DELTA=$(( FS_USED_AFTER - FS_USED_BEFORE ))
-if [ "$FS_DELTA" -lt 8192 ]; then
-  reg_ok "bytes case: /run usage unchanged (${FS_USED_BEFORE}K -> ${FS_USED_AFTER}K, delta ${FS_DELTA}K) — refusal is preventative"
+if require_number "$FS_USED_BEFORE" && require_number "$(run_fs)"; then
+  FS_USED_AFTER="$(run_fs)"
+  FS_DELTA=$(( FS_USED_AFTER - FS_USED_BEFORE ))
+  if [ "$FS_DELTA" -lt 8192 ]; then
+    reg_ok "bytes case: /run usage unchanged (${FS_USED_BEFORE}K -> ${FS_USED_AFTER}K, delta ${FS_DELTA}K) — refusal is preventative"
+  else
+    reg_fail "bytes case: /run usage grew by ${FS_DELTA}K during the refusal"
+  fi
 else
-  reg_fail "bytes case: /run usage grew by ${FS_DELTA}K during the refusal"
+  reg_fail "bytes case: /run usage figures unavailable (non-numeric df output); byte-usage evidence not proven"
 fi
-INODES_AFTER="$(run_inodes)"
-INODES_DELTA=$(( INODES_AFTER - INODES_BEFORE ))
-if [ "$INODES_DELTA" -lt 16 ]; then
-  reg_ok "bytes case: /run inode usage unchanged (${INODES_BEFORE} -> ${INODES_AFTER})"
+if require_number "$INODES_BEFORE" && require_number "$(run_inodes)"; then
+  INODES_AFTER="$(run_inodes)"
+  INODES_DELTA=$(( INODES_AFTER - INODES_BEFORE ))
+  if [ "$INODES_DELTA" -lt 16 ]; then
+    reg_ok "bytes case: /run inode usage unchanged (${INODES_BEFORE} -> ${INODES_AFTER})"
+  else
+    reg_fail "bytes case: /run inode usage grew by ${INODES_DELTA} during the refusal"
+  fi
 else
-  reg_fail "bytes case: /run inode usage grew by ${INODES_DELTA} during the refusal"
+  reg_fail "bytes case: /run inode figures unavailable (non-numeric df output); inode evidence not proven"
 fi
 if [ "$(mac_state_inventory)" = "$MAC_BEFORE" ]; then
   reg_ok "bytes case: no MAC ownership/use state added"

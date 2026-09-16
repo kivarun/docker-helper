@@ -53,30 +53,6 @@ var productionBuildStagingCeilings = buildStagingCeilings{
 	MaxDepth:   64,
 }
 
-// buildStagingCeilingError is the typed expected refusal of a build-staging
-// ceiling. It names the exhausted dimension ("bytes", "entries" or "depth"),
-// the fixed ceiling, and the attempted reservation, and carries no source
-// path or file-name material. The build handler classifies it — and only it
-// — into the single public build-context-limit response; every other
-// staging failure stays internal_error.
-type buildStagingCeilingError struct {
-	Resource  string
-	Ceiling   int64
-	Attempted int64
-}
-
-func (e *buildStagingCeilingError) Error() string {
-	return fmt.Sprintf("build context exceeds the staging %s ceiling (attempted %d, ceiling %d)", e.Resource, e.Attempted, e.Ceiling)
-}
-
-// Is makes errors.Is match any staging ceiling refusal of the same
-// resource through wrapping — the exhausted dimension is the refusal's
-// identity, not the instance.
-func (e *buildStagingCeilingError) Is(target error) bool {
-	t, ok := target.(*buildStagingCeilingError)
-	return ok && t != nil && e.Resource == t.Resource
-}
-
 // buildStagingBudget is the one mutable per-staging admission owner for the
 // three staging dimensions. It is created once per staging operation from
 // fixed ceilings, threaded through the existing descriptor-relative walker,
@@ -110,17 +86,6 @@ func (b *buildStagingBudget) reserveBytes(size int64) error {
 	return nil
 }
 
-// reserveEntry reserves one attacker-variable source entry (regular file,
-// hardlink directory entry, symlink or directory) before the corresponding
-// destination entry is created.
-func (b *buildStagingBudget) reserveEntry() error {
-	if b.entriesRemaining < 1 {
-		return &buildStagingCeilingError{Resource: "entries", Ceiling: b.ceilings.MaxEntries, Attempted: b.ceilings.MaxEntries + 1}
-	}
-	b.entriesRemaining--
-	return nil
-}
-
 // checkDepth refuses a destination directory whose own depth exceeds the
 // ceiling. The context root is depth 0, a direct child is depth 1; the
 // check runs before the destination mkdir and before the recursive descent.
@@ -131,23 +96,26 @@ func (b *buildStagingBudget) checkDepth(depth int) error {
 	return nil
 }
 
-// admitEnumeration refuses appending one more entry to a directory
-// enumeration slice beyond the remaining global entry budget: appended is
-// the number of entries already appended from this directory, so appending
-// #appended+1 when appended >= entriesRemaining would push the slice past
-// the budget still available for reservation. This is what bounds
-// enumeration itself: a directory with more entries than the remaining
-// budget is refused during enumeration, before any of its entries is
-// materialized and before the slice can grow past the budget. A nil budget
+// admitEnumeration globally reserves one source entry at the moment it is
+// admitted into a directory enumeration slice, before the append. The
+// reservation is global: a parent directory's enumeration slice stays live
+// during the recursive descent into its children, so nested directories
+// draw from the SAME single entry ceiling — the sum of all simultaneously
+// admitted enumeration entries of one staging operation can never exceed
+// MaxEntries, no matter the directory iteration order. This is the one
+// reservation owner of every entry: materialization paths never reserve an
+// entry again, so every materialized entry has exactly one reservation,
+// taken before any destination materialization. A nil budget
 // (staging-residue cleanup) is unbounded by design: cleanup enumerates
 // whatever exists.
-func (b *buildStagingBudget) admitEnumeration(appended int64) error {
+func (b *buildStagingBudget) admitEnumeration() error {
 	if b == nil {
 		return nil
 	}
-	if appended >= b.entriesRemaining {
+	if b.entriesRemaining < 1 {
 		return &buildStagingCeilingError{Resource: "entries", Ceiling: b.ceilings.MaxEntries, Attempted: b.ceilings.MaxEntries + 1}
 	}
+	b.entriesRemaining--
 	return nil
 }
 
@@ -491,7 +459,6 @@ type dirEntry struct {
 func readDirectoryEntries(fd int, budget *buildStagingBudget) ([]dirEntry, error) {
 	buf := make([]byte, 4096)
 	var entries []dirEntry
-	appended := int64(0)
 
 	for {
 		n, err := unix.Getdents(fd, buf)
@@ -534,15 +501,14 @@ func readDirectoryEntries(fd int, budget *buildStagingBudget) ([]dirEntry, error
 			name := unix.ByteSliceToString(buf[nameStart : nameStart+nameEnd])
 
 			if name != "." && name != ".." {
-				// Enumeration itself is budget-aware: appending an entry
-				// beyond the remaining global entry budget refuses during
-				// enumeration, before any of this directory's entries is
-				// materialized.
-				if err := budget.admitEnumeration(appended); err != nil {
+				// Enumeration admission is the one global entry
+				// reservation: the entry is reserved before it is appended
+				// and before anything of this directory is materialized,
+				// and nested directories draw from the same single budget.
+				if err := budget.admitEnumeration(); err != nil {
 					return entries, err
 				}
 				entries = append(entries, dirEntry{name: name, ino: ino})
-				appended++
 			}
 
 			off = entryStart + int(reclen)
@@ -576,12 +542,10 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 		}
 		target := unix.ByteSliceToString(buf[:n])
 
-		// The symlink target payload and the entry are reserved before the
-		// destination symlink is created.
+		// The symlink target payload is reserved before the destination
+		// symlink is created; the entry itself was already reserved once
+		// at enumeration admission.
 		if err := budget.reserveBytes(int64(len(target))); err != nil {
-			return err
-		}
-		if err := budget.reserveEntry(); err != nil {
 			return err
 		}
 
@@ -608,13 +572,9 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 		di := devIno{dev: st.Dev, ino: st.Ino}
 		if relPath, ok := hardlinkMap[di]; ok {
 			unix.Close(oPathFD)
-			// A hardlink name is an entry of its own even though it does
-			// not duplicate the file payload inode: reserve the entry
-			// before the destination link is created. The payload was
-			// already reserved once by the first staged copy of the inode.
-			if err := budget.reserveEntry(); err != nil {
-				return err
-			}
+			// The hardlink name's entry was already reserved once at
+			// enumeration admission; it does not duplicate the file
+			// payload inode, so no further reservation applies here.
 			if err := unix.Linkat(stagingRootFD, relPath, stagingDirFD, name, 0); err != nil {
 				return fmt.Errorf("cannot create hardlink %s: %w", name, err)
 			}
@@ -650,16 +610,13 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 		unix.Close(oPathFD)
 
 		// The first staged copy of a unique regular-file inode reserves its
-		// logical payload size and the entry before the destination file is
-		// created or copied. st_size is the conservative reservation: the
-		// copier de-sparsifies, so a sparse source file occupies its logical
-		// size. The comparison inside reserveBytes runs before the counter
+		// logical payload size before the destination file is created or
+		// copied; the entry itself was already reserved once at enumeration
+		// admission. st_size is the conservative reservation: the copier
+		// de-sparsifies, so a sparse source file occupies its logical size.
+		// The comparison inside reserveBytes runs before the counter
 		// mutation, so a near-max st_size cannot overflow into acceptance.
 		if err := budget.reserveBytes(st.Size); err != nil {
-			unix.Close(readFD)
-			return err
-		}
-		if err := budget.reserveEntry(); err != nil {
 			unix.Close(readFD)
 			return err
 		}
@@ -739,13 +696,9 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 
 		// The next directory level is admitted before the destination mkdir
 		// and before the recursive descent into it (the context root is
-		// depth 0, this directory's own depth is `depth`), and the
-		// directory itself is one attacker-variable entry.
+		// depth 0, this directory's own depth is `depth`); the directory
+		// entry itself was already reserved once at enumeration admission.
 		if err := budget.checkDepth(depth); err != nil {
-			unix.Close(sourceReadFD)
-			return err
-		}
-		if err := budget.reserveEntry(); err != nil {
 			unix.Close(sourceReadFD)
 			return err
 		}
