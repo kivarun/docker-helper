@@ -126,10 +126,21 @@ arm_shim() {
   # A self-stopping blocker: the shim raises SIGSTOP on itself, so it blocks
   # with no exec, no file access, and no CPU cost under the daemon's own
   # mandatory MAC policy (an exec-based shim would be denied by the shipped
-  # profile itself — the hostile state must be reachable from the confined
+  # policy itself — the hostile state must be reachable from the confined
   # daemon). The bounded runner's budget kill delivers SIGKILL, which
   # terminates a stopped process and is reaped.
-  printf '#!/bin/sh\nkill -STOP $$\n' > "$TARGET_PATH"
+  #
+  # The shebang must be an interpreter the shipped policy allows the daemon
+  # to execute: on Ubuntu /bin/sh executes under the profile (proven), while
+  # on Tumbleweed /bin/sh is bash and docker_helper_t may only execute the
+  # semanage interpreter chain (python3) — the AVC evidence proved the bash
+  # exec denial. python3 is semanage's own shebang interpreter, so its
+  # execution is already granted exactly for this frontend.
+  if [ "$BACKEND" = "selinux" ]; then
+    printf '#!/usr/bin/python3\nimport os, signal\nos.kill(os.getpid(), signal.SIGSTOP)\n' > "$TARGET_PATH"
+  else
+    printf '#!/bin/sh\nkill -STOP $$\n' > "$TARGET_PATH"
+  fi
   chmod 0755 "$TARGET_PATH"
   if [ -n "$SHIM_TYPE" ] && command -v chcon >/dev/null 2>&1; then
     chcon -t "$SHIM_TYPE" "$TARGET_PATH" 2>/dev/null || true

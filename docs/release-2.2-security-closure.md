@@ -1990,8 +1990,11 @@ and Tumbleweed group 8. The guest-local hostile mechanism is the least
 invasive one: the backend's own MAC frontend binary is temporarily replaced
 by a self-stopping shim (`kill -STOP $$` — no exec and no file access, so the
 hostile state is reachable from the confined daemon itself; an exec-based
-shim is denied by the shipped profile and never blocks; on the SELinux guest
-the shim carries the original binary's type via `chcon` so the confined
+shim is denied by the shipped policy and never blocks; the shim's shebang is
+an interpreter the shipped policy grants the daemon for that frontend —
+`/bin/sh` on the AppArmor guest, `python3` (semanage's own interpreter) on
+the SELinux guest, whose bash execution is denied; on the SELinux guest the
+shim also carries the original binary's type via `chcon` so the confined
 daemon's execute of that path keeps exactly the original permission),
 restored by a fail-closed trap — no production seam, debug API, environment backdoor, or
 configurable command pathname was added. Per backend the group proves: the
