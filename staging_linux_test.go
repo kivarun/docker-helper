@@ -4,7 +4,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -276,7 +278,7 @@ func TestStageBuildContextENOSYS(t *testing.T) {
 	absCtx := abs(t, ctxDir)
 
 	sy := stagingSyscall{Openat2: nil}
-	_, err := stageBuildContextInternal(context.Background(), workspace, absCtx, "Dockerfile", runtimeDir, "op1", sy, nil)
+	_, err := stageBuildContextInternal(context.Background(), workspace, absCtx, "Dockerfile", runtimeDir, "op1", sy, nil, productionBuildStagingCeilings)
 	if err == nil {
 		t.Error("expected error for nil Openat2, got nil")
 	}
@@ -292,7 +294,7 @@ func TestStageBuildContextEPERM(t *testing.T) {
 			return -1, unix.EPERM
 		},
 	}
-	_, err := stageBuildContextInternal(context.Background(), workspace, absCtx, "Dockerfile", runtimeDir, "op1", sy, nil)
+	_, err := stageBuildContextInternal(context.Background(), workspace, absCtx, "Dockerfile", runtimeDir, "op1", sy, nil, productionBuildStagingCeilings)
 	if err == nil {
 		t.Error("expected error for EPERM, got nil")
 	}
@@ -577,7 +579,7 @@ func TestStageBuildContextFileReplacement(t *testing.T) {
 		},
 	}
 
-	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
 	if err == nil {
 		t.Error("expected error for file replacement, got nil")
 	}
@@ -611,7 +613,7 @@ func TestStageBuildContextDirectoryReplacement(t *testing.T) {
 		},
 	}
 
-	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
 	if err == nil {
 		t.Error("expected error for directory replacement, got nil")
 	}
@@ -644,7 +646,7 @@ func TestStageBuildContextCancellationAfterCreate(t *testing.T) {
 		},
 	}
 
-	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
 	if err == nil {
 		t.Error("expected error for cancellation after create, got nil")
 	}
@@ -675,7 +677,7 @@ func TestStageBuildContextPartialCopy(t *testing.T) {
 		},
 	}
 
-	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
 	if err == nil {
 		t.Error("expected error for partial copy, got nil")
 	}
@@ -754,7 +756,7 @@ func TestStageBuildContextUnexpectedEOF(t *testing.T) {
 		},
 	}
 
-	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
 	if err == nil {
 		t.Error("expected error for unexpected EOF, got nil")
 	}
@@ -786,7 +788,7 @@ func TestStageBuildContextContextReplacement(t *testing.T) {
 		},
 	}
 
-	_, err := stageBuildContextInternal(context.Background(), workspace, absCtx, "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	_, err := stageBuildContextInternal(context.Background(), workspace, absCtx, "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
 	if err == nil {
 		t.Error("expected error for context replacement, got nil")
 	}
@@ -919,5 +921,929 @@ func TestStageBuildContextStripsSetUIDOnHardlinkedPair(t *testing.T) {
 	}
 	if stagedFirst.Mode() != 0o755 || stagedSecond.Mode() != 0o755 {
 		t.Errorf("staged hardlink pair modes = %o/%o, want 755/755 (no privilege bits)", stagedFirst.Mode(), stagedSecond.Mode())
+	}
+}
+
+// --- H4 staging ceilings -----------------------------------------------------
+//
+// The staging resources that must be refused are measured against the
+// proposed Release-2.2 production ceilings (128 MiB payload bytes, 50000
+// entries, depth 64). The hostile fixtures below are cheap: the byte case
+// uses a sparse source file (logical size only), the entry case uses
+// zero-byte files, and the depth case is an ordinary nested chain.
+
+// sparseHostileFile creates a sparse regular file with the given logical
+// size (st_size) and near-zero physical allocation.
+func sparseHostileFile(t *testing.T, path string, size int64) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != size {
+		t.Fatalf("sparse fixture has st_size %d, want %d", st.Size(), size)
+	}
+	if sys := st.Sys().(*syscall.Stat_t); sys.Blocks > 64 {
+		t.Fatalf("sparse fixture is not sparse: %d blocks for st_size %d", sys.Blocks, size)
+	}
+}
+
+// hugeSparseHostileFile creates a sparse regular file with the largest
+// hostile logical size this filesystem can represent: the near-max int64
+// size where a naive "used += requested" accumulation would wrap into
+// acceptance, falling back through progressively smaller (still vastly
+// over-ceiling) sizes for filesystems whose maximum file size is lower.
+// Returns the achieved logical size.
+func hugeSparseHostileFile(t *testing.T, path string) int64 {
+	t.Helper()
+	for _, size := range []int64{math.MaxInt64, 1 << 42, 1 << 37} {
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = f.Truncate(size)
+		f.Close()
+		if err == nil {
+			return size
+		}
+		if !errors.Is(err, syscall.EFBIG) && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("cannot create the huge sparse fixture: %v", err)
+		}
+		os.Remove(path)
+	}
+	t.Fatal("no representable huge sparse size on this filesystem")
+	return 0
+}
+
+// TestStageBuildContextSparsePayloadOverByteCeiling proves a single hostile
+// build context cannot push its payload past the production byte ceiling:
+// a sparse file whose logical size exceeds the ceiling must be refused
+// before its destination payload is created or written, and the refusal
+// must leave no operation tree. Pre-fix this staging operation succeeded and
+// began materializing the sparse file's logical payload in the runtime
+// filesystem (duringCopy/afterCreateDest ran for it).
+func TestStageBuildContextSparsePayloadOverByteCeiling(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	const byteCeiling = 128 * 1024 * 1024 // proposed production byte ceiling
+	sparseHostileFile(t, filepath.Join(ctxDir, "big.bin"), byteCeiling+1)
+
+	duringCopy := map[string]int64{}
+	created := map[string]bool{}
+	hooks := &stagingHooks{
+		duringCopy: func(name string, copiedBytes int64) error {
+			duringCopy[name] = copiedBytes
+			return nil
+		},
+		afterCreateDest: func(name string) error {
+			created[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
+	if err == nil {
+		t.Fatal("expected the over-ceiling sparse payload to be refused, got success")
+	}
+
+	if _, ok := duringCopy["big.bin"]; ok {
+		t.Errorf("over-ceiling payload began copying (duringCopy at offset %d); refusal must happen before any destination payload write", duringCopy["big.bin"])
+	}
+	if created["big.bin"] {
+		t.Error("over-ceiling payload destination entry was created; refusal must happen before destination creation")
+	}
+
+	// The source file must remain untouched and sparse.
+	st, err := os.Stat(filepath.Join(ctxDir, "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != byteCeiling+1 {
+		t.Errorf("source sparse file changed size: %d", st.Size())
+	}
+	if sys := st.Sys().(*syscall.Stat_t); sys.Blocks > 64 {
+		t.Errorf("source sparse file was materialized: %d blocks", sys.Blocks)
+	}
+
+	// The refusal must leave no operation tree.
+	if _, err := os.Stat(filepath.Join(runtimeDir, "builds", "op1")); err == nil {
+		t.Error("operation directory should be cleaned up after the byte-ceiling refusal")
+	}
+}
+
+// TestStageBuildContextEntriesOverCeiling proves a single hostile build
+// context cannot push its entry count past the production entry ceiling.
+// The refusal must happen while enumerating the over-ceiling directory —
+// before any of its entries materialize — and must leave no operation tree.
+// Pre-fix the whole directory was enumerated into an unbounded slice and
+// every entry was staged successfully.
+func TestStageBuildContextEntriesOverCeiling(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	const entryCeiling = 50000 // proposed production entry ceiling
+	// Dockerfile plus entryCeiling zero-byte regular files: one entry over.
+	for i := 0; i < entryCeiling; i++ {
+		if err := os.WriteFile(filepath.Join(ctxDir, fmt.Sprintf("f%06d", i)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	created := map[string]bool{}
+	hooks := &stagingHooks{
+		afterCreateDest: func(name string) error {
+			created[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
+	if err == nil {
+		t.Fatal("expected the over-ceiling entry count to be refused, got success")
+	}
+
+	if created["f000000"] {
+		t.Error("over-ceiling directory entries were materialized; the enumeration must refuse before any destination creation")
+	}
+
+	if _, err := os.Stat(filepath.Join(runtimeDir, "builds", "op1")); err == nil {
+		t.Error("operation directory should be cleaned up after the entry-ceiling refusal")
+	}
+}
+
+// TestStageBuildContextDepthOverCeiling proves a single hostile build
+// context cannot descend past the production depth ceiling: the over-deep
+// directory must be refused before its destination mkdir and before the
+// recursive descent into it, and the refusal must leave no operation tree.
+// Pre-fix the traversal recursed as deep as the source tree goes.
+func TestStageBuildContextDepthOverCeiling(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	const depthCeiling = 64 // proposed production depth ceiling
+	deepDir := ctxDir
+	for i := 0; i < depthCeiling+1; i++ {
+		deepDir = filepath.Join(deepDir, fmt.Sprintf("d%02d", i))
+	}
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deepDir, "deep.txt"), []byte("deep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	visited := map[string]bool{}
+	hooks := &stagingHooks{
+		betweenStatAndOpen: func(name string) error {
+			visited[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks, productionBuildStagingCeilings)
+	if err == nil {
+		t.Fatal("expected the over-ceiling depth to be refused, got success")
+	}
+
+	if visited["deep.txt"] {
+		t.Error("descent continued below the depth ceiling; the over-deep directory must be refused before recursive descent")
+	}
+
+	if _, err := os.Stat(filepath.Join(runtimeDir, "builds", "op1")); err == nil {
+		t.Error("operation directory should be cleaned up after the depth-ceiling refusal")
+	}
+}
+
+// --- H4 exact boundary semantics (injected tiny ceilings) --------------------
+//
+// The production ceilings are too large for exact boundary fixtures, so the
+// boundary tests below inject tiny ceilings through stageBuildContextInternal
+// and exercise the real descriptor-relative walker unchanged.
+
+// stageWithCeilings runs the real staging walker with injected ceilings.
+func stageWithCeilings(t *testing.T, workspace, ctxDir, dockerfileRel, runtimeDir, operationID string, ceilings buildStagingCeilings, hooks *stagingHooks) (*stagedBuildContext, error) {
+	t.Helper()
+	return stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), dockerfileRel, runtimeDir, operationID, defaultStagingSyscall(), hooks, ceilings)
+}
+
+// requireCeilingError asserts the typed ceiling refusal and its dimension.
+func requireCeilingError(t *testing.T, err error, resource string) *buildStagingCeilingError {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected a staging ceiling refusal, got success")
+	}
+	var ceilingErr *buildStagingCeilingError
+	if !errors.As(err, &ceilingErr) {
+		t.Fatalf("expected typed staging ceiling error, got: %v", err)
+	}
+	if ceilingErr.Resource != resource {
+		t.Errorf("ceiling resource = %q, want %q", ceilingErr.Resource, resource)
+	}
+	return ceilingErr
+}
+
+// requireNoOperationTree asserts the staging refusal left no operation tree
+// under runtime/builds.
+func requireNoOperationTree(t *testing.T, runtimeDir, operationID string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(runtimeDir, "builds", operationID)); err == nil {
+		t.Error("operation directory should be cleaned up after the ceiling refusal")
+	}
+}
+
+// TestStagingBudgetBytesExactlyAtLimitSucceeds proves the byte ceiling
+// accepts a context whose total staged payload is exactly at the ceiling.
+func TestStagingBudgetBytesExactlyAtLimitSucceeds(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	dfSt, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fileSize = 64
+	if err := os.WriteFile(filepath.Join(ctxDir, "a.bin"), make([]byte, fileSize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + fileSize, MaxEntries: 2, MaxDepth: 4}
+	staged, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	if err != nil {
+		t.Fatalf("exactly-at-limit staging must succeed: %v", err)
+	}
+	defer staged.Cleanup()
+
+	got, err := os.ReadFile(filepath.Join(staged.ContextPath, "a.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(got)) != fileSize {
+		t.Errorf("staged payload = %d bytes, want %d", len(got), fileSize)
+	}
+}
+
+// TestStagingBudgetBytesOneOverRefusedBeforeDestination proves one byte over
+// the byte ceiling is refused before the over-ceiling payload's destination
+// entry is created or written, and that the refusal leaves no operation
+// tree or source modification.
+func TestStagingBudgetBytesOneOverRefusedBeforeDestination(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	dfSt, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fileSize = 64
+	payload := make([]byte, fileSize)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	if err := os.WriteFile(filepath.Join(ctxDir, "a.bin"), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	copied := false
+	created := false
+	hooks := &stagingHooks{
+		duringCopy: func(name string, copiedBytes int64) error {
+			if name == "a.bin" {
+				copied = true
+			}
+			return nil
+		},
+		afterCreateDest: func(name string) error {
+			if name == "a.bin" {
+				created = true
+			}
+			return nil
+		},
+	}
+
+	ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + fileSize - 1, MaxEntries: 2, MaxDepth: 4}
+	_, err = stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
+	requireCeilingError(t, err, "bytes")
+
+	if copied {
+		t.Error("over-ceiling payload began copying; refusal must happen before any destination payload write")
+	}
+	if created {
+		t.Error("over-ceiling payload destination entry was created; refusal must happen before destination creation")
+	}
+
+	// The source payload must be unchanged.
+	got, err := os.ReadFile(filepath.Join(ctxDir, "a.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != fileSize {
+		t.Errorf("source file changed: %d bytes", len(got))
+	}
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetSparseLogicalSizeRefused proves a sparse source file is
+// accounted by its logical size (st_size): a sparse file whose st_size
+// exceeds the remaining byte budget is refused without materializing the
+// hole, and the source stays sparse.
+func TestStagingBudgetSparseLogicalSizeRefused(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	dfSt, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sparseHostileFile(t, filepath.Join(ctxDir, "sparse.bin"), dfSt.Size()+1024)
+
+	copied := false
+	hooks := &stagingHooks{
+		duringCopy: func(name string, copiedBytes int64) error {
+			if name == "sparse.bin" {
+				copied = true
+			}
+			return nil
+		},
+	}
+
+	ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + 1023, MaxEntries: 2, MaxDepth: 4}
+	_, err = stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
+	requireCeilingError(t, err, "bytes")
+
+	if copied {
+		t.Error("sparse hole began materializing; the logical-size reservation must refuse before any copy")
+	}
+
+	st, err := os.Stat(filepath.Join(ctxDir, "sparse.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != dfSt.Size()+1024 {
+		t.Errorf("source sparse file changed size: %d", st.Size())
+	}
+	if sys := st.Sys().(*syscall.Stat_t); sys.Blocks > 64 {
+		t.Errorf("source sparse file was materialized: %d blocks", sys.Blocks)
+	}
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetReserveBytesOverflow proves the byte admission arithmetic
+// cannot overflow into acceptance, as isolated pure behavior: with the
+// budget nearly exhausted, a near-max reservation is refused by the
+// before-comparison check — where a "used += requested" implementation
+// would wrap int64 negative and accept — the counter is not corrupted, and
+// the budget keeps admitting exactly-ceiling-sized reservations.
+func TestStagingBudgetReserveBytesOverflow(t *testing.T) {
+	budget := newBuildStagingBudget(buildStagingCeilings{MaxBytes: 4096, MaxEntries: 4, MaxDepth: 4})
+
+	if err := budget.reserveBytes(2048); err != nil {
+		t.Fatalf("ordinary reservation must succeed: %v", err)
+	}
+	// math.MaxInt64 + 2048 overflows int64; the comparison-before-mutation
+	// form must refuse instead.
+	err := budget.reserveBytes(math.MaxInt64)
+	ceilingErr := requireCeilingError(t, err, "bytes")
+	if ceilingErr.Attempted != math.MaxInt64 {
+		t.Errorf("attempted reservation = %d, want math.MaxInt64 (the refused resource value)", ceilingErr.Attempted)
+	}
+	if budget.bytesRemaining != 2048 {
+		t.Errorf("refused reservation mutated the budget: bytesRemaining = %d, want 2048", budget.bytesRemaining)
+	}
+	if err := budget.reserveBytes(2048); err != nil {
+		t.Errorf("budget corrupted by the refused overflow-sized reservation: %v", err)
+	}
+	if err := budget.reserveBytes(1); err == nil {
+		t.Error("budget must be exhausted after the exactly-at-limit reservation")
+	}
+}
+
+// TestStagingBudgetHugeSparseSourceRefused proves the end-to-end walker
+// refusal for a source file whose logical size is near the filesystem
+// maximum: the reservation is refused before any destination payload is
+// created or copied, the attempted value is the source's st_size, and the
+// refusal leaves no operation tree.
+func TestStagingBudgetHugeSparseSourceRefused(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	hugeSize := hugeSparseHostileFile(t, filepath.Join(ctxDir, "huge.bin"))
+
+	copied := false
+	created := false
+	hooks := &stagingHooks{
+		duringCopy: func(name string, copiedBytes int64) error {
+			if name == "huge.bin" {
+				copied = true
+			}
+			return nil
+		},
+		afterCreateDest: func(name string) error {
+			if name == "huge.bin" {
+				created = true
+			}
+			return nil
+		},
+	}
+
+	ceilings := buildStagingCeilings{MaxBytes: 4096, MaxEntries: 2, MaxDepth: 4}
+	_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
+	ceilingErr := requireCeilingError(t, err, "bytes")
+
+	if ceilingErr.Attempted != hugeSize {
+		t.Errorf("attempted reservation = %d, want the source st_size %d", ceilingErr.Attempted, hugeSize)
+	}
+	if copied {
+		t.Error("huge payload began copying; refusal must happen before any destination payload write")
+	}
+	if created {
+		t.Error("huge payload destination entry was created; refusal must happen before destination creation")
+	}
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetHardlinkPayloadCountedOnce proves a unique regular-file
+// inode's payload is reserved exactly once: the byte ceiling only needs
+// room for the first staged copy, and the hardlink name still stages
+// correctly (same staged inode, same content).
+func TestStagingBudgetHardlinkPayloadCountedOnce(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	dfSt, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const payloadSize = 128
+	if err := os.WriteFile(filepath.Join(ctxDir, "original.bin"), make([]byte, payloadSize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(ctxDir, "original.bin"), filepath.Join(ctxDir, "hardlink.bin")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly enough bytes for the Dockerfile and ONE copy of the payload:
+	// a double reservation would refuse.
+	ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + payloadSize, MaxEntries: 3, MaxDepth: 4}
+	staged, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	if err != nil {
+		t.Fatalf("hardlink payload must be reserved once, not per name: %v", err)
+	}
+	defer staged.Cleanup()
+
+	origInfo, err := os.Stat(filepath.Join(staged.ContextPath, "original.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkInfo, err := os.Stat(filepath.Join(staged.ContextPath, "hardlink.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if origInfo.Sys().(*syscall.Stat_t).Ino != linkInfo.Sys().(*syscall.Stat_t).Ino {
+		t.Error("staged hardlink pair lost its single staged inode")
+	}
+}
+
+// TestStagingBudgetHardlinkNameConsumesEntry proves a hardlink directory
+// entry consumes its own entry slot even though it does not duplicate the
+// file payload inode.
+func TestStagingBudgetHardlinkNameConsumesEntry(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	dfSt, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const payloadSize = 16
+	if err := os.WriteFile(filepath.Join(ctxDir, "original.bin"), make([]byte, payloadSize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(ctxDir, "original.bin"), filepath.Join(ctxDir, "hardlink.bin")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The entry budget covers the Dockerfile and the first copy only: the
+	// hardlink name is refused as its own entry.
+	ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + payloadSize, MaxEntries: 2, MaxDepth: 4}
+	_, err = stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	requireCeilingError(t, err, "entries")
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetSymlinkAccounting proves a staged symlink is accounted
+// by its target payload bytes and consumes its own entry slot.
+func TestStagingBudgetSymlinkAccounting(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	dfSt, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := "some-target"
+	if err := os.Symlink(target, filepath.Join(ctxDir, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("target payload bytes counted", func(t *testing.T) {
+		ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + int64(len(target)), MaxEntries: 2, MaxDepth: 4}
+		staged, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+		if err != nil {
+			t.Fatalf("symlink target bytes must be reserved exactly: %v", err)
+		}
+		staged.Cleanup()
+	})
+
+	t.Run("one target byte over refuses", func(t *testing.T) {
+		ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + int64(len(target)) - 1, MaxEntries: 2, MaxDepth: 4}
+		_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+		requireCeilingError(t, err, "bytes")
+		requireNoOperationTree(t, runtimeDir, "op1")
+	})
+
+	t.Run("symlink consumes an entry", func(t *testing.T) {
+		ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + int64(len(target)), MaxEntries: 1, MaxDepth: 4}
+		_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+		requireCeilingError(t, err, "entries")
+		requireNoOperationTree(t, runtimeDir, "op1")
+	})
+}
+
+// entriesAtLimitFixture builds a five-entry context: Dockerfile, one
+// directory, one regular file, one symlink, one hardlink name — every
+// attacker-variable entry kind the walker materializes.
+func entriesAtLimitFixture(t *testing.T, ctxDir string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(ctxDir, "subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ctxDir, "file.bin"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("file.bin", filepath.Join(ctxDir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(ctxDir, "file.bin"), filepath.Join(ctxDir, "alias.bin")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStagingBudgetEntriesExactlyAtLimitSucceeds proves the entry ceiling
+// accepts a context with exactly the ceiling's number of entries, counting
+// regular files, directories, symlinks and hardlink names alike.
+func TestStagingBudgetEntriesExactlyAtLimitSucceeds(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	entriesAtLimitFixture(t, ctxDir)
+
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: 5, MaxDepth: 4}
+	staged, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	if err != nil {
+		t.Fatalf("exactly-at-limit entry count must succeed: %v", err)
+	}
+	defer staged.Cleanup()
+
+	for _, name := range []string{"subdir", "file.bin", "link", "alias.bin"} {
+		if _, err := os.Lstat(filepath.Join(staged.ContextPath, name)); err != nil {
+			t.Errorf("staged entry %s missing: %v", name, err)
+		}
+	}
+}
+
+// TestStagingBudgetEntriesOneOverRefused proves one entry over the ceiling
+// is refused with the typed entries ceiling error and leaves no operation
+// tree.
+func TestStagingBudgetEntriesOneOverRefused(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	entriesAtLimitFixture(t, ctxDir)
+
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: 4, MaxDepth: 4}
+	_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	requireCeilingError(t, err, "entries")
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetEnumerationRefusesShallowSiblingsByEntries proves the
+// enumeration itself is bounded: a directory with more entries than the
+// remaining entry budget is refused during enumeration — before ANY of its
+// entries is materialized — and a shallow tree with many siblings is
+// governed by the entry ceiling, not the depth ceiling.
+func TestStagingBudgetEnumerationRefusesShallowSiblingsByEntries(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	sub := filepath.Join(ctxDir, "sub")
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("f%d", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Entry budget: Dockerfile + the sub directory itself + one sibling.
+	// Depth ceiling 1 admits the shallow sub directory, so a depth refusal
+	// would be wrong here: the refusal must come from the entry ceiling,
+	// during the sub directory's enumeration.
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: 3, MaxDepth: 1}
+
+	created := map[string]bool{}
+	hooks := &stagingHooks{
+		afterCreateDest: func(name string) error {
+			created[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
+	ceilingErr := requireCeilingError(t, err, "entries")
+
+	if ceilingErr.Ceiling != 3 {
+		t.Errorf("entries ceiling = %d, want 3", ceilingErr.Ceiling)
+	}
+	for i := 0; i < 10; i++ {
+		if created[fmt.Sprintf("f%d", i)] {
+			t.Errorf("sub directory entry f%d was materialized; the enumeration must refuse before any destination creation", i)
+		}
+	}
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetEnumerationBudgetIsGlobal proves the enumeration
+// admission consumes ONE global entry budget across parent and child
+// directories: a parent's enumeration slice stays live during the recursive
+// descent into its children, so a child must not be able to admit entries
+// beyond the same ceiling. The fixture makes every root entry an identical
+// directory with identical children, so the assertion holds under any
+// directory iteration order.
+func TestStagingBudgetEnumerationBudgetIsGlobal(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(ctxDir, "Dockerfile")); err != nil {
+		t.Fatal(err)
+	}
+
+	const maxEntries = 3
+	for d := 0; d < maxEntries; d++ {
+		sub := filepath.Join(ctxDir, fmt.Sprintf("d%d", d))
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for f := 0; f < 2; f++ {
+			if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("f%d", f)), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// The root's Dockerfile plus its directories alone exhaust the global
+	// entry budget; each directory's children must then be refused at
+	// enumeration admission instead of drawing a second budget.
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: maxEntries + 1, MaxDepth: 4}
+
+	created := map[string]bool{}
+	hooks := &stagingHooks{
+		afterCreateDest: func(name string) error {
+			created[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
+	ceilingErr := requireCeilingError(t, err, "entries")
+
+	if ceilingErr.Ceiling != maxEntries+1 {
+		t.Errorf("entries ceiling = %d, want %d", ceilingErr.Ceiling, maxEntries+1)
+	}
+	if ceilingErr.Attempted != maxEntries+2 {
+		t.Errorf("attempted global admission = %d, want %d", ceilingErr.Attempted, maxEntries+2)
+	}
+	for f := 0; f < 2; f++ {
+		if created[fmt.Sprintf("f%d", f)] {
+			t.Errorf("child entry f%d was materialized beyond the one global entry budget", f)
+		}
+	}
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetNestedEntriesExactlyAtLimitSucceeds proves the global
+// entry reservation is single-owner end to end: a nested context whose
+// total entry count across parent and child is exactly the ceiling stages
+// successfully, so an entry is never reserved twice (once at enumeration
+// admission and again at materialization).
+func TestStagingBudgetNestedEntriesExactlyAtLimitSucceeds(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	sub := filepath.Join(ctxDir, "d")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for f := 0; f < 2; f++ {
+		if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("f%d", f)), []byte(fmt.Sprintf("payload-%d", f)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Exactly the nested total: Dockerfile + one directory + its two files.
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: 4, MaxDepth: 4}
+	staged, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	if err != nil {
+		t.Fatalf("nested context at the exact global entry budget must succeed: %v", err)
+	}
+	defer staged.Cleanup()
+
+	for f := 0; f < 2; f++ {
+		got, err := os.ReadFile(filepath.Join(staged.ContextPath, "d", fmt.Sprintf("f%d", f)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != fmt.Sprintf("payload-%d", f) {
+			t.Errorf("staged child content mismatch: %q", string(got))
+		}
+	}
+}
+
+// TestStagingBudgetDepthExactlyAtLimitSucceeds proves the depth ceiling
+// accepts a directory chain that reaches exactly the ceiling: the context
+// root is depth 0 and a direct child is depth 1, so directories up to
+// MaxDepth stage successfully (files may sit one level deeper than the
+// deepest directory).
+func TestStagingBudgetDepthExactlyAtLimitSucceeds(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	const maxDepth = 8
+	deepDir := ctxDir
+	for i := 0; i < maxDepth; i++ {
+		deepDir = filepath.Join(deepDir, fmt.Sprintf("d%02d", i))
+	}
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deepDir, "deep.txt"), []byte("deep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: 1 << 20, MaxDepth: maxDepth}
+	staged, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	if err != nil {
+		t.Fatalf("exactly-at-limit depth must succeed: %v", err)
+	}
+	defer staged.Cleanup()
+
+	deepStaged := staged.ContextPath
+	for i := 0; i < maxDepth; i++ {
+		deepStaged = filepath.Join(deepStaged, fmt.Sprintf("d%02d", i))
+	}
+	if _, err := os.Stat(filepath.Join(deepStaged, "deep.txt")); err != nil {
+		t.Errorf("deep file missing from staging: %v", err)
+	}
+}
+
+// TestStagingBudgetDepthOneOverRefusedBeforeDescent proves a directory one
+// level deeper than the ceiling is refused before its destination mkdir and
+// before the recursive descent into it: the file below the over-deep
+// directory is never reached, and the refusal leaves no operation tree.
+func TestStagingBudgetDepthOneOverRefusedBeforeDescent(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	const maxDepth = 8
+	deepDir := ctxDir
+	for i := 0; i < maxDepth+1; i++ {
+		deepDir = filepath.Join(deepDir, fmt.Sprintf("d%02d", i))
+	}
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deepDir, "deep.txt"), []byte("deep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	visited := map[string]bool{}
+	hooks := &stagingHooks{
+		betweenStatAndOpen: func(name string) error {
+			visited[name] = true
+			return nil
+		},
+	}
+
+	ceilings := buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: 1 << 20, MaxDepth: maxDepth}
+	_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
+	requireCeilingError(t, err, "depth")
+
+	if visited["deep.txt"] {
+		t.Error("descent continued into the over-deep directory; the depth refusal must happen before recursive descent")
+	}
+
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingBudgetDockerfileCounted proves the Dockerfile itself is inside
+// the resource accounting: it consumes an entry slot and its payload bytes
+// are reserved like any other staged file.
+func TestStagingBudgetDockerfileCounted(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	dfSt, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly at the limit: one entry, exactly the Dockerfile's bytes.
+	ceilings := buildStagingCeilings{MaxBytes: dfSt.Size(), MaxEntries: 1, MaxDepth: 4}
+	staged, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	if err != nil {
+		t.Fatalf("Dockerfile-only context at the exact ceilings must succeed: %v", err)
+	}
+	staged.Cleanup()
+
+	// One byte under the ceiling: the Dockerfile payload is refused.
+	ceilings = buildStagingCeilings{MaxBytes: dfSt.Size() - 1, MaxEntries: 1, MaxDepth: 4}
+	_, err = stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	requireCeilingError(t, err, "bytes")
+	requireNoOperationTree(t, runtimeDir, "op1")
+}
+
+// TestStagingCeilingErrorSurvivesWrapping proves the typed ceiling refusal
+// stays identifiable through error wrapping, as the build handler
+// classification requires: errors.As recovers the typed fields and
+// errors.Is matches any refusal of the same exhausted resource.
+func TestStagingCeilingErrorSurvivesWrapping(t *testing.T) {
+	sentinel := &buildStagingCeilingError{Resource: "entries", Ceiling: 3, Attempted: 4}
+	wrapped := fmt.Errorf("cannot read directory: %w", fmt.Errorf("cannot copy directory sub: %w", sentinel))
+
+	var ceilingErr *buildStagingCeilingError
+	if !errors.As(wrapped, &ceilingErr) {
+		t.Fatal("errors.As must find the ceiling error through wrapping")
+	}
+	if ceilingErr.Resource != "entries" || ceilingErr.Ceiling != 3 || ceilingErr.Attempted != 4 {
+		t.Errorf("typed fields lost through wrapping: %+v", ceilingErr)
+	}
+
+	if !errors.Is(wrapped, &buildStagingCeilingError{Resource: "entries"}) {
+		t.Error("errors.Is must match the same exhausted resource through wrapping")
+	}
+	if errors.Is(wrapped, &buildStagingCeilingError{Resource: "bytes"}) {
+		t.Error("errors.Is must not match a different exhausted resource")
 	}
 }

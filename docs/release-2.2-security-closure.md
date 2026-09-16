@@ -117,7 +117,7 @@ risk rather than by the audit's original severity ordering.
 | **H1** | Builder can fetch arbitrary URLs from a network position unavailable to the agent | **BLOCKER_DECISION** | SC3 | Accept an explicit builder-network threat-boundary design. Fix the network position if the supported promise excludes this access; do not parse Dockerfiles as a substitute policy engine. |
 | **H2** | Credential can be revoked after authentication but before Session issuance | **CLOSED_CURRENT** | SC1 | Closed at the existing Session-issuance linearization owner: the create transaction's conditional insert re-proves the authorizing credential (still existing, still owned, still active) in the same statement as the Session insert, so a revoke/delete committing before the Session commit prevents the Session and the refusal answers the canonical non-disclosing 401 credential classification. Winning ordering unchanged: an already-issued Session stays valid. Deterministic parked-query race evidence on both credential paths. |
 | **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **CLOSED_CURRENT** | SC1 | Authorization-before-probing ordering established at all four session-facing admission boundaries: the raw spelling is admitted lexically against the issued filesystem capability FIRST (workspace create against the effective ceiling, absolute run mount against the issued snapshot entries, build context/Dockerfile against the workspace, issuance-time `filesystem_roots` against the effective Launcher ceiling), and a spelling outside the capability is refused immediately WITHOUT any privileged filesystem probe — zero-probe seam evidence, not merely equal responses. The former symlink-alias admission (an outside spelling resolving into the capability) is removed as an explicit Release 2.2 security tightening. After admission the canonical `EvalSymlinks` + containment proofs remain the mandatory second security proof (inside-ceiling aliases work; inside-ceiling symlink escapes stay fail-closed); public unauthorized failures stay bounded/non-disclosing; admitted spellings keep their actionable diagnostics; run/build keep their stable public contracts with admission diagnostics retained operationally. The issued snapshot's authority remains the persisted path tree (position/path/access + digest) — a review-round retraction of a live-kind exact-capability inference is recorded below. |
-| **H4** | Build staging can consume unbounded tmpfs bytes/inodes/depth/files | **BLOCKER_FIX** | SC2 | Add measured hard ceilings for staged bytes, entries and depth, admitted/reserved before staging. Failure must be bounded and leave no residue. Do not introduce the Release 3 quota hierarchy. |
+| **H4** | Build staging can consume unbounded tmpfs bytes/inodes/depth/files | **CLOSED_CURRENT** | SC2 | One build staging operation now has fixed, measured, non-configurable security ceilings for exactly three dimensions — payload bytes (128 MiB), entries (50000) and depth (64) — enforced by one per-staging budget inside the existing descriptor-relative walker. Bytes reserve the first staged copy of a unique regular-file inode's logical size (`st_size`, conservative for de-sparsified copies) before destination creation; hardlink names share the payload reservation but each consume an entry; symlink targets are accounted; admission arithmetic is overflow-safe (ceiling comparison before counter mutation). Every attacker-variable entry (regular file, hardlink name, symlink, directory) is reserved exactly once — at enumeration admission, before its append and before any destination materialization, with materialization paths never re-reserving — and directory enumeration draws from the same single global budget, so the sum of simultaneously admitted enumeration entries across parent and child directories can never exceed the ceiling whatever the iteration order (the former unbounded `[]dirEntry` accumulation is gone). Depth (context root = 0, direct child = 1) is admitted before the destination mkdir and before recursive descent. No second walker, no pre-scan, no config/CLI/override surface, no quota hierarchy; all descriptor-relative security invariants unchanged; the typed refusal is owned by the untagged staging surface (compiles for a non-Linux target under a compile-ownership gate) so the untagged build handler classifies — only it — into one canonical `build_context_too_large` code (HTTP 400, dimension-only bounded message); every other staging failure stays `internal_error`; refusal leaves no operation tree, no Docker invocation, no admitted Operation, no `build.start` event and no stale session MAC-use lease. Seam RED/GREEN evidence, exact-boundary unit tests and hostile exact-candidate UAT (sparse-payload, entry-count and depth cases against the packaged service under mandatory MAC) — see the SC2 evidence ledger. |
 | **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **BLOCKER_FIX** | SC2 | Bound response materialization, mounts/pins per operation, and concurrent/running operation admission at Session/global security ceilings. Measure defaults and reserve before expensive work. |
 | **H6** | Mandatory MAC policy blocks admin-token rotation | **CLOSED_CURRENT** | SC1 | The admin-token replacement lifecycle is rewritten around ONE fixed staging pathname (`.admin-token.new`, internal implementation pathname, not a config/API/CLI surface), serialized by the existing admin-token hash commit lock with the stale-rotation check BEFORE the staging pathname is touched, crash-residue recovery, and failure-safe cleanup (current token file and runtime hash unchanged, staging removed). The shipped MAC policy is narrowed to the token replacement lifecycle only: AppArmor (pathname-mediating) grants write/rename on exactly the two token pathnames (the generic config tree and config.json stay read-only, no broader write glob); SELinux (type-based) introduces the dedicated `docker_helper_admin_token_t` file type (MAC implementation state) with exact fcontext rules listed before the generic config-tree rule, the full replacement lifecycle granted on the token type only, an EXACT filename transition for `.admin-token.new` (no generic config-dir transition), `docker_helper_config_t:file` strictly read-only, and config-dir namespace operations limited to write/add_name/remove_name. ACCEPTED SELinux backend mechanic (release-owner ruling, PR #57 review round 2): SELinux does NOT provide AppArmor-equivalent destination-basename mediation for rename — once a token_t inode exists, the granted directory namespace + inode permissions may allow it to be renamed to an otherwise unused basename in the config directory; creation stays exact-name constrained, existing `docker_helper_config_t` objects stay immutable, and this is a backend mechanic, not additional product authority (no path-policy framework, token subdirectory architecture, or rename broker; see the H6 evidence ledger). Deployment labeling stays under the selinux_deploy owner: an exact post-create relabel after the initial token is written (the tree relabel runs before the token exists) with failed-relabel recovery (the just-created token file is removed, no partial initialization), and the packaged restorecon migrates a pre-H6 token on upgrade/reinstall without changing its value. Live enforcing UAT on the exact candidate proves rotation through the shipped confined service with old token rejected, new token accepted, no restart, 0600, no staging residue, config.json unchanged, no broader writable config surface, and no unexpected H6-policy denial on both backends. |
 | **H7** | A local user can occupy the optional TCP port and drive the service into systemd start-limit failure | **CLOSED_CURRENT** | SC2 | The Unix listener is authoritative: a loopback TCP bind failure after a successful Unix bind is DEGRADED STARTUP, never daemon failure — the Unix listener stays open, its socket is not removed, the complete API keeps serving over Unix, the TCP listener is absent for the daemon lifetime, and one bounded operational warning names the configured address and the bind failure. The bind itself is the authority (no pre-probe); no retry/rebind, timer, or listener supervisor exists. Unix creation failure stays fatal; user mode never attempts TCP; systemd Restart=/StartLimit values are untouched. Seam RED/GREEN evidence and hostile exact-candidate UAT (unprivileged port capture against the packaged service under mandatory MAC) — see the SC2 evidence ledger. |
@@ -1497,10 +1497,191 @@ Evidence:
   released and the service was normally restarted, both Unix and TCP
   listeners worked again with no degradation warning in the recovery window.
 
+## SC2 — H4: build staging has measured hard ceilings
+
+The audit class: the build flow created the Operation ID and staged the
+complete build context before `OperationSupervisor.admit()`, with no
+resource ceiling anywhere in `staging_linux.go`: a hostile Session
+workspace could drive the helper to copy an unbounded number of payload
+bytes into the runtime tmpfs, create an unbounded number of destination
+entries (inodes), recurse an unbounded directory depth (destination
+nesting plus Go recursive stack), and hold an unbounded
+`[]dirEntry` slice in daemon memory while enumerating one very large
+directory — `readDirectoryEntries` accumulated the entire directory
+before `copyEntry` could make any per-entry decision.
+
+Closed at the existing staging owner (`StageBuildContext` →
+`stageBuildContextInternal` → `walkAndCopy`/`readDirectoryEntries`/
+`copyEntry` in `staging_linux.go`) with one narrow H4-specific budget
+owner — no second filesystem walker, no pre-scan, no generic resource
+framework, no configuration surface, and no change to the
+descriptor-relative/openat2 security model:
+
+- **Exactly three dimensions, one budget:** a per-staging
+  `buildStagingBudget` (created from the fixed
+  `productionBuildStagingCeilings`) is threaded through the existing
+  walker and consumed by reserve checks before each corresponding
+  destination action. It is not exposed outside the staging
+  implementation; tests inject tiny ceilings through
+  `stageBuildContextInternal` for exact boundary semantics.
+- **Payload bytes (128 MiB):** the first staged copy of a unique
+  regular-file inode reserves its logical size (`st_size`) before the
+  destination file is created or copied — the conservative reservation
+  because the copier de-sparsifies a sparse source. Subsequent hardlink
+  names share the payload reservation but each consume an entry; staged
+  symlink targets are accounted by their target bytes; directories are
+  governed by entry/depth. Admission arithmetic is overflow-safe: the
+  ceiling comparison runs before the counter mutation, so a near-max
+  sparse `st_size` (demonstrated with `st_size = MaxInt64`) cannot
+  overflow into acceptance.
+- **Entries (50000):** every attacker-variable source entry staging
+  would materialize below the context root — regular files, hardlink
+  directory entries, symlinks, directories (the context root itself is
+  not an attacker-variable entry) — is reserved exactly once, at
+  enumeration admission, before its append and before any destination
+  materialization; materialization paths never reserve an entry again,
+  so every materialized entry has exactly one reservation owner. A
+  hardlink consumes another entry even though it does not duplicate the
+  payload inode. Enumeration itself is bounded by the same single
+  global budget: a parent's enumeration slice stays live during
+  recursive descent and a child draws from the same remaining budget,
+  so the sum of all simultaneously admitted enumeration entries of one
+  staging operation can never exceed the ceiling whatever the directory
+  iteration order — an over-ceiling directory is refused during
+  enumeration, before any of its entries is materialized.
+- **Depth (64):** one exact convention — context root = depth 0, direct
+  child = depth 1. The next directory level is admitted before its
+  destination `mkdir` and before the recursive descent into it,
+  bounding both destination nesting and the walker's recursive stack;
+  files may sit one level deeper than the deepest admitted directory.
+- **Typed refusal, one public code:** the ceiling refusal is
+  `buildStagingCeilingError` (resource `bytes`/`entries`/`depth`,
+  ceiling, attempted value; survives `errors.Is`/`errors.As` wrapping;
+  no source path material). It is owned by the untagged staging surface
+  (`staging.go`), so the untagged build handler classifies it — and only
+  it — into the single canonical `build_context_too_large` code with
+  HTTP 400, chosen consistently with the existing build client-input
+  refusal grammar (400 family; no new 413 status). A non-Linux
+  compile-ownership gate (`scripts/check-nonlinux-compile.sh`, wired
+  into CI) proves the untagged staging surface plus the non-Linux stub
+  type-check for `GOOS=darwin` and pins the documented pre-existing
+  non-Linux compile debt of the MAC layer (workload_selinux.go,
+  selinux_fcontext.go — reported separately, not part of H4). The
+  public message names only the exhausted dimension; operational
+  diagnostics carry the dimension and numeric limit/attempted values.
+  Every other staging failure stays `internal_error`.
+- **Bounded refusal, no residue:** on any ceiling refusal the existing
+  descriptor-relative failure cleanup removes the operation tree before
+  the handler responds; there is no Docker invocation, no registered or
+  admitted Operation, no `build.start` event, and the acquired session
+  MAC-use lease is released. H5's concurrent-admission gate is NOT
+  implemented here: H4 only establishes the finite maximum cost of ONE
+  staging operation.
+
+**Measured ceiling selection (Phase A).** Representative contexts
+measured before choosing limits: the docker-helper repository itself
+(working tree incl. a 17 MB built binary: ~26 MB payload, ~1800
+entries, depth ≤ 3; incl. `.git`: ~35 MB, ~2007 entries, depth ≤ 6);
+the existing UAT/build fixtures (a few entries); and generated realistic
+coding-agent contexts (repository snapshot with binary: ~17 MB/98/2;
+node_modules-style tree: ~2.3 MB/2402 entries/depth 3; media/cache
+workspace: ~5.4 MB/64/1). Runtime filesystem characteristics: systemd
+sizes `/run` as a tmpfs at `size=20%` of RAM with an 800k-inode default
+(`TMPFS_LIMITS_RUN`); the smallest evidence-backed UAT environment is
+the 3 GiB Tumbleweed VM (≈614 MB `/run` tmpfs), the Ubuntu UAT runners
+have ≈3.2 GB. Selected ceilings therefore keep one hostile build ≤ ~21%
+of the smallest `/run` tmpfs (bytes) and ≤ 6.25% of its inode budget
+(entries) while leaving ≥ ~3.7x (bytes), ~21x (entries) and >10x
+(depth) headroom over the measured realistic workloads. Contexts beyond
+these ceilings (e.g. a tree that materializes a huge `node_modules` into
+its build context) are refused as the designed trade-off; the Release-3
+quota hierarchy was deliberately not imported.
+
+Evidence:
+
+- RED (commit `9d81f5a`, deterministic hostile fixtures against the
+  pre-fix production walker, one per missing guard): the sparse-payload
+  fixture (sparse `st_size` = 128 MiB + 1) showed pre-fix staging
+  succeeded and began materializing the payload (`duringCopy`/
+  `afterCreateDest` ran for it); the entry fixture (Dockerfile + 50000
+  zero-byte files) showed the whole over-ceiling directory was
+  enumerated and staged; the depth fixture (65-deep chain) showed the
+  traversal recursed below the proposed ceiling and reached the leaf.
+  The enumeration-memory owner itself is proven structurally: pre-fix
+  `readDirectoryEntries(fd)` had no remaining-entry admission before
+  append (the unbounded slice accumulated before any per-entry
+  decision). All three desired-behavior tests failed pre-fix as
+  designed; no host DoS was attempted.
+- GREEN (commit `914e0e7`): production ceilings refuse each hostile
+  fixture before the corresponding expensive destination action; exact
+  boundary tests with injected tiny ceilings prove: exactly-at-limit
+  succeeds and one byte/entry/level over refuses; refusal happens before
+  destination payload creation/write (hook observability); sparse files
+  use logical size and are refused without materializing the hole
+  (source stays sparse); the `MaxInt64` `st_size` cannot overflow into
+  acceptance; unique hardlink payload counted once while the hardlink
+  name still consumes an entry; symlink target bytes and entry slot
+  counted; directories/symlinks/hardlinks/files all consume entries;
+  enumeration refuses before any destination creation of the refused
+  directory (shallow many-sibling tree governed by entries, not depth);
+  exactly-at-limit depth succeeds and one level over refuses before
+  mkdir/descent; the Dockerfile itself is included in the accounting;
+  the typed error survives wrapping; refusal removes
+  `runtime/builds/<op>`; ordinary contexts stage identically and every
+  existing staging test (identity proofs, SUID/SGID stripping, mtime/
+  mode preservation, cancellation, parallel cleanup, special-file
+  rejection) stays green; `go test -race` green. Handler path: the
+  typed refusal is classified into 400 `build_context_too_large` with a
+  bounded dimension-only message and a `build.rejected` audit record
+  carrying the same code; the real production walker behind the staging
+  seam leaves no operation tree, invokes no Docker command, registers no
+  operation, and releases the acquired session MAC-use lease
+  (`sessionUseLeases` empty); a non-ceiling staging failure remains 500
+  `internal_error`.
+- Review-round corrections (deterministic, fail-closed): the enumeration
+  admission was tightened to the single global reservation owner — the
+  nested regression `TestStagingBudgetEnumerationBudgetIsGlobal` failed
+  pre-correction under every directory iteration order (the first
+  processed root directory's children were materialized beyond one
+  budget while the parent slice stayed live) and passes with the
+  corrected global reservation, whose Attempted value names the one
+  over-budget admission; `TestStagingBudgetNestedEntriesExactlyAtLimitSucceeds`
+  proves the single reservation owner end to end (a nested total exactly
+  at the ceiling succeeds, so no entry is reserved twice); the pure
+  overflow proof (`TestStagingBudgetReserveBytesOverflow`) and the
+  filesystem-portable huge-source walker proof
+  (`TestStagingBudgetHugeSparseSourceRefused`) keep the byte admission
+  arithmetic un-wrappable. The typed refusal moved to the untagged
+  staging owner (`staging.go`) and the same-class pre-existing ownership
+  defect (`isOperationIDSafe` declared linux-tagged, consumed untagged)
+  moved to its canonical untagged owner (`operation.go`); the
+  compile-ownership gate fails on the simulated regression (undefined
+  staging symbol for GOOS=darwin). The UAT inode evidence validates both
+  `df` readings as numeric before arithmetic and fails the assertion
+  explicitly when inode figures are unavailable — an empty measurement
+  is never reported as proof.
+- Hostile exact-candidate UAT (new Ubuntu/DEB/AppArmor regression group
+  24, `uat-regression-h4-build-staging-bounds.sh`, real packaged service
+  with mandatory MAC active — the finding is not MAC-specific, so no
+  duplicate per-MAC logic exists; real production ceilings): a sparse
+  source file one byte over the byte ceiling (never allocated for real),
+  a Dockerfile + 50000 zero-byte-file context, and a 65-deep tree are
+  each refused quickly through the real CLI with the intended
+  classification (status 400, `code build_context_too_large`); the
+  service stays active and the Unix API healthy after every refusal; no
+  `build.start` audit event exists in each refusal window while the
+  refused code does; `/run` usage and inode evidence (both `df` readings
+  validated numeric before arithmetic; an unavailable measurement fails
+  the assertion instead of being reported) proves the sparse case is
+  preventative rather than "copy until tmpfs fails"; no staging
+  operation tree remains; the workload-MAC inventories are unchanged; a
+  subsequent small valid build succeeds and (positive control) does emit
+  `build.start`, proving the absence checks are meaningful.
+
 ## SC2 — bounded-resource and liveness closure
 
-**Queue:** `H4`, `H5`, `H8`. (H7 closed in SC2 — see the SC2 evidence ledger
-above.)
+**Queue:** `H5`, `H8`. (H4 and H7 closed in SC2 — see the SC2 evidence
+ledgers above.)
 
 SC2 removes unbounded host-resource and liveness channels without importing the
 Release 3 resource model. Release 2.2 needs hard security ceilings, not a new

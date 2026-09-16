@@ -2711,6 +2711,84 @@ original workspace paths.
 On platforms or kernels where `openat2` is unavailable, the operation
 fails closed without falling back to original workspace paths.
 
+**Staging ceilings (Release 2.2, H4).** One staging operation has hard,
+measured, non-configurable security ceilings for exactly three
+dimensions, enforced by one per-staging budget inside the existing
+descriptor-relative walker (`productionBuildStagingCeilings` in
+`staging_linux.go`):
+
+- **payload bytes: 128 MiB.** The first staged copy of a unique
+  regular-file inode reserves its logical size (`st_size`) before the
+  destination file is created or copied — the conservative reservation,
+  because the copier de-sparsifies, so a sparse source file occupies its
+  logical size. Subsequent hardlink names to the same source inode do
+  not reserve the payload a second time; staged symlink targets are
+  accounted by their target bytes; directories are governed by the
+  entry/depth ceilings. Admission arithmetic is overflow-safe: the
+  ceiling comparison runs before any counter mutation, so a near-max
+  `st_size` cannot overflow into acceptance.
+- **entries: 50000.** "Entry" means every attacker-controlled source
+  entry staging would materialize below the context root — regular
+  files, hardlink directory entries, symlinks and directories; the
+  context root itself is not an attacker-variable entry. Enumeration
+  admission is the one reservation owner of every entry: a source name
+  is reserved against the single global entry budget when it is
+  admitted into a directory enumeration slice, before the append and
+  before any materialization, and materialization paths never reserve
+  an entry again — every materialized entry has exactly one
+  reservation, taken before its corresponding destination entry is
+  created. Because a parent's enumeration slice stays live during the
+  recursive descent into its children, the sum of all simultaneously
+  admitted enumeration entries of one staging operation can never
+  exceed the ceiling, whatever the directory iteration order. A
+  hardlink consumes another entry even though it does not duplicate the
+  file payload inode. The Dockerfile is included in the accounting like
+  any other staged file.
+- **depth: 64.** The context root is depth 0, a direct child is depth 1.
+  A destination directory deeper than the ceiling is admitted before its
+  destination `mkdir` and before the recursive descent into it, bounding
+  both destination nesting and the walker's Go recursive stack depth.
+  Files may sit one level deeper than the deepest admitted directory.
+
+Enumeration itself is bounded: directory enumeration draws from the
+same single global entry budget, so a hostile directory is refused
+during enumeration — before any of its entries is materialized — and
+the daemon can never hold more than the ceiling's number of admitted
+names across all live enumeration slices of one staging operation.
+There is no pre-scan or second filesystem walker: the same
+descriptor-relative traversal measures and reserves as it copies,
+before each corresponding expensive destination action.
+
+The ceilings are measured production constants, not configuration:
+there is no config.json key, CLI knob, or Principal/Launcher/Session
+override, and no quota hierarchy. Measured rationale (Release 2.2): the
+largest representative build contexts are repository snapshots with
+build artifacts (~35 MB payload, ~2000 entries, depth ≤ 6) and
+node_modules-style trees (~2.4k entries); the smallest evidence-backed
+UAT environment is the 3 GiB Tumbleweed VM, whose `/run` tmpfs systemd
+sizes at 20% of RAM (≈614 MB) with an 800k-inode default. The ceilings
+therefore bound one hostile build to ≤ ~21% of that tmpfs (bytes) and
+≤ 6.25% of its inode budget (entries) with ≥ ~3.7x / ~21x / >10x
+headroom over the measured realistic workloads. One byte/entry/level
+over a ceiling refuses; exactly-at-limit succeeds.
+
+A ceiling refusal is a typed expected staging refusal
+(`buildStagingCeilingError`: resource `bytes`/`entries`/`depth`, the
+fixed ceiling, the attempted reservation). The build handler classifies
+it — and only it — into the single canonical
+`build_context_too_large` code with HTTP 400, consistent with the
+existing build client-input refusal grammar (400 family; a deliberately
+new 413 status is not introduced because the `code` field is this API's
+programmatic discriminator). The public message names only the
+exhausted dimension and carries no source path or file-name material;
+operational diagnostics carry the dimension and the numeric
+limit/attempted values. Every other staging failure remains
+`internal_error`. A refusal leaves no staging residue: the existing
+descriptor-relative failure cleanup removes the operation tree before
+the handler responds, no Docker invocation or admitted Operation
+follows, no `build.start` event exists, and the acquired session MAC-use
+lease is released.
+
 Staging directories are cleaned up as part of the build operation
 lifecycle.
 
@@ -3069,6 +3147,7 @@ Current error codes (non-exhaustive):
 | `unauthorized` | all protected | missing/invalid token |
 | `invalid_json` | all JSON endpoints | request body is not valid JSON |
 | `invalid_build_context` | `POST /build` | build request validation failure |
+| `build_context_too_large` | `POST /build` | the build context exceeds one of the fixed build-staging security ceilings (staged payload bytes, entries, or depth); the message names only the exhausted dimension — one canonical code for all three dimensions (see [Build context](#build-context)) |
 | `invalid_build_args` | `POST /build` | build-arg name invalid |
 | `invalid_image` | `POST /run`, `POST /pull` | image name is empty |
 | `invalid_mount` | `POST /run` | mount validation failure |
