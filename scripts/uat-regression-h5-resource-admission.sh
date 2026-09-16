@@ -244,7 +244,7 @@ printf 'FROM scratch\n' > "$WS_A/Dockerfile"
 # start record only after admission, immediately before its docker
 # execution).
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh pull --image "$IMAGE" \
+  dh pull "$IMAGE" \
   >/tmp/h5-pull-refused.out 2>/tmp/h5-pull-refused.err
 RC=$?
 if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-pull-refused.err && grep -q 'code capacity_unavailable' /tmp/h5-pull-refused.err; then
@@ -544,7 +544,7 @@ fi
 # before its docker execution, which fails fast against a loopback-only
 # unreachable address (no capacity refusal, no external registry).
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh pull --image "$IMAGE" \
+  dh pull "$IMAGE" \
   >/tmp/h5-pull-recovery.out 2>/tmp/h5-pull-recovery.err
 if [ "$?" -eq 0 ]; then
   reg_ok "recovery: an ordinary pull is admitted again and succeeds"
