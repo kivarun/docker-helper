@@ -414,8 +414,10 @@ func runDaemon(stdout, stderr io.Writer) error {
 
 		server := newHTTPServer(withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))))
 
-		// Prepare listeners based on deployment mode.
-		unixListener, tcpListener, err := prepareListeners(cfg.Mode, cfg.SocketPath, cfg.HTTPAddress)
+		// Prepare listeners based on deployment mode. The Unix listener is
+		// authoritative; an optional-TCP bind failure after a successful Unix
+		// bind is degraded startup (Unix-only), never a daemon failure.
+		unixListener, tcpListener, tcpDegraded, err := prepareListeners(cfg.Mode, cfg.SocketPath, cfg.HTTPAddress)
 		if err != nil {
 			serveStartupError(err, "")
 			return err
@@ -425,7 +427,12 @@ func runDaemon(stdout, stderr io.Writer) error {
 		logger := logging.snapshotLogger()
 
 		if logger != nil {
-			if cfg.Mode == ModeSystem {
+			if cfg.Mode == ModeSystem && tcpDegraded != nil {
+				logger.Info("daemon listening (TCP unavailable, serving Unix only)",
+					slog.String("socket", cfg.SocketPath),
+					slog.String("http", cfg.HTTPAddress),
+				)
+			} else if cfg.Mode == ModeSystem {
 				logger.Info("daemon listening",
 					slog.String("socket", cfg.SocketPath),
 					slog.String("http", cfg.HTTPAddress),
