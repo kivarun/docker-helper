@@ -159,6 +159,7 @@ REGRESSIONS=(
   "22:M13 Docker bind-mount serialization:uat-regression-bind-serialization.sh"
   "23:H7 hostile TCP port capture:uat-regression-h7-tcp-port-capture.sh"
   "24:H4 build staging ceilings:uat-regression-h4-build-staging-bounds.sh"
+  "25:H5 fixed resource admission ceilings:uat-regression-h5-resource-admission.sh"
 )
 
 declare -A RESULT
