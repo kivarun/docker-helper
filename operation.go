@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"sort"
 	"sync"
@@ -23,6 +24,39 @@ const (
 )
 
 const resultCancelled = "cancelled"
+
+// operationKindRun and operationKindBuild are the canonical Operation kind
+// terms. They identify the operation kind in the public Operation model, in
+// audit events, and in admission decisions.
+const (
+	operationKindRun   = "run"
+	operationKindBuild = "build"
+)
+
+// Release-2.2 fixed security ceilings (SC2/H5). These are hard,
+// non-configurable daemon resource ceilings measured in the H5 closure
+// evidence. They are not Principal/Launcher quotas and have no config, CLI,
+// or API surface.
+//
+// Concurrent Operation capacity counts preparation and running execution of
+// every admitted Operation and is released exactly once when the Operation
+// reaches a terminal state (retained metadata/logs never keep capacity).
+//
+//   - 4 concurrent Operations per Session: two times the maximum
+//     per-Session concurrency exercised by the existing UAT (2), sized for
+//     realistic agent parallelism.
+//   - 8 concurrent Operations globally: keeps at least half of the global
+//     capacity available to other Sessions when one Session is saturated.
+//   - 2 concurrent builds globally: worst-case hostile staging occupancy is
+//     2 × 128 MiB (the H4 per-build staging ceiling) = 256 MiB, which is 42%
+//     of the /run tmpfs of the smallest supported host (3 GiB RAM, ~614 MB
+//     /run); three or more concurrent maximal builds would exceed half of
+//     that tmpfs.
+const (
+	maxConcurrentOperationsPerSession = 4
+	maxConcurrentOperationsGlobal     = 8
+	maxConcurrentBuildsGlobal         = 2
+)
 
 // defaultTerminationTimeout is the graceful termination budget applied
 // when the caller does not supply a context deadline. Used by both
@@ -633,6 +667,19 @@ func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
 		}
 	}
 }
+
+// Release-2.2 fixed security ceiling (SC2/H5) for the operation-log response:
+// one HTTP logs response carries at most this many RAW retained log bytes.
+// The value is independent of the configurable operation_log_max_bytes
+// retention: measured worst-case JSON encoding expands adversarial bytes 6×
+// (control characters and invalid UTF-8 escape to six-character sequences), so
+// a chunked response stays under ~1.6 MiB encoded regardless of retention.
+const logResponseChunkBytes = 262144
+
+// rangeUnbounded is the Range maxBytes value for callers whose contract is the
+// complete retained range (the synchronous pull response and registry-login
+// classification capture).
+const rangeUnbounded = math.MaxInt64
 
 func (b *boundedBuffer) Range(offset int64) (data []byte, nextOffset int64, truncated bool) {
 	b.mu.RLock()

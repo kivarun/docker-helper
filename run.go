@@ -23,6 +23,19 @@ var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // This is an implementation constant, not a configurable value.
 const maxShmSize = 2 * 1024 * 1024 * 1024 // 2 GiB
 
+// maxRunMounts is the Release-2.2 fixed security ceiling (SC2/H5) for
+// caller-supplied run mounts. Every req.Mounts element consumes one slot —
+// duplicates and read-only requests included; the server-owned helper_socket
+// projection is not a caller mount. Measured in the H5 closure evidence: every
+// existing test and UAT run request carries 1–2 mounts, and the worst-case
+// kernel mount-table cost (3 entries per mount under the SELinux backend: pin,
+// lower file bind, bindfs projection) at the global Operation ceiling is 384
+// entries — 0.4% of the host fs.mount-max (100000). The ceiling is checked
+// before any lease, path probing, exposure resolution, pin, workload-MAC
+// preparation, or Operation reservation. The 16 KiB request-body limit is not
+// the security owner of this count.
+const maxRunMounts = 16
+
 // validateShmSize parses and validates an shm_size string.
 // Accepted formats: N (bytes), Nk, Nm, Ng (case-insensitive unit).
 // Returns the validated size in bytes, or an error if the value is
