@@ -48,12 +48,37 @@ const macLivenessCompletionSlop = 5 * time.Second
 // it deterministically through this package seam (never in parallel tests).
 const macLivenessBudgetOverride = 300 * time.Millisecond
 
+// macLivenessQueueBudgetOverride is the queue-proof budget. It must stay
+// large against scheduling jitter (the queue arithmetic is wall-clock) and
+// small enough to keep the pre-fix failure fast.
+const macLivenessQueueBudgetOverride = 2 * time.Second
+
+// macLivenessQueueDisableSlop is the scheduling slop on top of ONE budget
+// for the queue-proof disable deadline. Pre-fix the disable waits behind
+// every queued create's own fresh budget (queuedCreates+1 budgets total),
+// far beyond this bound; post-fix it waits only behind the one in-flight
+// transition.
+const macLivenessQueueDisableSlop = 2 * time.Second
+
+// h8QueueBudgetCount is the number of additional Session creates the queue
+// proof issues while the first create holds the lifecycle coordination.
+const h8QueueBudgetCount = 4
+
 // h8BudgetOverride narrows the fixed MAC transition budget to a
 // deterministic test value for the duration of a test and restores it.
 func h8BudgetOverride(t *testing.T) {
 	t.Helper()
 	origBudget := macTransitionBudget
 	macTransitionBudget = macLivenessBudgetOverride
+	t.Cleanup(func() { macTransitionBudget = origBudget })
+}
+
+// h8QueueBudgetOverride narrows the fixed MAC transition budget to the
+// queue-proof value for the duration of a test and restores it.
+func h8QueueBudgetOverride(t *testing.T) {
+	t.Helper()
+	origBudget := macTransitionBudget
+	macTransitionBudget = macLivenessQueueBudgetOverride
 	t.Cleanup(func() { macTransitionBudget = origBudget })
 }
 
@@ -369,6 +394,162 @@ func TestH8HungAppArmorParserParksSessionCreateAndBlocksDisable(t *testing.T) {
 		t.Fatalf("the next ordinary session create after the hostile condition must succeed: %v", err)
 	}
 	app.MACCoordinator.ReleaseSessionBinding(second.Session.ID)
+}
+
+// h8RunQueuedCreatesDisableProof is the deterministic queue liveness proof
+// shared by both MAC backends. The first Session create enters a parked
+// backend MAC command and holds the lifecycle coordination; four further
+// Session creates are issued while it holds the boundary; only then is the
+// Launcher/Principal disable requested.
+//
+// The single bounded window anchored at the in-flight create's budget
+// start proves the H8 queue closure: every queued create must receive its
+// refusal within the window (it must never queue behind the coordination
+// and execute its own later MAC transition), and the disable must reach its
+// authoritative transition within ONE in-flight transition budget — its
+// delay must not grow with the queued create count. On the pre-fix line the
+// queued creates block on the held lifecycleMu and each one, once served,
+// obtains its own fresh whole-transition budget, so the disable completes
+// only after (queuedCreates+1) budgets and the window expires with the
+// defect message.
+func h8RunQueuedCreatesDisableProof(t *testing.T, app *App, entered <-chan struct{}, release chan struct{}) {
+	t.Helper()
+	launcherID, username := setupH8DisableTarget(t, app)
+	allowedRoot := app.Config.AllowedRoots[0].Path
+
+	// 1. The in-flight create parks in the backend MAC command and holds
+	//    the lifecycle coordination.
+	createErrs := make([]chan error, h8QueueBudgetCount+1)
+	parkWorkspace := testWorkspaceDir(t, allowedRoot)
+	createErrs[0] = make(chan error, 1)
+	go func() {
+		_, err := createDefaultAdminSessionForTest(app, parkWorkspace)
+		createErrs[0] <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(macLivenessObservationWindow):
+		t.Fatal("the parked create never reached the backend MAC command")
+	}
+
+	// 2. The queued creates are issued while the boundary is held.
+	for i := 1; i <= h8QueueBudgetCount; i++ {
+		queuedWorkspace := testWorkspaceDir(t, allowedRoot)
+		queuedErr := make(chan error, 1)
+		createErrs[i] = queuedErr
+		go func() {
+			_, err := createDefaultAdminSessionForTest(app, queuedWorkspace)
+			queuedErr <- err
+		}()
+	}
+
+	// 3. The emergency disable is requested after the queued creates.
+	disableLauncherDone, disablePrincipalDone := h8RunConcurrentDisables(app, launcherID, username)
+
+	// 4. One bounded window: the queued creates must be refused and the
+	//    disable must commit within one in-flight transition budget plus
+	//    slop, whatever the queued create count.
+	deadline := time.After(macLivenessQueueBudgetOverride + macLivenessQueueDisableSlop)
+	refusalErrs := make([]error, h8QueueBudgetCount)
+	refusals := 0
+	disableLauncherCommitted := false
+	disablePrincipalCommitted := false
+	inFlightErr := false
+	for refusals < h8QueueBudgetCount || !disableLauncherCommitted || !disablePrincipalCommitted || !inFlightErr {
+		select {
+		case err := <-createErrs[0]:
+			if err == nil {
+				t.Fatal("the in-flight create whose MAC preparation exceeded the budget must fail, not succeed")
+			}
+			inFlightErr = true
+		case err := <-createErrs[1]:
+			refusalErrs[0] = err
+			refusals++
+		case err := <-createErrs[2]:
+			refusalErrs[1] = err
+			refusals++
+		case err := <-createErrs[3]:
+			refusalErrs[2] = err
+			refusals++
+		case err := <-createErrs[4]:
+			refusalErrs[3] = err
+			refusals++
+		case err := <-disableLauncherDone:
+			if err != nil {
+				t.Fatalf("launcher disable failed: %v", err)
+			}
+			disableLauncherCommitted = true
+		case err := <-disablePrincipalDone:
+			if err != nil {
+				t.Fatalf("principal disable failed: %v", err)
+			}
+			disablePrincipalCommitted = true
+		case <-deadline:
+			t.Fatalf("the queued creates and the disable did not settle within one in-flight transition budget plus slop: queued Session creates queue behind the held lifecycle coordination and each one obtains its own fresh whole-transition MAC budget, so the emergency disable's delay grows with the queued create count (H8 queue defect)")
+		}
+	}
+
+	// 5. Every queued create must have been refused, never executed later:
+	//    a refusal is an error, never a committed Session.
+	for i, err := range refusalErrs {
+		if err == nil {
+			t.Fatalf("queued create %d committed a Session instead of being refused", i+1)
+		}
+	}
+
+	// 6. The in-flight create keeps the existing whole-transition MAC
+	//    budget: its parked command was terminated at the budget and the
+	//    failure carries the typed budget error inside the MAC preparation
+	//    chain — never a false success.
+	if err := <-createErrs[0]; err != nil {
+		if !errors.Is(err, ErrMACPreparation) {
+			t.Fatalf("in-flight create error = %v, want ErrMACPreparation in the failure chain", err)
+		}
+		if !errors.Is(err, ErrMACTransitionBudgetExceeded) {
+			t.Fatalf("in-flight create error = %v, want ErrMACTransitionBudgetExceeded in the failure chain", err)
+		}
+	}
+
+	// 7. Post-disable state: both disable targets are durably disabled, no
+	//    Session was committed by any create, and operation admission is
+	//    closed for the disabled launcher.
+	h8DisabledStates(t, app, launcherID, username)
+	h8NoSessionCommitted(t, app, app.userModeDefault.launcherID, launcherID)
+	h8AdmissionClosed(t, app, launcherID)
+
+	// 8. No coordination is stranded: after the hostile condition is
+	//    removed, the next ordinary MAC transition succeeds.
+	close(release)
+	afterWorkspace := testWorkspaceDir(t, allowedRoot)
+	after, err := createDefaultAdminSessionForTest(app, afterWorkspace)
+	if err != nil {
+		t.Fatalf("the next ordinary session create after the hostile condition must succeed: %v", err)
+	}
+	app.MACCoordinator.ReleaseSessionBinding(after.Session.ID)
+}
+
+// TestH8QueuedAppArmorSessionCreatesDoNotDelayDisable proves the H8 queue
+// closure on the AppArmor backend: Session creates issued while one parked
+// create holds the lifecycle coordination are refused without queueing, and
+// the concurrent Launcher/Principal disable is delayed by at most the one
+// in-flight transition budget — never by the queued create count.
+func TestH8QueuedAppArmorSessionCreatesDoNotDelayDisable(t *testing.T) {
+	h8QueueBudgetOverride(t)
+
+	app, entered, release := setupH8AppArmorParkedCoordinator(t)
+	h8RunQueuedCreatesDisableProof(t, app, entered, release)
+}
+
+// TestH8QueuedSELinuxSessionCreatesDoNotDelayDisable proves the same H8
+// queue closure on the SELinux backend: the parked fcontext one-shot holds
+// the lifecycle coordination, queued creates are refused without queueing,
+// and the concurrent disable is delayed by at most one transition budget.
+func TestH8QueuedSELinuxSessionCreatesDoNotDelayDisable(t *testing.T) {
+	h8QueueBudgetOverride(t)
+
+	app, entered, release := setupH8SELinuxParkedCoordinator(t)
+	h8RunQueuedCreatesDisableProof(t, app, entered, release)
 }
 
 // TestH8HungSELinuxFcontextParksSessionCreateAndBlocksDisable proves RED case
