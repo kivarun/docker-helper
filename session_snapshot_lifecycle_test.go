@@ -469,7 +469,7 @@ func TestMACSessionBindingRollsBackWhenSnapshotPersistFails(t *testing.T) {
 	if bindings != 0 {
 		t.Fatalf("surviving MAC session bindings = %d, want 0", bindings)
 	}
-	if _, err := driver.verifyCoverage(workspace); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), workspace); err == nil {
 		t.Fatal("no durable MAC boundary may survive a failed session commit")
 	}
 	var sessions, entries int

@@ -39,7 +39,7 @@ func TestSELinuxWorkloadPrepareDirectoryProjection(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestSELinuxWorkloadPrepareRegularFileProjection(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestSELinuxWorkloadRWUsesPinnedSourceDirectly(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestSELinuxWorkloadIndependentPathsPerOperation(t *testing.T) {
 		if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		prepared, err := b.prepare(prep)
+		prepared, err := b.prepare(context.Background(), prep)
 		if err != nil {
 			t.Fatalf("prepare %s: %v", opID, err)
 		}
@@ -230,7 +230,7 @@ func TestSELinuxWorkloadPrepareFailureRollsBackPartialProjection(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.prepare(prep); err == nil {
+	if _, err := b.prepare(context.Background(), prep); err == nil {
 		t.Fatal("projection proof failure must fail preparation")
 	}
 	if len(seam.unmountCalls) == 0 {
@@ -280,7 +280,7 @@ func TestSELinuxWorkloadCleanupReverseOrder(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestSELinuxWorkloadCleanupOrderProvesWorkerExitBeforeLowerUnmount(t *testin
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestSELinuxWorkloadCleanupRetainsOnMountInventoryError(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestSELinuxWorkloadCleanupRetainsOnPostUnmountInventoryError(t *testing.T) 
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestSELinuxWorkloadCleanupRetainsWhenUnmountLeavesMounted(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -502,7 +502,7 @@ func TestSELinuxWorkloadCleanupRetainsOnLowerFileBindInventoryError(t *testing.T
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}

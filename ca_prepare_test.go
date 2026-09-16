@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -1032,7 +1033,7 @@ func TestTrustedCARestoreconInvokesWithMountScanDisabled(t *testing.T) {
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 
 	var args []string
-	trustedCARestorecon = func(a ...string) ([]byte, error) {
+	trustedCARestorecon = func(_ context.Context, a ...string) ([]byte, error) {
 		args = a
 		return []byte{}, nil
 	}
@@ -1063,7 +1064,7 @@ func TestTrustedCARestoreconSkipsWhenSELinuxInactive(t *testing.T) {
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 
 	called := false
-	trustedCARestorecon = func(a ...string) ([]byte, error) {
+	trustedCARestorecon = func(_ context.Context, a ...string) ([]byte, error) {
 		called = true
 		return []byte{}, nil
 	}
@@ -1086,7 +1087,7 @@ func TestTrustedCARestoreconErrorPropagates(t *testing.T) {
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 
 	sentinel := errors.New("restorecon: denied")
-	trustedCARestorecon = func(a ...string) ([]byte, error) {
+	trustedCARestorecon = func(_ context.Context, a ...string) ([]byte, error) {
 		return []byte("policy error"), sentinel
 	}
 

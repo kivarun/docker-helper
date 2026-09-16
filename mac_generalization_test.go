@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -169,7 +170,7 @@ func TestCoordinatorMultiBoundarySession(t *testing.T) {
 	// Release: every boundary goes through the canonical removal owner.
 	mac.ReleaseSessionBinding("sess-multi")
 	for _, boundary := range []string{ws, ext1, ext2} {
-		if _, err := driver.verifyCoverage(boundary); err == nil {
+		if _, err := driver.verifyCoverage(context.Background(), boundary); err == nil {
 			t.Errorf("boundary %s must be removed after the only consumer released it", boundary)
 		}
 	}
@@ -263,7 +264,7 @@ func TestCoordinatorEnsureRollback(t *testing.T) {
 				if boundary == failingTree && failingTree == "second" {
 					continue
 				}
-				if _, err := driver.verifyCoverage(boundary); err == nil && driver.coverageMap[boundary] == boundary {
+				if _, err := driver.verifyCoverage(context.Background(), boundary); err == nil && driver.coverageMap[boundary] == boundary {
 					t.Errorf("prepared boundary %s must be rolled back after the preparation failure", boundary)
 				}
 			}
@@ -296,7 +297,7 @@ func TestCoordinatorOwnershipRecordFailureRollsBack(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrMACPreparation) {
 		t.Fatalf("err = %v, want the MAC preparation family for a failed ownership record", err)
 	}
-	if _, err := driver.verifyCoverage(ws); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), ws); err == nil {
 		t.Error("the unrecordable boundary must be removed again (no unowned physical state)")
 	}
 }
@@ -331,20 +332,20 @@ func TestCoordinatorLeaseProtectsAllBoundRoots(t *testing.T) {
 	// Concurrent delete: the release of the session binding must not remove
 	// coverage the live lease still protects.
 	mac.ReleaseSessionBinding("sess-lease")
-	if _, err := driver.verifyCoverage(ext); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), ext); err != nil {
 		t.Fatalf("external issued-root coverage must survive the session deletion while the lease is live: %v", err)
 	}
-	if _, err := driver.verifyCoverage(ws); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), ws); err != nil {
 		t.Fatalf("workspace coverage must survive the session deletion while the lease is live: %v", err)
 	}
 
 	// Idempotent double release: still exactly one decrement.
 	release()
 	release()
-	if _, err := driver.verifyCoverage(ws); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), ws); err == nil {
 		t.Error("workspace coverage must be removed once every consumer (binding + lease) is gone")
 	}
-	if _, err := driver.verifyCoverage(ext); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), ext); err == nil {
 		t.Error("external coverage must be removed once every consumer (binding + lease) is gone")
 	}
 }
@@ -396,11 +397,11 @@ func TestCoordinatorSharedBoundaryRelease(t *testing.T) {
 	}
 
 	mac.ReleaseSessionBinding("sess-a")
-	if _, err := driver.verifyCoverage(shared); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), shared); err != nil {
 		t.Fatalf("coverage must remain for the second session after the first release: %v", err)
 	}
 	mac.ReleaseSessionBinding("sess-b")
-	if _, err := driver.verifyCoverage(shared); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), shared); err == nil {
 		t.Error("coverage must be removed after the last consumer releases it")
 	}
 }
@@ -433,16 +434,16 @@ func TestCoordinatorParentChildOverlapRelease(t *testing.T) {
 
 	// Delete the parent session first: the child stays usable and covered.
 	mac.ReleaseSessionBinding("sess-parent")
-	if _, err := driver.verifyCoverage(child); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), child); err != nil {
 		t.Fatalf("child coverage must survive the parent session deletion: %v", err)
 	}
 
 	// Delete the child session: both boundaries are gone.
 	mac.ReleaseSessionBinding("sess-child")
-	if _, err := driver.verifyCoverage(parent); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), parent); err == nil {
 		t.Error("parent coverage must be removed after the child session released it too")
 	}
-	if _, err := driver.verifyCoverage(child); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), child); err == nil {
 		t.Error("child coverage must be removed after the child session released it")
 	}
 }
@@ -487,10 +488,10 @@ func TestCoordinatorPendingWorkloadExternalRoot(t *testing.T) {
 	// Drop the binding (simulating a released session whose workload state
 	// is still pending): the pending gate must keep both issued trees.
 	mac.ReleaseSessionBinding("sess-pending")
-	if _, err := driver.verifyCoverage(ext); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), ext); err != nil {
 		t.Fatalf("external issued-root coverage must be retained while the workload state is pending: %v", err)
 	}
-	if _, err := driver.verifyCoverage(ws); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), ws); err != nil {
 		t.Fatalf("workspace coverage must be retained while the workload state is pending: %v", err)
 	}
 
@@ -498,16 +499,16 @@ func TestCoordinatorPendingWorkloadExternalRoot(t *testing.T) {
 	if _, err := app.DB.Exec(`DELETE FROM sessions WHERE id = 'sess-pending'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := driver.verifyCoverage(ext); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), ext); err != nil {
 		t.Fatalf("coverage must still be deferred (fail closed) when the pending session cannot be resolved: %v", err)
 	}
 
 	// Clear the pending gate: the deferred cleanup now completes.
 	mac.pendingWorkloadSessions = func() map[string]bool { return map[string]bool{} }
 	mac.mu.Lock()
-	mac.retryDeferredBoundaries()
+	mac.retryDeferredBoundaries(context.Background())
 	mac.mu.Unlock()
-	if _, err := driver.verifyCoverage(ext); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), ext); err == nil {
 		t.Error("deferred external coverage must be removed once the pending workload state is proven gone")
 	}
 }
@@ -551,7 +552,7 @@ func TestCoordinatorStartupMultiRootReconstruction(t *testing.T) {
 		t.Fatalf("binding = %+v, want both issued trees", binding)
 	}
 	for _, boundary := range []string{ws, ext} {
-		if _, err := driver.verifyCoverage(boundary); err != nil {
+		if _, err := driver.verifyCoverage(context.Background(), boundary); err != nil {
 			t.Errorf("issued tree %s must be covered after restart reconciliation: %v", boundary, err)
 		}
 	}
@@ -648,7 +649,7 @@ func TestCoordinatorStartupConcurrentDeleteRunRace(t *testing.T) {
 			}
 			// The run started: the coverage must survive the concurrent
 			// delete until the lease releases.
-			if _, err := driver.verifyCoverage(ext); err != nil {
+			if _, err := driver.verifyCoverage(context.Background(), ext); err != nil {
 				errCh <- fmt.Errorf("coverage removed under a live lease: %w", err)
 				release()
 				return
@@ -696,7 +697,7 @@ func TestCoordinatorInsertFailureRollback(t *testing.T) {
 		t.Fatal("no binding may be registered when the create commit fails")
 	}
 	for _, boundary := range []string{ws, ext} {
-		if _, err := driver.verifyCoverage(boundary); err == nil {
+		if _, err := driver.verifyCoverage(context.Background(), boundary); err == nil {
 			t.Errorf("prepared boundary %s must be rolled back after the failed create commit", boundary)
 		}
 	}

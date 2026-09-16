@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,20 +18,19 @@ import (
 	"time"
 )
 
-// H8 defect demonstrations (SC2 — bounded MAC-command liveness).
+// H8 liveness suite (SC2 — bounded MAC-command liveness).
 //
-// Every test in this file is RED evidence against the pre-fix release line:
-// a seam-parked external MAC one-shot command holds shared lifecycle
-// coordination with no bound at all. Each test fails on the pre-fix code at
-// its bounded observation window (the coordination never progresses) and
-// passes after the fix, when the fixed Release-2.2 MAC transition budget
-// kills the parked command and releases the lifecycle.
+// Every coordination test in this file is RED/GREEN evidence: a seam-parked
+// external MAC one-shot command parks shared lifecycle coordination, and the
+// fixed Release-2.2 MAC transition budget terminates the parked command and
+// releases the coordination. On the pre-fix release line each test fails at
+// its bounded observation window (the coordination never progresses); after
+// the fix it passes with the parked command killed at the budget.
 //
 // No sleeps-as-proof: the bounded observation window is the instrument that
-// proves non-arrival; the parked seams are channels closed by the test
-// itself. No real permanently hung host process is ever started (the parked
-// command is an injected seam; the kill/reap proof uses a short real process
-// bounded by the budget — added with the fix).
+// proves non-arrival; the parked seams are channels the test controls. The
+// kill/reap proof uses a short real process bounded by the test budget —
+// never a permanently hung host process.
 
 // macLivenessObservationWindow is the bounded window during which a parked
 // coordination must NOT progress (pre-fix defect) and during which a
@@ -42,16 +42,32 @@ const macLivenessObservationWindow = 750 * time.Millisecond
 // post-fix "progressed within the proven bound" wall-clock assertions.
 const macLivenessCompletionSlop = 5 * time.Second
 
-// h8ParkedCommand parks one command execution until release is closed,
-// signaling the entry on entered exactly once. The fix commit turns this
-// into a context-aware park so the budget terminates the parked command; the
-// pre-fix signature has no context, which is itself part of the defect.
-func h8ParkedCommand(entered chan<- struct{}, release <-chan struct{}) func() error {
+// macLivenessBudgetOverride is the test-narrow MAC transition budget. The
+// production budget stays the fixed security constant; liveness tests narrow
+// it deterministically through this package seam (never in parallel tests).
+const macLivenessBudgetOverride = 300 * time.Millisecond
+
+// h8BudgetOverride narrows the fixed MAC transition budget to a
+// deterministic test value for the duration of a test and restores it.
+func h8BudgetOverride(t *testing.T) {
+	t.Helper()
+	origBudget := macTransitionBudget
+	macTransitionBudget = macLivenessBudgetOverride
+	t.Cleanup(func() { macTransitionBudget = origBudget })
+}
+
+// h8ParkedCommand parks one command execution until release is closed or the
+// transition context expires (the budget kills the parked command, exactly
+// like a real hung process under the bounded runner), signaling the entry on
+// entered exactly once.
+func h8ParkedCommand(ctx context.Context, entered chan<- struct{}, release <-chan struct{}) error {
 	var once sync.Once
-	return func() error {
-		once.Do(func() { entered <- struct{}{} })
-		<-release
+	once.Do(func() { entered <- struct{}{} })
+	select {
+	case <-release:
 		return nil
+	case <-ctx.Done():
+		return macCommandError(ctx, "parked", context.DeadlineExceeded)
 	}
 }
 
@@ -68,9 +84,8 @@ func setupH8AppArmorParkedCoordinator(t *testing.T) (*App, <-chan struct{}, chan
 
 	entered := make(chan struct{}, 8)
 	release := make(chan struct{})
-	parked := h8ParkedCommand(entered, release)
-	_, mgr := setupAppArmorTestWithRunner(t, func(exe string, args []string) error {
-		return parked()
+	_, mgr := setupAppArmorTestWithRunner(t, func(ctx context.Context, _ string, _ []string) error {
+		return h8ParkedCommand(ctx, entered, release)
 	})
 
 	driver := &appArmorMACDriver{
@@ -127,13 +142,12 @@ func setupH8SELinuxParkedCoordinator(t *testing.T) (*App, <-chan struct{}, chan 
 
 	entered := make(chan struct{}, 8)
 	release := make(chan struct{})
-	parked := h8ParkedCommand(entered, release)
 
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.semanagePath = semanagePath
 	mgr.restoreconPath = restoreconPath
-	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
-		if err := parked(); err != nil {
+	mgr.runCommand = func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		if err := h8ParkedCommand(ctx, entered, release); err != nil {
 			return nil, err
 		}
 		return []byte{}, nil
@@ -238,7 +252,8 @@ func h8AwaitDisables(t *testing.T, disableLauncherDone, disablePrincipalDone cha
 }
 
 // h8AwaitCreateFailure waits for the parked create to terminate and asserts
-// it failed as MAC preparation (never a false success).
+// it failed as MAC preparation through the typed budget error (never a false
+// success).
 func h8AwaitCreateFailure(t *testing.T, createErr chan error) {
 	t.Helper()
 	select {
@@ -248,6 +263,9 @@ func h8AwaitCreateFailure(t *testing.T, createErr chan error) {
 		}
 		if !errors.Is(err, ErrMACPreparation) {
 			t.Fatalf("create error = %v, want ErrMACPreparation in the failure chain", err)
+		}
+		if !errors.Is(err, ErrMACTransitionBudgetExceeded) {
+			t.Fatalf("create error = %v, want ErrMACTransitionBudgetExceeded in the failure chain", err)
 		}
 	case <-time.After(macLivenessCompletionSlop):
 		t.Fatal("the parked create did not terminate after the MAC budget expired")
@@ -308,6 +326,8 @@ func h8AdmissionClosed(t *testing.T, app *App, launcherID string) {
 // closed, no coordination lock stays stranded, and the next ordinary MAC
 // transition succeeds.
 func TestH8HungAppArmorParserParksSessionCreateAndBlocksDisable(t *testing.T) {
+	h8BudgetOverride(t)
+
 	app, entered, release := setupH8AppArmorParkedCoordinator(t)
 	launcherID, username := setupH8DisableTarget(t, app)
 	allowedRoot := app.Config.AllowedRoots[0].Path
@@ -350,6 +370,8 @@ func TestH8HungAppArmorParserParksSessionCreateAndBlocksDisable(t *testing.T) {
 // lifecycle linearization boundary, so a concurrent administrative disable
 // cannot proceed.
 func TestH8HungSELinuxFcontextParksSessionCreateAndBlocksDisable(t *testing.T) {
+	h8BudgetOverride(t)
+
 	app, entered, release := setupH8SELinuxParkedCoordinator(t)
 	launcherID, username := setupH8DisableTarget(t, app)
 	allowedRoot := app.Config.AllowedRoots[0].Path
@@ -437,6 +459,8 @@ func TestH8SELinuxFcontextLockContentionFailsClosed(t *testing.T) {
 // previous effective config stays active, and the lifecycle coordination is
 // released within the bound.
 func TestH8ReloadHungTrustedCARestoreconKeepsPreviousConfig(t *testing.T) {
+	h8BudgetOverride(t)
+
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 	_ = socketPath
@@ -451,17 +475,16 @@ func TestH8ReloadHungTrustedCARestoreconKeepsPreviousConfig(t *testing.T) {
 
 	entered := make(chan struct{}, 8)
 	release := make(chan struct{})
-	parked := h8ParkedCommand(entered, release)
 	park := false
 	var parkMu sync.Mutex
-	trustedCARestorecon = func(args ...string) ([]byte, error) {
+	trustedCARestorecon = func(ctx context.Context, _ ...string) ([]byte, error) {
 		parkMu.Lock()
 		parking := park
 		parkMu.Unlock()
 		if !parking {
 			return []byte{}, nil
 		}
-		if err := parked(); err != nil {
+		if err := h8ParkedCommand(ctx, entered, release); err != nil {
 			return nil, err
 		}
 		return []byte{}, nil
@@ -611,6 +634,8 @@ func TestH8ReloadHungTrustedCARestoreconKeepsPreviousConfig(t *testing.T) {
 // cleanup path returns within the budget so the operation terminal
 // transition and shutdown are no longer hostage.
 func TestH8WorkloadAppArmorCleanupTimeoutRetainsOwnership(t *testing.T) {
+	h8BudgetOverride(t)
+
 	stateDir := t.TempDir()
 	profilePath := filepath.Join(stateDir, appArmorWorkloadProfileFileName)
 	profileName := workloadAppArmorProfileName("op_h8cleanup")
@@ -620,17 +645,36 @@ func TestH8WorkloadAppArmorCleanupTimeoutRetainsOwnership(t *testing.T) {
 
 	entered := make(chan struct{}, 8)
 	release := make(chan struct{})
-	parked := h8ParkedCommand(entered, release)
 	backend := newWorkloadAppArmorBackend()
-	backend.runParser = func(_ string, _ []string) error {
-		return parked()
+	backend.parserPath = filepath.Join(t.TempDir(), "apparmor_parser")
+	if err := os.WriteFile(backend.parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
 	}
+	backend.runParser = func(context.Context, string, []string) error { return nil }
 	backend.loadedProfiles = func() ([]string, error) { return []string{profileName}, nil }
+
+	// Build the prepared workload through the real production prepare path so
+	// the exercised cleanup is the real budgeted cleanup closure.
+	preparation := workloadPreparation{
+		OperationID: "op_h8cleanup",
+		SessionID:   "dhs_h8cleanup",
+		StateDir:    stateDir,
+		RuntimeDir:  t.TempDir(),
+	}
+	prepared, err := backend.prepare(context.Background(), preparation)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	// Arm the hostile hung parser for the cleanup pass.
+	backend.runParser = func(ctx context.Context, _ string, _ []string) error {
+		return h8ParkedCommand(ctx, entered, release)
+	}
 
 	started := time.Now()
 	cleanupDone := make(chan error, 1)
 	go func() {
-		cleanupDone <- backend.cleanupPrepared(stateDir, profileName)
+		cleanupDone <- prepared.Cleanup()
 	}()
 
 	select {
@@ -656,6 +700,225 @@ func TestH8WorkloadAppArmorCleanupTimeoutRetainsOwnership(t *testing.T) {
 	// profile, so the durable state stays behind for reconciliation.
 	if _, err := os.Stat(profilePath); err != nil {
 		t.Fatalf("the generated profile must be retained for reconciliation after a failed cleanup: %v", err)
+	}
+}
+
+// TestH8MACCommandKilledAndReapedAtBudget proves the kill/reap guarantee of
+// the bounded execution owners with a REAL external process: a genuinely
+// hung command started through the production parser runner is terminated at
+// the fixed MAC transition budget, the execution returns the typed budget
+// error within the budget, the child is reaped (no zombie), and no MAC child
+// process is left behind. The command is a short-lived sleep bounded by the
+// test budget — never a permanently hung host process.
+func TestH8MACCommandKilledAndReapedAtBudget(t *testing.T) {
+	h8BudgetOverride(t)
+
+	runner := newProductionParserRunner()
+	const sleepyArg = "793d"
+	started := time.Now()
+	ctx, cancel := newMACTransitionContext()
+	defer cancel()
+	err := runner(ctx, "/bin/sleep", []string{sleepyArg})
+	if err == nil {
+		t.Fatal("a hung MAC command must fail at the budget, not succeed")
+	}
+	if !errors.Is(err, ErrMACTransitionBudgetExceeded) {
+		t.Fatalf("hung command error = %v, want the typed budget error", err)
+	}
+	if elapsed := time.Since(started); elapsed > macLivenessBudgetOverride+2*time.Second {
+		t.Errorf("the hung command was terminated after %v, want at the budget %v", elapsed, macLivenessBudgetOverride)
+	}
+
+	// The child was reaped: no process with the unique command line remains.
+	if h8ProcWithCmdline("sleep", sleepyArg) {
+		t.Fatal("the hung MAC command child is still present after the budget: a MAC child process was left behind")
+	}
+}
+
+// h8ProcWithCmdline reports whether a process whose cmdline starts with the
+// given binary and contains the given argument is running.
+func h8ProcWithCmdline(binary, arg string) bool {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		parts := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+		if len(parts) == 0 || filepath.Base(parts[0]) != binary {
+			continue
+		}
+		for _, part := range parts[1:] {
+			if part == arg {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestH8RunCleanupSequenceBoundedUnderHungWorkloadCleanup proves the
+// shutdown-relevant liveness property at the run-cleanup owner: the workload
+// MAC cleanup stage failing at the fixed budget lets the cleanup sequence
+// finish (the retained outcome is recorded) instead of parking the run
+// completion goroutine — so the operation terminal transition and the
+// bounded shutdown drain are no longer hostage to a hung parser process.
+func TestH8RunCleanupSequenceBoundedUnderHungWorkloadCleanup(t *testing.T) {
+	h8BudgetOverride(t)
+
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
+	backend := newWorkloadAppArmorBackend()
+	backend.runParser = func(ctx context.Context, _ string, _ []string) error {
+		return h8ParkedCommand(ctx, entered, release)
+	}
+	backend.loadedProfiles = func() ([]string, error) { return []string{"workload_docker_helper_op_h8drain"}, nil }
+
+	prepared := &preparedWorkloadMAC{
+		Backend: LSMAppArmor,
+		cleanup: func() error {
+			cleanupCtx, cancel := newMACTransitionContext()
+			defer cancel()
+			return backend.cleanupPrepared(cleanupCtx, t.TempDir(), "workload_docker_helper_op_h8drain")
+		},
+	}
+
+	started := time.Now()
+	outcomeDone := make(chan runCleanupOutcome, 1)
+	go func() {
+		outcomeDone <- newRunCleanupSequence(
+			cleanupStage{name: cleanupStageWorkloadMAC, run: prepared.Cleanup},
+		).run()
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(macLivenessObservationWindow):
+		t.Fatal("the hung cleanup never reached the workload parser command")
+	}
+
+	var outcome runCleanupOutcome
+	select {
+	case outcome = <-outcomeDone:
+	case <-time.After(macLivenessObservationWindow + macLivenessBudgetOverride + macLivenessCompletionSlop):
+		t.Fatal("the run cleanup sequence did not finish within the MAC budget: the hung parser holds the run completion path without bound (H8 defect)")
+	}
+	if outcome.completed {
+		t.Fatal("a budget-expired workload cleanup must retain state, never report completion")
+	}
+	if outcome.retainedStage != cleanupStageWorkloadMAC {
+		t.Errorf("retained stage = %q, want %q", outcome.retainedStage, cleanupStageWorkloadMAC)
+	}
+	if !errors.Is(outcome.err, ErrMACTransitionBudgetExceeded) {
+		t.Errorf("retained error = %v, want the typed budget error", outcome.err)
+	}
+	if elapsed := time.Since(started); elapsed > macLivenessBudgetOverride+macLivenessCompletionSlop {
+		t.Errorf("cleanup sequence finished after %v, want within budget %v + slop", elapsed, macLivenessBudgetOverride)
+	}
+
+	// Release the hostile condition for deterministic test teardown.
+	close(release)
+}
+
+// TestH8StartupReconciliationBoundedUnderHungRepair proves the startup
+// reconciliation's repair pass is bounded: a hung backend repair command
+// fails the session reconciliation within the fixed MAC transition budget
+// (one budget per session), so daemon startup cannot be held hostage by a
+// single session's backend commands.
+func TestH8StartupReconciliationBoundedUnderHungRepair(t *testing.T) {
+	h8BudgetOverride(t)
+
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
+
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.semanagePath = semanagePath
+	mgr.restoreconPath = restoreconPath
+	mgr.runCommand = func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		if err := h8ParkedCommand(ctx, entered, release); err != nil {
+			return nil, err
+		}
+		return []byte{}, nil
+	}
+	mgr.readPathCon = func(string) (string, error) { return selinuxWorkspaceType, nil }
+	driver := &selinuxMACDriver{mgr: mgr, treeKind: macBoundaryKindFor}
+
+	db, err := openDatabase(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+	if _, err := migrateSessionFilesystemSnapshots(db); err != nil {
+		t.Fatalf("migrateSessionFilesystemSnapshots: %v", err)
+	}
+
+	// Seed a live session whose persisted snapshot carries one external
+	// (non-home) issued tree, so the reconciliation reaches the backend
+	// verification/repair path for it.
+	allowedRoot := t.TempDir()
+	issuedTree := filepath.Join(allowedRoot, "h8-reconcile-tree")
+	if err := os.MkdirAll(issuedTree, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ownerLauncherID := testMACLauncherID(t, db)
+	if err := insertTestSessionTx(db, ownerLauncherID, "dhs_h8reconcile", issuedTree); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	mac := newSessionMACCoordinator(db, driver)
+	started := time.Now()
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- mac.ReconcileLiveSessions()
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(macLivenessObservationWindow):
+		t.Fatal("the hung reconciliation never reached the backend repair command")
+	}
+
+	select {
+	case err := <-reconcileDone:
+		if err == nil {
+			t.Fatal("a reconciliation whose backend repair exceeded the budget must fail, not succeed")
+		}
+		if !errors.Is(err, ErrMACTransitionBudgetExceeded) {
+			t.Errorf("reconciliation error = %v, want the typed budget error", err)
+		}
+	case <-time.After(macLivenessObservationWindow + macLivenessBudgetOverride + macLivenessCompletionSlop):
+		t.Fatal("startup reconciliation did not return within the MAC budget: a hung repair command holds the startup coordination without bound (H8 defect)")
+	}
+	if elapsed := time.Since(started); elapsed > macLivenessBudgetOverride+macLivenessCompletionSlop {
+		t.Errorf("reconciliation returned after %v, want within budget %v + slop", elapsed, macLivenessBudgetOverride)
+	}
+
+	// The coordinator lock is not stranded: the next ordinary transition
+	// (a create on the same coordinator) proceeds after the hostile
+	// condition is removed.
+	close(release)
+	secondWorkspace := filepath.Join(allowedRoot, "h8-after-tree")
+	if err := os.MkdirAll(secondWorkspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	mgr.runCommand = func(context.Context, string, ...string) ([]byte, error) { return []byte{}, nil }
+	second, err := mac.CreateSessionBinding("dhs_h8after", []string{secondWorkspace}, func([]sessionMACCoverage) error {
+		return insertTestSessionTx(db, ownerLauncherID, "dhs_h8after", secondWorkspace)
+	})
+	if err != nil {
+		t.Fatalf("the next ordinary MAC transition after the hostile condition must succeed: %v", err)
+	}
+	if len(second) == 0 {
+		t.Fatal("the next ordinary transition must resolve coverage")
 	}
 }
 

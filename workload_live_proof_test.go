@@ -345,7 +345,7 @@ func TestLiveWorkloadAppArmor(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production AppArmor prepare: %v", prepErr)
 	}
@@ -459,7 +459,7 @@ func TestLiveWorkloadAppArmorExternalRoot(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production AppArmor prepare: %v", prepErr)
 	}
@@ -666,7 +666,7 @@ func TestLiveWorkloadSELinux(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production SELinux prepare: %v", prepErr)
 	}
@@ -787,7 +787,7 @@ func TestLiveWorkloadSELinuxExternalRoot(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production SELinux prepare: %v", prepErr)
 	}
@@ -923,7 +923,7 @@ func TestLiveWorkloadSELinuxRegularFile(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production SELinux regular-file prepare: %v", prepErr)
 	}
@@ -1051,7 +1051,7 @@ func TestLiveWorkloadMCSConcurrentRWRO(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production SELinux prepare: %v", prepErr)
 	}
@@ -1178,7 +1178,7 @@ func TestLiveWorkloadAppArmorRegularFile(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production AppArmor prepare: %v", prepErr)
 	}
@@ -1267,7 +1267,7 @@ func TestLiveWorkloadAppArmorNestedRW(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production AppArmor prepare: %v", prepErr)
 	}
@@ -1310,7 +1310,7 @@ func TestLiveWorkloadAppArmorNestedRW(t *testing.T) {
 	if err := os.MkdirAll(islandPrep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	island, islandErr := b.prepare(islandPrep)
+	island, islandErr := b.prepare(context.Background(), islandPrep)
 	if islandErr != nil {
 		t.Fatalf("production AppArmor prepare (island): %v", islandErr)
 	}
@@ -1396,7 +1396,7 @@ func TestLiveWorkloadAppArmorPrefixCollisionRW(t *testing.T) {
 	if err := os.MkdirAll(prep.RuntimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	prepared, prepErr := b.prepare(prep)
+	prepared, prepErr := b.prepare(context.Background(), prep)
 	if prepErr != nil {
 		t.Fatalf("production AppArmor prepare: %v", prepErr)
 	}

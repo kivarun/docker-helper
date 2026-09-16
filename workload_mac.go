@@ -197,14 +197,19 @@ type workloadMACBackend interface {
 	// On failure the backend must have attempted to roll back every
 	// kernel-side resource it created; whether that rollback succeeded is
 	// observable only through the coordinator's retained-outcome contract.
-	prepare(p workloadPreparation) (*preparedWorkloadMAC, error)
+	// ctx carries the daemon-owned fixed MAC transition budget: every
+	// external MAC command the backend starts consumes that remaining
+	// budget and is terminated at its expiry.
+	prepare(ctx context.Context, p workloadPreparation) (*preparedWorkloadMAC, error)
 	// validateOwnedState proves the durable state is exact and current-owner.
 	// Reconciliation retains anything that fails validation.
 	validateOwnedState(record workloadMACRecord) error
 	// cleanupOwnedState removes the kernel workload state and helper files
 	// of one owned record. Called only for positively identified owned
-	// state whose correlated container is proven absent.
-	cleanupOwnedState(record workloadMACRecord) error
+	// state whose correlated container is proven absent. ctx carries the
+	// daemon-owned fixed MAC transition budget (the backend cleanup's
+	// external MAC commands consume that remaining budget).
+	cleanupOwnedState(ctx context.Context, record workloadMACRecord) error
 }
 
 // workloadMACCoordinator is the single owner of operation-lifetime workload
@@ -333,7 +338,13 @@ func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorklo
 		return nil, err
 	}
 
-	prepared, err := c.backend.prepare(p)
+	// The whole preparation runs under the daemon-owned fixed MAC transition
+	// budget: the backend's MAC commands consume that remaining budget, so a
+	// hung external command cannot hold the run handler (and its capacity
+	// slot and session-use lease) hostage.
+	ctx, cancel := newMACTransitionContext()
+	defer cancel()
+	prepared, err := c.backend.prepare(ctx, p)
 	if err != nil {
 		// A backend that could not prove its own rollback of the partial
 		// kernel-side state keeps its live handles; a second, handle-free
@@ -347,7 +358,7 @@ func (c *workloadMACCoordinator) Prepare(p workloadPreparation) (*preparedWorklo
 		// Fail closed on the dependent resources: when the partial MAC
 		// state cannot be rolled back, the pins and lease that the
 		// projections depend on must remain until reconciliation.
-		if cleanupErr := c.backend.cleanupOwnedState(rec); cleanupErr != nil {
+		if cleanupErr := c.backend.cleanupOwnedState(ctx, rec); cleanupErr != nil {
 			logRetainedWorkloadState(context.Background(), p.OperationID, "prepare_rollback", cleanupErr)
 			return nil, &workloadMACRetainedError{err: err}
 		}
@@ -504,7 +515,7 @@ func (c *workloadMACCoordinator) reconcileOne(ctx context.Context, rec workloadM
 			return proveOperationContainerAbsent(queryCtx, c.docker, rec.OperationID, rec.SessionID)
 		}},
 		cleanupStage{name: cleanupStageWorkloadMAC, run: func() error {
-			return c.backend.cleanupOwnedState(rec)
+			return c.backend.cleanupOwnedState(queryCtx, rec)
 		}},
 		cleanupStage{name: cleanupStageSourcePins, run: func() error {
 			return c.cleanupStalePins(rec.OperationID)

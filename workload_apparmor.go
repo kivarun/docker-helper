@@ -15,6 +15,7 @@ package main
 // them.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -297,9 +298,10 @@ func workloadAppArmorTargetPlanFromExposures(exposures []sessionFilesystemExposu
 // verification, and helper-owned profile state for one Operation.
 type workloadAppArmorBackend struct {
 	parserPath string
-	// runParser executes apparmor_parser with the given arguments.
-	// Production shells out to the real parser; tests inject a seam.
-	runParser func(parserPath string, args []string) error
+	// runParser executes apparmor_parser with the given arguments within the
+	// remaining MAC transition budget carried by ctx. Production shells out
+	// to the real context-bounded parser; tests inject a seam.
+	runParser appArmorParserRunner
 	// loadedProfiles returns the names of the profiles currently loaded in
 	// the kernel inventory. Production reads
 	// /sys/kernel/security/apparmor/profiles; tests inject a seam.
@@ -311,10 +313,8 @@ type workloadAppArmorBackend struct {
 
 func newWorkloadAppArmorBackend() *workloadAppArmorBackend {
 	return &workloadAppArmorBackend{
-		parserPath: appArmorParserPath,
-		runParser: func(parserPath string, args []string) error {
-			return newProductionParserRunner()(parserPath, args)
-		},
+		parserPath:     appArmorParserPath,
+		runParser:      newProductionParserRunner(),
 		loadedProfiles: appArmorLoadedProfileNames,
 		abi30Present:   func() bool { return fileExists(appArmorAbi30Path) },
 	}
@@ -347,7 +347,7 @@ func appArmorLoadedProfileNames() ([]string, error) {
 // prepare renders, loads, and verifies the generated workload profile for
 // the accepted exposure plan, and returns the prepared result whose
 // SecurityOpts explicitly select that profile for the container.
-func (b *workloadAppArmorBackend) prepare(p workloadPreparation) (*preparedWorkloadMAC, error) {
+func (b *workloadAppArmorBackend) prepare(ctx context.Context, p workloadPreparation) (*preparedWorkloadMAC, error) {
 	if err := b.ensureParserAvailable(); err != nil {
 		return nil, err
 	}
@@ -369,7 +369,7 @@ func (b *workloadAppArmorBackend) prepare(p workloadPreparation) (*preparedWorkl
 	// directory (observed on openSUSE: "Failed setting up policy cache
 	// (/var/cache/apparmor): Permission denied"); the session-MAC profile
 	// manager uses the same argument.
-	if err := b.runParser(b.parserPath, []string{"--replace", "--skip-cache", profilePath}); err != nil {
+	if err := b.runParser(ctx, b.parserPath, []string{"--replace", "--skip-cache", profilePath}); err != nil {
 		return nil, fmt.Errorf("cannot load generated workload profile: %w", err)
 	}
 	if err := b.requireProfileLoaded(profileName); err != nil {
@@ -387,8 +387,18 @@ func (b *workloadAppArmorBackend) prepare(p workloadPreparation) (*preparedWorkl
 		// files that depend on it. The durable ownership record stays
 		// behind as the reconciliation retry marker until the run-level
 		// finalization boundary proves the dependent cleanup done.
+		// The cleanup releases only the kernel MAC state and the backend
+		// files that depend on it. It runs under its own daemon-owned MAC
+		// transition budget at cleanup time (operation completion, shutdown
+		// force-cleanup, or startup reconciliation), so an orphaned parser
+		// process can never hold the cleanup — and the terminal transition
+		// behind it — hostage. The durable ownership record stays
+		// behind as the reconciliation retry marker until the run-level
+		// finalization boundary proves the dependent cleanup done.
 		cleanup: func() error {
-			return b.cleanupPrepared(p.StateDir, profileName)
+			cleanupCtx, cancel := newMACTransitionContext()
+			defer cancel()
+			return b.cleanupPrepared(cleanupCtx, p.StateDir, profileName)
 		},
 	}, nil
 }
@@ -396,9 +406,9 @@ func (b *workloadAppArmorBackend) prepare(p workloadPreparation) (*preparedWorkl
 // cleanupPrepared unloads the generated profile (only if loaded), removes
 // the helper-owned profile file and ownership state, and fails closed: a
 // load/unload verification failure retains the owned state.
-func (b *workloadAppArmorBackend) cleanupPrepared(stateDir, profileName string) error {
+func (b *workloadAppArmorBackend) cleanupPrepared(ctx context.Context, stateDir, profileName string) error {
 	profilePath := filepath.Join(stateDir, appArmorWorkloadProfileFileName)
-	if err := b.unloadProfile(profilePath, profileName); err != nil {
+	if err := b.unloadProfile(ctx, profilePath, profileName); err != nil {
 		return err
 	}
 	// The profile is provably absent; the remaining files are pure state.
@@ -411,7 +421,7 @@ func (b *workloadAppArmorBackend) cleanupPrepared(stateDir, profileName string) 
 // unloadProfile removes a loaded generated profile through apparmor_parser
 // and verifies the removal in the kernel inventory. An unverified removal
 // is an error so the caller retains the owned state.
-func (b *workloadAppArmorBackend) unloadProfile(profilePath, profileName string) error {
+func (b *workloadAppArmorBackend) unloadProfile(ctx context.Context, profilePath, profileName string) error {
 	loaded, err := b.isProfileLoaded(profileName)
 	if err != nil {
 		return err
@@ -419,7 +429,7 @@ func (b *workloadAppArmorBackend) unloadProfile(profilePath, profileName string)
 	if !loaded {
 		return nil
 	}
-	if err := b.runParser(b.parserPath, []string{"--remove", profilePath}); err != nil {
+	if err := b.runParser(ctx, b.parserPath, []string{"--remove", profilePath}); err != nil {
 		return fmt.Errorf("cannot unload generated workload profile: %w", err)
 	}
 	stillLoaded, err := b.isProfileLoaded(profileName)
@@ -499,12 +509,15 @@ func (b *workloadAppArmorBackend) validateOwnedState(record workloadMACRecord) e
 
 // cleanupOwnedState removes the kernel profile and the helper-owned profile
 // file of one owned record. Called only after container absence is proven.
+// ctx carries the remaining MAC transition budget: the unload parser one-shot
+// consumes that remaining budget, so reconciliation and shutdown cannot be
+// hostage to an orphaned parser process.
 //
 // The profile name is derived from the record's operation ID, never read
 // from durable state. A loaded deterministic profile without its profile
 // source has no safe unload path and fails closed; an absent profile makes
 // the remaining owned state empty and its cleanup a pure state removal.
-func (b *workloadAppArmorBackend) cleanupOwnedState(record workloadMACRecord) error {
+func (b *workloadAppArmorBackend) cleanupOwnedState(ctx context.Context, record workloadMACRecord) error {
 	stateDir := record.StateDirPath()
 	profilePath := filepath.Join(stateDir, appArmorWorkloadProfileFileName)
 	profileName := workloadAppArmorProfileName(record.OperationID)
@@ -520,7 +533,7 @@ func (b *workloadAppArmorBackend) cleanupOwnedState(record workloadMACRecord) er
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("generated profile source is not a helper-owned regular file")
 		}
-		if err := b.unloadProfile(profilePath, profileName); err != nil {
+		if err := b.unloadProfile(ctx, profilePath, profileName); err != nil {
 			return err
 		}
 	}

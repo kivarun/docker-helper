@@ -160,7 +160,7 @@ func TestWorkloadAppArmorPrepareLoadVerifyOrder(t *testing.T) {
 		PinnedSources: pins,
 	}
 	b, h := newTestAppArmorWorkloadBackend(t)
-	prepared, err := b.prepare(prep)
+	prepared, err := b.prepare(context.Background(), prep)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestWorkloadAppArmorPrepareLoadFailureFailsClosed(t *testing.T) {
 		Exposures:     []sessionFilesystemExposure{{Target: "/inputs", RequestedReadOnly: true}},
 		PinnedSources: testPinnedSources(t, dir, 1),
 	}
-	if _, err := b.prepare(prep); err == nil {
+	if _, err := b.prepare(context.Background(), prep); err == nil {
 		t.Fatal("load failure must fail preparation")
 	}
 	if h.loaded[workloadAppArmorProfileName("op_a2")] {
@@ -230,7 +230,7 @@ func TestWorkloadAppArmorCleanupUnloadsProfileOnce(t *testing.T) {
 	rec := workloadMACRecord{OperationID: "op_c1", SessionID: "s", Backend: string(LSMAppArmor)}
 	rec.StateDir = dir
 	rec.RuntimeDir = dir
-	if err := b.cleanupOwnedState(rec); err != nil {
+	if err := b.cleanupOwnedState(context.Background(), rec); err != nil {
 		t.Fatalf("cleanupOwnedState: %v", err)
 	}
 	if h.loaded[name] {
@@ -240,7 +240,7 @@ func TestWorkloadAppArmorCleanupUnloadsProfileOnce(t *testing.T) {
 		t.Errorf("owned profile source must be removed, got %v", statErr)
 	}
 	// Reconciliation races may call cleanup again; absence is success.
-	if err := b.cleanupOwnedState(rec); err != nil {
+	if err := b.cleanupOwnedState(context.Background(), rec); err != nil {
 		t.Errorf("second cleanup must be idempotent, got %v", err)
 	}
 }

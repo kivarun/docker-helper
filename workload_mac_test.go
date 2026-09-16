@@ -696,7 +696,7 @@ func TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage(t *testing.T
 	if _, err := os.Stat(filepath.Join(stateRoot, testOperationID(61))); err != nil {
 		t.Fatalf("pending ownership record must be retained while Docker is unavailable: %v", err)
 	}
-	if _, err := driver.verifyCoverage(workspace); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), workspace); err != nil {
 		t.Fatal("workspace coverage must not be removed while the workload state is pending (Docker unavailable)")
 	}
 
@@ -714,7 +714,7 @@ func TestWorkloadStartupReconciliationKeepsPendingWorkspaceCoverage(t *testing.T
 		t.Fatalf("ReconcileLiveSessions (docker up): %v", err)
 	}
 	mac2.ReleaseSessionBinding(testWorkloadSessionID)
-	if _, err := driver.verifyCoverage(workspace); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), workspace); err == nil {
 		t.Fatal("stale coverage must be removed after the workload state is proven removed")
 	}
 }
@@ -774,7 +774,7 @@ func TestStaleBoundaryCleanupDeferredForPendingWorkload(t *testing.T) {
 	mac.pendingWorkloadSessions = func() map[string]bool {
 		return map[string]bool{pendingSessionID: true}
 	}
-	if err := mac.cleanupStaleBoundaries(); err != nil {
+	if err := mac.cleanupStaleBoundaries(context.Background()); err != nil {
 		t.Fatalf("cleanupStaleBoundaries: %v", err)
 	}
 	if !boundaryOwned() {
@@ -786,7 +786,7 @@ func TestStaleBoundaryCleanupDeferredForPendingWorkload(t *testing.T) {
 	mac.pendingWorkloadSessions = func() map[string]bool {
 		return map[string]bool{"\x00unknown-session": true}
 	}
-	if err := mac.cleanupStaleBoundaries(); err != nil {
+	if err := mac.cleanupStaleBoundaries(context.Background()); err != nil {
 		t.Fatalf("cleanupStaleBoundaries (unresolvable): %v", err)
 	}
 	if !boundaryOwned() {
@@ -795,13 +795,13 @@ func TestStaleBoundaryCleanupDeferredForPendingWorkload(t *testing.T) {
 
 	// Gate vacuous (no pending workload): the stale coverage is removed.
 	mac.pendingWorkloadSessions = func() map[string]bool { return map[string]bool{} }
-	if err := mac.cleanupStaleBoundaries(); err != nil {
+	if err := mac.cleanupStaleBoundaries(context.Background()); err != nil {
 		t.Fatalf("cleanupStaleBoundaries (vacuous): %v", err)
 	}
 	if boundaryOwned() {
 		t.Fatal("stale coverage ownership must be removed when no pending workload covers it")
 	}
-	if _, err := driver.verifyCoverage(parentWS); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), parentWS); err != nil {
 		t.Fatal("the live parent binding's coverage must never be removed")
 	}
 }
