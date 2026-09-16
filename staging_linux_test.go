@@ -921,3 +921,178 @@ func TestStageBuildContextStripsSetUIDOnHardlinkedPair(t *testing.T) {
 		t.Errorf("staged hardlink pair modes = %o/%o, want 755/755 (no privilege bits)", stagedFirst.Mode(), stagedSecond.Mode())
 	}
 }
+
+// --- H4 staging ceilings -----------------------------------------------------
+//
+// The staging resources that must be refused are measured against the
+// proposed Release-2.2 production ceilings (128 MiB payload bytes, 50000
+// entries, depth 64). The hostile fixtures below are cheap: the byte case
+// uses a sparse source file (logical size only), the entry case uses
+// zero-byte files, and the depth case is an ordinary nested chain.
+
+// sparseHostileFile creates a sparse regular file with the given logical
+// size (st_size) and near-zero physical allocation.
+func sparseHostileFile(t *testing.T, path string, size int64) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != size {
+		t.Fatalf("sparse fixture has st_size %d, want %d", st.Size(), size)
+	}
+	if sys := st.Sys().(*syscall.Stat_t); sys.Blocks > 64 {
+		t.Fatalf("sparse fixture is not sparse: %d blocks for st_size %d", sys.Blocks, size)
+	}
+}
+
+// TestStageBuildContextSparsePayloadOverByteCeiling proves a single hostile
+// build context cannot push its payload past the production byte ceiling:
+// a sparse file whose logical size exceeds the ceiling must be refused
+// before its destination payload is created or written, and the refusal
+// must leave no operation tree. Pre-fix this staging operation succeeded and
+// began materializing the sparse file's logical payload in the runtime
+// filesystem (duringCopy/afterCreateDest ran for it).
+func TestStageBuildContextSparsePayloadOverByteCeiling(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	const byteCeiling = 128 * 1024 * 1024 // proposed production byte ceiling
+	sparseHostileFile(t, filepath.Join(ctxDir, "big.bin"), byteCeiling+1)
+
+	duringCopy := map[string]int64{}
+	created := map[string]bool{}
+	hooks := &stagingHooks{
+		duringCopy: func(name string, copiedBytes int64) error {
+			duringCopy[name] = copiedBytes
+			return nil
+		},
+		afterCreateDest: func(name string) error {
+			created[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	if err == nil {
+		t.Fatal("expected the over-ceiling sparse payload to be refused, got success")
+	}
+
+	if _, ok := duringCopy["big.bin"]; ok {
+		t.Errorf("over-ceiling payload began copying (duringCopy at offset %d); refusal must happen before any destination payload write", duringCopy["big.bin"])
+	}
+	if created["big.bin"] {
+		t.Error("over-ceiling payload destination entry was created; refusal must happen before destination creation")
+	}
+
+	// The source file must remain untouched and sparse.
+	st, err := os.Stat(filepath.Join(ctxDir, "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != byteCeiling+1 {
+		t.Errorf("source sparse file changed size: %d", st.Size())
+	}
+	if sys := st.Sys().(*syscall.Stat_t); sys.Blocks > 64 {
+		t.Errorf("source sparse file was materialized: %d blocks", sys.Blocks)
+	}
+
+	// The refusal must leave no operation tree.
+	if _, err := os.Stat(filepath.Join(runtimeDir, "builds", "op1")); err == nil {
+		t.Error("operation directory should be cleaned up after the byte-ceiling refusal")
+	}
+}
+
+// TestStageBuildContextEntriesOverCeiling proves a single hostile build
+// context cannot push its entry count past the production entry ceiling.
+// The refusal must happen while enumerating the over-ceiling directory —
+// before any of its entries materialize — and must leave no operation tree.
+// Pre-fix the whole directory was enumerated into an unbounded slice and
+// every entry was staged successfully.
+func TestStageBuildContextEntriesOverCeiling(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	const entryCeiling = 50000 // proposed production entry ceiling
+	// Dockerfile plus entryCeiling zero-byte regular files: one entry over.
+	for i := 0; i < entryCeiling; i++ {
+		if err := os.WriteFile(filepath.Join(ctxDir, fmt.Sprintf("f%06d", i)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	created := map[string]bool{}
+	hooks := &stagingHooks{
+		afterCreateDest: func(name string) error {
+			created[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	if err == nil {
+		t.Fatal("expected the over-ceiling entry count to be refused, got success")
+	}
+
+	if created["f000000"] {
+		t.Error("over-ceiling directory entries were materialized; the enumeration must refuse before any destination creation")
+	}
+
+	if _, err := os.Stat(filepath.Join(runtimeDir, "builds", "op1")); err == nil {
+		t.Error("operation directory should be cleaned up after the entry-ceiling refusal")
+	}
+}
+
+// TestStageBuildContextDepthOverCeiling proves a single hostile build
+// context cannot descend past the production depth ceiling: the over-deep
+// directory must be refused before its destination mkdir and before the
+// recursive descent into it, and the refusal must leave no operation tree.
+// Pre-fix the traversal recursed as deep as the source tree goes.
+func TestStageBuildContextDepthOverCeiling(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	const depthCeiling = 64 // proposed production depth ceiling
+	deepDir := ctxDir
+	for i := 0; i < depthCeiling+1; i++ {
+		deepDir = filepath.Join(deepDir, fmt.Sprintf("d%02d", i))
+	}
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deepDir, "deep.txt"), []byte("deep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	visited := map[string]bool{}
+	hooks := &stagingHooks{
+		betweenStatAndOpen: func(name string) error {
+			visited[name] = true
+			return nil
+		},
+	}
+
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	if err == nil {
+		t.Fatal("expected the over-ceiling depth to be refused, got success")
+	}
+
+	if visited["deep.txt"] {
+		t.Error("descent continued below the depth ceiling; the over-deep directory must be refused before recursive descent")
+	}
+
+	if _, err := os.Stat(filepath.Join(runtimeDir, "builds", "op1")); err == nil {
+		t.Error("operation directory should be cleaned up after the depth-ceiling refusal")
+	}
+}
