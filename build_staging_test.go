@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1053,5 +1055,204 @@ func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 	}
 	if !strings.Contains(opLogContent, opID) {
 		t.Errorf("cleanup log should contain operation ID %q, got: %s", opID, opLogContent)
+	}
+}
+
+// --- H4 build-staging ceiling refusals on the handler path -------------------
+
+// TestBuildStagingCeilingRefusalClassification proves the handler classifies
+// the typed staging ceiling refusal — and only it — into the single
+// canonical build-context-limit response: HTTP 400 with code
+// build_context_too_large, a bounded message without source path material,
+// no Docker invocation, no registered operation, and a build.rejected audit
+// record whose result matches the public code. A non-ceiling staging error
+// stays internal_error.
+func TestBuildStagingCeilingRefusalClassification(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	t.Run("typed ceiling refusal is the limit response", func(t *testing.T) {
+		warnBuf := new(bytes.Buffer)
+		initLoggers(warnBuf, auditBuf, slog.LevelWarn, true)
+		t.Cleanup(logging.reset)
+
+		app, _, _, token := setupBuildTest(t)
+		app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+			return nil, &buildStagingCeilingError{Resource: "entries", Ceiling: 50000, Attempted: 50001}
+		}
+
+		dockerCalled := false
+		app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			dockerCalled = true
+			return exec.CommandContext(ctx, name, args...)
+		}
+
+		req := newBuildRequest(map[string]any{
+			"context":    ".",
+			"dockerfile": "Dockerfile",
+			"image":      "example:test",
+		}, token)
+		w := httptest.NewRecorder()
+		app.handleBuild(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+		}
+		var resp struct {
+			OK      bool   `json:"ok"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Code != "build_context_too_large" {
+			t.Errorf("code = %q, want build_context_too_large", resp.Code)
+		}
+		if resp.Message != "build context exceeds the staging entries ceiling" {
+			t.Errorf("message = %q, want the bounded dimension-only refusal", resp.Message)
+		}
+		if strings.ContainsAny(resp.Message, "/\\") {
+			t.Errorf("message must not carry source path material: %q", resp.Message)
+		}
+		if dockerCalled {
+			t.Error("Docker must not be invoked after a ceiling refusal")
+		}
+		if len(app.OperationSupervisor.ops) != 0 {
+			t.Errorf("no operation may be registered after a ceiling refusal, got %d", len(app.OperationSupervisor.ops))
+		}
+
+		// The rejection is audited with the canonical code.
+		records := parseAuditRecords(auditBuf)
+		var rejected []auditRecord
+		for _, rec := range records {
+			if rec.Event == "build.rejected" {
+				rejected = append(rejected, rec)
+			}
+		}
+		if len(rejected) != 1 {
+			t.Fatalf("expected exactly one build.rejected record, got %d in %v", len(rejected), records)
+		}
+		if rejected[0].Result != "build_context_too_large" {
+			t.Errorf("audit result = %q, want build_context_too_large", rejected[0].Result)
+		}
+
+		// The expected refusal is an operational warning, not an internal
+		// error record.
+		if !strings.Contains(warnBuf.String(), "build context exceeds the staging ceilings") {
+			t.Errorf("the ceiling refusal should be an operational warning, got: %s", warnBuf.String())
+		}
+	})
+
+	t.Run("non-ceiling staging failure stays internal_error", func(t *testing.T) {
+		app, _, _, token := setupBuildTest(t)
+		app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+			return nil, os.ErrInvalid
+		}
+
+		req := newBuildRequest(map[string]any{
+			"context":    ".",
+			"dockerfile": "Dockerfile",
+			"image":      "example:test",
+		}, token)
+		w := httptest.NewRecorder()
+		app.handleBuild(w, req)
+
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("expected %d, got %d", http.StatusInternalServerError, w.Code)
+		}
+		var resp struct {
+			Code string `json:"code"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Code != "internal_error" {
+			t.Errorf("code = %q, want internal_error", resp.Code)
+		}
+	})
+}
+
+// TestBuildStagingCeilingRefusalRealPathLeavesNoResidueOrLease proves the
+// full handler path with the REAL production staging walker (tiny injected
+// ceilings): the limit refusal removes the partially created operation tree,
+// registers no operation, invokes no Docker command, and releases the
+// acquired session MAC-use lease.
+func TestBuildStagingCeilingRefusalRealPathLeavesNoResidueOrLease(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	app.OperationSupervisor = newOperationSupervisor()
+	app.MACCoordinator = newSessionMACCoordinator(app.DB, newTestSessionMACDriver(LSMSELinux))
+
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSystemSession: %v", err)
+	}
+
+	ctxDir := filepath.Join(result.Session.Workspace, "buildctx")
+	if err := os.MkdirAll(ctxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ctxDir, "Dockerfile"), []byte("FROM alpine:3.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ctxDir, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Real production walker with an entries ceiling the fixture exceeds.
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		return stageBuildContextInternal(ctx, ws, cpath, dfrel, rdir, opID, defaultStagingSyscall(), nil, buildStagingCeilings{MaxBytes: 1 << 20, MaxEntries: 1, MaxDepth: 4})
+	}
+
+	dockerCalled := false
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerCalled = true
+		return exec.CommandContext(ctx, name, args...)
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    "buildctx",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != "build_context_too_large" {
+		t.Errorf("code = %q, want build_context_too_large", resp.Code)
+	}
+
+	if dockerCalled {
+		t.Error("Docker must not be invoked after a ceiling refusal")
+	}
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Errorf("no operation may be registered after a ceiling refusal, got %d", len(app.OperationSupervisor.ops))
+	}
+
+	// No operation staging tree remains under runtime/builds.
+	builds := filepath.Join(app.Config.RuntimeDir, "builds")
+	entries, err := os.ReadDir(builds)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("cannot inspect the builds runtime directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("staging residue remains under runtime/builds: %v", entries)
+	}
+
+	// The acquired session MAC-use lease must be released.
+	app.MACCoordinator.mu.Lock()
+	leases := len(app.MACCoordinator.sessionUseLeases)
+	app.MACCoordinator.mu.Unlock()
+	if leases != 0 {
+		t.Errorf("stale session MAC-use lease remains after the ceiling refusal (%d lease(s))", leases)
 	}
 }

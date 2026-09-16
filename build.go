@@ -142,6 +142,19 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if leaseRelease != nil {
 			leaseRelease()
 		}
+		// The typed build-staging ceiling refusal (H4) is an expected
+		// client-input refusal of the single canonical build-context-limit
+		// code; its message names only the exhausted dimension. Every other
+		// staging failure stays internal_error.
+		var ceilingErr *buildStagingCeilingError
+		if errors.As(err, &ceilingErr) {
+			opLog(ctx).Warn("build context exceeds the staging ceilings",
+				slog.String("operation", "build"),
+				slog.String("error", err.Error()),
+			)
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "build_context_too_large", "build context exceeds the staging "+ceilingErr.Resource+" ceiling", session.PrincipalName)
+			return
+		}
 		opLog(ctx).Error("build context staging failed",
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),

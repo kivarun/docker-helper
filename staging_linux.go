@@ -11,6 +11,138 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// buildStagingCeilings holds the fixed Release-2.2 build-staging security
+// ceilings for one staging operation. The values are measured production
+// constants, not configuration: see productionBuildStagingCeilings and
+// docs/architecture.md (build context) for the measurement rationale. They
+// are hard security ceilings, not Principal/Launcher/Session quotas, and
+// have no configuration, CLI, or override surface.
+type buildStagingCeilings struct {
+	// MaxBytes bounds the staged payload: the logical size (st_size) of
+	// every unique regular-file inode staged once, plus the target bytes of
+	// every staged symlink. Hardlink names share the first copy's payload
+	// reservation.
+	MaxBytes int64
+	// MaxEntries bounds every attacker-variable source entry staging would
+	// materialize below the context root: regular files, hardlink
+	// directory entries, symlinks and directories. The context root itself
+	// is not an attacker-variable entry.
+	MaxEntries int64
+	// MaxDepth bounds destination nesting and the recursive descent of the
+	// descriptor-relative walker: the context root is depth 0, a direct
+	// child is depth 1.
+	MaxDepth int
+}
+
+// productionBuildStagingCeilings are the selected Release-2.2 hard ceilings.
+// Measured headroom against representative build contexts (docker-helper
+// repository working tree including a 17 MB built binary, node_modules-style
+// trees, generated coding-agent contexts: ≤35 MB payload, ≤2402 entries,
+// depth ≤6) and the smallest evidence-backed UAT environment (Tumbleweed VM,
+// 3 GiB RAM, /run tmpfs sized 20% of RAM ≈ 614 MB with 800k inodes, per the
+// systemd /run tmpfs defaults):
+//
+//   - 128 MiB staged bytes ≤ 21% of that /run tmpfs, ~3.7x the largest
+//     measured realistic context;
+//   - 50000 entries ≤ 6.25% of the 800k inode budget, ~21x the measured
+//     node_modules-style tree;
+//   - depth 64 > 10x the measured maximum.
+var productionBuildStagingCeilings = buildStagingCeilings{
+	MaxBytes:   128 * 1024 * 1024,
+	MaxEntries: 50000,
+	MaxDepth:   64,
+}
+
+// buildStagingCeilingError is the typed expected refusal of a build-staging
+// ceiling. It names the exhausted dimension ("bytes", "entries" or "depth"),
+// the fixed ceiling, and the attempted reservation, and carries no source
+// path or file-name material. The build handler classifies it — and only it
+// — into the single public build-context-limit response; every other
+// staging failure stays internal_error.
+type buildStagingCeilingError struct {
+	Resource  string
+	Ceiling   int64
+	Attempted int64
+}
+
+func (e *buildStagingCeilingError) Error() string {
+	return fmt.Sprintf("build context exceeds the staging %s ceiling (attempted %d, ceiling %d)", e.Resource, e.Attempted, e.Ceiling)
+}
+
+// buildStagingBudget is the one mutable per-staging admission owner for the
+// three staging dimensions. It is created once per staging operation from
+// fixed ceilings, threaded through the existing descriptor-relative walker,
+// and consumed by reserve checks BEFORE the corresponding destination
+// action. Admission arithmetic is overflow-safe: the ceiling comparison
+// happens before any counter mutation, never "used += requested" afterwards.
+// It is never exposed outside the staging implementation.
+type buildStagingBudget struct {
+	ceilings         buildStagingCeilings
+	bytesRemaining   int64
+	entriesRemaining int64
+}
+
+func newBuildStagingBudget(ceilings buildStagingCeilings) *buildStagingBudget {
+	return &buildStagingBudget{
+		ceilings:         ceilings,
+		bytesRemaining:   ceilings.MaxBytes,
+		entriesRemaining: ceilings.MaxEntries,
+	}
+}
+
+// reserveBytes reserves the logical payload size of one unique regular-file
+// copy or one symlink target before its destination is created. The
+// comparison runs before the subtraction, so a near-max st_size (a sparse
+// source file) can never overflow into acceptance.
+func (b *buildStagingBudget) reserveBytes(size int64) error {
+	if size < 0 || size > b.bytesRemaining {
+		return &buildStagingCeilingError{Resource: "bytes", Ceiling: b.ceilings.MaxBytes, Attempted: size}
+	}
+	b.bytesRemaining -= size
+	return nil
+}
+
+// reserveEntry reserves one attacker-variable source entry (regular file,
+// hardlink directory entry, symlink or directory) before the corresponding
+// destination entry is created.
+func (b *buildStagingBudget) reserveEntry() error {
+	if b.entriesRemaining < 1 {
+		return &buildStagingCeilingError{Resource: "entries", Ceiling: b.ceilings.MaxEntries, Attempted: b.ceilings.MaxEntries + 1}
+	}
+	b.entriesRemaining--
+	return nil
+}
+
+// checkDepth refuses a destination directory whose own depth exceeds the
+// ceiling. The context root is depth 0, a direct child is depth 1; the
+// check runs before the destination mkdir and before the recursive descent.
+func (b *buildStagingBudget) checkDepth(depth int) error {
+	if depth > b.ceilings.MaxDepth {
+		return &buildStagingCeilingError{Resource: "depth", Ceiling: int64(b.ceilings.MaxDepth), Attempted: int64(depth)}
+	}
+	return nil
+}
+
+// admitEnumeration refuses appending one more entry to a directory
+// enumeration slice beyond the remaining global entry budget: appended is
+// the number of entries already appended from this directory, so appending
+// #appended+1 when appended >= entriesRemaining would push the slice past
+// the budget still available for reservation. This is what bounds
+// enumeration itself: a directory with more entries than the remaining
+// budget is refused during enumeration, before any of its entries is
+// materialized and before the slice can grow past the budget. A nil budget
+// (staging-residue cleanup) is unbounded by design: cleanup enumerates
+// whatever exists.
+func (b *buildStagingBudget) admitEnumeration(appended int64) error {
+	if b == nil {
+		return nil
+	}
+	if appended >= b.entriesRemaining {
+		return &buildStagingCeilingError{Resource: "entries", Ceiling: b.ceilings.MaxEntries, Attempted: b.ceilings.MaxEntries + 1}
+	}
+	return nil
+}
+
 // stagingHooks allows tests to inject behavior between critical operations.
 type stagingHooks struct {
 	afterWorkspacePin     func() error
@@ -54,7 +186,7 @@ func StageBuildContext(
 	runtimeDir string,
 	operationID string,
 ) (*stagedBuildContext, error) {
-	return stageBuildContextInternal(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID, defaultStagingSyscall(), nil)
+	return stageBuildContextInternal(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID, defaultStagingSyscall(), nil, productionBuildStagingCeilings)
 }
 
 func stageBuildContextInternal(
@@ -66,6 +198,7 @@ func stageBuildContextInternal(
 	operationID string,
 	sy stagingSyscall,
 	hooks *stagingHooks,
+	ceilings buildStagingCeilings,
 ) (*stagedBuildContext, error) {
 	if sy.Openat2 == nil {
 		return nil, fmt.Errorf("openat2 not available")
@@ -248,7 +381,12 @@ func stageBuildContextInternal(
 
 	hardlinkMap := make(map[devIno]string)
 
-	err = walkAndCopy(ctx, sourceFD, stagingFD, stagingFD, "", hardlinkMap, hooks)
+	// The one per-staging budget of the fixed ceilings: measured and
+	// reserved inside the existing descriptor-relative walker, never
+	// exposed outside the staging implementation.
+	budget := newBuildStagingBudget(ceilings)
+
+	err = walkAndCopy(ctx, sourceFD, stagingFD, stagingFD, "", hardlinkMap, hooks, budget, 0)
 	unix.Close(stagingFD)
 	if err != nil {
 		removeAllAtRecursive(buildsFD, operationID)
@@ -308,14 +446,14 @@ type devIno struct {
 	ino uint64
 }
 
-func walkAndCopy(ctx context.Context, sourceFD int, stagingRootFD int, stagingFD int, relPrefix string, hardlinkMap map[devIno]string, hooks *stagingHooks) error {
+func walkAndCopy(ctx context.Context, sourceFD int, stagingRootFD int, stagingFD int, relPrefix string, hardlinkMap map[devIno]string, hooks *stagingHooks, budget *buildStagingBudget, dirDepth int) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
 
-	entries, err := readDirectoryEntries(sourceFD)
+	entries, err := readDirectoryEntries(sourceFD, budget)
 	if err != nil {
 		return fmt.Errorf("cannot read directory: %w", err)
 	}
@@ -327,7 +465,9 @@ func walkAndCopy(ctx context.Context, sourceFD int, stagingRootFD int, stagingFD
 		default:
 		}
 
-		if err := copyEntry(ctx, sourceFD, entry.name, stagingRootFD, stagingFD, relPrefix, hardlinkMap, hooks); err != nil {
+		// dirDepth is the depth of the directory being walked; its entries
+		// live one level below it (the context root is depth 0).
+		if err := copyEntry(ctx, sourceFD, entry.name, stagingRootFD, stagingFD, relPrefix, hardlinkMap, hooks, budget, dirDepth+1); err != nil {
 			return err
 		}
 	}
@@ -340,9 +480,10 @@ type dirEntry struct {
 	ino  uint64
 }
 
-func readDirectoryEntries(fd int) ([]dirEntry, error) {
+func readDirectoryEntries(fd int, budget *buildStagingBudget) ([]dirEntry, error) {
 	buf := make([]byte, 4096)
 	var entries []dirEntry
+	appended := int64(0)
 
 	for {
 		n, err := unix.Getdents(fd, buf)
@@ -385,7 +526,15 @@ func readDirectoryEntries(fd int) ([]dirEntry, error) {
 			name := unix.ByteSliceToString(buf[nameStart : nameStart+nameEnd])
 
 			if name != "." && name != ".." {
+				// Enumeration itself is budget-aware: appending an entry
+				// beyond the remaining global entry budget refuses during
+				// enumeration, before any of this directory's entries is
+				// materialized.
+				if err := budget.admitEnumeration(appended); err != nil {
+					return entries, err
+				}
 				entries = append(entries, dirEntry{name: name, ino: ino})
+				appended++
 			}
 
 			off = entryStart + int(reclen)
@@ -395,7 +544,7 @@ func readDirectoryEntries(fd int) ([]dirEntry, error) {
 	return entries, nil
 }
 
-func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD int, stagingDirFD int, relPrefix string, hardlinkMap map[devIno]string, hooks *stagingHooks) error {
+func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD int, stagingDirFD int, relPrefix string, hardlinkMap map[devIno]string, hooks *stagingHooks, budget *buildStagingBudget, depth int) error {
 	oPathFD, err := unix.Openat(sourceDirFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return fmt.Errorf("cannot O_PATH open %s: %w", name, err)
@@ -418,6 +567,15 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 			return fmt.Errorf("cannot read symlink %s: %w", name, err)
 		}
 		target := unix.ByteSliceToString(buf[:n])
+
+		// The symlink target payload and the entry are reserved before the
+		// destination symlink is created.
+		if err := budget.reserveBytes(int64(len(target))); err != nil {
+			return err
+		}
+		if err := budget.reserveEntry(); err != nil {
+			return err
+		}
 
 		if err := unix.Symlinkat(target, stagingDirFD, name); err != nil {
 			return fmt.Errorf("cannot create symlink %s: %w", name, err)
@@ -442,6 +600,13 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 		di := devIno{dev: st.Dev, ino: st.Ino}
 		if relPath, ok := hardlinkMap[di]; ok {
 			unix.Close(oPathFD)
+			// A hardlink name is an entry of its own even though it does
+			// not duplicate the file payload inode: reserve the entry
+			// before the destination link is created. The payload was
+			// already reserved once by the first staged copy of the inode.
+			if err := budget.reserveEntry(); err != nil {
+				return err
+			}
 			if err := unix.Linkat(stagingRootFD, relPath, stagingDirFD, name, 0); err != nil {
 				return fmt.Errorf("cannot create hardlink %s: %w", name, err)
 			}
@@ -475,6 +640,21 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 		}
 
 		unix.Close(oPathFD)
+
+		// The first staged copy of a unique regular-file inode reserves its
+		// logical payload size and the entry before the destination file is
+		// created or copied. st_size is the conservative reservation: the
+		// copier de-sparsifies, so a sparse source file occupies its logical
+		// size. The comparison inside reserveBytes runs before the counter
+		// mutation, so a near-max st_size cannot overflow into acceptance.
+		if err := budget.reserveBytes(st.Size); err != nil {
+			unix.Close(readFD)
+			return err
+		}
+		if err := budget.reserveEntry(); err != nil {
+			unix.Close(readFD)
+			return err
+		}
 
 		createFD, err := unix.Openat(stagingDirFD, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
@@ -549,6 +729,19 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 
 		unix.Close(oPathFD)
 
+		// The next directory level is admitted before the destination mkdir
+		// and before the recursive descent into it (the context root is
+		// depth 0, this directory's own depth is `depth`), and the
+		// directory itself is one attacker-variable entry.
+		if err := budget.checkDepth(depth); err != nil {
+			unix.Close(sourceReadFD)
+			return err
+		}
+		if err := budget.reserveEntry(); err != nil {
+			unix.Close(sourceReadFD)
+			return err
+		}
+
 		if err := unix.Mkdirat(stagingDirFD, name, 0o700); err != nil {
 			unix.Close(sourceReadFD)
 			return fmt.Errorf("cannot create directory %s in staging: %w", name, err)
@@ -561,7 +754,7 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 			return fmt.Errorf("cannot open destination directory %s: %w", name, err)
 		}
 
-		err = walkAndCopy(ctx, sourceReadFD, stagingRootFD, destFD, filepath.Join(relPrefix, name), hardlinkMap, hooks)
+		err = walkAndCopy(ctx, sourceReadFD, stagingRootFD, destFD, filepath.Join(relPrefix, name), hardlinkMap, hooks, budget, depth)
 		unix.Close(sourceReadFD)
 
 		if err != nil {
@@ -667,7 +860,7 @@ func removeAllAtRecursive(parentFD int, name string) {
 	}
 	defer unix.Close(fd)
 
-	entries, err := readDirectoryEntries(fd)
+	entries, err := readDirectoryEntries(fd, nil)
 	if err != nil {
 		return
 	}
