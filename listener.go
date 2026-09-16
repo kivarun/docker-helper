@@ -11,7 +11,7 @@ const DefaultHTTPAddress = "127.0.0.1:52375"
 
 // ListenerFactory creates listeners for the daemon.
 // Can be replaced in tests.
-var ListenerFactory = &defaultListenerFactory{}
+var ListenerFactory listenerFactory = &defaultListenerFactory{}
 
 // listenerFactory defines how listeners are created.
 type listenerFactory interface {

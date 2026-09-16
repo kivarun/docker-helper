@@ -1447,3 +1447,212 @@ func TestCreateUnixListenerPermissionsSystem(t *testing.T) {
 		t.Errorf("permissions = %o, want 0666", perm)
 	}
 }
+
+// --- H7: the optional loopback TCP listener is never authoritative ---
+
+// stubH7Listener is a net.Listener whose Close state is observable. It is
+// never served; these tests only exercise listener acquisition.
+type stubH7Listener struct {
+	closed bool
+}
+
+func (l *stubH7Listener) Accept() (net.Conn, error) {
+	return nil, net.ErrClosed
+}
+
+func (l *stubH7Listener) Close() error {
+	l.closed = true
+	return nil
+}
+
+func (l *stubH7Listener) Addr() net.Addr {
+	return stubH7Addr{}
+}
+
+type stubH7Addr struct{}
+
+func (stubH7Addr) Network() string { return "unix" }
+func (stubH7Addr) String() string  { return "/tmp/stub-h7.sock" }
+
+// stubH7Factory is a listenerFactory seam recording how often each creator
+// was consulted (no retry/loop may consult the TCP creator more than once).
+type stubH7Factory struct {
+	unixListener net.Listener
+	unixErr      error
+	tcpListener  net.Listener
+	tcpErr       error
+	unixCalls    int
+	tcpCalls     int
+	tcpAddress   string
+}
+
+func (f *stubH7Factory) createUnixListener(socketPath string, mode DeploymentMode) (net.Listener, error) {
+	f.unixCalls++
+	return f.unixListener, f.unixErr
+}
+
+func (f *stubH7Factory) createTCPListener(address string) (net.Listener, error) {
+	f.tcpCalls++
+	f.tcpAddress = address
+	return f.tcpListener, f.tcpErr
+}
+
+// h7AddrInUse builds the deterministic TCP bind failure the hostile UAT
+// reproduces on the real service: an unprivileged local user holds the
+// configured loopback port, so the daemon's bind answers EADDRINUSE.
+func h7AddrInUse(addr string) error {
+	return &net.OpError{
+		Op:  "listen",
+		Net: "tcp",
+		Err: syscall.EADDRINUSE,
+	}
+}
+
+// TestH7PreFixTCPPortCaptureDestroysUnixListener is the H7 defect
+// demonstration: an unprivileged local user binds the configured loopback TCP
+// port, the Unix bind succeeds, and the pre-fix startup DESTROYS the
+// authoritative Unix listener (closes it, removes its socket) and fails the
+// whole daemon — which the shipped Restart=on-failure unit then turns into a
+// restart storm and start-limit failure. This test is removed together with
+// the defect in the H7 fix commit and replaced by
+// TestH7TCPPortCaptureLeavesUnixListenerAuthoritative.
+func TestH7PreFixTCPPortCaptureDestroysUnixListener(t *testing.T) {
+	setupTestLoggingDiscard(t)
+	factory := &stubH7Factory{unixListener: &stubH7Listener{}, tcpErr: h7AddrInUse(DefaultHTTPAddress)}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	if err := os.WriteFile(socketPath, []byte("sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := prepareListeners(ModeSystem, socketPath, DefaultHTTPAddress)
+	if err == nil {
+		t.Fatal("pre-fix defect: TCP port capture must deny the daemon startup")
+	}
+	if !factory.unixListener.(*stubH7Listener).closed {
+		t.Error("pre-fix defect: the successful Unix listener must have been closed")
+	}
+	if _, statErr := os.Stat(socketPath); !os.IsNotExist(statErr) {
+		t.Error("pre-fix defect: the Unix socket should have been removed")
+	}
+}
+
+// TestH7TCPPortCaptureLeavesUnixListenerAuthoritative is the H7 contract: the
+// Unix listener is authoritative, so after a successful Unix bind a TCP
+// EADDRINUSE is DEGRADED STARTUP, not daemon failure — the Unix listener
+// stays live, its socket is not removed, the API keeps serving over Unix,
+// the TCP listener is absent for this daemon lifetime, exactly one bounded
+// operational warning names the configured address and the bind failure, and
+// no retry consults the TCP creator again.
+func TestH7TCPPortCaptureLeavesUnixListenerAuthoritative(t *testing.T) {
+	opBuf, _ := setupTestLogging(t)
+	factory := &stubH7Factory{unixListener: &stubH7Listener{}, tcpErr: h7AddrInUse(DefaultHTTPAddress)}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	if err := os.WriteFile(socketPath, []byte("sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	unixListener, tcpListener, err := prepareListeners(ModeSystem, socketPath, DefaultHTTPAddress)
+	if err != nil {
+		t.Fatalf("TCP port capture must not deny the authoritative Unix service, got: %v", err)
+	}
+	if unixListener == nil {
+		t.Fatal("Unix listener must be returned")
+	}
+	if factory.unixListener.(*stubH7Listener).closed {
+		t.Error("the successful Unix listener must stay open on TCP degradation")
+	}
+	if tcpListener != nil {
+		t.Error("the TCP listener must be absent for this daemon lifetime")
+	}
+	if _, statErr := os.Stat(socketPath); statErr != nil {
+		t.Errorf("the Unix socket must not be removed on TCP failure: %v", statErr)
+	}
+	if factory.tcpCalls != 1 {
+		t.Errorf("no retry may consult the TCP creator again, got %d calls", factory.tcpCalls)
+	}
+	out := opBuf.String()
+	if !strings.Contains(out, DefaultHTTPAddress) {
+		t.Errorf("the degraded-startup warning must contain the configured address:\n%s", out)
+	}
+	if !strings.Contains(out, "address already in use") {
+		t.Errorf("the degraded-startup warning must contain the bind failure:\n%s", out)
+	}
+	if strings.Contains(out, "daemon startup failed") {
+		t.Errorf("degradation must not be logged as a fatal startup failure:\n%s", out)
+	}
+}
+
+// TestH7UnixFailureStillFatal proves the Unix listener stays authoritative:
+// Unix creation failure remains a fatal startup error and no TCP bind is
+// attempted after it.
+func TestH7UnixFailureStillFatal(t *testing.T) {
+	setupTestLoggingDiscard(t)
+	factory := &stubH7Factory{unixErr: errors.New("cannot listen on /run/docker-helper/docker-helper.sock: permission denied")}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	unixListener, tcpListener, err := prepareListeners(ModeSystem, "/run/docker-helper/docker-helper.sock", DefaultHTTPAddress)
+	if err == nil {
+		t.Fatal("Unix listener creation failure must remain fatal")
+	}
+	if unixListener != nil || tcpListener != nil {
+		t.Error("no listener may be returned on fatal Unix failure")
+	}
+	if factory.tcpCalls != 0 {
+		t.Errorf("TCP creation must not be attempted after fatal Unix failure, got %d calls", factory.tcpCalls)
+	}
+}
+
+// TestH7SystemModeBothListenersServed proves the healthy system-mode path is
+// unchanged: Unix success + TCP success returns both listeners and emits no
+// degradation warning.
+func TestH7SystemModeBothListenersServed(t *testing.T) {
+	opBuf, _ := setupTestLogging(t)
+	factory := &stubH7Factory{unixListener: &stubH7Listener{}, tcpListener: &stubH7Listener{}}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	unixListener, tcpListener, err := prepareListeners(ModeSystem, "/tmp/stub-h7.sock", DefaultHTTPAddress)
+	if err != nil {
+		t.Fatalf("healthy system-mode listener acquisition must succeed: %v", err)
+	}
+	if unixListener == nil || tcpListener == nil {
+		t.Fatal("both listeners must be returned on success")
+	}
+	if out := opBuf.String(); strings.Contains(out, "unavailable") {
+		t.Errorf("no degradation warning may be emitted on the healthy path:\n%s", out)
+	}
+}
+
+// TestH7UserModeNeverAttemptsTCP proves user mode is unchanged: the TCP
+// creator is never consulted.
+func TestH7UserModeNeverAttemptsTCP(t *testing.T) {
+	setupTestLoggingDiscard(t)
+	factory := &stubH7Factory{unixListener: &stubH7Listener{}}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	unixListener, tcpListener, err := prepareListeners(ModeUser, "/tmp/stub-h7.sock", "")
+	if err != nil {
+		t.Fatalf("user-mode acquisition must succeed: %v", err)
+	}
+	if unixListener == nil || tcpListener != nil {
+		t.Error("user mode must return exactly the Unix listener")
+	}
+	if factory.tcpCalls != 0 {
+		t.Errorf("user mode must never attempt TCP, got %d calls", factory.tcpCalls)
+	}
+}
