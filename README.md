@@ -995,6 +995,27 @@ Build args are not intended for secrets. Values may become visible in Docker
 build output depending on the Dockerfile/build process. Docker Helper audit
 records contain only `build_arg_keys`, never build-arg values.
 
+**Build-context ceilings.** The build context is staged into a helper-owned
+runtime directory before Docker sees it, and one build request has fixed,
+non-configurable security ceilings for that staging work — regardless of
+mode or session:
+
+- staged payload bytes: 128 MiB (the logical size of each unique file;
+  hardlink names share one payload reservation; symlink targets count);
+- staged entries: 50000 (every file, directory, symlink and hardlink name
+  below the context root; the context root itself is not counted);
+- directory depth: 64 (the context root is depth 0, a direct child is 1).
+
+A context beyond a ceiling is refused before anything is staged — the
+request fails with HTTP 400 and the code `build_context_too_large` (the
+message names only the exhausted dimension: `bytes`, `entries` or
+`depth`); the CLI prints `API error (status 400, code
+build_context_too_large) ...` and exits 1. No Docker build is started and
+no staging residue remains. If a legitimate context hits a ceiling, shrink
+what the context delivers (for example a `.dockerignore`-style split of
+build outputs out of the context directory); there is no override, because
+the ceilings are a hard host-protection boundary, not a quota.
+
 Response (HTTP 201):
 
 ```json
