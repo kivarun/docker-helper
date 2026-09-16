@@ -455,14 +455,16 @@ func h8RunQueuedCreatesDisableProof(t *testing.T, app *App, entered <-chan struc
 	refusals := 0
 	disableLauncherCommitted := false
 	disablePrincipalCommitted := false
-	inFlightErr := false
-	for refusals < h8QueueBudgetCount || !disableLauncherCommitted || !disablePrincipalCommitted || !inFlightErr {
+	var inFlightErr error
+	inFlightSettled := false
+	for refusals < h8QueueBudgetCount || !disableLauncherCommitted || !disablePrincipalCommitted || !inFlightSettled {
 		select {
 		case err := <-createErrs[0]:
 			if err == nil {
 				t.Fatal("the in-flight create whose MAC preparation exceeded the budget must fail, not succeed")
 			}
-			inFlightErr = true
+			inFlightErr = err
+			inFlightSettled = true
 		case err := <-createErrs[1]:
 			refusalErrs[0] = err
 			refusals++
@@ -491,10 +493,17 @@ func h8RunQueuedCreatesDisableProof(t *testing.T, app *App, entered <-chan struc
 	}
 
 	// 5. Every queued create must have been refused, never executed later:
-	//    a refusal is an error, never a committed Session.
+	//    a refusal is an error, never a committed Session, and the typed
+	//    refusal is the stable bounded lifecycle-busy class — a queued
+	//    create that executed its own later MAC transition would instead
+	//    fail inside the MAC preparation chain after at least one more
+	//    whole-transition budget.
 	for i, err := range refusalErrs {
 		if err == nil {
 			t.Fatalf("queued create %d committed a Session instead of being refused", i+1)
+		}
+		if !errors.Is(err, ErrLifecycleBusy) {
+			t.Fatalf("queued create %d error = %v, want ErrLifecycleBusy", i+1, err)
 		}
 	}
 
@@ -502,13 +511,11 @@ func h8RunQueuedCreatesDisableProof(t *testing.T, app *App, entered <-chan struc
 	//    budget: its parked command was terminated at the budget and the
 	//    failure carries the typed budget error inside the MAC preparation
 	//    chain — never a false success.
-	if err := <-createErrs[0]; err != nil {
-		if !errors.Is(err, ErrMACPreparation) {
-			t.Fatalf("in-flight create error = %v, want ErrMACPreparation in the failure chain", err)
-		}
-		if !errors.Is(err, ErrMACTransitionBudgetExceeded) {
-			t.Fatalf("in-flight create error = %v, want ErrMACTransitionBudgetExceeded in the failure chain", err)
-		}
+	if !errors.Is(inFlightErr, ErrMACPreparation) {
+		t.Fatalf("in-flight create error = %v, want ErrMACPreparation in the failure chain", inFlightErr)
+	}
+	if !errors.Is(inFlightErr, ErrMACTransitionBudgetExceeded) {
+		t.Fatalf("in-flight create error = %v, want ErrMACTransitionBudgetExceeded in the failure chain", inFlightErr)
 	}
 
 	// 7. Post-disable state: both disable targets are durably disabled, no
@@ -1151,6 +1158,70 @@ func TestH8CreateMACBudgetFailureHTTPClass(t *testing.T) {
 	}
 	if got := h8SessionCount(t, app, app.userModeDefault.launcherID); got != 0 {
 		t.Errorf("budget-expired create committed %d sessions, want 0", got)
+	}
+}
+
+// TestH8CreateLifecycleBusyHTTPClass proves the public boundary of the
+// non-waiting Session-create admission (H8): a create issued through the
+// real route handler while one parked create holds the lifecycle
+// coordination answers the stable lifecycle_busy class (HTTP 503) through
+// the real handler — the audit record carries the same class — and commits
+// no Session and resolves no policy state.
+func TestH8CreateLifecycleBusyHTTPClass(t *testing.T) {
+	h8BudgetOverride(t)
+
+	app, entered, release := setupH8AppArmorParkedCoordinator(t)
+	defer close(release)
+	adminHash := sha256.Sum256([]byte(testAdminToken))
+	app.AdminTokenHash = adminHash
+
+	// The in-flight create parks in the MAC command and holds the
+	// lifecycle coordination.
+	parkErr := make(chan error, 1)
+	go func() {
+		_, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+		parkErr <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(macLivenessObservationWindow):
+		t.Fatal("the parked create never reached the AppArmor parser command")
+	}
+
+	auditBuf := new(bytes.Buffer)
+	initLoggers(io.Discard, auditBuf, slog.LevelInfo, true)
+	defer logging.reset()
+
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
+	body, err := json.Marshal(map[string]string{"workspace": workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	withAdminToken(req)
+	w := httptest.NewRecorder()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", withRequestID(app.handleCreateSession))
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("lifecycle-busy create: status = %d, want 503: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot decode error response: %v", err)
+	}
+	if resp.Code != "lifecycle_busy" {
+		t.Errorf("error code = %q, want lifecycle_busy", resp.Code)
+	}
+	if !strings.Contains(auditBuf.String(), `"result":"lifecycle_busy"`) {
+		t.Errorf("audit record does not carry the lifecycle_busy class: %s", auditBuf.String())
+	}
+	if got := h8SessionCount(t, app, app.userModeDefault.launcherID); got != 0 {
+		t.Errorf("lifecycle-busy create committed %d sessions, want 0", got)
 	}
 }
 

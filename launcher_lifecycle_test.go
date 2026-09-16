@@ -1079,9 +1079,11 @@ func launcherLifecycleWorkspace(t *testing.T, app *App, db *sql.DB) string {
 }
 
 // TestRaceNoNewSessionAfterCheckedDelete proves that a concurrent Session
-// creation for a Launcher under checked deletion cannot slip in mid-delete: the
-// create serializes behind the delete's lifecycle lock and, once the owner is
-// removed, refuses with launcher-not-found.
+// creation for a Launcher under checked deletion cannot produce a Session
+// against the vanishing owner: the create's non-waiting admission refuses it
+// at the held lifecycle boundary (or, once the delete removed the owner,
+// the stale-owner recheck refuses with launcher-not-found) — either way no
+// Session is created for the deleted Launcher.
 func TestRaceNoNewSessionAfterCheckedDelete(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 	app, atQuiesce, release := quiesceBarrierApp(t, db)
@@ -1097,10 +1099,11 @@ func TestRaceNoNewSessionAfterCheckedDelete(t *testing.T) {
 
 	<-atQuiesce
 
-	// A concurrent Session creation for this Launcher is serialized behind the
-	// delete's lifecycle lock — it cannot complete while the delete is parked —
-	// and once the delete removes the owner it must be refused rather than
-	// producing a Session against a deleted Launcher.
+	// A concurrent Session creation for this Launcher cannot complete while
+	// the delete is parked: its non-waiting admission refuses it at the held
+	// lifecycle boundary, and if it is admitted only after the delete
+	// removed the owner the stale-owner recheck refuses it instead — either
+	// way it must not produce a Session against a deleted Launcher.
 	createDone := make(chan error, 1)
 	go func() {
 		_, err := app.createSessionAuthorized(
