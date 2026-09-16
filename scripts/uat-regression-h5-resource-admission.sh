@@ -125,7 +125,16 @@ reg_session "$cred_b" "$WS_B" || { reg_fail "session B create failed"; reg_resul
 TOKEN_B="$REG_SESSION_TOKEN"
 
 IMAGE="alpine:3.24"
-HOLD='sh -ec "sleep 300"'
+
+# hold_run TOKEN LOGFILE MOUNT_SOURCE — one long-lived harmless operation in
+# the background. The binary is exec'd directly (not through the dh shell
+# function) so that $! is the docker-helper CLI process itself and a SIGTERM
+# reaches the CLI's own cancellation path (a backgrounded function call would
+# make $! the intermediate subshell, and the signal would orphan the CLI).
+hold_run() { # TOKEN LOGFILE MOUNT_SOURCE
+  DOCKER_HELPER_SESSION_TOKEN="$1" exec /usr/bin/docker-helper run \
+    --image "$IMAGE" --mount "$3:/mnt/shared" -- sh -ec 'sleep 300' >"$2" 2>&1
+}
 
 # --- baselines ----------------------------------------------------------------
 PINS_BEFORE="$(pin_count)"
@@ -141,9 +150,7 @@ reg_ok "baselines: pins=$PINS_BEFORE mac=$MAC_BEFORE builds=$BUILDS_BEFORE conta
 # --- A: Session ceiling — 4 long-lived operations, 5th refused immediately -----
 PIDS_A=()
 for i in 1 2 3 4; do
-  DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-    dh run --image "$IMAGE" --mount "shareda$i:/mnt/shared$i" -- sh -ec "sleep 300" \
-    >"/tmp/h5-run-a$i.log" 2>&1 &
+  hold_run "$TOKEN_A" "/tmp/h5-run-a$i.log" "shareda$i" &
   PIDS_A+=("$!")
 done
 # Wait until all four operation containers are observable.
@@ -230,9 +237,7 @@ fi
 # --- A: second Session uses free global capacity (distinguishes scopes) -------
 PIDS_B=()
 for i in 1 2 3 4; do
-  DOCKER_HELPER_SESSION_TOKEN="$TOKEN_B" \
-    dh run --image "$IMAGE" --mount "sharedb$i:/mnt/shared$i" -- sh -ec "sleep 300" \
-    >"/tmp/h5-run-b$i.log" 2>&1 &
+  hold_run "$TOKEN_B" "/tmp/h5-run-b$i.log" "sharedb$i" &
   PIDS_B+=("$!")
 done
 up=0
