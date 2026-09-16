@@ -29,6 +29,23 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reserve fixed Release-2.2 capacity (SC2/H5) before any expensive
+	// preparation: the session-use lease, build-request probing, snapshot
+	// exposure resolution, and the H4 staging all happen while the
+	// reservation is held, and every failure path releases it exactly once.
+	// At a security ceiling the request is refused immediately; there is no
+	// queue and no waiting admission. Tests without a supervisor skip the
+	// reservation (the reservation and its release paths are nil-safe).
+	var reservation *capacityReservation
+	if a.OperationSupervisor != nil {
+		var decision admissionDecision
+		reservation, decision = a.OperationSupervisor.reserve(session.ID, session.LauncherID, operationKindBuild)
+		if decision != admissionAccepted {
+			writeOperationAdmissionRejected(ctx, w, "build", decision, session.PrincipalName)
+			return
+		}
+	}
+
 	// Acquire session-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
@@ -40,16 +57,26 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "build"),
 				slog.String("error", leaseErr.Error()),
 			)
+			// The capacity reservation was never used: release it.
+			reservation.Release()
 			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
 	}
 
-	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
-	if err != nil {
+	// releasePreparation is the pre-registration release owner for the
+	// session-use lease and the capacity reservation. Every failure path
+	// before the operation is registered calls it exactly once.
+	releasePreparation := func() {
 		if leaseRelease != nil {
 			leaseRelease()
 		}
+		reservation.Release()
+	}
+
+	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
+	if err != nil {
+		releasePreparation()
 		// The public response is the stable non-disclosing
 		// invalid_build_context contract; the resolver's host-filesystem
 		// diagnostics stay operational detail.
@@ -64,9 +91,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// Compute canonical relative Dockerfile path from the resolved absolute path.
 	dockerfileRel, err := filepath.Rel(contextPath, dockerfilePath)
 	if err != nil || !filepath.IsLocal(dockerfileRel) || dockerfileRel == "." {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
+		releasePreparation()
 		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
 		return
 	}
@@ -81,9 +106,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// refusal for an ordinary read of a valid source.
 	contextExposure, err := resolveSessionFilesystemExposure(authority.Snapshot, contextPath, "", true)
 	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
+		releasePreparation()
 		opLog(ctx).Error("cannot resolve build context filesystem exposure",
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
@@ -93,9 +116,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	dockerfileExposure, err := resolveSessionFilesystemExposure(authority.Snapshot, dockerfilePath, "", true)
 	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
+		releasePreparation()
 		opLog(ctx).Error("cannot resolve dockerfile filesystem exposure",
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
@@ -107,9 +128,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// Validate build-arg names and collect sorted keys.
 	buildArgKeys, err := validateBuildArgs(req.BuildArgs)
 	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
+		releasePreparation()
 		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_args", "invalid build args", session.PrincipalName)
 		return
 	}
@@ -121,9 +140,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// the operation so that a failure here does not leave a zombie operation.
 	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
 	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
+		releasePreparation()
 		opLog(ctx).Error("cannot create session Docker directory",
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
@@ -132,16 +149,29 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create the operation first so we have an ID for staging.
+	// Create the operation first so we have an ID for staging. The capacity
+	// reservation transfers to the operation here: the rollback paths after
+	// this point release it through the operation, and the terminal
+	// transition releases it exactly once.
 	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize, session.PrincipalName, session.LauncherID, session.LauncherName)
 	op.auditBuildArgKeys = buildArgKeys
+	op.macLeaseRelease = leaseRelease
+	if reservation != nil {
+		op.capacityRelease = reservation.release
+		reservation.release = nil
+	}
 
 	// Stage the build context into an isolated directory.
 	staged, err := a.stageBuildContext(ctx, session.Workspace, contextPath, dockerfileRel, cfg.RuntimeDir, op.ID)
 	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
+		// The capacity reservation transferred to the operation at creation,
+		// so this release goes through the operation (exactly once) alongside
+		// the lease — never through the pre-registration closure, whose
+		// reservation release is already nil.
+		if op.macLeaseRelease != nil {
+			op.macLeaseRelease()
 		}
+		op.releaseCapacity()
 		// The typed build-staging ceiling refusal (H4) is an expected
 		// client-input refusal of the single canonical build-context-limit
 		// code; its message names only the exhausted dimension. Every other
@@ -163,9 +193,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Register the operation: a single final admission after the H4 staging
+	// is complete. The capacity was reserved before any of that preparation;
+	// final admission re-checks only the lifecycle closure (shutdown/quiesce
+	// may still refuse) and the reservation has already transferred to the
+	// operation, which releases it exactly once at its terminal state.
 	if a.OperationSupervisor != nil {
-		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
-			// Cleanup staging before releasing lease.
+		if decision := a.OperationSupervisor.admitReserved(op, reservation); decision != admissionAccepted {
+			// Cleanup staging before releasing lease and capacity.
 			cleanupErr := staged.Cleanup()
 			if cleanupErr != nil {
 				opLog(ctx).Error("staging cleanup failed after admit rejection — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
@@ -174,22 +209,15 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 					slog.String("error", cleanupErr.Error()),
 				)
 			}
-			if cleanupErr == nil && leaseRelease != nil {
-				leaseRelease()
+			if cleanupErr == nil && op.macLeaseRelease != nil {
+				op.macLeaseRelease()
 			}
-			if decision == admissionRefusedShutdown {
-				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
-			} else {
-				writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "build", "launcher_unavailable", "launcher is not available", session.PrincipalName)
-			}
+			op.releaseCapacity()
+			writeOperationAdmissionRejected(ctx, w, "build", decision, session.PrincipalName)
 			return
 		}
 		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
-
-	// Lease is now associated with the registered operation; it will be
-	// released by waitBuildCompletion after cmd.Wait().
-	op.macLeaseRelease = leaseRelease
 
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:                   "build.start",
@@ -409,7 +437,10 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, nextOffset, truncated := op.LogBuffer.Range(offset)
+	// The bounded response chunk (SC2/H5): one HTTP logs response carries at
+	// most logResponseChunkBytes raw retained bytes. next_offset follows the
+	// returned bytes; the CLI and API consumers walk the chunks.
+	data, nextOffset, truncated := op.LogBuffer.Range(offset, logResponseChunkBytes)
 
 	resp := operationLogsResponse{
 		OK:          true,

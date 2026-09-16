@@ -152,17 +152,37 @@ case "$NRESTARTS" in
 esac
 
 # --- Unix authority: socket exists, authenticated API + health work -------------
-if [ -S "$SOCK" ]; then
+# The service unit is Type=exec: `systemctl restart` returns when the daemon
+# process is exec'd, before the daemon has bound the Unix socket. Wait for the
+# socket to appear (bounded) instead of racing daemon startup; the invariant
+# proven here is unchanged — the authoritative Unix socket must exist and serve
+# during degraded startup. A socket that never appears still fails.
+SOCK_OK=1
+for _ in $(seq 1 60); do
+  if [ -S "$SOCK" ]; then SOCK_OK=0; break; fi
+  sleep 0.5
+done
+if [ "$SOCK_OK" -eq 0 ]; then
   reg_ok "authoritative Unix socket exists"
 else
   reg_fail_early "authoritative Unix socket missing with the TCP port captured"
 fi
-if curl --silent --fail --max-time 2 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
+HEALTH_OK=1
+for _ in $(seq 1 20); do
+  if curl --silent --fail --max-time 2 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then HEALTH_OK=0; break; fi
+  sleep 0.5
+done
+if [ "$HEALTH_OK" -eq 0 ]; then
   reg_ok "GET /health over Unix works during degraded startup"
 else
   reg_fail_early "GET /health over Unix failed during degraded startup"
 fi
-if dh config show http_address >/dev/null 2>&1; then
+API_OK=1
+for _ in $(seq 1 20); do
+  if dh config show http_address >/dev/null 2>&1; then API_OK=0; break; fi
+  sleep 0.5
+done
+if [ "$API_OK" -eq 0 ]; then
   reg_ok "authenticated API operation over Unix works during degraded startup"
 else
   reg_fail_early "authenticated API operation over Unix failed during degraded startup"
@@ -229,7 +249,18 @@ systemctl is-active --quiet docker-helper.service || reg_fail_early "service not
 if curl --silent --fail --max-time 2 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
   reg_ok "Unix listener works after the recovery restart"
 else
-  reg_fail_early "Unix listener broken after the recovery restart"
+  # Type=exec: the restart returns before the daemon binds its sockets; wait
+  # briefly for both listeners instead of racing daemon startup.
+  UNIX_OK=1
+  for _ in $(seq 1 20); do
+    if curl --silent --fail --max-time 2 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then UNIX_OK=0; break; fi
+    sleep 0.5
+  done
+  if [ "$UNIX_OK" -eq 0 ]; then
+    reg_ok "Unix listener works after the recovery restart"
+  else
+    reg_fail_early "Unix listener broken after the recovery restart"
+  fi
 fi
 if curl --silent --fail --max-time 2 "http://$HTTP_ADDR/health" >/dev/null 2>&1; then
   reg_ok "TCP listener works again after the recovery restart"

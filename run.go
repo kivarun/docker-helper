@@ -23,6 +23,19 @@ var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // This is an implementation constant, not a configurable value.
 const maxShmSize = 2 * 1024 * 1024 * 1024 // 2 GiB
 
+// maxRunMounts is the Release-2.2 fixed security ceiling (SC2/H5) for
+// caller-supplied run mounts. Every req.Mounts element consumes one slot —
+// duplicates and read-only requests included; the server-owned helper_socket
+// projection is not a caller mount. Measured in the H5 closure evidence: every
+// existing test and UAT run request carries 1–2 mounts, and the worst-case
+// kernel mount-table cost (3 entries per mount under the SELinux backend: pin,
+// lower file bind, bindfs projection) at the global Operation ceiling is 384
+// entries — 0.4% of the host fs.mount-max (100000). The ceiling is checked
+// before any lease, path probing, exposure resolution, pin, workload-MAC
+// preparation, or Operation reservation. The 16 KiB request-body limit is not
+// the security owner of this count.
+const maxRunMounts = 16
+
 // validateShmSize parses and validates an shm_size string.
 // Accepted formats: N (bytes), Nk, Nm, Ng (case-insensitive unit).
 // Returns the validated size in bytes, or an error if the value is
@@ -385,6 +398,36 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Caller-mount count ceiling (SC2/H5): every req.Mounts element consumes
+	// one slot — duplicates and read-only requests included; the server-owned
+	// helper_socket projection is not a caller mount. Checked immediately
+	// after request decoding/basic validation and before the Session MAC-use
+	// lease, path probing, exposure resolution, any pin, workload-MAC
+	// preparation, or the Operation reservation: the request is already known
+	// invalid. One bounded ordinary client-input refusal; individual mount
+	// paths are never reported.
+	if len(req.Mounts) > maxRunMounts {
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "too_many_mounts", "too many mounts requested", session.PrincipalName)
+		return
+	}
+
+	// Reserve fixed Release-2.2 capacity (SC2/H5) before any expensive
+	// preparation: the Session MAC-use lease, mount probing, exposure
+	// resolution, pins, and workload-MAC materialization all happen while the
+	// reservation is held, and every failure path releases it exactly once.
+	// At a security ceiling the request is refused immediately; there is no
+	// queue and no waiting admission. Tests without a supervisor skip the
+	// reservation (the reservation and its release paths are nil-safe).
+	var reservation *capacityReservation
+	if a.OperationSupervisor != nil {
+		var decision admissionDecision
+		reservation, decision = a.OperationSupervisor.reserve(session.ID, session.LauncherID, operationKindRun)
+		if decision != admissionAccepted {
+			writeOperationAdmissionRejected(ctx, w, "run", decision, session.PrincipalName)
+			return
+		}
+	}
+
 	// Acquire session-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
@@ -396,9 +439,23 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "run"),
 				slog.String("error", leaseErr.Error()),
 			)
+			// The capacity reservation was never used: release it.
+			reservation.Release()
 			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
+	}
+
+	// releasePreparation is the pre-registration release owner for the
+	// session-use lease and the capacity reservation. Every failure path
+	// before the operation is registered calls it exactly once; after
+	// registration the shared rollback/terminal owners release both through
+	// the operation itself.
+	releasePreparation := func() {
+		if leaseRelease != nil {
+			leaseRelease()
+		}
+		reservation.Release()
 	}
 
 	targetSeen := make(map[string]bool)
@@ -407,9 +464,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	for _, mount := range req.Mounts {
 		resolved, err := resolveMount(mount, session.Workspace, authority.Snapshot)
 		if err != nil {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
+			releasePreparation()
 			// The public response is the stable non-disclosing
 			// invalid_mount contract; the resolver's host-filesystem
 			// diagnostics stay operational detail.
@@ -436,9 +491,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		// boundary enforces; the immutable Session snapshot remains the
 		// filesystem access-mode owner.
 		if cfg.Mode == ModeUser && resolved.SourcePath != session.Workspace {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
+			releasePreparation()
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
@@ -452,26 +505,20 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		// live in the serializer owner, never as scattered per-caller
 		// prohibitions.
 		if err := dockerMountFieldRepresentable(resolved.Target); err != nil {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
+			releasePreparation()
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 		if cfg.Mode == ModeUser {
 			if err := dockerMountFieldRepresentable(resolved.SourcePath); err != nil {
-				if leaseRelease != nil {
-					leaseRelease()
-				}
+				releasePreparation()
 				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 				return
 			}
 		}
 
 		if targetSeen[resolved.Target] {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
+			releasePreparation()
 			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
@@ -484,9 +531,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if cfg.TrustedCAInjection == "auto" {
 		for _, m := range req.Mounts {
 			if isTrustedCAMountOverlap(m.Target) {
-				if leaseRelease != nil {
-					leaseRelease()
-				}
+				releasePreparation()
 				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 				return
 			}
@@ -499,9 +544,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if req.HelperSocket {
 		for _, m := range req.Mounts {
 			if isHelperSocketMountOverlap(m.Target) {
-				if leaseRelease != nil {
-					leaseRelease()
-				}
+				releasePreparation()
 				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 				return
 			}
@@ -526,9 +569,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	for i, resolved := range resolvedMounts {
 		exposure, err := resolveSessionFilesystemExposure(authority.Snapshot, resolved.SourcePath, resolved.Target, resolved.ReadOnly)
 		if err != nil {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
+			releasePreparation()
 			if errors.Is(err, ErrReadOnlyRoot) {
 				writeRunReadOnlyRootRejected(ctx, w, session, req.Mounts[i], exposure)
 				return
@@ -607,9 +648,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Failure here means no operation is created and docker is not called.
 	execUID, execGID, err := resolveSessionExecutionIdentity(a.DB, session)
 	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
+		releasePreparation()
 		opLog(ctx).Error("cannot resolve session execution identity",
 			slog.String("operation", "run"),
 			slog.String("error", err.Error()),
@@ -622,9 +661,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// the operation so that a failure here does not leave a zombie operation.
 	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
 	if err != nil {
-		if leaseRelease != nil {
-			leaseRelease()
-		}
+		releasePreparation()
 		opLog(ctx).Error("cannot create session Docker directory",
 			slog.String("operation", "run"),
 			slog.String("error", err.Error()),
@@ -640,9 +677,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	var securityOpts []string
 	if cfg.Mode == ModeSystem {
 		if a.WorkloadMAC == nil {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
+			releasePreparation()
 			opLog(ctx).Error("no MAC backend active for system mode",
 				slog.String("operation", "run"),
 			)
@@ -668,8 +703,15 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// Associate the lease with the operation immediately so every failure
 	// path — pre-admission rollback included — releases it through the one
-	// rollback owner.
+	// rollback owner. The capacity reservation transfers the same way: the
+	// reservation's release closure becomes the operation's capacity release,
+	// invoked exactly once by the rollback owner on pre-admission failure and
+	// by the terminal transition afterwards.
 	op.macLeaseRelease = leaseRelease
+	if reservation != nil {
+		op.capacityRelease = reservation.release
+		reservation.release = nil
+	}
 	if shmSizeBytes > 0 {
 		op.auditShmSize = req.ShmSize
 	}
@@ -735,6 +777,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 					slog.String("operation", "run"),
 					slog.String("operation_id", op.ID),
 				)
+				// The operation never registered: its capacity reservation
+				// must release even while the dependent MAC state is retained.
+				op.releaseCapacity()
 			} else {
 				a.rollbackRunPreparation(ctx, op)
 			}
@@ -859,17 +904,17 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	args = append(args, req.Image)
 	args = append(args, req.Command...)
 
-	// Register the operation: a single admit after the complete Docker argv
-	// — pins, workload MAC state, and every serialized mount — is built, so
-	// an admitted Operation always has a valid serialized argv.
+	// Register the operation: a single final admission after the complete
+	// Docker argv — pins, workload MAC state, and every serialized mount — is
+	// built, so an admitted Operation always has a valid serialized argv. The
+	// capacity was reserved before any of that preparation; final admission
+	// re-checks only the lifecycle closure (shutdown/quiesce may still
+	// refuse) and transfers the reservation into the registered Operation,
+	// which releases it exactly once at its terminal state.
 	if a.OperationSupervisor != nil {
-		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
+		if decision := a.OperationSupervisor.admitReserved(op, reservation); decision != admissionAccepted {
 			a.rollbackRunPreparation(ctx, op)
-			if decision == admissionRefusedShutdown {
-				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
-			} else {
-				writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "run", "launcher_unavailable", "launcher is not available", session.PrincipalName)
-			}
+			writeOperationAdmissionRejected(ctx, w, "run", decision, session.PrincipalName)
 			return
 		}
 		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)

@@ -737,7 +737,7 @@ func TestOperationForSessionUnknownID(t *testing.T) {
 func TestOperationForSessionForeignSession(t *testing.T) {
 	supervisor := newOperationSupervisor()
 	op := newRunOperation("other-session", "alpine:latest", 1024, "", "", "")
-	supervisor.admit(op)
+	admitForTest(supervisor, op)
 
 	app := &App{OperationSupervisor: supervisor}
 	result := app.operationForSession("session-1", op.ID)
@@ -751,7 +751,7 @@ func TestOperationForSessionForeignSession(t *testing.T) {
 func TestOperationForSessionOwner(t *testing.T) {
 	supervisor := newOperationSupervisor()
 	op := newRunOperation("session-1", "alpine:latest", 1024, "", "", "")
-	supervisor.admit(op)
+	admitForTest(supervisor, op)
 
 	app := &App{OperationSupervisor: supervisor}
 	result := app.operationForSession("session-1", op.ID)

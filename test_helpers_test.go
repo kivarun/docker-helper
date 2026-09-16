@@ -429,6 +429,19 @@ func createDefaultAdminSessionForTest(app *App, workspace string) (*CreatedSessi
 	return app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace, nil)
 }
 
+// admitForTest registers an operation through the production admission path
+// (reserve → admitReserved) and returns the same decision contract. Tests that
+// need more concurrent operations than the fixed Release-2.2 ceilings allow
+// must raise the supervisor's ceilings explicitly first — the ceilings are
+// production semantics, never silently bypassed by a helper.
+func admitForTest(s *operationSupervisor, op *operation) admissionDecision {
+	res, decision := s.reserve(op.SessionID, op.LauncherID, op.Kind)
+	if decision != admissionAccepted {
+		return decision
+	}
+	return s.admitReserved(op, res)
+}
+
 // mockStandaloneUserInit mocks systemSocketExists and checkDockerAccess so
 // that runInit takes the "standalone user init" path (no system daemon,
 // Docker accessible). Returns a restore function that should be deferred.

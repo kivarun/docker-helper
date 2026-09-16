@@ -118,7 +118,7 @@ risk rather than by the audit's original severity ordering.
 | **H2** | Credential can be revoked after authentication but before Session issuance | **CLOSED_CURRENT** | SC1 | Closed at the existing Session-issuance linearization owner: the create transaction's conditional insert re-proves the authorizing credential (still existing, still owned, still active) in the same statement as the Session insert, so a revoke/delete committing before the Session commit prevents the Session and the refusal answers the canonical non-disclosing 401 credential classification. Winning ordering unchanged: an already-issued Session stays valid. Deterministic parked-query race evidence on both credential paths. |
 | **H3** | Privileged filesystem resolution happens before authorization and leaks resolver detail | **CLOSED_CURRENT** | SC1 | Authorization-before-probing ordering established at all four session-facing admission boundaries: the raw spelling is admitted lexically against the issued filesystem capability FIRST (workspace create against the effective ceiling, absolute run mount against the issued snapshot entries, build context/Dockerfile against the workspace, issuance-time `filesystem_roots` against the effective Launcher ceiling), and a spelling outside the capability is refused immediately WITHOUT any privileged filesystem probe — zero-probe seam evidence, not merely equal responses. The former symlink-alias admission (an outside spelling resolving into the capability) is removed as an explicit Release 2.2 security tightening. After admission the canonical `EvalSymlinks` + containment proofs remain the mandatory second security proof (inside-ceiling aliases work; inside-ceiling symlink escapes stay fail-closed); public unauthorized failures stay bounded/non-disclosing; admitted spellings keep their actionable diagnostics; run/build keep their stable public contracts with admission diagnostics retained operationally. The issued snapshot's authority remains the persisted path tree (position/path/access + digest) — a review-round retraction of a live-kind exact-capability inference is recorded below. |
 | **H4** | Build staging can consume unbounded tmpfs bytes/inodes/depth/files | **CLOSED_CURRENT** | SC2 | One build staging operation now has fixed, measured, non-configurable security ceilings for exactly three dimensions — payload bytes (128 MiB), entries (50000) and depth (64) — enforced by one per-staging budget inside the existing descriptor-relative walker. Bytes reserve the first staged copy of a unique regular-file inode's logical size (`st_size`, conservative for de-sparsified copies) before destination creation; hardlink names share the payload reservation but each consume an entry; symlink targets are accounted; admission arithmetic is overflow-safe (ceiling comparison before counter mutation). Every attacker-variable entry (regular file, hardlink name, symlink, directory) is reserved exactly once — at enumeration admission, before its append and before any destination materialization, with materialization paths never re-reserving — and directory enumeration draws from the same single global budget, so the sum of simultaneously admitted enumeration entries across parent and child directories can never exceed the ceiling whatever the iteration order (the former unbounded `[]dirEntry` accumulation is gone). Depth (context root = 0, direct child = 1) is admitted before the destination mkdir and before recursive descent. No second walker, no pre-scan, no config/CLI/override surface, no quota hierarchy; all descriptor-relative security invariants unchanged; the typed refusal is owned by the untagged staging surface (compiles for a non-Linux target under a compile-ownership gate) so the untagged build handler classifies — only it — into one canonical `build_context_too_large` code (HTTP 400, dimension-only bounded message); every other staging failure stays `internal_error`; refusal leaves no operation tree, no Docker invocation, no admitted Operation, no `build.start` event and no stale session MAC-use lease. Seam RED/GREEN evidence, exact-boundary unit tests and hostile exact-candidate UAT (sparse-payload, entry-count and depth cases against the packaged service under mandatory MAC) — see the SC2 evidence ledger. |
-| **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **BLOCKER_FIX** | SC2 | Bound response materialization, mounts/pins per operation, and concurrent/running operation admission at Session/global security ceilings. Measure defaults and reserve before expensive work. |
+| **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **CLOSED_CURRENT** | SC2 | The existing OperationSupervisor is the single concurrency owner with fixed, measured, non-configurable Release-2.2 security ceilings — 4 concurrent executions per Session, 8 globally, and a narrow build sub-ceiling of 2 concurrent builds — enforced by an atomic `reserve` → `admitReserved` flow: the reservation checks shutdown, Launcher quiesce, the Session ceiling, the global ceiling and the build sub-ceiling in one critical section and is acquired BEFORE any expensive preparation (run: before the MAC-use lease, mount probing, exposure resolution, pins and workload-MAC materialization; build: before H4 staging), so a capacity refusal leaves zero prepared state; final admission re-checks only the lifecycle closure (a reservation obtained before a quiesce or shutdown is not an admitted Operation) and transfers the reservation into the registered Operation without re-reserving; capacity is released exactly once at the terminal transition and on every pre-admission failure path (the frozen cleanup order gains a kernel-independent capacity stage first), never coupled to retention pruning; no queue, no waiter — one bounded `capacity_unavailable` refusal (HTTP 429) shared by every Session-token Docker execution surface. The synchronous surfaces are closed under the same owner (release-owner decision on the recorded adjacent boundary): `POST /pull` and `POST /registry/login` reserve the SAME Session/global capacity through the shared accounting core (`reserveCapacity`, the pure resource-accounting core `reserve` also uses) BEFORE any Docker process is started, never register an Operation, and release exactly once when the request handler returns (completion, Docker failure, and every pre-exec failure path); the build sub-ceiling applies to builds only; capacity is pure resource accounting — the synchronous surfaces are not closed on Launcher quiesce or daemon shutdown (lifecycle policy stays with its Operation-admission owners). POST /run refuses more than 16 caller mounts (`too_many_mounts`, HTTP 400) immediately after request decoding/basic validation, before the lease, probing, pins, MAC preparation and the reservation; duplicates and RO/RW consume slots equally and the server-owned helper_socket projection does not. One HTTP logs response now carries at most 256 KiB raw retained bytes independent of `operation_log_max_bytes` (`Range` gained a bounded read; `next_offset` follows the bytes actually returned and `truncated` keeps its established meaning with the read starting at the oldest retained byte — no retained bytes silently skipped); the measured worst-case JSON expansion (6× for control characters/invalid UTF-8) keeps one response under ~1.6 MiB encoded; the CLI drains bounded chunks through one shared helper (running polls drain all available chunks; the terminal drain empties every remaining chunk), so successful CLI output is never truncated by chunking. Phase-A measurement: amplification 6.0× adversarial / 1.0× ordinary (1 MiB → 6,291,544 encoded bytes), UAT max concurrency 2, all existing mount usage 1–2 per request, smallest host 3 GiB Tumbleweed VM with ~614 MB `/run` and fs.mount-max 100000, H4 multiplication bounded at 2 × 128 MiB = 256 MiB = 42% of the smallest `/run`. Seam RED/GREEN evidence and hostile exact-candidate UAT group 25 (concurrency, synchronous pull/login refusal before Docker execution, refusal-before-expensive-work, mount ceiling, hostile-byte chunk walk, recovery) — see the SC2 evidence ledger. |
 | **H6** | Mandatory MAC policy blocks admin-token rotation | **CLOSED_CURRENT** | SC1 | The admin-token replacement lifecycle is rewritten around ONE fixed staging pathname (`.admin-token.new`, internal implementation pathname, not a config/API/CLI surface), serialized by the existing admin-token hash commit lock with the stale-rotation check BEFORE the staging pathname is touched, crash-residue recovery, and failure-safe cleanup (current token file and runtime hash unchanged, staging removed). The shipped MAC policy is narrowed to the token replacement lifecycle only: AppArmor (pathname-mediating) grants write/rename on exactly the two token pathnames (the generic config tree and config.json stay read-only, no broader write glob); SELinux (type-based) introduces the dedicated `docker_helper_admin_token_t` file type (MAC implementation state) with exact fcontext rules listed before the generic config-tree rule, the full replacement lifecycle granted on the token type only, an EXACT filename transition for `.admin-token.new` (no generic config-dir transition), `docker_helper_config_t:file` strictly read-only, and config-dir namespace operations limited to write/add_name/remove_name. ACCEPTED SELinux backend mechanic (release-owner ruling, PR #57 review round 2): SELinux does NOT provide AppArmor-equivalent destination-basename mediation for rename — once a token_t inode exists, the granted directory namespace + inode permissions may allow it to be renamed to an otherwise unused basename in the config directory; creation stays exact-name constrained, existing `docker_helper_config_t` objects stay immutable, and this is a backend mechanic, not additional product authority (no path-policy framework, token subdirectory architecture, or rename broker; see the H6 evidence ledger). Deployment labeling stays under the selinux_deploy owner: an exact post-create relabel after the initial token is written (the tree relabel runs before the token exists) with failed-relabel recovery (the just-created token file is removed, no partial initialization), and the packaged restorecon migrates a pre-H6 token on upgrade/reinstall without changing its value. Live enforcing UAT on the exact candidate proves rotation through the shipped confined service with old token rejected, new token accepted, no restart, 0600, no staging residue, config.json unchanged, no broader writable config surface, and no unexpected H6-policy denial on both backends. |
 | **H7** | A local user can occupy the optional TCP port and drive the service into systemd start-limit failure | **CLOSED_CURRENT** | SC2 | The Unix listener is authoritative: a loopback TCP bind failure after a successful Unix bind is DEGRADED STARTUP, never daemon failure — the Unix listener stays open, its socket is not removed, the complete API keeps serving over Unix, the TCP listener is absent for the daemon lifetime, and one bounded operational warning names the configured address and the bind failure. The bind itself is the authority (no pre-probe); no retry/rebind, timer, or listener supervisor exists. Unix creation failure stays fatal; user mode never attempts TCP; systemd Restart=/StartLimit values are untouched. Seam RED/GREEN evidence and hostile exact-candidate UAT (unprivileged port capture against the packaged service under mandatory MAC) — see the SC2 evidence ledger. |
 | **H8** | External MAC commands can hold shared coordination long enough to delay emergency disable | **BLOCKER_FIX** | SC2 | Existing MAC command owners gain bounded cancellation/timeouts and the lifecycle lock path is reviewed so untrusted-size work cannot indefinitely hold administrative disable. Avoid a new queue/framework unless evidence requires it. |
@@ -1675,12 +1675,237 @@ Evidence:
   the assertion instead of being reported) proves the sparse case is
   preventative rather than "copy until tmpfs fails"; no staging
   operation tree remains; the workload-MAC inventories are unchanged; a
-  subsequent small valid build succeeds and (positive control) does emit
-  `build.start`, proving the absence checks are meaningful.
+   subsequent small valid build succeeds and (positive control) does emit
+   `build.start`, proving the absence checks are meaningful.
+
+## SC2 — H5: fixed Release-2.2 resource admission ceilings
+
+The audit class: three independent Session-token-controlled host-resource
+channels were unbounded. (1) One operation-log request materialized the
+whole retained buffer (`Range` copied everything after the offset) and
+JSON-expanded it — measured worst-case encoding amplification is 6.0×
+for control characters/invalid UTF-8 (1 MiB → 6,291,544 encoded bytes;
+ordinary text 1.0×), so an ~80-byte request could produce a ~24 MiB
+response plus transient copies against the 4 MiB default retention, per
+request. (2) One run request could create hundreds of `open_tree`/
+`move_mount` pins — the 16 KiB request-body limit was the only
+incidental count bound — and about 185 such runs could exhaust
+fs.mount-max = 100000. (3) `OperationSupervisor.admit()` checked only
+shutdown/quiesce: no Session or global running-operation ceiling
+existed, while run pinned all mount sources and prepared workload MAC
+and build staged the entire H4-bounded context BEFORE admission was even
+consulted. The initial closure recorded one adjacent boundary for a
+release-owner decision (H5 inspection item G): pull and registry-login
+are synchronous non-Operations whose materialization is already
+retention-bounded (pull response = complete retained buffer with
+`truncated`; registry-login output discarded, 4 KiB classification
+buffer), but their execution concurrency remained unbounded. That
+decision is now implemented inside H5 (see the synchronous-surface
+bullet below): the same owner and the same Session/global counters bound
+those executions, so the finding is closed, not deferred.
+
+Phase-A measurement (recorded in the PR): UAT/tests exercise at most 2
+concurrent Operations per Session and 1–2 mounts per run request; the
+smallest supported host is the 3 GiB Tumbleweed UAT VM with a ~614 MB
+`/run` tmpfs (~20% of RAM) and fs.mount-max 100000; the worst kernel
+mount-table cost is 3 entries per caller mount under the SELinux backend
+(pin + lower file bind + bindfs projection) plus one FUSE worker per
+read-only exposure; H4's per-build staging ceiling multiplied by
+concurrent builds exhausts the smallest `/run` at ~4 concurrent maximal
+hostile builds.
+
+Closed at the existing owners — the OperationSupervisor (one concurrency
+owner, now shared by the Operation-backed and synchronous execution
+surfaces), the run request surface (mount count), and the boundedBuffer
+Range owner (response chunking) — with no scheduler, no queue, no quota
+hierarchy, no configuration surface, and no change to the public
+Operation model (`running`/`succeeded`/`failed` only; the reservation is
+a narrow internal lease):
+
+- **Capacity (4 per Session / 8 global / 2 concurrent builds):** the
+  ceilings are measured security constants documented in
+  `docs/architecture.md`; the sub-ceiling exists so ordinary run
+  concurrency stays usable while worst-case H4 composition (2 × 128 MiB
+  = 256 MiB = 42% of the smallest `/run`) stays safe. `reserve` checks
+  shutdown, quiesce, Session ceiling, global ceiling and the build
+  sub-ceiling, then reserves, inside one critical section; the
+  reservation is acquired BEFORE any expensive preparation in both
+  handlers; `admitReserved` re-checks only the lifecycle closure and
+  transfers the reservation into the registered Operation without
+  re-reserving; release is exactly once at the terminal transition (the
+  winning `succeed`/`fail` invokes the transferred closure under the
+  operation lock) and on every pre-admission failure path (the frozen
+  run-cleanup order gained the kernel-independent capacity stage first,
+  so a failed MAC rollback cannot strand capacity of an operation that
+  never started). A terminal retained Operation consumes zero capacity
+  and release is never coupled to `pruneCompleted()`. No queue and no
+  waiter: one bounded `capacity_unavailable` refusal (HTTP
+  429) shared by every Session-token Docker execution surface, audited
+  through the existing `<kind>.rejected` record where the surface has
+  one (pull; registry login keeps its established no-rejection-event
+  contract).
+- **Synchronous surfaces (pull / registry login) under the same owner
+  (release-owner decision on the recorded adjacent boundary):** the
+  supervisor grew a pure capacity-accounting core
+  (`reserveCapacityLocked`/`reserveCapacity`) that `reserve` itself
+  uses; `POST /pull` and `POST /registry/login` call it directly before
+  any Docker process is started and consume the SAME Session/global
+  counters as Operation-backed execution, so a held synchronous
+  execution participates in the common ceilings and a saturated
+  Session/global ceiling refuses both surfaces immediately with the one
+  canonical `capacity_unavailable` refusal (HTTP 429). They never
+  register an Operation: the refusal happens before any
+  `pull.start`/`registry.login.start` audit record, and the held
+  reservation is invisible to the Operation model. Release is exactly
+  once through the reservation's once-guarded release when the handler
+  returns — completion, Docker failure, and every pre-exec failure path
+  (Docker-dir creation failure, `cmd.Start` failure) included. The
+  build sub-ceiling applies to builds only: a saturated build
+  sub-ceiling leaves the synchronous surfaces and runs admitted.
+  Capacity is pure resource accounting: the synchronous surfaces are
+  NOT closed on Launcher quiesce or daemon shutdown — quiesce is the
+  Operation-admission lifecycle gate and those endpoints' established
+  refusal contract has no shutdown/quiesce codes, so lifecycle policy
+  stays separate from the shared resource accounting. No scheduler, no
+  queue, no waiting, no retry logic, no new semaphore, no second
+  concurrency owner.
+- **Caller mounts (16 per run request):** checked immediately after
+  request decoding/basic validation, before the MAC-use lease, probing,
+  exposure resolution, pins, workload-MAC preparation and the
+  reservation; duplicates and RO/RW consume slots equally; the
+  server-owned helper_socket projection is not a caller mount; user
+  mode obeys the same ceiling without gaining system-mode mechanics;
+  one bounded `too_many_mounts` refusal (HTTP 400) that names no mount
+  path; worst-case composition with the ceilings leaves 384 kernel
+  mount entries — 0.4% of fs.mount-max. No PrivateMounts: pins remain
+  visible to dockerd.
+- **Bounded log response (256 KiB raw chunk):** `boundedBuffer.Range`
+  grew a `maxBytes` bound; `next_offset` identifies the byte immediately
+  after the bytes actually returned; when the offset predates the
+  retained data the read starts at the oldest retained byte, returns at
+  most one chunk with `truncated=true`, and `next_offset` follows the
+  returned bytes — no retained bytes are silently skipped. The
+  `operation_log_max_bytes` config is untouched: the response ceiling is
+  retention-independent, so no hard bound on the existing operator
+  setting is needed for the Session-token threat proof (retention itself
+  bounds what a Session-token holder can make the daemon retain for its
+  own operations, and retention is trusted-admin operational policy).
+  The synchronous pull response and the registry-login classification
+  capture keep their complete-retained-range contracts via an explicit
+  unbounded Range parameter.
+- **CLI drain:** one shared client drain helper fetches bounded chunks
+  until a short response ends the stream; the running poll drains all
+  currently available chunks (real-time pace preserved) and the terminal
+  drain empties every remaining chunk before the CLI returns, so
+  successful CLI output is never truncated by chunking.
+- RED (commit `1d3c9fa`; GREEN `e88f847`, UAT `4334b12`, UAT-run
+  corrections `c3c5030`/`8f7beec`, docs `d14e601`): five deterministic
+  defect demonstrations — five long-lived run Operations under one
+  Session are all admitted (no
+  capacity owner refuses the next request); a quiesce-refused run has
+  already created its mount pin and a quiesce-refused build has already
+  staged its whole context (expensive preparation before admission); a
+  run request with 17 caller mounts reaches pin preparation (duplicates
+  included); one logs request materializes the full retained log and
+  expands it to 4,718,717 encoded bytes against the proposed 1,576,960
+  bound. No host DoS was attempted.
+- GREEN (commit `e88f847`): supervisor-level exact-boundary tests
+  (Session limit, limit+1, other-Session free capacity, global limit,
+  terminal release with retained metadata/logs, release exactly once,
+  concurrent-reserve race never oversubscribes (200 goroutines, exactly
+  the ceiling accepted), reserve→quiesce and reserve→shutdown refused at
+  final admission, build sub-ceiling leaves runs available); handler
+  tests (capacity refusal with zero pins/zero MAC preparation/zero
+  staging/zero Docker invocation/zero `build.start` audit and no
+  lease/reservation residue; user mode obeys the same fixed ceilings);
+  mount tests (exact limit succeeds, +1 refused before probing/pinning,
+  duplicates count, RO/RW count equally, helper_socket consumes no
+  slot); bounded-Range tests (exact chunk boundary, one byte over,
+  chunked reconstruction with no gap/duplication, rollover/truncated
+  bounded chunk, zero-ceiling no-progress); CLI drain tests (multi-chunk
+  reconstruction, exact-boundary termination, terminal multi-chunk
+  delivery); the documented worst-case composition guard
+  (2 × 128 MiB ≤ 45% of the smallest `/run`; 384 mount entries < 1% of
+  fs.mount-max). All existing cancellation/shutdown/quiesce tests and
+  every H4 staging test stay green; the former `admit()` path was fully
+  superseded (all tests register through the production
+  reserve → admitReserved path; the admit-rejection tests now drive the
+  reserve→shutdown→final-admit race deterministically through the
+  mid-request pin/staging seams, keeping the pin/lease and staging/lease
+  ordering proofs on the real production path); `go test -race` green.
+- GREEN (synchronous-surface correction): held-seam handler tests prove
+  the saturated Session ceiling refuses a valid pull and a valid
+  registry login with the one canonical `capacity_unavailable` refusal
+  BEFORE any Docker command is constructed or started (zero Docker
+  invocations, counters unchanged, no Operation registered, refusal
+  response carries no credential); a held synchronous pull occupies the
+  one free global slot and refuses both synchronous surfaces of another
+  Session at the saturated global ceiling while that Session's counters
+  stay at zero; a held synchronous login occupies the SAME Session and
+  global counters with no Operation registered, refuses another login of
+  the same Session at the saturated Session ceiling while another
+  Session still uses free global capacity, and stays stdin-only for its
+  credential (marker password never in argv); completion and failure
+  release the synchronous reservations exactly once (counters back to
+  zero, capacity immediately reusable, no retention coupling) and the
+  pre-exec `cmd`-cannot-start path releases the same way; the build
+  sub-ceiling does not bind the synchronous surfaces.
+- Hostile exact-candidate UAT (new Ubuntu/DEB/AppArmor regression group
+  25, `uat-regression-h5-resource-admission.sh`, real packaged service
+  with mandatory MAC active, real production ceilings): four long-lived
+  operations occupy the Session ceiling and the fifth is refused
+  immediately with `capacity_unavailable` and no
+  container/process/state for the refusal; the second Session admits its
+  four operations while the first is saturated (global ceiling reached)
+  and the ninth is refused; a terminated operation releases its container
+  and capacity immediately and a new operation is admitted; the
+  capacity-refused run carries a valid mount yet adds no pin and no
+  workload-MAC state and the capacity-refused build adds no staging tree
+  (audited through `capacity_unavailable`); while real Operation
+  capacity is saturated, valid synchronous pull and registry-login
+  requests are refused immediately with the same `capacity_unavailable`
+  refusal BEFORE Docker execution (the audit window carries
+  `pull.rejected` and no `pull.start` and no `registry.login.start`;
+  the refused login leaks no password in CLI diagnostics; no external
+  registry or network dependency — admission refuses first); exactly 16 caller
+  mounts are accepted and 17 are refused with `/proc/self/mountinfo` and
+  the canonical pin inventory unchanged; a ~700 KB hostile control-byte
+  stream is served in chunks with every encoded response under the
+  documented bound, the chunk walk reconstructs the stream exactly
+  (boundary sentinels + exact byte count prove no gap/duplication), and
+  the ordinary CLI fully delivers terminal output spanning several
+  chunks; recovery leaves no pins, staging, workload-MAC state or
+  residual capacity, a subsequent ordinary run and build both succeed,
+  and the synchronous surfaces are admitted again (an ordinary pull
+  succeeds against the already-present image and an admitted
+  registry-login's `registry.login.start` is audited before its fast
+  loopback-only Docker failure).
+- UAT-run iterations (deterministic corrections, fail-closed): the first
+  full exact-candidate run caught a real release-path leak — the build
+  staging-failure branch (the H4 ceiling refusal included) released
+  through the pre-registration closure whose reservation release had
+  already been nulled by the transfer to the operation at creation, so
+  one build slot leaked per staging refusal until the daemon restart;
+  group 24's depth case and final valid build hit the build sub-ceiling
+  with 429 after two earlier refusals had leaked both slots. The release
+  now goes through the operation (exactly once) alongside the lease;
+  `TestBuildStagingRefusalReleasesCapacity` fails pre-fix (the follow-up
+  build gets 429) and pins the fix, and the run pin-failure and
+  `cmd.Start`-failure release paths are pinned the same way. The group 25
+  residue assertions now compare against the inventories taken
+  immediately before the refusal (the held operations legitimately hold
+  their own state), and the held operations exec the CLI binary directly
+  so a SIGTERM reaches the CLI's own bounded cancellation path (a
+  backgrounded shell-function call made `$!` the intermediate subshell
+  and orphaned the CLI). That 11/11 green full UAT run validated those
+  group-25 iterations on the head that carried them; the exact-candidate
+  evidence for the final PR head is the later full UAT run on that exact
+  head, recorded in the PR report rather than in a post-UAT ledger
+  commit.
 
 ## SC2 — bounded-resource and liveness closure
 
-**Queue:** `H5`, `H8`. (H4 and H7 closed in SC2 — see the SC2 evidence
+**Queue:** `H8`. (H4, H5 and H7 closed in SC2 — see the SC2 evidence
 ledgers above.)
 
 SC2 removes unbounded host-resource and liveness channels without importing the
@@ -1689,10 +1914,11 @@ quota hierarchy.
 
 Required direction:
 
-- staging has measured maximum bytes, entries and depth;
+- staging has measured maximum bytes, entries and depth; (closed — H4)
 - operation/mount/log/concurrency resources have finite admission ceilings;
+  (closed — H5)
 - resource reservation/admission happens before expensive preparation where the
-  attack depends on pre-admission work;
+  attack depends on pre-admission work; (closed — H5)
 - external MAC commands have bounded execution/cancellation and cannot hold
   lifecycle coordination indefinitely. (The optional-TCP item was closed in
   SC2 already — see the SC2 evidence ledger above.)

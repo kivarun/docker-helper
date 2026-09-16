@@ -317,7 +317,6 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	supervisor := newOperationSupervisor()
-	supervisor.beginShutdown()
 	app.OperationSupervisor = supervisor
 
 	result, err := createSystemSession(t, app)
@@ -332,6 +331,11 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 
 	cleanupCalled := false
 	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		// Force the reserve→shutdown→final-admit race deterministically: the
+		// pin seam flips the shutdown gate mid-request, so the reservation
+		// is obtained, the pin is created, and final admission is refused —
+		// exercising the canonical rollback of prepared state.
+		supervisor.beginShutdown()
 		return &pinnedMount{
 			PinnedPath: "/pinned/0",
 			cleanup: func() error {

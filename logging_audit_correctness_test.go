@@ -680,12 +680,14 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Force admit rejection so the cleanup path runs.
-	app.OperationSupervisor.shutting = true
-
-	// Use a staging seam that forces Cleanup() to fail.
+	// Force the reserve→shutdown→final-admit race deterministically: the
+	// staging seam flips the shutdown gate mid-request, so the reservation
+	// is obtained, staging runs, and final admission is refused.
 	sentinelErr := errors.New("injected staging cleanup error")
-	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelErr)
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		app.OperationSupervisor.beginShutdown()
+		return stagingSeamWithCleanupError(t, sentinelErr)(ctx, ws, cpath, dfrel, rdir, opID)
+	}
 
 	// Create a real build context so staging succeeds.
 	ctxDir := result.Session.Workspace

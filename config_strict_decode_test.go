@@ -197,7 +197,7 @@ func TestPruneCompletedNegativeCapPanics(t *testing.T) {
 	supervisor := newOperationSupervisor()
 	now := time.Now()
 	op := newTestOperation(t, operationSucceeded, now.Add(-1*time.Minute))
-	supervisor.admit(op)
+	admitForTest(supervisor, op)
 
 	defer func() {
 		r := recover()

@@ -2100,8 +2100,9 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 }
 
-// TestAdmitRejectionRunPinsBeforeLease drives handleRun with admit
-// rejection and verifies pins are cleaned up before the lease is released.
+// TestAdmitRejectionRunPinsBeforeLease drives handleRun through the
+// reserve→shutdown→final-admit race and verifies pins are cleaned up
+// before the lease is released.
 func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	dir := t.TempDir()
@@ -2145,8 +2146,6 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
-	// Force admit rejection.
-	app.OperationSupervisor.beginShutdown()
 
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
@@ -2177,6 +2176,10 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 
 	var cleanupOrder []string
 	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		// Force the reserve→shutdown→final-admit race deterministically: the
+		// pin seam flips the shutdown gate mid-request, so final admission is
+		// refused with the pin and lease already prepared.
+		app.OperationSupervisor.beginShutdown()
 		return &pinnedMount{
 			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {
@@ -2215,8 +2218,9 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 }
 
-// TestAdmitRejectionBuildStagingBeforeLease drives handleBuild with
-// admit rejection and verifies staging is cleaned up before the lease is released.
+// TestAdmitRejectionBuildStagingBeforeLease drives handleBuild through the
+// reserve→shutdown→final-admit race and verifies staging is cleaned up
+// before the lease is released.
 func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -2257,9 +2261,9 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
-	// Force admit rejection.
-	app.OperationSupervisor.beginShutdown()
-
+	// Force admit rejection through the reserve→shutdown→final-admit race:
+	// the staging seam flips the shutdown gate mid-request, after the
+	// reservation is obtained and before final admission.
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
@@ -2292,6 +2296,10 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 
 	var cleanupCalled bool
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		// Force the reserve→shutdown→final-admit race deterministically: the
+		// staging seam flips the shutdown gate mid-request, so final
+		// admission is refused with the staged context already prepared.
+		app.OperationSupervisor.beginShutdown()
 		stagingDir := t.TempDir()
 		opDir := filepath.Join(stagingDir, opID)
 		if err := os.MkdirAll(opDir, 0o700); err != nil {

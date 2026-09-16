@@ -49,6 +49,28 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reserve fixed Release-2.2 capacity (SC2/H5) before any Docker process
+	// is started. Pull is a synchronous Session-token execution surface, not
+	// an Operation: it consumes the SAME Session/global capacity as
+	// Operation-backed execution through the shared accounting core and
+	// never registers an Operation. Capacity is pure resource accounting —
+	// the Operation lifecycle gates (shutdown, Launcher quiesce) are not
+	// consulted here. At a security ceiling the request is refused
+	// immediately with the one canonical capacity refusal; there is no queue
+	// and no waiting. The reservation covers the whole synchronous execution
+	// and is released exactly once when the handler returns — completion,
+	// Docker failure, and every pre-exec failure path included.
+	var reservation *capacityReservation
+	if a.OperationSupervisor != nil {
+		var admitted bool
+		reservation, admitted = a.OperationSupervisor.reserveCapacity(session.ID, false)
+		if !admitted {
+			writeDockerActionRejected(ctx, w, http.StatusTooManyRequests, "pull", capacityRefusalCode, capacityRefusalMessage, session.PrincipalName)
+			return
+		}
+	}
+	defer reservation.Release()
+
 	// Ensure the session Docker config directory exists before writing
 	// pull.start so that a failure here does not leave an orphan audit event.
 	cfg := a.getConfig()
@@ -85,7 +107,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		waitErr = cmd.Wait()
 	}
-	data, _, truncated := buf.Range(0)
+	data, _, truncated := buf.Range(0, rangeUnbounded)
 	outputStr := string(data)
 	duration := time.Since(started).Round(time.Millisecond).String()
 

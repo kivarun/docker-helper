@@ -28,15 +28,21 @@ func newTestOperation(t *testing.T, state operationState, completedAt time.Time)
 
 func TestPruneCompletedRemovesExpired(t *testing.T) {
 	supervisor := newOperationSupervisor()
+	// The prune tests register several pre-marked-terminal build
+	// operations through the production admission path; raise the
+	// fixed capacity ceilings for the test scope.
+	supervisor.maxPerSession = 100
+	supervisor.maxGlobal = 100
+	supervisor.maxGlobalBuilds = 100
 
 	now := time.Now()
 	expired := newTestOperation(t, operationSucceeded, now.Add(-11*time.Minute))
 	fresh := newTestOperation(t, operationSucceeded, now.Add(-1*time.Minute))
 	running := newTestOperation(t, operationRunning, time.Time{})
 
-	supervisor.admit(expired)
-	supervisor.admit(fresh)
-	supervisor.admit(running)
+	admitForTest(supervisor, expired)
+	admitForTest(supervisor, fresh)
+	admitForTest(supervisor, running)
 
 	supervisor.pruneCompleted(10*time.Minute, 200)
 
@@ -53,12 +59,18 @@ func TestPruneCompletedRemovesExpired(t *testing.T) {
 
 func TestPruneCompletedCapsCompleted(t *testing.T) {
 	supervisor := newOperationSupervisor()
+	// The prune tests register several pre-marked-terminal build
+	// operations through the production admission path; raise the
+	// fixed capacity ceilings for the test scope.
+	supervisor.maxPerSession = 100
+	supervisor.maxGlobal = 100
+	supervisor.maxGlobalBuilds = 100
 
 	now := time.Now()
 	ops := make([]*operation, 5)
 	for i := range ops {
 		ops[i] = newTestOperation(t, operationSucceeded, now.Add(time.Duration(i)*time.Minute))
-		supervisor.admit(ops[i])
+		admitForTest(supervisor, ops[i])
 	}
 
 	supervisor.pruneCompleted(10*time.Minute, 3)
@@ -78,15 +90,21 @@ func TestPruneCompletedCapsCompleted(t *testing.T) {
 
 func TestPruneCompletedMaxCompletedZero(t *testing.T) {
 	supervisor := newOperationSupervisor()
+	// The prune tests register several pre-marked-terminal build
+	// operations through the production admission path; raise the
+	// fixed capacity ceilings for the test scope.
+	supervisor.maxPerSession = 100
+	supervisor.maxGlobal = 100
+	supervisor.maxGlobalBuilds = 100
 
 	now := time.Now()
 	op1 := newTestOperation(t, operationSucceeded, now.Add(-1*time.Minute))
 	op2 := newTestOperation(t, operationSucceeded, now.Add(-2*time.Minute))
 	running := newTestOperation(t, operationRunning, time.Time{})
 
-	supervisor.admit(op1)
-	supervisor.admit(op2)
-	supervisor.admit(running)
+	admitForTest(supervisor, op1)
+	admitForTest(supervisor, op2)
+	admitForTest(supervisor, running)
 
 	supervisor.pruneCompleted(10*time.Minute, 0)
 
@@ -103,12 +121,18 @@ func TestPruneCompletedMaxCompletedZero(t *testing.T) {
 
 func TestPruneCompletedConcurrency(t *testing.T) {
 	supervisor := newOperationSupervisor()
+	// The prune tests register several pre-marked-terminal build
+	// operations through the production admission path; raise the
+	// fixed capacity ceilings for the test scope.
+	supervisor.maxPerSession = 100
+	supervisor.maxGlobal = 100
+	supervisor.maxGlobalBuilds = 100
 
 	// Pre-seed known operations before any concurrent work.
 	expired := newTestOperation(t, operationSucceeded, time.Now().Add(-time.Hour))
 	running := newTestOperation(t, operationRunning, time.Time{})
-	supervisor.admit(expired)
-	supervisor.admit(running)
+	admitForTest(supervisor, expired)
+	admitForTest(supervisor, running)
 
 	const iterations = 100
 	start := make(chan struct{})
@@ -121,7 +145,7 @@ func TestPruneCompletedConcurrency(t *testing.T) {
 		<-start
 		for i := 0; i < iterations; i++ {
 			op := newTestOperation(t, operationRunning, time.Time{})
-			if supervisor.admit(op) == admissionAccepted {
+			if admitForTest(supervisor, op) == admissionAccepted {
 				// Complete the operation.
 				op.mu.Lock()
 				now := time.Now()

@@ -2086,22 +2086,35 @@ Authentication
     │
 Request validation
     │
+Request-shape ceilings (caller-mount count)
+    │
 Lexical capability admission
     │
 Canonical filesystem resolution
     │
 Canonical containment/policy proof
     │
-Operation registration (supervisor admission — atomic with shutdown gate)
+Capacity reservation (supervisor — atomic with shutdown/quiesce/ceilings)
+    │
+Expensive preparation (MAC lease, pins, workload MAC, H4 staging)
+    │
+Final admission (supervisor re-checks lifecycle closure; transfers reservation)
     │
 Async process start (cmd.Start under op.mu)
     │
 Incremental bounded log capture (cmd.Stdout/stderr → boundedBuffer)
     │
-Completion goroutine (cmd.Wait → status transition)
+Completion goroutine (cmd.Wait → status transition; capacity released exactly once)
     │
-Retention cleanup
+Retention cleanup (independent of capacity)
 ```
+
+The synchronous surfaces (pull, registry login) share the same
+supervisor accounting without the Operation stages: capacity reservation
+before any Docker process, whole synchronous execution under the
+reservation, exact-once release when the handler returns, and no
+registration in the supervisor's Operation map (see
+[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision)).
 
 Authentication validates the session token. Request validation checks
 required fields and path relativity per operation. The H3 authorization
@@ -2123,10 +2136,89 @@ structural rule, not a universal data-plane authorization rule. A symlink
 inside the lexical capability that resolves outside stays fail-closed
 through that canonical proof.
 
-Operation registration uses the operation supervisor admission path
-(`admit`), which atomically checks the shutdown gate and registers the
-operation under the same mutex. If the daemon is shutting down,
-registration is rejected with 503.
+Operation admission is the two-step `reserve → admitReserved` flow of the
+operation supervisor (SC2/H5). Both steps are atomic under the same
+supervisor mutex:
+
+- `reserve(session, launcher, kind)` checks the Operation lifecycle gates
+  (daemon shutdown, Launcher quiesce) and the fixed Release-2.2 capacity
+  ceilings — Session scope, global scope, and the build sub-ceiling — then
+  reserves one capacity slot in the same critical section, so concurrent
+  reserves can never oversubscribe. The reservation happens BEFORE any
+  expensive preparation: run reserves before the session MAC-use lease,
+  mount probing, exposure resolution, pins and workload-MAC
+  materialization; build reserves before H4 staging. Cheap
+  syntactic/request validation may run first, and the caller-mount count
+  ceiling is checked before the reservation (the request is already
+  known invalid). No half-prepared Operation is ever registered to
+  reserve a slot, and the public Operation model stays `running`,
+  `succeeded`, `failed` — the reservation is a narrow internal lease,
+  never an API/domain state.
+- `admitReserved(op, reservation)` re-checks only the lifecycle closure:
+  a reservation obtained before a Launcher quiesce or daemon shutdown is
+  NOT an admitted Operation — "once quiesced, no new Operation
+  admission" is preserved at final admission, and shutdown may still
+  refuse. Already-reserved capacity is never re-checked or re-reserved;
+  it transfers to the registered Operation. On refusal the caller cleans
+  preparation and releases the reservation.
+
+The same supervisor owns the shared capacity accounting for the
+synchronous Session-token Docker execution surfaces: `POST /pull` and
+`POST /registry/login` reserve one capacity slot through the same
+Session/global counters (`reserveCapacity`, the pure resource-accounting
+core that `reserve` also uses) BEFORE their Docker process is started,
+and never register an Operation. Capacity is pure resource accounting:
+the Operation lifecycle gates are not consulted — pull and registry
+login are not closed on Launcher quiesce or on daemon shutdown
+(lifecycle policy stays with its Operation-admission owners). The
+synchronous reservation covers the whole request execution and is
+released exactly once when the handler returns — completion, Docker
+failure, and every pre-exec failure path included. There is no waiting,
+no queue, no retry logic and no scheduler: at any ceiling the request is
+refused immediately.
+
+There is no queue and no waiting admission: at any ceiling the request
+is refused immediately with the single bounded
+`capacity_unavailable` refusal (HTTP 429) for every Session-token
+Docker execution surface — run, build, pull, and registry login, for
+both the Session scope and the global scope — the capacity topology is
+never exposed — and the client decides whether and when to retry.
+
+**Fixed Release-2.2 capacity ceilings (SC2/H5).** The ceilings are
+measured security constants, not Principal/Launcher quotas and not
+configurable:
+
+| Ceiling | Value | Basis |
+|---------|-------|-------|
+| concurrent executions per Session | 4 | 2× the maximum per-Session concurrency exercised by the UAT (2), sized for realistic agent parallelism |
+| concurrent executions globally | 8 | keeps at least half of global capacity available to other Sessions when one is saturated |
+| concurrent builds globally (sub-ceiling) | 2 | worst-case hostile staging = 2 × 128 MiB (H4) = 256 MiB = 42% of the smallest supported /run tmpfs (3 GiB RAM, ~614 MB); ≥3 concurrent maximal builds would exceed half of it |
+| caller mounts per run request | 16 | 16× the maximum single-request mount usage in all tests and UAT; worst kernel mount-table cost (3 entries per mount under SELinux) at the global ceiling is 384 entries = 0.4% of fs.mount-max (100000) |
+| raw log bytes per HTTP logs response | 256 KiB | measured worst-case JSON-encoding expansion is 6× (control characters/invalid UTF-8), so one response stays under ~1.6 MiB encoded regardless of retention |
+
+The execution ceilings count every admitted Operation AND every
+synchronous pull/registry-login execution: the two concurrency limits
+count preparation and running execution of Operations and the whole
+execution of every synchronous pull and registry-login request through
+the same shared counters. An Operation-backed capacity slot is released
+exactly once when the
+Operation reaches a terminal state (`succeed`/`fail` invoke the
+transferred reservation release inside the winning transition); a
+synchronous slot is released exactly once when the request handler
+returns. Retained Operation metadata and logs never keep capacity, and
+release is never coupled to `pruneCompleted()`. Operation release paths
+include: preparation failure after reservation, pin failure,
+workload-MAC preparation failure (rolled-back and retained variants),
+build staging failure including the H4 refusal, final-admission
+refusal, `cmd.Start` failure, pre-start cancellation/shutdown, normal
+success, Docker failure, explicit cancel, and daemon-shutdown
+termination. The user-mode deployment obeys the same fixed ceilings
+without gaining system-mode mechanics.
+
+The narrow build sub-ceiling exists so the generic run concurrency stays
+usable while worst-case H4 composition stays safe (see
+[Build-context staging ceilings](#build-context-staging-ceilings)); there is no second build scheduler, no build queue and no staging quota
+manager.
 
 The process starts asynchronously. `cmd.Start()` is called under
 `op.mu` to synchronize with shutdown termination. stdout and stderr are
@@ -2189,6 +2281,25 @@ Logs are a mixed stdout/stderr byte stream: each operation log is stored
 in a bounded buffer of `operation_log_max_bytes`; when the limit is
 exceeded, the oldest data is evicted, and `truncated` is true when the
 requested offset refers to evicted data.
+
+**Bounded response chunks (SC2/H5).** One HTTP logs response carries at
+most 256 KiB of raw retained log bytes, independent of the configured
+`operation_log_max_bytes` retention. The measured worst-case JSON
+encoding of adversarial bytes expands 6× (control characters and invalid
+UTF-8 escape to six-character sequences), so a single response stays
+under ~1.6 MiB encoded even for JSON-hostile output; one request can
+never materialize the whole retained buffer. `next_offset` always
+identifies the byte immediately AFTER the bytes actually returned —
+never the total length when bytes in between were not returned. When
+the requested offset predates the retained data, the read starts at the
+oldest retained byte, returns at most one chunk with `truncated=true`,
+and `next_offset` follows the returned bytes: no retained bytes are
+silently skipped, and the consumer walks the chunks to catch up. There
+is no caller-controlled limit parameter. The CLI drains the chunks
+through one shared helper: every poll drains all currently available
+chunks (real-time pace preserved), and when the operation reaches a
+terminal state the same helper drains every remaining chunk before
+returning, so successful CLI output is never truncated by chunking.
 
 **`POST /operations/{id}/cancel`** (session token):
 
@@ -2362,6 +2473,8 @@ that label, never a PID.
 ### Pull
 
 `POST /pull` authenticates, validates that the image field is non-empty,
+reserves one shared capacity slot (see
+[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision)),
 and runs `docker pull` with the image reference. The endpoint remains
 synchronous and returns the execution result directly in the response;
 pull output is captured into a bounded buffer of
@@ -2374,6 +2487,26 @@ field is non-empty. Docker CLI validates the reference when the command
 executes. If Docker rejects the reference, the endpoint returns its
 standard Docker failure response.
 
+**Synchronous execution capacity (SC2/H5 release-owner decision).**
+Pull and registry login remain synchronous and are never registered
+Operations. Their execution concurrency is finite under the same fixed
+Release-2.2 ceilings: each request reserves one capacity slot through
+the shared Session/global counters before its Docker process is started
+and releases it exactly once when the handler returns, on the same
+ceilings as Operation-backed execution — a saturated Session or global
+ceiling refuses a pull or registry login immediately with the one
+canonical `capacity_unavailable` refusal (HTTP 429), with no waiting,
+no queue and no retry logic. The synchronous surfaces are NOT closed on
+Launcher quiesce or daemon shutdown: quiesce is the Operation-admission
+lifecycle gate ("once quiesced, no new Operation admission"), and the
+established refusal contract of those endpoints does not include
+shutdown/quiesce codes; lifecycle policy stays separate from the shared
+resource accounting. Their materialization channels are bounded as
+before: the pull response is the complete retained buffer, bounded per
+pull by the configured `operation_log_max_bytes` with the established
+`truncated` flag, and registry login retains only a 4 KiB
+classification buffer whose output is never exposed.
+
 ### Registry login
 
 `POST /registry/login` authenticates a session with a Docker registry.
@@ -2383,13 +2516,18 @@ Authentication
     │
 Request validation
     │
+Shared capacity reservation (no Operation)
+    │
 Session Docker config directory
     │
 Docker invocation
 ```
 
 Request validation checks that `registry`, `username`, and `password` are
-all non-empty.
+all non-empty. The synchronous capacity reservation happens before the
+Docker invocation (see
+[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision));
+the endpoint never registers an Operation.
 
 The session Docker config directory is per-session, located at
 `runtimeDir/sessions/<session_id>/docker`. It is created with `0700`
@@ -2589,6 +2727,18 @@ backends do not load snapshots or recompute writable-parent semantics.
 
 #### System-mode run mounts
 
+The caller-mount count ceiling (SC2/H5) is checked immediately after
+request decoding/basic validation, before the Session MAC-use lease,
+mount probing, exposure resolution, any pin, workload-MAC preparation,
+and the Operation reservation: a run request carrying more than the
+fixed 16 caller mounts is refused with the bounded `too_many_mounts`
+client-input refusal. Every `req.Mounts` element consumes one slot —
+duplicates and read-only requests included; the server-owned
+`helper_socket` projection is not a caller mount. The 16 KiB HTTP
+request-body limit is not the security owner of this count, and no
+private mount namespace is introduced: existing pins remain visible to
+dockerd.
+
 In system mode, every bind-mount source has already been accepted by the
 filesystem exposure resolution (issued snapshot authority). The helper
 then opens "/" as a root file descriptor. The source path is converted
@@ -2599,7 +2749,10 @@ workspace or in a disjoint Session filesystem root — is pinned through
 the same owner. The resulting inode
 is pinned with `open_tree` + `move_mount` into a helper-owned directory
 under the runtime path. Docker receives the pinned path, not the original
-workspace path.
+workspace path. The pins and the workload MAC materialization happen
+only after the capacity reservation (see
+[Operation lifecycle](#operation-lifecycle)), so a capacity-refused run
+creates neither.
 
 Pinning requires Linux kernel support for `openat2`, `open_tree`, and
 `move_mount`, and `CAP_SYS_ADMIN`. When any of these are unavailable or
@@ -2691,7 +2844,9 @@ labels (schema, `com.dockerhelper.operation.id`, Session ID), never a PID.
 
 In user mode, the resolved mount source must equal the canonical
 `session.Workspace`. Subdirectory and file mounts are rejected as
-`invalid_mount`.
+`invalid_mount`. The caller-mount count ceiling is mode-independent: a
+user-mode run request is refused with `too_many_mounts` beyond the same
+fixed 16 caller mounts even though user mode creates no inode pins.
 
 This restriction exists because user mode lacks `CAP_SYS_ADMIN` for
 inode-pinned mounts. The security of the workspace-root mount relies on
@@ -2715,7 +2870,11 @@ fails closed without falling back to original workspace paths.
 measured, non-configurable security ceilings for exactly three
 dimensions, enforced by one per-staging budget inside the existing
 descriptor-relative walker (`productionBuildStagingCeilings` in
-`staging_linux.go`):
+`staging_linux.go`). H5 composes with these ceilings multiplicatively:
+the global build sub-ceiling (2 concurrent builds) bounds the worst-case
+hostile staging occupancy at 2 × 128 MiB = 256 MiB on the runtime tmpfs
+(see [Operation lifecycle](#operation-lifecycle)); the staging budget
+owner itself is unchanged. The three dimensions:
 
 - **payload bytes: 128 MiB.** The first staged copy of a unique
   regular-file inode reserves its logical size (`st_size`) before the
@@ -3167,6 +3326,8 @@ Current error codes (non-exhaustive):
 | `launcher_name_requires_principal` | `GET /sessions?launcher=` | a Launcher-name narrowing selector was supplied without a Principal scope (names are never searched globally) |
 | `invalid_selector` | `GET /sessions` | a narrowing selector is illegal for the authenticated authority (a Principal selector under a Principal credential, any selector under a Launcher credential) |
 | `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
+| `capacity_unavailable` | `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login` | the fixed Release-2.2 concurrent execution capacity is exhausted (Session scope or global scope; one bounded refusal for all four Session-token Docker execution surfaces, whether Operation-backed or synchronous, HTTP 429 — no queue, the client decides whether to retry) |
+| `too_many_mounts` | `POST /run` | the request carries more than the fixed 16 caller mounts (HTTP 400; checked before the MAC lease, probing, pins, MAC preparation and the reservation; individual mount paths are never reported) |
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero and the failure is not classified |
 | `image_not_found` | `POST /pull` | docker pull: image/repository not found |
 | `pull_access_denied` | `POST /pull` | docker pull: authentication/authorization denied |
@@ -3192,7 +3353,8 @@ only:
 
 - `event`: `<kind>.rejected`
 - `result`: the public API error code (e.g., `invalid_image`, `invalid_mount`,
-  `launcher_unavailable`, `shutting_down`, `internal_error`)
+  `launcher_unavailable`, `shutting_down`, `capacity_unavailable`,
+  `too_many_mounts`, `internal_error`)
 - `principal_name`: when available
 - `session_id`: from the authenticated session
 - `request_id`: from the request context
