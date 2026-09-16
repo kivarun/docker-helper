@@ -959,6 +959,33 @@ func sparseHostileFile(t *testing.T, path string, size int64) {
 	}
 }
 
+// hugeSparseHostileFile creates a sparse regular file with the largest
+// hostile logical size this filesystem can represent: the near-max int64
+// size where a naive "used += requested" accumulation would wrap into
+// acceptance, falling back through progressively smaller (still vastly
+// over-ceiling) sizes for filesystems whose maximum file size is lower.
+// Returns the achieved logical size.
+func hugeSparseHostileFile(t *testing.T, path string) int64 {
+	t.Helper()
+	for _, size := range []int64{math.MaxInt64, 1 << 42, 1 << 37} {
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = f.Truncate(size)
+		f.Close()
+		if err == nil {
+			return size
+		}
+		if !errors.Is(err, syscall.EFBIG) && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("cannot create the huge sparse fixture: %v", err)
+		}
+		os.Remove(path)
+	}
+	t.Fatal("no representable huge sparse size on this filesystem")
+	return 0
+}
+
 // TestStageBuildContextSparsePayloadOverByteCeiling proves a single hostile
 // build context cannot push its payload past the production byte ceiling:
 // a sparse file whose logical size exceeds the ceiling must be refused
@@ -1283,25 +1310,79 @@ func TestStagingBudgetSparseLogicalSizeRefused(t *testing.T) {
 	requireNoOperationTree(t, runtimeDir, "op1")
 }
 
-// TestStagingBudgetBytesOverflowRefused proves the byte admission arithmetic
-// cannot overflow into acceptance: a sparse source file with a near-max
-// st_size is refused by the before-comparison check, where a
-// "used += requested" implementation would wrap int64 and accept.
-func TestStagingBudgetBytesOverflowRefused(t *testing.T) {
+// TestStagingBudgetReserveBytesOverflow proves the byte admission arithmetic
+// cannot overflow into acceptance, as isolated pure behavior: with the
+// budget nearly exhausted, a near-max reservation is refused by the
+// before-comparison check — where a "used += requested" implementation
+// would wrap int64 negative and accept — the counter is not corrupted, and
+// the budget keeps admitting exactly-ceiling-sized reservations.
+func TestStagingBudgetReserveBytesOverflow(t *testing.T) {
+	budget := newBuildStagingBudget(buildStagingCeilings{MaxBytes: 4096, MaxEntries: 4, MaxDepth: 4})
+
+	if err := budget.reserveBytes(2048); err != nil {
+		t.Fatalf("ordinary reservation must succeed: %v", err)
+	}
+	// math.MaxInt64 + 2048 overflows int64; the comparison-before-mutation
+	// form must refuse instead.
+	err := budget.reserveBytes(math.MaxInt64)
+	ceilingErr := requireCeilingError(t, err, "bytes")
+	if ceilingErr.Attempted != math.MaxInt64 {
+		t.Errorf("attempted reservation = %d, want math.MaxInt64 (the refused resource value)", ceilingErr.Attempted)
+	}
+	if budget.bytesRemaining != 2048 {
+		t.Errorf("refused reservation mutated the budget: bytesRemaining = %d, want 2048", budget.bytesRemaining)
+	}
+	if err := budget.reserveBytes(2048); err != nil {
+		t.Errorf("budget corrupted by the refused overflow-sized reservation: %v", err)
+	}
+	if err := budget.reserveBytes(1); err == nil {
+		t.Error("budget must be exhausted after the exactly-at-limit reservation")
+	}
+}
+
+// TestStagingBudgetHugeSparseSourceRefused proves the end-to-end walker
+// refusal for a source file whose logical size is near the filesystem
+// maximum: the reservation is refused before any destination payload is
+// created or copied, the attempted value is the source's st_size, and the
+// refusal leaves no operation tree.
+func TestStagingBudgetHugeSparseSourceRefused(t *testing.T) {
 	workspace, runtimeDir := setupStagingTest(t)
 	ctxDir := createBuildContext(t, workspace)
 	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
 		t.Fatal(err)
 	}
 
-	sparseHostileFile(t, filepath.Join(ctxDir, "huge.bin"), math.MaxInt64)
+	hugeSize := hugeSparseHostileFile(t, filepath.Join(ctxDir, "huge.bin"))
+
+	copied := false
+	created := false
+	hooks := &stagingHooks{
+		duringCopy: func(name string, copiedBytes int64) error {
+			if name == "huge.bin" {
+				copied = true
+			}
+			return nil
+		},
+		afterCreateDest: func(name string) error {
+			if name == "huge.bin" {
+				created = true
+			}
+			return nil
+		},
+	}
 
 	ceilings := buildStagingCeilings{MaxBytes: 4096, MaxEntries: 2, MaxDepth: 4}
-	_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, nil)
+	_, err := stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
 	ceilingErr := requireCeilingError(t, err, "bytes")
 
-	if ceilingErr.Attempted != math.MaxInt64 {
-		t.Errorf("attempted reservation = %d, want math.MaxInt64 (the refused resource value)", ceilingErr.Attempted)
+	if ceilingErr.Attempted != hugeSize {
+		t.Errorf("attempted reservation = %d, want the source st_size %d", ceilingErr.Attempted, hugeSize)
+	}
+	if copied {
+		t.Error("huge payload began copying; refusal must happen before any destination payload write")
+	}
+	if created {
+		t.Error("huge payload destination entry was created; refusal must happen before destination creation")
 	}
 
 	requireNoOperationTree(t, runtimeDir, "op1")
