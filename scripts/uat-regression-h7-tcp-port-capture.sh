@@ -218,7 +218,7 @@ else
   reg_fail_early "the TCP port is still occupied after releasing the hostile listener"
 fi
 
-RECOVERY_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
+RECOVERY_CURSOR="$(journalctl -n 0 --show-cursor -q 2>/dev/null | grep -oE 's=[a-f0-9]+' | head -1 || true)"
 systemctl restart docker-helper.service 2>/dev/null || reg_fail_early "normal restart after release failed"
 for _ in $(seq 1 30); do
   systemctl is-active --quiet docker-helper.service && break
@@ -236,8 +236,12 @@ if curl --silent --fail --max-time 2 "http://$HTTP_ADDR/health" >/dev/null 2>&1;
 else
   reg_fail_early "TCP listener did not come back after the recovery restart"
 fi
-if journalctl -u docker-helper.service --since "$RECOVERY_MARK" --no-pager 2>/dev/null | grep -q 'loopback TCP listener unavailable'; then
+# The cursor-based window is exact: a same-second capture-phase warning can
+# never bleed into the recovery window (second-granularity --since did).
+if [ -n "$RECOVERY_CURSOR" ] && journalctl -u docker-helper.service --after-cursor "$RECOVERY_CURSOR" --no-pager 2>/dev/null | grep -q 'loopback TCP listener unavailable'; then
   reg_fail_early "the recovery restart must not report a degraded TCP listener"
+elif [ -z "$RECOVERY_CURSOR" ]; then
+  reg_fail_early "cannot obtain the journal cursor for the recovery window (absence is never assumed)"
 else
   reg_ok "recovery restart reports no degraded TCP listener"
 fi
