@@ -477,6 +477,14 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", cerr.Error()),
 			)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", sessionFilesystemPolicyMessage)
+		} else if errors.Is(cerr, ErrMAC) {
+			// MAC preparation failure (including a MAC command terminated at
+			// the fixed transition budget): the audit record already carries
+			// the canonical mac_preparation_failed class; the HTTP answer
+			// carries the same class instead of the generic internal_error
+			// fallback (the documented create error-contract class for a
+			// preparation failure before the create transaction).
+			writeError(ctx, w, http.StatusInternalServerError, "mac_preparation_failed", "internal server error")
 		} else {
 			opLog(ctx).Error("session creation error",
 				slog.String("operation", "session_create"),

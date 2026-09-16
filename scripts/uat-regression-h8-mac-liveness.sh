@@ -112,15 +112,23 @@ arm_shim() {
   fi
   REAL_PATH="${TARGET_PATH}.dh8-real-$$"
   mv "$TARGET_PATH" "$REAL_PATH"
-  # A self-replacing blocker: exec makes sleep the single process the
-  # daemon's bounded runner kills and reaps at the budget.
-  printf '#!/bin/sh\nexec /bin/sleep 793d\n' > "$TARGET_PATH"
+  # A self-stopping blocker: the shim raises SIGSTOP on itself, so it blocks
+  # with no exec, no file access, and no CPU cost under the daemon's own
+  # mandatory MAC policy (an exec-based shim would be denied by the shipped
+  # profile itself — the hostile state must be reachable from the confined
+  # daemon). The bounded runner's budget kill delivers SIGKILL, which
+  # terminates a stopped process and is reaped.
+  printf '#!/bin/sh\nkill -STOP $$\n' > "$TARGET_PATH"
   chmod 0755 "$TARGET_PATH"
   SHIM_ARMED=1
 }
 
 shim_marker_present() { # -> 0 when a shim child process exists
-  pgrep -f 'sleep 793d' >/dev/null 2>&1
+  # The shim's argv[0] is the backend command path (shebang exec); while the
+  # shim is armed that path belongs to exactly one blocked process.
+  local cmd
+  cmd="$(backend_command_path)"
+  pgrep -f -- "$cmd" >/dev/null 2>&1
 }
 
 service_healthy() { # LABEL
@@ -192,6 +200,10 @@ WS_A="$home_a/ws"
 mkdir -p "$WS_A"
 CREDFILE="/tmp/uat-h8-cred.$$"
 reg_principal_credential "$USER_A" "$CREDFILE" || { reg_fail "credential create failed"; reg_result; }
+# The credential is kept for the whole group: a Principal disable/enable
+# cycle does not revoke credentials, so the recovery session create reuses
+# the same one-shot token file (a second credential create could hit the
+# per-Principal credential ceiling).
 
 # --- hostile scenario: hung MAC command vs emergency disable -------------------
 reg_info "arming the hostile shim on the backend command"
@@ -257,8 +269,8 @@ reg_info "hostile lifecycle wall-clock: $(( $(date +%s) - create_start ))s (boun
 if [ "$create_rc" = 0 ]; then
   reg_fail "a Session create whose MAC command was terminated at the budget must fail, not succeed"
 else
-  if grep -qi "MAC preparation failed" "$CREATE_OUT" 2>/dev/null; then
-    reg_ok "the parked Session create failed bounded with a MAC-preparation failure"
+  if grep -q "mac_preparation_failed" "$CREATE_OUT" 2>/dev/null; then
+    reg_ok "the parked Session create failed bounded with the documented mac_preparation_failed class"
   else
     reg_ok "the parked Session create failed bounded (nonzero exit)"
   fi
@@ -281,6 +293,17 @@ else
   reg_fail "the hung MAC command process survived the budget: a MAC child was left behind"
 fi
 
+# Restore the backend binary BEFORE any post-hold check that would itself
+# invoke it: the fail-closed MAC inventory below uses the real frontend
+# (restoring the binary does not change any MAC state the failed create
+# left behind).
+restore_hostile
+if [ -f "$(backend_command_path)" ]; then
+  reg_ok "the backend command binary was restored"
+else
+  reg_fail "the backend command binary was not restored"
+fi
+
 # No Session was committed by the failed create.
 if dh session list --system --json 2>/dev/null | grep -qF "$WS_A"; then
   reg_fail "the failed Session create committed a Session"
@@ -288,10 +311,11 @@ else
   reg_ok "the failed Session create committed no Session"
 fi
 
-# The disable is durable.
+# The disable is durable (list JSON: {"ok":...,"principals":[...]}).
 if dh principal list --system --json 2>/dev/null | python3 -c "
 import json, sys
-for p in json.load(sys.stdin):
+doc = json.load(sys.stdin)
+for p in doc.get('principals', []):
     if p.get('username') == '$USER_A':
         sys.exit(0 if p.get('enabled') is False else 1)
 sys.exit(1)
@@ -317,20 +341,13 @@ else
   fi
 fi
 
-# --- restore, then prove recovery ---------------------------------------------
-restore_hostile
-if [ -f "$(backend_command_path)" ]; then
-  reg_ok "the backend command binary was restored"
-else
-  reg_fail "the backend command binary was not restored"
-fi
+# --- prove recovery -------------------------------------------------------------
 service_healthy "after restoring the backend command"
 
 # A subsequent normal MAC transition works after the hostile condition is
-# removed.
+# removed (the kept one-shot credential token file is reused; a disable/
+# enable cycle does not revoke credentials).
 dh principal set --system "$USER_A" enabled true >/dev/null 2>&1 || true
-rm -f "$CREDFILE"
-reg_principal_credential "$USER_A" "$CREDFILE" || { reg_fail "recovery credential create failed"; reg_result; }
 if reg_session "$CREDFILE" "$WS_A"; then
   reg_ok "a subsequent normal MAC transition (session create) succeeds after the hostile condition is removed"
   RECOVERY_SESSION_ID="$REG_SESSION_ID"

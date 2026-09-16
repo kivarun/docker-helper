@@ -3621,7 +3621,7 @@ Result codes:
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
 | `invalid_filesystem_policy` | `filesystem_roots` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
-| `mac_preparation_failed` | MAC boundary preparation failed before the create transaction (no Session exists) |
+| `mac_preparation_failed` | MAC boundary preparation failed before the create transaction (no Session exists) — HTTP 500; the audit record and the HTTP answer carry the same class |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
 | `unknown_error` | unexpected error not classified above |

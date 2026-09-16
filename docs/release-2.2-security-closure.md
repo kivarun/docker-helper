@@ -1988,22 +1988,28 @@ Hostile exact-candidate UAT: new regression group
 `scripts/uat-regression-h8-mac-liveness.sh`, registered as Ubuntu group 26
 and Tumbleweed group 8. The guest-local hostile mechanism is the least
 invasive one: the backend's own MAC frontend binary is temporarily replaced
-by a self-blocking shim (`exec /bin/sleep 793d`, a single process the
-bounded runner kills and reaps), restored by a fail-closed trap — no
-production seam, debug API, environment backdoor, or configurable command
-pathname was added. Per backend the group proves: the real command entered
-the hostile blocked state (shim process present); the daemon does not wait
-forever (the parked create fails within the whole-transition bound and
-commits no Session); the hung command process is gone after the bound; the
-concurrent administrative Principal disable completes (wall-clock recorded
-against the bound); the service and Unix API stay healthy during and after
-the hold; the MAC ownership/backend inventory is fail closed (no false
-AppArmor fragment boundary, no false SELinux fcontext coverage); a
-subsequent normal MAC transition works after the hostile condition is
-removed; and — with the shim re-armed and a create parked — the real
-packaged service reaches stopped state within the documented shutdown
-wall-clock bound (`TimeoutStopSec=45s` margin) with no external MAC child
-left behind.
+by a self-stopping shim (`kill -STOP $$` — no exec and no file access, so the
+hostile state is reachable from the confined daemon itself; an exec-based
+shim is denied by the shipped profile and never blocks), restored by a
+fail-closed trap — no production seam, debug API, environment backdoor, or
+configurable command pathname was added. Per backend the group proves: the
+real command entered the hostile blocked state (shim process present); the
+daemon does not wait forever (the parked create fails within the
+whole-transition bound, commits no Session, and answers the documented
+`mac_preparation_failed` class); the hung command process is gone after the
+bound; the concurrent administrative Principal disable completes
+(wall-clock recorded against the bound); the service and Unix API stay
+healthy during and after the hold; the MAC ownership/backend inventory is
+fail closed (no false AppArmor fragment boundary, no false SELinux fcontext
+coverage — checked with the restored real frontend, since the armed shim
+would otherwise be executed by the checking script itself); a subsequent
+normal MAC transition works after the hostile condition is removed (the
+one-shot credential token file is reused across the disable/enable cycle);
+and — with the shim re-armed and a create parked — the real packaged service
+reaches stopped state within the documented shutdown wall-clock bound
+(`TimeoutStopSec=45s` margin) with no external MAC child left behind. The
+group also records the Phase-B measurement evidence (real parser reloads,
+semanage listings, and the 50000-entry restorecon) against the budget.
 
 ## SC2 — bounded-resource and liveness closure
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -295,14 +296,20 @@ func h8DisabledStates(t *testing.T, app *App, launcherID, username string) {
 func h8NoSessionCommitted(t *testing.T, app *App, ownerLauncherID, disabledLauncherID string) {
 	t.Helper()
 	for _, id := range []string{ownerLauncherID, disabledLauncherID} {
-		var n int
-		if err := app.DB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id = ?`, id).Scan(&n); err != nil {
-			t.Fatalf("count sessions: %v", err)
-		}
-		if n != 0 {
-			t.Errorf("launcher %s carries %d sessions, want 0", id, n)
+		if got := h8SessionCount(t, app, id); got != 0 {
+			t.Errorf("launcher %s carries %d sessions, want 0", id, got)
 		}
 	}
+}
+
+// h8SessionCount counts live sessions of one launcher.
+func h8SessionCount(t *testing.T, app *App, launcherID string) int {
+	t.Helper()
+	var n int
+	if err := app.DB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id = ?`, launcherID).Scan(&n); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	return n
 }
 
 // h8AdmissionClosed asserts operation admission is closed for the disabled
@@ -919,6 +926,50 @@ func TestH8StartupReconciliationBoundedUnderHungRepair(t *testing.T) {
 	}
 	if len(second) == 0 {
 		t.Fatal("the next ordinary transition must resolve coverage")
+	}
+}
+
+// TestH8CreateMACBudgetFailureHTTPClass proves the HTTP boundary of the
+// budget-expired create: a Session create whose MAC preparation was
+// terminated at the fixed transition budget answers the documented
+// mac_preparation_failed error class (HTTP 500) through the real route
+// handler — the same class the audit record carries — never the generic
+// internal_error fallback, and commits no Session.
+func TestH8CreateMACBudgetFailureHTTPClass(t *testing.T) {
+	h8BudgetOverride(t)
+
+	app, _, release := setupH8AppArmorParkedCoordinator(t)
+	_ = release
+	adminHash := sha256.Sum256([]byte(testAdminToken))
+	app.AdminTokenHash = adminHash
+
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
+	body, err := json.Marshal(map[string]string{"workspace": workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	withAdminToken(req)
+	w := httptest.NewRecorder()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", withRequestID(app.handleCreateSession))
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("budget-expired create: status = %d, want 500: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot decode error response: %v", err)
+	}
+	if resp.Code != "mac_preparation_failed" {
+		t.Errorf("error code = %q, want mac_preparation_failed", resp.Code)
+	}
+	if got := h8SessionCount(t, app, app.userModeDefault.launcherID); got != 0 {
+		t.Errorf("budget-expired create committed %d sessions, want 0", got)
 	}
 }
 
