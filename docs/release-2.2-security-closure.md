@@ -121,7 +121,7 @@ risk rather than by the audit's original severity ordering.
 | **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **CLOSED_CURRENT** | SC2 | The existing OperationSupervisor is the single concurrency owner with fixed, measured, non-configurable Release-2.2 security ceilings — 4 concurrent executions per Session, 8 globally, and a narrow build sub-ceiling of 2 concurrent builds — enforced by an atomic `reserve` → `admitReserved` flow: the reservation checks shutdown, Launcher quiesce, the Session ceiling, the global ceiling and the build sub-ceiling in one critical section and is acquired BEFORE any expensive preparation (run: before the MAC-use lease, mount probing, exposure resolution, pins and workload-MAC materialization; build: before H4 staging), so a capacity refusal leaves zero prepared state; final admission re-checks only the lifecycle closure (a reservation obtained before a quiesce or shutdown is not an admitted Operation) and transfers the reservation into the registered Operation without re-reserving; capacity is released exactly once at the terminal transition and on every pre-admission failure path (the frozen cleanup order gains a kernel-independent capacity stage first), never coupled to retention pruning; no queue, no waiter — one bounded `capacity_unavailable` refusal (HTTP 429) shared by every Session-token Docker execution surface. The synchronous surfaces are closed under the same owner (release-owner decision on the recorded adjacent boundary): `POST /pull` and `POST /registry/login` reserve the SAME Session/global capacity through the shared accounting core (`reserveCapacity`, the pure resource-accounting core `reserve` also uses) BEFORE any Docker process is started, never register an Operation, and release exactly once when the request handler returns (completion, Docker failure, and every pre-exec failure path); the build sub-ceiling applies to builds only; capacity is pure resource accounting — the synchronous surfaces are not closed on Launcher quiesce or daemon shutdown (lifecycle policy stays with its Operation-admission owners). POST /run refuses more than 16 caller mounts (`too_many_mounts`, HTTP 400) immediately after request decoding/basic validation, before the lease, probing, pins, MAC preparation and the reservation; duplicates and RO/RW consume slots equally and the server-owned helper_socket projection does not. One HTTP logs response now carries at most 256 KiB raw retained bytes independent of `operation_log_max_bytes` (`Range` gained a bounded read; `next_offset` follows the bytes actually returned and `truncated` keeps its established meaning with the read starting at the oldest retained byte — no retained bytes silently skipped); the measured worst-case JSON expansion (6× for control characters/invalid UTF-8) keeps one response under ~1.6 MiB encoded; the CLI drains bounded chunks through one shared helper (running polls drain all available chunks; the terminal drain empties every remaining chunk), so successful CLI output is never truncated by chunking. Phase-A measurement: amplification 6.0× adversarial / 1.0× ordinary (1 MiB → 6,291,544 encoded bytes), UAT max concurrency 2, all existing mount usage 1–2 per request, smallest host 3 GiB Tumbleweed VM with ~614 MB `/run` and fs.mount-max 100000, H4 multiplication bounded at 2 × 128 MiB = 256 MiB = 42% of the smallest `/run`. Seam RED/GREEN evidence and hostile exact-candidate UAT group 25 (concurrency, synchronous pull/login refusal before Docker execution, refusal-before-expensive-work, mount ceiling, hostile-byte chunk walk, recovery) — see the SC2 evidence ledger. |
 | **H6** | Mandatory MAC policy blocks admin-token rotation | **CLOSED_CURRENT** | SC1 | The admin-token replacement lifecycle is rewritten around ONE fixed staging pathname (`.admin-token.new`, internal implementation pathname, not a config/API/CLI surface), serialized by the existing admin-token hash commit lock with the stale-rotation check BEFORE the staging pathname is touched, crash-residue recovery, and failure-safe cleanup (current token file and runtime hash unchanged, staging removed). The shipped MAC policy is narrowed to the token replacement lifecycle only: AppArmor (pathname-mediating) grants write/rename on exactly the two token pathnames (the generic config tree and config.json stay read-only, no broader write glob); SELinux (type-based) introduces the dedicated `docker_helper_admin_token_t` file type (MAC implementation state) with exact fcontext rules listed before the generic config-tree rule, the full replacement lifecycle granted on the token type only, an EXACT filename transition for `.admin-token.new` (no generic config-dir transition), `docker_helper_config_t:file` strictly read-only, and config-dir namespace operations limited to write/add_name/remove_name. ACCEPTED SELinux backend mechanic (release-owner ruling, PR #57 review round 2): SELinux does NOT provide AppArmor-equivalent destination-basename mediation for rename — once a token_t inode exists, the granted directory namespace + inode permissions may allow it to be renamed to an otherwise unused basename in the config directory; creation stays exact-name constrained, existing `docker_helper_config_t` objects stay immutable, and this is a backend mechanic, not additional product authority (no path-policy framework, token subdirectory architecture, or rename broker; see the H6 evidence ledger). Deployment labeling stays under the selinux_deploy owner: an exact post-create relabel after the initial token is written (the tree relabel runs before the token exists) with failed-relabel recovery (the just-created token file is removed, no partial initialization), and the packaged restorecon migrates a pre-H6 token on upgrade/reinstall without changing its value. Live enforcing UAT on the exact candidate proves rotation through the shipped confined service with old token rejected, new token accepted, no restart, 0600, no staging residue, config.json unchanged, no broader writable config surface, and no unexpected H6-policy denial on both backends. |
 | **H7** | A local user can occupy the optional TCP port and drive the service into systemd start-limit failure | **CLOSED_CURRENT** | SC2 | The Unix listener is authoritative: a loopback TCP bind failure after a successful Unix bind is DEGRADED STARTUP, never daemon failure — the Unix listener stays open, its socket is not removed, the complete API keeps serving over Unix, the TCP listener is absent for the daemon lifetime, and one bounded operational warning names the configured address and the bind failure. The bind itself is the authority (no pre-probe); no retry/rebind, timer, or listener supervisor exists. Unix creation failure stays fatal; user mode never attempts TCP; systemd Restart=/StartLimit values are untouched. Seam RED/GREEN evidence and hostile exact-candidate UAT (unprivileged port capture against the packaged service under mandatory MAC) — see the SC2 evidence ledger. |
-| **H8** | External MAC commands can hold shared coordination long enough to delay emergency disable | **BLOCKER_FIX** | SC2 | Existing MAC command owners gain bounded cancellation/timeouts and the lifecycle lock path is reviewed so untrusted-size work cannot indefinitely hold administrative disable. Avoid a new queue/framework unless evidence requires it. |
+| **H8** | External MAC commands can hold shared coordination long enough to delay emergency disable | **CLOSED_CURRENT** | SC2 | Every serialized MAC transition is bounded as a whole by ONE fixed, measured, non-configurable Release-2.2 wall-clock budget (60 s) owned by the existing MAC owners — no scheduler, no queue, no new coordinator, no retry goroutine, and the lifecycle linearization and Session policy model are unchanged. Individual external MAC one-shot commands consume the REMAINING transition budget through context-aware execution at the existing command owners (the AppArmor profile manager and its transactional fragment owner; `selinuxFcontextManager`, the one fcontext owner; the trusted-CA runtime restorecon; the workload AppArmor profile one-shots), so a budget-expired command is killed and reaped at the bound, carries `Pdeathsig=SIGKILL` (no MAC child can outlive the daemon on any exit path), returns a typed bounded error (`ErrMACTransitionBudgetExceeded`) inside the existing `mac_preparation_failed` chain, and is never reported as successful MAC preparation. A whole-transition budget is required, not per-command timeouts alone, because the reachable command multiplication of one create is bounded only by the Session filesystem-roots request grammar (the 16 KiB request-body cap admits hundreds of distinct issued trees); the budget application is: create/release = one budget each (create rollback and removal commands consume the same remaining budget, never an unlimited new lifetime), startup reconciliation = one per session pass, workload prepare/cleanup = one per call (the cleanup closure runs its own budget, so operation completion and the bounded shutdown drain cannot be hostage to an orphaned parser), trusted-CA restorecon = one. The global SELinux fcontext flock is now fail-closed/non-waiting (`LOCK_EX|LOCK_NB`, consistent with the existing AppArmor lock) instead of an unbounded blocking pre-command wait — contention is an immediate bounded refusal ("another SELinux fcontext operation is in progress"), no polling queue. Fail-closed mutation outcomes are preserved: an AppArmor timeout/rollback-unproven leaves the fragment restored and the error fail-closed; a SELinux possibly-partial mutation on timeout never claims clean success and never deletes ownership evidence it cannot prove (canonical retain/retry/reconciliation unchanged; the C3 real-procfs prerequisite and descriptor-safe floor untouched); a workload cleanup timeout retains durable ownership for reconciliation. The request lifetime is never the security owner: every budget context is daemon-owned (`context.Background()`). Inventory disposition: deployment/init-only commands (init relabels, `apparmor check`/`selinux check` diagnostics, `systemctl daemon-reload`) cannot delay a live administrative lifecycle transition and stay out of the budget; the SELinux bindfs worker is an intentionally long-lived FUSE worker with existing readiness (10 s) and worker-exit (5 s) bounds, not a timed one-shot. Phase-B measurement: UAT audit evidence shows ordinary creates/releases (full backend preparation) well under 1 s on both backends; the group measures real `apparmor_parser --replace` reloads and `semanage fcontext -l` listings plus a 50000-entry `restorecon -R -m -x` on the exact guests and asserts every observed maximum sits far below half the budget. Seam RED/GREEN evidence and hostile exact-candidate UAT group 26 (Ubuntu/AppArmor) and group 8 (Tumbleweed/SELinux) — hung backend one-shot via a guest-local shim (restored), parked create fails within the bound and commits no Session, concurrent Principal disable reaches its authoritative transition (wall-clock recorded), hung command process killed and reaped, service/Unix API healthy throughout, fail-closed MAC inventory, recovery transition succeeds, and the real packaged service reaches stopped state within the documented shutdown bound with no MAC child left behind — see the SC2 evidence ledger. |
 | **H9** | Agent container can receive the helper runtime directory and steal registry secrets/replace CA state | **CLOSED_CURRENT** | SC1 | Closed by composition with C1, without a second socket transport owner: with the privilege floor in place the strongest reachable workload privilege is the Principal UID:GID with no capabilities and no-new-privileges, which the root-owned `0700` helper-private runtime state denies; the read-only projection and unchanged bearer authentication are unchanged. Hostile helper-socket UAT on enforcing AppArmor and enforcing SELinux proved the socket transport functional, unauthenticated calls refused, private runtime/session Docker config unreadable, runtime immutable, and escalation dead (see the SC1 evidence ledger). |
 | **H10** | An allowed root lets the root daemon read files the Principal could not read under Unix DAC | **BLOCKER_DECISION** | SC3 | Decide whether a filesystem capability intentionally grants helper-mediated read independent of DAC or must additionally preserve Principal DAC/group/ACL semantics. Do **not** implement an owner-UID check as a fake Unix permission model. |
 | **M1** | Environment/build secret values appear in the Docker CLI process argv | **BLOCKER_DECISION** | SC3 | Inventory each secret-bearing channel and choose a supported transport/mitigation. `--env-file` is not assumed equivalent for arbitrary current values. Any residual `/proc` exposure must be explicit in threat/operations docs. |
@@ -1903,10 +1903,112 @@ a narrow internal lease):
   head, recorded in the PR report rather than in a post-UAT ledger
   commit.
 
+## SC2 — H8: bounded MAC-command liveness
+
+The defect: every external MAC one-shot command reachable in the live daemon
+ran without any bound, and a hung command could hold the shared lifecycle
+coordination indefinitely. The dangerous chain (proven by code reading and
+RED seam tests on the pre-fix line):
+
+    Session create
+      -> lifecycleMu                       (createSessionAuthorized)
+      -> createSessionWithPolicyLocked
+      -> MACCoordinator.CreateSessionBinding
+      -> coordinator.mu
+      -> backend MAC command               (apparmor_parser reload /
+                                            blocking SELinux flock +
+                                            semanage + restorecon)
+      -> unbounded wait
+
+so a concurrent Principal/Launcher disable could be kept from reaching its
+lifecycle linearization point (its own `lifecycleMu` acquisition, the quiesce
+prologue, and the durable commit). The reload variant held `lifecycleMu`
+across `loadAndPrepareRuntimeConfig` → trusted-CA restorecon; the workload
+AppArmor parser cleanup could outlive the intended cleanup bound (the run
+completion goroutine reaches its terminal transition only after the cleanup
+sequence returns); and the global SELinux fcontext flock was an unbounded
+blocking `LOCK_EX` pre-command wait.
+
+RED evidence (commit `45a5d2c`, tests against the pre-fix code, deterministic
+seam parks, no sleeps-as-proof — the bounded observation window is the
+non-arrival instrument): `TestH8HungAppArmorParserParksSessionCreateAndBlocksDisable`,
+`TestH8HungSELinuxFcontextParksSessionCreateAndBlocksDisable`,
+`TestH8ReloadHungTrustedCARestoreconKeepsPreviousConfig`, and
+`TestH8WorkloadAppArmorCleanupTimeoutRetainsOwnership` all parked the real
+production owners (a temp-isolated AppArmor profile manager, the real
+`selinuxFcontextManager` mechanics, the real reload/CA preparation path, and
+the real workload prepare/cleanup path) and failed pre-fix exactly at their
+bounded window with the defect message; `TestH8SELinuxFcontextLockContentionFailsClosed`
+proved the blocking acquisition never fails closed under contention (it runs
+wherever the real `/run/lock` flock is exercisable).
+
+Phase-B measurement and the selected budget: existing UAT audit evidence
+shows ordinary creates/releases — full backend preparation included —
+completing in well under 1 s on both backends (the largest observed
+16-mount workload run, preparation and Docker run included, 208–514 ms), and
+the shipped bounded-wait culture is 5 s (termination), 10 s (mount-ready,
+absence proof), 30 s (reconcile scan, shutdown clamp). The new regression
+group measures the real commands on the exact guests — `apparmor_parser
+--replace --skip-cache` reloads, `semanage fcontext -l -C -n` listings, and
+`restorecon -R -m -x` over the H4-scale 50000-entry workspace — and asserts
+every observed maximum sits far below half the budget. On that basis ONE
+fixed, non-configurable budget was selected: `macTransitionBudget = 60 s`
+(one serialized MAC transition), with individual commands consuming the
+remaining budget. The whole-transition shape is required, not per-command
+timeouts alone: the reachable multiplication of one create is bounded only
+by the Session filesystem-roots request grammar (the 16 KiB body cap admits
+hundreds of distinct issued trees), so `per-command × count` does not prove
+a bounded hold of the coordination; the budget makes an abusive create fail
+closed while every legitimate transition (a handful of roots, seconds of
+relabel) sits orders of magnitude inside it. No Session policy model change
+and no lifecycle-linearization weakening: the create's linearization point,
+the commit-boundary revalidation, and the ownership proofs are unchanged.
+
+GREEN evidence (commit `9d9c8e0`, all deterministic, `go test -race` clean):
+the parked-coordination tests now pass — the budget terminates the parked
+command, the create fails with the typed budget error inside the
+`ErrMACPreparation` chain, BOTH concurrent disables reach their authoritative
+transitions within the bound, no Session is committed, operation admission
+stays closed (`admissionRefusedQuiesced`), no coordination lock is stranded,
+and the next ordinary MAC transition succeeds; the reload test keeps the
+previous effective config and adopts the new one on the next successful
+reload; the workload cleanup test retains the generated profile (ownership
+evidence) and returns within the budget through the real prepare→cleanup
+closure; the startup-reconciliation test proves one budget per session pass
+and that the next ordinary transition proceeds; the run-cleanup sequence
+test proves a hung workload cleanup yields a retained outcome (never
+completion) so the terminal transition and the bounded shutdown drain are no
+longer hostage; `TestH8MACCommandKilledAndReapedAtBudget` proves with a REAL
+external process that the bounded runner kills and reaps it at the budget
+with no child left behind (`Pdeathsig=SIGKILL` covers every daemon exit
+path); the lock-contention test proves the non-waiting acquisition fails
+closed immediately under contention.
+
+Hostile exact-candidate UAT: new regression group
+`scripts/uat-regression-h8-mac-liveness.sh`, registered as Ubuntu group 26
+and Tumbleweed group 8. The guest-local hostile mechanism is the least
+invasive one: the backend's own MAC frontend binary is temporarily replaced
+by a self-blocking shim (`exec /bin/sleep 793d`, a single process the
+bounded runner kills and reaps), restored by a fail-closed trap — no
+production seam, debug API, environment backdoor, or configurable command
+pathname was added. Per backend the group proves: the real command entered
+the hostile blocked state (shim process present); the daemon does not wait
+forever (the parked create fails within the whole-transition bound and
+commits no Session); the hung command process is gone after the bound; the
+concurrent administrative Principal disable completes (wall-clock recorded
+against the bound); the service and Unix API stay healthy during and after
+the hold; the MAC ownership/backend inventory is fail closed (no false
+AppArmor fragment boundary, no false SELinux fcontext coverage); a
+subsequent normal MAC transition works after the hostile condition is
+removed; and — with the shim re-armed and a create parked — the real
+packaged service reaches stopped state within the documented shutdown
+wall-clock bound (`TimeoutStopSec=45s` margin) with no external MAC child
+left behind.
+
 ## SC2 — bounded-resource and liveness closure
 
-**Queue:** `H8`. (H4, H5 and H7 closed in SC2 — see the SC2 evidence
-ledgers above.)
+**Queue:** empty — **SC2 CLOSED**. (H4, H5, H7 and H8 closed in SC2 — see
+the SC2 evidence ledgers above.)
 
 SC2 removes unbounded host-resource and liveness channels without importing the
 Release 3 resource model. Release 2.2 needs hard security ceilings, not a new
@@ -1920,8 +2022,11 @@ Required direction:
 - resource reservation/admission happens before expensive preparation where the
   attack depends on pre-admission work; (closed — H5)
 - external MAC commands have bounded execution/cancellation and cannot hold
-  lifecycle coordination indefinitely. (The optional-TCP item was closed in
-  SC2 already — see the SC2 evidence ledger above.)
+  lifecycle coordination indefinitely. (closed — H8: one fixed measured
+  transition budget consumed by the individual backend commands, a
+  fail-closed fcontext lock, typed budget errors, kill/reap with
+  `Pdeathsig`, and hostile both-backend UAT; the optional-TCP item was
+  closed in SC2 already — see the SC2 evidence ledger above.)
 
 Concrete limits are selected from measurement and UAT, not invented from the
 future Release 3 quota design.
