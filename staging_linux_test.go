@@ -1643,7 +1643,8 @@ func TestStagingBudgetDockerfileCounted(t *testing.T) {
 
 // TestStagingCeilingErrorSurvivesWrapping proves the typed ceiling refusal
 // stays identifiable through error wrapping, as the build handler
-// classification requires.
+// classification requires: errors.As recovers the typed fields and
+// errors.Is matches any refusal of the same exhausted resource.
 func TestStagingCeilingErrorSurvivesWrapping(t *testing.T) {
 	sentinel := &buildStagingCeilingError{Resource: "entries", Ceiling: 3, Attempted: 4}
 	wrapped := fmt.Errorf("cannot read directory: %w", fmt.Errorf("cannot copy directory sub: %w", sentinel))
@@ -1654,5 +1655,12 @@ func TestStagingCeilingErrorSurvivesWrapping(t *testing.T) {
 	}
 	if ceilingErr.Resource != "entries" || ceilingErr.Ceiling != 3 || ceilingErr.Attempted != 4 {
 		t.Errorf("typed fields lost through wrapping: %+v", ceilingErr)
+	}
+
+	if !errors.Is(wrapped, &buildStagingCeilingError{Resource: "entries"}) {
+		t.Error("errors.Is must match the same exhausted resource through wrapping")
+	}
+	if errors.Is(wrapped, &buildStagingCeilingError{Resource: "bytes"}) {
+		t.Error("errors.Is must not match a different exhausted resource")
 	}
 }

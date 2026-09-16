@@ -69,6 +69,14 @@ func (e *buildStagingCeilingError) Error() string {
 	return fmt.Sprintf("build context exceeds the staging %s ceiling (attempted %d, ceiling %d)", e.Resource, e.Attempted, e.Ceiling)
 }
 
+// Is makes errors.Is match any staging ceiling refusal of the same
+// resource through wrapping — the exhausted dimension is the refusal's
+// identity, not the instance.
+func (e *buildStagingCeilingError) Is(target error) bool {
+	t, ok := target.(*buildStagingCeilingError)
+	return ok && t != nil && e.Resource == t.Resource
+}
+
 // buildStagingBudget is the one mutable per-staging admission owner for the
 // three staging dimensions. It is created once per staging operation from
 // fixed ceilings, threaded through the existing descriptor-relative walker,
