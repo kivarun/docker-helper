@@ -483,7 +483,13 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			// the canonical mac_preparation_failed class; the HTTP answer
 			// carries the same class instead of the generic internal_error
 			// fallback (the documented create error-contract class for a
-			// preparation failure before the create transaction).
+			// preparation failure before the create transaction). The
+			// actionable internal cause (backend command, guard refusal,
+			// budget expiry) stays in the operational log, as before.
+			opLog(ctx).Error("session creation error",
+				slog.String("operation", "session_create"),
+				slog.String("error", cerr.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "mac_preparation_failed", "internal server error")
 		} else {
 			opLog(ctx).Error("session creation error",

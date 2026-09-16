@@ -111,6 +111,17 @@ arm_shim() {
     reg_blocked "backend command $TARGET_PATH not found (unexpected on a supported guest)"
   fi
   REAL_PATH="${TARGET_PATH}.dh8-real-$$"
+  SHIM_TYPE=""
+  if [ "$BACKEND" = "selinux" ] && command -v ls >/dev/null 2>&1; then
+    # SELinux is type-based: a freshly created file inherits the directory
+    # default, not the original binary's type, so the confined daemon could
+    # not execute the shim at all. Copy the ORIGINAL's type onto the shim so
+    # the daemon's execute of that path keeps exactly the original
+    # permission; the restore (mv) brings the original file and its type
+    # back.
+    SHIM_TYPE="$(ls -Z "$TARGET_PATH" 2>/dev/null | awk '{print $1}' | cut -d: -f3)"
+    [ -n "$SHIM_TYPE" ] || SHIM_TYPE=""
+  fi
   mv "$TARGET_PATH" "$REAL_PATH"
   # A self-stopping blocker: the shim raises SIGSTOP on itself, so it blocks
   # with no exec, no file access, and no CPU cost under the daemon's own
@@ -120,6 +131,9 @@ arm_shim() {
   # terminates a stopped process and is reaped.
   printf '#!/bin/sh\nkill -STOP $$\n' > "$TARGET_PATH"
   chmod 0755 "$TARGET_PATH"
+  if [ -n "$SHIM_TYPE" ] && command -v chcon >/dev/null 2>&1; then
+    chcon -t "$SHIM_TYPE" "$TARGET_PATH" 2>/dev/null || true
+  fi
   SHIM_ARMED=1
 }
 
@@ -358,9 +372,14 @@ fi
 
 # --- shutdown bound -------------------------------------------------------------
 reg_info "re-arming the hostile shim for the shutdown proof"
+# A FRESH workspace: the recovery create gave its workspace real coverage, so
+# that workspace's create is idempotent at the backend and would never reach
+# the backend command. Only a NEW boundary reaches the parser/semanage path.
+WS_STOP="$home_a/ws-stop-$$"
+mkdir -p "$WS_STOP"
 arm_shim
 (
-  dh session create --system --token-file "$CREDFILE" --workspace "$WS_A" >/dev/null 2>&1
+  dh session create --system --token-file "$CREDFILE" --workspace "$WS_STOP" >/dev/null 2>&1
 ) &
 CREATE_PID2=$!
 for _ in $(seq 1 50); do
@@ -395,10 +414,22 @@ else
   reg_fail "the backend command binary was not restored after the shutdown proof"
 fi
 systemctl start docker-helper.service >/dev/null 2>&1
+# Type=exec reports active at exec start, before the daemon binds its socket
+# and finishes startup reconciliation: readiness is the /health answer, not
+# the unit state.
+health_ready=0
 for _ in $(seq 1 30); do
-  systemctl is-active --quiet docker-helper.service && break
+  if curl --silent --fail --max-time 2 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
+    health_ready=1
+    break
+  fi
   sleep 1
 done
+if [ "$health_ready" = 1 ]; then
+  reg_ok "the service returned healthy after the shutdown proof and restart"
+else
+  reg_fail "the service did not become healthy within the bounded wait after the restart"
+fi
 service_healthy "after the shutdown proof and restart"
 
 # --- cleanup ---------------------------------------------------------------------
@@ -406,6 +437,6 @@ if [ -n "${RECOVERY_SESSION_ID:-}" ]; then
   dh session delete --system --id "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
 fi
 dh principal delete --system "$USER_A" >/dev/null 2>&1 || true
-rm -rf "$BIGTREE" "$WS_A" "$CREATE_OUT" "$DISABLE_OUT" "$CREDFILE" 2>/dev/null || true
+rm -rf "$BIGTREE" "$WS_A" "$WS_STOP" "$CREATE_OUT" "$DISABLE_OUT" "$CREDFILE" 2>/dev/null || true
 
 reg_result
