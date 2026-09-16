@@ -540,9 +540,20 @@ Pull a Docker image.
 Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
 \-\-context accepts a workspace-relative path or an absolute host path
 inside the session workspace (the daemon validates containment).
+Run and build are asynchronous operations under fixed concurrency
+ceilings (4 per session, 8 per daemon, of which 2 may be builds; a mount
+ceiling of 16 caller mounts per run applies): beyond a ceiling the
+request is refused immediately with \fBoperation_capacity_unavailable\fR
+(HTTP 429, "too many concurrent operations"); there is no queue, and the
+client decides whether to retry. A refused request leaves no pin, no
+staging, no workload-MAC state and no started container behind.
 .TP
 .B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] \-\- [command]
  Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
+A run request carries at most 16 caller mounts (duplicates and read-only
+mounts included; the server-owned helper-socket projection is not a
+caller mount): a longer list is refused with
+.BR too_many_mounts .
 A mount source is a workspace-relative path (system mode: any file or
 subdirectory; user mode: only the workspace root \fB.\fR) or an absolute
 host path inside the issued Session filesystem snapshot; any other source
