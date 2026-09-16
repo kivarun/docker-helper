@@ -99,7 +99,7 @@ func (f *runWorkloadLifecycleFixture) run(t *testing.T, token, body string) (*ht
 // verification to fail for retention tests.
 func (f *runWorkloadLifecycleFixture) parser(t *testing.T, unloadLeavesLoaded bool) {
 	t.Helper()
-	f.backend.runParser = func(parserPath string, args []string) error {
+	f.backend.runParser = func(_ context.Context, parserPath string, args []string) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.parserCalls = append(f.parserCalls, args[0])
@@ -131,7 +131,7 @@ func (f *runWorkloadLifecycleFixture) parser(t *testing.T, unloadLeavesLoaded bo
 // ownership order.
 func TestRunWorkloadPrepareFailureBlocksDocker(t *testing.T) {
 	f := newRunWorkloadLifecycleFixture(t)
-	f.backend.runParser = func(parserPath string, args []string) error {
+	f.backend.runParser = func(_ context.Context, parserPath string, args []string) error {
 		if args[0] == "--replace" {
 			return fmt.Errorf("simulated parser load failure")
 		}

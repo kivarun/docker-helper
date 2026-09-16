@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -52,9 +53,13 @@ func selinuxFcontextBoundaryAllowed(canonical string) bool {
 type selinuxFcontextManager struct {
 	semanagePath   string
 	restoreconPath string
-	runCommand     func(string, ...string) ([]byte, error)
-	readPathCon    func(string) (string, error)
-	selinuxActive  func() (bool, bool, error) // (active, enforcing, error)
+	// runCommand executes one external SELinux command within the remaining
+	// MAC transition budget carried by ctx: on expiry the child is killed and
+	// reaped and a bounded actionable error is returned (never a timeout
+	// reported as success).
+	runCommand    func(context.Context, string, ...string) ([]byte, error)
+	readPathCon   func(string) (string, error)
+	selinuxActive func() (bool, bool, error) // (active, enforcing, error)
 	// readMountinfo reads the current mount namespace's mount info
 	// (/proc/self/mountinfo) used by the workspace relabel-boundary guard.
 	readMountinfo func() ([]byte, error)
@@ -75,9 +80,15 @@ type selinuxFcontextManager struct {
 }
 
 func newSELinuxFcontextManager() *selinuxFcontextManager {
-	rc := func(cmd string, args ...string) ([]byte, error) {
-		c := exec.Command(cmd, args...)
+	rc := func(ctx context.Context, cmd string, args ...string) ([]byte, error) {
+		c := exec.CommandContext(ctx, cmd, args...)
+		if err := configureMACCommandSysProcAttr(c); err != nil {
+			return nil, fmt.Errorf("cannot prepare bounded %s execution: %w", filepath.Base(cmd), err)
+		}
 		out, err := c.CombinedOutput()
+		if classifyErr := macCommandError(ctx, filepath.Base(cmd), err); classifyErr != err {
+			return out, classifyErr
+		}
 		return out, err
 	}
 	return &selinuxFcontextManager{
@@ -123,15 +134,32 @@ func readSelfMountinfo() ([]byte, error) {
 // acquireSELinuxFcontextLock acquires the global SELinux workspace management
 // lock. Returns a release function and an error.
 func acquireSELinuxFcontextLock() (func() error, error) {
-	if err := os.MkdirAll("/run/lock", 0755); err != nil {
+	return acquireSELinuxFcontextLockAt(selinuxFcontextLockPath)
+}
+
+// acquireSELinuxFcontextLockAt acquires the global SELinux workspace
+// management lock at the given lock path. The acquisition is
+// fail-closed/non-waiting (LOCK_EX|LOCK_NB), consistent with the existing
+// AppArmor workspace lock: a contended fcontext transition is refused
+// immediately with a bounded actionable error instead of parking an
+// unbounded blocking LOCK_EX wait in front of the bounded backend commands.
+// The lock serializes fcontext state transitions across processes; within
+// the daemon the session MAC coordinator serializes transitions anyway, so
+// contention is a cross-process condition and immediate refusal is the
+// correct liveness behavior (no polling queue).
+func acquireSELinuxFcontextLockAt(lockPath string) (func() error, error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
 		return nil, fmt.Errorf("cannot create lock directory: %w", err)
 	}
-	f, err := os.OpenFile(selinuxFcontextLockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open SELinux workspace lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
+		if err == syscall.EWOULDBLOCK {
+			return nil, errors.New("another SELinux fcontext operation is in progress")
+		}
 		return nil, fmt.Errorf("cannot acquire SELinux workspace lock: %w", err)
 	}
 	return func() error {
@@ -307,7 +335,7 @@ func unescapeFcontextPath(s string) (string, bool) {
 //     operator-compatible (never helper-owned).
 //   - HelperOwned is resolved by the sessionMACCoordinator using durable
 //     ownership metadata, not by this backend function.
-func (m *selinuxFcontextManager) ensureTreeFcontext(tree string, kind macBoundaryKind) (newlyCreated bool, err error) {
+func (m *selinuxFcontextManager) ensureTreeFcontext(ctx context.Context, tree string, kind macBoundaryKind) (newlyCreated bool, err error) {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {
 		return false, fmt.Errorf("cannot determine SELinux status: %w", err)
@@ -335,7 +363,8 @@ func (m *selinuxFcontextManager) ensureTreeFcontext(tree string, kind macBoundar
 		return false, fmt.Errorf("refusing workspace fcontext setup for %s: %w", tree, err)
 	}
 
-	// Acquire global SELinux workspace management lock.
+	// Acquire global SELinux workspace management lock (fail-closed,
+	// non-waiting: contention is an immediate bounded refusal).
 	release, err := m.acquireLock()
 	if err != nil {
 		return false, fmt.Errorf("cannot acquire SELinux workspace lock: %w", err)
@@ -346,7 +375,7 @@ func (m *selinuxFcontextManager) ensureTreeFcontext(tree string, kind macBoundar
 	pattern := fcontextPatternFor(boundary, kind)
 
 	// Check existing local fcontext rules.
-	existing, err := m.listLocalFcontextRules()
+	existing, err := m.listLocalFcontextRules(ctx)
 	if err != nil {
 		return false, fmt.Errorf("cannot list local fcontext rules: %w", err)
 	}
@@ -377,7 +406,7 @@ func (m *selinuxFcontextManager) ensureTreeFcontext(tree string, kind macBoundar
 		if existingRule.fileType == selinuxWorkspaceType {
 			// Exact match already exists - idempotent path.
 			// Still need to run restorecon and verify.
-			if err := m.restoreconTree(tree, kind); err != nil {
+			if err := m.restoreconTree(ctx, tree, kind); err != nil {
 				return false, fmt.Errorf("restorecon failed for existing mapping %s: %w", tree, err)
 			}
 			if err := m.verifyActualType(tree); err != nil {
@@ -393,15 +422,18 @@ func (m *selinuxFcontextManager) ensureTreeFcontext(tree string, kind macBoundar
 	}
 
 	// No matching rule - add ours.
-	if err := m.addFcontextRule(pattern, selinuxWorkspaceType); err != nil {
+	if err := m.addFcontextRule(ctx, pattern, selinuxWorkspaceType); err != nil {
 		return false, fmt.Errorf("cannot add fcontext rule for %s: %w", tree, err)
 	}
 
 	// Apply restorecon recursively.
-	if err := m.restoreconTree(tree, kind); err != nil {
-		// Internal rollback: manager cannot complete its transition.
-		if rbErr := m.removeFcontextBoundary(boundary, kind); rbErr != nil {
-			return false, fmt.Errorf("restorecon failed: %v; rollback also failed: %v", err, rbErr)
+	if err := m.restoreconTree(ctx, tree, kind); err != nil {
+		// Internal rollback: manager cannot complete its transition. The
+		// rollback consumes the SAME remaining transition budget (never an
+		// unlimited new lifetime); a rollback that cannot be proven is a
+		// failure, never a falsely complete transition.
+		if rbErr := m.removeFcontextBoundary(ctx, boundary, kind); rbErr != nil {
+			return false, fmt.Errorf("restorecon failed: %w; rollback also failed: %w", err, rbErr)
 		}
 		return false, fmt.Errorf("restorecon failed for %s: %w", tree, err)
 	}
@@ -409,8 +441,8 @@ func (m *selinuxFcontextManager) ensureTreeFcontext(tree string, kind macBoundar
 	// Verify the actual on-disk type.
 	if err := m.verifyActualType(tree); err != nil {
 		// Internal rollback.
-		if rbErr := m.removeFcontextBoundary(boundary, kind); rbErr != nil {
-			return false, fmt.Errorf("verification failed: %v; rollback also failed: %v", err, rbErr)
+		if rbErr := m.removeFcontextBoundary(ctx, boundary, kind); rbErr != nil {
+			return false, fmt.Errorf("verification failed: %w; rollback also failed: %w", err, rbErr)
 		}
 		return false, err
 	}
@@ -565,8 +597,8 @@ func sameStemWorkspacePatterns(rules []fcontextRule, boundary string) []string {
 //	two or more same-stem workspace rules -> the owned shape cannot be
 //	    proven; returns an error (fail closed, ownership retained for
 //	    reconciliation).
-func (m *selinuxFcontextManager) proveOwnedFcontextShape(boundary string) (macBoundaryKind, bool, error) {
-	existing, err := m.listLocalFcontextRules()
+func (m *selinuxFcontextManager) proveOwnedFcontextShape(ctx context.Context, boundary string) (macBoundaryKind, bool, error) {
+	existing, err := m.listLocalFcontextRules(ctx)
 	if err != nil {
 		return macBoundaryUnknown, false, fmt.Errorf("cannot list local fcontext rules: %w", err)
 	}
@@ -648,13 +680,13 @@ func (m *selinuxFcontextManager) proveOwnedFcontextShape(boundary string) (macBo
 // without touching any rule (relabel-only completion), and any same-stem
 // workspace rule that appeared since the proof is refused — the state is no
 // longer the proven one and the owned shape is unprovable again.
-func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string, kind macBoundaryKind) error {
+func (m *selinuxFcontextManager) removeFcontextBoundary(ctx context.Context, boundary string, kind macBoundaryKind) error {
 	// Mount-safety preflight BEFORE deleting the persistent fcontext rule.
 	if err := m.checkTreeRelabelBoundary(boundary); err != nil {
 		return err
 	}
 
-	existing, err := m.listLocalFcontextRules()
+	existing, err := m.listLocalFcontextRules(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot list local fcontext rules: %w", err)
 	}
@@ -668,7 +700,7 @@ func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string, kind ma
 		// removal attempt is the resumable intermediate state, not drift.
 		pattern := fcontextPatternFor(boundary, kind)
 		if fcontextRulePresent(existing, pattern, selinuxWorkspaceType) {
-			if err := m.removeFcontextRule(pattern); err != nil {
+			if err := m.removeFcontextRule(ctx, pattern); err != nil {
 				return fmt.Errorf("cannot remove fcontext rule for %s: %w", boundary, err)
 			}
 		}
@@ -695,7 +727,7 @@ func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string, kind ma
 		return fmt.Errorf("cannot classify boundary %s for the removal relabel: %w", boundary, err)
 	}
 	if currentKind != macBoundaryMissing {
-		if err := m.restoreconTree(boundary, currentKind); err != nil {
+		if err := m.restoreconTree(ctx, boundary, currentKind); err != nil {
 			return fmt.Errorf("restorecon rollback for %s after rule removal: %w", boundary, err)
 		}
 	}
@@ -727,8 +759,8 @@ type fcontextRule struct {
 // Uses -C -n to inspect only local customizations, not base policy.
 //
 // Fails closed on any non-empty line that cannot be classified safely.
-func (m *selinuxFcontextManager) listLocalFcontextRules() ([]fcontextRule, error) {
-	out, err := m.runCommand(m.semanagePath, "fcontext", "-l", "-C", "-n")
+func (m *selinuxFcontextManager) listLocalFcontextRules(ctx context.Context) ([]fcontextRule, error) {
+	out, err := m.runCommand(ctx, m.semanagePath, "fcontext", "-l", "-C", "-n")
 	if err != nil {
 		return nil, fmt.Errorf("semanage fcontext -l -C -n: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -878,18 +910,18 @@ func isLiteralAbsPath(s string) bool {
 	return true
 }
 
-func (m *selinuxFcontextManager) addFcontextRule(pattern, fileType string) error {
+func (m *selinuxFcontextManager) addFcontextRule(ctx context.Context, pattern, fileType string) error {
 	// semanage fcontext -a -t TYPE PATTERN
-	out, err := m.runCommand(m.semanagePath, "fcontext", "-a", "-t", fileType, pattern)
+	out, err := m.runCommand(ctx, m.semanagePath, "fcontext", "-a", "-t", fileType, pattern)
 	if err != nil {
 		return fmt.Errorf("semanage fcontext -a: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-func (m *selinuxFcontextManager) removeFcontextRule(pattern string) error {
+func (m *selinuxFcontextManager) removeFcontextRule(ctx context.Context, pattern string) error {
 	// semanage fcontext -d PATTERN
-	out, err := m.runCommand(m.semanagePath, "fcontext", "-d", pattern)
+	out, err := m.runCommand(ctx, m.semanagePath, "fcontext", "-d", pattern)
 	if err != nil {
 		return fmt.Errorf("semanage fcontext -d: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -1061,12 +1093,15 @@ func (m *selinuxFcontextManager) checkTreeRelabelBoundary(workspace string) erro
 //
 // Type-only: restorecon is never passed -F, so user/role/MLS/MCS range are
 // not forcibly reset.
-func (m *selinuxFcontextManager) restoreconTree(path string, kind macBoundaryKind) error {
+func (m *selinuxFcontextManager) restoreconTree(ctx context.Context, path string, kind macBoundaryKind) error {
 	if err := m.checkTreeRelabelBoundary(path); err != nil {
 		return err
 	}
 	if kind == macBoundaryRegularFile {
-		out, err := m.runCommand(m.restoreconPath, "-m", path)
+		out, err := m.runCommand(ctx, m.restoreconPath, "-m", path)
+		if classify := macCommandError(ctx, "restorecon", err); classify != err {
+			return classify
+		}
 		if err != nil {
 			return fmt.Errorf("restorecon -m: %w: %s", err, strings.TrimSpace(string(out)))
 		}
@@ -1078,7 +1113,10 @@ func (m *selinuxFcontextManager) restoreconTree(path string, kind macBoundaryKin
 	if err := m.procfsUsable(); err != nil {
 		return fmt.Errorf("refusing recursive workspace relabel of %s: %w", path, err)
 	}
-	out, err := m.runCommand(m.restoreconPath, "-R", "-m", "-x", path)
+	out, err := m.runCommand(ctx, m.restoreconPath, "-R", "-m", "-x", path)
+	if classify := macCommandError(ctx, "restorecon", err); classify != err {
+		return classify
+	}
 	if err != nil {
 		return fmt.Errorf("restorecon -R -m -x: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -1088,8 +1126,8 @@ func (m *selinuxFcontextManager) restoreconTree(path string, kind macBoundaryKin
 // listCoveringFcontexts returns all existing fcontext boundaries that cover
 // the given workspace path. Returns only boundaries that map to
 // docker_helper_workspace_t. The caller determines ownership via mac_boundaries.
-func (m *selinuxFcontextManager) listCoveringFcontexts(workspace string) ([]string, error) {
-	rules, err := m.listLocalFcontextRules()
+func (m *selinuxFcontextManager) listCoveringFcontexts(ctx context.Context, workspace string) ([]string, error) {
+	rules, err := m.listLocalFcontextRules(ctx)
 	if err != nil {
 		return nil, err
 	}

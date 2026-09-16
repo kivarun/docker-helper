@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -36,8 +37,12 @@ func setupAppArmorMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *a
 	}
 
 	driver := &appArmorMACDriver{
-		addManagedBoundary:    func(path string) (boundaryResult, error) { return mgr.addManagedBoundary(path) },
-		removeManagedBoundary: func(path string) (boundaryResult, error) { return mgr.removeManagedBoundary(path) },
+		addManagedBoundary: func(ctx context.Context, path string) (boundaryResult, error) {
+			return mgr.addManagedBoundary(ctx, path)
+		},
+		removeManagedBoundary: func(ctx context.Context, path string) (boundaryResult, error) {
+			return mgr.removeManagedBoundary(ctx, path)
+		},
 		listManagedBoundaries: func() ([]appArmorManagedBoundary, error) { return mgr.listManagedBoundaries() },
 	}
 	mac := newSessionMACCoordinator(db, driver)
@@ -93,7 +98,7 @@ func TestAppArmorDriverExternalTreeThroughSameOwner(t *testing.T) {
 
 	// Both issued trees must be covered by the real AppArmor driver.
 	for _, tree := range []string{extDir, extFile} {
-		if _, err := driver.verifyCoverage(tree); err != nil {
+		if _, err := driver.verifyCoverage(context.Background(), tree); err != nil {
 			t.Errorf("issued tree %s must be covered after creation: %v", tree, err)
 		}
 	}
@@ -118,7 +123,7 @@ func TestAppArmorDriverExternalTreeThroughSameOwner(t *testing.T) {
 	// Release: the canonical removal owner drops both boundaries.
 	mac.ReleaseSessionBinding("sess-aa")
 	for _, tree := range []string{extDir, extFile} {
-		if _, err := driver.verifyCoverage(tree); err == nil {
+		if _, err := driver.verifyCoverage(context.Background(), tree); err == nil {
 			t.Errorf("boundary %s must be removed after the only consumer released it", tree)
 		}
 	}
@@ -160,12 +165,12 @@ func TestAppArmorDriverOverlapRelease(t *testing.T) {
 	// Delete the parent session first: the child session still holds the
 	// boundary.
 	mac.ReleaseSessionBinding("sess-aa-parent")
-	if _, err := driver.verifyCoverage(child); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), child); err != nil {
 		t.Fatalf("child coverage must survive the parent session deletion: %v", err)
 	}
 
 	mac.ReleaseSessionBinding("sess-aa-child")
-	if _, err := driver.verifyCoverage(parent); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), parent); err == nil {
 		t.Error("the boundary must be removed once every consumer released it")
 	}
 }
@@ -202,10 +207,10 @@ func TestAppArmorDriverFileBoundaryNeverCoversDescendant(t *testing.T) {
 	}
 
 	// verify: the exact file is covered; a descendant is not.
-	if _, err := driver.verifyCoverage(treeFile); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), treeFile); err != nil {
 		t.Fatalf("verifyCoverage(exact file): %v", err)
 	}
-	if _, err := driver.verifyCoverage(child); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), child); err == nil {
 		t.Error("a regular-file boundary must never cover a descendant path")
 	}
 
@@ -214,7 +219,7 @@ func TestAppArmorDriverFileBoundaryNeverCoversDescendant(t *testing.T) {
 	// the kind-aware verify proof above already refuses the descendant, and
 	// the real descendant-boundary preparation is proven by
 	// TestAppArmorDriverFileBoundaryNotWidenedByKindChange.
-	coverage, created, err := driver.ensureCoverage(treeFile)
+	coverage, created, err := driver.ensureCoverage(context.Background(), treeFile)
 	if err != nil {
 		t.Fatalf("ensureCoverage(exact file): %v", err)
 	}
@@ -254,10 +259,10 @@ func TestAppArmorDriverReplacedDirectoryNotCoveredByFileBoundary(t *testing.T) {
 
 	// Coverage refusal in both directions: the persisted exact-file rule
 	// covers neither the directory at the exact path nor any descendant.
-	if _, err := driver.verifyCoverage(treeFile); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), treeFile); err == nil {
 		t.Error("a regular-file boundary must not verify coverage for the directory that replaced the file")
 	}
-	if _, _, err := driver.ensureCoverage(treeFile); err == nil {
+	if _, _, err := driver.ensureCoverage(context.Background(), treeFile); err == nil {
 		t.Error("ensureCoverage for the replaced directory tree must fail closed")
 	}
 
@@ -281,7 +286,7 @@ func TestAppArmorDriverReplacedDirectoryNotCoveredByFileBoundary(t *testing.T) {
 	if err := os.MkdirAll(descendant, 0755); err != nil {
 		t.Fatal(err)
 	}
-	descCoverage, created, err := driver.ensureCoverage(descendant)
+	descCoverage, created, err := driver.ensureCoverage(context.Background(), descendant)
 	if err != nil {
 		t.Fatalf("ensureCoverage(descendant): %v", err)
 	}
@@ -316,10 +321,10 @@ func TestAppArmorDriverReplacedFileNotCoveredByDirectoryBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := driver.verifyCoverage(treeDir); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), treeDir); err == nil {
 		t.Error("a directory boundary must not verify coverage for the regular file that replaced it")
 	}
-	if _, _, err := driver.ensureCoverage(treeDir); err == nil {
+	if _, _, err := driver.ensureCoverage(context.Background(), treeDir); err == nil {
 		t.Error("ensureCoverage for the replaced file tree must fail closed")
 	}
 

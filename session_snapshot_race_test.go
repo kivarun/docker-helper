@@ -131,9 +131,12 @@ func TestRaceSessionCreateCommitsSnapshotWhollyBeforeNarrowing(t *testing.T) {
 // TestRaceSessionCreateCommitsSnapshotWhollyAfterNarrowing proves the mirror
 // linearization: the narrowing holds the boundary and commits its durable
 // mutation while the create is pinned at its pre-boundary authentication
-// read, so the create can only resolve policy inside the post-narrowing
-// state — the new Session commits the wholly post-narrowing snapshot (or is
-// refused), never the old one and never a mixed snapshot.
+// read. The concurrent create's non-waiting admission (H8) refuses it before
+// any policy read — the refused attempt resolves no state and commits no
+// Session, so it can never observe a mixed policy state — and the retried
+// create, admitted only after the boundary is released, resolves wholly
+// inside the post-narrowing state and commits the wholly post-narrowing
+// snapshot, never the old one and never a mixed snapshot.
 func TestRaceSessionCreateCommitsSnapshotWhollyAfterNarrowing(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
@@ -163,7 +166,29 @@ func TestRaceSessionCreateCommitsSnapshotWhollyAfterNarrowing(t *testing.T) {
 		<-doorPoint.parked
 		close(doorPoint.release)
 
-		// 3. The narrowing commits and releases the boundary.
+		// 3. The create's admission attempt lands while the narrowing holds
+		//    the boundary: the non-waiting admission refuses it before any
+		//    policy read, and the refused attempt leaves no Session and no
+		//    snapshot.
+		resp := <-createDone
+		if resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("concurrent create: expected 503, got %d (body=%s)", resp.Code, resp.Body.String())
+		}
+		if code := decodeAPIError(t, resp.Body.Bytes()).Code; code != "lifecycle_busy" {
+			t.Fatalf("concurrent create: expected lifecycle_busy code, got %q (body=%s)", code, resp.Body.String())
+		}
+		var count int
+		if err := app.DB.QueryRow(
+			`SELECT COUNT(*) FROM sessions s JOIN launchers l ON l.id = s.launcher_id
+			 JOIN principals p ON p.id = l.principal_id WHERE p.username = 'snapracer'`,
+		).Scan(&count); err != nil {
+			t.Fatalf("count refused sessions: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("refused creation left %d Session row(s) behind", count)
+		}
+
+		// 4. The narrowing commits and releases the boundary.
 		close(mutationPoint.release)
 		got := <-narrowingDone
 		if got.err != nil {
@@ -173,10 +198,11 @@ func TestRaceSessionCreateCommitsSnapshotWhollyAfterNarrowing(t *testing.T) {
 			t.Fatal("removePrincipalAllowedRootWithLifecycle reported no change")
 		}
 
-		// 4. The create resolves wholly inside the post-narrowing state.
-		resp := <-createDone
+		// 5. The retried create is admitted (the boundary is free) and
+		//    resolves wholly inside the post-narrowing state.
+		resp = createSessionThroughMux(app, token, workspace)
 		if resp.Code != http.StatusCreated {
-			t.Fatalf("create: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
+			t.Fatalf("retried create: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
 		}
 
 		// The committed snapshot is the wholly post-narrowing one: only the

@@ -763,6 +763,22 @@ func waitSyncStarted(t *testing.T, startedPath string) {
 	}
 }
 
+// heldSyncCapacityCounters snapshots the capacity counters under the
+// supervisor lock. A held synchronous request goroutine is live while these
+// counters are observed, so unlocked reads would race with the
+// reservation/release paths running in that goroutine (the seam readiness
+// file orders the observations semantically, but only the supervisor lock is
+// a synchronization edge for concurrent counter access).
+func heldSyncCapacityCounters(s *operationSupervisor) (global int, perSession map[string]int, ops int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	perSession = make(map[string]int, len(s.sessionRunning))
+	for id, count := range s.sessionRunning {
+		perSession[id] = count
+	}
+	return s.globalRunning, perSession, len(s.ops)
+}
+
 // syncPullCapacityRequest posts one pull request through the real handler.
 func syncPullCapacityRequest(t *testing.T, app *App, token string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -901,17 +917,18 @@ func TestSynchronousPullLoginHoldTheSharedCounters(t *testing.T) {
 	waitSyncStarted(t, startedPath)
 
 	s := app.OperationSupervisor
-	if got := s.globalRunning; got != 1 {
-		t.Fatalf("held synchronous pull must hold the global capacity counter, got %d", got)
+	global, perSession, ops := heldSyncCapacityCounters(s)
+	if global != 1 {
+		t.Fatalf("held synchronous pull must hold the global capacity counter, got %d", global)
 	}
-	if got := s.sessionRunning[result.Session.ID]; got != 1 {
-		t.Fatalf("held synchronous pull must hold the Session capacity counter, got %d", got)
+	if perSession[result.Session.ID] != 1 {
+		t.Fatalf("held synchronous pull must hold the Session capacity counter, got %d", perSession[result.Session.ID])
 	}
 	if got := s.globalBuildCount; got != 0 {
 		t.Fatalf("synchronous pull must not consume the build sub-ceiling: %d", got)
 	}
-	if got := len(s.ops); got != 0 {
-		t.Fatalf("synchronous pull must not register an Operation: %d registered", got)
+	if ops != 0 {
+		t.Fatalf("synchronous pull must not register an Operation: %d registered", ops)
 	}
 
 	// The saturated global ceiling refuses both synchronous surfaces of a
@@ -927,14 +944,15 @@ func TestSynchronousPullLoginHoldTheSharedCounters(t *testing.T) {
 	if code := decodeRejectedResponse(t, syncRegistryLoginCapacityRequest(t, app, second.Token)); code != capacityRefusalCode {
 		t.Fatalf("registry login at the saturated global ceiling: expected %q, got %q", capacityRefusalCode, code)
 	}
-	if got := s.globalRunning; got != 1 {
-		t.Fatalf("refused requests must not consume capacity: global=%d", got)
+	global, perSession, ops = heldSyncCapacityCounters(s)
+	if global != 1 {
+		t.Fatalf("refused requests must not consume capacity: global=%d", global)
 	}
-	if _, exists := s.sessionRunning[second.Session.ID]; exists {
+	if _, exists := perSession[second.Session.ID]; exists {
 		t.Fatal("refused second-Session requests must not consume Session capacity")
 	}
-	if got := len(s.ops); got != 0 {
-		t.Fatalf("refused requests must not register an Operation: %d registered", got)
+	if ops != 0 {
+		t.Fatalf("refused requests must not register an Operation: %d registered", ops)
 	}
 
 	// Release the held command: the handler completes and releases its slot
@@ -1004,14 +1022,15 @@ func TestSynchronousRegistryLoginHoldsSessionCapacityAndReleasesOnFailure(t *tes
 	waitSyncStarted(t, startedPath)
 
 	s := app.OperationSupervisor
-	if got := s.globalRunning; got != 1 {
-		t.Fatalf("held synchronous login must hold the global capacity counter, got %d", got)
+	global, perSession, ops := heldSyncCapacityCounters(s)
+	if global != 1 {
+		t.Fatalf("held synchronous login must hold the global capacity counter, got %d", global)
 	}
-	if got := s.sessionRunning[result.Session.ID]; got != 1 {
-		t.Fatalf("held synchronous login must hold the Session capacity counter, got %d", got)
+	if perSession[result.Session.ID] != 1 {
+		t.Fatalf("held synchronous login must hold the Session capacity counter, got %d", perSession[result.Session.ID])
 	}
-	if got := len(s.ops); got != 0 {
-		t.Fatalf("synchronous login must not register an Operation: %d registered", got)
+	if ops != 0 {
+		t.Fatalf("synchronous login must not register an Operation: %d registered", ops)
 	}
 
 	// The credential stays stdin-only while the synchronous reservation is
@@ -1060,11 +1079,12 @@ func TestSynchronousRegistryLoginHoldsSessionCapacityAndReleasesOnFailure(t *tes
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := s.sessionRunning[second.Session.ID]; got != 1 {
-		t.Fatalf("admitted second-Session login must hold its own Session slot, got %d", got)
+	global, perSession, _ = heldSyncCapacityCounters(s)
+	if perSession[second.Session.ID] != 1 {
+		t.Fatalf("admitted second-Session login must hold its own Session slot, got %d", perSession[second.Session.ID])
 	}
-	if got := s.globalRunning; got != 2 {
-		t.Fatalf("both held synchronous logins must share the global counter, got %d", got)
+	if global != 2 {
+		t.Fatalf("both held synchronous logins must share the global counter, got %d", global)
 	}
 
 	// Release both held commands: both handlers reach their failure path and

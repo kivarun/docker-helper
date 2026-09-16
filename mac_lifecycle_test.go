@@ -50,7 +50,7 @@ func newTestSessionMACDriver(backend LSMBackend) *testSessionMACDriver {
 	}
 }
 
-func (b *testSessionMACDriver) ensureCoverage(workspace string) (sessionMACCoverage, bool, error) {
+func (b *testSessionMACDriver) ensureCoverage(_ context.Context, workspace string) (sessionMACCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -69,7 +69,7 @@ func (b *testSessionMACDriver) ensureCoverage(workspace string) (sessionMACCover
 	return sessionMACCoverage{Boundary: workspace, HelperOwned: true, Kind: macBoundaryDirectory}, true, nil
 }
 
-func (b *testSessionMACDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
+func (b *testSessionMACDriver) verifyCoverage(_ context.Context, workspace string) (sessionMACCoverage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -81,7 +81,7 @@ func (b *testSessionMACDriver) verifyCoverage(workspace string) (sessionMACCover
 	return sessionMACCoverage{}, fmt.Errorf("no coverage for %s", workspace)
 }
 
-func (b *testSessionMACDriver) removeBoundary(boundary string, kind macBoundaryKind) error {
+func (b *testSessionMACDriver) removeBoundary(_ context.Context, boundary string, kind macBoundaryKind) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -111,7 +111,7 @@ func (b *testSessionMACDriver) discoverHelperOwnedBoundaries() ([]helperOwnedBou
 // absent boundary proves the owned state is gone. The mock records kinds on
 // every creation, so kind-less rows are only reachable through directly
 // seeded rows, which resolve as "owned state gone".
-func (b *testSessionMACDriver) proveOwnedKind(boundary string) (macBoundaryKind, bool, error) {
+func (b *testSessionMACDriver) proveOwnedKind(_ context.Context, boundary string) (macBoundaryKind, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -282,7 +282,7 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 	}
 
 	// Verify boundary was actually removed from driver.
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err == nil {
 		t.Error("expected error verifying removed boundary")
 	}
@@ -664,7 +664,7 @@ func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 	mgr := &selinuxFcontextManager{
 		semanagePath:   "/usr/sbin/semanage",
 		restoreconPath: "/usr/sbin/restorecon",
-		runCommand: func(cmd string, args ...string) ([]byte, error) {
+		runCommand: func(_ context.Context, cmd string, args ...string) ([]byte, error) {
 			return nil, fmt.Errorf("semanage failed")
 		},
 		readPathCon: func(path string) (string, error) {
@@ -686,13 +686,13 @@ func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 	driver := &selinuxMACDriver{mgr: mgr, treeKind: fakeTreeKindDirectory}
 
 	// ensureCoverage should fail when listCoveringFcontexts fails.
-	_, _, err = driver.ensureCoverage("/data/workspace")
+	_, _, err = driver.ensureCoverage(context.Background(), "/data/workspace")
 	if err == nil {
 		t.Error("ensureCoverage should fail when listCoveringFcontexts fails")
 	}
 
 	// verifyCoverage should fail when listCoveringFcontexts fails.
-	_, err = driver.verifyCoverage("/data/workspace")
+	_, err = driver.verifyCoverage(context.Background(), "/data/workspace")
 	if err == nil {
 		t.Error("verifyCoverage should fail when listCoveringFcontexts fails")
 	}
@@ -771,15 +771,15 @@ type failingSessionMACDriver struct {
 	err error
 }
 
-func (b *failingSessionMACDriver) ensureCoverage(workspace string) (sessionMACCoverage, bool, error) {
+func (b *failingSessionMACDriver) ensureCoverage(_ context.Context, workspace string) (sessionMACCoverage, bool, error) {
 	return sessionMACCoverage{}, false, b.err
 }
 
-func (b *failingSessionMACDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
+func (b *failingSessionMACDriver) verifyCoverage(_ context.Context, workspace string) (sessionMACCoverage, error) {
 	return sessionMACCoverage{}, b.err
 }
 
-func (b *failingSessionMACDriver) removeBoundary(boundary string, kind macBoundaryKind) error {
+func (b *failingSessionMACDriver) removeBoundary(_ context.Context, boundary string, kind macBoundaryKind) error {
 	return nil
 }
 
@@ -805,7 +805,7 @@ type selinuxTestDriver struct {
 	verifyActualTypeFail bool
 }
 
-func (b *selinuxTestDriver) ensureCoverage(workspace string) (sessionMACCoverage, bool, error) {
+func (b *selinuxTestDriver) ensureCoverage(_ context.Context, workspace string) (sessionMACCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -825,7 +825,7 @@ func (b *selinuxTestDriver) ensureCoverage(workspace string) (sessionMACCoverage
 	return sessionMACCoverage{Boundary: workspace, HelperOwned: true}, true, nil
 }
 
-func (b *selinuxTestDriver) verifyCoverage(workspace string) (sessionMACCoverage, error) {
+func (b *selinuxTestDriver) verifyCoverage(_ context.Context, workspace string) (sessionMACCoverage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -844,7 +844,7 @@ func (b *selinuxTestDriver) verifyCoverage(workspace string) (sessionMACCoverage
 	return sessionMACCoverage{Boundary: workspace, HelperOwned: false}, nil
 }
 
-func (b *selinuxTestDriver) removeBoundary(boundary string, kind macBoundaryKind) error {
+func (b *selinuxTestDriver) removeBoundary(_ context.Context, boundary string, kind macBoundaryKind) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return nil
@@ -867,7 +867,7 @@ func TestSELinuxAncestorRuleCorrectType(t *testing.T) {
 		actualType: "docker_helper_workspace_t",
 	}
 
-	cov, err := driver.verifyCoverage("/data/workspace")
+	cov, err := driver.verifyCoverage(context.Background(), "/data/workspace")
 	if err != nil {
 		t.Fatalf("verifyCoverage should succeed with correct type: %v", err)
 	}
@@ -885,7 +885,7 @@ func TestSELinuxAncestorRuleWrongType(t *testing.T) {
 		verifyActualTypeFail: true,
 	}
 
-	_, err := driver.verifyCoverage("/data/workspace")
+	_, err := driver.verifyCoverage(context.Background(), "/data/workspace")
 	if err == nil {
 		t.Fatal("verifyCoverage should fail with wrong actual type")
 	}
@@ -904,7 +904,7 @@ func TestSELinuxEnsureExistingAncestorWrongType(t *testing.T) {
 		verifyActualTypeFail: true,
 	}
 
-	_, _, err := driver.ensureCoverage("/data/workspace")
+	_, _, err := driver.ensureCoverage(context.Background(), "/data/workspace")
 	if err == nil {
 		t.Fatal("ensureCoverage should fail when actual type verification fails")
 	}
@@ -990,7 +990,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 	countAfterFirst := mac.boundaryConsumerCounts[workspace]
 	leaseCountAfterFirst := len(mac.sessionUseLeases)
 	boundaryRemoved := func() bool {
-		_, err := mac.driver.verifyCoverage(workspace)
+		_, err := mac.driver.verifyCoverage(context.Background(), workspace)
 		return err != nil
 	}()
 	mac.mu.Unlock()
@@ -1002,7 +1002,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 	countAfterSecond := mac.boundaryConsumerCounts[workspace]
 	leaseCountAfterSecond := len(mac.sessionUseLeases)
 	boundaryRemovedSecond := func() bool {
-		_, err := mac.driver.verifyCoverage(workspace)
+		_, err := mac.driver.verifyCoverage(context.Background(), workspace)
 		return err != nil
 	}()
 	mac.mu.Unlock()
@@ -1115,11 +1115,11 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 	}
 
 	// Verify both boundaries were removed from driver.
-	_, err = driver.verifyCoverage(parentWS)
+	_, err = driver.verifyCoverage(context.Background(), parentWS)
 	if err == nil {
 		t.Error("parent boundary should be removed from driver")
 	}
-	_, err = driver.verifyCoverage(childWS)
+	_, err = driver.verifyCoverage(context.Background(), childWS)
 	if err == nil {
 		t.Error("child boundary should be removed from driver")
 	}
@@ -1285,7 +1285,7 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 	}
 
 	// Verify boundary was removed from driver.
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err == nil {
 		t.Error("boundary should be removed from driver")
 	}
@@ -1357,7 +1357,7 @@ func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
 	// The MAC coverage must remain while the pending workload state is
 	// unproven: the boundary stays in the driver, ownership metadata stays,
 	// and the boundary is registered for the retry path.
-	if _, err := driver.verifyCoverage(workspace); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), workspace); err != nil {
 		t.Fatalf("boundary coverage must remain while pending workload is unproven: %v", err)
 	}
 	mac.mu.Lock()
@@ -1397,7 +1397,7 @@ func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
 	// path may remove the boundary.
 	mac.pendingWorkloadSessions = func() map[string]bool { return nil }
 	mac.mu.Lock()
-	mac.retryDeferredBoundaries()
+	mac.retryDeferredBoundaries(context.Background())
 	ownedAfter, oerrAfter := mac.isBoundaryOwnedByHelper(workspace)
 	mac.mu.Unlock()
 	if oerrAfter != nil {
@@ -1406,7 +1406,7 @@ func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
 	if ownedAfter {
 		t.Error("boundary ownership metadata must be removed after the pending workload is proven cleaned")
 	}
-	if _, err := driver.verifyCoverage(workspace); err == nil {
+	if _, err := driver.verifyCoverage(context.Background(), workspace); err == nil {
 		t.Error("boundary must be removed from the driver after the pending workload is proven cleaned")
 	}
 }
@@ -1446,7 +1446,7 @@ func TestSessionDeleteKeepsBoundaryWhenPendingWorkloadUnresolvable(t *testing.T)
 	// The boundary MUST NOT be removed: coverage and ownership remain and the
 	// boundary is deferred until the pending workload state resolves or is
 	// proven cleaned.
-	if _, err := driver.verifyCoverage(workspace); err != nil {
+	if _, err := driver.verifyCoverage(context.Background(), workspace); err != nil {
 		t.Fatalf("boundary coverage must remain when pending workload workspace is unresolvable: %v", err)
 	}
 	mac.mu.Lock()
@@ -2369,7 +2369,7 @@ type selinuxSeam struct {
 	removeErr         error    // error from removeWorkspaceFcontext
 }
 
-func (s *selinuxSeam) listCoveringFcontexts(workspace string) ([]string, error) {
+func (s *selinuxSeam) listCoveringFcontexts(_ context.Context, workspace string) ([]string, error) {
 	if s.fcontextErr != nil {
 		return nil, s.fcontextErr
 	}
@@ -2380,16 +2380,16 @@ func (s *selinuxSeam) verifyActualType(workspace string) error {
 	return s.actualTypeErr
 }
 
-func (s *selinuxSeam) restoreconTree(tree string, kind macBoundaryKind) error {
+func (s *selinuxSeam) restoreconTree(_ context.Context, tree string, kind macBoundaryKind) error {
 	return s.restoreconErr
 }
 
-func (s *selinuxSeam) ensureTreeFcontext(tree string, kind macBoundaryKind) (bool, error) {
+func (s *selinuxSeam) ensureTreeFcontext(_ context.Context, tree string, kind macBoundaryKind) (bool, error) {
 	s.ensureCalled = true
 	return s.ensureCreated, s.ensureErr
 }
 
-func (s *selinuxSeam) removeFcontextBoundary(boundary string, kind macBoundaryKind) error {
+func (s *selinuxSeam) removeFcontextBoundary(_ context.Context, boundary string, kind macBoundaryKind) error {
 	return s.removeErr
 }
 
@@ -2401,7 +2401,7 @@ func TestSELinuxRealDriverAncestorCorrectType(t *testing.T) {
 	}
 	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
-	cov, err := driver.verifyCoverage("/data/workspace")
+	cov, err := driver.verifyCoverage(context.Background(), "/data/workspace")
 	if err != nil {
 		t.Fatalf("verifyCoverage should succeed: %v", err)
 	}
@@ -2418,7 +2418,7 @@ func TestSELinuxRealDriverAncestorWrongType(t *testing.T) {
 	}
 	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
-	_, err := driver.verifyCoverage("/data/workspace")
+	_, err := driver.verifyCoverage(context.Background(), "/data/workspace")
 	if err == nil {
 		t.Fatal("verifyCoverage should fail with wrong actual type")
 	}
@@ -2436,7 +2436,7 @@ func TestSELinuxRealDriverNoBoundaryCorrectXattrFails(t *testing.T) {
 	}
 	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
-	_, err := driver.verifyCoverage("/data/workspace")
+	_, err := driver.verifyCoverage(context.Background(), "/data/workspace")
 	if err == nil {
 		t.Fatal("verifyCoverage must fail when no persistent fcontext boundary exists")
 	}
@@ -2454,7 +2454,7 @@ func TestSELinuxRealDriverEnsureRepairsWrongType(t *testing.T) {
 	}
 	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
-	cov, changed, err := driver.ensureCoverage("/data/workspace")
+	cov, changed, err := driver.ensureCoverage(context.Background(), "/data/workspace")
 	if err != nil {
 		t.Fatalf("ensureCoverage should succeed: %v", err)
 	}
@@ -2475,7 +2475,7 @@ func TestSELinuxRealDriverEnsureCreatesNewBoundary(t *testing.T) {
 	}
 	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
-	cov, changed, err := driver.ensureCoverage("/data/workspace")
+	cov, changed, err := driver.ensureCoverage(context.Background(), "/data/workspace")
 	if err != nil {
 		t.Fatalf("ensureCoverage should succeed: %v", err)
 	}
@@ -2495,7 +2495,7 @@ func TestSELinuxOptNoExistingBoundaryFails(t *testing.T) {
 	}
 	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
-	_, _, err := driver.ensureCoverage("/opt")
+	_, _, err := driver.ensureCoverage(context.Background(), "/opt")
 	if err == nil {
 		t.Fatal("ensureCoverage must fail for /opt with no existing boundary")
 	}
@@ -2519,7 +2519,7 @@ func TestSELinuxOptExistingBoundarySucceeds(t *testing.T) {
 	}
 	driver := &selinuxMACDriver{mgr: seam, treeKind: fakeTreeKindDirectory}
 
-	cov, changed, err := driver.ensureCoverage("/opt")
+	cov, changed, err := driver.ensureCoverage(context.Background(), "/opt")
 	if err != nil {
 		t.Fatalf("ensureCoverage should succeed with existing /opt boundary: %v", err)
 	}
@@ -2604,7 +2604,7 @@ func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
 	seam.coveringFcontexts = []string{workspace}
 
 	// Verify: verifyCoverage now succeeds.
-	cov, err := driver.verifyCoverage(workspace)
+	cov, err := driver.verifyCoverage(context.Background(), workspace)
 	if err != nil {
 		t.Fatalf("verifyCoverage should succeed after reconciliation: %v", err)
 	}
@@ -2743,7 +2743,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 
 	// Call cleanupStaleBoundaries: it must discover the orphaned child boundary
 	// and register it as deferred because the parent still overlaps.
-	err = mac.cleanupStaleBoundaries()
+	err = mac.cleanupStaleBoundaries(context.Background())
 	if err != nil {
 		t.Fatalf("cleanupStaleBoundaries: %v", err)
 	}
@@ -2774,11 +2774,11 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 	}
 
 	// Verify both boundaries were removed from driver.
-	_, err = driver.verifyCoverage(parentWS)
+	_, err = driver.verifyCoverage(context.Background(), parentWS)
 	if err == nil {
 		t.Error("parent boundary should be removed from driver")
 	}
-	_, err = driver.verifyCoverage(childWS)
+	_, err = driver.verifyCoverage(context.Background(), childWS)
 	if err == nil {
 		t.Error("child boundary should be removed from driver")
 	}
@@ -2865,7 +2865,7 @@ func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 	}
 
 	// Verify boundary was removed from driver.
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err == nil {
 		t.Error("boundary should be removed from driver after binding release")
 	}
@@ -2945,7 +2945,7 @@ func TestPrincipalDeleteReleasesMACBindings(t *testing.T) {
 	}
 
 	// Verify boundary was removed from driver.
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err == nil {
 		t.Error("boundary should be removed from driver after binding release")
 	}
@@ -3031,7 +3031,7 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 	}
 
 	// Boundary should NOT be removed from driver (lease still active).
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err != nil {
 		t.Errorf("boundary should still exist while lease is active: %v", err)
 	}
@@ -3048,7 +3048,7 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 	}
 
 	// Verify boundary was removed from driver.
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err == nil {
 		t.Error("boundary should be removed from driver after lease release")
 	}
@@ -3120,7 +3120,7 @@ func TestPrincipalDeleteLeasePreserved(t *testing.T) {
 	}
 
 	// Boundary should NOT be removed from driver (lease still active).
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err != nil {
 		t.Errorf("boundary should still exist while lease is active: %v", err)
 	}
@@ -3137,7 +3137,7 @@ func TestPrincipalDeleteLeasePreserved(t *testing.T) {
 	}
 
 	// Verify boundary was actually removed from driver.
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err == nil {
 		t.Error("boundary should be removed from driver after lease release")
 	}
@@ -3227,7 +3227,7 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 	}
 
 	// Verify boundary was removed from driver.
-	_, err = driver.verifyCoverage(workspace)
+	_, err = driver.verifyCoverage(context.Background(), workspace)
 	if err == nil {
 		t.Error("boundary should be removed from driver after all bindings released")
 	}
@@ -3338,7 +3338,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	}
 
 	// Verify no boundary was created (rollback occurred).
-	_, err = driver.verifyCoverage(projDir)
+	_, err = driver.verifyCoverage(context.Background(), projDir)
 	if err == nil {
 		t.Error("boundary should not exist after failed session creation")
 	}
@@ -3350,14 +3350,14 @@ func fakeTreeKindDirectory(string) (macBoundaryKind, error) {
 	return macBoundaryDirectory, nil
 }
 
-func (b *failingSessionMACDriver) proveOwnedKind(boundary string) (macBoundaryKind, bool, error) {
+func (b *failingSessionMACDriver) proveOwnedKind(_ context.Context, boundary string) (macBoundaryKind, bool, error) {
 	return macBoundaryUnknown, false, nil
 }
 
-func (b *selinuxTestDriver) proveOwnedKind(boundary string) (macBoundaryKind, bool, error) {
+func (b *selinuxTestDriver) proveOwnedKind(_ context.Context, boundary string) (macBoundaryKind, bool, error) {
 	return macBoundaryUnknown, false, nil
 }
 
-func (s *selinuxSeam) proveOwnedFcontextShape(boundary string) (macBoundaryKind, bool, error) {
+func (s *selinuxSeam) proveOwnedFcontextShape(_ context.Context, boundary string) (macBoundaryKind, bool, error) {
 	return macBoundaryUnknown, false, nil
 }

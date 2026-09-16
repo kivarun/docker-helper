@@ -20,6 +20,16 @@ var ErrDatabase = errors.New("database error")
 var ErrSystem = errors.New("system error")
 var ErrMAC = errors.New("MAC preparation failed")
 
+// ErrLifecycleBusy is the stable typed refusal of the non-waiting
+// Session-create admission (H8): the create attempt found the lifecycle
+// coordination held by another transition and was refused without queueing,
+// so concurrent Session creates can never stack their whole-transition MAC
+// budgets behind the held coordination and lengthen the delay an emergency
+// administrative disable already waits behind the one in-flight transition.
+// The refusal names no transition detail; the client decides whether to
+// retry.
+var ErrLifecycleBusy = errors.New("lifecycle coordination is busy")
+
 // The canonical issued Session ID shape: the production prefix plus exactly
 // sessionIDHexLength lowercase hex characters (16 random bytes).
 const (
@@ -35,6 +45,8 @@ func classifyCreateSessionError(err error) string {
 		return "invalid_workspace"
 	case errors.Is(err, ErrInvalidSessionFilesystemPolicy):
 		return "invalid_filesystem_policy"
+	case errors.Is(err, ErrLifecycleBusy):
+		return "lifecycle_busy"
 	case errors.Is(err, ErrDatabase):
 		return "database_error"
 	case errors.Is(err, ErrSystem):
@@ -583,8 +595,21 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceil
 // filesystemRoots is the caller-supplied issuance-time Session filesystem
 // request (nil when the request omitted filesystem_roots or carried the
 // empty array); it is proven and composed inside this boundary.
+//
+// Admission is non-waiting (H8): the create never queues behind the
+// lifecycle serialization. A create that arrives while the coordination is
+// held is refused immediately with ErrLifecycleBusy — before any policy
+// resolution or MAC work, so a refused attempt resolves no state and
+// commits nothing — instead of parking on the mutex where each queued
+// create would obtain its own fresh whole-transition MAC budget and stack
+// the emergency administrative disable's delay behind the queued count.
+// An admitted create runs its whole boundary, MAC preparation included,
+// under the existing single fixed transition budget. Administrative
+// lifecycle operations keep their blocking acquisition.
 func (a *App) createSessionAuthorized(auth *operatorAuthority, sel createSelector, workspace string, filesystemRoots []sessionFilesystemRootEntry) (*CreatedSession, error) {
-	a.lifecycleMu.Lock()
+	if !a.lifecycleMu.TryLock() {
+		return nil, ErrLifecycleBusy
+	}
 	defer a.lifecycleMu.Unlock()
 
 	policy, err := a.resolveCreatePolicy(auth, sel, workspace, filesystemRoots)

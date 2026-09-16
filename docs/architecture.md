@@ -29,6 +29,7 @@
   - [Session workspace](#session-workspace)
   - [Policy introspection](#policy-introspection)
   - [MAC lifecycle](#mac-lifecycle)
+  - [Bounded MAC-command execution](#bounded-mac-command-execution-h8)
 - [Control-plane API and CLI mapping](#control-plane-api-and-cli-mapping)
   - [Principal](#principal)
   - [Launcher](#launcher)
@@ -685,6 +686,12 @@ One pipeline serves every authority; only target resolution differs.
 ```
 authority
     ↓
+non-waiting lifecycle admission (H8)
+    (the create never queues behind the lifecycle serialization: while any
+     lifecycle transition holds the coordination, the create is refused
+     immediately — `503 lifecycle_busy`, no policy state resolved, no
+     Session; the client decides whether to retry)
+    ↓
 resolve exactly one target Launcher
     ↓
 derive the owning Principal through the Launcher
@@ -767,7 +774,19 @@ The whole resolution, narrowing, and snapshot issuance happens inside the
 existing `lifecycleMu` create linearization boundary, so a concurrent
 parent-policy mutation linearizes wholly before or wholly after the create:
 a request is never validated against one ceiling and committed against
-another.
+another. Session-create admission into that boundary is non-waiting: a
+create that arrives while the coordination is held by another transition is
+refused immediately (the stable `503 lifecycle_busy` class) before any
+policy resolution or MAC work — it never queues on the boundary, so it can
+never stack its whole-transition MAC budget behind the held coordination
+and lengthen the delay an emergency administrative disable already waits
+behind the one in-flight transition. The refused attempt resolves no state
+and commits no Session; the client decides whether to retry. The MAC
+preparation inside the boundary is bounded (see
+[Bounded MAC-command execution](#bounded-mac-command-execution-h8)): a hung
+external MAC command can delay a concurrent administrative disable by at
+most one transition budget, after which the create fails
+(`mac_preparation_failed`) and the coordination is released.
 
 The commit-boundary credential revalidation closes the credential
 revocation race: a Principal or Launcher credential that authenticated the
@@ -1565,6 +1584,74 @@ MAC state follows the concrete Session lifecycle, not the policy ceilings:
   boundary state file), never authorization roots and never config.json
   state.
 
+#### Bounded MAC-command execution (H8)
+
+Every external MAC one-shot command reachable in the live daemon is bounded,
+and every *serialized MAC transition* is bounded as a whole:
+
+- **One fixed budget owner.** A fixed, non-configurable Release-2.2 wall-clock
+  budget (`macTransitionBudget`, 60 seconds — selected from measured UAT
+  command durations and the documented existing bounded-wait constants) bounds
+  one serialized MAC transition: one Session create (backend preparation of
+  every issued tree plus its rollback), one Session release, one
+  startup-reconciliation session pass, one workload prepare or cleanup, and
+  the trusted-CA restorecon of one configuration preparation. Individual
+  subprocesses consume the *remaining* budget (context-aware execution), so
+  the whole serialized transition is bounded — this matters because the
+  reachable command multiplication of one create is bounded only by the
+  Session filesystem-roots request grammar (the 16 KiB request-body cap),
+  so per-command timeouts alone cannot prove a bounded hold of the
+  coordination. A budget-expired command is a failure (`ErrMACTransitionBudgetExceeded`
+  inside the `mac_preparation_failed` chain), never successful MAC
+  preparation, and the request lifetime is never the security owner: every
+  budget context is derived from `context.Background()` by the daemon.
+- **Kill/reap and no orphaned child.** Every bounded MAC command is started
+  with `Pdeathsig=SIGKILL`, so no external MAC child can outlive the daemon
+  process on any exit path (crash, signal, normal exit). During normal
+  operation the budget kills and reaps the child at the bound.
+- **Lock ordering and bounded side effects.** The lifecycle serialization
+  (`lifecycleMu`) and the session MAC coordinator lock are held across
+  bounded side effects only: a hung external MAC command can delay a
+  concurrent administrative transition (Launcher/Principal disable, config
+  reload) by at most one transition budget, and the disable's own
+  post-commit MAC release is bounded the same way. The bound is
+  queue-independent: Session-create admission into the lifecycle boundary is
+  non-waiting (`TryLock` at the existing create owner) — a create that
+  arrives while the coordination is held is refused immediately with the
+  typed `ErrLifecycleBusy` refusal (`503 lifecycle_busy`, never queued), so
+  concurrent creates cannot stack their fresh whole-transition budgets
+  behind the held coordination and grow the disable's delay with the
+  queued create count; an already-running create keeps its whole-transition
+  budget. The backend file locks
+  are not equivalent by design: the AppArmor workspace lock is
+  fail-closed/non-waiting (`LOCK_EX|LOCK_NB`) and the global SELinux
+  fcontext lock is the same — a contended fcontext transition is refused
+  immediately with a bounded actionable error ("another SELinux fcontext
+  operation is in progress") instead of parking an unbounded blocking
+  pre-command wait; there is no polling queue.
+- **Fail-closed mutation outcomes.** An AppArmor reload timeout is a
+  failure; the fragment rollback consumes the same remaining budget, and an
+  unprovable rollback leaves the fragment restored and the error fail-closed
+  (the next reload converges the kernel to the fragment). A SELinux add/
+  relabel/remove timeout never claims clean success and never deletes
+  ownership evidence it cannot prove: the canonical retain/retry/
+  reconciliation semantics are unchanged, and a possibly-partial semanage
+  mutation on timeout is recoverable by the next ordinary transition or
+  startup reconciliation. A workload AppArmor cleanup timeout retains the
+  durable ownership state for reconciliation (the run cleanup sequence's
+  retained outcome) and the cleanup closure runs its own budget, so the
+  operation terminal transition and the bounded shutdown drain cannot be
+  held hostage by an orphaned parser process. Startup reconciliation runs
+  one budget per session pass.
+- **Inventory of the remaining external MAC-adjacent commands.**
+  Deployment/init-only relabels (`docker-helper init`: the helper-owned
+  config/state trees, the Docker CLI executable, the admin token) run before
+  the service exists and cannot delay a live administrative transition; the
+  `apparmor check` and `selinux check` CLI diagnostics are separate
+  processes that hold no daemon locks; the SELinux workload bindfs worker is
+  an intentionally long-lived FUSE worker with its existing readiness
+  (10s) and worker-exit (5s) bounds, not a timed one-shot.
+
 ## Control-plane API and CLI mapping
 
 ### Principal
@@ -2027,7 +2114,13 @@ Startup-only fields (require daemon restart): `http_address`.
 Computed paths (socket, database, state) are not changed. If the daemon is
 not running, the command fails with a non-zero exit code. If the new
 configuration is invalid, the daemon keeps its current configuration and
-the command returns an error.
+the command returns an error. The whole reload transition — including the
+trusted-CA runtime preparation — shares the `lifecycleMu` create/reload
+linearization boundary and is bounded (the trusted-CA restorecon runs under
+the fixed MAC transition budget, see
+[Bounded MAC-command execution](#bounded-mac-command-execution-h8)), so a
+failed preparation releases the coordination within that bound and the
+previous effective configuration stays active.
 
 ### Strict config document grammar
 
@@ -3197,7 +3290,13 @@ docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 - the lock is held during the entire drain so a second instance cannot
   start until the first fully stops;
 - helper-owned build/run processes and containers are never left unmanaged
-  after shutdown.
+  after shutdown;
+- external MAC children cannot outlive the stopped daemon: every MAC
+  command carries `Pdeathsig=SIGKILL` and every serialized MAC transition
+  is bounded (see
+  [Bounded MAC-command execution](#bounded-mac-command-execution-h8)), and
+  the shipped units' `KillMode` default (`control-group`) kills any process
+  remaining in the unit's cgroup when the service stops.
 
 After `TimeoutStopSec=45s`, systemd sends SIGKILL if any processes
 remain. The internal `shutdown_timeout` budget is therefore bounded: its
@@ -3319,6 +3418,7 @@ Current error codes (non-exhaustive):
 | `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
 | `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
+| `lifecycle_busy` | `POST /sessions` | the lifecycle coordination was held by another transition when the create arrived; the non-waiting admission refuses the create without queueing (HTTP 503; no Session, no resolved policy state; the client decides whether to retry) |
 | `invalid_filesystem_policy` | `POST /sessions` | the supplied `filesystem_roots` is malformed or is not a narrowing of the effective Launcher ceiling (issuance-time refusal; no Session exists) |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `principal_not_found` | `GET /sessions?principal=` | the selected Principal does not exist (list narrowing; non-disclosing) |
@@ -3544,7 +3644,8 @@ Result codes:
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
 | `invalid_filesystem_policy` | `filesystem_roots` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
-| `mac_preparation_failed` | MAC boundary preparation failed before the create transaction (no Session exists) |
+| `lifecycle_busy` | the lifecycle coordination was held by another transition; the non-waiting Session-create admission refused the create without queueing (HTTP 503) — no Session, no snapshot, no resolved policy state; the audit record and the HTTP answer carry the same class |
+| `mac_preparation_failed` | MAC boundary preparation failed before the create transaction (no Session exists) — HTTP 500; the audit record and the HTTP answer carry the same class |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
 | `unknown_error` | unexpected error not classified above |

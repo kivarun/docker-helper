@@ -120,7 +120,9 @@ func runAppArmorRootAdd(path string, stdout, stderr io.Writer) int {
 	}
 
 	mgr := newProductionAppArmorProfileManager()
-	result, err := mgr.addManagedBoundary(path)
+	ctx, cancel := newMACTransitionContext()
+	defer cancel()
+	result, err := mgr.addManagedBoundary(ctx, path)
 	if err != nil {
 		var ie *inputError
 		if errors.As(err, &ie) {
@@ -150,7 +152,9 @@ func runAppArmorRootRemove(path string, stdout, stderr io.Writer) int {
 	}
 
 	mgr := newProductionAppArmorProfileManager()
-	result, err := mgr.removeManagedBoundary(path)
+	ctx, cancel := newMACTransitionContext()
+	defer cancel()
+	result, err := mgr.removeManagedBoundary(ctx, path)
 	if err != nil {
 		var ie *inputError
 		if errors.As(err, &ie) {
@@ -180,7 +184,9 @@ func runAppArmorCheck(stdout, stderr io.Writer) int {
 	}
 
 	mgr := newProductionAppArmorProfileManager()
-	if err := mgr.check(); err != nil {
+	checkCtx, cancel := newMACTransitionContext()
+	defer cancel()
+	if err := mgr.check(checkCtx); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}

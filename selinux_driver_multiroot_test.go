@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -26,7 +27,7 @@ func newKindAwareTestManager(t *testing.T, active bool, enforcing bool) kindAwar
 	mgr := newTestManager(func() (bool, bool, error) { return active, enforcing, nil })
 	mgr.semanagePath = semanagePath
 	mgr.restoreconPath = restoreconPath
-	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+	mgr.runCommand = func(_ context.Context, cmd string, args ...string) ([]byte, error) {
 		switch {
 		case strings.HasSuffix(cmd, "semanage"):
 			joined := strings.Join(args, " ")
@@ -75,7 +76,7 @@ func TestSELinuxDriverExternalDirectoryCoverage(t *testing.T) {
 	world.treeKind = func(string) (macBoundaryKind, error) { return macBoundaryDirectory, nil }
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	coverage, created, err := driver.ensureCoverage("/opt/michael/cache")
+	coverage, created, err := driver.ensureCoverage(context.Background(), "/opt/michael/cache")
 	if err != nil {
 		t.Fatalf("ensureCoverage: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestSELinuxDriverExternalDirectoryCoverage(t *testing.T) {
 	}
 
 	// Idempotent second ensure: the exact rule exists, no new rule.
-	_, createdAgain, err := driver.ensureCoverage("/opt/michael/cache")
+	_, createdAgain, err := driver.ensureCoverage(context.Background(), "/opt/michael/cache")
 	if err != nil {
 		t.Fatalf("second ensureCoverage: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestSELinuxDriverExternalDirectoryCoverage(t *testing.T) {
 	}
 
 	// Removal: the recursive rule is removed and the tree is restored.
-	if err := driver.removeBoundary("/opt/michael/cache", macBoundaryDirectory); err != nil {
+	if err := driver.removeBoundary(context.Background(), "/opt/michael/cache", macBoundaryDirectory); err != nil {
 		t.Fatalf("removeBoundary: %v", err)
 	}
 	if len(*world.rules) != 0 {
@@ -127,7 +128,7 @@ func TestSELinuxDriverRegularFileCoverage(t *testing.T) {
 	world.treeKind = func(string) (macBoundaryKind, error) { return macBoundaryRegularFile, nil }
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	coverage, created, err := driver.ensureCoverage("/opt/michael/secrets/token.pem")
+	coverage, created, err := driver.ensureCoverage(context.Background(), "/opt/michael/secrets/token.pem")
 	if err != nil {
 		t.Fatalf("ensureCoverage: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestSELinuxDriverRegularFileCoverage(t *testing.T) {
 	}
 
 	// Removal: the exact-file rule is found by stem and removed.
-	if err := driver.removeBoundary("/opt/michael/secrets/token.pem", macBoundaryRegularFile); err != nil {
+	if err := driver.removeBoundary(context.Background(), "/opt/michael/secrets/token.pem", macBoundaryRegularFile); err != nil {
 		t.Fatalf("removeBoundary: %v", err)
 	}
 	if len(*world.rules) != 0 {
@@ -171,7 +172,7 @@ func TestSELinuxDriverOperatorRuleNeverClaimedOrDeleted(t *testing.T) {
 	*world.rules = append(*world.rules, "/opt/michael(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)")
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	coverage, created, err := driver.ensureCoverage("/opt/michael/cache")
+	coverage, created, err := driver.ensureCoverage(context.Background(), "/opt/michael/cache")
 	if err != nil {
 		t.Fatalf("ensureCoverage: %v", err)
 	}
@@ -199,7 +200,7 @@ func TestSELinuxDriverCeilingNeverTriggersRelabel(t *testing.T) {
 	world.treeKind = func(string) (macBoundaryKind, error) { return macBoundaryDirectory, nil }
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	_, _, err := driver.ensureCoverage("/opt")
+	_, _, err := driver.ensureCoverage(context.Background(), "/opt")
 	if err == nil {
 		t.Fatal("ensureCoverage(/opt) must fail: the exact /opt namespace is not a permitted boundary")
 	}
@@ -220,7 +221,7 @@ func TestSELinuxDriverMissingTreeFailsClosed(t *testing.T) {
 	}
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	if _, _, err := driver.ensureCoverage("/gone"); err == nil {
+	if _, _, err := driver.ensureCoverage(context.Background(), "/gone"); err == nil {
 		t.Fatal("a missing issued tree must fail closed")
 	}
 	if len(*world.semanageCalls) != 0 {
@@ -308,7 +309,7 @@ func TestSELinuxRemovalDeletesOnlyDurableOwnedRuleShape(t *testing.T) {
 			driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
 			// The helper becomes the owner of its own shape first.
-			if _, created, err := driver.ensureCoverage("/opt/michael/cache"); err != nil || !created {
+			if _, created, err := driver.ensureCoverage(context.Background(), "/opt/michael/cache"); err != nil || !created {
 				t.Fatalf("ensureCoverage: created=%v err=%v", created, err)
 			}
 			if len(*world.rules) != 1 || (*world.rules)[0] != tc.helperPattern {
@@ -325,7 +326,7 @@ func TestSELinuxRemovalDeletesOnlyDurableOwnedRuleShape(t *testing.T) {
 			// The object kind changed (mutable host state); cleanup must
 			// still delete exactly the durable owned shape.
 			currentKind = tc.kindAtRemoval
-			if err := driver.removeBoundary("/opt/michael/cache", tc.durableKind); err != nil {
+			if err := driver.removeBoundary(context.Background(), "/opt/michael/cache", tc.durableKind); err != nil {
 				t.Fatalf("removeBoundary: %v", err)
 			}
 
@@ -342,7 +343,7 @@ func TestSELinuxRemovalDeletesOnlyDurableOwnedRuleShape(t *testing.T) {
 
 			// Subsequent coverage discovery remains correct: the surviving
 			// operator rule still covers sibling trees.
-			coverage, created, err := driver.ensureCoverage("/opt/michael/cache/doc.txt")
+			coverage, created, err := driver.ensureCoverage(context.Background(), "/opt/michael/cache/doc.txt")
 			if err != nil {
 				t.Fatalf("post-removal ensureCoverage: %v", err)
 			}
@@ -370,7 +371,7 @@ func TestSELinuxRemovalMissingTreeDurableKindExact(t *testing.T) {
 	*world.rules = append(*world.rules, "/opt/gone", "/opt/gone(/.*)?")
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	if err := driver.removeBoundary("/opt/gone", macBoundaryRegularFile); err != nil {
+	if err := driver.removeBoundary(context.Background(), "/opt/gone", macBoundaryRegularFile); err != nil {
 		t.Fatalf("removeBoundary: %v", err)
 	}
 	if len(*world.rules) != 1 || (*world.rules)[0] != "/opt/gone(/.*)?" {
@@ -392,7 +393,7 @@ func TestSELinuxRemovalMissingTreeLegacyAmbiguityRetained(t *testing.T) {
 	*world.rules = append(*world.rules, "/opt/gone", "/opt/gone(/.*)?")
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	err := driver.removeBoundary("/opt/gone", macBoundaryUnknown)
+	err := driver.removeBoundary(context.Background(), "/opt/gone", macBoundaryUnknown)
 	if err == nil {
 		t.Fatal("legacy removal must refuse the ambiguous same-stem rule set")
 	}
@@ -417,7 +418,7 @@ func TestSELinuxLegacyRemovalRefusesWhenRuleSurvives(t *testing.T) {
 	*world.rules = append(*world.rules, "/opt/michael(/.*)?")
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	err := driver.removeBoundary("/opt/michael", macBoundaryUnknown)
+	err := driver.removeBoundary(context.Background(), "/opt/michael", macBoundaryUnknown)
 	if err == nil {
 		t.Fatal("the legacy removal must refuse a surviving same-stem rule without a proven owned shape")
 	}
@@ -443,7 +444,7 @@ func TestSELinuxLegacyRemovalCompletesWhenRuleGone(t *testing.T) {
 	world.treeKind = func(string) (macBoundaryKind, error) { return macBoundaryDirectory, nil }
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	if err := driver.removeBoundary("/opt/michael", macBoundaryUnknown); err != nil {
+	if err := driver.removeBoundary(context.Background(), "/opt/michael", macBoundaryUnknown); err != nil {
 		t.Fatalf("removeBoundary: %v", err)
 	}
 	if len(*world.rules) != 0 {
@@ -463,7 +464,7 @@ func TestSELinuxLegacyRemovalCompletesWhenTreeGone(t *testing.T) {
 	world.treeKind = func(string) (macBoundaryKind, error) { return macBoundaryMissing, nil }
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	if err := driver.removeBoundary("/opt/gone", macBoundaryUnknown); err != nil {
+	if err := driver.removeBoundary(context.Background(), "/opt/gone", macBoundaryUnknown); err != nil {
 		t.Fatalf("removeBoundary: %v", err)
 	}
 	if len(*world.rules) != 0 {
@@ -485,7 +486,7 @@ func TestSELinuxLegacyRelabelOnlyRefusesAppearedRule(t *testing.T) {
 	*world.rules = append(*world.rules, "/opt/gone")
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	err := driver.removeBoundary("/opt/gone", macBoundaryUnknown)
+	err := driver.removeBoundary(context.Background(), "/opt/gone", macBoundaryUnknown)
 	if err == nil {
 		t.Fatal("the legacy relabel-only completion must refuse a same-stem rule that appeared since the proof")
 	}
@@ -513,20 +514,20 @@ func TestSELinuxRemovalRestoreconFailureIsResumable(t *testing.T) {
 	world.treeKind = func(string) (macBoundaryKind, error) { return macBoundaryDirectory, nil }
 	restoreconFailing := 0
 	base := world.selinuxFcontextManager.runCommand
-	world.selinuxFcontextManager.runCommand = func(cmd string, args ...string) ([]byte, error) {
+	world.selinuxFcontextManager.runCommand = func(_ context.Context, cmd string, args ...string) ([]byte, error) {
 		if strings.HasSuffix(cmd, "restorecon") && restoreconFailing > 0 {
 			restoreconFailing--
 			return nil, fmt.Errorf("restorecon: relabel failed")
 		}
-		return base(cmd, args...)
+		return base(context.Background(), cmd, args...)
 	}
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	if _, created, err := driver.ensureCoverage("/opt/michael/cache"); err != nil || !created {
+	if _, created, err := driver.ensureCoverage(context.Background(), "/opt/michael/cache"); err != nil || !created {
 		t.Fatalf("ensureCoverage: created=%v err=%v", created, err)
 	}
 	restoreconFailing = 1
-	err := driver.removeBoundary("/opt/michael/cache", macBoundaryDirectory)
+	err := driver.removeBoundary(context.Background(), "/opt/michael/cache", macBoundaryDirectory)
 	if err == nil {
 		t.Fatal("a restorecon failure after rule removal must surface as an error")
 	}
@@ -541,7 +542,7 @@ func TestSELinuxRemovalRestoreconFailureIsResumable(t *testing.T) {
 	// intermediate state. The retry must not recreate the rule and must
 	// complete by performing the pending relabel work.
 	restoreconCallsBefore := len(*world.restoreconArgs)
-	if err := driver.removeBoundary("/opt/michael/cache", macBoundaryDirectory); err != nil {
+	if err := driver.removeBoundary(context.Background(), "/opt/michael/cache", macBoundaryDirectory); err != nil {
 		t.Fatalf("retry removeBoundary: %v", err)
 	}
 	if len(*world.rules) != 0 {
@@ -567,7 +568,7 @@ func TestSELinuxRemovalRuleAbsenceCompletesAfterRelabel(t *testing.T) {
 	*world.rules = append(*world.rules, "/opt/michael/cache")
 	driver := &selinuxMACDriver{mgr: world.selinuxFcontextManager, treeKind: world.treeKind}
 
-	if err := driver.removeBoundary("/opt/michael/cache", macBoundaryDirectory); err != nil {
+	if err := driver.removeBoundary(context.Background(), "/opt/michael/cache", macBoundaryDirectory); err != nil {
 		t.Fatalf("removeBoundary: %v", err)
 	}
 	if len(*world.rules) != 1 || (*world.rules)[0] != "/opt/michael/cache" {
@@ -637,7 +638,7 @@ func TestCoordinatorLegacySELinuxAmbiguousRulesFailClosed(t *testing.T) {
 	*world.rules = append(*world.rules, "/opt/p", "/opt/p(/.*)?")
 	mac := newLegacySELinuxCoordinator(t, world, "/opt/p")
 
-	if err := mac.cleanupStaleBoundaries(); err != nil {
+	if err := mac.cleanupStaleBoundaries(context.Background()); err != nil {
 		t.Fatalf("cleanupStaleBoundaries: %v", err)
 	}
 
@@ -661,7 +662,7 @@ func TestCoordinatorLegacySELinuxSymmetricKindChangeFailClosed(t *testing.T) {
 	*world.rules = append(*world.rules, "/opt/p(/.*)?", "/opt/p")
 	mac := newLegacySELinuxCoordinator(t, world, "/opt/p")
 
-	if err := mac.cleanupStaleBoundaries(); err != nil {
+	if err := mac.cleanupStaleBoundaries(context.Background()); err != nil {
 		t.Fatalf("cleanupStaleBoundaries: %v", err)
 	}
 
@@ -691,15 +692,15 @@ func TestCoordinatorLegacySELinuxCleanupResumesAndConverges(t *testing.T) {
 	// Attempt 1: the relabel fails after the owned rule is deleted.
 	restoreconFailing := 0
 	base := world.selinuxFcontextManager.runCommand
-	world.selinuxFcontextManager.runCommand = func(cmd string, args ...string) ([]byte, error) {
+	world.selinuxFcontextManager.runCommand = func(_ context.Context, cmd string, args ...string) ([]byte, error) {
 		if strings.HasSuffix(cmd, "restorecon") && restoreconFailing > 0 {
 			restoreconFailing--
 			return nil, fmt.Errorf("restorecon: relabel failed")
 		}
-		return base(cmd, args...)
+		return base(context.Background(), cmd, args...)
 	}
 	restoreconFailing = 1
-	if err := mac.cleanupStaleBoundaries(); err != nil {
+	if err := mac.cleanupStaleBoundaries(context.Background()); err != nil {
 		t.Fatalf("cleanupStaleBoundaries: %v", err)
 	}
 
@@ -721,7 +722,7 @@ func TestCoordinatorLegacySELinuxCleanupResumesAndConverges(t *testing.T) {
 	// durable kind — it must not recreate the deleted rule and must not
 	// treat the absent rule as an ownership mismatch.
 	restoreconCallsBefore := len(*world.restoreconArgs)
-	if err := mac.cleanupStaleBoundaries(); err != nil {
+	if err := mac.cleanupStaleBoundaries(context.Background()); err != nil {
 		t.Fatalf("retry cleanupStaleBoundaries: %v", err)
 	}
 	if len(*world.rules) != 0 {

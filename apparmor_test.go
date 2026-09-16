@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -21,7 +22,7 @@ type capturedParserCall struct {
 
 // setupAppArmorTestWithRunner builds a manager over a fresh temp dir with a
 // fake executable parser and the given runner.
-func setupAppArmorTestWithRunner(t *testing.T, runner func(exe string, args []string) error) (dir string, mgr *appArmorProfileManager) {
+func setupAppArmorTestWithRunner(t *testing.T, runner appArmorParserRunner) (dir string, mgr *appArmorProfileManager) {
 	t.Helper()
 	dir = t.TempDir()
 
@@ -53,7 +54,7 @@ func setupAppArmorTestWithRunner(t *testing.T, runner func(exe string, args []st
 func setupAppArmorTest(t *testing.T) (dir string, mgr *appArmorProfileManager, captured *capturedParserCall) {
 	t.Helper()
 	captured = &capturedParserCall{}
-	dir, mgr = setupAppArmorTestWithRunner(t, func(exe string, args []string) error {
+	dir, mgr = setupAppArmorTestWithRunner(t, func(_ context.Context, exe string, args []string) error {
 		captured.exe = exe
 		captured.args = args
 		return nil
@@ -195,7 +196,7 @@ func TestAppArmorBoundaryAddRegularFile(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	result, err := mgr.addManagedBoundary(filePath)
+	result, err := mgr.addManagedBoundary(context.Background(), filePath)
 	if err != nil {
 		t.Fatalf("a regular-file issued tree must be accepted as a managed boundary: %v", err)
 	}
@@ -234,7 +235,7 @@ func TestAppArmorBoundaryAddSymlinkedPath(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	result, err := mgr.addManagedBoundary(linkDir)
+	result, err := mgr.addManagedBoundary(context.Background(), linkDir)
 	if err != nil {
 		t.Fatalf("addBoundary failed: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestAppArmorBoundaryAddSymlinkedPath(t *testing.T) {
 func TestAppArmorBoundaryAddRootDirectory(t *testing.T) {
 	_, mgr, _ := setupAppArmorTest(t)
 
-	_, err := mgr.addManagedBoundary("/")
+	_, err := mgr.addManagedBoundary(context.Background(), "/")
 	if err == nil {
 		t.Fatal("expected error for /")
 	}
@@ -282,7 +283,7 @@ func TestAppArmorBoundaryAddGlobRejected(t *testing.T) {
 			}
 
 			_, mgr, _ := setupAppArmorTest(t)
-			_, err := mgr.addManagedBoundary(path)
+			_, err := mgr.addManagedBoundary(context.Background(), path)
 			if err == nil {
 				t.Fatalf("expected error for path with %q", ch)
 			}
@@ -383,7 +384,7 @@ func TestBoundaryWithSpecialCharacters(t *testing.T) {
 
 			_, mgr, _ := setupAppArmorTest(t)
 
-			result, err := mgr.addManagedBoundary(path)
+			result, err := mgr.addManagedBoundary(context.Background(), path)
 			if err != nil {
 				t.Fatalf("addBoundary failed: %v", err)
 			}
@@ -412,7 +413,7 @@ func TestBoundaryWithControlCharacter(t *testing.T) {
 	}
 
 	_, mgr, _ := setupAppArmorTest(t)
-	_, err := mgr.addManagedBoundary(path)
+	_, err := mgr.addManagedBoundary(context.Background(), path)
 	if err == nil {
 		t.Fatal("expected error for control character")
 	}
@@ -471,7 +472,7 @@ func TestAppArmorDuplicateAdd(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	result1, err := mgr.addManagedBoundary(testDir)
+	result1, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err != nil {
 		t.Fatalf("first addBoundary failed: %v", err)
 	}
@@ -482,7 +483,7 @@ func TestAppArmorDuplicateAdd(t *testing.T) {
 		t.Errorf("first add expected path %s, got %s", testDir, result1.Path)
 	}
 
-	result2, err := mgr.addManagedBoundary(testDir)
+	result2, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err != nil {
 		t.Fatalf("second addBoundary failed: %v", err)
 	}
@@ -516,7 +517,7 @@ func TestAppArmorAddBoundaryKindConflictFailsClosed(t *testing.T) {
 	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	result, err := mgr.addManagedBoundary(dirPath)
+	result, err := mgr.addManagedBoundary(context.Background(), dirPath)
 	if err != nil {
 		t.Fatalf("addManagedBoundary(directory): %v", err)
 	}
@@ -533,7 +534,7 @@ func TestAppArmorAddBoundaryKindConflictFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fragment: %v", err)
 	}
-	if _, err := mgr.addManagedBoundary(dirPath); err == nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), dirPath); err == nil {
 		t.Fatal("the add must refuse an existing same-path boundary with another persisted kind")
 	}
 	fragmentAfter, err := os.ReadFile(mgr.managedFragmentPath)
@@ -549,7 +550,7 @@ func TestAppArmorAddBoundaryKindConflictFailsClosed(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("token"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	result, err = mgr.addManagedBoundary(filePath)
+	result, err = mgr.addManagedBoundary(context.Background(), filePath)
 	if err != nil {
 		t.Fatalf("addManagedBoundary(regular file): %v", err)
 	}
@@ -566,7 +567,7 @@ func TestAppArmorAddBoundaryKindConflictFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fragment: %v", err)
 	}
-	if _, err := mgr.addManagedBoundary(filePath); err == nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), filePath); err == nil {
 		t.Fatal("the add must refuse an existing same-path boundary with another persisted kind")
 	}
 	fragmentAfter, err = os.ReadFile(mgr.managedFragmentPath)
@@ -589,7 +590,7 @@ func TestAppArmorAbsentRemove(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	result, err := mgr.removeManagedBoundary(testDir)
+	result, err := mgr.removeManagedBoundary(context.Background(), testDir)
 	if err != nil {
 		t.Fatalf("removeBoundary failed: %v", err)
 	}
@@ -612,7 +613,7 @@ func TestAppArmorRemoveAfterDeletion(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedBoundary(testDir); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testDir); err != nil {
 		t.Fatalf("addBoundary failed: %v", err)
 	}
 
@@ -620,7 +621,7 @@ func TestAppArmorRemoveAfterDeletion(t *testing.T) {
 		t.Fatalf("RemoveAll failed: %v", err)
 	}
 
-	result, err := mgr.removeManagedBoundary(testDir)
+	result, err := mgr.removeManagedBoundary(context.Background(), testDir)
 	if err != nil {
 		t.Fatalf("removeBoundary failed after deletion: %v", err)
 	}
@@ -698,7 +699,7 @@ func TestAppArmorParserInvocation(t *testing.T) {
 		{
 			name: "reload on add",
 			op: func(mgr *appArmorProfileManager, testDir string) error {
-				_, err := mgr.addManagedBoundary(testDir)
+				_, err := mgr.addManagedBoundary(context.Background(), testDir)
 				return err
 			},
 			wantArgs: []string{"--replace", "--skip-cache"},
@@ -706,7 +707,7 @@ func TestAppArmorParserInvocation(t *testing.T) {
 		{
 			name: "validate on check",
 			op: func(mgr *appArmorProfileManager, testDir string) error {
-				return mgr.check()
+				return mgr.check(context.Background())
 			},
 			wantArgs: []string{"--skip-kernel-load", "--skip-cache"},
 		},
@@ -737,7 +738,7 @@ func TestAppArmorParserInvocation(t *testing.T) {
 
 			captured := &capturedParserCall{}
 			mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-				func(exe string, args []string) error {
+				func(_ context.Context, exe string, args []string) error {
 					captured.exe = exe
 					captured.args = args
 					return nil
@@ -779,7 +780,7 @@ func TestAppArmorNoShellInvocation(t *testing.T) {
 	}
 
 	shellUsed := false
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		base := filepath.Base(exe)
 		if base == "sh" || base == "bash" || exe == "/bin/sh" || exe == "/bin/bash" {
 			shellUsed = true
@@ -799,7 +800,7 @@ func TestAppArmorNoShellInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := mgr.addManagedBoundary(testDir)
+	_, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err != nil {
 		t.Fatalf("addBoundary failed: %v", err)
 	}
@@ -833,7 +834,7 @@ func TestAppArmorCheckDoesNotReload(t *testing.T) {
 
 	reloadCalled := false
 	validateCalled := false
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		if len(args) >= 1 && args[0] == "--replace" {
 			reloadCalled = true
 		}
@@ -845,7 +846,7 @@ func TestAppArmorCheckDoesNotReload(t *testing.T) {
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	if err := mgr.check(); err != nil {
+	if err := mgr.check(context.Background()); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
 
@@ -879,9 +880,9 @@ func TestAppArmorCheckDoesNotModifyFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, func(exe string, args []string) error { return nil })
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, func(_ context.Context, exe string, args []string) error { return nil })
 
-	if err := mgr.check(); err != nil {
+	if err := mgr.check(context.Background()); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
 
@@ -912,7 +913,7 @@ func TestAppArmorSuccessfulAdd(t *testing.T) {
 
 	_, mgr, captured := setupAppArmorTest(t)
 
-	result, err := mgr.addManagedBoundary(testDir)
+	result, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err != nil {
 		t.Fatalf("addBoundary failed: %v", err)
 	}
@@ -944,12 +945,12 @@ func TestAppArmorSuccessfulRemove(t *testing.T) {
 
 	_, mgr, captured := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedBoundary(testDir); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testDir); err != nil {
 		t.Fatalf("addBoundary failed: %v", err)
 	}
 	captured.args = nil
 
-	result, err := mgr.removeManagedBoundary(testDir)
+	result, err := mgr.removeManagedBoundary(context.Background(), testDir)
 	if err != nil {
 		t.Fatalf("removeBoundary failed: %v", err)
 	}
@@ -986,13 +987,13 @@ func TestAppArmorAddMultipleBoundaries(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedBoundary(dirC); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), dirC); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addManagedBoundary(dirA); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), dirA); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addManagedBoundary(dirB); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), dirB); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1042,7 +1043,7 @@ func TestAppArmorFragmentPermissions(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedBoundary(testDir); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testDir); err != nil {
 		t.Fatalf("addBoundary failed: %v", err)
 	}
 
@@ -1079,7 +1080,7 @@ func TestAppArmorParserFailureRestoresPrevious(t *testing.T) {
 	}
 
 	callCount := 0
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		callCount++
 		if callCount == 1 {
 			return nil
@@ -1089,7 +1090,7 @@ func TestAppArmorParserFailureRestoresPrevious(t *testing.T) {
 
 	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addManagedBoundary(testDirA); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testDirA); err != nil {
 		t.Fatalf("first addBoundary failed: %v", err)
 	}
 
@@ -1098,7 +1099,7 @@ func TestAppArmorParserFailureRestoresPrevious(t *testing.T) {
 		t.Fatalf("cannot read fragment: %v", err)
 	}
 
-	_, err = mgr.addManagedBoundary(testDirB)
+	_, err = mgr.addManagedBoundary(context.Background(), testDirB)
 	if err == nil {
 		t.Fatal("expected error for second addBoundary")
 	}
@@ -1131,20 +1132,20 @@ func TestAppArmorParserFailureRemoveRestores(t *testing.T) {
 		}
 	}
 
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		return nil
 	}
 
 	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addManagedBoundary(testDirA); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testDirA); err != nil {
 		t.Fatalf("first addBoundary failed: %v", err)
 	}
-	if _, err := mgr.addManagedBoundary(testDirB); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testDirB); err != nil {
 		t.Fatalf("second addBoundary failed: %v", err)
 	}
 
-	mgr.runParser = func(exe string, args []string) error {
+	mgr.runParser = func(_ context.Context, exe string, args []string) error {
 		return errors.New("parser failed on remove")
 	}
 
@@ -1153,7 +1154,7 @@ func TestAppArmorParserFailureRemoveRestores(t *testing.T) {
 		t.Fatalf("cannot read fragment: %v", err)
 	}
 
-	_, err = mgr.removeManagedBoundary(testDirA)
+	_, err = mgr.removeManagedBoundary(context.Background(), testDirA)
 	if err == nil {
 		t.Fatal("expected error for removeBoundary")
 	}
@@ -1180,23 +1181,23 @@ func TestAppArmorRollbackReloadFailure(t *testing.T) {
 		}
 	}
 
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		return nil
 	}
 
 	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addManagedBoundary(testDirA); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testDirA); err != nil {
 		t.Fatalf("first addBoundary failed: %v", err)
 	}
 
 	callCount := 0
-	mgr.runParser = func(exe string, args []string) error {
+	mgr.runParser = func(_ context.Context, exe string, args []string) error {
 		callCount++
 		return fmt.Errorf("parser error %d", callCount)
 	}
 
-	_, err := mgr.addManagedBoundary(testDirB)
+	_, err := mgr.addManagedBoundary(context.Background(), testDirB)
 	if err == nil {
 		t.Fatal("expected error for second addBoundary")
 	}
@@ -1234,7 +1235,7 @@ func TestAppArmorLockSerialization(t *testing.T) {
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-		func(exe string, args []string) error { return nil },
+		func(_ context.Context, exe string, args []string) error { return nil },
 	)
 
 	_, err = mgr.acquireAppArmorLock()
@@ -1265,7 +1266,7 @@ func TestAppArmorConcurrentLockBusy(t *testing.T) {
 	firstDone := make(chan struct{})
 	secondDone := make(chan struct{})
 
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		close(firstInRunner)
 		<-firstDone
 		return nil
@@ -1282,7 +1283,7 @@ func TestAppArmorConcurrentLockBusy(t *testing.T) {
 	// First goroutine: enters runner, holds lock
 	go func() {
 		defer wg.Done()
-		resultA, errA = mgr.addManagedBoundary(testDirA)
+		resultA, errA = mgr.addManagedBoundary(context.Background(), testDirA)
 	}()
 
 	// Wait for first goroutine to be in the runner (lock held)
@@ -1291,7 +1292,7 @@ func TestAppArmorConcurrentLockBusy(t *testing.T) {
 	// Second goroutine: tries to acquire lock while first holds it
 	go func() {
 		defer wg.Done()
-		_, errB = mgr.addManagedBoundary(testDirB)
+		_, errB = mgr.addManagedBoundary(context.Background(), testDirB)
 		close(secondDone)
 	}()
 
@@ -1362,14 +1363,14 @@ func TestAppArmorParserNotExecutable(t *testing.T) {
 	origMode := origInfo.Mode().Perm()
 
 	runnerCalled := false
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		runnerCalled = true
 		return nil
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	_, err = mgr.addManagedBoundary(testDir)
+	_, err = mgr.addManagedBoundary(context.Background(), testDir)
 	if err == nil {
 		t.Fatal("expected error for non-executable parser")
 	}
@@ -1406,11 +1407,11 @@ func TestAppArmorSymlinkFragmentRejected(t *testing.T) {
 		op   func(mgr *appArmorProfileManager, testDir string) error
 	}{
 		{"add", func(mgr *appArmorProfileManager, testDir string) error {
-			_, err := mgr.addManagedBoundary(testDir)
+			_, err := mgr.addManagedBoundary(context.Background(), testDir)
 			return err
 		}},
 		{"remove", func(mgr *appArmorProfileManager, testDir string) error {
-			_, err := mgr.removeManagedBoundary(testDir)
+			_, err := mgr.removeManagedBoundary(context.Background(), testDir)
 			return err
 		}},
 	}
@@ -1448,7 +1449,7 @@ func TestAppArmorSymlinkFragmentRejected(t *testing.T) {
 
 			runnerCalled := false
 			mgr := newAppArmorProfileManager(mainProfile, linkFragment, lockPath, parserPath,
-				func(exe string, args []string) error {
+				func(_ context.Context, exe string, args []string) error {
 					runnerCalled = true
 					return nil
 				},
@@ -1515,10 +1516,10 @@ func TestAppArmorNonRegularFragmentDirectory(t *testing.T) {
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-		func(exe string, args []string) error { return nil },
+		func(_ context.Context, exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addManagedBoundary(testDir)
+	_, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err == nil {
 		t.Fatal("expected error for directory fragment")
 	}
@@ -1546,10 +1547,10 @@ func TestAppArmorParserUnavailableNoChanges(t *testing.T) {
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-		func(exe string, args []string) error { return nil },
+		func(_ context.Context, exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addManagedBoundary(testDir)
+	_, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err == nil {
 		t.Fatal("expected error for missing parser")
 	}
@@ -1581,10 +1582,10 @@ func TestAppArmorMainProfileMissingNoChanges(t *testing.T) {
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-		func(exe string, args []string) error { return nil },
+		func(_ context.Context, exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addManagedBoundary(testDir)
+	_, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err == nil {
 		t.Fatal("expected error for missing main profile")
 	}
@@ -1607,10 +1608,10 @@ func TestAppArmorCheckParserNotAvailable(t *testing.T) {
 	parserPath := filepath.Join(dir, "nonexistent")
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-		func(exe string, args []string) error { return nil },
+		func(_ context.Context, exe string, args []string) error { return nil },
 	)
 
-	err := mgr.check()
+	err := mgr.check(context.Background())
 	if err == nil {
 		t.Fatal("expected error when parser not available")
 	}
@@ -1631,10 +1632,10 @@ func TestAppArmorCheckMainProfileNotFound(t *testing.T) {
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-		func(exe string, args []string) error { return nil },
+		func(_ context.Context, exe string, args []string) error { return nil },
 	)
 
-	err := mgr.check()
+	err := mgr.check(context.Background())
 	if err == nil {
 		t.Fatal("expected error when main profile not found")
 	}
@@ -1664,10 +1665,10 @@ func TestAppArmorCheckValidationFailure(t *testing.T) {
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-		func(exe string, args []string) error { return errors.New("validation failed") },
+		func(_ context.Context, exe string, args []string) error { return errors.New("validation failed") },
 	)
 
-	err := mgr.check()
+	err := mgr.check(context.Background())
 	if err == nil {
 		t.Fatal("expected error when validation fails")
 	}
@@ -1697,10 +1698,10 @@ func TestAppArmorCheckSuccess(t *testing.T) {
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
-		func(exe string, args []string) error { return nil },
+		func(_ context.Context, exe string, args []string) error { return nil },
 	)
 
-	if err := mgr.check(); err != nil {
+	if err := mgr.check(context.Background()); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
 }
@@ -1719,14 +1720,14 @@ func TestAppArmorRemoveNoInference(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedBoundary(parentDir); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), parentDir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addManagedBoundary(childDir); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), childDir); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := mgr.removeManagedBoundary(childDir); err != nil {
+	if _, err := mgr.removeManagedBoundary(context.Background(), childDir); err != nil {
 		t.Fatalf("removeBoundary failed: %v", err)
 	}
 
@@ -1890,7 +1891,7 @@ func TestAppArmorRollbackRestoresMode(t *testing.T) {
 	}
 
 	callCount := 0
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		callCount++
 		if callCount == 1 {
 			return nil
@@ -1900,7 +1901,7 @@ func TestAppArmorRollbackRestoresMode(t *testing.T) {
 
 	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addManagedBoundary(testDirA); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testDirA); err != nil {
 		t.Fatalf("first addBoundary failed: %v", err)
 	}
 
@@ -1910,7 +1911,7 @@ func TestAppArmorRollbackRestoresMode(t *testing.T) {
 	}
 	prevMode := prevInfo.Mode().Perm()
 
-	_, err = mgr.addManagedBoundary(testDirB)
+	_, err = mgr.addManagedBoundary(context.Background(), testDirB)
 	if err == nil {
 		t.Fatal("expected error for second addBoundary")
 	}
@@ -1948,14 +1949,14 @@ func TestAppArmorRollbackRestoresNoFragment(t *testing.T) {
 	}
 
 	callCount := 0
-	fakeRunner := func(exe string, args []string) error {
+	fakeRunner := func(_ context.Context, exe string, args []string) error {
 		callCount++
 		return errors.New("parser always fails")
 	}
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	_, err := mgr.addManagedBoundary(testDir)
+	_, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err == nil {
 		t.Fatal("expected error for addBoundary")
 	}
@@ -2114,7 +2115,7 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 	}
 
 	// 2) Stale REMOVE semantics: the unsafe boundary must still be removable.
-	res, err := mgr.removeManagedBoundary(staleUnsafe)
+	res, err := mgr.removeManagedBoundary(context.Background(), staleUnsafe)
 	if err != nil {
 		t.Fatalf("removeBoundary() error: %v", err)
 	}
@@ -2133,7 +2134,7 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 	if err := os.WriteFile(fragmentPath, renderFragment([]appArmorManagedBoundary{{Path: staleUnsafe}}), 0644); err != nil {
 		t.Fatal(err)
 	}
-	err = mgr.check()
+	err = mgr.check(context.Background())
 	if err == nil {
 		t.Error("check() should diagnose policy-violating managed boundary")
 	} else if !strings.Contains(err.Error(), "workspace root policy") {
@@ -2679,7 +2680,7 @@ func TestRewriteNormalizesLegacyHeader(t *testing.T) {
 	}
 
 	// Add a boundary — this rewrites the file with the new header.
-	_, err := mgr.addManagedBoundary(testDir)
+	_, err := mgr.addManagedBoundary(context.Background(), testDir)
 	if err != nil {
 		t.Fatalf("addManagedBoundary failed: %v", err)
 	}
@@ -3255,7 +3256,7 @@ func TestManagedFragmentKindStableAcrossUnrelatedRewrites(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedBoundary(testFile); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), testFile); err != nil {
 		t.Fatalf("add regular-file boundary: %v", err)
 	}
 
@@ -3263,7 +3264,7 @@ func TestManagedFragmentKindStableAcrossUnrelatedRewrites(t *testing.T) {
 	if err := os.MkdirAll(otherDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addManagedBoundary(otherDir); err != nil {
+	if _, err := mgr.addManagedBoundary(context.Background(), otherDir); err != nil {
 		t.Fatalf("add unrelated boundary: %v", err)
 	}
 
@@ -3281,7 +3282,7 @@ func TestManagedFragmentKindStableAcrossUnrelatedRewrites(t *testing.T) {
 	if err := os.Remove(testFile); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.removeManagedBoundary(otherDir); err != nil {
+	if _, err := mgr.removeManagedBoundary(context.Background(), otherDir); err != nil {
 		t.Fatalf("remove unrelated boundary: %v", err)
 	}
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509"
@@ -649,12 +650,20 @@ func prepareCAFromData(runtimeDir string, caData []byte) (preparedDir string, er
 	return snapshotDir, nil
 }
 
-// trustedCARestorecon runs restorecon over the trusted CA tree. It is a
-// package-level variable so tests can capture the exact invocation without
-// executing a real SELinux policy binary.
-var trustedCARestorecon = func(args ...string) ([]byte, error) {
-	cmd := exec.Command("/usr/sbin/restorecon", args...)
-	return cmd.CombinedOutput()
+// trustedCARestorecon runs restorecon over the trusted CA tree within the
+// remaining MAC transition budget carried by ctx. It is a package-level
+// variable so tests can capture the exact invocation without executing a
+// real SELinux policy binary.
+var trustedCARestorecon = func(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "/usr/sbin/restorecon", args...)
+	if err := configureMACCommandSysProcAttr(cmd); err != nil {
+		return nil, fmt.Errorf("cannot prepare bounded restorecon execution: %w", err)
+	}
+	out, err := cmd.CombinedOutput()
+	if classify := macCommandError(ctx, "restorecon", err); classify != err {
+		return out, classify
+	}
+	return out, err
 }
 
 // restoreconTrustedCATree relabels the trusted CA base directory tree to the
@@ -683,7 +692,17 @@ func restoreconTrustedCATree(baseDir string) error {
 	if !active {
 		return nil
 	}
-	out, err := trustedCARestorecon("-R", "-m", baseDir)
+	// The restorecon is one daemon-owned MAC command of the enclosing
+	// configuration preparation: it runs under the fixed MAC transition
+	// budget, so the reload path (which holds the lifecycle serialization
+	// across the whole configuration preparation) can never be held hostage
+	// by a hung restorecon process.
+	ctx, cancel := newMACTransitionContext()
+	defer cancel()
+	out, err := trustedCARestorecon(ctx, "-R", "-m", baseDir)
+	if classify := macCommandError(ctx, "restorecon", err); classify != err {
+		return fmt.Errorf("trusted CA restorecon failed: %w", classify)
+	}
 	if err != nil {
 		return fmt.Errorf("trusted CA restorecon failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}

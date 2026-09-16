@@ -19,6 +19,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -301,7 +302,9 @@ func (b *workloadSELinuxBackend) ensureDependencies() error {
 // exists, worker alive, effective SELinux type — must hold before
 // preparation succeeds; any failure rolls back owned partial state and
 // fails closed so no container can start.
-func (b *workloadSELinuxBackend) prepare(p workloadPreparation) (*preparedWorkloadMAC, error) {
+func (b *workloadSELinuxBackend) prepare(ctx context.Context, p workloadPreparation) (*preparedWorkloadMAC, error) {
+	_ = ctx // bindfs projections are long-lived workers with existing readiness/exit bounds, not timed one-shots
+
 	if err := b.ensureDependencies(); err != nil {
 		return nil, err
 	}
@@ -571,7 +574,9 @@ func (b *workloadSELinuxBackend) validateOwnedState(record workloadMACRecord) er
 // and no removal happens against unproven objects. Unmount order is
 // projection first, lower file bind second, and every unmount is positively
 // verified against the mount inventory before filesystem state is removed.
-func (b *workloadSELinuxBackend) cleanupOwnedState(record workloadMACRecord) error {
+func (b *workloadSELinuxBackend) cleanupOwnedState(ctx context.Context, record workloadMACRecord) error {
+	_ = ctx // SELinux workload cleanup is mount/worker mechanics with existing bounds; no external one-shot MAC commands
+
 	projections, err := b.proveProjectionRuntimeShape(record.RuntimeDirPath())
 	if err != nil {
 		return err

@@ -107,11 +107,14 @@ func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 
 // TestRaceNarrowedSessionCreateLinearizesAfterParentMutation proves the mirror
 // linearization: the parent-policy mutation holds the boundary and commits
-// while the create is pinned at its pre-boundary authentication read, so the
-// create can only resolve the ceiling inside the post-mutation state — the
-// same widening request is now a valid narrowing and commits the wholly
-// post-mutation snapshot, never the pre-mutation refusal and never a mixed
-// state.
+// while the create is pinned at its pre-boundary authentication read. The
+// concurrent create's non-waiting admission (H8) refuses it before any
+// ceiling read — the refused attempt resolves no state, so it can never mix
+// ceiling generations — and the retried create, admitted only after the
+// mutation committed, resolves the ceiling wholly inside the post-mutation
+// state: the same widening request is now a valid narrowing and commits the
+// wholly post-mutation snapshot, never the pre-mutation refusal and never a
+// mixed state.
 func TestRaceNarrowedSessionCreateLinearizesAfterParentMutation(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	// The multi-root issuance contract is a system-mode capability; the
@@ -144,7 +147,18 @@ func TestRaceNarrowedSessionCreateLinearizesAfterParentMutation(t *testing.T) {
 		<-doorPoint.parked
 		close(doorPoint.release)
 
-		// 3. The mutation commits and releases the boundary.
+		// 3. The create's admission attempt lands while the mutation holds
+		//    the boundary: the non-waiting admission refuses it before any
+		//    ceiling read, and the refused attempt leaves no Session.
+		resp := <-createDone
+		if resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("concurrent create: expected 503, got %d (body=%s)", resp.Code, resp.Body.String())
+		}
+		if code := decodeAPIError(t, resp.Body.Bytes()).Code; code != "lifecycle_busy" {
+			t.Fatalf("concurrent create: expected lifecycle_busy code, got %q (body=%s)", code, resp.Body.String())
+		}
+
+		// 4. The mutation commits and releases the boundary.
 		close(mutationPoint.release)
 		got := <-mutationDone
 		if got.err != nil {
@@ -154,11 +168,12 @@ func TestRaceNarrowedSessionCreateLinearizesAfterParentMutation(t *testing.T) {
 			t.Fatal("removePrincipalAllowedRootWithLifecycle reported no change")
 		}
 
-		// 4. The create resolves wholly inside the post-mutation ceiling:
-		//    the request is proven against the widened ceiling and commits.
-		resp := <-createDone
+		// 5. The retried create is admitted (the boundary is free) and
+		//    resolves the ceiling wholly inside the post-mutation state: the
+		//    request is proven against the widened ceiling and commits.
+		resp = createNarrowedSessionThroughMux(app, token, workspace, wideningRoots(inputs))
 		if resp.Code != http.StatusCreated {
-			t.Fatalf("create: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
+			t.Fatalf("retried create: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
 		}
 
 		// The committed snapshot is the wholly post-mutation narrowing: the

@@ -135,20 +135,27 @@ type sessionMACDriver interface {
 	// ancestor) with the boundary's kind where the backend proves it
 	// durably. created is true if a new boundary was created; a newly
 	// created boundary always carries its proven kind.
-	ensureCoverage(tree string) (coverage sessionMACCoverage, created bool, err error)
+	//
+	// ctx carries the remaining MAC transition budget of the enclosing
+	// serialized transition: every external MAC command the backend starts
+	// consumes that remaining budget and is terminated at its expiry.
+	ensureCoverage(ctx context.Context, tree string) (coverage sessionMACCoverage, created bool, err error)
 
 	// verifyCoverage checks that a concrete canonical issued tree has valid
 	// MAC coverage without mutating state. Returns the actual coverage
 	// boundary with the boundary's kind where the backend proves it
-	// durably.
-	verifyCoverage(tree string) (coverage sessionMACCoverage, err error)
+	// durably. ctx carries the remaining MAC transition budget (the backend
+	// verification can run external commands).
+	verifyCoverage(ctx context.Context, tree string) (coverage sessionMACCoverage, err error)
 
 	// removeBoundary removes a docker-helper-owned boundary. kind is the
 	// durable creation-proven kind from the boundary's ownership metadata
 	// (macBoundaryUnknown for a legacy row recorded without one). The
 	// owned rule shape is decided by that durable kind, never by the
-	// current host object kind.
-	removeBoundary(boundary string, kind macBoundaryKind) error
+	// current host object kind. ctx carries the remaining MAC transition
+	// budget (a removal runs external MAC commands and must itself be
+	// bounded, never an unlimited new lifetime).
+	removeBoundary(ctx context.Context, boundary string, kind macBoundaryKind) error
 
 	// discoverHelperOwnedBoundaries returns boundaries intrinsically
 	// attributable to docker-helper, with the durable kind each backend can
@@ -165,8 +172,9 @@ type sessionMACDriver interface {
 	// proven (fail closed, ownership retained for reconciliation). The
 	// mutable host object kind is never ownership evidence. Only called for
 	// a row without a durable kind; the coordinator converges the proven
-	// kind into the ownership metadata before any destructive step.
-	proveOwnedKind(boundary string) (macBoundaryKind, bool, error)
+	// kind into the ownership metadata before any destructive step. ctx
+	// carries the remaining MAC transition budget.
+	proveOwnedKind(ctx context.Context, boundary string) (macBoundaryKind, bool, error)
 
 	// backend returns the LSM backend identity for this driver
 	// ("apparmor" or "selinux").
@@ -240,9 +248,11 @@ func newSessionMACCoordinator(db *sql.DB, driver sessionMACDriver) *sessionMACCo
 // (for a newly created boundary) record helper ownership. A newly created
 // boundary whose ownership record fails is best-effort removed so no
 // unowned physical state survives a failed preparation.
+// ctx carries the remaining MAC transition budget of the enclosing
+// serialized transition.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) ensureBoundaryWithOwnership(tree string) (sessionMACCoverage, bool, error) {
-	coverage, newlyCreated, err := c.driver.ensureCoverage(tree)
+func (c *sessionMACCoordinator) ensureBoundaryWithOwnership(ctx context.Context, tree string) (sessionMACCoverage, bool, error) {
+	coverage, newlyCreated, err := c.driver.ensureCoverage(ctx, tree)
 	if err != nil {
 		return sessionMACCoverage{}, false, fmt.Errorf("%w: %w", ErrMACPreparation, err)
 	}
@@ -265,7 +275,7 @@ func (c *sessionMACCoordinator) ensureBoundaryWithOwnership(tree string) (sessio
 	// state.
 	if newlyCreated {
 		if err := c.recordBoundaryOwnership(coverage.Boundary, coverage.Kind); err != nil {
-			c.driver.removeBoundary(coverage.Boundary, coverage.Kind) // best-effort cleanup
+			c.driver.removeBoundary(ctx, coverage.Boundary, coverage.Kind) // best-effort cleanup within the same budget
 			return sessionMACCoverage{}, false, fmt.Errorf("%w: %w", ErrMACPreparation, err)
 		}
 	}
@@ -281,16 +291,18 @@ func (c *sessionMACCoordinator) ensureBoundaryWithOwnership(tree string) (sessio
 // issued trees may resolve onto one covering boundary; one physical boundary
 // never becomes multiple accidental consumers of the same session).
 //
+// ctx carries the remaining MAC transition budget of the enclosing
+// serialized transition; the rollback consumes that same remaining budget.
 // On failure the boundaries prepared so far are rolled back through the
 // canonical removal decision owner before the error is returned.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) ensureSessionCoverage(trees []string) ([]sessionMACCoverage, []string, error) {
+func (c *sessionMACCoordinator) ensureSessionCoverage(ctx context.Context, trees []string) ([]sessionMACCoverage, []string, error) {
 	resolved := make(map[string]sessionMACCoverage, len(trees))
 	var prepared []string
 	for _, tree := range trees {
-		coverage, newlyCreated, err := c.ensureBoundaryWithOwnership(tree)
+		coverage, newlyCreated, err := c.ensureBoundaryWithOwnership(ctx, tree)
 		if err != nil {
-			c.rollbackPreparedBoundaries(prepared)
+			c.rollbackPreparedBoundaries(ctx, prepared)
 			return nil, nil, err
 		}
 		if newlyCreated {
@@ -337,11 +349,14 @@ func normalizeCoverageSet(resolved map[string]sessionMACCoverage) []sessionMACCo
 // driver, and forget the ownership metadata only after success. A failed
 // kind resolution or removal retains the ownership metadata for the
 // canonical retry/reconciliation owner (fail closed).
+// ctx carries the remaining MAC transition budget of the enclosing
+// serialized transition; the removal consumes that remaining budget, never
+// an unlimited new lifetime.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) removeOwnedBoundary(boundary, stage string) error {
+func (c *sessionMACCoordinator) removeOwnedBoundary(ctx context.Context, boundary, stage string) error {
 	kind, err := c.ownedBoundaryRemovalKind(boundary)
 	if err == nil && kind == macBoundaryUnknown {
-		kind, err = c.convergeLegacyOwnedKind(boundary)
+		kind, err = c.convergeLegacyOwnedKind(ctx, boundary)
 	}
 	if err != nil {
 		opLog(context.Background()).Warn("MAC boundary removal cannot resolve the owned kind, ownership preserved for retry",
@@ -350,7 +365,7 @@ func (c *sessionMACCoordinator) removeOwnedBoundary(boundary, stage string) erro
 			slog.String("error", err.Error()))
 		return err
 	}
-	if err := c.driver.removeBoundary(boundary, kind); err != nil {
+	if err := c.driver.removeBoundary(ctx, boundary, kind); err != nil {
 		opLog(context.Background()).Warn("MAC boundary removal failed, ownership preserved for retry",
 			slog.String("stage", stage),
 			slog.String("boundary", boundary),
@@ -378,8 +393,8 @@ func (c *sessionMACCoordinator) removeOwnedBoundary(boundary, stage string) erro
 // rule. Returns an error when the shape cannot be proven (fail closed;
 // ownership retained).
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) convergeLegacyOwnedKind(boundary string) (macBoundaryKind, error) {
-	provenKind, exists, err := c.driver.proveOwnedKind(boundary)
+func (c *sessionMACCoordinator) convergeLegacyOwnedKind(ctx context.Context, boundary string) (macBoundaryKind, error) {
+	provenKind, exists, err := c.driver.proveOwnedKind(ctx, boundary)
 	if err != nil {
 		return macBoundaryUnknown, fmt.Errorf("cannot prove the owned shape of legacy boundary %s: %w", boundary, err)
 	}
@@ -398,9 +413,11 @@ func (c *sessionMACCoordinator) convergeLegacyOwnedKind(boundary string) (macBou
 // them yet, but pending helper-owned workload state may still rely on the
 // coverage: boundaryMayBeRemoved decides, and a boundary it blocks is kept
 // as deferred helper-owned state for canonical reconciliation instead of
-// being removed unsafely.
+// being removed unsafely. ctx carries the remaining MAC transition budget:
+// the rollback is bounded by the SAME overall transition budget, never an
+// unlimited new lifetime.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) rollbackPreparedBoundaries(prepared []string) {
+func (c *sessionMACCoordinator) rollbackPreparedBoundaries(ctx context.Context, prepared []string) {
 	if len(prepared) == 0 {
 		return
 	}
@@ -413,7 +430,7 @@ func (c *sessionMACCoordinator) rollbackPreparedBoundaries(prepared []string) {
 			c.deferredBoundaries[boundary] = true
 			continue
 		}
-		_ = c.removeOwnedBoundary(boundary, "rollback")
+		_ = c.removeOwnedBoundary(ctx, boundary, "rollback")
 	}
 }
 
@@ -426,19 +443,30 @@ func (c *sessionMACCoordinator) rollbackPreparedBoundaries(prepared []string) {
 // method has committed the Session and registered every actual coverage
 // boundary as a session consumer.
 //
+// The whole transition runs under the daemon-owned fixed MAC transition
+// budget: preparation of every issued tree and the rollback of any prepared
+// boundary share one budget, so the enclosing lifecycle coordination (the
+// create's lifecycleMu) can never be held longer than one budget whatever
+// the issued-tree count or the backend command behavior.
+//
 // This method acquires and releases the coordinator lock.
 func (c *sessionMACCoordinator) CreateSessionBinding(sessionID string, boundaries []string, insertFn func([]sessionMACCoverage) error) ([]sessionMACCoverage, error) {
+	ctx, cancel := newMACTransitionContext()
+	defer cancel()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	coverageSet, prepared, err := c.ensureSessionCoverage(boundaries)
+	coverageSet, prepared, err := c.ensureSessionCoverage(ctx, boundaries)
 	if err != nil {
 		return nil, err
 	}
 
-	// DB insert (the create transaction's commit point).
+	// DB insert (the create transaction's commit point). The SQLite write is
+	// local daemon state, not an external MAC command: the budget bounds the
+	// MAC work, the database owns its own completion semantics.
 	if err := insertFn(coverageSet); err != nil {
-		c.rollbackPreparedBoundaries(prepared)
+		c.rollbackPreparedBoundaries(ctx, prepared)
 		return nil, err
 	}
 
@@ -453,8 +481,17 @@ func (c *sessionMACCoordinator) CreateSessionBinding(sessionID string, boundarie
 // session: the session's complete bound coverage set. The underlying
 // boundaries may remain because of other consumers.
 //
+// The whole release runs under the daemon-owned fixed MAC transition budget:
+// the removal commands of every owned boundary in the released set share one
+// budget, so the release can never hold the coordinator (and on the
+// disable/delete paths the lifecycle serialization) longer than one budget
+// whatever the boundary count or the backend command behavior.
+//
 // This method acquires and releases the coordinator lock.
 func (c *sessionMACCoordinator) ReleaseSessionBinding(sessionID string) {
+	ctx, cancel := newMACTransitionContext()
+	defer cancel()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -465,10 +502,10 @@ func (c *sessionMACCoordinator) ReleaseSessionBinding(sessionID string) {
 	delete(c.sessionBindings, sessionID)
 
 	for _, coverage := range coverageSet {
-		c.conditionalReleaseBoundary(coverage.Boundary, coverage.HelperOwned)
+		c.conditionalReleaseBoundary(ctx, coverage.Boundary, coverage.HelperOwned)
 	}
 	// Retry cleanup of previously deferred boundaries now that a consumer disappeared.
-	c.retryDeferredBoundaries()
+	c.retryDeferredBoundaries(ctx)
 }
 
 // AcquireSessionUse acquires a session-use lease for an operation. It proves
@@ -518,11 +555,17 @@ func (c *sessionMACCoordinator) AcquireSessionUse(sessionID, workspace string) (
 				return
 			}
 			delete(c.sessionUseLeases, leaseKey)
+			// The lease release runs its own removal commands under the
+			// daemon-owned fixed MAC transition budget (the release is
+			// usually a no-op consumer-count decrement, but a boundary
+			// reaching zero consumers here removes kernel state).
+			ctx, cancel := newMACTransitionContext()
+			defer cancel()
 			for _, coverage := range lease.coverage {
-				c.conditionalReleaseBoundary(coverage.Boundary, coverage.HelperOwned)
+				c.conditionalReleaseBoundary(ctx, coverage.Boundary, coverage.HelperOwned)
 			}
 			// Retry cleanup of previously deferred boundaries.
-			c.retryDeferredBoundaries()
+			c.retryDeferredBoundaries(ctx)
 		})
 	}
 
@@ -536,6 +579,11 @@ func (c *sessionMACCoordinator) AcquireSessionUse(sessionID, workspace string) (
 // through the canonical snapshot loader — issued roots are never
 // reconstructed from current parent policy — so a snapshot integrity
 // failure fails startup closed through the existing integrity contract.
+//
+// Every session's verification/repair pass runs under the daemon-owned fixed
+// MAC transition budget (one budget per session, so startup cannot be held
+// hostage by a single session's backend commands); the stale-boundary
+// cleanup pass gets its own budget.
 //
 // This method acquires and releases the coordinator lock.
 func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
@@ -555,8 +603,10 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 	}
 
 	for _, s := range sessions {
+		ctx, cancel := newMACTransitionContext()
 		snapshot, err := loadSessionFilesystemSnapshot(c.db, s.ID, s.Workspace)
 		if err != nil {
+			cancel()
 			return fmt.Errorf("MAC state for session %s cannot be reconciled: persisted snapshot integrity: %w", s.ID, err)
 		}
 		boundaries := sessionMACBoundaries(snapshot)
@@ -566,17 +616,19 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 		// path and the startup reconciliation follow the same semantics).
 		resolved := make(map[string]sessionMACCoverage, len(boundaries))
 		for _, boundary := range boundaries {
-			coverage, verifyErr := c.driver.verifyCoverage(boundary)
+			coverage, verifyErr := c.driver.verifyCoverage(ctx, boundary)
 			if verifyErr != nil {
 				// Attempt repair through the canonical preparation primitive.
 				var repairErr error
-				coverage, _, repairErr = c.ensureBoundaryWithOwnership(boundary)
+				coverage, _, repairErr = c.ensureBoundaryWithOwnership(ctx, boundary)
 				if repairErr != nil {
+					cancel()
 					return fmt.Errorf("MAC state for tree %s (session %s) cannot be repaired: %w (original verification error: %v)", boundary, s.ID, repairErr, verifyErr)
 				}
 			} else {
 				owned, oerr := c.isBoundaryOwnedByHelper(coverage.Boundary)
 				if oerr != nil {
+					cancel()
 					return fmt.Errorf("cannot verify boundary ownership for session %s: %w", s.ID, oerr)
 				}
 				coverage.HelperOwned = owned
@@ -589,10 +641,14 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 		for _, coverage := range c.sessionBindings[s.ID] {
 			c.boundaryConsumerCounts[coverage.Boundary]++
 		}
+		cancel()
 	}
 
 	// Clean up stale docker-helper-owned boundaries left by earlier failures.
-	if err := c.cleanupStaleBoundaries(); err != nil {
+	// One budget for the whole cleanup pass.
+	ctx, cancel := newMACTransitionContext()
+	defer cancel()
+	if err := c.cleanupStaleBoundaries(ctx); err != nil {
 		opLog(context.Background()).Warn("stale MAC boundary cleanup failed", slog.String("error", err.Error()))
 	}
 
@@ -661,7 +717,7 @@ func (c *sessionMACCoordinator) boundaryMayBeRemoved(boundary string, pendingRoo
 // owner: direct consumers, overlapping bindings/leases, and pending
 // helper-owned workload coverage all defer the release.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, helperOwned bool) {
+func (c *sessionMACCoordinator) conditionalReleaseBoundary(ctx context.Context, boundary string, helperOwned bool) {
 	count := c.boundaryConsumerCounts[boundary]
 	if count <= 1 {
 		delete(c.boundaryConsumerCounts, boundary)
@@ -687,13 +743,13 @@ func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, help
 		return
 	}
 
-	_ = c.removeOwnedBoundary(boundary, "release")
+	_ = c.removeOwnedBoundary(ctx, boundary, "release")
 }
 
 // retryDeferredBoundaries attempts to clean up previously deferred boundaries
 // now that a consumer has disappeared.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) retryDeferredBoundaries() {
+func (c *sessionMACCoordinator) retryDeferredBoundaries(ctx context.Context) {
 	pendingRoots, deferAll := c.pendingWorkloadCoverage()
 	for boundary := range c.deferredBoundaries {
 		if !c.boundaryMayBeRemoved(boundary, pendingRoots, deferAll) {
@@ -716,7 +772,7 @@ func (c *sessionMACCoordinator) retryDeferredBoundaries() {
 			continue
 		}
 
-		_ = c.removeOwnedBoundary(boundary, "deferred")
+		_ = c.removeOwnedBoundary(ctx, boundary, "deferred")
 	}
 }
 
@@ -790,7 +846,8 @@ func (c *sessionMACCoordinator) pendingWorkloadCoverage() (map[string]bool, bool
 // coverage) cannot be resolved.
 // This keeps the host/MAC state a crashed-but-pending workload relies on
 // intact until the workload reconciliation has proven or removed that state.
-func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
+// ctx carries the remaining MAC transition budget of the cleanup pass.
+func (c *sessionMACCoordinator) cleanupStaleBoundaries(ctx context.Context) error {
 	boundaries, err := c.listOwnedBoundaries()
 	if err != nil {
 		return err
@@ -811,7 +868,7 @@ func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 			c.deferredBoundaries[boundary] = true
 			continue
 		}
-		_ = c.removeOwnedBoundary(boundary, "stale")
+		_ = c.removeOwnedBoundary(ctx, boundary, "stale")
 	}
 
 	return nil
@@ -1073,8 +1130,8 @@ func appArmorBoundaryCoversTree(boundary appArmorManagedBoundary, tree string, t
 
 // appArmorMACDriver wraps the AppArmor manager for the coordinator.
 type appArmorMACDriver struct {
-	addManagedBoundary    func(string) (boundaryResult, error)
-	removeManagedBoundary func(string) (boundaryResult, error)
+	addManagedBoundary    func(context.Context, string) (boundaryResult, error)
+	removeManagedBoundary func(context.Context, string) (boundaryResult, error)
 	listManagedBoundaries func() ([]appArmorManagedBoundary, error)
 	// treeKind classifies the issued tree's filesystem kind with the
 	// canonical classifier. Production wires macBoundaryKindFor; tests may
@@ -1104,7 +1161,7 @@ func (d *appArmorMACDriver) provableKind(tree string) (macBoundaryKind, error) {
 	return kind, nil
 }
 
-func (d *appArmorMACDriver) ensureCoverage(tree string) (sessionMACCoverage, bool, error) {
+func (d *appArmorMACDriver) ensureCoverage(ctx context.Context, tree string) (sessionMACCoverage, bool, error) {
 	treeKind, err := d.provableKind(tree)
 	if err != nil {
 		return sessionMACCoverage{}, false, err
@@ -1125,7 +1182,7 @@ func (d *appArmorMACDriver) ensureCoverage(tree string) (sessionMACCoverage, boo
 		}
 	}
 
-	result, err := d.addManagedBoundary(tree)
+	result, err := d.addManagedBoundary(ctx, tree)
 	if err != nil {
 		return sessionMACCoverage{}, false, err
 	}
@@ -1136,7 +1193,7 @@ func (d *appArmorMACDriver) ensureCoverage(tree string) (sessionMACCoverage, boo
 	}, result.Changed, nil
 }
 
-func (d *appArmorMACDriver) verifyCoverage(tree string) (sessionMACCoverage, error) {
+func (d *appArmorMACDriver) verifyCoverage(_ context.Context, tree string) (sessionMACCoverage, error) {
 	treeKind, err := d.provableKind(tree)
 	if err != nil {
 		return sessionMACCoverage{}, err
@@ -1162,8 +1219,8 @@ func (d *appArmorMACDriver) verifyCoverage(tree string) (sessionMACCoverage, err
 // fragment persists each boundary's kind, so the durable-kind parameter of
 // the driver contract is already owned by the boundary state itself; the
 // coordinator's kind is informational here and never re-derives the removal.
-func (d *appArmorMACDriver) removeBoundary(boundary string, _ macBoundaryKind) error {
-	_, err := d.removeManagedBoundary(boundary)
+func (d *appArmorMACDriver) removeBoundary(ctx context.Context, boundary string, _ macBoundaryKind) error {
+	_, err := d.removeManagedBoundary(ctx, boundary)
 	return err
 }
 
@@ -1188,7 +1245,7 @@ func (d *appArmorMACDriver) discoverHelperOwnedBoundaries() ([]helperOwnedBounda
 // boundary proves the owned state is gone. AppArmor ownership rows are
 // normally converged by the startup import, which records every fragment
 // boundary's kind; this proof covers the remaining window honestly.
-func (d *appArmorMACDriver) proveOwnedKind(boundary string) (macBoundaryKind, bool, error) {
+func (d *appArmorMACDriver) proveOwnedKind(_ context.Context, boundary string) (macBoundaryKind, bool, error) {
 	boundaries, err := d.listManagedBoundaries()
 	if err != nil {
 		return macBoundaryUnknown, false, fmt.Errorf("cannot list AppArmor managed boundaries: %w", err)
@@ -1220,12 +1277,12 @@ func (d *appArmorMACDriver) backend() LSMBackend {
 // used by the MAC coordinator. Defined as an interface so that tests
 // can inject a mock without changing production behavior.
 type selinuxFcontextOps interface {
-	listCoveringFcontexts(tree string) ([]string, error)
+	listCoveringFcontexts(ctx context.Context, tree string) ([]string, error)
 	verifyActualType(tree string) error
-	restoreconTree(tree string, kind macBoundaryKind) error
-	ensureTreeFcontext(tree string, kind macBoundaryKind) (bool, error)
-	removeFcontextBoundary(boundary string, kind macBoundaryKind) error
-	proveOwnedFcontextShape(boundary string) (macBoundaryKind, bool, error)
+	restoreconTree(ctx context.Context, tree string, kind macBoundaryKind) error
+	ensureTreeFcontext(ctx context.Context, tree string, kind macBoundaryKind) (bool, error)
+	removeFcontextBoundary(ctx context.Context, boundary string, kind macBoundaryKind) error
+	proveOwnedFcontextShape(ctx context.Context, boundary string) (macBoundaryKind, bool, error)
 }
 
 // selinuxMACDriver is the MAC driver backed by selinuxFcontextManager
@@ -1238,7 +1295,7 @@ type selinuxMACDriver struct {
 	treeKind func(string) (macBoundaryKind, error)
 }
 
-func (d *selinuxMACDriver) ensureCoverage(tree string) (sessionMACCoverage, bool, error) {
+func (d *selinuxMACDriver) ensureCoverage(ctx context.Context, tree string) (sessionMACCoverage, bool, error) {
 	if isUnderHome(tree) {
 		return sessionMACCoverage{Boundary: tree, HelperOwned: false}, false, nil
 	}
@@ -1252,12 +1309,12 @@ func (d *selinuxMACDriver) ensureCoverage(tree string) (sessionMACCoverage, bool
 	}
 
 	// Check if an existing boundary covers this tree.
-	if cov, found, err := d.findExistingCoverage(tree); err != nil {
+	if cov, found, err := d.findExistingCoverage(ctx, tree); err != nil {
 		return sessionMACCoverage{}, false, err
 	} else if found {
 		// Existing compatible coverage found: relabel the concrete tree
 		// (kind-aware) and verify the actual on-disk type.
-		if err := d.mgr.restoreconTree(tree, kind); err != nil {
+		if err := d.mgr.restoreconTree(ctx, tree, kind); err != nil {
 			return sessionMACCoverage{}, false, fmt.Errorf("restorecon failed for tree %s under existing boundary %s: %w", tree, cov.Boundary, err)
 		}
 		if err := d.mgr.verifyActualType(tree); err != nil {
@@ -1278,20 +1335,20 @@ func (d *selinuxMACDriver) ensureCoverage(tree string) (sessionMACCoverage, bool
 	// Prepare the tree as a helper-owned boundary. The boundary's kind is the
 	// kind proven here at creation: the driver returns it so the coordinator
 	// can persist the durable owned rule shape with the ownership metadata.
-	newlyCreated, err := d.mgr.ensureTreeFcontext(tree, kind)
+	newlyCreated, err := d.mgr.ensureTreeFcontext(ctx, tree, kind)
 	if err != nil {
 		return sessionMACCoverage{}, false, err
 	}
 	return sessionMACCoverage{Boundary: tree, HelperOwned: true, Kind: kind}, newlyCreated, nil
 }
 
-func (d *selinuxMACDriver) verifyCoverage(tree string) (sessionMACCoverage, error) {
+func (d *selinuxMACDriver) verifyCoverage(ctx context.Context, tree string) (sessionMACCoverage, error) {
 	if isUnderHome(tree) {
 		return sessionMACCoverage{Boundary: tree, HelperOwned: false}, nil
 	}
 
 	// Discover the actual persistent covering boundary.
-	boundaries, err := d.mgr.listCoveringFcontexts(tree)
+	boundaries, err := d.mgr.listCoveringFcontexts(ctx, tree)
 	if err != nil {
 		return sessionMACCoverage{}, fmt.Errorf("cannot discover SELinux coverage for %s: %w", tree, err)
 	}
@@ -1312,8 +1369,8 @@ func (d *selinuxMACDriver) verifyCoverage(tree string) (sessionMACCoverage, erro
 	return sessionMACCoverage{}, fmt.Errorf("tree %s has no persistent SELinux fcontext boundary", tree)
 }
 
-func (d *selinuxMACDriver) findExistingCoverage(tree string) (sessionMACCoverage, bool, error) {
-	boundaries, err := d.mgr.listCoveringFcontexts(tree)
+func (d *selinuxMACDriver) findExistingCoverage(ctx context.Context, tree string) (sessionMACCoverage, bool, error) {
+	boundaries, err := d.mgr.listCoveringFcontexts(ctx, tree)
 	if err != nil {
 		return sessionMACCoverage{}, false, fmt.Errorf("cannot list covering SELinux boundaries: %w", err)
 	}
@@ -1328,22 +1385,22 @@ func (d *selinuxMACDriver) findExistingCoverage(tree string) (sessionMACCoverage
 // removeBoundary removes the boundary whose durable creation-proven kind the
 // coordinator resolved from the ownership metadata. The owned rule shape is
 // that durable kind, never the current host object kind.
-func (d *selinuxMACDriver) removeBoundary(boundary string, kind macBoundaryKind) error {
+func (d *selinuxMACDriver) removeBoundary(ctx context.Context, boundary string, kind macBoundaryKind) error {
 	if isUnderHome(boundary) {
 		return nil
 	}
-	return d.mgr.removeFcontextBoundary(boundary, kind)
+	return d.mgr.removeFcontextBoundary(ctx, boundary, kind)
 }
 
 // proveOwnedKind resolves the owned rule shape of a kind-less (legacy)
 // SELinux ownership row from the backend rule inventory (the
 // single-unambiguous same-stem workspace rule contract; the mutable host
 // object kind is never ownership evidence).
-func (d *selinuxMACDriver) proveOwnedKind(boundary string) (macBoundaryKind, bool, error) {
+func (d *selinuxMACDriver) proveOwnedKind(ctx context.Context, boundary string) (macBoundaryKind, bool, error) {
 	if isUnderHome(boundary) {
 		return macBoundaryUnknown, false, nil
 	}
-	return d.mgr.proveOwnedFcontextShape(boundary)
+	return d.mgr.proveOwnedFcontextShape(ctx, boundary)
 }
 
 // discoverHelperOwnedBoundaries returns nil because the driver does not know
@@ -1373,11 +1430,11 @@ func newSessionMACDriver(mode DeploymentMode, detectLSM func() (LSMBackend, erro
 	case LSMAppArmor:
 		mgr := newProductionAppArmorProfileManager()
 		return &appArmorMACDriver{
-			addManagedBoundary: func(path string) (boundaryResult, error) {
-				return mgr.addManagedBoundary(path)
+			addManagedBoundary: func(ctx context.Context, path string) (boundaryResult, error) {
+				return mgr.addManagedBoundary(ctx, path)
 			},
-			removeManagedBoundary: func(path string) (boundaryResult, error) {
-				return mgr.removeManagedBoundary(path)
+			removeManagedBoundary: func(ctx context.Context, path string) (boundaryResult, error) {
+				return mgr.removeManagedBoundary(ctx, path)
 			},
 			listManagedBoundaries: func() ([]appArmorManagedBoundary, error) {
 				return mgr.listManagedBoundaries()

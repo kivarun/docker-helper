@@ -2,7 +2,7 @@
 #
 # uat-regressions-runner-ubuntu.sh — collect-all runner for the Release-2
 # targeted UAT regression groups on the Ubuntu / DEB / AppArmor profile
-# (groups 3-22).
+# (groups 3-26).
 #
 # The runner installs a docker-helper .deb and starts the system service, then
 # runs every regression group, capturing rc and recording PASS / FAIL / BLOCKED
@@ -160,6 +160,7 @@ REGRESSIONS=(
   "23:H7 hostile TCP port capture:uat-regression-h7-tcp-port-capture.sh"
   "24:H4 build staging ceilings:uat-regression-h4-build-staging-bounds.sh"
   "25:H5 fixed resource admission ceilings:uat-regression-h5-resource-admission.sh"
+  "26:H8 bounded MAC-command liveness:uat-regression-h8-mac-liveness.sh"
 )
 
 declare -A RESULT

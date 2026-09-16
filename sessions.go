@@ -477,6 +477,33 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", cerr.Error()),
 			)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", sessionFilesystemPolicyMessage)
+		} else if errors.Is(cerr, ErrLifecycleBusy) {
+			// Non-waiting lifecycle admission (H8): the create arrived while
+			// the lifecycle coordination was held by another transition and
+			// was refused without queueing, so the queued create count can
+			// never lengthen an emergency administrative transition's delay.
+			// The refusal is client-side (not a server error), names no
+			// transition detail, and commits no Session; the client decides
+			// whether to retry.
+			opLog(ctx).Warn("session creation rejected",
+				slog.String("operation", "session_create"),
+				slog.String("error", cerr.Error()),
+			)
+			writeError(ctx, w, http.StatusServiceUnavailable, "lifecycle_busy", "lifecycle coordination is busy")
+		} else if errors.Is(cerr, ErrMAC) {
+			// MAC preparation failure (including a MAC command terminated at
+			// the fixed transition budget): the audit record already carries
+			// the canonical mac_preparation_failed class; the HTTP answer
+			// carries the same class instead of the generic internal_error
+			// fallback (the documented create error-contract class for a
+			// preparation failure before the create transaction). The
+			// actionable internal cause (backend command, guard refusal,
+			// budget expiry) stays in the operational log, as before.
+			opLog(ctx).Error("session creation error",
+				slog.String("operation", "session_create"),
+				slog.String("error", cerr.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "mac_preparation_failed", "internal server error")
 		} else {
 			opLog(ctx).Error("session creation error",
 				slog.String("operation", "session_create"),

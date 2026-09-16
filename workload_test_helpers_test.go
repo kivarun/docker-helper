@@ -90,7 +90,7 @@ func newTestAppArmorWorkloadBackend(t *testing.T) (*workloadAppArmorBackend, *te
 	}
 	b.parserPath = parserPath
 	b.abi30Present = func() bool { return false }
-	b.runParser = func(parserPath string, args []string) error {
+	b.runParser = func(_ context.Context, parserPath string, args []string) error {
 		if len(args) == 0 {
 			return errors.New("parser invoked without arguments")
 		}
