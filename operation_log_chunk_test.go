@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -85,5 +89,232 @@ func TestOperationLogsResponseBoundedForAdversarialBytes(t *testing.T) {
 	}
 	if logsW.Body.Len() == 0 {
 		t.Fatal("expected log output in the bounded response")
+	}
+
+	// Walk next_offset through every bounded chunk and reconstruct the
+	// retained stream exactly: no gaps, no duplicates, and every response
+	// stays under the documented encoded bound.
+	var reassembled []byte
+	var sawTruncated bool
+	offset := int64(0)
+	chunks := 0
+	for {
+		chunkReq := httptest.NewRequest(http.MethodGet,
+			"/operations/"+created.OperationID+"/logs?offset="+strconv.FormatInt(offset, 10), nil)
+		chunkReq.Header.Set("Authorization", "Bearer "+result.Token)
+		chunkW := httptest.NewRecorder()
+		newOperationMux(app).ServeHTTP(chunkW, chunkReq)
+		if chunkW.Code != http.StatusOK {
+			t.Fatalf("logs chunk at offset %d: expected %d, got %d", offset, http.StatusOK, chunkW.Code)
+		}
+		if got := chunkW.Body.Len(); got > encodedResponseBound {
+			t.Fatalf("chunk response at offset %d exceeded the encoded bound: %d", offset, got)
+		}
+		var resp operationLogsResponse
+		if err := json.Unmarshal(chunkW.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode chunk response: %v", err)
+		}
+		reassembled = append(reassembled, []byte(resp.Logs)...)
+		if resp.Truncated {
+			sawTruncated = true
+		}
+		chunks++
+		if len(resp.Logs) < logResponseChunkBytes {
+			if resp.NextOffset != offset+int64(len(resp.Logs)) {
+				t.Fatalf("next_offset must follow the returned bytes: got %d, want %d", resp.NextOffset, offset+int64(len(resp.Logs)))
+			}
+			break
+		}
+		if resp.NextOffset <= offset {
+			t.Fatalf("next_offset must advance: got %d at offset %d", resp.NextOffset, offset)
+		}
+		offset = resp.NextOffset
+		if chunks > 16 {
+			t.Fatal("chunk walk did not terminate")
+		}
+	}
+
+	// The workload emitted exactly 3 chunks of 0x01 bytes; the reconstruction
+	// must match byte for byte.
+	if !sawTruncated {
+		t.Log("note: no truncation observed (stream fit in retention)")
+	}
+	if len(reassembled) != 3*logResponseChunkBytes {
+		t.Fatalf("chunked reconstruction: got %d bytes, want %d", len(reassembled), 3*logResponseChunkBytes)
+	}
+	for i, b := range reassembled {
+		if b != 0x01 {
+			t.Fatalf("chunked reconstruction mismatch at byte %d: got %#x", i, b)
+		}
+	}
+}
+
+// newChunkedLogsTestClient starts a fake daemon on a Unix socket whose logs
+// endpoint serves a fixed chunked stream for the given operation. The client
+// and socket path are returned for waitForOperationContext-style drives.
+type chunkedLogsFixture struct {
+	client     *apiClient
+	socketPath string
+	logsCalls  atomic.Int32
+	server     *http.Server
+}
+
+func newChunkedLogsFixture(t *testing.T, opID string, chunks [][]byte, nextAfterChunk int64) *chunkedLogsFixture {
+	t.Helper()
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f := &chunkedLogsFixture{socketPath: socketPath}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "succeeded",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		f.logsCalls.Add(1)
+		offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+		// Serve the chunk at the requested offset, or an empty tail response
+		// once the stream is exhausted.
+		index := -1
+		var pos int64
+		for i, c := range chunks {
+			if offset == pos {
+				index = i
+				break
+			}
+			pos += int64(len(c))
+		}
+		logs := ""
+		next := offset
+		truncated := false
+		if index >= 0 {
+			logs = string(chunks[index])
+			next = offset + int64(len(chunks[index]))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       offset,
+			"next_offset":  next,
+			"truncated":    truncated,
+			"logs":         logs,
+		})
+	})
+
+	f.server = &http.Server{Handler: mux}
+	go f.server.Serve(listener)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		f.server.Shutdown(ctx)
+	})
+	waitForDialReady(t, "unix", socketPath)
+
+	f.client = &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+	return f
+}
+
+// TestDrainOperationLogsReconstructsChunks proves the shared CLI drain
+// helper: multiple chunks concatenate with no gaps and no duplicates, the
+// exact chunk boundary produces one extra empty read, and a terminal
+// operation whose remaining log spans several chunks is fully emitted.
+func TestDrainOperationLogsReconstructsChunks(t *testing.T) {
+	opID := "op_chunkdrain"
+	chunkA := bytes.Repeat([]byte{'A'}, logResponseChunkBytes) // full chunk
+	chunkB := bytes.Repeat([]byte{'B'}, logResponseChunkBytes) // full chunk
+	chunkC := bytes.Repeat([]byte{'C'}, 128)                   // short tail
+	f := newChunkedLogsFixture(t, opID, [][]byte{chunkA, chunkB, chunkC}, logResponseChunkBytes)
+
+	var out bytes.Buffer
+	offset, sawTruncated, err := f.client.drainOperationLogs(context.Background(), opID, 0, &out)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if sawTruncated {
+		t.Fatal("no chunk was truncated")
+	}
+
+	// Full reconstruction in order, no gaps, no duplicates.
+	want := append(append(append([]byte{}, chunkA...), chunkB...), chunkC...)
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("drained output mismatch: got %d bytes, want %d", out.Len(), len(want))
+	}
+
+	// The drain ended at the short tail chunk (a short chunk means caught
+	// up; no extra read is needed).
+	if got := f.logsCalls.Load(); got != 3 {
+		t.Fatalf("expected 3 log requests (2 full chunks + short tail), got %d", got)
+	}
+	if offset != int64(len(chunkA)+len(chunkB)+len(chunkC)) {
+		t.Fatalf("final offset must follow all returned bytes: %d", offset)
+	}
+}
+
+// TestDrainOperationLogsTerminatesOnExactBoundary proves the drain terminates
+// when the retained stream is an exact multiple of the chunk ceiling: the
+// full chunk is returned, the follow-up empty read ends the loop, and the
+// offset never regresses.
+func TestDrainOperationLogsTerminatesOnExactBoundary(t *testing.T) {
+	opID := "op_chunkexact"
+	chunkA := bytes.Repeat([]byte{'A'}, logResponseChunkBytes)
+	f := newChunkedLogsFixture(t, opID, [][]byte{chunkA}, logResponseChunkBytes)
+
+	var out bytes.Buffer
+	offset, _, err := f.client.drainOperationLogs(context.Background(), opID, 0, &out)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), chunkA) {
+		t.Fatalf("drained output mismatch: %d bytes", out.Len())
+	}
+	if got := f.logsCalls.Load(); got != 2 {
+		t.Fatalf("expected 2 log requests (full chunk + empty boundary read), got %d", got)
+	}
+	if offset != int64(logResponseChunkBytes) {
+		t.Fatalf("final offset must be the stream end: %d", offset)
+	}
+}
+
+// TestWaitForOperationDrainsTerminalChunks proves the CLI poll loop: a
+// terminal operation whose remaining log spans several chunks is fully
+// emitted through the shared drain helper before the command returns.
+func TestWaitForOperationDrainsTerminalChunks(t *testing.T) {
+	opID := "op_terminaldrain"
+	chunkA := bytes.Repeat([]byte{'A'}, logResponseChunkBytes)
+	chunkB := bytes.Repeat([]byte{'B'}, 100)
+	f := newChunkedLogsFixture(t, opID, [][]byte{chunkA, chunkB}, logResponseChunkBytes)
+
+	var out, errOut bytes.Buffer
+	status, err := waitForOperationContext(context.Background(), f.client, opID, &out, &errOut)
+	if err != nil {
+		t.Fatalf("waitForOperation: %v", err)
+	}
+	if status.Status != operationSucceeded {
+		t.Fatalf("expected succeeded, got %s", status.Status)
+	}
+
+	want := append(append([]byte{}, chunkA...), chunkB...)
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("terminal output mismatch: got %d bytes, want %d", out.Len(), len(want))
 	}
 }

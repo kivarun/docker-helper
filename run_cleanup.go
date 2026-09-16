@@ -45,6 +45,7 @@ type workloadCleanupStageName string
 
 const (
 	cleanupStageContainerProof workloadCleanupStageName = "container_absence_proof"
+	cleanupStageCapacity       workloadCleanupStageName = "operation_capacity"
 	cleanupStageWorkloadMAC    workloadCleanupStageName = "workload_mac_state"
 	cleanupStageSourcePins     workloadCleanupStageName = "source_pins"
 	cleanupStageOwnershipState workloadCleanupStageName = "workload_ownership_state"
@@ -56,8 +57,12 @@ const (
 // Release 2.2 cleanup lifecycle. Every cleanup path — post-start cleanup,
 // pre-container rollback, startup reconciliation — executes a subsequence
 // of exactly this order, and runCleanupSequence refuses any stage list
-// that would reorder it.
+// that would reorder it. The capacity stage (SC2/H5) is the first,
+// kernel-independent entry: it is bookkeeping only, and a pre-container
+// rollback releases the fixed capacity slot of an operation that never
+// started even when a later stage fails and retains dependent kernel state.
 var canonicalWorkloadCleanupOrder = []workloadCleanupStageName{
+	cleanupStageCapacity,
 	cleanupStageContainerProof,
 	cleanupStageWorkloadMAC,
 	cleanupStageSourcePins,
@@ -189,14 +194,21 @@ func (a *App) cleanupAfterRunProcess(op *operation) {
 }
 
 // rollbackRunPreparation reverses prepared run resources before any
-// container can exist: workload MAC state, pins, the durable ownership
-// record, lease, cidfile. It is used by every pre-start failure path (MAC
-// preparation failure, MAC validation failure, admission refusal, shutdown
-// gate before process start, and cmd.Start failure). No container exists by
-// construction, so no container-absence proof is needed; the dependency
-// order is otherwise the canonical one.
+// container can exist: the capacity reservation (SC2/H5), workload MAC
+// state, pins, the durable ownership record, lease, cidfile. It is used by
+// every pre-start failure path (MAC preparation failure, MAC validation
+// failure, admission refusal, shutdown gate before process start, and
+// cmd.Start failure). No container exists by construction, so no
+// container-absence proof is needed; the dependency order is otherwise the
+// canonical one. The capacity stage runs first and is independent of every
+// kernel resource: a failed MAC rollback must never keep the capacity slot
+// of an operation that never became a running container.
 func (a *App) rollbackRunPreparation(ctx context.Context, op *operation) {
 	outcome := newRunCleanupSequence(
+		cleanupStage{name: cleanupStageCapacity, run: func() error {
+			op.releaseCapacity()
+			return nil
+		}},
 		cleanupStage{name: cleanupStageWorkloadMAC, run: func() error {
 			if op.workloadMAC == nil {
 				return nil

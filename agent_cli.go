@@ -113,24 +113,27 @@ func resolveAgentEndpoint(endpoint string, tokenSource func() (string, error)) (
 
 // waitForOperationContext polls an operation until it reaches a terminal state.
 // If ctx is cancelled, it returns immediately with ctx.Err().
+//
+// Log bytes arrive in bounded response chunks (SC2/H5). Every poll drains all
+// currently available chunks through the shared drain helper, so the CLI
+// keeps real-time pace with a verbose workload without ever materializing an
+// unbounded response; when the operation becomes terminal, the same helper
+// drains every remaining chunk before returning.
 func waitForOperationContext(ctx context.Context, c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
 	var offset int64
 	truncated := false
 
 	for {
-		// Fetch and print any new logs.
-		logs, err := c.operationLogs(ctx, opID, offset)
+		// Drain all currently available bounded log chunks.
+		newOffset, sawTruncated, err := c.drainOperationLogs(ctx, opID, offset, stdout)
 		if err != nil {
 			return nil, err
 		}
-		if logs.Logs != "" {
-			fmt.Fprint(stdout, logs.Logs)
-		}
-		if logs.Truncated && !truncated {
+		offset = newOffset
+		if sawTruncated && !truncated {
 			truncated = true
 			fmt.Fprintln(stderr, "warning: operation log was truncated")
 		}
-		offset = logs.NextOffset
 
 		// Check operation status.
 		status, err := c.operationStatus(ctx, opID)
@@ -139,15 +142,15 @@ func waitForOperationContext(ctx context.Context, c *apiClient, opID string, std
 		}
 
 		if status.Status == operationSucceeded || status.Status == operationFailed {
-			// Read remaining logs one final time (always, even if offset == 0).
-			finalLogs, err := c.operationLogs(ctx, opID, offset)
+			// Terminal: drain every remaining chunk (the process may have
+			// written between the last poll and completion). The shared
+			// helper ends at the empty read.
+			newOffset, sawTruncated, err := c.drainOperationLogs(ctx, opID, offset, stdout)
 			if err != nil {
 				return nil, err
 			}
-			if finalLogs.Logs != "" {
-				fmt.Fprint(stdout, finalLogs.Logs)
-			}
-			if finalLogs.Truncated && !truncated {
+			offset = newOffset
+			if sawTruncated && !truncated {
 				fmt.Fprintln(stderr, "warning: operation log was truncated")
 			}
 			return status, nil

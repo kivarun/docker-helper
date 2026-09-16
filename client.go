@@ -438,6 +438,46 @@ func (c *apiClient) operationLogs(ctx context.Context, opID string, offset int64
 	return &result, nil
 }
 
+// drainOperationLogs fetches the operation's bounded log chunks (SC2/H5
+// response chunking) from the given offset until the stream is caught up —
+// the server returned fewer log bytes than one full response chunk — and
+// prints every chunk to stdout. It is the one shared drain helper for the
+// running poll loop and the terminal drain; each HTTP response stays within
+// the server's documented bounded response size.
+//
+// next_offset always follows the bytes actually returned, so a non-empty
+// chunk strictly advances the offset and the loop terminates; the empty
+// read at the end makes no progress and ends the drain. Truncation is
+// reported once per drain through the returned flag (the caller keeps the
+// once-per-run warning semantics).
+func (c *apiClient) drainOperationLogs(ctx context.Context, opID string, offset int64, stdout io.Writer) (int64, bool, error) {
+	sawTruncated := false
+	for {
+		logs, err := c.operationLogs(ctx, opID, offset)
+		if err != nil {
+			return offset, sawTruncated, err
+		}
+		if logs.Logs != "" {
+			fmt.Fprint(stdout, logs.Logs)
+		}
+		if logs.Truncated {
+			sawTruncated = true
+		}
+		newOffset := logs.NextOffset
+		// Caught up: fewer log bytes than one full response chunk (the
+		// terminal, empty read included).
+		if int64(len(logs.Logs)) < logResponseChunkBytes {
+			return newOffset, sawTruncated, nil
+		}
+		// Defensive bound against a peer that does not advance next_offset
+		// for a full chunk: treat it as caught up rather than looping.
+		if newOffset <= offset {
+			return newOffset, sawTruncated, nil
+		}
+		offset = newOffset
+	}
+}
+
 func (c *apiClient) createPrincipal(username string, issueCredential bool) (*principalResponse, error) {
 	body, err := json.Marshal(createPrincipalRequest{Username: username, IssueCredential: issueCredential})
 	if err != nil {

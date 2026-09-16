@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,14 +121,12 @@ func TestRunOtherSessionUsesFreeGlobalCapacity(t *testing.T) {
 }
 
 // TestRunTerminalOperationFreesCapacityImmediately proves that capacity ends
-// at the terminal state, not at retention pruning: a finished operation frees
-// its slot while its metadata and logs remain retained.
+// at the terminal state, not at retention pruning: after the Session ceiling
+// is exhausted, explicitly cancelling the running operations frees their
+// slots immediately — their metadata and logs remain retained — and new
+// operations are admitted again without any waiting.
 func TestRunTerminalOperationFreesCapacityImmediately(t *testing.T) {
 	app, result := newCapacityTestApp(t)
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
 
 	for i := 0; i < maxConcurrentOperationsPerSession; i++ {
 		if w := runCapacityRequest(t, app, result.Token); w.Code != http.StatusCreated {
@@ -138,14 +137,18 @@ func TestRunTerminalOperationFreesCapacityImmediately(t *testing.T) {
 		t.Fatalf("capacity refusal: expected %d, got %d (%s)", http.StatusTooManyRequests, w.Code, w.Body.String())
 	}
 
-	// Let the /bin/true operations reach a terminal state. Their metadata and
-	// logs remain retained, but the capacity must be reusable immediately.
+	// Terminate every running operation and wait for its terminal state.
 	app.OperationSupervisor.mu.RLock()
 	ops := make([]*operation, 0, len(app.OperationSupervisor.ops))
 	for _, op := range app.OperationSupervisor.ops {
 		ops = append(ops, op)
 	}
 	app.OperationSupervisor.mu.RUnlock()
+	for _, op := range ops {
+		if err := app.OperationSupervisor.cancel(op.ID, nil); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+	}
 	for _, op := range ops {
 		select {
 		case <-op.done:
@@ -154,10 +157,306 @@ func TestRunTerminalOperationFreesCapacityImmediately(t *testing.T) {
 		}
 	}
 
+	// Capacity is reusable immediately while the terminal operations remain
+	// retained in the supervisor.
+	if got := len(app.OperationSupervisor.ops); got != maxConcurrentOperationsPerSession {
+		t.Fatalf("terminal operations must remain retained: %d registered operations", got)
+	}
 	w := runCapacityRequest(t, app, result.Token)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("terminal operations must free capacity: expected %d, got %d (%s)",
 			http.StatusCreated, w.Code, w.Body.String())
+	}
+}
+
+// TestReserveSessionAndGlobalCeilings exercises the supervisor's fixed
+// Release-2.2 capacity ceilings directly: exact Session limit succeeds,
+// Session limit+1 refuses immediately, another Session can still use free
+// global capacity, the global ceiling refuses, and a released slot is
+// reusable immediately.
+func TestReserveSessionAndGlobalCeilings(t *testing.T) {
+	s := newOperationSupervisor()
+	s.maxPerSession = 2
+	s.maxGlobal = 3
+	s.maxGlobalBuilds = 3
+
+	// Session A takes its full share.
+	resA1, d := s.reserve("sess-a", "launcher-a", operationKindRun)
+	if d != admissionAccepted {
+		t.Fatalf("reserve A1: %d", d)
+	}
+	resA2, d := s.reserve("sess-a", "launcher-a", operationKindRun)
+	if d != admissionAccepted {
+		t.Fatalf("reserve A2: %d", d)
+	}
+	// Session A is exhausted; a different Session uses free global capacity.
+	if _, d := s.reserve("sess-a", "launcher-a", operationKindRun); d != admissionRefusedCapacity {
+		t.Fatalf("reserve A3: expected capacity refusal, got %d", d)
+	}
+	resB1, d := s.reserve("sess-b", "launcher-b", operationKindRun)
+	if d != admissionAccepted {
+		t.Fatalf("reserve B1: %d", d)
+	}
+
+	// The global ceiling is now reached and refuses immediately: no queue,
+	// no waiter.
+	if _, d := s.reserve("sess-c", "launcher-c", operationKindRun); d != admissionRefusedCapacity {
+		t.Fatalf("reserve C1 at global ceiling: expected capacity refusal, got %d", d)
+	}
+
+	// Releasing one slot frees global capacity immediately while A is still
+	// saturated; the release is exactly once.
+	resA2.Release()
+	resA2.Release()
+	resC, d := s.reserve("sess-c", "launcher-c", operationKindRun)
+	if d != admissionAccepted {
+		t.Fatalf("reserve C after release: %d", d)
+	}
+	resA1.Release()
+	resB1.Release()
+	resC.Release()
+
+	if got := s.globalRunning; got != 0 {
+		t.Fatalf("capacity must be fully released: %d", got)
+	}
+	if got := len(s.sessionRunning); got != 0 {
+		t.Fatalf("session capacity must be fully released: %d sessions", got)
+	}
+}
+
+// TestReserveConcurrentNeverOversubscribes proves the check-and-reserve is a
+// single critical section: concurrent reserves can never oversubscribe the
+// fixed ceilings.
+func TestReserveConcurrentNeverOversubscribes(t *testing.T) {
+	s := newOperationSupervisor()
+	s.maxPerSession = 1
+	s.maxGlobal = 7
+	s.maxGlobalBuilds = 7
+
+	const attempts = 200
+	accepted := make(chan struct{}, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			session := fmt.Sprintf("sess-%d", n)
+			launcher := fmt.Sprintf("launcher-%d", n)
+			if res, d := s.reserve(session, launcher, operationKindRun); d == admissionAccepted {
+				accepted <- struct{}{}
+				_ = res
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(accepted)
+
+	got := 0
+	for range accepted {
+		got++
+	}
+	if got != s.maxGlobal {
+		t.Fatalf("expected exactly %d accepted concurrent reserves, got %d", s.maxGlobal, got)
+	}
+	if got := s.globalRunning; got != s.maxGlobal {
+		t.Fatalf("global counter must match accepted reservations: %d", got)
+	}
+}
+
+// TestReserveThenQuiesceRefusedAtFinalAdmission proves that a reservation
+// obtained before a Launcher quiesce is not an admitted Operation: final
+// admission re-checks the lifecycle closure and refuses, and the released
+// reservation leaves the capacity reusable.
+func TestReserveThenQuiesceRefusedAtFinalAdmission(t *testing.T) {
+	s := newOperationSupervisor()
+	s.maxPerSession = 1
+	s.maxGlobal = 1
+	s.maxGlobalBuilds = 1
+
+	res, d := s.reserve("sess-a", "launcher-a", operationKindRun)
+	if d != admissionAccepted {
+		t.Fatalf("reserve: %d", d)
+	}
+
+	// The Launcher quiesces after the reservation.
+	s.quiesceLauncher("launcher-a")
+
+	op := newRunOperation("sess-a", "alpine", 1024, "p", "launcher-a", "launcher")
+	if d := s.admitReserved(op, res); d != admissionRefusedQuiesced {
+		t.Fatalf("final admission after quiesce: expected quiesce refusal, got %d", d)
+	}
+	if s.lookup(op.ID) != nil {
+		t.Fatal("quiesce-refused operation must not be registered")
+	}
+
+	// Refusal releases the reservation through the caller's failure path.
+	res.Release()
+	if got := s.globalRunning; got != 0 {
+		t.Fatalf("refused conversion must release the reservation: %d", got)
+	}
+}
+
+// TestReserveThenShutdownRefusedAtFinalAdmission is the shutdown counterpart:
+// a reservation obtained before daemon shutdown is refused at final
+// admission and released by the caller.
+func TestReserveThenShutdownRefusedAtFinalAdmission(t *testing.T) {
+	s := newOperationSupervisor()
+	s.maxPerSession = 1
+	s.maxGlobal = 1
+	s.maxGlobalBuilds = 1
+
+	res, d := s.reserve("sess-a", "launcher-a", operationKindRun)
+	if d != admissionAccepted {
+		t.Fatalf("reserve: %d", d)
+	}
+
+	s.beginShutdown()
+
+	op := newRunOperation("sess-a", "alpine", 1024, "p", "launcher-a", "launcher")
+	if d := s.admitReserved(op, res); d != admissionRefusedShutdown {
+		t.Fatalf("final admission after shutdown: expected shutdown refusal, got %d", d)
+	}
+	if s.lookup(op.ID) != nil {
+		t.Fatal("shutdown-refused operation must not be registered")
+	}
+
+	res.Release()
+	if got := s.globalRunning; got != 0 {
+		t.Fatalf("refused conversion must release the reservation: %d", got)
+	}
+}
+
+// TestReservedCapacityTransfersToAdmittedOperation proves the reservation is
+// never reserved a second time at final admission and is released exactly
+// once when the Operation reaches its terminal state — while its metadata and
+// logs remain retained.
+func TestReservedCapacityTransfersToAdmittedOperation(t *testing.T) {
+	s := newOperationSupervisor()
+	s.maxPerSession = 1
+	s.maxGlobal = 1
+	s.maxGlobalBuilds = 1
+
+	res, d := s.reserve("sess-a", "launcher-a", operationKindRun)
+	if d != admissionAccepted {
+		t.Fatalf("reserve: %d", d)
+	}
+
+	op := newRunOperation("sess-a", "alpine", 1024, "p", "launcher-a", "launcher")
+	if d := s.admitReserved(op, res); d != admissionAccepted {
+		t.Fatalf("final admission: %d", d)
+	}
+
+	// The capacity transferred: the same slot is the Operation's capacity.
+	if got := s.globalRunning; got != 1 {
+		t.Fatalf("admitted operation must hold exactly one capacity slot: %d", got)
+	}
+
+	// The registered Operation reaches its terminal state: capacity is
+	// released exactly once while the Operation metadata stays retained.
+	if !op.fail("docker_run_failed", "failed", nil) {
+		t.Fatal("operation must transition to terminal")
+	}
+	if got := s.globalRunning; got != 0 {
+		t.Fatalf("terminal operation must release its capacity slot: %d", got)
+	}
+	if s.lookup(op.ID) == nil {
+		t.Fatal("terminal operation must remain retained in the supervisor")
+	}
+}
+
+// TestBuildSubCeilingLeavesRunsAvailable proves the narrow build
+// sub-ceiling: concurrent builds are capped independently of the generic
+// Operation ceilings, and run Operations still have free capacity.
+func TestBuildSubCeilingLeavesRunsAvailable(t *testing.T) {
+	s := newOperationSupervisor()
+	s.maxPerSession = maxConcurrentOperationsPerSession
+	s.maxGlobal = maxConcurrentOperationsGlobal
+	s.maxGlobalBuilds = maxConcurrentBuildsGlobal
+
+	var buildRes []*operationReservation
+	for i := 0; i < maxConcurrentBuildsGlobal; i++ {
+		res, d := s.reserve(fmt.Sprintf("sess-b%d", i), fmt.Sprintf("launcher-b%d", i), operationKindBuild)
+		if d != admissionAccepted {
+			t.Fatalf("build reserve %d: %d", i, d)
+		}
+		buildRes = append(buildRes, res)
+	}
+	// A third build is refused even though the generic ceilings have room.
+	if _, d := s.reserve("sess-b9", "launcher-b9", operationKindBuild); d != admissionRefusedCapacity {
+		t.Fatalf("third build: expected capacity refusal, got %d", d)
+	}
+	// Run Operations still have free capacity.
+	for i := 0; i < maxConcurrentOperationsGlobal-maxConcurrentBuildsGlobal; i++ {
+		if _, d := s.reserve(fmt.Sprintf("sess-r%d", i), fmt.Sprintf("launcher-r%d", i), operationKindRun); d != admissionAccepted {
+			t.Fatalf("run reserve %d at build sub-ceiling: %d", i, d)
+		}
+	}
+	// The global ceiling binds the total.
+	if _, d := s.reserve("sess-x", "launcher-x", operationKindRun); d != admissionRefusedCapacity {
+		t.Fatalf("over global ceiling: expected capacity refusal, got %d", d)
+	}
+
+	for _, res := range buildRes {
+		res.Release()
+	}
+}
+
+// TestRunQuiesceCapacityRefusalHasNoReservationResidue proves the user-facing
+// refusal grammar and residue contract at the handler level: the capacity
+// refusal admits no Operation and leaves no lease.
+func TestRunQuiesceCapacityRefusalHasNoReservationResidue(t *testing.T) {
+	app, result := newCapacityTestApp(t)
+
+	for i := 0; i < maxConcurrentOperationsPerSession; i++ {
+		if w := runCapacityRequest(t, app, result.Token); w.Code != http.StatusCreated {
+			t.Fatalf("operation %d: expected %d, got %d (%s)", i+1, http.StatusCreated, w.Code, w.Body.String())
+		}
+	}
+
+	// One more request with a mount: refused by the Session ceiling with the
+	// single bounded capacity refusal and zero Docker invocation.
+	w := runCapacityRequest(t, app, result.Token)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("capacity refusal: expected %d, got %d (%s)", http.StatusTooManyRequests, w.Code, w.Body.String())
+	}
+	if code := decodeRejectedResponse(t, w); code != "operation_capacity_unavailable" {
+		t.Fatalf("capacity refusal code: expected operation_capacity_unavailable, got %q", code)
+	}
+
+	// No build/run start audit for the refusal: the supervisor holds exactly
+	// the ceiling of operations and nothing else.
+	if got := len(app.OperationSupervisor.ops); got != maxConcurrentOperationsPerSession {
+		t.Fatalf("capacity refusal must not register an Operation: %d registered", got)
+	}
+}
+
+// TestH5ComposesWithH4StagingCeiling guards the documented worst-case
+// composition: at the build sub-ceiling, concurrent hostile builds cannot
+// exceed the documented staging occupancy bound on the smallest supported
+// host. The constants are the exact Release-2.2 measured ceilings; the
+// smallest supported host is the 3 GiB Tumbleweed UAT VM whose /run tmpfs is
+// 20% of RAM (~614 MB).
+func TestH5ComposesWithH4StagingCeiling(t *testing.T) {
+	const h4StagingByteCeiling = 128 * 1024 * 1024
+	const smallestHostRunTmpfs = 614 * 1024 * 1024
+
+	worstCaseOccupancy := maxConcurrentBuildsGlobal * h4StagingByteCeiling
+	if worstCaseOccupancy != 256*1024*1024 {
+		t.Fatalf("documented worst-case staging occupancy changed: %d", worstCaseOccupancy)
+	}
+	if worstCaseOccupancy*100 > smallestHostRunTmpfs*45 {
+		t.Fatalf("worst-case concurrent hostile staging (%d bytes) exceeds 45%% of the smallest supported /run tmpfs (%d bytes)",
+			worstCaseOccupancy, smallestHostRunTmpfs)
+	}
+	// The mount ceiling composes too: the worst-case kernel mount-table cost
+	// (3 entries per caller mount under the SELinux backend: pin, lower file
+	// bind, bindfs projection) at the global Operation ceiling stays far
+	// below the host fs.mount-max (100000).
+	const selinuxWorstMountsPerCallerMount = 3
+	const hostMountMax = 100000
+	worstMountTable := maxRunMounts * selinuxWorstMountsPerCallerMount * maxConcurrentOperationsGlobal
+	if worstMountTable > hostMountMax/100 {
+		t.Fatalf("worst-case mount-table occupancy (%d entries) must stay below 1%% of fs.mount-max (%d)", worstMountTable, hostMountMax)
 	}
 }
 

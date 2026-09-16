@@ -79,7 +79,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	// Start first operation.
 	app.ExecCommandContext = makeIgnoringCmd(readyFile1)
 	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "", "", "")
-	if supervisor.admit(op1) != admissionAccepted {
+	if admitForTest(supervisor, op1) != admissionAccepted {
 		t.Fatal("admit op1 failed")
 	}
 	cmd1 := app.newDockerCommand(context.Background(), "sh", "-c",
@@ -97,7 +97,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	// Start second operation.
 	app.ExecCommandContext = makeIgnoringCmd(readyFile2)
 	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "", "", "")
-	if supervisor.admit(op2) != admissionAccepted {
+	if admitForTest(supervisor, op2) != admissionAccepted {
 		t.Fatal("admit op2 failed")
 	}
 	cmd2 := app.newDockerCommand(context.Background(), "sh", "-c",

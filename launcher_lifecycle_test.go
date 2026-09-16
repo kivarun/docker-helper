@@ -452,7 +452,7 @@ func TestDeleteLauncherCheckedActiveRunningOpRefuses(t *testing.T) {
 
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	app.OperationSupervisor.admit(op)
+	admitForTest(app.OperationSupervisor, op)
 
 	revoked, err := app.deleteLauncherChecked(context.Background(), laID)
 	if !errors.Is(err, ErrLauncherRuntimeActive) {
@@ -484,7 +484,7 @@ func TestDeleteLauncherCheckedActiveRunningOpRefuses(t *testing.T) {
 	if launcherAdmissionClosed(app.OperationSupervisor, laID) {
 		t.Error("expected prologue quiesce undone after refused delete (launcher enabled)")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); admitted != admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, laID)); admitted != admissionAccepted {
 		t.Error("expected operation admitted for launcher after refused delete restored admission")
 	}
 }
@@ -719,7 +719,7 @@ func TestDeleteLauncherCheckedInspectErrorFailClosed(t *testing.T) {
 	if launcherAdmissionClosed(app.OperationSupervisor, laID) {
 		t.Error("expected launcher admission re-opened after inspect-failure delete (not quiesced)")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); admitted != admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, laID)); admitted != admissionAccepted {
 		t.Error("expected operation admitted for launcher after inspect-failure delete restored it")
 	}
 }
@@ -794,8 +794,8 @@ func TestHasRunningForLauncherSiblingIsolation(t *testing.T) {
 	runA.LauncherID = "la"
 	doneB := newTestOperation(t, operationSucceeded, time.Now())
 	doneB.LauncherID = "lb"
-	supervisor.admit(runA)
-	supervisor.admit(doneB)
+	admitForTest(supervisor, runA)
+	admitForTest(supervisor, doneB)
 
 	if !supervisor.hasRunningForLauncher("la") {
 		t.Error("expected running op reported for launcher la")
@@ -1024,7 +1024,7 @@ func TestRaceLauncherConcurrentOperationAdmissionRefused(t *testing.T) {
 	// admit a running Operation for this Launcher, concurrently with the delete.
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	if admitted := app.OperationSupervisor.admit(op); admitted == admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, op); admitted == admissionAccepted {
 		t.Fatal("operation admitted after checked deletion closed admission; delete would remove launcher while it runs")
 	}
 
@@ -1047,7 +1047,7 @@ func TestRaceLauncherPreQuiescedRunningOperationBlocksDelete(t *testing.T) {
 
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	app.OperationSupervisor.admit(op)
+	admitForTest(app.OperationSupervisor, op)
 
 	if _, err := app.deleteLauncherChecked(context.Background(), laID); !errors.Is(err, ErrLauncherRuntimeActive) {
 		t.Fatalf("expected ErrLauncherRuntimeActive for pre-quiesced running op, got %v", err)
@@ -1131,7 +1131,7 @@ func TestRaceLauncherRetryAfterOperationExits(t *testing.T) {
 
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	app.OperationSupervisor.admit(op)
+	admitForTest(app.OperationSupervisor, op)
 
 	if _, err := app.deleteLauncherChecked(context.Background(), laID); !errors.Is(err, ErrLauncherRuntimeActive) {
 		t.Fatalf("expected first delete refused while op runs, got %v", err)
@@ -1163,7 +1163,7 @@ func TestRacePrincipalRunningOperationPreservesLaunchers(t *testing.T) {
 	// An Operation admitted under Launcher a is running.
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	app.OperationSupervisor.admit(op)
+	admitForTest(app.OperationSupervisor, op)
 
 	if _, err := app.deletePrincipalChecked(context.Background(), "owner"); !errors.Is(err, ErrLauncherRuntimeActive) {
 		t.Fatalf("expected principal delete refused while an op runs under a launcher, got %v", err)
@@ -1221,7 +1221,7 @@ func TestRaceLauncherSessionResolvedBeforeRefusedDeleteCanAdmit(t *testing.T) {
 		<-release
 		pausedOp := newTestOperation(t, operationRunning, time.Time{})
 		pausedOp.LauncherID = sess.LauncherID
-		admitted <- app.OperationSupervisor.admit(pausedOp)
+		admitted <- admitForTest(app.OperationSupervisor, pausedOp)
 	}()
 
 	// Pause the in-flight request right after its Session resolution, before
@@ -1230,7 +1230,7 @@ func TestRaceLauncherSessionResolvedBeforeRefusedDeleteCanAdmit(t *testing.T) {
 	<-resolved
 	blocking := newTestOperation(t, operationRunning, time.Time{})
 	blocking.LauncherID = laID
-	app.OperationSupervisor.admit(blocking)
+	admitForTest(app.OperationSupervisor, blocking)
 
 	if _, err := app.deleteLauncherChecked(context.Background(), laID); !errors.Is(err, ErrLauncherRuntimeActive) {
 		t.Fatalf("expected delete refused by running operation, got %v", err)
@@ -1284,7 +1284,7 @@ func TestRaceLauncherSessionResolvedBeforeSuccessfulDeleteCannotAdmit(t *testing
 		<-release
 		pausedOp := newTestOperation(t, operationRunning, time.Time{})
 		pausedOp.LauncherID = sess.LauncherID
-		admitted <- app.OperationSupervisor.admit(pausedOp)
+		admitted <- admitForTest(app.OperationSupervisor, pausedOp)
 	}()
 
 	// Pause the in-flight request right after its Session resolution, before
@@ -1325,7 +1325,7 @@ func TestDisableEnableFreshSessionCanAdmit(t *testing.T) {
 	if _, _, err := app.updateLauncherWithLifecycle(laID, nil, &disabled); err != nil {
 		t.Fatalf("disable launcher: %v", err)
 	}
-	if admitted := app.OperationSupervisor.admit(op()); admitted == admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, op()); admitted == admissionAccepted {
 		t.Fatal("operation admitted while launcher disabled")
 	}
 
@@ -1356,7 +1356,7 @@ func TestDisableEnableFreshSessionCanAdmit(t *testing.T) {
 	}
 	fresh := newTestOperation(t, operationRunning, time.Time{})
 	fresh.LauncherID = created.Session.LauncherID
-	if admitted := app.OperationSupervisor.admit(fresh); admitted != admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, fresh); admitted != admissionAccepted {
 		t.Fatal("expected fresh session's operation admitted after re-enable")
 	}
 }
@@ -1382,7 +1382,7 @@ func TestPrincipalDisableEnableQuiescesAllLaunchers(t *testing.T) {
 		if !launcherAdmissionClosed(app.OperationSupervisor, id) {
 			t.Fatalf("expected launcher %s quiesced after principal disable", id)
 		}
-		if admitted := app.OperationSupervisor.admit(opFor(id)); admitted == admissionAccepted {
+		if admitted := admitForTest(app.OperationSupervisor, opFor(id)); admitted == admissionAccepted {
 			t.Fatalf("operation admitted for launcher %s after principal disable", id)
 		}
 	}
@@ -1394,7 +1394,7 @@ func TestPrincipalDisableEnableQuiescesAllLaunchers(t *testing.T) {
 		if launcherAdmissionClosed(app.OperationSupervisor, id) {
 			t.Fatalf("expected launcher %s unquiesced after principal enable", id)
 		}
-		if admitted := app.OperationSupervisor.admit(opFor(id)); admitted != admissionAccepted {
+		if admitted := admitForTest(app.OperationSupervisor, opFor(id)); admitted != admissionAccepted {
 			t.Fatalf("operation refused for launcher %s after principal enable", id)
 		}
 	}
@@ -1439,13 +1439,13 @@ func TestHierarchyPrincipalReenableRespectsIndividuallyDisabledLauncher(t *testi
 	if launcherAdmissionClosed(app.OperationSupervisor, laID) {
 		t.Fatal("expected launcher A admission open after principal re-enable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); admitted != admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, laID)); admitted != admissionAccepted {
 		t.Fatal("expected operation admitted for enabled launcher A after principal re-enable")
 	}
 	if !launcherAdmissionClosed(app.OperationSupervisor, lbID) {
 		t.Fatal("expected individually-disabled launcher B to stay quiesced after principal re-enable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted == admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, lbID)); admitted == admissionAccepted {
 		t.Fatal("expected operation refused for individually-disabled launcher B after principal re-enable")
 	}
 }
@@ -1483,7 +1483,7 @@ func TestHierarchyLauncherEnableWhilePrincipalDisabledStaysClosed(t *testing.T) 
 	if !launcherAdmissionClosed(app.OperationSupervisor, lbID) {
 		t.Fatal("expected launcher B admission still closed while principal disabled")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted == admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, lbID)); admitted == admissionAccepted {
 		t.Fatal("expected operation refused for launcher B while principal disabled")
 	}
 
@@ -1494,7 +1494,7 @@ func TestHierarchyLauncherEnableWhilePrincipalDisabledStaysClosed(t *testing.T) 
 	if launcherAdmissionClosed(app.OperationSupervisor, lbID) {
 		t.Fatal("expected launcher B admission open after principal re-enable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted != admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, lbID)); admitted != admissionAccepted {
 		t.Fatal("expected operation admitted for launcher B after principal re-enable")
 	}
 }
@@ -1583,7 +1583,7 @@ func TestRaceLauncherDeleteExcludesConcurrentEnable(t *testing.T) {
 	}
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	if app.OperationSupervisor.admit(op) == admissionAccepted {
+	if admitForTest(app.OperationSupervisor, op) == admissionAccepted {
 		t.Fatal("operation admitted against a launcher being concurrently deleted")
 	}
 
@@ -1758,7 +1758,7 @@ func TestRaceInspectionErrorRestoreExcludesConcurrentEnable(t *testing.T) {
 	// delete owns the ownership and the enable contends for the same lock.
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	if app.OperationSupervisor.admit(op) == admissionAccepted {
+	if admitForTest(app.OperationSupervisor, op) == admissionAccepted {
 		t.Fatal("operation admitted while delete pending and enable serialized behind it")
 	}
 
@@ -1896,14 +1896,14 @@ func TestPrincipalDisableFailureRestoresAdmissionPerChildAuthorities(t *testing.
 	if launcherAdmissionClosed(app.OperationSupervisor, laID) {
 		t.Fatal("expected launcher A admission open after failed principal disable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); admitted != admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, laID)); admitted != admissionAccepted {
 		t.Fatal("expected operation admitted for enabled launcher A after failed principal disable")
 	}
 	// B remains admission-closed (individually disabled).
 	if !launcherAdmissionClosed(app.OperationSupervisor, lbID) {
 		t.Fatal("expected individually-disabled launcher B to remain quiesced after failed principal disable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted == admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, lbID)); admitted == admissionAccepted {
 		t.Fatal("expected operation refused for individually-disabled launcher B after failed principal disable")
 	}
 	// Child enabled flags unchanged: A still enabled, B still disabled.
@@ -2008,7 +2008,7 @@ func TestLauncherEnableCommitsWithoutPostCommitLookup(t *testing.T) {
 	if launcherAdmissionClosed(app.OperationSupervisor, lID) {
 		t.Fatal("expected the transactionally decided admission to reopen the launcher after enable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lID)); admitted != admissionAccepted {
+	if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, lID)); admitted != admissionAccepted {
 		t.Fatal("expected operation admitted for launcher after committed enable")
 	}
 }
@@ -2156,7 +2156,7 @@ func TestPrincipalEnableAppliesAllChildAdmissionsWithoutPostCommitLookup(t *test
 		if launcherAdmissionClosed(app.OperationSupervisor, id) {
 			t.Fatalf("expected child launcher %s admission reopened by the committed principal enable", id)
 		}
-		if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, id)); admitted != admissionAccepted {
+		if admitted := admitForTest(app.OperationSupervisor, launcherRunningOp(t, id)); admitted != admissionAccepted {
 			t.Fatalf("expected operation admitted for child launcher %s after committed principal enable", id)
 		}
 	}

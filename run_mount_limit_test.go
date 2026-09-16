@@ -131,3 +131,89 @@ func TestRunUserModeSameMountCeiling(t *testing.T) {
 		t.Fatalf("user mode over-limit mounts code: expected too_many_mounts, got %q", code)
 	}
 }
+
+// TestRunHelperSocketProjectionDoesNotConsumeMountSlots proves the
+// server-owned helper_socket projection is not a caller mount: a request
+// with helper_socket and exactly maxRunMounts caller mounts is accepted.
+func TestRunHelperSocketProjectionDoesNotConsumeMountSlots(t *testing.T) {
+	app := newSystemModeRunTestApp(t)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	var pinCount atomic.Int32
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinCount.Add(1)
+		return &pinnedMount{PinnedPath: t.TempDir(), cleanup: func() error { return nil }}, nil
+	}
+
+	mounts := make([]string, 0, maxRunMounts)
+	for i := 0; i < maxRunMounts; i++ {
+		mounts = append(mounts, fmt.Sprintf(`{"source":".","target":"/m%d"}`, i))
+	}
+	body := fmt.Sprintf(`{"image":"alpine:3.24","helper_socket":true,"command":["true"],"mounts":[%s]}`, strings.Join(mounts, ","))
+	req := httptest.NewRequest("POST", "/run", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("helper_socket with exactly-at-limit caller mounts: expected %d, got %d (%s)", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if got := pinCount.Load(); got != int32(maxRunMounts) {
+		t.Fatalf("expected %d caller-mount pins, got %d", maxRunMounts, got)
+	}
+}
+
+// TestRunReadOnlyAndWritableMountsCountEqually proves the read-only flag does
+// not change the count: maxRunMounts read-only mounts are accepted and one
+// more is refused.
+func TestRunReadOnlyAndWritableMountsCountEqually(t *testing.T) {
+	app := newSystemModeRunTestApp(t)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	var pinCount atomic.Int32
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinCount.Add(1)
+		// A real pinned directory: read-only exposures are inspected through
+		// the pinned node kind by the workload MAC backend.
+		return &pinnedMount{PinnedPath: t.TempDir(), cleanup: func() error { return nil }}, nil
+	}
+
+	mounts := make([]string, 0, maxRunMounts+1)
+	for i := 0; i < maxRunMounts; i++ {
+		mounts = append(mounts, fmt.Sprintf(`{"source":".","target":"/m%d","read_only":true}`, i))
+	}
+	body := fmt.Sprintf(`{"image":"alpine:3.24","command":["true"],"mounts":[%s]}`, strings.Join(mounts, ","))
+	req := httptest.NewRequest("POST", "/run", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("exactly-at-limit read-only mounts: expected %d, got %d (%s)", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if got := pinCount.Load(); got != int32(maxRunMounts) {
+		t.Fatalf("expected %d pins for read-only mounts, got %d", maxRunMounts, got)
+	}
+
+	// One more read-only mount is refused.
+	mounts = append(mounts, fmt.Sprintf(`{"source":".","target":"/m%d","read_only":true}`, maxRunMounts))
+	overBody := fmt.Sprintf(`{"image":"alpine:3.24","command":["true"],"mounts":[%s]}`, strings.Join(mounts, ","))
+	overReq := httptest.NewRequest("POST", "/run", strings.NewReader(overBody))
+	overReq.Header.Set("Authorization", "Bearer "+result.Token)
+	overReq.Header.Set("Content-Type", "application/json")
+	overW := httptest.NewRecorder()
+	app.handleRun(overW, overReq)
+	if overW.Code != http.StatusBadRequest {
+		t.Fatalf("over-limit read-only mounts: expected %d, got %d (%s)", http.StatusBadRequest, overW.Code, overW.Body.String())
+	}
+	if code := decodeRejectedResponse(t, overW); code != "too_many_mounts" {
+		t.Fatalf("over-limit read-only mounts code: expected too_many_mounts, got %q", code)
+	}
+}

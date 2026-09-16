@@ -85,7 +85,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		waitErr = cmd.Wait()
 	}
-	data, _, truncated := buf.Range(0)
+	data, _, truncated := buf.Range(0, rangeUnbounded)
 	outputStr := string(data)
 	duration := time.Since(started).Round(time.Millisecond).String()
 

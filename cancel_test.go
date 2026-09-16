@@ -331,7 +331,7 @@ func TestCancelClassificationUsesSentinels(t *testing.T) {
 
 	// Terminal operation -> ErrOperationAlreadyTerminal.
 	op := newRunOperation("sess", "img", 4*1024*1024, "", "", "")
-	if sup.admit(op) != admissionAccepted {
+	if admitForTest(sup, op) != admissionAccepted {
 		t.Fatal("admit failed")
 	}
 	op.succeed(nil)

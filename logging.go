@@ -239,6 +239,33 @@ func writeDockerActionRejected(
 	writeError(ctx, w, status, resultCode, message)
 }
 
+// writeOperationAdmissionRejected maps one admissionDecision to its public
+// refusal for POST /run and POST /build. It is the single owner of the
+// admission refusal contract: shutdown keeps the established
+// `shutting_down` refusal, quiesce keeps the established
+// `launcher_unavailable` refusal, and exhausted fixed Release-2.2 capacity
+// (SC2/H5) answers with the single bounded `operation_capacity_unavailable`
+// refusal for both the Session scope and the global scope — the capacity
+// topology is never exposed.
+func writeOperationAdmissionRejected(
+	ctx context.Context,
+	w http.ResponseWriter,
+	kind string,
+	decision admissionDecision,
+	principalName string,
+) {
+	switch decision {
+	case admissionRefusedShutdown:
+		writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, kind, "shutting_down", "daemon is shutting down", principalName)
+	case admissionRefusedQuiesced:
+		writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, kind, "launcher_unavailable", "launcher is not available", principalName)
+	case admissionRefusedCapacity:
+		writeDockerActionRejected(ctx, w, http.StatusTooManyRequests, kind, "operation_capacity_unavailable", "too many concurrent operations", principalName)
+	default:
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, kind, "internal_error", "internal server error", principalName)
+	}
+}
+
 // writeRunReadOnlyRootRejected is the narrow policy-aware rejection path for
 // the read_only_root filesystem policy refusal. The generic
 // writeDockerActionRejected contract (no payload metadata) is preserved for

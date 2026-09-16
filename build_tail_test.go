@@ -70,7 +70,7 @@ func TestBuildTailOutputNotLost(t *testing.T) {
 	}
 
 	// Fetch logs and verify the tail marker is present.
-	data, _, _ := op.LogBuffer.Range(0)
+	data, _, _ := op.LogBuffer.Range(0, rangeUnbounded)
 	logs := string(data)
 
 	if !strings.Contains(logs, "line1") {

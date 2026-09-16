@@ -109,7 +109,7 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		// Classify the login failure (authentication vs. registry/backend)
 		// using the docker CLI's stable stderr lines. Only a sanitized
 		// category message is returned; the captured output is discarded.
-		outData, _, _ := errBuf.Range(0)
+		outData, _, _ := errBuf.Range(0, rangeUnbounded)
 		status, code, message := classifyRegistryLoginFailure(string(outData))
 
 		writeRequestContextAudit(ctx, auditRecord{
