@@ -686,6 +686,12 @@ One pipeline serves every authority; only target resolution differs.
 ```
 authority
     ↓
+non-waiting lifecycle admission (H8)
+    (the create never queues behind the lifecycle serialization: while any
+     lifecycle transition holds the coordination, the create is refused
+     immediately — `503 lifecycle_busy`, no policy state resolved, no
+     Session; the client decides whether to retry)
+    ↓
 resolve exactly one target Launcher
     ↓
 derive the owning Principal through the Launcher
@@ -768,7 +774,15 @@ The whole resolution, narrowing, and snapshot issuance happens inside the
 existing `lifecycleMu` create linearization boundary, so a concurrent
 parent-policy mutation linearizes wholly before or wholly after the create:
 a request is never validated against one ceiling and committed against
-another. The MAC preparation inside that boundary is bounded (see
+another. Session-create admission into that boundary is non-waiting: a
+create that arrives while the coordination is held by another transition is
+refused immediately (the stable `503 lifecycle_busy` class) before any
+policy resolution or MAC work — it never queues on the boundary, so it can
+never stack its whole-transition MAC budget behind the held coordination
+and lengthen the delay an emergency administrative disable already waits
+behind the one in-flight transition. The refused attempt resolves no state
+and commits no Session; the client decides whether to retry. The MAC
+preparation inside the boundary is bounded (see
 [Bounded MAC-command execution](#bounded-mac-command-execution-h8)): a hung
 external MAC command can delay a concurrent administrative disable by at
 most one transition budget, after which the create fails
@@ -1600,7 +1614,15 @@ and every *serialized MAC transition* is bounded as a whole:
   bounded side effects only: a hung external MAC command can delay a
   concurrent administrative transition (Launcher/Principal disable, config
   reload) by at most one transition budget, and the disable's own
-  post-commit MAC release is bounded the same way. The backend file locks
+  post-commit MAC release is bounded the same way. The bound is
+  queue-independent: Session-create admission into the lifecycle boundary is
+  non-waiting (`TryLock` at the existing create owner) — a create that
+  arrives while the coordination is held is refused immediately with the
+  typed `ErrLifecycleBusy` refusal (`503 lifecycle_busy`, never queued), so
+  concurrent creates cannot stack their fresh whole-transition budgets
+  behind the held coordination and grow the disable's delay with the
+  queued create count; an already-running create keeps its whole-transition
+  budget. The backend file locks
   are not equivalent by design: the AppArmor workspace lock is
   fail-closed/non-waiting (`LOCK_EX|LOCK_NB`) and the global SELinux
   fcontext lock is the same — a contended fcontext transition is refused
@@ -3396,6 +3418,7 @@ Current error codes (non-exhaustive):
 | `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
 | `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
+| `lifecycle_busy` | `POST /sessions` | the lifecycle coordination was held by another transition when the create arrived; the non-waiting admission refuses the create without queueing (HTTP 503; no Session, no resolved policy state; the client decides whether to retry) |
 | `invalid_filesystem_policy` | `POST /sessions` | the supplied `filesystem_roots` is malformed or is not a narrowing of the effective Launcher ceiling (issuance-time refusal; no Session exists) |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `principal_not_found` | `GET /sessions?principal=` | the selected Principal does not exist (list narrowing; non-disclosing) |
@@ -3621,6 +3644,7 @@ Result codes:
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
 | `invalid_filesystem_policy` | `filesystem_roots` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
+| `lifecycle_busy` | the lifecycle coordination was held by another transition; the non-waiting Session-create admission refused the create without queueing (HTTP 503) — no Session, no snapshot, no resolved policy state; the audit record and the HTTP answer carry the same class |
 | `mac_preparation_failed` | MAC boundary preparation failed before the create transaction (no Session exists) — HTTP 500; the audit record and the HTTP answer carry the same class |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
