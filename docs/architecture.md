@@ -77,8 +77,11 @@ policy:
 
 docker-helper limits the host paths exposed through its supported Docker
 operations. It is not a complete sandbox: Docker/default networking remains
-available, and a validation or command-construction defect in this trusted
-Docker-facing service can compromise the host.
+available — for workload containers and for builds alike (the
+Docker/BuildKit builder executes with its own execution and network
+position, documented as the accepted build boundary pending the Release 2.4
+build sandbox) — and a validation or command-construction defect in this
+trusted Docker-facing service can compromise the host.
 
 ## High-level architecture
 
@@ -4165,8 +4168,11 @@ Non-goals of the current implementation:
 - build secrets;
 - registry and credential management beyond per-session
   `registry login` (registry authentication itself is supported);
-- network management (creating or configuring Docker networks; containers
-  use Docker's default networking);
+- network management (creating or configuring Docker networks; workload
+  containers and builds use the Docker/BuildKit default networking — the
+  builder's own execution/network position is the accepted Release 2.2
+  build boundary, owned architecturally by the Release 2.4 build sandbox
+  design);
 - volume management beyond bind mounts.
 
 Project purpose, product boundary, and long-lived design principles are

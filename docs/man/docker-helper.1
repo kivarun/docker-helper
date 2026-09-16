@@ -696,7 +696,12 @@ through a hard link. A write through a read-write alias is also observed
 through a read-only alias; docker-helper does not promise inode-level
 immutability or confidentiality between hard-link aliases.
 .IP \(bu 4
-No remote or non-loopback network access in Release 2
+The daemon's own listeners are local only: a Unix socket, plus a loopback
+HTTP listener in system mode. No remote or non-loopback listener exists in
+Release 2. This is a statement about the daemon's own transport only: it
+does not promise anything about Docker workload or build networking.
+Builds and containers use the Docker/BuildKit default network position;
+docker-helper provides no workload or build network isolation.
 .SH SEE ALSO
 .BR docker-helper-config (5),
 .BR apparmor (7),

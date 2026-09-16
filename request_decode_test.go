@@ -111,6 +111,30 @@ func TestDecodeJSONRequest_BuildRequest(t *testing.T) {
 	}
 }
 
+// TestDecodeJSONRequest_BuildRequestHasNoCallerNetworkOrPrivilegeKnobs proves
+// the accepted Release 2.2 build boundary (H1 disposition): the public build
+// request grammar carries no caller-controlled builder network or privileged
+// entitlement knob — a caller-supplied network/privilege field is an unknown
+// field refused by the strict request decode. A builder network mode or
+// entitlement can only ever be introduced through the explicitly accepted
+// server-owned sandbox policy (Release 2.4 build sandbox design), never as a
+// hidden caller field.
+func TestDecodeJSONRequest_BuildRequestHasNoCallerNetworkOrPrivilegeKnobs(t *testing.T) {
+	for _, body := range []string{
+		`{"context":".","dockerfile":"Dockerfile","image":"myapp:v1","network":"none"}`,
+		`{"context":".","dockerfile":"Dockerfile","image":"myapp:v1","network":"host"}`,
+		`{"context":".","dockerfile":"Dockerfile","image":"myapp:v1","privileged":true}`,
+		`{"context":".","dockerfile":"Dockerfile","image":"myapp:v1","allow_entitlements":["network_host"]}`,
+	} {
+		r := httptest.NewRequest("POST", "/build", bytes.NewReader([]byte(body)))
+		w := httptest.NewRecorder()
+		var req buildRequest
+		if err := decodeJSONRequest(w, r, &req); err == nil {
+			t.Fatalf("build request %s must be refused: the grammar carries no caller-controlled network or privilege knob", body)
+		}
+	}
+}
+
 func TestDecodeJSONRequest_RunRequest(t *testing.T) {
 	buf := bytes.NewReader([]byte(`{"image":"alpine:3.24"}
 `))
