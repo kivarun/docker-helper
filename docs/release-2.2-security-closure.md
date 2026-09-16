@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-**Status: SC0 CLOSED; SC1 CLOSED; SC2 NEXT (2026-09-15).**
+**Status: SC0 CLOSED; SC1 CLOSED; SC2 CLOSED (2026-09-15).**
 
 The external audit that triggered this closure reviewed docker-helper 2.0.0 at
 commit `7e9762576327b625acde45934a15216d1ff0a56b`. Its finding identifiers are
