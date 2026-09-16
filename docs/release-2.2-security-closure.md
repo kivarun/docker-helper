@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-**Status: SC0 CLOSED; SC1 CLOSED; SC2 CLOSED (2026-09-15).**
+**Status: SC0 CLOSED; SC1 CLOSED; SC2 CLOSED (2026-09-16).**
 
 The external audit that triggered this closure reviewed docker-helper 2.0.0 at
 commit `7e9762576327b625acde45934a15216d1ff0a56b`. Its finding identifiers are
@@ -2068,9 +2068,17 @@ with a held boundary is now refused before any ceiling read (provably
 resolving no state), and the retried create commits the wholly
 post-mutation/post-narrowing snapshot exactly as before. No scheduler,
 no queue, no coordinator, and no retry goroutine were added; the
-lifecycle linearization and Session policy model are unchanged, and the
-hostile exact-candidate UAT group (26/8) re-proves the packaged-service
-scenarios on the fixed head.
+lifecycle linearization and Session policy model are unchanged, and no
+retry goroutine was added. The queue closure is also proven
+cross-boundary: the hostile exact-candidate UAT group (26/8) extends the
+packaged-service scenario — while the first create is parked in the
+hostile shim and holds the lifecycle coordination, four concurrent
+Session creates are refused with the stable `lifecycle_busy` / HTTP 503
+class without waiting for the boundary or obtaining a late MAC budget,
+no refused create leaves a Session or MAC state, and the administrative
+disable still completes within the single in-flight transition budget
+(its wall-clock is recorded) — on both the AppArmor and the enforcing
+SELinux exact candidate.
 
 ## SC2 — bounded-resource and liveness closure
 

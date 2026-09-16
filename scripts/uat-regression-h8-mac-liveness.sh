@@ -30,6 +30,13 @@
 #   * the hostile shim really blocks the MAC one-shot (process present);
 #   * the daemon does not wait forever: the parked Session create fails
 #     within the bound and commits no Session;
+#   * the queue closure: further Session creates issued while the first
+#     parked create holds the lifecycle coordination are refused immediately
+#     with the stable lifecycle_busy / HTTP 503 class (no queued wait for the
+#     boundary, no own late MAC budget), so the emergency disable completes
+#     within ONE in-flight transition budget regardless of the concurrent
+#     create count, and the refused creates commit no Session and leave no
+#     MAC state;
 #   * the hung command process is gone after the bound (no MAC child left
 #     behind);
 #   * the administrative Principal disable completes within the proven
@@ -280,8 +287,60 @@ else
   cat "$CREATE_OUT" >&2 || true
 fi
 
+# --- H8 queue closure: concurrent creates while the boundary is held ------------
+# While the first create provably holds the lifecycle coordination inside the
+# parked MAC command, further Session creates must be refused immediately
+# (the stable lifecycle_busy / HTTP 503 class) without queueing on the
+# boundary and without obtaining their own late MAC budget, so the emergency
+# disable's delay stays bounded by the ONE in-flight transition budget
+# regardless of the concurrent create count.
+QUEUE_COUNT=4
+QUEUE_OUT_PREFIX="/tmp/uat-h8-q.$$"
+queue_pids=""
+for i in $(seq 1 "$QUEUE_COUNT"); do
+  (
+    dh session create --system --token-file "$CREDFILE" --workspace "$WS_A" >"${QUEUE_OUT_PREFIX}-$i" 2>&1
+  ) &
+  queue_pids="$queue_pids $!"
+done
+queue_deadline=$(( $(date +%s) + 20 ))
+queue_all_done=1
+for pid in $queue_pids; do
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$(date +%s)" -gt "$queue_deadline" ]; then
+      queue_all_done=0
+      break 2
+    fi
+    sleep 0.2
+  done
+done
+if [ "$queue_all_done" = 1 ]; then
+  reg_ok "all $QUEUE_COUNT concurrent Session creates were refused while the first MAC command stayed parked (no queued wait for the boundary)"
+else
+  reg_fail "a concurrent Session create waited for the lifecycle boundary instead of being refused (queued-create liveness gap)"
+  kill $queue_pids 2>/dev/null || true
+fi
+if shim_marker_present; then
+  reg_ok "the first MAC command was still parked after every concurrent create was refused"
+else
+  reg_fail "the hostile parked MAC command vanished during the queue subcase"
+fi
+queue_class_ok=1
+for i in $(seq 1 "$QUEUE_COUNT"); do
+  if ! grep -q "lifecycle_busy" "${QUEUE_OUT_PREFIX}-$i" 2>/dev/null || ! grep -q "status 503" "${QUEUE_OUT_PREFIX}-$i" 2>/dev/null; then
+    queue_class_ok=0
+  fi
+done
+if [ "$queue_class_ok" = 1 ]; then
+  reg_ok "every concurrent create answered the stable lifecycle_busy / HTTP 503 refusal"
+else
+  reg_fail "a concurrent create did not answer the lifecycle_busy / HTTP 503 refusal (it waited or failed differently)"
+  for i in $(seq 1 "$QUEUE_COUNT"); do cat "${QUEUE_OUT_PREFIX}-$i" >&2 2>/dev/null || true; done
+fi
+
 # Emergency administrative disable while the create holds lifecycleMu inside
 # the parked MAC command.
+disable_start="$(date +%s)"
 (
   dh principal set --system "$USER_A" enabled false >"$DISABLE_OUT" 2>&1
 ) &
@@ -318,6 +377,7 @@ while [ "$create_done" = 0 ] || [ "$disable_done" = 0 ]; do
   sleep 0.2
 done
 reg_info "hostile lifecycle wall-clock: $(( $(date +%s) - create_start ))s (bound: ${HOLD_BUDGET_S}s)"
+reg_info "disable wall-clock from its launch: $(( $(date +%s) - disable_start ))s — the parked in-flight create's single ${MAC_BUDGET_S}s transition budget plus kill/reap slop, independent of the $QUEUE_COUNT refused concurrent creates"
 if [ "$HOLD_DEADLINE_BREACHED" = 1 ]; then
   # Every later subcase would run against a still-held daemon and produce
   # garbage results: abort the group with the deadline evidence on record.
@@ -363,11 +423,12 @@ else
   reg_fail "the backend command binary was not restored"
 fi
 
-# No Session was committed by the failed create.
+# No Session was committed by the parked create nor by any refused
+# concurrent create (all of them request the same workspace).
 if dh session list --system --json 2>/dev/null | grep -qF "$WS_A"; then
-  reg_fail "the failed Session create committed a Session"
+  reg_fail "the parked or a refused concurrent Session create committed a Session"
 else
-  reg_ok "the failed Session create committed no Session"
+  reg_ok "the parked create and every refused concurrent create committed no Session"
 fi
 
 # The disable is durable (list JSON: {"ok":...,"principals":[...]}).
@@ -390,13 +451,13 @@ if [ "$BACKEND" = "apparmor" ]; then
   if [ -f "$FRAGMENT" ] && grep -qF "$WS_A" "$FRAGMENT"; then
     reg_fail "the managed fragment recorded a boundary although the reload never succeeded (false coverage)"
   else
-    reg_ok "AppArmor managed fragment carries no false boundary after the failed create"
+    reg_ok "AppArmor managed fragment carries no false boundary after the failed create and the refused concurrent creates"
   fi
 else
   if semanage fcontext -l -C -n 2>/dev/null | grep -qF "$WS_A"; then
     reg_fail "a persistent fcontext rule exists although the transition never succeeded"
   else
-    reg_ok "SELinux fcontext inventory carries no false coverage after the failed create"
+    reg_ok "SELinux fcontext inventory carries no false coverage after the failed create and the refused concurrent creates"
   fi
 fi
 
@@ -482,6 +543,6 @@ if [ -n "${RECOVERY_SESSION_ID:-}" ]; then
   dh session delete --system --id "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
 fi
 dh principal delete --system "$USER_A" >/dev/null 2>&1 || true
-rm -rf "$BIGTREE" "$WS_A" "$WS_STOP" "$CREATE_OUT" "$DISABLE_OUT" "$CREDFILE" 2>/dev/null || true
+rm -rf "$BIGTREE" "$WS_A" "$WS_STOP" "$CREATE_OUT" "$DISABLE_OUT" "$CREDFILE" "$QUEUE_OUT_PREFIX"-* 2>/dev/null || true
 
 reg_result
