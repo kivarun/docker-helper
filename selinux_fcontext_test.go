@@ -143,8 +143,8 @@ func TestSELinuxPolicyInitTAndSystemPermissions(t *testing.T) {
 	//   scontext=init_t tcontext=docker_helper_t tclass=process denied { siginh }
 	// The process class declaration and the init_t -> docker_helper_t process
 	// rule must both carry siginh.
-	if !strings.Contains(content, "class process { transition siginh noatsecure rlimitinh };") {
-		t.Error("process class declaration must include siginh (and the kernel-required noatsecure/rlimitinh)")
+	if !strings.Contains(content, "class process { transition siginh noatsecure rlimitinh sigkill };") {
+		t.Error("process class declaration must include siginh (and the kernel-required noatsecure/rlimitinh/sigkill)")
 	}
 	if !strings.Contains(content, "allow init_t docker_helper_t:process { transition siginh };") {
 		t.Error("init_t -> docker_helper_t process rule must include siginh")

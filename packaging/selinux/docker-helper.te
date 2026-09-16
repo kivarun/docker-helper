@@ -113,7 +113,7 @@ module docker_helper 1.0;
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
 		class capability { dac_read_search dac_override sys_admin fowner };
-		class process { transition siginh noatsecure rlimitinh };
+		class process { transition siginh noatsecure rlimitinh sigkill };
 		class process2 { nnp_transition };
 	}
 
