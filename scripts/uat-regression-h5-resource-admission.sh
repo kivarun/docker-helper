@@ -500,6 +500,25 @@ else
   reg_fail "containers remain after recovery (count: $(cont_count))"
 fi
 
+# The daemon-side cleanup (container-absence proof, workload-MAC release, pin
+# removal) runs after the correlated containers are gone; wait for the
+# inventories to converge on the baselines instead of racing the cleanup. A
+# real residue leak still fails here — the wait is bounded.
+residue_settled=0
+for _ in $(seq 1 30); do
+  if [ "$(pin_count)" = "$PINS_BEFORE" ] \
+     && [ "$(mac_state_inventory)" = "$MAC_BEFORE" ] \
+     && [ "$(inventory_count "$RUNTIME_DIR/builds")" = "$BUILDS_BEFORE" ]; then
+    residue_settled=1
+    break
+  fi
+  sleep 1
+done
+if [ "$residue_settled" -eq 1 ]; then
+  reg_ok "recovery: cleanup converged on the baselines after the terminations"
+else
+  reg_fail "recovery: cleanup did not converge on the baselines within the bounded wait (pins=$(pin_count) mac=$(mac_state_inventory) builds=$(inventory_count "$RUNTIME_DIR/builds"))"
+fi
 PINS_AFTER="$(pin_count)"
 MAC_AFTER="$(mac_state_inventory)"
 BUILDS_AFTER="$(inventory_count "$RUNTIME_DIR/builds")"
