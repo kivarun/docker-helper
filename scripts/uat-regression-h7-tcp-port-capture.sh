@@ -56,11 +56,23 @@ reg_ok "configured loopback TCP address: $HTTP_ADDR"
 reg_fail_early() { reg_fail "$1"; reg_result; }
 
 # --- hostile holder: an ordinary unprivileged local user binds the port ---------
+# The capture must happen BEFORE service startup (the finding scenario): the
+# runner re-ensures the service before each group, so the daemon may currently
+# own the port. Stop it first and prove the port is free.
+systemctl stop docker-helper.service >/dev/null 2>&1 || true
+systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
+PORT_FREE_BEFORE=1
+for _ in $(seq 1 50); do
+  if ! ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then PORT_FREE_BEFORE=0; break; fi
+  sleep 0.2
+done
+[ "$PORT_FREE_BEFORE" -eq 0 ] || reg_fail_early "the configured TCP port is not free before the hostile capture"
+
 H7_USER="h7holder"
 id -u "$H7_USER" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash "$H7_USER" 2>/dev/null \
   || reg_fail_early "cannot create the unprivileged hostile user"
 
-HOLD_PID=""
+HOLDER_UID=""
 start_holder() {
   sudo -u "$H7_USER" python3 -c '
 import socket, sys, time
@@ -74,10 +86,19 @@ while True:
 ' "$PORT" >/tmp/h7-holder.out 2>/tmp/h7-holder.err &
   HOLD_PID=$!
   # The hold is proven, not assumed: wait until the kernel reports the port
-  # LISTENING (bounded; the holder exits nonzero if the bind failed).
+  # LISTENING and the listener process belongs to the unprivileged holder
+  # (bounded; the holder exits nonzero if the bind failed).
   for _ in $(seq 1 30); do
-    if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then return 0; fi
     if ! kill -0 "$HOLD_PID" 2>/dev/null; then return 1; fi
+    if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
+      local uid user
+      uid="$(ss -ltnp "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+      user="$(ps -o user= -p "$uid" 2>/dev/null || true)"
+      if [ "$user" = "$H7_USER" ]; then
+        HOLDER_UID="$uid"
+        return 0
+      fi
+    fi
     sleep 0.2
   done
   return 1
@@ -91,13 +112,7 @@ stop_holder() {
 trap stop_holder EXIT
 
 start_holder || reg_fail_early "the hostile holder could not take the port (holder log: $(tail -2 /tmp/h7-holder.err 2>/dev/null | redact))"
-HOLDER_UID="$(ss -ltnp "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
-HOLDER_USER="$(ps -o user= -p "$HOLDER_UID" 2>/dev/null || true)"
-if [ "$HOLDER_USER" = "$H7_USER" ]; then
-  reg_ok "unprivileged hostile holder owns TCP $HTTP_ADDR (pid $HOLDER_UID as $H7_USER)"
-else
-  reg_fail_early "the hostile holder does not own the port as expected (pid=$HOLDER_UID user=$HOLDER_USER)"
-fi
+reg_ok "unprivileged hostile holder owns TCP $HTTP_ADDR (pid $HOLDER_UID as $H7_USER)"
 
 # --- restart the real packaged service with the port captured -------------------
 JOURNAL_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
