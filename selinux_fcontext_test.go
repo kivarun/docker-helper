@@ -266,6 +266,12 @@ func TestSELinuxPolicySemanageTransition(t *testing.T) {
 		"allow docker_helper_t semanage_t:process2 { nnp_transition };",
 		"allow docker_helper_t semanage_exec_t:file { execute read open getattr map };",
 		"allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };",
+		// The H8 bounded MAC-command execution must be able to kill a hung
+		// semanage child at the fixed transition budget; the semanage frontend
+		// runs in the semanage_t domain (the type transition above), so the
+		// budget SIGKILL requires this signal grant (hostile-UAT evidence:
+		// without it the kill is denied and the hung child survives).
+		"allow docker_helper_t semanage_t:process sigkill;",
 		// bin_t execution is only the source-domain interpreter permission
 		// required by the semanage transition. Same-domain generic execution
 		// stays forbidden; bindfs uses its dedicated exec type and projection

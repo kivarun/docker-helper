@@ -149,11 +149,28 @@ arm_shim() {
 }
 
 shim_marker_present() { # -> 0 when a shim child process exists
-  # The shim's argv[0] is the backend command path (shebang exec); while the
-  # shim is armed that path belongs to exactly one blocked process.
+  # The shim's argv ends with the backend command path (shebang exec), so the
+  # pattern is anchored at the end: the moved real binary path
+  # (<path>.dh8-real-$$) must not produce a substring match, and nothing else
+  # may match while the shim is armed.
   local cmd
   cmd="$(backend_command_path)"
-  pgrep -f -- "$cmd" >/dev/null 2>&1
+  pgrep -f -- "$cmd\$" >/dev/null 2>&1
+}
+
+# Dump the hostile-state evidence when the hold deadline fires: the parked
+# process state, the daemon journal since the hold, and any fresh AVC denial
+# (a denied budget kill is a policy defect, not a daemon defect).
+hold_deadline_diagnostics() { # $1 = reason
+  local reason="$1"
+  reg_info "deadline diagnostics (${reason}): parked MAC command state:"
+  ps -o pid,ppid,stat,etime,args -e 2>/dev/null | grep -F "$(backend_command_path)" | grep -v grep || true
+  reg_info "deadline diagnostics: daemon journal since the hold:"
+  journalctl -u docker-helper.service --since "@${create_start}" --no-pager 2>/dev/null | tail -12 || true
+  if command -v ausearch >/dev/null 2>&1; then
+    reg_info "deadline diagnostics: fresh AVC denials since the hold:"
+    ausearch -m AVC --start "$(date -d "@${create_start}" +%H:%M:%S 2>/dev/null || echo "${create_start}")" 2>/dev/null | grep -E "avc:  denied" | tail -6 || true
+  fi
 }
 
 service_healthy() { # LABEL
@@ -237,6 +254,7 @@ arm_shim
 CREATE_OUT="/tmp/uat-h8-create.$$"
 DISABLE_OUT="/tmp/uat-h8-disable.$$"
 create_start="$(date +%s)"
+HOLD_DEADLINE_BREACHED=0
 (
   dh session create --system --token-file "$CREDFILE" --workspace "$WS_A" >"$CREATE_OUT" 2>&1
 ) &
@@ -248,7 +266,15 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 if [ "$marker_seen" = 1 ]; then
-  reg_ok "external MAC command really entered the hostile blocked state (shim process present)"
+  # Confirm durability: a transient match must not count as the hostile
+  # blocked state.
+  sleep 1
+  if shim_marker_present; then
+    reg_ok "external MAC command really entered the hostile blocked state (shim process present)"
+  else
+    marker_seen=0
+    reg_fail "the shim process vanished before the hold: the hostile state was not durable"
+  fi
 else
   reg_fail "the hostile shim never blocked a MAC one-shot (create may have failed before the backend command)"
   cat "$CREATE_OUT" >&2 || true
@@ -283,13 +309,21 @@ while [ "$create_done" = 0 ] || [ "$disable_done" = 0 ]; do
     disable_rc=$?
   fi
   if [ "$(date +%s)" -gt "$deadline" ]; then
+    hold_deadline_diagnostics "the hostile MAC hold exceeded the whole-transition bound (${HOLD_BUDGET_S}s): the daemon waited without a bound"
     reg_fail "the hostile MAC hold exceeded the whole-transition bound (${HOLD_BUDGET_S}s): the daemon waited without a bound"
     kill "$CREATE_PID" "$DISABLE_PID" 2>/dev/null || true
+    HOLD_DEADLINE_BREACHED=1
     break
   fi
   sleep 0.2
 done
 reg_info "hostile lifecycle wall-clock: $(( $(date +%s) - create_start ))s (bound: ${HOLD_BUDGET_S}s)"
+if [ "$HOLD_DEADLINE_BREACHED" = 1 ]; then
+  # Every later subcase would run against a still-held daemon and produce
+  # garbage results: abort the group with the deadline evidence on record.
+  reg_fail "the hostile hold never cleared: later subcases aborted (see deadline diagnostics above)"
+  reg_result
+fi
 
 if [ "$create_rc" = 0 ]; then
   reg_fail "a Session create whose MAC command was terminated at the budget must fail, not succeed"

@@ -411,6 +411,17 @@ allow docker_helper_t docker_helper_workspace_t:lnk_file { read };
 # process2:nnp_transition (mirrors the existing init_t -> docker_helper_t rule).
 type_transition docker_helper_t semanage_exec_t:process semanage_t;
 allow docker_helper_t semanage_t:process { transition siginh noatsecure rlimitinh };
+# The daemon's bounded MAC-command execution (Release 2.2 H8) kills a hung
+# frontend child at the fixed MAC transition budget with kill(2) SIGKILL. The
+# real semanage frontend runs in the semanage_t domain (the type transition
+# above), so the budget kill requires the signal permission toward that
+# domain. Observed hostile-UAT evidence (Tumbleweed): without it the budget
+# kill is denied, the hung semanage_t child survives the budget, and the
+# Session create waits unbounded. Pdeathsig delivery is kernel-internal and
+# not AVC-checked, so it already covers the daemon-exit path; only the
+# daemon's own budget kill needs this grant. restorecon runs in the same
+# domain (execute_no_trans below), so no additional grant is needed for it.
+allow docker_helper_t semanage_t:process sigkill;
 allow docker_helper_t semanage_t:process2 { nnp_transition };
 allow docker_helper_t semanage_exec_t:file { execute read open getattr map };
 allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };

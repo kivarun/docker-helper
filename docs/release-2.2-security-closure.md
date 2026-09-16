@@ -2016,6 +2016,21 @@ reaches stopped state within the documented shutdown wall-clock bound
 group also records the Phase-B measurement evidence (real parser reloads,
 semanage listings, and the 50000-entry restorecon) against the budget.
 
+The fourth UAT round (run 35126571490) surfaced one further real defect on
+the SELinux backend, fixed in this change set: the budget kill of a hung
+semanage child was denied by the shipped policy — the real semanage frontend
+runs in the `semanage_t` domain (the existing type transition), and the
+policy granted it no signal permission, so the hung `semanage_t` child
+survived the fixed transition budget and the create waited unbounded. The
+policy now grants the narrowest permission that satisfies the demonstrated
+bounded-execution requirement (`allow docker_helper_t semanage_t:process
+sigkill;` — Pdeathsig delivery is kernel-internal and already covers the
+daemon-exit path; restorecon runs in the daemon's own domain via
+`execute_no_trans` and needs no additional grant). The shipped-policy rule
+is asserted by the SELinux regression tests, and the group's deadline
+diagnostics dump the parked process state, the daemon journal, and fresh
+AVC denials so any residual kill denial is directly visible in the run.
+
 ## SC2 — bounded-resource and liveness closure
 
 **Queue:** empty — **SC2 CLOSED**. (H4, H5, H7 and H8 closed in SC2 — see
