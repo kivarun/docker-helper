@@ -164,7 +164,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// Stage the build context into an isolated directory.
 	staged, err := a.stageBuildContext(ctx, session.Workspace, contextPath, dockerfileRel, cfg.RuntimeDir, op.ID)
 	if err != nil {
-		releasePreparation()
+		// The capacity reservation transferred to the operation at creation,
+		// so this release goes through the operation (exactly once) alongside
+		// the lease — never through the pre-registration closure, whose
+		// reservation release is already nil.
+		if op.macLeaseRelease != nil {
+			op.macLeaseRelease()
+		}
+		op.releaseCapacity()
 		// The typed build-staging ceiling refusal (H4) is an expected
 		// client-input refusal of the single canonical build-context-limit
 		// code; its message names only the exhausted dimension. Every other

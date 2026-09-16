@@ -161,8 +161,13 @@ else
 fi
 
 # One valid mount on the refused request proves the refusal happens before
-# any pin or workload-MAC preparation.
+# any pin or workload-MAC preparation. The inventories are compared against
+# the state right before the refused request — the four held operations
+# legitimately hold containers, pins and workload-MAC state of their own.
 CAPACITY_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
+CONTAINERS_AT_REFUSAL="$(cont_count)"
+PINS_AT_REFUSAL="$(pin_count)"
+MAC_AT_REFUSAL="$(mac_state_inventory)"
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
   dh run --image "$IMAGE" --mount "shareda1:/mnt/refused" -- sh -ec "true" \
   >/tmp/h5-run-refused.out 2>/tmp/h5-run-refused.err
@@ -180,20 +185,20 @@ fi
 
 # No extra Docker container/process/state exists for the refusal.
 CONTAINERS_AFTER_REFUSAL="$(cont_count)"
-if [ "$CONTAINERS_AFTER_REFUSAL" = "$CONTAINERS_BEFORE" ]; then
+if [ "$CONTAINERS_AFTER_REFUSAL" = "$CONTAINERS_AT_REFUSAL" ]; then
   reg_ok "refusal created no Docker container/process/state (containers unchanged: $CONTAINERS_AFTER_REFUSAL)"
 else
-  reg_fail "refusal changed the container inventory ($CONTAINERS_BEFORE -> $CONTAINERS_AFTER_REFUSAL)"
+  reg_fail "refusal changed the container inventory ($CONTAINERS_AT_REFUSAL -> $CONTAINERS_AFTER_REFUSAL)"
 fi
 
 # Refusal-before-expensive-work for the run: the valid mount was never probed,
 # never pinned, never MAC-prepared.
-if [ "$(pin_count)" = "$PINS_BEFORE" ]; then
-  reg_ok "capacity-refused run: mount-pin inventory unchanged ($PINS_BEFORE)"
+if [ "$(pin_count)" = "$PINS_AT_REFUSAL" ]; then
+  reg_ok "capacity-refused run: mount-pin inventory unchanged ($PINS_AT_REFUSAL)"
 else
-  reg_fail "capacity-refused run: pin inventory changed ($(pin_count) != $PINS_BEFORE)"
+  reg_fail "capacity-refused run: pin inventory changed ($(pin_count) != $PINS_AT_REFUSAL)"
 fi
-if [ "$(mac_state_inventory)" = "$MAC_BEFORE" ]; then
+if [ "$(mac_state_inventory)" = "$MAC_AT_REFUSAL" ]; then
   reg_ok "capacity-refused run: workload-MAC inventory unchanged"
 else
   reg_fail "capacity-refused run: workload-MAC inventory changed"

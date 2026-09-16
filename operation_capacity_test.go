@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -457,6 +458,149 @@ func TestH5ComposesWithH4StagingCeiling(t *testing.T) {
 	worstMountTable := maxRunMounts * selinuxWorstMountsPerCallerMount * maxConcurrentOperationsGlobal
 	if worstMountTable > hostMountMax/100 {
 		t.Fatalf("worst-case mount-table occupancy (%d entries) must stay below 1%% of fs.mount-max (%d)", worstMountTable, hostMountMax)
+	}
+}
+
+// TestBuildStagingRefusalReleasesCapacity is the exact regression the UAT
+// caught: a build whose staging fails — the H4 ceiling refusal included —
+// releases its already-transferred capacity slot, so the next build can be
+// admitted. Pre-fix, the staging-failure path released through the
+// pre-registration closure whose reservation release had already been nulled
+// by the transfer, leaking one build slot per refusal until the daemon
+// restarted.
+func TestBuildStagingRefusalReleasesCapacity(t *testing.T) {
+	app, result := newCapacityTestApp(t)
+	// One build slot: the refused build must free it for the next build.
+	app.OperationSupervisor.maxGlobalBuilds = 1
+	if err := os.WriteFile(filepath.Join(result.Session.Workspace, "Dockerfile"), []byte("FROM alpine\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First build: staging refuses with the H4 typed ceiling error.
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		return nil, &buildStagingCeilingError{Resource: "bytes", Ceiling: 128, Attempted: 129}
+	}
+	w := httptest.NewRecorder()
+	app.handleBuild(w, newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ceiling refusal: expected %d, got %d (%s)", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if code := decodeRejectedResponse(t, w); code != "build_context_too_large" {
+		t.Fatalf("ceiling refusal code: expected build_context_too_large, got %q", code)
+	}
+
+	// The slot is free again: a real build is admitted.
+	app.StageBuildContextFn = newStagingSeam(t, stagingSeamOptions{})
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+	w2 := httptest.NewRecorder()
+	app.handleBuild(w2, newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token))
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("follow-up build after the staging refusal: expected %d, got %d (%s)", http.StatusCreated, w2.Code, w2.Body.String())
+	}
+}
+
+// TestRunPinFailureReleasesCapacity proves the run pin-failure path releases
+// the capacity reservation through the canonical rollback owner (the capacity
+// stage runs first), so the next run is admitted.
+func TestRunPinFailureReleasesCapacity(t *testing.T) {
+	app := newSystemModeRunTestApp(t)
+	result, err := createSystemSession(t, app)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	// One Session slot: the failed run must free it for the next run.
+	app.OperationSupervisor.maxPerSession = 1
+
+	mountDir := filepath.Join(result.Session.Workspace, "mountdir")
+	if err := os.MkdirAll(mountDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mountDir, "file.txt"), []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return nil, errors.New("injected pin failure")
+	}
+	req := newRunRequest(map[string]any{
+		"image": "alpine:3.24",
+		"mounts": []map[string]any{
+			{"source": "mountdir", "target": "/data"},
+		},
+		"command": []string{"true"},
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("pin failure: expected %d, got %d (%s)", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+
+	// The slot is free again: a real run is admitted.
+	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{PinnedPath: filepath.Join(t.TempDir(), "pin"), cleanup: func() error { return nil }}, nil
+	}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+	req2 := newRunRequest(map[string]any{
+		"image": "alpine:3.24",
+		"mounts": []map[string]any{
+			{"source": "mountdir", "target": "/data"},
+		},
+		"command": []string{"true"},
+	}, result.Token)
+	w2 := httptest.NewRecorder()
+	app.handleRun(w2, req2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("follow-up run after the pin failure: expected %d, got %d (%s)", http.StatusCreated, w2.Code, w2.Body.String())
+	}
+}
+
+// TestRunStartFailureReleasesCapacity proves the cmd.Start failure path
+// (post-admission, pre-start) releases capacity exactly once through the
+// terminal transition, so the next run is admitted.
+func TestRunStartFailureReleasesCapacity(t *testing.T) {
+	app, result := newCapacityTestApp(t)
+	app.OperationSupervisor.maxPerSession = 1
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// A command that cannot start.
+		return exec.CommandContext(ctx, "nonexistent-docker-binary")
+	}
+	w := runCapacityRequest(t, app, result.Token)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("start-failure run: expected %d, got %d (%s)", http.StatusCreated, w.Code, w.Body.String())
+	}
+	var created operationCreatedResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	op := app.OperationSupervisor.lookup(created.OperationID)
+	if op == nil {
+		t.Fatal("operation must be registered before its start failure")
+	}
+	select {
+	case <-op.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("operation did not reach a terminal state after the start failure")
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+	w2 := runCapacityRequest(t, app, result.Token)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("follow-up run after the start failure: expected %d, got %d (%s)", http.StatusCreated, w2.Code, w2.Body.String())
 	}
 }
 
