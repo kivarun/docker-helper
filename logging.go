@@ -239,14 +239,25 @@ func writeDockerActionRejected(
 	writeError(ctx, w, status, resultCode, message)
 }
 
+// The public refusal contract of the fixed Release-2.2 execution capacity
+// (SC2/H5): one canonical generic refusal for every Session-token Docker
+// execution surface — run, build, pull, and registry login, whether
+// Operation-backed or synchronous. HTTP 429; the bounded message names no
+// capacity topology (no Session/global distinction, no synchronous/Operation
+// distinction) and the client decides whether to retry.
+const (
+	capacityRefusalCode    = "capacity_unavailable"
+	capacityRefusalMessage = "too many concurrent requests"
+)
+
 // writeOperationAdmissionRejected maps one admissionDecision to its public
 // refusal for POST /run and POST /build. It is the single owner of the
 // admission refusal contract: shutdown keeps the established
 // `shutting_down` refusal, quiesce keeps the established
 // `launcher_unavailable` refusal, and exhausted fixed Release-2.2 capacity
-// (SC2/H5) answers with the single bounded `operation_capacity_unavailable`
-// refusal for both the Session scope and the global scope — the capacity
-// topology is never exposed.
+// (SC2/H5) answers with the single bounded `capacity_unavailable` refusal
+// for both the Session scope and the global scope — the capacity topology is
+// never exposed.
 func writeOperationAdmissionRejected(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -260,7 +271,7 @@ func writeOperationAdmissionRejected(
 	case admissionRefusedQuiesced:
 		writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, kind, "launcher_unavailable", "launcher is not available", principalName)
 	case admissionRefusedCapacity:
-		writeDockerActionRejected(ctx, w, http.StatusTooManyRequests, kind, "operation_capacity_unavailable", "too many concurrent operations", principalName)
+		writeDockerActionRejected(ctx, w, http.StatusTooManyRequests, kind, capacityRefusalCode, capacityRefusalMessage, principalName)
 	default:
 		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, kind, "internal_error", "internal server error", principalName)
 	}

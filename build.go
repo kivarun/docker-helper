@@ -36,7 +36,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// At a security ceiling the request is refused immediately; there is no
 	// queue and no waiting admission. Tests without a supervisor skip the
 	// reservation (the reservation and its release paths are nil-safe).
-	var reservation *operationReservation
+	var reservation *capacityReservation
 	if a.OperationSupervisor != nil {
 		var decision admissionDecision
 		reservation, decision = a.OperationSupervisor.reserve(session.ID, session.LauncherID, operationKindBuild)

@@ -2109,6 +2109,13 @@ Completion goroutine (cmd.Wait → status transition; capacity released exactly 
 Retention cleanup (independent of capacity)
 ```
 
+The synchronous surfaces (pull, registry login) share the same
+supervisor accounting without the Operation stages: capacity reservation
+before any Docker process, whole synchronous execution under the
+reservation, exact-once release when the handler returns, and no
+registration in the supervisor's Operation map (see
+[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision)).
+
 Authentication validates the session token. Request validation checks
 required fields and path relativity per operation. The H3 authorization
 boundary orders every filesystem decision: the raw caller spelling is
@@ -2133,13 +2140,13 @@ Operation admission is the two-step `reserve → admitReserved` flow of the
 operation supervisor (SC2/H5). Both steps are atomic under the same
 supervisor mutex:
 
-- `reserve(session, launcher, kind)` checks the lifecycle gates (daemon
-  shutdown, Launcher quiesce) and the fixed Release-2.2 capacity ceilings
-  — Session scope, global scope, and the build sub-ceiling — then
-  reserves one capacity slot in the same critical section, so
-  concurrent reserves can never oversubscribe. The reservation happens
-  BEFORE any expensive preparation: run reserves before the session MAC-use
-  lease, mount probing, exposure resolution, pins and workload-MAC
+- `reserve(session, launcher, kind)` checks the Operation lifecycle gates
+  (daemon shutdown, Launcher quiesce) and the fixed Release-2.2 capacity
+  ceilings — Session scope, global scope, and the build sub-ceiling — then
+  reserves one capacity slot in the same critical section, so concurrent
+  reserves can never oversubscribe. The reservation happens BEFORE any
+  expensive preparation: run reserves before the session MAC-use lease,
+  mount probing, exposure resolution, pins and workload-MAC
   materialization; build reserves before H4 staging. Cheap
   syntactic/request validation may run first, and the caller-mount count
   ceiling is checked before the reservation (the request is already
@@ -2155,11 +2162,27 @@ supervisor mutex:
   it transfers to the registered Operation. On refusal the caller cleans
   preparation and releases the reservation.
 
+The same supervisor owns the shared capacity accounting for the
+synchronous Session-token Docker execution surfaces: `POST /pull` and
+`POST /registry/login` reserve one capacity slot through the same
+Session/global counters (`reserveCapacity`, the pure resource-accounting
+core that `reserve` also uses) BEFORE their Docker process is started,
+and never register an Operation. Capacity is pure resource accounting:
+the Operation lifecycle gates are not consulted — pull and registry
+login are not closed on Launcher quiesce or on daemon shutdown
+(lifecycle policy stays with its Operation-admission owners). The
+synchronous reservation covers the whole request execution and is
+released exactly once when the handler returns — completion, Docker
+failure, and every pre-exec failure path included. There is no waiting,
+no queue, no retry logic and no scheduler: at any ceiling the request is
+refused immediately.
+
 There is no queue and no waiting admission: at any ceiling the request
 is refused immediately with the single bounded
-`operation_capacity_unavailable` refusal (HTTP 429) for both the Session
-scope and the global scope — the capacity topology is never exposed —
-and the client decides whether and when to retry.
+`capacity_unavailable` refusal (HTTP 429) for every Session-token
+Docker execution surface — run, build, pull, and registry login, for
+both the Session scope and the global scope — the capacity topology is
+never exposed — and the client decides whether and when to retry.
 
 **Fixed Release-2.2 capacity ceilings (SC2/H5).** The ceilings are
 measured security constants, not Principal/Launcher quotas and not
@@ -2167,24 +2190,30 @@ configurable:
 
 | Ceiling | Value | Basis |
 |---------|-------|-------|
-| concurrent Operations per Session | 4 | 2× the maximum per-Session concurrency exercised by the UAT (2), sized for realistic agent parallelism |
-| concurrent Operations globally | 8 | keeps at least half of global capacity available to other Sessions when one is saturated |
+| concurrent executions per Session | 4 | 2× the maximum per-Session concurrency exercised by the UAT (2), sized for realistic agent parallelism |
+| concurrent executions globally | 8 | keeps at least half of global capacity available to other Sessions when one is saturated |
 | concurrent builds globally (sub-ceiling) | 2 | worst-case hostile staging = 2 × 128 MiB (H4) = 256 MiB = 42% of the smallest supported /run tmpfs (3 GiB RAM, ~614 MB); ≥3 concurrent maximal builds would exceed half of it |
 | caller mounts per run request | 16 | 16× the maximum single-request mount usage in all tests and UAT; worst kernel mount-table cost (3 entries per mount under SELinux) at the global ceiling is 384 entries = 0.4% of fs.mount-max (100000) |
 | raw log bytes per HTTP logs response | 256 KiB | measured worst-case JSON-encoding expansion is 6× (control characters/invalid UTF-8), so one response stays under ~1.6 MiB encoded regardless of retention |
 
-Both concurrency limits count preparation and running execution. A
-capacity slot is released exactly once when the Operation reaches a
-terminal state (`succeed`/`fail` invoke the transferred reservation
-release inside the winning transition); retained Operation metadata and
-logs never keep capacity, and release is never coupled to
-`pruneCompleted()`. Release paths include: preparation failure after
-reservation, pin failure, workload-MAC preparation failure (rolled-back
-and retained variants), build staging failure including the H4 refusal,
-final-admission refusal, `cmd.Start` failure, pre-start
-cancellation/shutdown, normal success, Docker failure, explicit cancel,
-and daemon-shutdown termination. The user-mode deployment obeys the
-same fixed ceilings without gaining system-mode mechanics.
+The execution ceilings count every admitted Operation AND every
+synchronous pull/registry-login execution: the two concurrency limits
+count preparation and running execution of Operations and the whole
+execution of every synchronous pull and registry-login request through
+the same shared counters. An Operation-backed capacity slot is released
+exactly once when the
+Operation reaches a terminal state (`succeed`/`fail` invoke the
+transferred reservation release inside the winning transition); a
+synchronous slot is released exactly once when the request handler
+returns. Retained Operation metadata and logs never keep capacity, and
+release is never coupled to `pruneCompleted()`. Operation release paths
+include: preparation failure after reservation, pin failure,
+workload-MAC preparation failure (rolled-back and retained variants),
+build staging failure including the H4 refusal, final-admission
+refusal, `cmd.Start` failure, pre-start cancellation/shutdown, normal
+success, Docker failure, explicit cancel, and daemon-shutdown
+termination. The user-mode deployment obeys the same fixed ceilings
+without gaining system-mode mechanics.
 
 The narrow build sub-ceiling exists so the generic run concurrency stays
 usable while worst-case H4 composition stays safe (see
@@ -2444,6 +2473,8 @@ that label, never a PID.
 ### Pull
 
 `POST /pull` authenticates, validates that the image field is non-empty,
+reserves one shared capacity slot (see
+[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision)),
 and runs `docker pull` with the image reference. The endpoint remains
 synchronous and returns the execution result directly in the response;
 pull output is captured into a bounded buffer of
@@ -2456,21 +2487,25 @@ field is non-empty. Docker CLI validates the reference when the command
 executes. If Docker rejects the reference, the endpoint returns its
 standard Docker failure response.
 
-**Synchronous data-plane boundedness (SC2/H5 inspection).** Pull and
-registry login are synchronous and are not registered Operations, so the
-concurrency ceilings do not count them. Their materialization channels
-are already bounded: the pull response is the complete retained buffer,
-bounded per pull by the configured `operation_log_max_bytes` with the
-established `truncated` flag, and registry login retains only a 4 KiB
-classification buffer whose output is never exposed. What is NOT
-bounded today is their execution concurrency: concurrent pull and
-registry-login requests each start an unbounded number of synchronous
-Docker child processes with per-request bounded buffers. Closing that
-would require a release-owner decision (the smallest consistent
-extension would count concurrent pull/registry-login executions against
-the existing reservation owner without registering Operations); no
-scheduler was invented inside H5, and the finding is recorded in the
-Release-2.2 security closure ledger.
+**Synchronous execution capacity (SC2/H5 release-owner decision).**
+Pull and registry login remain synchronous and are never registered
+Operations. Their execution concurrency is finite under the same fixed
+Release-2.2 ceilings: each request reserves one capacity slot through
+the shared Session/global counters before its Docker process is started
+and releases it exactly once when the handler returns, on the same
+ceilings as Operation-backed execution — a saturated Session or global
+ceiling refuses a pull or registry login immediately with the one
+canonical `capacity_unavailable` refusal (HTTP 429), with no waiting,
+no queue and no retry logic. The synchronous surfaces are NOT closed on
+Launcher quiesce or daemon shutdown: quiesce is the Operation-admission
+lifecycle gate ("once quiesced, no new Operation admission"), and the
+established refusal contract of those endpoints does not include
+shutdown/quiesce codes; lifecycle policy stays separate from the shared
+resource accounting. Their materialization channels are bounded as
+before: the pull response is the complete retained buffer, bounded per
+pull by the configured `operation_log_max_bytes` with the established
+`truncated` flag, and registry login retains only a 4 KiB
+classification buffer whose output is never exposed.
 
 ### Registry login
 
@@ -2481,13 +2516,18 @@ Authentication
     │
 Request validation
     │
+Shared capacity reservation (no Operation)
+    │
 Session Docker config directory
     │
 Docker invocation
 ```
 
 Request validation checks that `registry`, `username`, and `password` are
-all non-empty.
+all non-empty. The synchronous capacity reservation happens before the
+Docker invocation (see
+[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision));
+the endpoint never registers an Operation.
 
 The session Docker config directory is per-session, located at
 `runtimeDir/sessions/<session_id>/docker`. It is created with `0700`
@@ -3286,7 +3326,7 @@ Current error codes (non-exhaustive):
 | `launcher_name_requires_principal` | `GET /sessions?launcher=` | a Launcher-name narrowing selector was supplied without a Principal scope (names are never searched globally) |
 | `invalid_selector` | `GET /sessions` | a narrowing selector is illegal for the authenticated authority (a Principal selector under a Principal credential, any selector under a Launcher credential) |
 | `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
-| `operation_capacity_unavailable` | `POST /build`, `POST /run` | the fixed Release-2.2 concurrent Operation capacity is exhausted (Session scope or global scope; one bounded refusal for both, HTTP 429 — no queue, the client decides whether to retry) |
+| `capacity_unavailable` | `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login` | the fixed Release-2.2 concurrent execution capacity is exhausted (Session scope or global scope; one bounded refusal for all four Session-token Docker execution surfaces, whether Operation-backed or synchronous, HTTP 429 — no queue, the client decides whether to retry) |
 | `too_many_mounts` | `POST /run` | the request carries more than the fixed 16 caller mounts (HTTP 400; checked before the MAC lease, probing, pins, MAC preparation and the reservation; individual mount paths are never reported) |
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero and the failure is not classified |
 | `image_not_found` | `POST /pull` | docker pull: image/repository not found |
@@ -3313,7 +3353,7 @@ only:
 
 - `event`: `<kind>.rejected`
 - `result`: the public API error code (e.g., `invalid_image`, `invalid_mount`,
-  `launcher_unavailable`, `shutting_down`, `operation_capacity_unavailable`,
+  `launcher_unavailable`, `shutting_down`, `capacity_unavailable`,
   `too_many_mounts`, `internal_error`)
 - `principal_name`: when available
 - `session_id`: from the authenticated session

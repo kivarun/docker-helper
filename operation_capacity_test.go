@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -85,8 +87,8 @@ func TestRunSessionCapacityRefusedImmediately(t *testing.T) {
 		t.Fatalf("capacity refusal: expected %d at the Session ceiling, got %d (%s)",
 			http.StatusTooManyRequests, w.Code, w.Body.String())
 	}
-	if code := decodeRejectedResponse(t, w); code != "operation_capacity_unavailable" {
-		t.Fatalf("capacity refusal code: expected operation_capacity_unavailable, got %q", code)
+	if code := decodeRejectedResponse(t, w); code != "capacity_unavailable" {
+		t.Fatalf("capacity refusal code: expected capacity_unavailable, got %q", code)
 	}
 
 	// The refusal admitted no Operation: the Session still holds exactly the
@@ -374,7 +376,7 @@ func TestBuildSubCeilingLeavesRunsAvailable(t *testing.T) {
 	s.maxGlobal = maxConcurrentOperationsGlobal
 	s.maxGlobalBuilds = maxConcurrentBuildsGlobal
 
-	var buildRes []*operationReservation
+	var buildRes []*capacityReservation
 	for i := 0; i < maxConcurrentBuildsGlobal; i++ {
 		res, d := s.reserve(fmt.Sprintf("sess-b%d", i), fmt.Sprintf("launcher-b%d", i), operationKindBuild)
 		if d != admissionAccepted {
@@ -385,6 +387,19 @@ func TestBuildSubCeilingLeavesRunsAvailable(t *testing.T) {
 	// A third build is refused even though the generic ceilings have room.
 	if _, d := s.reserve("sess-b9", "launcher-b9", operationKindBuild); d != admissionRefusedCapacity {
 		t.Fatalf("third build: expected capacity refusal, got %d", d)
+	}
+	// The narrow build sub-ceiling applies to builds only: the synchronous
+	// pull/registry-login surfaces are still admitted while the sub-ceiling
+	// is exhausted (the generic ceilings have room).
+	if res, ok := s.reserveCapacity("sess-pull", false); !ok {
+		t.Fatal("build sub-ceiling must not bind synchronous pull capacity")
+	} else {
+		res.Release()
+	}
+	if res, ok := s.reserveCapacity("sess-login", false); !ok {
+		t.Fatal("build sub-ceiling must not bind synchronous registry-login capacity")
+	} else {
+		res.Release()
 	}
 	// Run Operations still have free capacity.
 	for i := 0; i < maxConcurrentOperationsGlobal-maxConcurrentBuildsGlobal; i++ {
@@ -420,8 +435,8 @@ func TestRunQuiesceCapacityRefusalHasNoReservationResidue(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("capacity refusal: expected %d, got %d (%s)", http.StatusTooManyRequests, w.Code, w.Body.String())
 	}
-	if code := decodeRejectedResponse(t, w); code != "operation_capacity_unavailable" {
-		t.Fatalf("capacity refusal code: expected operation_capacity_unavailable, got %q", code)
+	if code := decodeRejectedResponse(t, w); code != "capacity_unavailable" {
+		t.Fatalf("capacity refusal code: expected capacity_unavailable, got %q", code)
 	}
 
 	// No build/run start audit for the refusal: the supervisor holds exactly
@@ -700,5 +715,430 @@ func TestBuildQuiesceRefusalLeavesNoStaging(t *testing.T) {
 	}
 	if got := stagingCalls.Load(); got != 0 {
 		t.Fatalf("quiesce-refused build staged its context %d time(s) before admission", got)
+	}
+}
+
+// syncCapacitySecretPassword is a unique marker password for the synchronous
+// registry-login capacity tests: every leak-sensitive assertion can prove the
+// marker never reached an observable surface.
+const syncCapacitySecretPassword = "uat-sync-capacity-password-7c41d2"
+
+// newHeldSyncSeam returns an ExecCommandContext seam whose docker child
+// records its real start in the returned started path and blocks until the
+// release path exists, then exits with exitStatus. It gives the tests a
+// deterministic signal that a synchronous handler is inside its started
+// Docker child process (not merely inside a constructed exec.Cmd), and a
+// deterministic release; no public registry, network, or timing guess is
+// involved. Cleanup releases any still-held child.
+func newHeldSyncSeam(t *testing.T, exitStatus int) (func(ctx context.Context, name string, args ...string) *exec.Cmd, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	startedPath := filepath.Join(dir, "started")
+	releasePath := filepath.Join(dir, "release")
+	script := fmt.Sprintf("echo started > %s; while [ ! -e %s ]; do sleep 0.05; done; exit %d",
+		startedPath, releasePath, exitStatus)
+	t.Cleanup(func() {
+		if err := os.WriteFile(releasePath, []byte("release"), 0644); err != nil {
+			t.Errorf("cannot release held synchronous docker command: %v", err)
+		}
+	})
+	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	}, startedPath, releasePath
+}
+
+// waitSyncStarted polls for the started marker, proving the synchronous
+// Docker child process really started.
+func waitSyncStarted(t *testing.T, startedPath string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(startedPath); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("held synchronous docker command never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// syncPullCapacityRequest posts one pull request through the real handler.
+func syncPullCapacityRequest(t *testing.T, app *App, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	app.handlePull(w, newPullRequest(map[string]any{"image": "alpine:3.24"}, token))
+	return w
+}
+
+// syncRegistryLoginCapacityRequest posts one registry-login request through
+// the real handler, carrying the unique marker password.
+func syncRegistryLoginCapacityRequest(t *testing.T, app *App, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"registry": "registry.example.com",
+		"username": "uat-capacity",
+		"password": syncCapacitySecretPassword,
+	})
+	if err != nil {
+		t.Fatalf("cannot encode login request: %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/registry/login", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	app.handleRegistryLogin(w, req)
+	return w
+}
+
+// TestSynchronousPullRefusedAtSaturatedSessionCapacity proves the Session
+// ceiling binds the synchronous pull surface: with the Session's full
+// Operation capacity running, a valid pull is refused immediately with the
+// one canonical capacity refusal BEFORE any Docker command is constructed or
+// started, consumes no capacity, and registers no Operation.
+func TestSynchronousPullRefusedAtSaturatedSessionCapacity(t *testing.T) {
+	app, result := newCapacityTestApp(t)
+
+	for i := 0; i < maxConcurrentOperationsPerSession; i++ {
+		if w := runCapacityRequest(t, app, result.Token); w.Code != http.StatusCreated {
+			t.Fatalf("operation %d: expected %d, got %d (%s)", i+1, http.StatusCreated, w.Code, w.Body.String())
+		}
+	}
+
+	seam, _, _ := newHeldSyncSeam(t, 0)
+	var started atomic.Int32
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		started.Add(1)
+		return seam(ctx, name, args...)
+	}
+
+	w := syncPullCapacityRequest(t, app, result.Token)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("capacity refusal: expected %d, got %d (%s)", http.StatusTooManyRequests, w.Code, w.Body.String())
+	}
+	if code := decodeRejectedResponse(t, w); code != capacityRefusalCode {
+		t.Fatalf("capacity refusal code: expected %q, got %q", capacityRefusalCode, code)
+	}
+	if got := started.Load(); got != 0 {
+		t.Fatalf("capacity-refused pull must refuse before cmd.Start: %d docker commands started", got)
+	}
+
+	s := app.OperationSupervisor
+	if got := s.globalRunning; got != maxConcurrentOperationsPerSession {
+		t.Fatalf("refused pull must not consume capacity: global=%d", got)
+	}
+	if got := s.sessionRunning[result.Session.ID]; got != maxConcurrentOperationsPerSession {
+		t.Fatalf("refused pull must not consume Session capacity: %d", got)
+	}
+	if got := len(s.ops); got != maxConcurrentOperationsPerSession {
+		t.Fatalf("refused pull must not register an Operation: %d registered", got)
+	}
+}
+
+// TestSynchronousRegistryLoginRefusedAtSaturatedSessionCapacity is the
+// registry-login counterpart: at the saturated Session ceiling a valid login
+// is refused immediately with the one canonical capacity refusal BEFORE
+// cmd.Run, the refusal response carries no credential, and no Operation and
+// no capacity is consumed.
+func TestSynchronousRegistryLoginRefusedAtSaturatedSessionCapacity(t *testing.T) {
+	app, result := newCapacityTestApp(t)
+
+	for i := 0; i < maxConcurrentOperationsPerSession; i++ {
+		if w := runCapacityRequest(t, app, result.Token); w.Code != http.StatusCreated {
+			t.Fatalf("operation %d: expected %d, got %d (%s)", i+1, http.StatusCreated, w.Code, w.Body.String())
+		}
+	}
+
+	seam, _, _ := newHeldSyncSeam(t, 0)
+	var started atomic.Int32
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		started.Add(1)
+		return seam(ctx, name, args...)
+	}
+
+	w := syncRegistryLoginCapacityRequest(t, app, result.Token)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("capacity refusal: expected %d, got %d (%s)", http.StatusTooManyRequests, w.Code, w.Body.String())
+	}
+	if code := decodeRejectedResponse(t, w); code != capacityRefusalCode {
+		t.Fatalf("capacity refusal code: expected %q, got %q", capacityRefusalCode, code)
+	}
+	if strings.Contains(w.Body.String(), syncCapacitySecretPassword) {
+		t.Fatalf("capacity refusal response leaked the registry password")
+	}
+	if got := started.Load(); got != 0 {
+		t.Fatalf("capacity-refused registry login must refuse before cmd.Run: %d docker commands started", got)
+	}
+
+	s := app.OperationSupervisor
+	if got := s.globalRunning; got != maxConcurrentOperationsPerSession {
+		t.Fatalf("refused login must not consume capacity: global=%d", got)
+	}
+	if got := len(s.ops); got != maxConcurrentOperationsPerSession {
+		t.Fatalf("refused login must not register an Operation: %d registered", got)
+	}
+}
+
+// TestSynchronousPullLoginHoldTheSharedCounters proves the synchronous
+// surfaces consume the SAME Session/global capacity counters as
+// Operation-backed execution: a held synchronous pull occupies the one free
+// global slot, refuses both pull and registry-login requests of another
+// Session at the saturated global ceiling (whose Session counters stay at
+// zero), registers no Operation, and releases its slot exactly once when the
+// handler completes — making the capacity immediately reusable.
+func TestSynchronousPullLoginHoldTheSharedCounters(t *testing.T) {
+	app, result := newCapacityTestApp(t)
+	// One slot total: the held synchronous execution saturates the global
+	// ceiling while every Session stays far below its own.
+	app.OperationSupervisor.maxGlobal = 1
+
+	seam, startedPath, releasePath := newHeldSyncSeam(t, 0)
+	app.ExecCommandContext = seam
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- syncPullCapacityRequest(t, app, result.Token)
+	}()
+	waitSyncStarted(t, startedPath)
+
+	s := app.OperationSupervisor
+	if got := s.globalRunning; got != 1 {
+		t.Fatalf("held synchronous pull must hold the global capacity counter, got %d", got)
+	}
+	if got := s.sessionRunning[result.Session.ID]; got != 1 {
+		t.Fatalf("held synchronous pull must hold the Session capacity counter, got %d", got)
+	}
+	if got := s.globalBuildCount; got != 0 {
+		t.Fatalf("synchronous pull must not consume the build sub-ceiling: %d", got)
+	}
+	if got := len(s.ops); got != 0 {
+		t.Fatalf("synchronous pull must not register an Operation: %d registered", got)
+	}
+
+	// The saturated global ceiling refuses both synchronous surfaces of a
+	// second Session whose own Session counters are untouched.
+	second, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	if w := syncPullCapacityRequest(t, app, second.Token); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("pull at the saturated global ceiling: expected %d, got %d (%s)",
+			http.StatusTooManyRequests, w.Code, w.Body.String())
+	}
+	if code := decodeRejectedResponse(t, syncRegistryLoginCapacityRequest(t, app, second.Token)); code != capacityRefusalCode {
+		t.Fatalf("registry login at the saturated global ceiling: expected %q, got %q", capacityRefusalCode, code)
+	}
+	if got := s.globalRunning; got != 1 {
+		t.Fatalf("refused requests must not consume capacity: global=%d", got)
+	}
+	if _, exists := s.sessionRunning[second.Session.ID]; exists {
+		t.Fatal("refused second-Session requests must not consume Session capacity")
+	}
+	if got := len(s.ops); got != 0 {
+		t.Fatalf("refused requests must not register an Operation: %d registered", got)
+	}
+
+	// Release the held command: the handler completes and releases its slot
+	// exactly once — completion, not retention, ends capacity.
+	if err := os.WriteFile(releasePath, []byte("release"), 0644); err != nil {
+		t.Fatalf("cannot release held pull: %v", err)
+	}
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("synchronous pull handler did not complete after release")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("held pull must complete successfully: expected %d, got %d (%s)", http.StatusOK, w.Code, w.Body.String())
+	}
+	if got := s.globalRunning; got != 0 {
+		t.Fatalf("completion must release the synchronous reservation exactly once: global=%d", got)
+	}
+	if got := len(s.sessionRunning); got != 0 {
+		t.Fatalf("completion must release the Session slot exactly once: %d sessions", got)
+	}
+	if got := len(s.ops); got != 0 {
+		t.Fatalf("completion must not register an Operation: %d registered", got)
+	}
+
+	// The freed capacity is immediately reusable for ordinary work — no
+	// waiting, no queue, no retry delay.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+	if w := syncPullCapacityRequest(t, app, result.Token); w.Code != http.StatusOK {
+		t.Fatalf("freed capacity must admit a pull immediately: expected %d, got %d (%s)",
+			http.StatusOK, w.Code, w.Body.String())
+	}
+	if got := s.globalRunning; got != 0 {
+		t.Fatalf("completed pull must not keep capacity: global=%d", got)
+	}
+}
+
+// TestSynchronousRegistryLoginHoldsSessionCapacityAndReleasesOnFailure
+// proves the login counterpart at the Session scope: a held synchronous
+// registry login occupies the SAME Session and global counters with no
+// Operation registered, refuses another login of the SAME Session at the
+// saturated Session ceiling before any Docker command starts (while another
+// Session still uses free global capacity), stays stdin-only for its
+// credential, and releases exactly once through its failure path.
+func TestSynchronousRegistryLoginHoldsSessionCapacityAndReleasesOnFailure(t *testing.T) {
+	app, result := newCapacityTestApp(t)
+	// One Session slot: the held login saturates the Session ceiling while
+	// the global ceiling still has room.
+	app.OperationSupervisor.maxPerSession = 1
+
+	seam, startedPath, releasePath := newHeldSyncSeam(t, 9)
+	var started atomic.Int32
+	var loginArgs atomic.Value
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		started.Add(1)
+		loginArgs.Store(append([]string(nil), args...))
+		return seam(ctx, name, args...)
+	}
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- syncRegistryLoginCapacityRequest(t, app, result.Token)
+	}()
+	waitSyncStarted(t, startedPath)
+
+	s := app.OperationSupervisor
+	if got := s.globalRunning; got != 1 {
+		t.Fatalf("held synchronous login must hold the global capacity counter, got %d", got)
+	}
+	if got := s.sessionRunning[result.Session.ID]; got != 1 {
+		t.Fatalf("held synchronous login must hold the Session capacity counter, got %d", got)
+	}
+	if got := len(s.ops); got != 0 {
+		t.Fatalf("synchronous login must not register an Operation: %d registered", got)
+	}
+
+	// The credential stays stdin-only while the synchronous reservation is
+	// held: the marker password never appears in the docker argv.
+	if argv, ok := loginArgs.Load().([]string); ok {
+		for _, arg := range argv {
+			if arg == syncCapacitySecretPassword {
+				t.Fatalf("registry password appeared in argv: %v", argv)
+			}
+		}
+	} else {
+		t.Fatal("held login argv was not captured")
+	}
+
+	// The saturated Session ceiling refuses another login of the same
+	// Session before any Docker command, with no credential in the response.
+	if w := syncRegistryLoginCapacityRequest(t, app, result.Token); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("login at the saturated Session ceiling: expected %d, got %d (%s)",
+			http.StatusTooManyRequests, w.Code, w.Body.String())
+	} else if code := decodeRejectedResponse(t, w); code != capacityRefusalCode {
+		t.Fatalf("capacity refusal code: expected %q, got %q", capacityRefusalCode, code)
+	} else if strings.Contains(w.Body.String(), syncCapacitySecretPassword) {
+		t.Fatalf("capacity refusal response leaked the registry password")
+	}
+	if got := started.Load(); got != 1 {
+		t.Fatalf("refused login must not reach Docker execution: %d docker commands started", got)
+	}
+
+	// The refusal was Session-scoped: another Session still uses free global
+	// capacity.
+	second, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	done2 := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done2 <- syncRegistryLoginCapacityRequest(t, app, second.Token)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if started.Load() == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second-Session login was not admitted at the saturated Session ceiling")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := s.sessionRunning[second.Session.ID]; got != 1 {
+		t.Fatalf("admitted second-Session login must hold its own Session slot, got %d", got)
+	}
+	if got := s.globalRunning; got != 2 {
+		t.Fatalf("both held synchronous logins must share the global counter, got %d", got)
+	}
+
+	// Release both held commands: both handlers reach their failure path and
+	// release their slots exactly once.
+	if err := os.WriteFile(releasePath, []byte("release"), 0644); err != nil {
+		t.Fatalf("cannot release held logins: %v", err)
+	}
+	for _, ch := range []chan *httptest.ResponseRecorder{done, done2} {
+		select {
+		case w := <-ch:
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("failing synchronous login: expected %d, got %d (%s)",
+					http.StatusBadRequest, w.Code, w.Body.String())
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("synchronous login handler did not complete after release")
+		}
+	}
+	if got := s.globalRunning; got != 0 {
+		t.Fatalf("failure must release the synchronous reservations exactly once: global=%d", got)
+	}
+	if got := len(s.sessionRunning); got != 0 {
+		t.Fatalf("failure must release the Session slots exactly once: %d sessions", got)
+	}
+
+	// The freed capacity is immediately reusable for a successful login.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+	if w := syncRegistryLoginCapacityRequest(t, app, result.Token); w.Code != http.StatusOK {
+		t.Fatalf("freed capacity must admit a login immediately: expected %d, got %d (%s)",
+			http.StatusOK, w.Code, w.Body.String())
+	}
+}
+
+// TestSynchronousPullLoginStartFailureReleasesCapacity proves the pre-exec
+// failure path: when the synchronous Docker command cannot even start, the
+// reservation is released exactly once and the capacity is immediately
+// reusable for the same surface.
+func TestSynchronousPullLoginStartFailureReleasesCapacity(t *testing.T) {
+	app, result := newCapacityTestApp(t)
+	app.OperationSupervisor.maxPerSession = 1
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// A docker command that cannot start.
+		return exec.CommandContext(ctx, "nonexistent-docker-helper-test-binary")
+	}
+
+	w := syncPullCapacityRequest(t, app, result.Token)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("pull start failure: expected %d, got %d (%s)", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+	wl := syncRegistryLoginCapacityRequest(t, app, result.Token)
+	if wl.Code != http.StatusBadRequest {
+		t.Fatalf("login start failure: expected %d, got %d (%s)", http.StatusBadRequest, wl.Code, wl.Body.String())
+	}
+
+	s := app.OperationSupervisor
+	if got := s.globalRunning; got != 0 {
+		t.Fatalf("start failure must release the synchronous reservation exactly once: global=%d", got)
+	}
+	if got := len(s.sessionRunning); got != 0 {
+		t.Fatalf("start failure must release the Session slot exactly once: %d sessions", got)
+	}
+	if got := len(s.ops); got != 0 {
+		t.Fatalf("start failure must not register an Operation: %d registered", got)
+	}
+
+	// The freed capacity is immediately reusable.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+	if w := syncPullCapacityRequest(t, app, result.Token); w.Code != http.StatusOK {
+		t.Fatalf("freed capacity must admit a pull immediately: expected %d, got %d (%s)",
+			http.StatusOK, w.Code, w.Body.String())
 	}
 }

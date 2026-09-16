@@ -1058,14 +1058,16 @@ The daemon enforces fixed, non-configurable security ceilings on how
 much work one token can make it do at once (measured host protection,
 not per-user quotas):
 
-- at most 4 concurrent operations (run or build) per session and 8
-  across the whole daemon, of which at most 2 may be builds;
+- at most 4 concurrent executions per session and 8 across the whole
+  daemon, of which at most 2 may be builds — this counts run/build
+  operations AND synchronous pull/registry-login executions;
 - at most 16 caller mounts per run request.
 
 Beyond a ceiling the request is refused immediately — there is no queue
 and no waiting; retry when capacity frees. The refusal is HTTP 429 with
-the code `operation_capacity_unavailable` ("too many concurrent
-operations") for build/run, and HTTP 400 with `too_many_mounts` for an
+the code `capacity_unavailable` ("too many concurrent requests") for
+every Session-token Docker execution surface (run, build, pull, and
+registry login), and HTTP 400 with `too_many_mounts` for an
 over-limit mount list. A refused request leaves no pins, no staging, no
 workload-MAC state and no started container behind.
 

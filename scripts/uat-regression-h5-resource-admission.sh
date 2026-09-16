@@ -17,10 +17,16 @@
 # 256 KiB raw log response chunk):
 #   * Session/global concurrency: 4 long-lived operations occupy the Session
 #     ceiling; the next request is refused immediately with the single
-#     bounded capacity refusal (HTTP 429 / operation_capacity_unavailable);
+#     bounded capacity refusal (HTTP 429 / capacity_unavailable);
 #     a second Session still uses free global capacity; the refusal creates
 #     no Docker container/process/state; terminating one operation makes the
 #     capacity reusable immediately;
+#   * synchronous surfaces: while real Operation capacity is saturated,
+#     valid pull and registry-login requests are refused immediately with
+#     the same capacity refusal BEFORE Docker execution (audited:
+#     pull.rejected present, no pull.start and no registry.login.start in
+#     the window); after recovery an ordinary pull succeeds and a registry
+#     login is admitted again (no external registry dependency);
 #   * refusal-before-expensive-work: the capacity-refused run request carries
 #     a valid mount yet adds no mount pin and no workload-MAC state; the
 #     capacity-refused build adds no staging tree;
@@ -179,12 +185,12 @@ DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
   dh run --image "$IMAGE" --mount "shareda1:/mnt/refused" -- sh -ec "true" \
   >/tmp/h5-run-refused.out 2>/tmp/h5-run-refused.err
 RC=$?
-if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-run-refused.err && grep -q 'code operation_capacity_unavailable' /tmp/h5-run-refused.err; then
-  reg_ok "5th request refused immediately with the single bounded capacity refusal (429 / operation_capacity_unavailable)"
+if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-run-refused.err && grep -q 'code capacity_unavailable' /tmp/h5-run-refused.err; then
+  reg_ok "5th request refused immediately with the single bounded capacity refusal (429 / capacity_unavailable)"
 else
-  reg_fail "5th request: expected immediate 429 / operation_capacity_unavailable refusal (rc=$RC, stderr: $(head -2 /tmp/h5-run-refused.err | redact))"
+  reg_fail "5th request: expected immediate 429 / capacity_unavailable refusal (rc=$RC, stderr: $(head -2 /tmp/h5-run-refused.err | redact))"
 fi
-if grep -q 'too many concurrent operations' /tmp/h5-run-refused.err; then
+if grep -q 'too many concurrent requests' /tmp/h5-run-refused.err; then
   reg_ok "capacity refusal message names no capacity topology (session/global hidden)"
 else
   reg_fail "capacity refusal message missing: $(head -2 /tmp/h5-run-refused.err | redact)"
@@ -216,10 +222,10 @@ DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
   dh build --context . --dockerfile Dockerfile --image uat-h5-refused:2.2 \
   >/tmp/h5-build-refused.out 2>/tmp/h5-build-refused.err
 RC=$?
-if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-build-refused.err && grep -q 'code operation_capacity_unavailable' /tmp/h5-build-refused.err; then
+if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-build-refused.err && grep -q 'code capacity_unavailable' /tmp/h5-build-refused.err; then
   reg_ok "build at the Session ceiling refused with the same bounded capacity refusal"
 else
-  reg_fail "build at the Session ceiling: expected 429 / operation_capacity_unavailable (rc=$RC, stderr: $(head -2 /tmp/h5-build-refused.err | redact))"
+  reg_fail "build at the Session ceiling: expected 429 / capacity_unavailable (rc=$RC, stderr: $(head -2 /tmp/h5-build-refused.err | redact))"
 fi
 if [ "$(inventory_count "$RUNTIME_DIR/builds")" = "$BUILDS_BEFORE" ]; then
   reg_ok "capacity-refused build: no staging tree under $RUNTIME_DIR/builds"
@@ -227,11 +233,54 @@ else
   reg_fail "capacity-refused build: staging residue appeared ($(inventory_count "$RUNTIME_DIR/builds") != $BUILDS_BEFORE)"
 fi
 printf 'FROM scratch\n' > "$WS_A/Dockerfile"
-journal="$(journalctl -u docker-helper.service --since "$CAPACITY_MARK" --no-pager 2>/dev/null || true)"
-if printf '%s\n' "$journal" | grep -q '"result":"operation_capacity_unavailable"'; then
-  reg_ok "run/build rejections audited with the capacity refusal code"
+
+# --- A: synchronous surfaces — pull and registry-login refuse first -----------
+# While the real Operation capacity of Session A is saturated, valid pull and
+# registry-login requests must be refused immediately with the same capacity
+# refusal BEFORE any Docker process is started. No external registry or
+# network dependency is needed: admission refuses first. The audit window
+# proves it: pull.rejected carries the capacity code while no pull.start and
+# no registry.login.start exist in the window (registry login writes its
+# start record only after admission, immediately before its docker
+# execution).
+DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
+  dh pull --image "$IMAGE" \
+  >/tmp/h5-pull-refused.out 2>/tmp/h5-pull-refused.err
+RC=$?
+if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-pull-refused.err && grep -q 'code capacity_unavailable' /tmp/h5-pull-refused.err; then
+  reg_ok "synchronous pull refused at the Session ceiling before Docker execution (429 / capacity_unavailable)"
 else
-  reg_fail "no run/build.rejected audit record carries operation_capacity_unavailable in the journal window"
+  reg_fail "synchronous pull: expected immediate 429 / capacity_unavailable refusal (rc=$RC, stderr: $(head -2 /tmp/h5-pull-refused.err | redact))"
+fi
+
+printf '%s\n' 'uat-sync-capacity-password' | \
+DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
+  dh registry login --registry registry.example.com --username "$USER_A" --password-stdin \
+  >/tmp/h5-login-refused.out 2>/tmp/h5-login-refused.err
+RC=$?
+if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-login-refused.err && grep -q 'code capacity_unavailable' /tmp/h5-login-refused.err; then
+  reg_ok "synchronous registry login refused at the Session ceiling before Docker execution (429 / capacity_unavailable)"
+else
+  reg_fail "synchronous registry login: expected immediate 429 / capacity_unavailable refusal (rc=$RC, stderr: $(head -2 /tmp/h5-login-refused.err | redact))"
+fi
+if grep -q 'uat-sync-capacity-password' /tmp/h5-login-refused.err /tmp/h5-login-refused.out 2>/dev/null; then
+  reg_fail "synchronous registry-login refusal leaked the password in CLI diagnostics"
+else
+  reg_ok "synchronous registry-login refusal leaks no password in CLI diagnostics"
+fi
+
+journal="$(journalctl -u docker-helper.service --since "$CAPACITY_MARK" --no-pager 2>/dev/null || true)"
+if printf '%s\n' "$journal" | grep -q '"result":"capacity_unavailable"'; then
+  reg_ok "run/build/pull rejections audited with the capacity refusal code"
+else
+  reg_fail "no run/build/pull.rejected audit record carries capacity_unavailable in the journal window"
+fi
+if printf '%s\n' "$journal" | grep -q '"event":"pull.rejected"' \
+  && ! printf '%s\n' "$journal" | grep -q '"event":"pull.start"' \
+  && ! printf '%s\n' "$journal" | grep -q '"event":"registry.login.start"'; then
+  reg_ok "synchronous refusals precede Docker execution: pull.rejected audited, no pull.start and no registry.login.start in the window"
+else
+  reg_fail "audit window shows Docker execution for a refused synchronous request (pull.start or registry.login.start present)"
 fi
 
 # --- A: second Session uses free global capacity (distinguishes scopes) -------
@@ -255,7 +304,7 @@ fi
 
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_B" \
   dh run --image "$IMAGE" -- sh -ec "true" >/tmp/h5-run-b5.out 2>/tmp/h5-run-b5.err
-if grep -q 'status 429' /tmp/h5-run-b5.err && grep -q 'code operation_capacity_unavailable' /tmp/h5-run-b5.err; then
+if grep -q 'status 429' /tmp/h5-run-b5.err && grep -q 'code capacity_unavailable' /tmp/h5-run-b5.err; then
   reg_ok "9th operation refused at the ceilings (no queue, no wait)"
 else
   reg_fail "9th operation: expected immediate 429 refusal (stderr: $(head -2 /tmp/h5-run-b5.err | redact))"
@@ -487,6 +536,36 @@ if [ "$?" -eq 0 ]; then
   reg_ok "recovery: a subsequent ordinary build succeeds"
 else
   reg_fail "recovery: the ordinary build failed: $(head -2 /tmp/h5-final-build.err | redact)"
+fi
+
+# Recovery of the synchronous surfaces: an ordinary pull is admitted again
+# and succeeds against the already-present image (no external registry), and
+# a registry login is admitted again — its registry.login.start is audited
+# before its docker execution, which fails fast against a loopback-only
+# unreachable address (no capacity refusal, no external registry).
+DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
+  dh pull --image "$IMAGE" \
+  >/tmp/h5-pull-recovery.out 2>/tmp/h5-pull-recovery.err
+if [ "$?" -eq 0 ]; then
+  reg_ok "recovery: an ordinary pull is admitted again and succeeds"
+else
+  reg_fail "recovery: the ordinary pull failed: $(head -2 /tmp/h5-pull-recovery.err | redact)"
+fi
+LOGIN_RECOVERY_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
+printf '%s\n' 'uat-recovery-password' | \
+DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
+  dh registry login --registry 127.0.0.1:1 --username "$USER_A" --password-stdin \
+  >/tmp/h5-login-recovery.out 2>/tmp/h5-login-recovery.err
+if ! grep -q 'status 429' /tmp/h5-login-recovery.err && ! grep -q 'code capacity_unavailable' /tmp/h5-login-recovery.err; then
+  reg_ok "recovery: a registry login is admitted again (docker execution reached, no capacity refusal)"
+else
+  reg_fail "recovery: registry login was capacity-refused: $(head -2 /tmp/h5-login-recovery.err | redact)"
+fi
+recovery_journal="$(journalctl -u docker-helper.service --since "$LOGIN_RECOVERY_MARK" --no-pager 2>/dev/null || true)"
+if printf '%s\n' "$recovery_journal" | grep -q '"event":"registry.login.start"'; then
+  reg_ok "recovery: registry.login.start audited before the admitted login's docker execution"
+else
+  reg_fail "recovery: no registry.login.start audit record (the recovered login was not admitted)"
 fi
 service_healthy "recovery"
 

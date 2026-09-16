@@ -543,10 +543,13 @@ inside the session workspace (the daemon validates containment).
 Run and build are asynchronous operations under fixed concurrency
 ceilings (4 per session, 8 per daemon, of which 2 may be builds; a mount
 ceiling of 16 caller mounts per run applies): beyond a ceiling the
-request is refused immediately with \fBoperation_capacity_unavailable\fR
-(HTTP 429, "too many concurrent operations"); there is no queue, and the
+request is refused immediately with \fBcapacity_unavailable\fR
+(HTTP 429, "too many concurrent requests"); there is no queue, and the
 client decides whether to retry. A refused request leaves no pin, no
-staging, no workload-MAC state and no started container behind.
+staging, no workload-MAC state and no started container behind. The
+same ceilings also bound the synchronous pull and registry-login
+executions, which reserve the same shared capacity before their Docker
+process starts and never register an operation.
 .TP
 .B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] \-\- [command]
  Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.

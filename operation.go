@@ -38,14 +38,18 @@ const (
 // evidence. They are not Principal/Launcher quotas and have no config, CLI,
 // or API surface.
 //
-// Concurrent Operation capacity counts preparation and running execution of
-// every admitted Operation and is released exactly once when the Operation
-// reaches a terminal state (retained metadata/logs never keep capacity).
+// Concurrent execution capacity counts preparation and running execution of
+// every admitted Operation AND every synchronous Session-token Docker
+// execution (pull, registry-login), all through the one shared accounting
+// core below. Operation-backed capacity is released exactly once when the
+// Operation reaches a terminal state (retained metadata/logs never keep
+// capacity); synchronous capacity is released exactly once when the request
+// handler returns.
 //
-//   - 4 concurrent Operations per Session: two times the maximum
+//   - 4 concurrent executions per Session: two times the maximum
 //     per-Session concurrency exercised by the existing UAT (2), sized for
 //     realistic agent parallelism.
-//   - 8 concurrent Operations globally: keeps at least half of the global
+//   - 8 concurrent executions globally: keeps at least half of the global
 //     capacity available to other Sessions when one Session is saturated.
 //   - 2 concurrent builds globally: worst-case hostile staging occupancy is
 //     2 × 128 MiB (the H4 per-build staging ceiling) = 256 MiB, which is 42%
@@ -229,13 +233,17 @@ type operationSupervisor struct {
 	// currently refused. Checked Launcher/Principal deletion sets it as the
 	// operation-admission closing point: once set, no new Operation may be
 	// admitted for that Launcher, while Operations admitted before it remain
-	// visible to checked cleanup.
+	// visible to checked cleanup. Quiesce is Operation lifecycle policy: it
+	// is consulted by reserve/admitReserved, never by the shared capacity
+	// accounting, and never by the synchronous execution surfaces.
 	quiesced map[string]bool
 	// Release-2.2 fixed capacity accounting (SC2/H5). The ceilings are the
 	// documented security constants; only the counts live here. A capacity
-	// slot is reserved before any expensive preparation, transfers to the
-	// admitted Operation at final admission, and is released exactly once
-	// when the Operation reaches a terminal state — never when retained
+	// slot is reserved before any expensive preparation (Operations) or
+	// before any Docker process starts (synchronous surfaces), transfers to
+	// the admitted Operation at final admission, and is released exactly
+	// once when the Operation reaches a terminal state or when the
+	// synchronous request handler returns — never when retained
 	// metadata/logs are pruned.
 	maxPerSession    int
 	maxGlobal        int
@@ -279,21 +287,24 @@ const (
 	admissionRefusedCapacity
 )
 
-// operationReservation is the narrow internal capacity lease of the fixed
+// capacityReservation is the narrow internal capacity lease of the fixed
 // Release-2.2 admission ceilings. It is acquired before any expensive
-// preparation, consumed by admitReserved into the registered Operation's
+// preparation (Operations) or before any Docker process starts (synchronous
+// surfaces), consumed by admitReserved into the registered Operation's
 // capacity, and released exactly once on every other path. It is not an
 // Operation, is never registered or exposed, and never waits: at a security
 // ceiling the request is refused immediately and the caller decides whether
 // to retry.
-type operationReservation struct {
+type capacityReservation struct {
 	release func()
 }
 
 // Release returns the reserved capacity exactly once. It is safe to call
 // repeatedly and after the reservation was converted into an admitted
-// Operation (post-conversion calls are no-ops).
-func (r *operationReservation) Release() {
+// Operation (post-conversion calls are no-ops). The nil reservation is a
+// no-op, so callers that skip reservation (tests without a supervisor) can
+// release unconditionally.
+func (r *capacityReservation) Release() {
 	if r == nil {
 		return
 	}
@@ -303,38 +314,28 @@ func (r *operationReservation) Release() {
 	}
 }
 
-// reserve atomically checks the lifecycle gates (daemon shutdown, Launcher
-// quiesce) and the fixed Release-2.2 capacity ceilings (Session scope, global
-// scope, and the build sub-ceiling), then reserves one capacity slot for the
-// given operation kind on behalf of the Session. The check-and-reserve is a
-// single critical section under the supervisor lock, so concurrent reserves
-// can never oversubscribe.
-//
-// The reservation must be released exactly once if the operation does not
-// reach admitReserved; the callers' failure paths own that release. Capacity
-// is never re-checked or re-reserved at final admission.
-func (s *operationSupervisor) reserve(sessionID, launcherID, kind string) (*operationReservation, admissionDecision) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.shutting {
-		return nil, admissionRefusedShutdown
-	}
-	if s.quiesced[launcherID] {
-		return nil, admissionRefusedQuiesced
-	}
+// reserveCapacityLocked is the pure capacity-accounting core of the fixed
+// Release-2.2 ceilings, called under the supervisor lock. It checks the
+// Session ceiling, the global ceiling and the build sub-ceiling, then
+// reserves one capacity slot for the Session. The build flag is the one
+// dimension the accounting distinguishes: only a build consumes the narrow
+// global build sub-ceiling; every other caller is accounted against the
+// Session and global ceilings alone. It returns nil when a ceiling is
+// exhausted; the caller owns the refusal in its own critical section.
+func (s *operationSupervisor) reserveCapacityLocked(sessionID string, build bool) *capacityReservation {
 	if s.globalRunning >= s.maxGlobal {
-		return nil, admissionRefusedCapacity
+		return nil
 	}
 	if s.sessionRunning[sessionID] >= s.maxPerSession {
-		return nil, admissionRefusedCapacity
+		return nil
 	}
-	if kind == operationKindBuild && s.globalBuildCount >= s.maxGlobalBuilds {
-		return nil, admissionRefusedCapacity
+	if build && s.globalBuildCount >= s.maxGlobalBuilds {
+		return nil
 	}
 
 	s.globalRunning++
 	s.sessionRunning[sessionID]++
-	if kind == operationKindBuild {
+	if build {
 		s.globalBuildCount++
 	}
 
@@ -355,11 +356,56 @@ func (s *operationSupervisor) reserve(sessionID, launcherID, kind string) (*oper
 		if s.sessionRunning[sessionID] == 0 {
 			delete(s.sessionRunning, sessionID)
 		}
-		if kind == operationKindBuild && s.globalBuildCount > 0 {
+		if build && s.globalBuildCount > 0 {
 			s.globalBuildCount--
 		}
 	}
-	return &operationReservation{release: release}, admissionAccepted
+	return &capacityReservation{release: release}
+}
+
+// reserveCapacity atomically reserves one capacity slot on behalf of the
+// Session under the fixed Release-2.2 ceilings (SC2/H5). It is the shared
+// resource-accounting owner of every Session-token Docker execution surface:
+// Operation-backed run/build reach it through reserve (which adds the
+// Operation lifecycle gates), and the synchronous pull/registry-login
+// surfaces call it directly before their Docker process is started — they
+// consume the SAME Session/global counters and participate in the SAME
+// common ceilings, but never register an Operation. Capacity is pure
+// resource accounting: no lifecycle gate (daemon shutdown, Launcher quiesce)
+// is consulted here; that policy stays with its Operation-admission owners.
+// The reservation is released exactly once when the synchronous handler
+// returns — completion, Docker failure, and every pre-exec failure path.
+func (s *operationSupervisor) reserveCapacity(sessionID string, build bool) (*capacityReservation, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res := s.reserveCapacityLocked(sessionID, build)
+	return res, res != nil
+}
+
+// reserve atomically checks the Operation lifecycle gates (daemon shutdown,
+// Launcher quiesce) and the fixed Release-2.2 capacity ceilings (Session
+// scope, global scope, and the build sub-ceiling), then reserves one
+// capacity slot for the given operation kind on behalf of the Session. The
+// check-and-reserve is a single critical section under the supervisor lock,
+// so concurrent reserves can never oversubscribe.
+//
+// The reservation must be released exactly once if the operation does not
+// reach admitReserved; the callers' failure paths own that release. Capacity
+// is never re-checked or re-reserved at final admission.
+func (s *operationSupervisor) reserve(sessionID, launcherID, kind string) (*capacityReservation, admissionDecision) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shutting {
+		return nil, admissionRefusedShutdown
+	}
+	if s.quiesced[launcherID] {
+		return nil, admissionRefusedQuiesced
+	}
+	res := s.reserveCapacityLocked(sessionID, kind == operationKindBuild)
+	if res == nil {
+		return nil, admissionRefusedCapacity
+	}
+	return res, admissionAccepted
 }
 
 // admitReserved re-checks the lifecycle closure at final admission and
@@ -371,7 +417,7 @@ func (s *operationSupervisor) reserve(sessionID, launcherID, kind string) (*oper
 // The reserved capacity is never re-checked or re-reserved here: it transfers
 // to the registered Operation and is released exactly once when the Operation
 // reaches a terminal state.
-func (s *operationSupervisor) admitReserved(op *operation, reservation *operationReservation) admissionDecision {
+func (s *operationSupervisor) admitReserved(op *operation, reservation *capacityReservation) admissionDecision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.shutting {
