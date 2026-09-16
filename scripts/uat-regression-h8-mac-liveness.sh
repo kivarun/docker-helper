@@ -155,7 +155,7 @@ shim_marker_present() { # -> 0 when a shim child process exists
   # may match while the shim is armed.
   local cmd
   cmd="$(backend_command_path)"
-  pgrep -f -- "$cmd\$" >/dev/null 2>&1
+  pgrep -f -- "${cmd}([[:space:]]|\$)" >/dev/null 2>&1
 }
 
 # Dump the hostile-state evidence when the hold deadline fires: the parked
