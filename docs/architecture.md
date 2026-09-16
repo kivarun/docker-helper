@@ -449,6 +449,28 @@ workspace access is type-based and does not reproduce AppArmor's per-path
 managed-boundary rule; canonical application-level allowed-root validation
 remains authoritative in both modes.
 
+Descriptor-safe recursive relabeling (C3): SELinux recursive workspace
+relabeling is delegated to the upstream libselinux `selinux_restorecon`
+implementation; supported SELinux system mode requires a proven
+descriptor-safe implementation — `libselinux1 >= 3.11`, the rewrite that
+labels each inode through `/proc/self/fd` paths so a pathname replacement
+racing the tree walk cannot redirect a relabel to a foreign inode. The floor
+is expressed as an RPM hard dependency and re-proven by the tarball SELinux
+installer from rpm package metadata BEFORE any SELinux installation mutation
+(the restorecon frontend version is not proof of the loaded libselinux
+implementation; the package the linked `libselinux.so.1` belongs to is). A
+real procfs is a separate mandatory runtime prerequisite, because the
+descriptor-backed context operations use `/proc/self/fd`: without it the
+upstream implementation silently falls back to pathname labeling, so the one
+recursive workspace relabel owner refuses to run without real procfs
+(statfs filesystem identity), fail-closed before any fcontext mutation.
+Mount-point safety (`checkTreeRelabelBoundary`) and pathname-TOCTOU safety
+are separate invariants with separate owners. Helper-owned recursive
+relabels (trusted-CA runtime tree, deployment state, package scripts) are
+covered by the same packaged/install-time libselinux guarantee and never
+traverse a Principal-mutable tree, so they cannot cross the C3 trust
+boundary. No home-grown recursive relabel traversal exists.
+
 The admin-token replacement lifecycle is the one narrow write surface in the
 config directory, and it is NOT a generic writable config grant — the two
 backends treat config paths differently by their mechanics:
@@ -3005,7 +3027,10 @@ Filesystem-namespace directives (`ProtectSystem`, `ProtectHome`,
 mount specifications) are deliberately not used in the system unit: any
 directive that creates a separate mount namespace hides mount pins created
 by docker-helper from dockerd (bind mounts would fail with permission
-denied). Access to kernel and cgroup paths is restricted by the AppArmor
+denied). No shipped directive hides procfs, and the recursive workspace
+relabel depends on real procfs (see [Mandatory access control](#mandatory-access-control)):
+any future hardening that would separate the daemon from procfs must also
+fail that relabel closed. Access to kernel and cgroup paths is restricted by the AppArmor
 default-deny policy instead; ProtectHome is disabled to allow workspace
 access. The hardening profile does not by itself create a full security
 boundary: access to the Docker socket means the process-level directives
@@ -3679,6 +3704,19 @@ proof; a spelling outside the capability never reaches the resolver.
 Note: `EvalSymlinks` alone does not prevent TOCTOU attacks where the
 filesystem changes between validation and use. The specific operation
 mitigations (staging, inode pinning) address this gap.
+
+### SELinux relabel race
+
+The recursive workspace relabel delegates the tree walk to the upstream
+descriptor-safe libselinux restorecon implementation (see
+[Mandatory access control](#mandatory-access-control)): a hostile
+pathname replacement DURING the walk cannot redirect a relabel to a
+foreign inode, because the safe implementation labels through
+`/proc/self/fd` paths over pinned descriptors. That pathname-TOCTOU
+invariant is separate from mount-point safety
+(`checkTreeRelabelBoundary`), and both are enforced before the relabel
+runs; without a proven descriptor-safe implementation or real procfs the
+relabel fails closed.
 
 ### Cross-workspace access
 

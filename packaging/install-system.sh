@@ -39,6 +39,15 @@ SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
 SEMODULE="${SEMODULE:-semodule}"
 RESTORECON="${RESTORECON:-restorecon}"
 BINDFS="${BINDFS:-bindfs}"
+# C3: descriptor-safe recursive relabel floor. The libselinux 3.11
+# selinux_restorecon rewrite labels inodes through /proc/self/fd paths so a
+# pathname replacement racing the tree walk cannot redirect a relabel to a
+# foreign inode; older implementations relabel by pathname and stay racy.
+# The supported openSUSE SELinux path proves the installed implementation
+# through the rpm package database (libselinux1); no other provider grammar
+# is invented, and anything older, non-libselinux, or unparseable fails
+# closed before any SELinux installation mutation.
+LIBSELINUX_MIN="3.11"
 # Kernel truth for MAC backend selection (the same sources the RPM postinstall
 # and the MAC UAT adapters use).
 AA_ENABLED_PATH="${AA_ENABLED_PATH:-/sys/module/apparmor/parameters/enabled}"
@@ -190,6 +199,93 @@ select_mac_backend() {
 	fi
 }
 
+# version_at_least A B compares two dot-separated numeric version strings
+# (three components). Returns 0 when A >= B, 1 when A < B, and 2 when either
+# string carries a non-numeric component (the caller refuses unparseable
+# versions; it never guesses).
+version_at_least() {
+	local a="$1" b="$2" i ai bi
+	local -a A B
+	IFS=. read -r -a A <<<"$a"
+	IFS=. read -r -a B <<<"$b"
+	for i in 0 1 2; do
+		ai="${A[i]:-0}"
+		bi="${B[i]:-0}"
+		case "$ai" in ''|*[!0-9]*) return 2 ;; esac
+		case "$bi" in ''|*[!0-9]*) return 2 ;; esac
+		if ((10#$ai > 10#$bi)); then return 0; fi
+		if ((10#$ai < 10#$bi)); then return 1; fi
+	done
+	return 0
+}
+
+# check_libselinux_floor establishes that the installed libselinux restorecon
+# implementation is the descriptor-safe floor (libselinux1 >= $LIBSELINUX_MIN)
+# BEFORE any SELinux installation mutation. The supported openSUSE SELinux
+# path proves it through the rpm package database: the restorecon frontend
+# must link libselinux.so.1, the resolved library file must be owned by the
+# libselinux1 package, and that package's version must satisfy the floor.
+# A missing rpm database, a missing linkage, a foreign owning package, an
+# older version, or an unparseable version all fail closed with an
+# actionable diagnostic. Nothing here is a generic-distro version heuristic.
+check_libselinux_floor() {
+	if ! command -v ldd >/dev/null 2>&1; then
+		error "ldd not found in PATH"
+		error "cannot establish the installed libselinux implementation; docker-helper SELinux system mode requires libselinux1 >= $LIBSELINUX_MIN."
+		exit 1
+	fi
+	if ! command -v rpm >/dev/null 2>&1; then
+		error "rpm not found in PATH"
+		error "cannot establish the installed libselinux implementation from the package database; docker-helper SELinux system mode requires libselinux1 >= $LIBSELINUX_MIN (install it, or use the docker-helper RPM, which requires the floor directly)."
+		exit 1
+	fi
+	local restorecon_bin lib owner name version
+	restorecon_bin="$(command -v "$RESTORECON")" || {
+		error "cannot resolve the restorecon frontend in PATH"
+		exit 1
+	}
+	lib="$(ldd "$restorecon_bin" 2>/dev/null | awk '$1 == "libselinux.so.1" {print $3; exit}' || true)"
+	if [[ -z "$lib" ]]; then
+		error "$restorecon_bin does not link libselinux.so.1"
+		error "cannot establish the installed libselinux implementation; docker-helper SELinux system mode requires libselinux1 >= $LIBSELINUX_MIN."
+		exit 1
+	fi
+	if ! lib="$(readlink -f "$lib" 2>/dev/null)" || [[ -z "$lib" ]]; then
+		error "cannot resolve the libselinux library path reported by ldd"
+		error "cannot establish the installed libselinux implementation; docker-helper SELinux system mode requires libselinux1 >= $LIBSELINUX_MIN."
+		exit 1
+	fi
+	owner="$(rpm -qf --qf '%{NAME} %{VERSION}\n' "$lib" 2>/dev/null)" || {
+		error "$lib is not owned by any installed rpm package"
+		error "cannot establish the installed libselinux implementation; docker-helper SELinux system mode requires libselinux1 >= $LIBSELINUX_MIN (install it, or use the docker-helper RPM, which requires the floor directly)."
+		exit 1
+	}
+	name="${owner%% *}"
+	version="${owner#* }"
+	if [[ "$name" != "libselinux1" ]]; then
+		error "$lib is owned by package '$name', not libselinux1"
+		error "cannot establish the descriptor-safe libselinux implementation; docker-helper SELinux system mode requires libselinux1 >= $LIBSELINUX_MIN."
+		exit 1
+	fi
+	cmp_rc=0
+	version_at_least "$version" "$LIBSELINUX_MIN" || cmp_rc=$?
+	case "$cmp_rc" in
+		0)
+			info "libselinux implementation: libselinux1-$version (descriptor-safe floor $LIBSELINUX_MIN satisfied)"
+			;;
+		1)
+			error "installed libselinux1-$version is older than the descriptor-safe floor $LIBSELINUX_MIN (the C3 pathname-replacement relabel race is closed only in libselinux >= 3.11)"
+			error "install libselinux1 >= $LIBSELINUX_MIN first, or use the docker-helper RPM, which requires the floor directly."
+			exit 1
+			;;
+		*)
+			error "cannot parse installed libselinux1 version '$version'"
+			error "refusing to proceed on a SELinux host without a provable descriptor-safe libselinux implementation (requires libselinux1 >= $LIBSELINUX_MIN)."
+			exit 1
+			;;
+	esac
+}
+
 # check_selected_mac_tools validates the runtime tooling and the bundled MAC
 # artifact for the selected backend. It runs BEFORE any installation mutation,
 # so a missing required tool or a missing bundled artifact never leaves a
@@ -212,6 +308,9 @@ check_selected_mac_tools() {
 			error "SELinux runtime tooling (restorecon) is required for system mode on a SELinux host."
 			exit 1
 		fi
+		# C3: prove the installed libselinux implementation is the
+		# descriptor-safe floor before any SELinux installation mutation.
+		check_libselinux_floor
 		if ! command -v "$BINDFS" >/dev/null 2>&1; then
 			error "bindfs not found in PATH"
 			error "bindfs is required for SELinux read-only workload projection; install the bindfs package first."

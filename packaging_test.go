@@ -2056,6 +2056,35 @@ func (e *systemScriptEnv) fakeRestorecon(t *testing.T, script string) {
 	}
 }
 
+// fakeLdd installs an ldd fake (SELinux path) into the fake bin dir. The
+// production install-system.sh resolves the restorecon-linked libselinux.so.1
+// through ldd, so the fake emits the standard dynamic-link line for restorecon.
+func (e *systemScriptEnv) fakeLdd(t *testing.T, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.fakeBinDir, "ldd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fakeRpm installs an rpm fake (SELinux path) into the fake bin dir. The
+// production install-system.sh establishes the installed libselinux
+// implementation from the rpm package database, so the fake answers the
+// package-owner query with a canned `NAME VERSION` record.
+func (e *systemScriptEnv) fakeRpm(t *testing.T, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.fakeBinDir, "rpm"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// removeFakeTool removes a fake tool so `command -v` cannot find it.
+func (e *systemScriptEnv) removeFakeTool(t *testing.T, name string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(e.fakeBinDir, name)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
 // setLSMState writes the AppArmor and SELinux kernel-truth files that drive
 // install-system.sh backend selection.
 func (e *systemScriptEnv) setLSMState(t *testing.T, aaEnabled, selinuxEnforce string) {
@@ -2192,6 +2221,33 @@ exit 0
 	if err := os.WriteFile(filepath.Join(selinuxDir, "enforce"), []byte("0"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// Standard ldd/rpm pair for the SELinux libselinux admission: restorecon
+	// links libselinux.so.1, and the resolved library is owned by a
+	// floor-satisfying libselinux1 3.11 package record. The linked path is a
+	// real fixture file so readlink -f resolution behaves like the installed
+	// library. Backend-selection and floor-refusal tests override or remove
+	// these fakes; the AppArmor path must never invoke either tool.
+	libFixture := filepath.Join(e.destDir, "lib64", "libselinux.so.1")
+	if err := os.MkdirAll(filepath.Dir(libFixture), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(libFixture, []byte("fixture libselinux.so.1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	e.fakeLdd(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+case "$1" in
+  */restorecon) echo "	libselinux.so.1 => %s (0x00007f0000000000)" ;;
+esac
+exit 0
+`, logFile, libFixture))
+	e.fakeRpm(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+echo "libselinux1 3.11"
+exit 0
+`, logFile))
 
 	scriptData, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -2957,6 +3013,12 @@ func TestInstallSystemSelectsApparmor(t *testing.T) {
 		if strings.Contains(c, "restorecon") {
 			t.Errorf("AppArmor path must not invoke restorecon: %q", c)
 		}
+		if strings.Contains(c, "ldd") {
+			t.Errorf("AppArmor path must not invoke ldd (SELinux libselinux admission is backend-specific): %q", c)
+		}
+		if strings.Contains(c, "/rpm ") {
+			t.Errorf("AppArmor path must not invoke rpm (SELinux libselinux admission is backend-specific): %q", c)
+		}
 	}
 	if !parserSeen {
 		t.Error("AppArmor profile must be loaded on the AppArmor-only path")
@@ -3005,7 +3067,13 @@ exit 0
 			}
 		}
 		if strings.Contains(c, "restorecon") {
-			restoreconSeen = true
+			first := c
+			if idx := strings.IndexByte(c, ' '); idx >= 0 {
+				first = c[:idx]
+			}
+			if strings.HasSuffix(first, "/restorecon") {
+				restoreconSeen = true
+			}
 		}
 		if strings.Contains(c, "apparmor_parser") {
 			t.Errorf("SELinux path must not invoke apparmor_parser: %q", c)
@@ -3265,7 +3333,11 @@ exit 0
 
 	var restoreconCalls []string
 	for _, c := range env.calls(t) {
-		if strings.Contains(c, "restorecon") {
+		first := c
+		if idx := strings.IndexByte(c, ' '); idx >= 0 {
+			first = c[:idx]
+		}
+		if strings.HasSuffix(first, "/restorecon") {
 			restoreconCalls = append(restoreconCalls, c)
 		}
 	}
@@ -3314,6 +3386,196 @@ func TestInstallSystemSELinuxNoRecursiveRuntimeRestorecon(t *testing.T) {
 	if strings.Contains(string(data), "restorecon -R /run/docker-helper") {
 		t.Error("install-system.sh must not recursively restorecon /run/docker-helper (would walk mount-pin aliases and corrupt workspace SELinux labels)")
 	}
+}
+
+// TestInstallSystemSelinuxLibselinuxFloor verifies the tarball SELinux path
+// establishes the installed libselinux implementation as the descriptor-safe
+// floor (3.11, the upstream selinux_restorecon TOCTOU rewrite) from package
+// metadata BEFORE any SELinux installation mutation, and refuses to proceed
+// when the implementation is older, unverifiable, or unparseable. The
+// supported openSUSE SELinux path proves the floor through the rpm package
+// database; no other provider vocabulary is invented.
+func TestInstallSystemSelinuxLibselinuxFloor(t *testing.T) {
+	baseSetup := func(t *testing.T) *systemScriptEnv {
+		env := newSystemInstallScriptEnv(t)
+		env.setLSMState(t, "N", "1")
+		env.writeBundledSELinuxPP(t)
+		env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+		env.fakeRestorecon(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+		return env
+	}
+	callsOf := func(t *testing.T, env *systemScriptEnv, name string) []string {
+		var found []string
+		for _, c := range env.calls(t) {
+			first := c
+			if idx := strings.IndexByte(c, ' '); idx >= 0 {
+				first = c[:idx]
+			}
+			if strings.HasSuffix(first, "/"+name) {
+				found = append(found, c)
+			}
+		}
+		return found
+	}
+
+	t.Run("safe 3.11 proceeds", func(t *testing.T) {
+		env := baseSetup(t)
+		// Standard fakes: ldd resolves libselinux.so.1, rpm answers
+		// libselinux1 3.11.
+		testRoot := t.TempDir()
+		out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+		if err != nil {
+			t.Fatalf("install must proceed with a floor-satisfying libselinux1: %v\n%s", err, out)
+		}
+		if len(callsOf(t, env, "semodule")) == 0 {
+			t.Error("SElinux module load must happen once the floor is established")
+		}
+		if len(callsOf(t, env, "restorecon")) != 5 {
+			t.Errorf("restorecon must still be applied on the SELinux path (got %d calls)", len(callsOf(t, env, "restorecon")))
+		}
+	})
+
+	t.Run("old 3.10 refuses before SELinux mutation", func(t *testing.T) {
+		env := baseSetup(t)
+		env.fakeRpm(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+echo "libselinux1 3.10"
+exit 0
+`, env.logFile))
+		testRoot := t.TempDir()
+		out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+		if err == nil {
+			t.Fatal("install must refuse an older-than-floor libselinux implementation")
+		}
+		if !strings.Contains(out, "libselinux1") || !strings.Contains(out, "3.11") {
+			t.Errorf("expected actionable floor diagnostic naming libselinux1 and the 3.11 floor, got: %s", out)
+		}
+		// No SELinux installation mutation and no installed binary.
+		if len(callsOf(t, env, "semodule")) != 0 {
+			t.Errorf("semodule must not run when the libselinux floor is not met: %v", callsOf(t, env, "semodule"))
+		}
+		if len(callsOf(t, env, "restorecon")) != 0 {
+			t.Errorf("restorecon must not run when the libselinux floor is not met: %v", callsOf(t, env, "restorecon"))
+		}
+		if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+			t.Error("binary must not be installed when the libselinux floor is not met")
+		}
+	})
+
+	t.Run("unverifiable provider refuses", func(t *testing.T) {
+		env := baseSetup(t)
+		env.fakeRpm(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+echo "error: file /lib64/libselinux.so.1: No such file or directory" >&2
+exit 1
+`, env.logFile))
+		testRoot := t.TempDir()
+		out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+		if err == nil {
+			t.Fatal("install must refuse when the libselinux implementation cannot be established")
+		}
+		if !strings.Contains(out, "libselinux") {
+			t.Errorf("expected actionable diagnostic about the unverifiable libselinux implementation, got: %s", out)
+		}
+		if len(callsOf(t, env, "semodule")) != 0 {
+			t.Error("semodule must not run when the implementation is unverifiable")
+		}
+		if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+			t.Error("binary must not be installed when the implementation is unverifiable")
+		}
+	})
+
+	t.Run("restorecon without libselinux linkage refuses", func(t *testing.T) {
+		env := baseSetup(t)
+		env.fakeLdd(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+echo "	not a dynamic executable" >&2
+exit 1
+`, env.logFile))
+		testRoot := t.TempDir()
+		out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+		if err == nil {
+			t.Fatal("install must refuse when restorecon does not link libselinux.so.1")
+		}
+		if !strings.Contains(out, "libselinux") {
+			t.Errorf("expected actionable diagnostic about missing libselinux linkage, got: %s", out)
+		}
+		if len(callsOf(t, env, "semodule")) != 0 {
+			t.Error("semodule must not run when the linkage is unverifiable")
+		}
+	})
+
+	t.Run("malformed version refuses", func(t *testing.T) {
+		env := baseSetup(t)
+		env.fakeRpm(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+echo "libselinux1 not-a-version"
+exit 0
+`, env.logFile))
+		testRoot := t.TempDir()
+		out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+		if err == nil {
+			t.Fatal("install must refuse an unparseable libselinux version")
+		}
+		if !strings.Contains(out, "libselinux") {
+			t.Errorf("expected actionable diagnostic about the unparseable version, got: %s", out)
+		}
+		if len(callsOf(t, env, "semodule")) != 0 {
+			t.Error("semodule must not run when the version cannot be parsed")
+		}
+	})
+
+	t.Run("missing rpm tool refuses", func(t *testing.T) {
+		if _, err := exec.LookPath("rpm"); err == nil {
+			t.Skip("host has a real rpm binary; absence cannot be manufactured through PATH")
+		}
+		env := baseSetup(t)
+		env.removeFakeTool(t, "rpm")
+		testRoot := t.TempDir()
+		out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+		if err == nil {
+			t.Fatal("install must refuse when the rpm package database is unavailable")
+		}
+		if !strings.Contains(out, "libselinux") {
+			t.Errorf("expected actionable diagnostic about the missing package metadata authority, got: %s", out)
+		}
+		if len(callsOf(t, env, "semodule")) != 0 {
+			t.Error("semodule must not run when the package metadata authority is missing")
+		}
+	})
+
+	t.Run("non-libselinux owner refuses", func(t *testing.T) {
+		env := baseSetup(t)
+		env.fakeRpm(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+echo "someotherpkg 9.9"
+exit 0
+`, env.logFile))
+		testRoot := t.TempDir()
+		out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+		if err == nil {
+			t.Fatal("install must refuse when the linked library is not owned by a libselinux package")
+		}
+		if !strings.Contains(out, "libselinux") {
+			t.Errorf("expected actionable diagnostic about the unexpected owning package, got: %s", out)
+		}
+		if len(callsOf(t, env, "semodule")) != 0 {
+			t.Error("semodule must not run when the owning package is not libselinux")
+		}
+	})
 }
 
 // TestUninstallSystemSELinuxModuleCleanup verifies the uninstaller removes the
@@ -3698,10 +3960,25 @@ func TestNfpmConfigFile(t *testing.T) {
 	if !strings.Contains(rpmSection, "apparmor-parser") {
 		t.Error("RPM depends must include apparmor-parser")
 	}
+	// C3: the RPM must hard-require the descriptor-safe libselinux floor so
+	// the packaged restorecon implementation cannot predate the upstream
+	// 3.11 selinux_restorecon rewrite (pathname-replacement TOCTOU).
+	if !strings.Contains(rpmSection, "libselinux1 >= 3.11") {
+		t.Error("RPM depends must include libselinux1 >= 3.11 (descriptor-safe restorecon floor)")
+	}
+	// policycoreutils remains the restorecon frontend dependency and must
+	// not be turned into a version-floor substitute for libselinux.
+	if !strings.Contains(rpmSection, "policycoreutils") {
+		t.Error("RPM depends must include policycoreutils")
+	}
 	for _, line := range strings.Split(rpmSection, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "- docker") {
 			t.Error("RPM depends must not include docker package")
 		}
+	}
+	// The DEB is AppArmor-only and must not acquire SELinux dependencies.
+	if strings.Contains(debSection, "libselinux") {
+		t.Error("DEB depends must not include libselinux (DEB is AppArmor-only)")
 	}
 }
 
@@ -4039,9 +4316,12 @@ func TestRPMSelinuxDependencies(t *testing.T) {
 
 	// policycoreutils provides both semodule and restorecon on openSUSE.
 	// With this hard dependency, both tools are guaranteed present.
-	// restorecon failures remain best-effort because context restoration
-	// is not strictly required for first-run functionality: the binary is
-	// installed with default context and systemd handles the runtime directory.
+	// The restorecon IMPLEMENTATION floor is a separate contract owned by
+	// libselinux1 >= 3.11 (the descriptor-safe selinux_restorecon rewrite,
+	// C3): recursive workspace relabeling is delegated to that upstream
+	// implementation and is fail-closed at the runtime procfs prerequisite,
+	// not best-effort. Exact-path packaging restorecon calls (binary, bindfs,
+	// deployment trees) remain best-effort for labels only.
 }
 
 // TestRPMBackendDependencies verifies that the RPM retains both AppArmor
@@ -4220,6 +4500,10 @@ func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
 	if strings.Contains(depends, "docker") {
 		t.Error("DEB Depends must not include docker package")
 	}
+	// The DEB is AppArmor-only; SELinux dependencies must stay RPM-only.
+	if strings.Contains(depends, "libselinux") {
+		t.Error("DEB Depends must not include libselinux (DEB is AppArmor-only)")
+	}
 
 	// Conffiles — extract control tarball and verify no conffiles
 	// (dynamic AppArmor state is not package-owned).
@@ -4259,6 +4543,17 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	}
 	if !strings.Contains(requires, "apparmor-abstractions") {
 		t.Error("RPM Requires must include apparmor-abstractions")
+	}
+	// C3: descriptor-safe recursive restorecon floor, proven from the BUILT
+	// RPM metadata (not merely the nfpm config source text): the packaged
+	// restorecon implementation must be libselinux 3.11 or newer, where
+	// selinux_restorecon(3) labels through /proc/self/fd paths.
+	if !strings.Contains(requires, "libselinux1 >= 3.11") {
+		t.Error("RPM Requires must include libselinux1 >= 3.11 (descriptor-safe restorecon floor)")
+	}
+	// policycoreutils remains the restorecon frontend dependency.
+	if !strings.Contains(requires, "policycoreutils") {
+		t.Error("RPM Requires must include policycoreutils")
 	}
 	// Check for docker dependency (various package names).
 	for _, dep := range []string{"docker.io", "docker-ce", "docker-" + "community"} {
