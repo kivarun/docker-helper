@@ -1762,8 +1762,10 @@ a narrow internal lease):
   currently available chunks (real-time pace preserved) and the terminal
   drain empties every remaining chunk before the CLI returns, so
   successful CLI output is never truncated by chunking.
-- RED (commit `1d3c9fa`): five deterministic defect demonstrations —
-  five long-lived run Operations under one Session are all admitted (no
+- RED (commit `1d3c9fa`; GREEN `e88f847`, UAT `4334b12`, UAT-run
+  corrections `c3c5030`/`8f7beec`, docs `d14e601`): five deterministic
+  defect demonstrations — five long-lived run Operations under one
+  Session are all admitted (no
   capacity owner refuses the next request); a quiesce-refused run has
   already created its mount pin and a quiesce-refused build has already
   staged its whole context (expensive preparation before admission); a
@@ -1815,6 +1817,25 @@ a narrow internal lease):
   the ordinary CLI fully delivers terminal output spanning several
   chunks; recovery leaves no pins, staging, workload-MAC state or
   residual capacity and a subsequent ordinary run and build both succeed.
+- UAT-run iterations (deterministic corrections, fail-closed): the first
+  full exact-candidate run caught a real release-path leak — the build
+  staging-failure branch (the H4 ceiling refusal included) released
+  through the pre-registration closure whose reservation release had
+  already been nulled by the transfer to the operation at creation, so
+  one build slot leaked per staging refusal until the daemon restart;
+  group 24's depth case and final valid build hit the build sub-ceiling
+  with 429 after two earlier refusals had leaked both slots. The release
+  now goes through the operation (exactly once) alongside the lease;
+  `TestBuildStagingRefusalReleasesCapacity` fails pre-fix (the follow-up
+  build gets 429) and pins the fix, and the run pin-failure and
+  `cmd.Start`-failure release paths are pinned the same way. The group 25
+  residue assertions now compare against the inventories taken
+  immediately before the refusal (the held operations legitimately hold
+  their own state), and the held operations exec the CLI binary directly
+  so a SIGTERM reaches the CLI's own bounded cancellation path (a
+  backgrounded shell-function call made `$!` the intermediate subshell
+  and orphaned the CLI). Final full exact-candidate UAT: 11/11 green with
+  all 25 regression groups PASS including group 25.
 
 ## SC2 — bounded-resource and liveness closure
 
