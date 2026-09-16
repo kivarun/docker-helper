@@ -428,7 +428,7 @@ func TestPrepareListenersSystemCustomAddress(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	defer os.Remove(socketPath)
 
-	unixListener, tcpListener, err := prepareListeners(ModeSystem, socketPath, "127.0.0.1:0")
+	unixListener, tcpListener, _, err := prepareListeners(ModeSystem, socketPath, "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("prepareListeners: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestPrepareListenersUserModeNoTCP(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	defer os.Remove(socketPath)
 
-	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, DefaultHTTPAddress)
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, DefaultHTTPAddress)
 	if err != nil {
 		t.Fatalf("prepareListeners: %v", err)
 	}

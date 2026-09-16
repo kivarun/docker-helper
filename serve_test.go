@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -122,7 +123,7 @@ func TestPrepareListenersStaleSocket(t *testing.T) {
 		t.Fatal("stale socket should still exist on disk after Close")
 	}
 
-	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
 	if err != nil {
 		t.Fatalf("prepareListeners() error: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestPrepareListenersLiveSocket(t *testing.T) {
 	}
 	defer listener.Close()
 
-	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket has a live listener")
 	}
@@ -170,7 +171,7 @@ func TestPrepareListenersRegularFile(t *testing.T) {
 		t.Fatalf("cannot create file: %v", err)
 	}
 
-	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket path is a regular file")
 	}
@@ -194,7 +195,7 @@ func TestPrepareListenersDirectory(t *testing.T) {
 		t.Fatalf("cannot create directory: %v", err)
 	}
 
-	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket path is a directory")
 	}
@@ -210,7 +211,7 @@ func TestPrepareListenersNewSocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
-	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
 	if err != nil {
 		t.Fatalf("prepareListeners() error: %v", err)
 	}
@@ -357,7 +358,7 @@ func TestPrepareListenersUnknownDialError(t *testing.T) {
 		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected failure")}
 	}
 
-	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
 	if err == nil {
 		t.Fatal("expected error from prepareListeners on unknown dial error")
 	}
@@ -396,7 +397,7 @@ func TestSocketDisappearsDuringCheck(t *testing.T) {
 		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected")}
 	}
 
-	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
 	if err != nil {
 		t.Fatalf("prepareListeners: %v", err)
 	}
@@ -1445,5 +1446,254 @@ func TestCreateUnixListenerPermissionsSystem(t *testing.T) {
 	perm := info.Mode().Perm()
 	if perm != 0666 {
 		t.Errorf("permissions = %o, want 0666", perm)
+	}
+}
+
+// --- H7: the optional loopback TCP listener is never authoritative ---
+
+// stubH7Listener is a net.Listener whose Close state is observable. It is
+// never served; these tests only exercise listener acquisition.
+type stubH7Listener struct {
+	closed bool
+}
+
+func (l *stubH7Listener) Accept() (net.Conn, error) {
+	return nil, net.ErrClosed
+}
+
+func (l *stubH7Listener) Close() error {
+	l.closed = true
+	return nil
+}
+
+func (l *stubH7Listener) Addr() net.Addr {
+	return stubH7Addr{}
+}
+
+type stubH7Addr struct{}
+
+func (stubH7Addr) Network() string { return "unix" }
+func (stubH7Addr) String() string  { return "/tmp/stub-h7.sock" }
+
+// stubH7Factory is a listenerFactory seam recording how often each creator
+// was consulted (no retry/loop may consult the TCP creator more than once).
+type stubH7Factory struct {
+	unixListener net.Listener
+	unixErr      error
+	tcpListener  net.Listener
+	tcpErr       error
+	unixCalls    int
+	tcpCalls     int
+	tcpAddress   string
+}
+
+func (f *stubH7Factory) createUnixListener(socketPath string, mode DeploymentMode) (net.Listener, error) {
+	f.unixCalls++
+	return f.unixListener, f.unixErr
+}
+
+func (f *stubH7Factory) createTCPListener(address string) (net.Listener, error) {
+	f.tcpCalls++
+	f.tcpAddress = address
+	return f.tcpListener, f.tcpErr
+}
+
+// h7AddrInUse builds the deterministic TCP bind failure the hostile UAT
+// reproduces on the real service: an unprivileged local user holds the
+// configured loopback port, so the daemon's bind answers EADDRINUSE.
+func h7AddrInUse(addr string) error {
+	return &net.OpError{
+		Op:  "listen",
+		Net: "tcp",
+		Err: syscall.EADDRINUSE,
+	}
+}
+
+// TestH7TCPPortCaptureLeavesUnixListenerAuthoritative is the H7 contract: the
+// Unix listener is authoritative, so after a successful Unix bind a TCP
+// EADDRINUSE is DEGRADED STARTUP, not daemon failure — the Unix listener
+// stays live, its socket is not removed, the API keeps serving over Unix,
+// the TCP listener is absent for this daemon lifetime, exactly one bounded
+// operational warning names the configured address and the bind failure, and
+// no retry consults the TCP creator again.
+func TestH7TCPPortCaptureLeavesUnixListenerAuthoritative(t *testing.T) {
+	// Capture operational output at warn level: the degraded-startup
+	// diagnostic is a Warn record.
+	opBuf := new(bytes.Buffer)
+	initLoggers(opBuf, io.Discard, slog.LevelWarn, true)
+	t.Cleanup(logging.reset)
+	factory := &stubH7Factory{unixListener: &stubH7Listener{}, tcpErr: h7AddrInUse(DefaultHTTPAddress)}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	if err := os.WriteFile(socketPath, []byte("sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	unixListener, tcpListener, tcpDegraded, err := prepareListeners(ModeSystem, socketPath, DefaultHTTPAddress)
+	if err != nil {
+		t.Fatalf("TCP port capture must not deny the authoritative Unix service, got: %v", err)
+	}
+	if tcpDegraded == nil {
+		t.Error("the TCP degradation must be reported to the caller (non-fatal)")
+	}
+	if unixListener == nil {
+		t.Fatal("Unix listener must be returned")
+	}
+	if factory.unixListener.(*stubH7Listener).closed {
+		t.Error("the successful Unix listener must stay open on TCP degradation")
+	}
+	if tcpListener != nil {
+		t.Error("the TCP listener must be absent for this daemon lifetime")
+	}
+	if _, statErr := os.Stat(socketPath); statErr != nil {
+		t.Errorf("the Unix socket must not be removed on TCP failure: %v", statErr)
+	}
+	if factory.tcpCalls != 1 {
+		t.Errorf("no retry may consult the TCP creator again, got %d calls", factory.tcpCalls)
+	}
+	out := opBuf.String()
+	if !strings.Contains(out, DefaultHTTPAddress) {
+		t.Errorf("the degraded-startup warning must contain the configured address:\n%s", out)
+	}
+	if !strings.Contains(out, "address already in use") {
+		t.Errorf("the degraded-startup warning must contain the bind failure:\n%s", out)
+	}
+	if strings.Contains(out, "daemon startup failed") {
+		t.Errorf("degradation must not be logged as a fatal startup failure:\n%s", out)
+	}
+}
+
+// TestH7UnixFailureStillFatal proves the Unix listener stays authoritative:
+// Unix creation failure remains a fatal startup error and no TCP bind is
+// attempted after it.
+func TestH7UnixFailureStillFatal(t *testing.T) {
+	setupTestLoggingDiscard(t)
+	factory := &stubH7Factory{unixErr: errors.New("cannot listen on /run/docker-helper/docker-helper.sock: permission denied")}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	unixListener, tcpListener, _, err := prepareListeners(ModeSystem, "/run/docker-helper/docker-helper.sock", DefaultHTTPAddress)
+	if err == nil {
+		t.Fatal("Unix listener creation failure must remain fatal")
+	}
+	if unixListener != nil || tcpListener != nil {
+		t.Error("no listener may be returned on fatal Unix failure")
+	}
+	if factory.tcpCalls != 0 {
+		t.Errorf("TCP creation must not be attempted after fatal Unix failure, got %d calls", factory.tcpCalls)
+	}
+}
+
+// TestH7SystemModeBothListenersServed proves the healthy system-mode path is
+// unchanged: Unix success + TCP success returns both listeners and emits no
+// degradation warning.
+func TestH7SystemModeBothListenersServed(t *testing.T) {
+	opBuf, _ := setupTestLogging(t)
+	factory := &stubH7Factory{unixListener: &stubH7Listener{}, tcpListener: &stubH7Listener{}}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	unixListener, tcpListener, _, err := prepareListeners(ModeSystem, "/tmp/stub-h7.sock", DefaultHTTPAddress)
+	if err != nil {
+		t.Fatalf("healthy system-mode listener acquisition must succeed: %v", err)
+	}
+	if unixListener == nil || tcpListener == nil {
+		t.Fatal("both listeners must be returned on success")
+	}
+	if out := opBuf.String(); strings.Contains(out, "unavailable") {
+		t.Errorf("no degradation warning may be emitted on the healthy path:\n%s", out)
+	}
+}
+
+// TestH7UserModeNeverAttemptsTCP proves user mode is unchanged: the TCP
+// creator is never consulted.
+func TestH7UserModeNeverAttemptsTCP(t *testing.T) {
+	setupTestLoggingDiscard(t)
+	factory := &stubH7Factory{unixListener: &stubH7Listener{}}
+	orig := ListenerFactory
+	t.Cleanup(func() { ListenerFactory = orig })
+	ListenerFactory = factory
+
+	unixListener, tcpListener, _, err := prepareListeners(ModeUser, "/tmp/stub-h7.sock", "")
+	if err != nil {
+		t.Fatalf("user-mode acquisition must succeed: %v", err)
+	}
+	if unixListener == nil || tcpListener != nil {
+		t.Error("user mode must return exactly the Unix listener")
+	}
+	if factory.tcpCalls != 0 {
+		t.Errorf("user mode must never attempt TCP, got %d calls", factory.tcpCalls)
+	}
+}
+
+// TestH7ServeAndCleanupWithNilTCP proves the degraded-startup runtime path is
+// correct: a system-shaped server with a live Unix listener and a nil TCP
+// listener serves the complete API over Unix (nil TCP is simply not served,
+// exactly like user mode), and cleanup with a nil TCP listener closes the
+// Unix listener and removes its socket without error.
+func TestH7ServeAndCleanupWithNilTCP(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	server := &http.Server{Handler: mux}
+	signalCtx, signalCancel := context.WithCancel(context.Background())
+	defer signalCancel()
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := os.Chmod(socketPath, 0o666); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	serveDone := make(chan error, 1)
+	go func() {
+		_, shutdownCancel, drainCh, serveDoneErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, func() time.Duration { return 30 * time.Second }, nil)
+		<-drainCh
+		shutdownCancel()
+		serveDone <- serveDoneErr
+	}()
+
+	// The degraded daemon serves /health over Unix only.
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", socketPath)
+			},
+		},
+	}
+	resp, err := client.Get("http://localhost/health")
+	if err != nil {
+		t.Fatalf("GET /health over Unix during degraded startup: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /health status = %d, want 200", resp.StatusCode)
+	}
+
+	// TCP was never served: no listener exists on the TCP side for this
+	// daemon lifetime (nothing to dial).
+	signalCancel()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serveHTTPUntilShutdown: %v", err)
+	}
+
+	// Normal cleanup with a nil TCP listener: closes Unix, removes socket.
+	cleanupListeners(listener, nil, socketPath)
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Errorf("cleanup must remove the Unix socket, got stat error: %v", err)
 	}
 }

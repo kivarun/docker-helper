@@ -157,6 +157,7 @@ REGRESSIONS=(
   "20:RC5 CLI grammar and stored-roots completion:uat-regression-rc5-cli-grammar.sh"
   "21:Allowed-root recovery universe:uat-regression-allowed-root-recovery.sh"
   "22:M13 Docker bind-mount serialization:uat-regression-bind-serialization.sh"
+  "23:H7 hostile TCP port capture:uat-regression-h7-tcp-port-capture.sh"
 )
 
 declare -A RESULT

@@ -422,6 +422,18 @@ non-loopback listeners, TLS, and remote execution are not part of the
 current implementation (see [Current limitations and
 non-goals](#current-limitations-and-non-goals)).
 
+The Unix listener is authoritative. In system mode the optional loopback
+TCP listener is attempted after a successful Unix bind; a TCP bind failure
+(a local unprivileged user can occupy the configured port) is DEGRADED
+STARTUP, not daemon failure: the Unix listener stays live and serves the
+complete API, the TCP listener is absent for this daemon lifetime, and one
+bounded operational warning names the configured address and the bind
+failure. The bind itself is the authority — no pre-probe, and no
+retry/rebind: a port that becomes free later stays unused until the next
+normal service restart. Unix creation failure remains fatal. (Historical
+note: startup was once described as creating both listeners atomically;
+the current contract is Unix-authoritative with degraded-TCP startup.)
+
 ### systemd services
 
 Both deployment modes ship systemd unit files (see [systemd units and

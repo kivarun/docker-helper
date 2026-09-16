@@ -120,7 +120,7 @@ risk rather than by the audit's original severity ordering.
 | **H4** | Build staging can consume unbounded tmpfs bytes/inodes/depth/files | **BLOCKER_FIX** | SC2 | Add measured hard ceilings for staged bytes, entries and depth, admitted/reserved before staging. Failure must be bounded and leave no residue. Do not introduce the Release 3 quota hierarchy. |
 | **H5** | Logs, mount pins and concurrent/running Operations provide unbounded host-resource channels | **BLOCKER_FIX** | SC2 | Bound response materialization, mounts/pins per operation, and concurrent/running operation admission at Session/global security ceilings. Measure defaults and reserve before expensive work. |
 | **H6** | Mandatory MAC policy blocks admin-token rotation | **CLOSED_CURRENT** | SC1 | The admin-token replacement lifecycle is rewritten around ONE fixed staging pathname (`.admin-token.new`, internal implementation pathname, not a config/API/CLI surface), serialized by the existing admin-token hash commit lock with the stale-rotation check BEFORE the staging pathname is touched, crash-residue recovery, and failure-safe cleanup (current token file and runtime hash unchanged, staging removed). The shipped MAC policy is narrowed to the token replacement lifecycle only: AppArmor (pathname-mediating) grants write/rename on exactly the two token pathnames (the generic config tree and config.json stay read-only, no broader write glob); SELinux (type-based) introduces the dedicated `docker_helper_admin_token_t` file type (MAC implementation state) with exact fcontext rules listed before the generic config-tree rule, the full replacement lifecycle granted on the token type only, an EXACT filename transition for `.admin-token.new` (no generic config-dir transition), `docker_helper_config_t:file` strictly read-only, and config-dir namespace operations limited to write/add_name/remove_name. ACCEPTED SELinux backend mechanic (release-owner ruling, PR #57 review round 2): SELinux does NOT provide AppArmor-equivalent destination-basename mediation for rename — once a token_t inode exists, the granted directory namespace + inode permissions may allow it to be renamed to an otherwise unused basename in the config directory; creation stays exact-name constrained, existing `docker_helper_config_t` objects stay immutable, and this is a backend mechanic, not additional product authority (no path-policy framework, token subdirectory architecture, or rename broker; see the H6 evidence ledger). Deployment labeling stays under the selinux_deploy owner: an exact post-create relabel after the initial token is written (the tree relabel runs before the token exists) with failed-relabel recovery (the just-created token file is removed, no partial initialization), and the packaged restorecon migrates a pre-H6 token on upgrade/reinstall without changing its value. Live enforcing UAT on the exact candidate proves rotation through the shipped confined service with old token rejected, new token accepted, no restart, 0600, no staging residue, config.json unchanged, no broader writable config surface, and no unexpected H6-policy denial on both backends. |
-| **H7** | A local user can occupy the optional TCP port and drive the service into systemd start-limit failure | **BLOCKER_FIX** | SC2 | Current code still creates the Unix listener and then treats TCP bind failure as fatal, while the shipped service has `Restart=on-failure` plus a finite start-limit. The authoritative local Unix service must not be permanently denied by unauthenticated TCP port capture. |
+| **H7** | A local user can occupy the optional TCP port and drive the service into systemd start-limit failure | **CLOSED_CURRENT** | SC2 | The Unix listener is authoritative: a loopback TCP bind failure after a successful Unix bind is DEGRADED STARTUP, never daemon failure — the Unix listener stays open, its socket is not removed, the complete API keeps serving over Unix, the TCP listener is absent for the daemon lifetime, and one bounded operational warning names the configured address and the bind failure. The bind itself is the authority (no pre-probe); no retry/rebind, timer, or listener supervisor exists. Unix creation failure stays fatal; user mode never attempts TCP; systemd Restart=/StartLimit values are untouched. Seam RED/GREEN evidence and hostile exact-candidate UAT (unprivileged port capture against the packaged service under mandatory MAC) — see the SC2 evidence ledger. |
 | **H8** | External MAC commands can hold shared coordination long enough to delay emergency disable | **BLOCKER_FIX** | SC2 | Existing MAC command owners gain bounded cancellation/timeouts and the lifecycle lock path is reviewed so untrusted-size work cannot indefinitely hold administrative disable. Avoid a new queue/framework unless evidence requires it. |
 | **H9** | Agent container can receive the helper runtime directory and steal registry secrets/replace CA state | **CLOSED_CURRENT** | SC1 | Closed by composition with C1, without a second socket transport owner: with the privilege floor in place the strongest reachable workload privilege is the Principal UID:GID with no capabilities and no-new-privileges, which the root-owned `0700` helper-private runtime state denies; the read-only projection and unchanged bearer authentication are unchanged. Hostile helper-socket UAT on enforcing AppArmor and enforcing SELinux proved the socket transport functional, unauthenticated calls refused, private runtime/session Docker config unreadable, runtime immutable, and escalation dead (see the SC1 evidence ledger). |
 | **H10** | An allowed root lets the root daemon read files the Principal could not read under Unix DAC | **BLOCKER_DECISION** | SC3 | Decide whether a filesystem capability intentionally grants helper-mediated read independent of DAC or must additionally preserve Principal DAC/group/ACL semantics. Do **not** implement an owner-UID check as a fake Unix permission model. |
@@ -1432,9 +1432,75 @@ Implementation constraints:
 - M11: host-path control-character policy belongs to the shared path owner.
 - M12: the parser follows the producer grammar, not terminal-width spacing.
 
+## SC2 — H7: the optional loopback TCP listener is never authoritative
+
+The audit class: `prepareListeners` created the authoritative Unix listener
+first and then treated a TCP bind failure as fatal — it closed the live Unix
+listener, removed its socket, and failed the whole startup. A local
+unprivileged user could bind and hold the configured loopback TCP port
+(`127.0.0.1:52375` default) before service startup, denying the authoritative
+Unix service and, with the shipped `Restart=on-failure` +
+`StartLimitIntervalSec=60s` / `StartLimitBurst=3` unit, driving the whole
+system service into a restart storm and start-limit failure.
+
+Closed at the existing listener owner (`prepareListeners` in `listener.go`)
+with an explicit narrow return contract — no second listener manager, no
+global state:
+
+- the Unix listener is authoritative: Unix creation failure remains a fatal
+  startup error, and no TCP bind is attempted after it;
+- a TCP bind failure after a successful Unix bind is DEGRADED STARTUP: the
+  Unix listener stays open, its socket is not removed, the complete API keeps
+  serving over Unix, the TCP listener is absent for this daemon lifetime, and
+  exactly one bounded operational warning (existing operational logging
+  owner, `serve_startup` operation field) names the configured address and
+  the bind failure — never a fatal `daemon startup failed` record, and no
+  audit state;
+- the bind itself is the authority: no pre-probe (a check-then-bind sequence
+  would only add a race), and no retry/rebind, timer, watcher, queue, or
+  listener state machine — a port that becomes free later stays unused until
+  the next normal service restart;
+- `Serve()`-time failures on an already-created TCP listener keep the
+  existing shutdown/error semantics (not part of H7); user mode is unchanged
+  (the TCP creator is never consulted); cleanup with a nil TCP listener is
+  unchanged (nil-safe);
+- systemd `Restart=`/`StartLimit*` values are NOT the fix and are untouched.
+
+Evidence:
+
+- RED (commit `1e34c8c`, seam-based, deterministic — no port timing): the
+  defect demonstration proved the pre-fix startup failed and DESTROYED the
+  successful Unix listener (closed + socket removed) on a deterministic TCP
+  EADDRINUSE; the desired-behavior test failed pre-fix as designed. The
+  seam-enablement type correction (`ListenerFactory` typed as its interface;
+  the comment already promised replaceability) changed no behavior.
+- GREEN (commit `bc60f4b`): Unix failure still fatal with zero TCP attempts;
+  healthy system mode returns both listeners with no warning; degraded
+  startup keeps the Unix listener live and the socket in place, reports the
+  degradation to the caller (non-fatal), emits exactly the intended warning
+  (configured address + bind failure, at warn level, never a fatal startup
+  record), consults the TCP creator exactly once (no retry); user mode never
+  attempts TCP; `serveHTTPUntilShutdown` with a nil TCP listener serves the
+  complete API over Unix and cleanup with a nil TCP listener closes Unix and
+  removes the socket.
+- Hostile exact-candidate UAT (new Ubuntu/DEB/AppArmor regression group 23,
+  `uat-regression-h7-tcp-port-capture.sh`, real packaged service with
+  mandatory MAC active — the finding is not MAC-specific, so no duplicate
+  per-MAC logic exists): an ordinary unprivileged local user bound and held
+  the configured loopback port; the service restarted and stayed active
+  (NRestarts bounded, no start-limit/failed state), the authoritative Unix
+  socket existed and served `/health` plus an authenticated API operation,
+  the hostile process still owned the port (same pid/uid — docker-helper did
+  not steal or replace it), the journal carried exactly one bounded
+  degraded-TCP warning containing the configured address and the bind
+  failure and no fatal startup record, and after the hostile listener was
+  released and the service was normally restarted, both Unix and TCP
+  listeners worked again with no degradation warning in the recovery window.
+
 ## SC2 — bounded-resource and liveness closure
 
-**Queue:** `H4`, `H5`, `H7`, `H8`.
+**Queue:** `H4`, `H5`, `H8`. (H7 closed in SC2 — see the SC2 evidence ledger
+above.)
 
 SC2 removes unbounded host-resource and liveness channels without importing the
 Release 3 resource model. Release 2.2 needs hard security ceilings, not a new
@@ -1446,10 +1512,9 @@ Required direction:
 - operation/mount/log/concurrency resources have finite admission ceilings;
 - resource reservation/admission happens before expensive preparation where the
   attack depends on pre-admission work;
-- optional TCP listener failure cannot destroy availability of the authoritative
-  local Unix service;
 - external MAC commands have bounded execution/cancellation and cannot hold
-  lifecycle coordination indefinitely.
+  lifecycle coordination indefinitely. (The optional-TCP item was closed in
+  SC2 already — see the SC2 evidence ledger above.)
 
 Concrete limits are selected from measurement and UAT, not invented from the
 future Release 3 quota design.

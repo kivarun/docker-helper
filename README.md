@@ -73,7 +73,11 @@ private Unix socket.
 In system mode, the daemon runs as root, serves multiple principals, and
 exposes both a system Unix socket and a loopback HTTP listener. The
 loopback HTTP address is configurable (`http_address`); changing it
-requires a daemon restart.
+requires a daemon restart. The Unix socket is authoritative: if another
+process (for example an unprivileged local user) occupies the configured
+loopback port at startup, the service starts degraded — Unix-only, with one
+warning in the journal — and picks the TCP listener up again at the next
+normal restart once the port is free.
 
 System daemon mode is implemented. Release 2 adds system mode, native
 DEB/RPM packages, a systemd system service, and mandatory confinement by
