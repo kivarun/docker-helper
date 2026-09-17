@@ -208,26 +208,18 @@ mkdir -p "$M_HOME/ws" "$M_POLICY/sub/ws"
 printf 'mig-input\n' > "$M_POLICY/sub/ws/input.txt"
 chown -R "$M_USER:$M_USER" "$M_POLICY" "$M_HOME/ws" >"$M_DIAG/chown.out" 2>&1 || true
 dh config allowed-root add "$M_POLICY" >"$M_DIAG/gadd.out" 2>&1
-# The list side of this check reads and validates
-# /etc/docker-helper/config.json directly on the CLI side; it never touches
-# the daemon socket. The R2 RED of run 35230250365 captured only the add
-# output (the old harness lost the list stderr), so the only proven
-# observation is that the downstream migration checks then saw both roots
-# present; the cause of that single failure was not captured and is not
-# claimed here. Retry the read bounded, capture the list output/exit
-# status/stderr, and keep the invariant fail closed: the seeded state must
-# contain BOTH roots on every attempt. The ok line records the successful
-# attempt number, so a late attempt 2/3 success remains visible and
-# investigable.
-M_GLIST_OK=0
-for _attempt in 1 2 3; do
-  dh config allowed-root list >"$M_DIAG/glist.out" 2>"$M_DIAG/glist.err" \
-    && grep -qx "$M_POLICY" "$M_DIAG/glist.out" \
-    && grep -qx "$ALLOWED_ROOT" "$M_DIAG/glist.out" && M_GLIST_OK=1 && break
-  [ "$_attempt" -lt 3 ] && sleep 1
-done
-if [ "$M_GLIST_OK" = 1 ]; then
-  acc_ok "R2 two path-only global roots seeded (list ok on attempt $_attempt/3)"
+# config allowed-root list reads and validates /etc/docker-helper/config.json
+# directly on the CLI side. After the synchronous add above there is no proven
+# eventual-consistency window to retry across, so the read runs exactly once.
+# The historical R2 RED of run 35230250365 cannot name a root cause (the old
+# harness lost the list stderr); the only proven observation is that the
+# downstream migration checks then saw both roots present. The required
+# invariant stays fail closed: BOTH roots must be present in this single
+# read; a failed read or a missing root REDs the scenario.
+dh config allowed-root list >"$M_DIAG/glist.out" 2>"$M_DIAG/glist.err"
+if grep -qx "$M_POLICY" "$M_DIAG/glist.out" \
+    && grep -qx "$ALLOWED_ROOT" "$M_DIAG/glist.out"; then
+  acc_ok "R2 two path-only global roots seeded"
 else
   acc_fail_ctx "R2 global allowed-root seeding failed" "$M_DIAG/gadd.out" "$M_DIAG/glist.out" "$M_DIAG/glist.err"
 fi
