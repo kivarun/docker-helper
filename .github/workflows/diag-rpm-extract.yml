@@ -1,0 +1,79 @@
+name: RPM payload extraction diagnostic (throwaway)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install rpm + cpio (same as the producer)
+        run: |
+          sudo apt-get install -y rpm cpio
+
+      - name: Show tool identities
+        run: |
+          rpm2cpio --help 2>&1 | head -3 || true
+          cpio --version | head -1
+          cpio --help 2>&1 | rg -c "no-absolute-filenames" || echo "no --no-absolute-filenames in help"
+
+      - name: Install nFPM (pinned, single owner)
+        run: scripts/install-nfpm.sh
+
+      - name: Build a real nfpm RPM (same inputs as the producer payload)
+        run: |
+          mkdir -p dist/man dist/completions
+          printf 'fake-bin\n' > dist/docker-helper && chmod 755 dist/docker-helper
+          printf 'man1\n' > dist/man/docker-helper.1.gz
+          printf 'man5\n' > dist/man/docker-helper-config.5.gz
+          printf 'comp\n' > dist/completions/docker-helper
+          printf 'pp\n' > dist/docker_helper.pp
+          VERSION=1.0.0 nfpm package \
+            --config packaging/nfpm.yaml \
+            --packager rpm \
+            --target dist
+          ls -la dist/*.rpm
+
+      - name: Stage 1 — rpm2cpio alone (capture stderr + exit code)
+        run: |
+          set -o pipefail
+          rpm2cpio dist/*.rpm > /tmp/payload.cpio 2>/tmp/rpm2cpio.err
+          echo "rpm2cpio exit=$?"
+          echo "--- rpm2cpio stderr ---"
+          cat /tmp/rpm2cpio.err
+          echo "--- payload size ---"
+          ls -la /tmp/payload.cpio
+          echo "--- first 64 bytes ---"
+          head -c 64 /tmp/payload.cpio | od -c | head -4
+
+      - name: Stage 2 — cpio alone with producer flags
+        run: |
+          rm -rf /tmp/x && mkdir -p /tmp/x
+          ( cd /tmp/x && cpio -idmu --no-absolute-filenames --quiet < /tmp/payload.cpio )
+          echo "cpio exit=$?"
+          find /tmp/x -type f | head -10
+
+      - name: Stage 3 — the exact producer pipeline (set -x)
+        run: |
+          rm -rf /tmp/y && mkdir -p /tmp/y
+          set -x
+          rpm2cpio dist/*.rpm | ( cd /tmp/y && cpio -idmu --no-absolute-filenames --quiet )
+          rc=$?
+          set +x
+          echo "pipeline exit=$rc"
+          find /tmp/y -type f | head -10
+
+      - name: Stage 4 — cpio exit with no --quiet (verbose, full diagnostics)
+        if: always()
+        run: |
+          rm -rf /tmp/z && mkdir -p /tmp/z
+          ( cd /tmp/z && cpio -idmu --no-absolute-filenames < /tmp/payload.cpio; echo "verbose cpio exit=$?" )
+          find /tmp/z -type f | wc -l
