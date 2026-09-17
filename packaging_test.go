@@ -3960,7 +3960,7 @@ func TestNfpmConfigFile(t *testing.T) {
 	if !strings.Contains(rpmSection, "apparmor-parser") {
 		t.Error("RPM depends must include apparmor-parser")
 	}
-	// C3: the RPM must hard-require the descriptor-safe libselinux floor so
+	// The RPM must hard-require the descriptor-safe libselinux floor so
 	// the packaged restorecon implementation cannot predate the upstream
 	// 3.11 selinux_restorecon rewrite (pathname-replacement TOCTOU).
 	if !strings.Contains(rpmSection, "libselinux1 >= 3.11") {
@@ -3979,6 +3979,36 @@ func TestNfpmConfigFile(t *testing.T) {
 	// The DEB is AppArmor-only and must not acquire SELinux dependencies.
 	if strings.Contains(debSection, "libselinux") {
 		t.Error("DEB depends must not include libselinux (DEB is AppArmor-only)")
+	}
+}
+
+// TestObsoleteRepositoryAppArmorFragmentIsNotAnInput pins the retirement of
+// the obsolete repository fragment packaging/apparmor/docker-helper.d/
+// managed-roots: it must not exist in the repository, and no package or
+// bundle input may reference its directory. The legacy installed pathname
+// /etc/apparmor.d/docker-helper.d/managed-roots keeps its upgrade migration
+// and purge cleanup semantics (install/uninstall scripts and their tests);
+// only the repository source file is retired — the live boundary state is
+// /var/lib/docker-helper/apparmor/managed-boundaries.
+func TestObsoleteRepositoryAppArmorFragmentIsNotAnInput(t *testing.T) {
+	if _, err := os.Stat("packaging/apparmor/docker-helper.d/managed-roots"); !os.IsNotExist(err) {
+		t.Fatal("obsolete repository fragment packaging/apparmor/docker-helper.d/managed-roots must not exist (retired; live state is /var/lib/docker-helper/apparmor/managed-boundaries)")
+	}
+
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatalf("packaging/nfpm.yaml not found: %v", err)
+	}
+	if strings.Contains(string(data), "apparmor/docker-helper.d") {
+		t.Error("nfpm.yaml must not package the retired repository AppArmor fragment directory")
+	}
+
+	bundle, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatalf("build-bundle.sh not found: %v", err)
+	}
+	if strings.Contains(string(bundle), "apparmor/docker-helper.d") {
+		t.Error("build-bundle.sh must not bundle the retired repository AppArmor fragment directory")
 	}
 }
 
