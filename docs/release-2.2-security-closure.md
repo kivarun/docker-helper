@@ -2,7 +2,17 @@
 
 ## Status and authority
 
-**Status: SC0 CLOSED; SC1 CLOSED; SC2 CLOSED (2026-09-16).**
+**Status: SC0 CLOSED; SC1 CLOSED; SC2 CLOSED (2026-09-16); SC3 CLOSED
+(2026-09-17); SC4 CLOSED (2026-09-17).**
+
+SC3 closed with the disposition PR merge (Release 2.2 head
+`3529f2ab65725a72d068638aced078a74250c596`); it carried accepted release-owner
+dispositions only. SC4 closed the adjacent hardening/audit tail (M3, M6, M9
+review and the Low-findings rebase pass, 2026-09-17, see the SC4 section).
+**This closes the disposition phase, not the Release 2.2 security gate:** the
+mandatory hostile exact-artifact security UAT below and the final security
+release review still gate stable promotion, and the conditional final C1/H9
+exact-candidate proof required by M3 is retained.
 
 The external audit that triggered this closure reviewed docker-helper 2.0.0 at
 commit `7e9762576327b625acde45934a15216d1ff0a56b`. Its finding identifiers are
@@ -1236,19 +1246,19 @@ existing 2.2 feature work / RC fixes
 SC0  current-line audit rebase and terminal classification      CLOSED
         |
         v
-SC1  immediate trust-boundary / parser / MAC closure            NEXT
+SC1  immediate trust-boundary / parser / MAC closure            CLOSED
         |
         v
-SC2  bounded-resource and liveness closure
+SC2  bounded-resource and liveness closure                      CLOSED
         |
         v
-SC3  explicit architecture dispositions for remaining questions
+SC3  explicit architecture dispositions for remaining questions CLOSED
         |
         v
-SC4  adjacent hardening/documentation cleanup
+SC4  adjacent hardening/documentation cleanup                   CLOSED
         |
         v
-security cross-boundary UAT on exact candidate artifacts
+security cross-boundary UAT on exact candidate artifacts        NEXT
         |
         v
 full Phase 2.2.7 release gate + final architecture/docs review
@@ -2163,17 +2173,67 @@ unresolved decision blocks stable promotion.
 
 ## SC4 — adjacent hardening and audit tail
 
-SC4 owns non-blocking hardening after the release-blocking semantics are closed:
+SC4 owns non-blocking hardening after the release-blocking semantics are
+closed. **SC4 CLOSED (2026-09-17, release owner):** M3, M6 and M9 were
+reviewed against the current Release 2.2 line (head
+`3529f2ab65725a72d068638aced078a74250c596`), the Low-findings backlog was
+rebased once, and no change was warranted. Production code is unchanged; no
+new hardening, storage, pinning, or audit mechanism was added.
 
-- M3 storage hardening only if a concrete independent use case justifies a new
-  secret-storage owner; otherwise retain the documented protected-at-rest
-  boundary after C1/H9 UAT passes;
-- M6 audit-write failure observability may be improved without changing the
-  accepted operation-success contract;
-- M9 documentation/hardening may improve user-mode clarity without pretending
-  user mode isolates mutually hostile same-UID processes;
-- Low findings L1-L14 remain backlog unless implementation evidence promotes
-  one into the release gate.
+- **M3 plaintext Session registry credentials — reviewed, remains
+  `DEFER_HARDENING`.** Evidence re-verified: registry credentials are stored
+  plaintext in the per-Session Docker config under
+  `sessions/<session-id>/docker/`, which is root-owned in system mode and
+  created with mode `0700` (`ensureSessionDockerDir`); the same `0700` mode
+  is the runtime-directory default, and mandatory MAC policy (AppArmor /
+  SELinux shipped profiles) additionally bounds container reach into
+  helper-private state. The protection composition is unchanged: root-owned
+  helper runtime + per-Session `0700` + mandatory MAC. The shipped hostile
+  workload UAT already asserts on both backends that the per-Session Docker
+  config stays unreadable even at its exact known path and that
+  helper-private runtime state stays unreadable and immutable. No keychain,
+  encryption, or new secret-storage owner enters Release 2.2. **The earlier
+  C1/H9 hostile evidence is not an exemption from the final gate:** the
+  mandatory hostile exact-artifact UAT below must re-prove the C1/H9
+  composition on the same exact candidate, under enforcing AppArmor and
+  enforcing SELinux, and the final security exit criteria retain the
+  corresponding M3 condition. If that proof fails, M3 returns to a blocker
+  automatically.
+- **M6 audit write failure — reviewed, remains `ACCEPTED_CONTRACT`.** The
+  current error path was traced: an audit write or encode failure never
+  changes the success/failure outcome of the protected operation (no
+  fail-stop semantics), and it is not silent — the failure is recorded at
+  operational ERROR level with full correlation fields
+  (`audit: cannot write record` / `audit: cannot marshal record`, with
+  `audit_event`, `request_id`, `session_id`, `operation_id`). Regression
+  tests pin both properties (correlation fields in the operational failure
+  record; the protected operation still completes when the audit writer
+  fails). Release 2.x audit stays best-effort observability, not a
+  transactional boundary; nothing to change.
+- **M9 user-mode pathname race — reviewed, remains `ACCEPTED_CONTRACT`.**
+  Documentation consistency verified across the closure matrix, the user-mode
+  limitation notes (no inode pinning in user mode; the pathname-stability
+  argument is the workspace-parent write invariant), and the canonical
+  architecture (user-mode mount-source equality rule, mode-independent
+  caller-mount ceiling, and the explicit TOCTOU note that pathname
+  canonicalization alone does not close the resolution gap — system mode owns
+  the inode-pinning boundary). User mode does not claim isolation from
+  another process running as the same OS user and Docker authority; no
+  system-mode pinning architecture is transplanted into user mode and no new
+  mount/pinning mechanism is introduced.
+- **Low findings L1-L14 — rebase pass completed, backlog unchanged.** The
+  pass re-checked the SC0 classification against the owners and mechanisms
+  that SC1-SC3 actually changed (bind-mount serialization, host-path text
+  grammar, config ingest, resource admission ceilings, MAC-command
+  liveness, credential/session admission, and the accepted H1/H10/M1
+  contract boundaries): none of the SC1-SC3 change sets carried Low-finding
+  promotion evidence, no Low item is an independent violation of a current
+  security contract, and no Low item became release-blocking through the
+  changed architecture. No automatic closure is claimed without
+  implementation evidence. The backlog stays as classified: Low findings do
+  not independently enter the Release 2.2 stable gate unless implementation
+  evidence promotes one. No scope was widened for formal Low closure; a
+  promotion, if it ever occurs, would be reported separately.
 
 ## Mandatory hostile exact-artifact security UAT
 
