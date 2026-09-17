@@ -25,6 +25,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,23 @@ import (
 // container-absence proof so a stuck Docker daemon cannot block operation
 // completion indefinitely.
 const containerAbsenceProofTimeout = 10 * time.Second
+
+// containerRemovalSettleWindow bounds how long the absence proof waits for a
+// removal that Docker already owns to finish, and containerRemovalSettlePoll
+// is its poll interval. Docker removes a container asynchronously once it
+// owns the removal, so the proof settles on the observed state instead of a
+// single racy inspect.
+const (
+	containerRemovalSettleWindow = 5 * time.Second
+	containerRemovalSettlePoll   = 100 * time.Millisecond
+)
+
+// errDockerRemovalInProgress reports that Docker already owns an in-progress
+// removal of the correlated container (the --rm auto-removal raced the
+// cleanup). The removal completes without further action; the caller's
+// absence proof decides the final state, so this classification is not a
+// cleanup-stage failure and must not retain dependent state.
+var errDockerRemovalInProgress = errors.New("docker reports removal of the correlated container already in progress")
 
 // workloadCleanupStageName identifies one authoritative stage of the frozen
 // Release 2.2 cleanup dependency order.
@@ -319,17 +337,29 @@ func proveOperationContainerAbsent(ctx context.Context, prov containerProvenance
 	if classifyHelperContainerState(container.State) == helperStateUnknown {
 		return fmt.Errorf("correlated container state %q is unclassifiable; refusing removal", container.State)
 	}
-	if err := prov.remove(ctx, container.ID); err != nil {
+	if err := prov.remove(ctx, container.ID); err != nil && !errors.Is(err, errDockerRemovalInProgress) {
 		return fmt.Errorf("cannot remove proven-owned correlated container: %w", err)
 	}
-	after, err := prov.inspect(ctx, operationID, sessionID)
-	if err != nil {
-		return fmt.Errorf("cannot verify correlated container removal: %w", err)
+	// Absence proof: a removal that Docker already owns completes
+	// asynchronously, so verify absence with a bounded settle loop instead of
+	// a single racy inspect. The caller's context bounds the whole stage; the
+	// internal window keeps deadline-less contexts bounded.
+	settleCtx, settleCancel := context.WithTimeout(ctx, containerRemovalSettleWindow)
+	defer settleCancel()
+	for {
+		after, err := prov.inspect(settleCtx, operationID, sessionID)
+		if err != nil {
+			return fmt.Errorf("cannot verify correlated container removal: %w", err)
+		}
+		if len(after) == 0 {
+			return nil
+		}
+		select {
+		case <-settleCtx.Done():
+			return fmt.Errorf("correlated container removal could not be verified")
+		case <-time.After(containerRemovalSettlePoll):
+		}
 	}
-	if len(after) != 0 {
-		return fmt.Errorf("correlated container removal could not be verified")
-	}
-	return nil
 }
 
 // inspectOperationContainers lists helper-owned containers correlated with
@@ -380,7 +410,17 @@ func forceRemoveCorrelatedContainer(ctx context.Context, newCommand dockerComman
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("cannot remove correlated container: %w: %s", err, strings.TrimSpace(stderr.String()))
+		stderrText := stderr.String()
+		// The Docker CLI exposes no typed signal for this case (every daemon
+		// error is exit status 1), so classify the daemon's stable removal-race
+		// phrase narrowly. "Removal already in progress" means Docker itself is
+		// removing the container; it completes without further action and the
+		// caller's absence proof decides the final state.
+		if strings.Contains(stderrText, "removal of container") &&
+			strings.Contains(stderrText, "is already in progress") {
+			return errDockerRemovalInProgress
+		}
+		return fmt.Errorf("cannot remove correlated container: %w: %s", err, strings.TrimSpace(stderrText))
 	}
 	return nil
 }
