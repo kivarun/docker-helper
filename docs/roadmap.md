@@ -384,20 +384,15 @@ work are recorded in
 the historical completed implementation plan is
 [`docs/release-2.1-implementation-plan.md`](release-2.1-implementation-plan.md).
 
-Release 2.1 implementation is complete on `main`: the Launcher ownership
-model, the Launcher/credential control plane, the Session ownership cutover
-with the idempotent v2.0.0 → 2.1 ownership migration, launcher lifecycle
-propagation, helper-owned runtime correlation labels, and the `launcher` CLI
-are all implemented. This is an implementation statement, not release
-acceptance: promotion still requires the artifact gate to pass, including a
-privileged run of the acceptance scenarios
-(`scripts/uat-release2-acceptance.sh`). Release 2.1 production code is
-frozen for the RC6 candidate: documentation/help/man and
-documented-contract reconciliation are complete; remaining pre-release work
-is the final pre-release review and the RC6 exact-SHA gate. The current
-behavior contract lives in
+Release 2.1 is complete and published as `v2.1.1`; the RC6 candidate freeze
+text below is historical. Historically, the Launcher ownership model, the
+Launcher/credential control plane, the Session ownership cutover with the
+idempotent v2.0.0 → 2.1 ownership migration, launcher lifecycle propagation,
+helper-owned runtime correlation labels, and the `launcher` CLI were
+implemented, the artifact gate passed, and the RC6 exact-SHA gate closed
+before publication. The historical behavior contract lives in
 [`docs/architecture.md`](architecture.md) ("Launcher ownership"); the Release 3
-vocabulary map has been updated to the final 2.1 symbols
+vocabulary map was updated to the final 2.1 symbols
 ([`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md)).
 
 ### Post-2.0 validation and hardening follow-ups

@@ -100,10 +100,14 @@ state:
 current status had not yet been proved. **SC0 is closed only because that state
 is now absent from the entire C/H/M matrix.**
 
-## SC0 result
+## SC0 exit distribution (historical snapshot)
 
-SC0 closes with this terminal distribution across the 26 Critical/High/Medium
-findings:
+SC0 closed with this terminal distribution across the 26 Critical/High/Medium
+findings. This table is the historical SC0-exit snapshot, not the current
+disposition: the SC0 blocker queue was subsequently closed through SC1-SC4,
+and the authoritative current state is the per-finding disposition matrix
+below (currently: no `BLOCKER_FIX`, no `BLOCKER_DECISION`, and no
+`VERIFY_CURRENT` rows remain).
 
 ```text
 BLOCKER_FIX       16
@@ -114,7 +118,7 @@ DEFER_HARDENING    1
 VERIFY_CURRENT      0
 ```
 
-The release-blocking implementation queue is intentionally split by owner and
+The release-blocking implementation queue was intentionally split by owner and
 risk rather than by the audit's original severity ordering.
 
 ## Current C/H/M disposition matrix

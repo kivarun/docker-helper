@@ -706,8 +706,11 @@ the existing release pipeline. Source-only success is not sufficient.
 
 ## Phase 2.2.8 — issuance-time Session filesystem narrowing
 
-**Status: CORRECTED to the multi-root filesystem-roots contract; awaiting
-architectural acceptance and the full UAT gate.** The original
+**Status: CORRECTED to the multi-root filesystem-roots contract; implemented
+and merged to `release/2.2` after architectural acceptance.** The final
+exact-artifact gate is pending again after the pre-release remediation series:
+the next `scope=full` UAT run on the final remediated SHA is the acceptance
+basis. The original
 issuance-time narrowing increment
 (`feature/2.2.10-session-filesystem-narrowing`) issued a
 workspace-relative entry grammar; the release owner corrected the model

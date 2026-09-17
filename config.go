@@ -119,10 +119,11 @@ type configFieldSpec struct {
 var configFields = []configFieldSpec{
 	{name: "allowed_roots", writable: true, required: true},
 	{name: "allowed_root", writable: false, required: false},
-	// allowed_root is the legacy migration-only scalar: it is accepted by
-	// config loading for migration compatibility only and is never part of
-	// the show vocabulary, so the read-only classification makes a
-	// config.json carrying it a fail-closed validation error.
+	// allowed_root is the legacy migration-only scalar: the config grammar
+	// and load path accept it for migration compatibility (it migrates into
+	// the canonical allowed_roots projection) and it is not a canonical
+	// surface — it is not a config show field and not a writable config set
+	// field, so carrying it is a valid config, not a validation error.
 	{name: "session_ttl", writable: true, required: true},
 	{name: "log_level", writable: true},
 	{name: "audit_enabled", writable: true},
