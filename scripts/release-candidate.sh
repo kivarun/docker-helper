@@ -215,8 +215,24 @@ dpkg-deb -x "$DEB" "$PAYLOAD_VERIFY_DIR/deb" \
 # nFPM's RPM payload carries ABSOLUTE cpio entry names; --no-absolute-filenames
 # extracts them under the verification directory instead of the real system
 # paths (a non-root producer must never write to /).
-rpm2cpio "$RPM" | ( cd "$PAYLOAD_VERIFY_DIR/rpm" && cpio -idmu --no-absolute-filenames --quiet ) \
-  || fail "cannot extract RPM payload for payload identity verification"
+#
+# rpm2cpio's exit status is deliberately NOT trusted: on the producer platform
+# (Ubuntu noble, rpm 4.18.2) rpm2cpio writes the complete payload and exits 1
+# on SUCCESS (upstream rpm2cpio exit-status bug; proven by the diagnostic run
+# — full valid payload, exit 1, GNU cpio 2.15 extracts it cleanly). The
+# authoritative fail-closed gate is cpio itself: an empty, truncated, or
+# garbage payload always makes cpio exit non-zero, and the member-existence
+# checks below catch any missing file.
+rpm2cpio "$RPM" > "$PAYLOAD_VERIFY_DIR/payload.cpio" 2>"$PAYLOAD_VERIFY_DIR/rpm2cpio.err" \
+  || true
+if [ ! -s "$PAYLOAD_VERIFY_DIR/payload.cpio" ]; then
+  fail "rpm2cpio produced no RPM payload for payload identity verification: $(head -c 400 "$PAYLOAD_VERIFY_DIR/rpm2cpio.err" 2>/dev/null)"
+fi
+if ! ( cd "$PAYLOAD_VERIFY_DIR/rpm" \
+       && cpio -idmu --no-absolute-filenames --quiet < "$PAYLOAD_VERIFY_DIR/payload.cpio" ) \
+       2>"$PAYLOAD_VERIFY_DIR/cpio.err"; then
+  fail "cannot extract RPM payload for payload identity verification: $(head -c 400 "$PAYLOAD_VERIFY_DIR/cpio.err" 2>/dev/null)"
+fi
 
 TAR_MEMBER_ROOT="$PAYLOAD_VERIFY_DIR/tar/docker-helper-${VERSION}-linux-amd64"
 
