@@ -234,7 +234,7 @@ create_session() {
 
 # show_snapshot SESSION_ID — prints the issued snapshot as PATH/ACCESS lines.
 show_snapshot() {
-  dh session show --system --id "$1" 2>/dev/null \
+  dh session show --system "$1" 2>/dev/null \
     | sed -n '/^FILESYSTEM SNAPSHOT/,$p' | tail -n +2
 }
 

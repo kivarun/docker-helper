@@ -612,7 +612,7 @@ else
 fi
 
 # SE introspection: session show and self carry the issued external roots.
-SE_SHOW="$(dh session show --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE_ID" --json 2>/dev/null || true)"
+SE_SHOW="$(dh session show --system --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" --json 2>/dev/null || true)"
 if printf '%s' "$SE_SHOW" | grep -q '"'"$SE_CACHE"'"' \
     && printf '%s' "$SE_SHOW" | grep -q '"'"$SE_HELPER"'"'; then
   acc_ok "SE session show carries the issued external roots (RW cache + RO helper)"
@@ -727,7 +727,7 @@ SE2_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
 SE2_ID="$(printf '%s' "$SE2_OUT" | json_field id)"
 if [ -n "$SE2_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE2_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_CACHE(/.*)?" \
     "SE shared external tree survives the first Session deletion (second Session keeps it)" \
     "SE external fcontext coverage was released while a second Session still issues the tree"

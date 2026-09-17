@@ -744,7 +744,7 @@ with the non-disclosing not-found error.
 ### Show a session
 
 ```bash
-docker-helper session show --id dhs_...
+docker-helper session show dhs_...
 ```
 
 Displays the session metadata plus the persisted immutable filesystem

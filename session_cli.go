@@ -363,21 +363,16 @@ var sessionDeleteCommand = &Command{
 }
 
 var sessionShowCommand = &Command{
-	Name:    "show",
-	Summary: "Show one session with its issued filesystem snapshot",
-	Usage:   "docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]",
+	Name:       "show",
+	Summary:    "Show one session with its issued filesystem snapshot",
+	Usage:      "docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		id := fs.String("id", "", "Session ID to show")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
-			Validate: func() error {
-				if *id == "" || strings.HasPrefix(*id, "-") {
-					return fmt.Errorf("--id is required")
-				}
-				return nil
-			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -389,11 +384,16 @@ var sessionShowCommand = &Command{
 					return 1
 				}
 
+				// The Session ID is the primary resource identity and is
+				// positional, like the other resource show commands; flags
+				// carry options and transport only.
+				sessionID := fs.Arg(0)
+
 				// The daemon authorizes the read against the authenticated
 				// bearer and loads the persisted immutable snapshot through
 				// the canonical snapshot owner; the CLI performs no
 				// client-side ownership check and never recomputes policy.
-				result, err := client.getSession(*id)
+				result, err := client.getSession(sessionID)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

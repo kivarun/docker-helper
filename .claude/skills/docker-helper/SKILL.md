@@ -219,7 +219,7 @@ deployment mode.
 The session's filesystem policy is the immutable snapshot issued when the
 session was created. Introspect your own snapshot with `docker-helper self`
 — it renders the exact persisted PATH/ACCESS table for a Session bearer.
-`docker-helper session show --id SESSION_ID` is the operator/control-plane
+`docker-helper session show SESSION_ID` is the operator/control-plane
 lookup for a credential that authorizes it, not a Session-bearer surface.
 The snapshot does not change during the session's lifetime, and parent
 allowed-root policy changes do not affect an already-issued session.

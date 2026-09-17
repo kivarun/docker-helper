@@ -360,8 +360,8 @@ else
   acc_fail "R5 Launcher root migration wrong (rich projection: $M_LLIST_JSON)"
 fi
 
-M_S1_SHOW="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
-M_S2_SHOW="$(dh session show --system --id "$M_S2_ID" 2>/dev/null || true)"
+M_S1_SHOW="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
+M_S2_SHOW="$(dh session show --system "$M_S2_ID" 2>/dev/null || true)"
 if printf '%s\n' "$M_S1_SHOW" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$" \
     && printf '%s\n' "$M_S2_SHOW" | grep -Eq "^$(printf '%s' "$M_HOME/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
   acc_ok "R6 pre-existing Sessions carry the compatibility workspace/read_write snapshot"
@@ -415,7 +415,7 @@ M_R9_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system --json "$M
 systemctl restart docker-helper.service >/dev/null 2>&1 || true
 wait_service_active || acc_fail "R9 daemon not active after restart"
 if wait_health; then
-  M_S1_SHOW2="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
+  M_S1_SHOW2="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
   if printf '%s\n' "$M_S1_SHOW2" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
     acc_ok "R9 snapshot stable across restart (idempotent migration)"
   else

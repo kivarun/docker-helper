@@ -24,7 +24,7 @@
 #   S4 launcher self reflects a scope replacement (inherit -> restricted
 #      and back) in the next self response;
 #   S5 session self: the Session bearer answers with type=session and the
-#      same body 'session show --id' renders for the same Session
+#      same body 'session show' renders for the same Session
 #      (workspace, ownership, expiry, persisted immutable filesystem
 #      snapshot in canonical ordering);
 #   S6 admin has no self resource: 404 self_not_available, no envelope,
@@ -381,7 +381,7 @@ if [ -n "$S5_ID" ] && [ -n "$S5_TOKEN" ]; then
   printf '%s\n' "$S5_TOKEN" > /tmp/uat-self-session.token
   chmod 600 /tmp/uat-self-session.token
   if S5_SELF="$(dh self --system --token-file /tmp/uat-self-session.token --json 2>&1)" \
-      && S5_SHOW="$(dh session show --system --id "$S5_ID" --json 2>&1)"; then
+      && S5_SHOW="$(dh session show --system "$S5_ID" --json 2>&1)"; then
     if printf '%s\n' "$S5_SELF" | grep -q '"type": "session"' \
         && printf '%s\n' "$S5_SELF" | grep -q "\"id\": \"$S5_ID\"" \
         && printf '%s\n' "$S5_SELF" | grep -q "\"workspace\": \"$S5_WS\""; then
@@ -598,7 +598,7 @@ if [ -n "$SELF_SESSION_IDS" ]; then
     if ! dh session delete --system --id "$sid" >/dev/null 2>&1; then
       # An expired session may already have been reaped by the daemon; the
       # delete only failed when the Session is still provably present.
-      if dh session show --system --id "$sid" >/dev/null 2>&1; then
+      if dh session show --system "$sid" >/dev/null 2>&1; then
         fail "Z session $sid delete failed"
       fi
     fi

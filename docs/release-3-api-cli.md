@@ -1005,7 +1005,7 @@ Session lookup uses:
 
 ```text
 GET /sessions/{session_id}
-docker-helper session show --id SESSION_ID [--json]
+docker-helper session show SESSION_ID [--json]
 ```
 
 The Query returns one direct Session management projection:

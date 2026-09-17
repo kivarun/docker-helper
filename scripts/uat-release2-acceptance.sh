@@ -1636,8 +1636,8 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   fi
 
   # --- M5: compatibility workspace/read_write snapshots ------------------------
-  M_S1_SHOW="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
-  M_S2_SHOW="$(dh session show --system --id "$M_S2_ID" 2>/dev/null || true)"
+  M_S1_SHOW="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
+  M_S2_SHOW="$(dh session show --system "$M_S2_ID" 2>/dev/null || true)"
   if printf '%s\n' "$M_S1_SHOW" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$" \
       && printf '%s\n' "$M_S2_SHOW" | grep -Eq "^$(printf '%s' "$M_HOME/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
     acc_ok "M5 pre-existing Sessions carry the compatibility workspace/read_write snapshot"
@@ -1697,7 +1697,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
     sleep 1
   done
   if wait_health "$SOCK"; then
-    M_S1_SHOW2="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
+    M_S1_SHOW2="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
     if printf '%s\n' "$M_S1_SHOW2" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
       acc_ok "M8 snapshot stable across restart (idempotent migration)"
     else

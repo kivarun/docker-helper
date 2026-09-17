@@ -687,7 +687,7 @@ NEW_SESS_ID="$(printf '%s\n' "$NEW_SESS_JSON" | grep -oP '"id": "\K[^"]+' | head
 NEW_SESS_TOKEN="$(printf '%s\n' "$NEW_SESS_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
 [ -n "$NEW_SESS_ID" ] && [ -n "$NEW_SESS_TOKEN" ] \
   || fail_uat "post-policy session returned no id/token"
-docker-helper session show --system --id "$NEW_SESS_ID" \
+docker-helper session show --system "$NEW_SESS_ID" \
   | grep -Eq "^$(printf '%s' "$WS/ro" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_only$" \
   || fail_uat "issued snapshot does not show the policy RO region (session show)"
 

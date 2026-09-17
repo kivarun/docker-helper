@@ -7,10 +7,11 @@ import (
 	"testing"
 )
 
-// TestSessionShowCLIMatrix proves the `session show` CLI contract: it issues
-// exactly one GET /sessions/{id}, renders the compact human block with the
-// explicit FILESYSTEM SNAPSHOT PATH/ACCESS table (the access mode is never
-// hidden), passes --json through unchanged, rejects a missing --id locally,
+// TestSessionShowCLIMatrix proves the `session show` CLI contract: the
+// Session ID is the primary positional identity, it issues exactly one
+// GET /sessions/{id}, renders the compact human block with the explicit
+// FILESYSTEM SNAPSHOT PATH/ACCESS table (the access mode is never hidden),
+// passes --json through unchanged, rejects a missing ID positional locally,
 // and keeps server errors visible.
 func TestSessionShowCLIMatrix(t *testing.T) {
 	showBody := `{"id":"dhs_show","workspace":"/run/job","created_at":"now","expires_at":"later","launcher_id":"dhl_default","filesystem_snapshot":{"entries":[{"path":"/run/job","access":"read_write"},{"path":"/run/job/pipeline-inputs","access":"read_only"}]}}`
@@ -24,6 +25,7 @@ func TestSessionShowCLIMatrix(t *testing.T) {
 		wantExit   int
 		wantPath   string
 		human      bool
+		noTarget   bool
 	}{
 		{
 			name:       "human output renders the snapshot table",
@@ -47,9 +49,10 @@ func TestSessionShowCLIMatrix(t *testing.T) {
 			wantPath:   "/sessions/dhs_show",
 		},
 		{
-			name:     "missing --id is rejected locally",
-			wantErr:  "--id is required",
+			name:     "missing SESSION_ID positional is rejected locally",
+			wantErr:  "missing required argument(s)",
 			wantExit: 2,
+			noTarget: true,
 		},
 	}
 
@@ -66,8 +69,8 @@ func TestSessionShowCLIMatrix(t *testing.T) {
 			})
 
 			args := []string{"session", "show", "--endpoint", endpoint, "--token-file", tokenPath}
-			if tc.wantExit != 2 {
-				args = append(args, "--id", "dhs_show")
+			if !tc.noTarget {
+				args = append(args, "dhs_show")
 			}
 			args = append(args, tc.args...)
 			var stdout, stderr bytes.Buffer
@@ -125,17 +128,30 @@ func TestSessionShowCLIMatrix(t *testing.T) {
 	}
 }
 
-// TestSessionShowHelpDocumentsIDFlag protects the help invariant: the show
-// command help documents the mandatory --id selector and the operator flags.
-func TestSessionShowHelpDocumentsIDFlag(t *testing.T) {
+// TestSessionShowHelpDocumentsPositionalIdentity protects the help
+// invariant: the show command help documents the positional SESSION_ID
+// identity (the canonical resource-show targeting) and the operator flags,
+// and the legacy `session delete --id` grammar stays untouched.
+func TestSessionShowHelpDocumentsPositionalIdentity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session", "show", "--help"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("help exit = %d (stderr=%s)", code, stderr.String())
 	}
-	for _, want := range []string{"--id", "SESSION_ID", "session show"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Errorf("session show help missing %q:\n%s", want, stdout.String())
+	help := stdout.String()
+	for _, want := range []string{"SESSION_ID", "session show"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("session show help missing %q:\n%s", want, help)
 		}
+	}
+	if strings.Contains(help, "--id") {
+		t.Errorf("session show help must not carry the retired --id selector:\n%s", help)
+	}
+
+	// The legacy pre-2.2 delete grammar is compatibility and unchanged.
+	var delOut, delErr bytes.Buffer
+	delUsage := runCommandWithWriters([]string{"session", "delete", "--help"}, &delOut, &delErr)
+	if delUsage != 0 || !strings.Contains(delOut.String(), "--id SESSION_ID") {
+		t.Errorf("session delete must keep its legacy --id grammar (exit=%d):\n%s", delUsage, delOut.String())
 	}
 }
