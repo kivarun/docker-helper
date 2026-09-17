@@ -45,6 +45,8 @@ if [[ "${2:-}" == "--payload" ]]; then
 	fi
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 if ! command -v nfpm >/dev/null 2>&1; then
 	echo "error: nfpm not found" >&2
 	echo "  Install (pinned, single owner): scripts/install-nfpm.sh" >&2
@@ -54,8 +56,6 @@ fi
 # Verify the installed nfpm through the single pinned owner (version/hash live
 # only in scripts/install-nfpm.sh); an unpinned or wrong version fails closed.
 "${SCRIPT_DIR}/scripts/install-nfpm.sh" --check "$(command -v nfpm)"
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ -n "$PAYLOAD_DIR" ]]; then
 	# Assemble only: stage the shared payload members into the canonical dist
