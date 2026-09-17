@@ -474,7 +474,7 @@ func printSessionsTable(w io.Writer, sessions []sessionJSON) {
 var sessionCleanupCommand = &Command{
 	Name:    "cleanup",
 	Summary: "Remove expired sessions from the database",
-	Usage:   "docker-helper session cleanup",
+	Usage:   "docker-helper session cleanup [--json]",
 	Help: `Remove expired sessions from the local state database.
 
 This is an OFFLINE maintenance command. The daemon must not be running.
