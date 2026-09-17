@@ -1180,14 +1180,13 @@ not a path ceiling layered over the Principal's Unix DAC. Accepted semantics
 - `read_only` is an access/integrity mode inside the granted capability: it
   denies the *workload* a writable host-path exposure. It is not a
   confidentiality boundary against the helper.
-- Actual workload file access is additionally bounded by kernel DAC under
-  the container credentials and by the privilege floor (no capabilities,
-  no-new-privileges). The current workload identity is the Principal
-  `UID:GID` with no capability bypass — this is NOT a
-  reproduction of the Principal's Unix login view: the helper and the
-  workload do not carry the Principal's supplementary groups or ACL
-  semantics, so group- or ACL-mediated access the Principal has through its
-  own login credential set is not reproduced.
+- Actual workload file access is additionally evaluated by kernel DAC,
+  including POSIX ACLs, against the credentials actually supplied to the
+  container: Principal `UID:GID` with no capability bypass, plus the
+  privilege floor (no capabilities, no-new-privileges). This is
+  not a reproduction of the Principal's host login credential set: host
+  supplementary groups are not propagated, so permissions depending on
+  those group memberships may differ.
 - User mode has no separate H10 gap: the non-root daemon is naturally
   bounded by its own DAC identity (the daemon owner is the only Principal).
   This is an implementation consequence of the same capability model, not a

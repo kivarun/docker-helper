@@ -270,7 +270,9 @@ func TestH10CapabilitySemanticsDocumented(t *testing.T) {
 				"filesystem **capability**",
 				"not a path ceiling layered over the Principal's Unix DAC",
 				"not a\n  confidentiality boundary against the helper",
-				"NOT a\n  reproduction of the Principal's Unix login view",
+				"evaluated by kernel DAC,\n  including POSIX ACLs, against the credentials actually supplied to the\n  container",
+				"not a reproduction of the Principal's host login credential set",
+				"host\n  supplementary groups are not propagated",
 			},
 		},
 		{
@@ -279,6 +281,7 @@ func TestH10CapabilitySemanticsDocumented(t *testing.T) {
 				"helper-mediated filesystem capability",
 				"not a path ceiling layered over the Principal's Unix DAC",
 				"not a confidentiality boundary against the daemon",
+				"with POSIX ACLs\n  evaluated against those actual credentials",
 			},
 		},
 		{
@@ -286,6 +289,7 @@ func TestH10CapabilitySemanticsDocumented(t *testing.T) {
 			contains: []string{
 				"helper-mediated filesystem capability, not a path ceiling over the",
 				"it is not a\nconfidentiality boundary against the daemon",
+				"with POSIX ACLs\nevaluated against those actual credentials",
 			},
 		},
 	}

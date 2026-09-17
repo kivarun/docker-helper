@@ -715,8 +715,10 @@ context even when the Principal could not read it. \fBread_only\fR
 denies the workload a writable host-path exposure; it is not a
 confidentiality boundary against the daemon. Workload file access
 remains additionally bounded by kernel DAC under the container
-credentials (Principal UID:GID, privilege floor); the workload does not
-carry the Principal's supplementary groups or ACL semantics.
+credentials (Principal UID:GID, privilege floor), with POSIX ACLs
+evaluated against those actual credentials; host supplementary groups
+are not propagated, so permissions depending on those group memberships
+may differ.
 .IP \(bu 4
 The daemon's own listeners are local only: a Unix socket, plus a loopback
 HTTP listener in system mode. No remote or non-loopback listener exists in

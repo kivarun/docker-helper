@@ -1258,8 +1258,10 @@ Note: `docker-helper config show` (without a field) displays
   denies the workload a writable host-path exposure — it is
   not a confidentiality boundary against the daemon. Workload file access
   remains additionally bounded by kernel DAC under the container
-  credentials (Principal UID:GID, privilege floor) — the workload does
-  not carry the Principal's supplementary groups or ACL semantics. User
+  credentials (Principal UID:GID, privilege floor), with POSIX ACLs
+  evaluated against those actual credentials; host supplementary groups
+  are not propagated, so permissions depending on those group
+  memberships may differ. User
   mode has no separate gap: the non-root daemon is naturally bounded by
   its own DAC identity.
 - docker-helper does not sandbox a coding tool that already has direct
