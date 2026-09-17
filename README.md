@@ -867,7 +867,7 @@ An unset SOURCE fails closed before any container operation is created; a
 SOURCE set to the empty string is delivered as an empty value.
 `--env-from` composes with `--env`.
 
-Limitation (accepted Release 2.2 residual, SC3/M1): the 2.1.x `run`
+Limitation (accepted Release 2.2 residual): the 2.1.x `run`
 implementation starts the workload through the legacy Docker CLI, which
 receives environment values as `--env DEST=value` argv entries, so a
 resolved value is visible in the argv of that daemon-side child process

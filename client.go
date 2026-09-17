@@ -438,7 +438,7 @@ func (c *apiClient) operationLogs(ctx context.Context, opID string, offset int64
 	return &result, nil
 }
 
-// drainOperationLogs fetches the operation's bounded log chunks (SC2/H5
+// drainOperationLogs fetches the operation's bounded log chunks (fixed
 // response chunking) from the given offset until the stream is caught up —
 // the server returned fewer log bytes than one full response chunk — and
 // prints every chunk to stdout. It is the one shared drain helper for the

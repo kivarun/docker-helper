@@ -114,7 +114,7 @@ func resolveAgentEndpoint(endpoint string, tokenSource func() (string, error)) (
 // waitForOperationContext polls an operation until it reaches a terminal state.
 // If ctx is cancelled, it returns immediately with ctx.Err().
 //
-// Log bytes arrive in bounded response chunks (SC2/H5). Every poll drains all
+// Log bytes arrive in bounded response chunks. Every poll drains all
 // currently available chunks through the shared drain helper, so the CLI
 // keeps real-time pace with a verbose workload without ever materializing an
 // unbounded response; when the operation becomes terminal, the same helper

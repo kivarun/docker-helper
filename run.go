@@ -23,10 +23,10 @@ var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // This is an implementation constant, not a configurable value.
 const maxShmSize = 2 * 1024 * 1024 * 1024 // 2 GiB
 
-// maxRunMounts is the Release-2.2 fixed security ceiling (SC2/H5) for
+// maxRunMounts is the Release-2.2 fixed security ceiling for
 // caller-supplied run mounts. Every req.Mounts element consumes one slot —
 // duplicates and read-only requests included; the server-owned helper_socket
-// projection is not a caller mount. Measured in the H5 closure evidence: every
+// projection is not a caller mount. Measured closure evidence: every
 // existing test and UAT run request carries 1–2 mounts, and the worst-case
 // kernel mount-table cost (3 entries per mount under the SELinux backend: pin,
 // lower file bind, bindfs projection) at the global Operation ceiling is 384
@@ -245,7 +245,7 @@ func resolveMount(mount mountRequest, workspace string, snapshot *sessionFilesys
 		return nil, fmt.Errorf("mount target is invalid: %s", mount.Target)
 	}
 
-	// Authorization ceiling first (H3): the raw source spelling must be
+	// Authorization ceiling first: the raw source spelling must be
 	// lexically inside the issued filesystem capability before any
 	// privileged host-filesystem probing. A spelling outside the capability
 	// is refused immediately without EvalSymlinks/stat.
@@ -398,7 +398,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Caller-mount count ceiling (SC2/H5): every req.Mounts element consumes
+	// Caller-mount count ceiling: every req.Mounts element consumes
 	// one slot — duplicates and read-only requests included; the server-owned
 	// helper_socket projection is not a caller mount. Checked immediately
 	// after request decoding/basic validation and before the Session MAC-use
@@ -411,7 +411,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reserve fixed Release-2.2 capacity (SC2/H5) before any expensive
+	// Reserve fixed Release-2.2 capacity before any expensive
 	// preparation: the Session MAC-use lease, mount probing, exposure
 	// resolution, pins, and workload-MAC materialization all happen while the
 	// reservation is held, and every failure path releases it exactly once.
@@ -496,7 +496,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Docker bind-mount serialization (M13): the caller-visible fields of
+		// Docker bind-mount serialization: the caller-visible fields of
 		// every mount must be representable through the Docker mount grammar
 		// before any pin, operation, or Docker state exists — the container
 		// target in every mode, and the canonical bind source in user mode

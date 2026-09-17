@@ -131,7 +131,7 @@ func TestRaceSessionCreateCommitsSnapshotWhollyBeforeNarrowing(t *testing.T) {
 // TestRaceSessionCreateCommitsSnapshotWhollyAfterNarrowing proves the mirror
 // linearization: the narrowing holds the boundary and commits its durable
 // mutation while the create is pinned at its pre-boundary authentication
-// read. The concurrent create's non-waiting admission (H8) refuses it before
+// read. The concurrent create's non-waiting admission refuses it before
 // any policy read — the refused attempt resolves no state and commits no
 // Session, so it can never observe a mixed policy state — and the retried
 // create, admitted only after the boundary is released, resolves wholly

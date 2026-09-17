@@ -8,8 +8,8 @@ import (
 	"unicode"
 )
 
-// validateHostPathText is the shared host capability path text-grammar check
-// (SC1/M11). A host capability path must not contain control characters that
+// validateHostPathText is the shared host capability path text-grammar check.
+// A host capability path must not contain control characters that
 // can desynchronize line-oriented tool output (persistent SELinux fcontext
 // records, AppArmor fragments, and config serialization are line-oriented
 // artifacts the path text feeds) or be unrepresentable as a host pathname.

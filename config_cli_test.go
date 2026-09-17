@@ -473,7 +473,7 @@ func TestConfigUnsetLogLevelRestoresInfo(t *testing.T) {
 	}
 }
 
-// M4: an existing config.json carrying an unknown member is refused by every
+// An existing config.json carrying an unknown member is refused by every
 // config mutation — the document grammar is strict, and a mutation must not
 // erase the evidence of malformed input as a side effect. The file bytes stay
 // unchanged after the refusal.

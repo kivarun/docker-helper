@@ -43,7 +43,7 @@ func setupCredentialRacePrincipal(t *testing.T, app *App, username string) (work
 // may exist after a committed revoke, and the answer is the canonical
 // non-disclosing 401 credential contract. An implementation without the
 // commit-boundary revalidation creates the Session (201) behind a revoked
-// credential — the audited H2 race.
+// credential — the race this test pins.
 func TestRaceCredentialRevokedBeforeSessionCommitRefusesSessionCreate(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
@@ -121,7 +121,7 @@ func TestRaceCredentialRevokedBeforeSessionCommitRefusesSessionCreate(t *testing
 // while the create is parked inside its lifecycleMu critical section, and
 // the resumed create must refuse at its commit boundary. A delegated
 // Session issued after the delete committed would recreate authentication
-// authority the operator removed — the same H2 race on the Launcher path.
+// authority the operator removed — the same race on the Launcher path.
 func TestRaceLauncherCredentialDeletedBeforeSessionCommitRefusesSessionCreate(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)

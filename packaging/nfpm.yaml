@@ -22,14 +22,14 @@ overrides:
       - apparmor-abstractions
       - policycoreutils
       - policycoreutils-python-utils
-      # C3: recursive workspace relabeling is delegated to upstream libselinux
+      # Descriptor-safe recursive workspace relabeling is delegated to upstream libselinux
       # restorecon, which is descriptor-safe against the pathname-replacement
       # TOCTOU only from the 3.11 selinux_restorecon rewrite onward (and only
       # with a real procfs, enforced at runtime). The floor is verified from
       # the built RPM metadata, not merely this source text.
       - libselinux1 >= 3.11
       # bindfs is the required passthrough projection mechanism for the
-      # SELinux workload read-only exposure path (Release 2.2 Phase 2.2.6).
+      # SELinux workload read-only exposure path.
       # The SELinux backend fails closed when the binary is missing.
       - bindfs
     scripts:

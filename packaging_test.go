@@ -4347,8 +4347,8 @@ func TestRPMSelinuxDependencies(t *testing.T) {
 	// policycoreutils provides both semodule and restorecon on openSUSE.
 	// With this hard dependency, both tools are guaranteed present.
 	// The restorecon IMPLEMENTATION floor is a separate contract owned by
-	// libselinux1 >= 3.11 (the descriptor-safe selinux_restorecon rewrite,
-	// C3): recursive workspace relabeling is delegated to that upstream
+	// libselinux1 >= 3.11 (the descriptor-safe selinux_restorecon rewrite):
+	// recursive workspace relabeling is delegated to that upstream
 	// implementation and is fail-closed at the runtime procfs prerequisite,
 	// not best-effort. Exact-path packaging restorecon calls (binary, bindfs,
 	// deployment trees) remain best-effort for labels only.
@@ -4574,7 +4574,7 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	if !strings.Contains(requires, "apparmor-abstractions") {
 		t.Error("RPM Requires must include apparmor-abstractions")
 	}
-	// C3: descriptor-safe recursive restorecon floor, proven from the BUILT
+	// Descriptor-safe recursive restorecon floor, proven from the BUILT
 	// RPM metadata (not merely the nfpm config source text): the packaged
 	// restorecon implementation must be libselinux 3.11 or newer, where
 	// selinux_restorecon(3) labels through /proc/self/fd paths.

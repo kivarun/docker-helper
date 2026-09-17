@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// H8 liveness suite (SC2 — bounded MAC-command liveness).
+// Bounded MAC-command liveness suite.
 //
 // Every coordination test in this file is RED/GREEN evidence: a seam-parked
 // external MAC one-shot command parks shared lifecycle coordination, and the
@@ -253,7 +253,7 @@ func h8RunConcurrentDisables(app *App, launcherID, username string) (chan error,
 
 // h8AwaitDisables waits for both disables to reach their authoritative
 // transitions within the deadline. Pre-fix this fails at the deadline with
-// the H8 defect message; post-fix it passes.
+// the unbounded-hold message; post-fix it passes.
 func h8AwaitDisables(t *testing.T, disableLauncherDone, disablePrincipalDone chan error) {
 	t.Helper()
 	deadline := time.After(macLivenessObservationWindow + macLivenessCompletionSlop)
@@ -272,7 +272,7 @@ func h8AwaitDisables(t *testing.T, disableLauncherDone, disablePrincipalDone cha
 			}
 			principalCommitted = true
 		case <-deadline:
-			t.Fatal("administrative disable did not reach its authoritative transition within the bounded window: the parked MAC command holds lifecycle coordination without any bound (H8 defect)")
+			t.Fatal("administrative disable did not reach its authoritative transition within the bounded window: the parked MAC command holds lifecycle coordination without any bound")
 		}
 	}
 }
@@ -403,7 +403,7 @@ func TestH8HungAppArmorParserParksSessionCreateAndBlocksDisable(t *testing.T) {
 // Launcher/Principal disable requested.
 //
 // The single bounded window anchored at the in-flight create's budget
-// start proves the H8 queue closure: every queued create must receive its
+// start proves the queue closure: every queued create must receive its
 // refusal within the window (it must never queue behind the coordination
 // and execute its own later MAC transition), and the disable must reach its
 // authoritative transition within ONE in-flight transition budget — its
@@ -488,7 +488,7 @@ func h8RunQueuedCreatesDisableProof(t *testing.T, app *App, entered <-chan struc
 			}
 			disablePrincipalCommitted = true
 		case <-deadline:
-			t.Fatalf("the queued creates and the disable did not settle within one in-flight transition budget plus slop: queued Session creates queue behind the held lifecycle coordination and each one obtains its own fresh whole-transition MAC budget, so the emergency disable's delay grows with the queued create count (H8 queue defect)")
+			t.Fatalf("the queued creates and the disable did not settle within one in-flight transition budget plus slop: queued Session creates queue behind the held lifecycle coordination and each one obtains its own fresh whole-transition MAC budget, so the emergency disable's delay grows with the queued create count")
 		}
 	}
 
@@ -536,7 +536,7 @@ func h8RunQueuedCreatesDisableProof(t *testing.T, app *App, entered <-chan struc
 	app.MACCoordinator.ReleaseSessionBinding(after.Session.ID)
 }
 
-// TestH8QueuedAppArmorSessionCreatesDoNotDelayDisable proves the H8 queue
+// TestH8QueuedAppArmorSessionCreatesDoNotDelayDisable proves the queue
 // closure on the AppArmor backend: Session creates issued while one parked
 // create holds the lifecycle coordination are refused without queueing, and
 // the concurrent Launcher/Principal disable is delayed by at most the one
@@ -548,7 +548,7 @@ func TestH8QueuedAppArmorSessionCreatesDoNotDelayDisable(t *testing.T) {
 	h8RunQueuedCreatesDisableProof(t, app, entered, release)
 }
 
-// TestH8QueuedSELinuxSessionCreatesDoNotDelayDisable proves the same H8
+// TestH8QueuedSELinuxSessionCreatesDoNotDelayDisable proves the same
 // queue closure on the SELinux backend: the parked fcontext one-shot holds
 // the lifecycle coordination, queued creates are refused without queueing,
 // and the concurrent disable is delayed by at most one transition budget.
@@ -642,7 +642,7 @@ func TestH8SELinuxFcontextLockContentionFailsClosed(t *testing.T) {
 			t.Fatalf("lock contention error = %v, want the fail-closed contention refusal", err)
 		}
 	case <-time.After(macLivenessObservationWindow):
-		t.Fatal("the SELinux fcontext lock acquisition did not fail closed under contention: the blocking LOCK_EX wait has no bound (H8 defect)")
+		t.Fatal("the SELinux fcontext lock acquisition did not fail closed under contention: the blocking LOCK_EX wait has no bound")
 	}
 }
 
@@ -792,7 +792,7 @@ func TestH8ReloadHungTrustedCARestoreconKeepsPreviousConfig(t *testing.T) {
 			reloadCode = code
 			reloadSet = true
 		case <-deadline:
-			t.Fatal("lifecycle coordination did not release within the bounded window: the hung trusted-CA restorecon holds lifecycleMu without any bound (H8 defect)")
+			t.Fatal("lifecycle coordination did not release within the bounded window: the hung trusted-CA restorecon holds lifecycleMu without any bound")
 		}
 	}
 
@@ -882,7 +882,7 @@ func TestH8WorkloadAppArmorCleanupTimeoutRetainsOwnership(t *testing.T) {
 	select {
 	case cleanupErr = <-cleanupDone:
 	case <-time.After(macLivenessObservationWindow + macLivenessCompletionSlop):
-		t.Fatal("workload AppArmor parser cleanup did not return within the bounded window: the parked parser outlives the intended cleanup bound (H8 defect)")
+		t.Fatal("workload AppArmor parser cleanup did not return within the bounded window: the parked parser outlives the intended cleanup bound")
 	}
 	if cleanupErr == nil {
 		t.Fatal("a cleanup whose parser exceeded the MAC budget must fail, not succeed")
@@ -1002,7 +1002,7 @@ func TestH8RunCleanupSequenceBoundedUnderHungWorkloadCleanup(t *testing.T) {
 	select {
 	case outcome = <-outcomeDone:
 	case <-time.After(macLivenessObservationWindow + macLivenessBudgetOverride + macLivenessCompletionSlop):
-		t.Fatal("the run cleanup sequence did not finish within the MAC budget: the hung parser holds the run completion path without bound (H8 defect)")
+		t.Fatal("the run cleanup sequence did not finish within the MAC budget: the hung parser holds the run completion path without bound")
 	}
 	if outcome.completed {
 		t.Fatal("a budget-expired workload cleanup must retain state, never report completion")
@@ -1091,7 +1091,7 @@ func TestH8StartupReconciliationBoundedUnderHungRepair(t *testing.T) {
 			t.Errorf("reconciliation error = %v, want the typed budget error", err)
 		}
 	case <-time.After(macLivenessObservationWindow + macLivenessBudgetOverride + macLivenessCompletionSlop):
-		t.Fatal("startup reconciliation did not return within the MAC budget: a hung repair command holds the startup coordination without bound (H8 defect)")
+		t.Fatal("startup reconciliation did not return within the MAC budget: a hung repair command holds the startup coordination without bound")
 	}
 	if elapsed := time.Since(started); elapsed > macLivenessBudgetOverride+macLivenessCompletionSlop {
 		t.Errorf("reconciliation returned after %v, want within budget %v + slop", elapsed, macLivenessBudgetOverride)
@@ -1162,7 +1162,7 @@ func TestH8CreateMACBudgetFailureHTTPClass(t *testing.T) {
 }
 
 // TestH8CreateLifecycleBusyHTTPClass proves the public boundary of the
-// non-waiting Session-create admission (H8): a create issued through the
+// non-waiting Session-create admission: a create issued through the
 // real route handler while one parked create holds the lifecycle
 // coordination answers the stable lifecycle_busy class (HTTP 503) through
 // the real handler — the audit record carries the same class — and commits

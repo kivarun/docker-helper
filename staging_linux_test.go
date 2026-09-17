@@ -924,7 +924,7 @@ func TestStageBuildContextStripsSetUIDOnHardlinkedPair(t *testing.T) {
 	}
 }
 
-// --- H4 staging ceilings -----------------------------------------------------
+// --- build staging ceilings -----------------------------------------------------
 //
 // The staging resources that must be refused are measured against the
 // proposed Release-2.2 production ceilings (128 MiB payload bytes, 50000
@@ -1126,7 +1126,7 @@ func TestStageBuildContextDepthOverCeiling(t *testing.T) {
 	}
 }
 
-// --- H4 exact boundary semantics (injected tiny ceilings) --------------------
+// --- exact staging boundary semantics (injected tiny ceilings) --------------------
 //
 // The production ceilings are too large for exact boundary fixtures, so the
 // boundary tests below inject tiny ceilings through stageBuildContextInternal

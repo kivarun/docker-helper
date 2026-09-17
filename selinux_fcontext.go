@@ -70,7 +70,7 @@ type selinuxFcontextManager struct {
 	// Returns a release function and an error. The release function must be
 	// called to release the lock.
 	acquireLock func() (func() error, error)
-	// procfsUsable establishes the C3 runtime prerequisite for the
+	// procfsUsable establishes the runtime prerequisite for the
 	// descriptor-safe recursive relabel: /proc must be a real procfs mount
 	// (statfs filesystem identity), so the libselinux restorecon
 	// implementation actually labels through /proc/self/fd paths instead of
@@ -105,7 +105,7 @@ func newSELinuxFcontextManager() *selinuxFcontextManager {
 }
 
 // procfsUsableForRestorecon establishes that /proc is a real procfs mount —
-// the runtime prerequisite for the descriptor-safe recursive relabel (C3).
+// the runtime prerequisite for the descriptor-safe recursive relabel.
 // The libselinux 3.11 selinux_restorecon implementation labels each inode
 // through /proc/self/fd/<fd> paths so a hostile pathname replacement during
 // the tree walk cannot redirect a relabel to a foreign inode; when /proc is
@@ -353,7 +353,7 @@ func (m *selinuxFcontextManager) ensureTreeFcontext(ctx context.Context, tree st
 		return false, err
 	}
 
-	// Fail-closed C3 admission, before any fcontext state is read or mutated:
+	// Fail-closed descriptor-safe admission, before any fcontext state is read or mutated:
 	// without a real procfs the descriptor-safe restorecon implementation
 	// would silently fall back to pathname labeling (the pre-3.11 TOCTOU
 	// behavior), so no rule is ever created for a tree docker-helper cannot
@@ -1082,7 +1082,7 @@ func (m *selinuxFcontextManager) checkTreeRelabelBoundary(workspace string) erro
 // mount point at or below it.
 //
 // Mount-point safety and pathname-TOCTOU safety are separate invariants: the
-// mount-boundary guard above cannot close the C3 pathname-replacement race
+// mount-boundary guard above cannot close the pathname-replacement race
 // (a hostile Principal can swap pathnames DURING the walk). That race is
 // closed by delegating the walk to the descriptor-safe libselinux 3.11
 // restorecon implementation (packaged floor libselinux1 >= 3.11), which is
@@ -1107,7 +1107,7 @@ func (m *selinuxFcontextManager) restoreconTree(ctx context.Context, path string
 		}
 		return nil
 	}
-	// C3 admission for the recursive walk: the descriptor-safe
+	// Descriptor-safe admission for the recursive walk: the descriptor-safe
 	// implementation requires a real procfs; without one it falls back
 	// to pathname labeling and the relabel must not run.
 	if err := m.procfsUsable(); err != nil {

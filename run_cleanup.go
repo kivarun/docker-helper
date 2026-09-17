@@ -1,7 +1,6 @@
 package main
 
-// run_cleanup.go — the single cleanup owner for terminal run paths
-// (Release 2.2 Phase 2.2.6).
+// run_cleanup.go — the single cleanup owner for terminal run paths.
 //
 // Every path where a Docker process/container may exist, and every path
 // where it provably cannot, converges here. The staged progression is
@@ -57,7 +56,7 @@ const (
 // Release 2.2 cleanup lifecycle. Every cleanup path — post-start cleanup,
 // pre-container rollback, startup reconciliation — executes a subsequence
 // of exactly this order, and runCleanupSequence refuses any stage list
-// that would reorder it. The capacity stage (SC2/H5) is the first,
+// that would reorder it. The capacity stage is the first,
 // kernel-independent entry: it is bookkeeping only, and a pre-container
 // rollback releases the fixed capacity slot of an operation that never
 // started even when a later stage fails and retains dependent kernel state.
@@ -194,7 +193,7 @@ func (a *App) cleanupAfterRunProcess(op *operation) {
 }
 
 // rollbackRunPreparation reverses prepared run resources before any
-// container can exist: the capacity reservation (SC2/H5), workload MAC
+// container can exist: the capacity reservation, workload MAC
 // state, pins, the durable ownership record, lease, cidfile. It is used by
 // every pre-start failure path (MAC preparation failure, MAC validation
 // failure, admission refusal, shutdown gate before process start, and

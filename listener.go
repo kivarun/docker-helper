@@ -118,7 +118,7 @@ func (f *defaultListenerFactory) createTCPListener(address string) (net.Listener
 // free later stays free until the next normal service restart), and exactly
 // one bounded operational warning names the configured address and the bind
 // failure. A hostile unprivileged local user can therefore hold the TCP port
-// without denying the authoritative Unix service (H7).
+// without denying the authoritative Unix service.
 func prepareListeners(mode DeploymentMode, socketPath, httpAddress string) (unixListener, tcpListener net.Listener, tcpDegradedErr, err error) {
 	unixListener, err = ListenerFactory.createUnixListener(socketPath, mode)
 	if err != nil {

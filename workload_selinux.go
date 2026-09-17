@@ -1,7 +1,6 @@
 package main
 
-// workload_selinux.go — the SELinux workload MAC backend (Release 2.2
-// Phase 2.2.6, mechanism accepted by M0-S).
+// workload_selinux.go — the SELinux workload MAC backend.
 //
 // For each accepted read-only exposure the backend creates a helper-owned
 // writable bindfs passthrough projection from the existing pinned source and

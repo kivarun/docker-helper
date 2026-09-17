@@ -854,7 +854,7 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 	}
 }
 
-// TestMountCommaTargetRoundTripsThroughDockerGrammar proves the M13
+// TestMountCommaTargetRoundTripsThroughDockerGrammar proves the
 // serializer property at the handler boundary: a crafted target carrying the
 // option-injection spelling is now safely representable through the Docker
 // mount grammar — the Docker CLI parses it as exactly ONE field, so the

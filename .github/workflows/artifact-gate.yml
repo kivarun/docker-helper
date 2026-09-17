@@ -56,18 +56,22 @@
 # production SELinux path is covered by the full gate. The bounded SELinux
 # developer diagnostic is the scope=selinux run (openSUSE SELinux job only).
 #
-# Upgrade-baseline recovery source: the pinned baseline version and SHA-256s
-# are owned by scripts/uat-upgrade-baseline-fixture.sh and can never come from
-# GitHub variables. That fixture owner also pins the published v2.1.1 DEB/RPM
-# migration baseline for the Release-2.2 2.1.1 -> candidate migration gates
-# (DEB scenario M and the RPM guest migration stage). The optional repository
-# variables below
-# (UAT_UPGRADE_BASELINE_DEB_URL / UAT_UPGRADE_BASELINE_RPM_URL) may override
-# only the artifact SOURCE, so an administrator can mirror/stage the exact same
-# known bytes when the canonical URL is unavailable. Normal state (variables
-# unset) -> canonical v2.0.0 release URLs. An explicit override must contain
-# the SAME exact bytes (the pinned SHA is always verified before use). No
-# secrets are involved.
+# Upgrade-baseline recovery source. Both baseline fixture families are owned
+# by scripts/uat-upgrade-baseline-fixture.sh; their pinned versions and
+# SHA-256s are identity and can never come from GitHub variables:
+#
+#   * v2.0.0 historical ownership/package migration baseline — the
+#     UPGRADE_BASELINE_* family. The optional repository variables below
+#     (UAT_UPGRADE_BASELINE_DEB_URL / UAT_UPGRADE_BASELINE_RPM_URL) override
+#     only the artifact SOURCE, so an administrator can mirror/stage the
+#     exact same known bytes when the canonical URL is unavailable.
+#   * v2.1.1 mandatory Release-2.2 access-mode migration baseline — the
+#     UPGRADE211_* family, with its own dedicated source overrides
+#     (UAT_UPGRADE211_DEB_PATH/URL and UAT_UPGRADE211_RPM_PATH/URL).
+#
+# Normal state (variables unset) resolves to the canonical published release
+# URLs. An explicit override must contain the SAME exact bytes (the pinned
+# SHA is always verified before use). No secrets are involved.
 
 name: Release artifact gate
 

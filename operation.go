@@ -33,9 +33,9 @@ const (
 	operationKindBuild = "build"
 )
 
-// Release-2.2 fixed security ceilings (SC2/H5). These are hard,
-// non-configurable daemon resource ceilings measured in the H5 closure
-// evidence. They are not Principal/Launcher quotas and have no config, CLI,
+// Release-2.2 fixed security ceilings. These are hard,
+// non-configurable daemon resource ceilings measured at closure. They are
+// not Principal/Launcher quotas and have no config, CLI,
 // or API surface.
 //
 // Concurrent execution capacity counts preparation and running execution of
@@ -52,7 +52,7 @@ const (
 //   - 8 concurrent executions globally: keeps at least half of the global
 //     capacity available to other Sessions when one Session is saturated.
 //   - 2 concurrent builds globally: worst-case hostile staging occupancy is
-//     2 × 128 MiB (the H4 per-build staging ceiling) = 256 MiB, which is 42%
+//     2 × 128 MiB (the per-build staging ceiling) = 256 MiB, which is 42%
 //     of the /run tmpfs of the smallest supported host (3 GiB RAM, ~614 MB
 //     /run); three or more concurrent maximal builds would exceed half of
 //     that tmpfs.
@@ -137,7 +137,7 @@ type operation struct {
 	// nil when no lease was acquired (user mode or no MAC backend).
 	macLeaseRelease func()
 	// capacityRelease releases the fixed Release-2.2 capacity slot of this
-	// operation (SC2/H5). It is set at final admission (transferred from the
+	// operation. It is set at final admission (transferred from the
 	// pre-preparation reservation) and invoked exactly once when the
 	// operation reaches a terminal state; pre-admission failure paths release
 	// through the same reservation before the slot ever transfers.
@@ -237,7 +237,7 @@ type operationSupervisor struct {
 	// is consulted by reserve/admitReserved, never by the shared capacity
 	// accounting, and never by the synchronous execution surfaces.
 	quiesced map[string]bool
-	// Release-2.2 fixed capacity accounting (SC2/H5). The ceilings are the
+	// Release-2.2 fixed capacity accounting. The ceilings are the
 	// documented security constants; only the counts live here. A capacity
 	// slot is reserved before any expensive preparation (Operations) or
 	// before any Docker process starts (synchronous surfaces), transfers to
@@ -364,7 +364,7 @@ func (s *operationSupervisor) reserveCapacityLocked(sessionID string, build bool
 }
 
 // reserveCapacity atomically reserves one capacity slot on behalf of the
-// Session under the fixed Release-2.2 ceilings (SC2/H5). It is the shared
+// Session under the fixed Release-2.2 ceilings. It is the shared
 // resource-accounting owner of every Session-token Docker execution surface:
 // Operation-backed run/build reach it through reserve (which adds the
 // Operation lifecycle gates), and the synchronous pull/registry-login
@@ -834,7 +834,7 @@ func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
 	}
 }
 
-// Release-2.2 fixed security ceiling (SC2/H5) for the operation-log response:
+// Release-2.2 fixed security ceiling for the operation-log response:
 // one HTTP logs response carries at most this many RAW retained log bytes.
 // The value is independent of the configurable operation_log_max_bytes
 // retention: measured worst-case JSON encoding expands adversarial bytes 6×
@@ -848,7 +848,7 @@ const logResponseChunkBytes = 262144
 const rangeUnbounded = math.MaxInt64
 
 // Range returns the retained log bytes from the requested offset, bounded to
-// maxBytes raw bytes. It is the fixed Release-2.2 (SC2/H5) response-chunk
+// maxBytes raw bytes. It is the fixed Release-2.2 response-chunk
 // mechanism of the logs surface: one HTTP logs response carries at most
 // logResponseChunkBytes raw bytes regardless of the configured retention, so
 // a request can never materialize the whole retained buffer.

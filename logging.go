@@ -239,8 +239,8 @@ func writeDockerActionRejected(
 	writeError(ctx, w, status, resultCode, message)
 }
 
-// The public refusal contract of the fixed Release-2.2 execution capacity
-// (SC2/H5): one canonical generic refusal for every Session-token Docker
+// The public refusal contract of the fixed Release-2.2 execution capacity:
+// one canonical generic refusal for every Session-token Docker
 // execution surface — run, build, pull, and registry login, whether
 // Operation-backed or synchronous. HTTP 429; the bounded message names no
 // capacity topology (no Session/global distinction, no synchronous/Operation
@@ -255,7 +255,7 @@ const (
 // admission refusal contract: shutdown keeps the established
 // `shutting_down` refusal, quiesce keeps the established
 // `launcher_unavailable` refusal, and exhausted fixed Release-2.2 capacity
-// (SC2/H5) answers with the single bounded `capacity_unavailable` refusal
+// answers with the single bounded `capacity_unavailable` refusal
 // for both the Session scope and the global scope — the capacity topology is
 // never exposed.
 func writeOperationAdmissionRejected(

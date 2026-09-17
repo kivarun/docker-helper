@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// --- M4 RED: the raw-validation key grammar and the fileConfig struct decode
+// --- the raw-validation key grammar and the fileConfig struct decode
 // do NOT share one key grammar. validateRawConfig recognizes canonical exact
 // snake_case spellings, while encoding/json struct matching also accepts
 // case-insensitive matches against the json tag, so a later case-variant

@@ -39,7 +39,7 @@ SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
 SEMODULE="${SEMODULE:-semodule}"
 RESTORECON="${RESTORECON:-restorecon}"
 BINDFS="${BINDFS:-bindfs}"
-# C3: descriptor-safe recursive relabel floor. The libselinux 3.11
+# Descriptor-safe recursive relabel floor. The libselinux 3.11
 # selinux_restorecon rewrite labels inodes through /proc/self/fd paths so a
 # pathname replacement racing the tree walk cannot redirect a relabel to a
 # foreign inode; older implementations relabel by pathname and stay racy.
@@ -274,7 +274,7 @@ check_libselinux_floor() {
 			info "libselinux implementation: libselinux1-$version (descriptor-safe floor $LIBSELINUX_MIN satisfied)"
 			;;
 		1)
-			error "installed libselinux1-$version is older than the descriptor-safe floor $LIBSELINUX_MIN (the C3 pathname-replacement relabel race is closed only in libselinux >= 3.11)"
+			error "installed libselinux1-$version is older than the descriptor-safe floor $LIBSELINUX_MIN (the pathname-replacement relabel race is closed only in libselinux >= 3.11)"
 			error "install libselinux1 >= $LIBSELINUX_MIN first, or use the docker-helper RPM, which requires the floor directly."
 			exit 1
 			;;
@@ -308,7 +308,7 @@ check_selected_mac_tools() {
 			error "SELinux runtime tooling (restorecon) is required for system mode on a SELinux host."
 			exit 1
 		fi
-		# C3: prove the installed libselinux implementation is the
+		# Prove the installed libselinux implementation is the
 		# descriptor-safe floor before any SELinux installation mutation.
 		check_libselinux_floor
 		if ! command -v "$BINDFS" >/dev/null 2>&1; then
@@ -508,8 +508,8 @@ apply_selinux_restorecon() {
 	if ! "$RESTORECON" /usr/bin/docker-helper; then
 		warn "restorecon /usr/bin/docker-helper failed (continuing; module + unit confinement apply)"
 	fi
-	# bindfs executable label for the workload read-only projection
-	# (Release 2.2 Phase 2.2.6); best-effort like the rest of the tree.
+	# bindfs executable label for the workload read-only projection;
+	# best-effort like the rest of the tree.
 	"$RESTORECON" /usr/bin/bindfs 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper 2>/dev/null || true

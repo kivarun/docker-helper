@@ -21,7 +21,7 @@ var ErrSystem = errors.New("system error")
 var ErrMAC = errors.New("MAC preparation failed")
 
 // ErrLifecycleBusy is the stable typed refusal of the non-waiting
-// Session-create admission (H8): the create attempt found the lifecycle
+// Session-create admission: the create attempt found the lifecycle
 // coordination held by another transition and was refused without queueing,
 // so concurrent Session creates can never stack their whole-transition MAC
 // budgets behind the held coordination and lengthen the delay an emergency
@@ -176,7 +176,7 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("no allowed roots configured: %w", ErrInvalidWorkspace)
 	}
 
-	// Authorization ceiling first (H3): the raw request spelling must be
+	// Authorization ceiling first: the raw request spelling must be
 	// lexically inside the effective allowed-root ceiling BEFORE any
 	// privileged host-filesystem probing. A spelling outside the ceiling is
 	// refused immediately without EvalSymlinks/stat — no existence, error
@@ -541,7 +541,7 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceil
 		}
 		cleaned := filepath.Clean(root.Path)
 
-		// Authorization ceiling first (H3): the raw cleaned spelling must be
+		// Authorization ceiling first: the raw cleaned spelling must be
 		// lexically inside the effective allowed-root ceiling BEFORE any
 		// privileged host-filesystem probing. A spelling outside the ceiling
 		// is refused immediately without EvalSymlinks/stat.
@@ -596,7 +596,7 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceil
 // request (nil when the request omitted filesystem_roots or carried the
 // empty array); it is proven and composed inside this boundary.
 //
-// Admission is non-waiting (H8): the create never queues behind the
+// Admission is non-waiting: the create never queues behind the
 // lifecycle serialization. A create that arrives while the coordination is
 // held is refused immediately with ErrLifecycleBusy — before any policy
 // resolution or MAC work, so a refused attempt resolves no state and

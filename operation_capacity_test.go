@@ -477,7 +477,7 @@ func TestH5ComposesWithH4StagingCeiling(t *testing.T) {
 }
 
 // TestBuildStagingRefusalReleasesCapacity is the exact regression the UAT
-// caught: a build whose staging fails — the H4 ceiling refusal included —
+// caught: a build whose staging fails — the staging ceiling refusal included —
 // releases its already-transferred capacity slot, so the next build can be
 // admitted. Pre-fix, the staging-failure path released through the
 // pre-registration closure whose reservation release had already been nulled
@@ -491,7 +491,7 @@ func TestBuildStagingRefusalReleasesCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// First build: staging refuses with the H4 typed ceiling error.
+	// First build: staging refuses with the typed ceiling error.
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
 		return nil, &buildStagingCeilingError{Resource: "bytes", Ceiling: 128, Attempted: 129}
 	}
@@ -681,7 +681,7 @@ func TestRunQuiesceRefusalLeavesNoPreparedState(t *testing.T) {
 }
 
 // TestBuildQuiesceRefusalLeavesNoStaging proves the reservation-before-staging
-// ordering for build: a build refused at admission does not stage its H4
+// ordering for build: a build refused at admission does not stage its
 // context. RED evidence at the starting SHA: the old flow stages the whole
 // context before admit() is consulted.
 func TestBuildQuiesceRefusalLeavesNoStaging(t *testing.T) {
