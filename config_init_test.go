@@ -355,17 +355,37 @@ func TestInitCLIInputErrorExitCode(t *testing.T) {
 	// Mock system mode and config path.
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc
+	// System init probes the MAC backend before the input validation; the
+	// seam keeps this test on the intended mismatch path on every host, so
+	// the asserted exit code cannot come from (or depend on) the host's own
+	// MAC detection.
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMAppArmor, nil }
 	EffectiveUID = func() int { return 0 }
 	getConfigPathFunc = func() string { return configPath }
 	defer func() {
 		EffectiveUID = origUID
 		getConfigPathFunc = origGetConfig
+		detectLSM = origLSM
 	}()
+
+	// The requested root is canonicalized before the mismatch is reported.
+	effective, err := resolveAllowedRoot(newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMismatch := fmt.Sprintf("existing configuration allowed_roots [%s] do not include %s", oldRoot, effective)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"init", "--allowed-root", newRoot}, &stdout, &stderr)
 	if code != 2 {
 		t.Errorf("expected exit code 2 for input error, got %d (stderr: %s)", code, stderr.String())
+	}
+	// The stderr must carry the concrete existing-roots/requested-root
+	// mismatch diagnostics, so the test cannot become false-green through an
+	// unrelated input error on the same exit code.
+	if !strings.Contains(stderr.String(), wantMismatch) {
+		t.Errorf("stderr must report the allowed-roots mismatch %q, got: %s", wantMismatch, stderr.String())
 	}
 }
 
