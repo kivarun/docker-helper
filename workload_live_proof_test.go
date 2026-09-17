@@ -1,13 +1,16 @@
 package main
 
-// Live backend verification for Phase 2.2.6 (bounded live evidence gate).
+// Live backend verification for the workload MAC acceptance evidence.
 // These tests exercise the PRODUCTION renderers, drivers, and lifecycle
 // owners — the real AppArmor parser, real bindfs/FUSE mounts, the real
 // kernel LSMs, and the real Docker daemon — to prove the independent MAC
 // denial of would-be read-only exposures. They are skipped in ordinary
-// test runs and are enabled only by the dedicated live-evidence workflows
-// with DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 on a prepared rootful host
-// (GitHub runner for AppArmor, enforcing Tumbleweed VM for SELinux).
+// test runs and run only under DOCKER_HELPER_LIVE_WORKLOAD_PROOF=1 on a
+// prepared rootful host: the canonical release/UAT gate compiles this
+// package into the proof harness and drives it through the workload
+// acceptance scripts (scripts/uat-workload-apparmor.sh scenario W6 on the
+// Ubuntu runner; scripts/uat-workload-selinux.sh scenario S13 inside the
+// enforcing Tumbleweed VM, reached from scripts/uat-vm-opensuse-selinux.sh).
 //
 // The proof follows the release requirement: VFS readonly alone is not MAC
 // evidence. After the application decision the read-only exposure is
@@ -1126,7 +1129,7 @@ func containerProcessLabel(t *testing.T, securityOpts []string, bind string) str
 }
 
 // liveEvidence writes a proof artifact into WORKLOAD_EVIDENCE_DIR when set,
-// mirroring how the M0 live workflows archive their evidence.
+// mirroring how the workload acceptance scripts archive their evidence.
 func liveEvidence(t *testing.T, name, content string) {
 	t.Helper()
 	dir := os.Getenv("WORKLOAD_EVIDENCE_DIR")
