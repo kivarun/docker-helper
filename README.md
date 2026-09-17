@@ -1225,9 +1225,9 @@ Note: `docker-helper config show` (without a field) displays
   with FD-relative traversal; system-mode run mounts use inode-pinned
   helper-owned mounts.
 - **Bearer authentication** — admin token uses SHA-256 hashing with
-  constant-time comparison in memory; Principal credentials and session
-  tokens use SHA-256 hashes stored in SQLite and resolved through
-  database lookup.
+  constant-time comparison in memory; Principal credentials, Launcher
+  credentials, and session tokens use SHA-256 hashes stored in SQLite and
+  resolved through database lookup.
 - **Socket permissions** — user mode Unix socket has 0600 permissions;
   system mode Unix socket has 0666 permissions. In system mode, the
   socket is accessible to any local user, but security is enforced
@@ -1237,7 +1237,15 @@ Note: `docker-helper config show` (without a field) displays
   `--user <uid>:<gid>` (the owning Principal's UID:GID, or the daemon
   UID:GID for user-mode daemon-owner Sessions). User mode and AppArmor system mode
   use `--security-opt label=disable`; SELinux system mode uses the confined
-  `docker_helper_container_t` type.
+  `docker_helper_container_t` type. The UID:GID execution identity is not
+  the only runtime protection: every workload in every mode also gets the
+  fixed server-owned runtime privilege floor — `--cap-drop ALL` and
+  `--security-opt no-new-privileges:true` are emitted before any backend
+  option and no request field can disable or weaken them. Linux
+  no-new-privileges and the dropped capability set keep an image-delivered
+  or build-staging-delivered SUID/SGID executable at the workload's own
+  execution identity, and build-context staging strips the SUID/SGID
+  privilege bits from every staged file.
 - **Mandatory access control** — system mode requires exactly one active
   backend: AppArmor with `docker-helper-system`, or enforcing SELinux with the
   daemon in `docker_helper_t`. Neither, both, and permissive SELinux fail closed.
