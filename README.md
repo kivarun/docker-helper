@@ -641,7 +641,6 @@ config.json. If present, configuration validation and daemon startup fail:
 | `database_path` | SQLite database path |
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
-| `allowed_roots` | Rich `{path, access}` projection of the canonical global allowed roots |
 | `mode` | `"user"` or `"system"` |
 
 ### 3. Start the daemon
@@ -1910,6 +1909,8 @@ docker-helper is licensed under GPL-3.0-only. See LICENSE.
 
 ## More information
 
-- [docs/architecture.md](docs/architecture.md) — full architecture, HTTP API reference,
-  audit logging, filesystem and environment policy, error codes,
-  security considerations, and future work.
+- [docs/architecture.md](docs/architecture.md) — the current architecture:
+  HTTP API reference, audit logging, filesystem and environment policy,
+  error codes, security considerations, and current limitations. It is the
+  canonical current-state reference, not a future-work plan.
+- [docs/roadmap.md](docs/roadmap.md) — planned and future work.

@@ -328,9 +328,11 @@ revision. The fallback is not to weaken SELinux parity silently.
 | M0-S | **CLOSED** | Helper-owned writable `bindfs` passthrough projection with an SELinux mount context for each read-only exposure | [run 34383031755](https://github.com/kivarun/docker-helper/actions/runs/34383031755), artifact `release-2.2-m0-selinux-34383031755-1`, digest `sha256:797b22725fd51c9c8d69828c3b03d492209863a0a26488d9556ec203f5d697c1`, tested commit `fc43e012245240d34914757a6e0a4edca777fbf4` |
 
 Both runs include a passing static-check job and a passing live workload-mode
-proof job. They are reproducible through
+proof job. They were produced by
 `.github/workflows/release-2.2-m0-apparmor.yml` and
-`.github/workflows/release-2.2-m0-selinux.yml` respectively.
+`.github/workflows/release-2.2-m0-selinux.yml` respectively; those
+feasibility-gate workflows are retired — Release 2.2 release evidence is
+owned by `artifact-gate.yml`.
 
 ### Accepted M0-A mechanism
 
