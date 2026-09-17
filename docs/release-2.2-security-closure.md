@@ -2257,8 +2257,18 @@ At minimum:
    token succeeds with no broader writable config surface. (Closed: see the
    SC1 evidence ledger, H6.)
 4. **H2 parked revoke/create race.** Park Session issuance across the
-   authorization linearization point, revoke/rotate the credential, and prove
-   the losing ordering cannot issue a new Session.
+   authorization linearization point, revoke the authorizing credential
+   (the accepted commit-boundary contract covers revoke and credential
+   delete), and prove the losing ordering cannot issue a new Session. Wired
+   as the final-gate regression group 27 (AppArmor runner) / group 9
+   (SELinux runner) (`scripts/uat-regression-h2-parked-revocation.sh`): the
+   bounded pass-through parking shim on the backend MAC frontend parks the
+   real packaged create inside its post-authentication/pre-insert MAC
+   preparation, the harness revokes the credential through the production
+   control plane while parked, the release continues the REAL backend flow,
+   and the create must lose at the commit boundary with the canonical
+   non-disclosing 401 credential contract, no Session, and no stale MAC
+   state.
 5. **H4/H5 resource ceilings.** Exercise each hard ceiling and prove bounded
    refusal before the corresponding expensive resource is consumed, with no
    residual helper/Docker/MAC state.
