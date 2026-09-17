@@ -81,8 +81,11 @@ func TestRepoHygieneFixtureExceptionIsIntentional(t *testing.T) {
 		t.Fatal(err)
 	}
 	const exception = "testdata/semanage-fcontext-producer-capture.txt"
+	// Two literal occurrences: the header note and the single EXCEPTION
+	// assignment both checks consume; a third spelling would already be a
+	// second, competing exception definition.
 	if n := strings.Count(string(script), exception); n != 2 {
-		t.Fatalf("the hygiene gate must name the fixture exception exactly twice (header + both checks), got %d occurrences", n)
+		t.Fatalf("the hygiene gate must name the fixture exception exactly twice (header note + single exception assignment), got %d occurrences", n)
 	}
 	capture, err := os.ReadFile(exception)
 	if err != nil {

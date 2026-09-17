@@ -831,7 +831,9 @@ func TestAbsenceProofRealRemovalFailureRetains(t *testing.T) {
 // TestAbsenceProofSettleWindowBounded proves the settle loop is bounded: a
 // container that never disappears must fail the proof when the caller context
 // expires after several settled re-inspections, not spin forever and not
-// return after a single failed inspection.
+// return after a single failed inspection. The deadline check proves the
+// failure completion itself: the caller context is exhausted by the settle
+// loop, so the negative outcome came from caller context exhaustion.
 func TestAbsenceProofSettleWindowBounded(t *testing.T) {
 	var mu sync.Mutex
 	inspections := 0
@@ -852,6 +854,9 @@ func TestAbsenceProofSettleWindowBounded(t *testing.T) {
 	err := proveOperationContainerAbsent(ctx, prov, "opA", "sessA")
 	if err == nil {
 		t.Fatal("a container that never disappears must fail the absence proof")
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("the proof must end on the caller deadline exhaustion, got caller context state %v (err: %v)", ctx.Err(), err)
 	}
 	if !strings.Contains(err.Error(), "could not be verified") {
 		t.Fatalf("proof must report the unverifiable removal, got %v", err)
