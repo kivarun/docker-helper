@@ -2369,19 +2369,6 @@ func TestCompletionPositionalLauncherMatrix(t *testing.T) {
 	}
 }
 
-// assertNoDuplicates asserts the completion candidates are unique.
-func assertNoDuplicates(t *testing.T, got []string) {
-	t.Helper()
-	seen := make(map[string]bool, len(got))
-	for _, value := range got {
-		if seen[value] {
-			t.Errorf("duplicate completion candidate %q in %v", value, got)
-			return
-		}
-		seen[value] = true
-	}
-}
-
 // TestCompletionSelectorsPrincipalCommandContext proves the --principal
 // selector completion is command-context aware: a Principal credential
 // receives its own username on the command families where the explicit own

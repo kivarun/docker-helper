@@ -13,22 +13,11 @@ import (
 )
 
 // --- the raw-validation key grammar and the fileConfig struct decode
-// do NOT share one key grammar. validateRawConfig recognizes canonical exact
-// snake_case spellings, while encoding/json struct matching also accepts
-// case-insensitive matches against the json tag, so a later case-variant
-// member can silently overwrite a validated canonical value — including
-// security-relevant values — without any revalidation.
-
-// m4MixedPayload returns the RED payload: a canonical-valid value followed by
-// a case-variant value that violates the canonical validator.
-func m4MixedPayload() string {
-	return `{
-  "allowed_roots": ["/opt/project"],
-  "session_ttl": "12h",
-  "operation_max_completed": 200,
-  "Operation_Max_Completed": -1
-}`
-}
+// share the strict member-name contract: every member of a config document
+// must be a canonical exact config-file key, so encoding/json struct matching
+// can never silently fold a case-variant member onto a validated canonical
+// value — including security-relevant values — without any revalidation.
+// The case-variant overwrite is a closed regression, pinned by these tests.
 
 // TestValidateRawConfigRejectsCaseVariantKeys proves the strict member-name
 // contract through the raw-validation owner: every member of a config

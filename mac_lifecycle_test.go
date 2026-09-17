@@ -198,28 +198,6 @@ func TestNewSessionMACCoordinatorRejectsNilDriver(t *testing.T) {
 	newSessionMACCoordinator(app.DB, nil)
 }
 
-// insertTestSession inserts a test session into the database.
-func insertTestSession(t *testing.T, db *sql.DB, launcherID, sessionID, workspace string) {
-	t.Helper()
-	_, err := db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sessionID, "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
-	)
-	if err != nil {
-		t.Fatalf("insertTestSession: %v", err)
-	}
-	insertTestSessionSnapshot(t, db, sessionID, workspace)
-}
-
-// seedTestSessionSnapshot issues the workspace-only persisted snapshot for a
-// session row without the *testing.T helper shape, matching the inherited
-// create behavior. Used where a test inserts session rows inline.
-func seedTestSessionSnapshot(t *testing.T, db *sql.DB, sessionID, workspace string) {
-	t.Helper()
-	insertTestSessionSnapshot(t, db, sessionID, workspace)
-}
-
 // TestLeaseReleaseConditionalBoundaryCleanup verifies that when a session is
 // deleted while an operation is running, the operation's lease release
 // triggers conditional boundary cleanup.

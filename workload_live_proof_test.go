@@ -288,27 +288,6 @@ func appArmorDenialDiagnostics(t *testing.T, profileName string) {
 	}
 }
 
-// liveContainerProcessLabel runs one container carrying the given security
-// options and reports the process label observed inside the container.
-func liveContainerProcessLabel(t *testing.T, securityOpts []string) (string, error) {
-	t.Helper()
-	args := []string{"run", "--rm", "--entrypoint", "/bin/cat"}
-	for _, opt := range securityOpts {
-		args = append(args, "--security-opt", opt)
-	}
-	args = append(args, "alpine:3.19", "/proc/self/attr/current")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out.String()), nil
-}
-
 // TestLiveWorkloadAppArmor drives the production AppArmor backend through
 // prepare (render + real parser load + load verification), runs a container
 // with the prepared security options over a deliberately VFS-writable

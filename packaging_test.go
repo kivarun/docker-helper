@@ -7936,17 +7936,6 @@ func extractRunBlock(stepContent string) string {
 	return strings.Join(result, "\n")
 }
 
-// findAptInstallLine returns the first line in text that contains
-// "apt-get install", trimmed of leading whitespace. Returns "" if not found.
-func findAptInstallLine(text string) string {
-	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, "apt-get install") {
-			return strings.TrimSpace(line)
-		}
-	}
-	return ""
-}
-
 // workflowPermissionsBlock returns the top-level `permissions:` block of a
 // workflow file (the block at column 0 up to the next top-level key), or ""
 // when the workflow declares no top-level permissions.
@@ -8472,18 +8461,6 @@ func TestSyncReleaseToMainDisabled(t *testing.T) {
 	if _, err := os.Stat(".github/workflows/sync-release-to-main.yml"); !os.IsNotExist(err) {
 		t.Error("sync-release-to-main.yml must stay absent: the automatic release/** -> main synchronization is disabled")
 	}
-}
-
-// gitAt runs git with the given working directory and returns combined output.
-func gitAt(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return string(out)
 }
 
 // runBashIn runs a bash script with the given working directory.
