@@ -208,11 +208,23 @@ mkdir -p "$M_HOME/ws" "$M_POLICY/sub/ws"
 printf 'mig-input\n' > "$M_POLICY/sub/ws/input.txt"
 chown -R "$M_USER:$M_USER" "$M_POLICY" "$M_HOME/ws" >"$M_DIAG/chown.out" 2>&1 || true
 dh config allowed-root add "$M_POLICY" >"$M_DIAG/gadd.out" 2>&1
-if dh config allowed-root list 2>/dev/null | grep -qx "$M_POLICY" \
-    && dh config allowed-root list 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
+# The list side of this check is a read-only probe against the daemon socket;
+# one transient socket read must not produce an undiagnosable RED (the R2 RED
+# of run 35230250365 captured only the add output while both downstream
+# migration proofs showed the roots present). Retry the read bounded, capture
+# the list output/exit status/stderr, and keep the invariant fail closed: the
+# seeded state must contain BOTH roots on every attempt.
+M_GLIST_OK=0
+for _attempt in 1 2 3; do
+  dh config allowed-root list >"$M_DIAG/glist.out" 2>"$M_DIAG/glist.err" \
+    && grep -qx "$M_POLICY" "$M_DIAG/glist.out" \
+    && grep -qx "$ALLOWED_ROOT" "$M_DIAG/glist.out" && M_GLIST_OK=1 && break
+  [ "$_attempt" -lt 3 ] && sleep 1
+done
+if [ "$M_GLIST_OK" = 1 ]; then
   acc_ok "R2 two path-only global roots seeded"
 else
-  acc_fail_ctx "R2 global allowed-root seeding failed" "$M_DIAG/gadd.out"
+  acc_fail_ctx "R2 global allowed-root seeding failed" "$M_DIAG/gadd.out" "$M_DIAG/glist.out" "$M_DIAG/glist.err"
 fi
 
 dh principal create --system --no-credential "$M_USER" >"$M_DIAG/pcreate.out" 2>&1 || true
