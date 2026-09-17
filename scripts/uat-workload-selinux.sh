@@ -431,10 +431,10 @@ dh principal allowed-root add --system "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setu
   echo "error: principal TREE root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
 dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/work/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || {
   echo "error: principal pipeline-inputs root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
-MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential 2>>/tmp/uat-wls-setup.err || true)"
+MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential --json 2>>/tmp/uat-wls-setup.err || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON ($(redact </tmp/uat-wls-setup.err | tail -10))" >&2; exit 1; }
-MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null || true)"
+MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
 MAIN_LC_TOKEN="$(printf '%s' "$MAIN_LC_OUT" | json_field token)"
 [ -n "$MAIN_LC_TOKEN" ] || { echo "error: launcher credential create failed" >&2; exit 1; }
 printf '%s\n' "$MAIN_LC_TOKEN" > /tmp/uat-wls-cred-main; chmod 600 /tmp/uat-wls-cred-main
@@ -543,7 +543,7 @@ if dh config allowed-root add --access read_write "$SE_OPT" >/dev/null 2>&1 \
 else
   acc_fail "SE setup: second effective root setup failed"
 fi
-SE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name se-multiroot --no-credential 2>/dev/null || true)"
+SE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name se-multiroot --no-credential --json 2>/dev/null || true)"
 SE_L_ID="$(printf '%s' "$SE_L_JSON" | json_field id)"
 if [ -n "$SE_L_ID" ] \
     && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$ALLOWED_ROOT" "$SE_L_ID" >/dev/null 2>&1 \
@@ -552,7 +552,7 @@ if [ -n "$SE_L_ID" ] \
 else
   acc_fail "SE setup: multiroot launcher setup failed: $SE_L_JSON"
 fi
-SE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" "$SE_L_ID" 2>/dev/null || true)"
+SE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$SE_L_ID" 2>/dev/null || true)"
 SE_LC_TOKEN="$(printf '%s' "$SE_LC_OUT" | json_field token)"
 if [ -n "$SE_LC_TOKEN" ]; then
   printf '%s\n' "$SE_LC_TOKEN" > /tmp/uat-wls-cred-multiroot; chmod 600 /tmp/uat-wls-cred-multiroot
@@ -727,7 +727,7 @@ SE2_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
 SE2_ID="$(printf '%s' "$SE2_OUT" | json_field id)"
 if [ -n "$SE2_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE2_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_CACHE(/.*)?" \
     "SE shared external tree survives the first Session deletion (second Session keeps it)" \
     "SE external fcontext coverage was released while a second Session still issues the tree"

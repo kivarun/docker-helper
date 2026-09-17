@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -153,5 +156,39 @@ func TestSessionShowHelpDocumentsPositionalIdentity(t *testing.T) {
 	delUsage := runCommandWithWriters([]string{"session", "delete", "--help"}, &delOut, &delErr)
 	if delUsage != 0 || !strings.Contains(delOut.String(), "--id SESSION_ID") {
 		t.Errorf("session delete must keep its legacy --id grammar (exit=%d):\n%s", delUsage, delOut.String())
+	}
+}
+
+// TestShippedScriptSessionDeleteGrammar protects the legacy targeting
+// grammar across the shipped UAT corpus: every `session delete` invocation
+// addresses the Session through the pre-2.2 compatibility `--id` flag.
+// A mechanical positional conversion (the `session show SESSION_ID`
+// normalization applied to `delete`) would silently change a compatibility
+// contract; this check fails such a replacement.
+func TestShippedScriptSessionDeleteGrammar(t *testing.T) {
+	var sessionDelete = regexp.MustCompile(`(?:\bdh\b|\bdhx\b|\bdocker-helper\b|\$DH\b|\$DHX\b)\s+session delete\b`)
+	entries, err := os.ReadDir("scripts")
+	if err != nil {
+		t.Fatalf("cannot read scripts directory: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sh") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("scripts", entry.Name()))
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", entry.Name(), err)
+		}
+		// Join backslash line continuations so flags written on the next
+		// line still belong to the invocation.
+		logical := strings.Split(strings.ReplaceAll(string(data), "\\\n", " "), "\n")
+		for i, line := range logical {
+			if !sessionDelete.MatchString(line) {
+				continue
+			}
+			if !strings.Contains(line, "--id") {
+				t.Errorf("scripts/%s:%d: session delete must keep the legacy --id grammar: %s", entry.Name(), i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }
