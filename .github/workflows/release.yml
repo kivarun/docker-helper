@@ -141,8 +141,8 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Whitespace errors
-        run: git diff --check
+      - name: Repository hygiene (tracked tree)
+        run: bash scripts/check-repo-hygiene.sh
 
       - name: Release pipeline helper tests
         run: bash scripts/test-release-pipeline.sh

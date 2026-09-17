@@ -52,7 +52,11 @@ governance, not as a substitute for `docs/architecture.md`.
   `.claude/skills/docker-helper/SKILL.md` = instructions for agents USING
   docker-helper, not developing it.
 - **Validation gate** (same core gate as CI): `gofmt -l .` (must be empty),
-  `go test ./...`, `go test -race ./...`, `go vet ./...`, `git diff --check`.
+  `go test ./...`, `go test -race ./...`, `go vet ./...`,
+  `scripts/check-repo-hygiene.sh` (the one canonical tracked-tree hygiene
+  gate: no accidental trailing whitespace, final newline present;
+  `testdata/semanage-fcontext-producer-capture.txt` is its documented
+  exact-byte exception).
   CI-only extras needing additional tools include
   `scripts/check-selinux-policy.sh` and `scripts/check-static-build.sh`.
 - **Secrets:** never write admin tokens, Session bearer tokens, Principal
