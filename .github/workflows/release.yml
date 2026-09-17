@@ -119,6 +119,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install cpio (shared-payload extraction in release pipeline tests)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y cpio
+
       - name: Formatting
         run: |
           unformatted="$(gofmt -l .)"

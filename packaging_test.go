@@ -7622,6 +7622,31 @@ func TestReleaseWorkflow(t *testing.T) {
 		t.Error("release-candidate.sh must verify SHA256SUMS")
 	}
 
+	// The producer is the single owner of the shared release payload: it builds
+	// the payload exactly once through the canonical builders and hands it to
+	// the tar/DEB/RPM assemblers via --payload, and it verifies the shared
+	// payload identity across the final formats.
+	if !strings.Contains(producerContent, "build-static.sh") {
+		t.Error("release-candidate.sh must build the payload binary through build-static.sh")
+	}
+	if !strings.Contains(producerContent, "build-selinux-policy.sh") {
+		t.Error("release-candidate.sh must build the payload policy through build-selinux-policy.sh")
+	}
+	if !strings.Contains(producerContent, "build-manpages.sh") {
+		t.Error("release-candidate.sh must build the payload man pages through build-manpages.sh")
+	}
+	if !strings.Contains(producerContent, "completion bash") {
+		t.Error("release-candidate.sh must generate the payload Bash completion from the built binary")
+	}
+	for _, builder := range []string{"build-bundle.sh", "build-packages.sh"} {
+		if !strings.Contains(producerContent, builder+"\" \"$VERSION\" --payload \"$PAYLOAD_DIR\"") {
+			t.Errorf("release-candidate.sh must hand the shared payload to %s via --payload", builder)
+		}
+	}
+	if !strings.Contains(producerContent, "shared payload identity mismatch") {
+		t.Error("release-candidate.sh must fail closed on cross-format payload identity mismatch")
+	}
+
 	// The promote job must publish tar.gz/deb/rpm/SHA256SUMS via gh.
 	promoteJob := findJobSection(releaseContent, "promote")
 	if promoteJob == "" {

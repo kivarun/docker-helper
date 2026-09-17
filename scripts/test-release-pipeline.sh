@@ -10,7 +10,13 @@
 # without a full build toolchain (no go/musl-gcc/nfpm needed).
 #
 # Provenance invariants proven here:
+#   * the producer builds the shared release payload EXACTLY ONCE through the
+#     canonical builders (build-static.sh / build-selinux-policy.sh /
+#     build-manpages.sh) and hands it to tar/DEB/RPM assemblers via --payload;
 #   * candidate set contains exactly one tarball/DEB/RPM;
+#   * the shared payload members are byte-identical across tar/DEB/RPM
+#     (extracted and SHA-256-compared through the real extraction contract);
+#   * mixed-payload divergence (tar payload A vs package payload B) is fatal;
 #   * SHA256SUMS is producer-owned, generated once, and verified;
 #   * candidate.manifest binds source SHA + version + checksums;
 #   * candidate SHA mismatch is fatal;
@@ -60,20 +66,11 @@ make_repo() {
   cp "$SRC_DIR/scripts/release-promote-verify.sh" "$repo/scripts/release-promote-verify.sh"
   cp "$SRC_DIR/scripts/release-candidate-artifact.sh" "$repo/scripts/release-candidate-artifact.sh"
 
-  # Mock authoritative builders (same names/contract as the real ones).
-  cat > "$repo/build-bundle.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-VERSION="${1:?}"
-D="$(cd "$(dirname "$0")" && pwd)/dist"
-mkdir -p "$D"
-  printf '#!/usr/bin/env bash\necho "%s"\n' "${FAKE_BIN_VERSION:-$VERSION}" > "$D/docker-helper"
-  chmod +x "$D/docker-helper"
-  printf 'bundle-content\n' > "$D/bundle-content.txt"
-  tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" \
-    --owner=0 --group=0 --numeric-owner -C "$D" bundle-content.txt
-EOF
-  cat > "$repo/build-packages.sh" <<'EOF'
+  # Mock authoritative payload builders (same names/contract as the real ones;
+  # the producer builds the shared payload through build-static.sh,
+  # build-selinux-policy.sh and build-manpages.sh and generates the completion
+  # from the built binary).
+  cat > "$repo/build-static.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 VERSION="${1:?}"
@@ -81,12 +78,112 @@ D="$(cd "$(dirname "$0")" && pwd)/dist"
 mkdir -p "$D"
 printf '#!/usr/bin/env bash\necho "%s"\n' "${FAKE_BIN_VERSION:-$VERSION}" > "$D/docker-helper"
 chmod +x "$D/docker-helper"
-printf 'fake-deb-%s\n' "$VERSION" > "$D/docker-helper_${VERSION}_amd64.deb"
-printf 'fake-rpm-%s\n' "$VERSION" > "$D/docker-helper-${VERSION}-1.x86_64.rpm"
 EOF
-  chmod +x "$repo/build-bundle.sh" "$repo/build-packages.sh"
+  cat > "$repo/build-selinux-policy.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+OUT="${1:-dist}"
+mkdir -p "$OUT"
+printf 'fake-pp\n' > "$OUT/docker_helper.pp"
+EOF
+  cat > "$repo/build-manpages.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+D="$(cd "$(dirname "$0")" && pwd)/dist"
+mkdir -p "$D/man"
+printf 'man1\n' > "$D/man/docker-helper.1.gz"
+printf 'man5\n' > "$D/man/docker-helper-config.5.gz"
+EOF
+
+  # Mock artifact assemblers. Faithful mode (default): each format packs the
+  # bytes of the shared payload it is handed. The fake DEB/RPM embed the staged
+  # members as base64 blocks; the dpkg-deb/rpm2cpio shims model the real
+  # extraction contract from those bytes.
+  cat > "$repo/build-bundle.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="${1:?}"
+shift || true
+PAYLOAD=""
+if [ "${1:-}" = "--payload" ]; then
+  PAYLOAD="${2:-}"
+fi
+D="$(cd "$(dirname "$0")" && pwd)/dist"
+mkdir -p "$D"
+if [ -n "$PAYLOAD" ]; then
+  B="$D/docker-helper-${VERSION}-linux-amd64"
+  mkdir -p "$B/man" "$B/completions" "$B/selinux"
+  cp "$PAYLOAD/docker-helper" "$B/docker-helper"
+  chmod 755 "$B/docker-helper"
+  cp "$PAYLOAD/docker_helper.pp" "$B/selinux/docker_helper.pp"
+  cp "$PAYLOAD/man/docker-helper.1.gz" "$B/man/docker-helper.1.gz"
+  cp "$PAYLOAD/man/docker-helper-config.5.gz" "$B/man/docker-helper-config.5.gz"
+  cp "$PAYLOAD/completions/docker-helper" "$B/completions/docker-helper"
+  printf 'bundle-content\n' > "$B/bundle-content.txt"
+  tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" \
+    --owner=0 --group=0 --numeric-owner -C "$D" "docker-helper-${VERSION}-linux-amd64"
+else
+  printf '#!/usr/bin/env bash\necho "%s"\n' "${FAKE_BIN_VERSION:-$VERSION}" > "$D/docker-helper"
+  chmod +x "$D/docker-helper"
+  printf 'bundle-content\n' > "$D/bundle-content.txt"
+  tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" \
+    --owner=0 --group=0 --numeric-owner -C "$D" bundle-content.txt
+fi
+EOF
+  cat > "$repo/build-packages.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="${1:?}"
+shift || true
+PAYLOAD=""
+if [ "${1:-}" = "--payload" ]; then
+  PAYLOAD="${2:-}"
+fi
+D="$(cd "$(dirname "$0")" && pwd)/dist"
+mkdir -p "$D"
+if [ -n "$PAYLOAD" ]; then
+  mkdir -p "$D/man" "$D/completions"
+  cp "$PAYLOAD/docker-helper" "$D/docker-helper"
+  chmod 755 "$D/docker-helper"
+  cp "$PAYLOAD/docker_helper.pp" "$D/docker_helper.pp"
+  cp "$PAYLOAD/man/docker-helper.1.gz" "$D/man/docker-helper.1.gz"
+  cp "$PAYLOAD/man/docker-helper-config.5.gz" "$D/man/docker-helper-config.5.gz"
+  cp "$PAYLOAD/completions/docker-helper" "$D/completions/docker-helper"
+else
+  printf '#!/usr/bin/env bash\necho "%s"\n' "${FAKE_BIN_VERSION:-$VERSION}" > "$D/docker-helper"
+  chmod +x "$D/docker-helper"
+  printf 'man1\n' > "$D/man/docker-helper.1.gz"
+  printf 'man5\n' > "$D/man/docker-helper-config.5.gz"
+  printf 'fake-completion\n' > "$D/completions/docker-helper"
+  printf 'fake-pp\n' > "$D/docker_helper.pp"
+fi
+embed() { # member-name file
+  printf '%s\n' "$1"
+  base64 "$2"
+  printf 'END\n'
+}
+{
+  printf 'fake-deb-%s\n' "$VERSION"
+  embed BIN "$D/docker-helper"
+  embed MAN1 "$D/man/docker-helper.1.gz"
+  embed MAN5 "$D/man/docker-helper-config.5.gz"
+  embed COMPLETION "$D/completions/docker-helper"
+} > "$D/docker-helper_${VERSION}_amd64.deb"
+{
+  printf 'fake-rpm-%s\n' "$VERSION"
+  embed BIN "$D/docker-helper"
+  embed MAN1 "$D/man/docker-helper.1.gz"
+  embed MAN5 "$D/man/docker-helper-config.5.gz"
+  embed COMPLETION "$D/completions/docker-helper"
+  embed PP "$D/docker_helper.pp"
+} > "$D/docker-helper-${VERSION}-1.x86_64.rpm"
+EOF
+  chmod +x "$repo/build-static.sh" "$repo/build-selinux-policy.sh" \
+    "$repo/build-manpages.sh" "$repo/build-bundle.sh" "$repo/build-packages.sh"
 
   # Mock package-identity tools (same CLI contract the producer uses).
+  # dpkg-deb -x and rpm2cpio model the real extraction contract from the
+  # embedded base64 member blocks the mock builders wrote.
   mkdir -p "$repo/shims"
   cat > "$repo/shims/dpkg-deb" <<'EOF'
 #!/usr/bin/env bash
@@ -102,6 +199,19 @@ if [ "$1" = "--contents" ]; then
     './usr/share/man/man1/docker-helper.1.gz' \
     './usr/share/man/man5/docker-helper-config.5.gz' \
     './usr/share/doc/docker-helper/LICENSE'
+  exit 0
+fi
+if [ "$1" = "-x" ]; then
+  deb="$2"; dir="$3"
+  extract() { # member-name dest-path
+    sed -n "/^$1$/,/^END$/p" "$deb" | sed '1d;$d' | base64 -d > "$dir/$2"
+  }
+  mkdir -p "$dir/usr/bin" "$dir/usr/share/man/man1" "$dir/usr/share/man/man5" \
+    "$dir/usr/share/bash-completion/completions"
+  extract BIN usr/bin/docker-helper
+  extract MAN1 usr/share/man/man1/docker-helper.1.gz
+  extract MAN5 usr/share/man/man5/docker-helper-config.5.gz
+  extract COMPLETION usr/share/bash-completion/completions/docker-helper
   exit 0
 fi
 exit 1
@@ -129,7 +239,26 @@ if [ "$1" = "-qpl" ]; then
 fi
 exit 1
 EOF
-  chmod +x "$repo/shims/dpkg-deb" "$repo/shims/rpm"
+  # rpm2cpio shim: emit the RPM payload as a real cpio archive built from the
+  # embedded base64 member blocks; the producer's real cpio extracts it.
+  cat > "$repo/shims/rpm2cpio" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+rpm="$1"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+extract() { # member-name dest-relative-path
+  mkdir -p "$tmp/$(dirname "$2")"
+  sed -n "/^$1$/,/^END$/p" "$rpm" | sed '1d;$d' | base64 -d > "$tmp/$2"
+}
+extract BIN usr/bin/docker-helper
+extract MAN1 usr/share/man/man1/docker-helper.1.gz
+extract MAN5 usr/share/man/man5/docker-helper-config.5.gz
+extract COMPLETION usr/share/bash-completion/completions/docker-helper
+extract PP usr/share/selinux/docker_helper.pp
+( cd "$tmp" && find . -print | cpio -o -H newc --quiet )
+EOF
+  chmod +x "$repo/shims/dpkg-deb" "$repo/shims/rpm" "$repo/shims/rpm2cpio"
 }
 
 VERSION="2.2.0-uat"
@@ -193,6 +322,47 @@ for key in tarball deb rpm; do
     || bad "candidate.manifest $key checksum does not match SHA256SUMS"
 done
 
+# Shared payload identity: the producer builds the payload once and every
+# format must carry byte-identical members. Extract from the staged candidate
+# through the real extraction contract (tar + dpkg-deb -x + rpm2cpio|cpio) and
+# re-prove the binary equality the producer enforces internally.
+VERIFY="$WORK/identity"
+mkdir -p "$VERIFY/tar" "$VERIFY/deb" "$VERIFY/rpm"
+tar xzf "$CAND"/*.tar.gz -C "$VERIFY/tar"
+dpkg-deb -x "$CAND"/*.deb "$VERIFY/deb"
+rpm2cpio "$CAND"/*.rpm | ( cd "$VERIFY/rpm" && cpio -idmu --quiet )
+tar_bin="$(sha256sum "$VERIFY/tar/docker-helper-${VERSION}-linux-amd64/docker-helper" | awk '{print $1}')"
+deb_bin="$(sha256sum "$VERIFY/deb/usr/bin/docker-helper" | awk '{print $1}')"
+rpm_bin="$(sha256sum "$VERIFY/rpm/usr/bin/docker-helper" | awk '{print $1}')"
+if [ -n "$tar_bin" ] && [ "$tar_bin" = "$deb_bin" ] && [ "$deb_bin" = "$rpm_bin" ]; then
+  ok "shared payload binary is byte-identical across tar/DEB/RPM"
+else
+  bad "shared payload binary differs across formats (tar=$tar_bin deb=$deb_bin rpm=$rpm_bin)"
+fi
+tar_man="$(sha256sum "$VERIFY/tar/docker-helper-${VERSION}-linux-amd64/man/docker-helper.1.gz" | awk '{print $1}')"
+deb_man="$(sha256sum "$VERIFY/deb/usr/share/man/man1/docker-helper.1.gz" | awk '{print $1}')"
+rpm_man="$(sha256sum "$VERIFY/rpm/usr/share/man/man1/docker-helper.1.gz" | awk '{print $1}')"
+if [ -n "$tar_man" ] && [ "$tar_man" = "$deb_man" ] && [ "$deb_man" = "$rpm_man" ]; then
+  ok "shared payload man page is byte-identical across tar/DEB/RPM"
+else
+  bad "shared payload man page differs across formats"
+fi
+tar_comp="$(sha256sum "$VERIFY/tar/docker-helper-${VERSION}-linux-amd64/completions/docker-helper" | awk '{print $1}')"
+deb_comp="$(sha256sum "$VERIFY/deb/usr/share/bash-completion/completions/docker-helper" | awk '{print $1}')"
+rpm_comp="$(sha256sum "$VERIFY/rpm/usr/share/bash-completion/completions/docker-helper" | awk '{print $1}')"
+if [ -n "$tar_comp" ] && [ "$tar_comp" = "$deb_comp" ] && [ "$deb_comp" = "$rpm_comp" ]; then
+  ok "shared payload Bash completion is byte-identical across tar/DEB/RPM"
+else
+  bad "shared payload Bash completion differs across formats"
+fi
+tar_pp="$(sha256sum "$VERIFY/tar/docker-helper-${VERSION}-linux-amd64/selinux/docker_helper.pp" | awk '{print $1}')"
+rpm_pp="$(sha256sum "$VERIFY/rpm/usr/share/selinux/docker_helper.pp" | awk '{print $1}')"
+if [ -n "$tar_pp" ] && [ "$tar_pp" = "$rpm_pp" ]; then
+  ok "shared payload SELinux policy module is byte-identical across tar/RPM (DEB does not ship it)"
+else
+  bad "shared payload SELinux policy module differs across tar/RPM"
+fi
+
 # --- T2: exactly-one tarball invariant -----------------------------------------
 REPO2="$WORK/repo-two-tars"
 make_repo "$REPO2"
@@ -250,6 +420,73 @@ EOF
 chmod +x "$REPO_OWN/build-bundle.sh"
 expect_fail "producer rejects a tarball with non-root archive ownership" "not owned 0:0" \
   bash -c "cd '$REPO_OWN' && scripts/release-candidate.sh '$VERSION' '$SOURCE_SHA'"
+
+# --- T-AB: mixed-payload divergence is fatal -------------------------------------
+# Independent-review regression: two DIFFERENT version-valid binaries reaching
+# the tar and the package formats must fail the producer. The mock assemblers
+# deliberately diverge from the shared payload: the tarball carries binary A
+# and the DEB/RPM carry binary B (both valid shell scripts echoing VERSION so
+# the producer's own binary-version check passes and only the cross-format
+# payload identity check can catch the divergence).
+REPO_AB="$WORK/repo-mixed-payload"
+make_repo "$REPO_AB"
+cat > "$REPO_AB/build-bundle.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="${1:?}"
+D="$(cd "$(dirname "$0")" && pwd)/dist"
+mkdir -p "$D"
+printf '#!/usr/bin/env bash\necho "%s"\n# payload marker: BUNDLE-BINARY-A\n' "$VERSION" > "$D/docker-helper"
+chmod +x "$D/docker-helper"
+B="$D/docker-helper-${VERSION}-linux-amd64"
+mkdir -p "$B/man" "$B/completions" "$B/selinux"
+printf '#!/usr/bin/env bash\necho "%s"\n# payload marker: BUNDLE-BINARY-A\n' "$VERSION" > "$B/docker-helper"
+chmod 755 "$B/docker-helper"
+printf 'man1-tar\n' > "$B/man/docker-helper.1.gz"
+printf 'man5-tar\n' > "$B/man/docker-helper-config.5.gz"
+printf 'completion-tar\n' > "$B/completions/docker-helper"
+printf 'fake-pp-tar\n' > "$B/selinux/docker_helper.pp"
+printf 'bundle-content\n' > "$B/bundle-content.txt"
+tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" \
+  --owner=0 --group=0 --numeric-owner -C "$D" "docker-helper-${VERSION}-linux-amd64"
+EOF
+cat > "$REPO_AB/build-packages.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="${1:?}"
+D="$(cd "$(dirname "$0")" && pwd)/dist"
+mkdir -p "$D/man" "$D/completions"
+printf '#!/usr/bin/env bash\necho "%s"\n# payload marker: PACKAGES-BINARY-B\n' "$VERSION" > "$D/docker-helper"
+chmod +x "$D/docker-helper"
+printf 'man1-deb\n' > "$D/man/docker-helper.1.gz"
+printf 'man5-deb\n' > "$D/man/docker-helper-config.5.gz"
+printf 'completion-deb\n' > "$D/completions/docker-helper"
+printf 'fake-pp-rpm\n' > "$D/docker_helper.pp"
+embed() { # member-name file
+  printf '%s\n' "$1"
+  base64 "$2"
+  printf 'END\n'
+}
+{
+  printf 'fake-deb-%s\n' "$VERSION"
+  embed BIN "$D/docker-helper"
+  embed MAN1 "$D/man/docker-helper.1.gz"
+  embed MAN5 "$D/man/docker-helper-config.5.gz"
+  embed COMPLETION "$D/completions/docker-helper"
+} > "$D/docker-helper_${VERSION}_amd64.deb"
+{
+  printf 'fake-rpm-%s\n' "$VERSION"
+  embed BIN "$D/docker-helper"
+  embed MAN1 "$D/man/docker-helper.1.gz"
+  embed MAN5 "$D/man/docker-helper-config.5.gz"
+  embed COMPLETION "$D/completions/docker-helper"
+  embed PP "$D/docker_helper.pp"
+} > "$D/docker-helper-${VERSION}-1.x86_64.rpm"
+EOF
+chmod +x "$REPO_AB/build-bundle.sh" "$REPO_AB/build-packages.sh"
+expect_fail "mixed-payload divergence (tar payload A vs package payload B) is fatal" \
+  "shared payload identity mismatch for member 'binary'" \
+  bash -c "cd '$REPO_AB' && scripts/release-candidate.sh '$VERSION' '$SOURCE_SHA'"
 
 # --- T4: promotion verification happy path + producer SHA256SUMS reused ----------
 SHA_BEFORE="$(sha256sum "$CAND/SHA256SUMS" | awk '{print $1}')"

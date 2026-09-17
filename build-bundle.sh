@@ -1,14 +1,29 @@
 #!/usr/bin/env bash
-# build-bundle.sh — build a static binary and pack a release tarball.
+# build-bundle.sh — assemble the release tarball.
 #
 # Usage:
-#   ./build-bundle.sh VERSION
+#   ./build-bundle.sh VERSION [--payload DIR]
 #
 # Example:
 #   ./build-bundle.sh 1.0.0
 #
 # Output:
 #   dist/docker-helper-<version>-linux-amd64.tar.gz
+#
+# Payload modes:
+#
+#   --payload DIR   assemble the tarball from an ALREADY-BUILT shared release
+#                   payload (docker-helper, docker_helper.pp, man pages, Bash
+#                   completion) without rebuilding anything. The canonical
+#                   producer (scripts/release-candidate.sh) builds the payload
+#                   exactly once through the canonical builders and passes it
+#                   to every artifact builder, so tar/DEB/RPM all pack the
+#                   same bytes.
+#
+#   (default)       developer path: build the payload first through the
+#                   canonical builders (build-static.sh, build-selinux-policy.sh,
+#                   build-manpages.sh) and generate the Bash completion from
+#                   the built binary.
 #
 # The tarball contains:
 #   docker-helper-<version>-linux-amd64/
@@ -46,8 +61,17 @@ VERSION="${1:-}"
 
 if [[ -z "$VERSION" ]]; then
   echo "error: VERSION is required" >&2
-  echo "Usage: $0 VERSION" >&2
+  echo "Usage: $0 VERSION [--payload DIR]" >&2
   exit 1
+fi
+
+PAYLOAD_DIR=""
+if [[ "${2:-}" == "--payload" ]]; then
+  PAYLOAD_DIR="${3:-}"
+  if [[ -z "$PAYLOAD_DIR" ]]; then
+    echo "error: --payload requires a payload directory" >&2
+    exit 1
+  fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -55,17 +79,33 @@ OUT_DIR="$SCRIPT_DIR/dist"
 BUNDLE_DIR="$OUT_DIR/docker-helper-${VERSION}-linux-amd64"
 TARBALL="$OUT_DIR/docker-helper-${VERSION}-linux-amd64.tar.gz"
 
-# --- Step 1: Build static binary + SELinux policy module ---
+# --- Step 1: Obtain the shared release payload members ------------------------
+# The canonical builders (build-static.sh, build-selinux-policy.sh,
+# build-manpages.sh) remain the single owners of binary/policy/man
+# compilation; this script only assembles. With --payload the members were
+# built exactly once by the canonical producer and are consumed as-is.
 
-echo "=== Building static binary ==="
-bash "$SCRIPT_DIR/build-static.sh" "$VERSION"
+if [[ -n "$PAYLOAD_DIR" ]]; then
+  echo "=== Assembling from shared release payload: $PAYLOAD_DIR ==="
+  for member in docker-helper docker_helper.pp \
+    man/docker-helper.1.gz man/docker-helper-config.5.gz \
+    completions/docker-helper; do
+    if [[ ! -s "$PAYLOAD_DIR/$member" ]]; then
+      echo "error: shared release payload member missing or empty: $PAYLOAD_DIR/$member" >&2
+      exit 1
+    fi
+  done
+else
+  echo "=== Building static binary ==="
+  bash "$SCRIPT_DIR/build-static.sh" "$VERSION"
 
-# The canonical SELinux policy builder (same owner as build-packages.sh): the
-# tarball carries selinux/docker_helper.pp built from the authoritative
-# packaging/selinux/docker-helper.{te,fc}. A missing policy build tool or a
-# failed compilation FAILS the bundle build (fail-closed).
-echo "=== Building SELinux policy module ==="
-bash "$SCRIPT_DIR/build-selinux-policy.sh" "$OUT_DIR"
+  # The canonical SELinux policy builder (same owner as build-packages.sh): the
+  # tarball carries selinux/docker_helper.pp built from the authoritative
+  # packaging/selinux/docker-helper.{te,fc}. A missing policy build tool or a
+  # failed compilation FAILS the bundle build (fail-closed).
+  echo "=== Building SELinux policy module ==="
+  bash "$SCRIPT_DIR/build-selinux-policy.sh" "$OUT_DIR"
+fi
 
 # --- Step 2: Assemble bundle directory ---
 
@@ -75,7 +115,11 @@ rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR"
 
 # Binary
-cp "$OUT_DIR/docker-helper" "$BUNDLE_DIR/docker-helper"
+if [[ -n "$PAYLOAD_DIR" ]]; then
+  cp "$PAYLOAD_DIR/docker-helper" "$BUNDLE_DIR/docker-helper"
+else
+  cp "$OUT_DIR/docker-helper" "$BUNDLE_DIR/docker-helper"
+fi
 chmod 755 "$BUNDLE_DIR/docker-helper"
 
 # License
@@ -113,8 +157,13 @@ cp "$SCRIPT_DIR/packaging/apparmor/local/curl" \
 
 # SELinux policy module (both MAC backends ship in the bundle; the installer
 # selects the active one)
-mkdir -p "$BUNDLE_DIR/selinux"
-cp "$OUT_DIR/docker_helper.pp" "$BUNDLE_DIR/selinux/docker_helper.pp"
+if [[ -n "$PAYLOAD_DIR" ]]; then
+  mkdir -p "$BUNDLE_DIR/selinux"
+  cp "$PAYLOAD_DIR/docker_helper.pp" "$BUNDLE_DIR/selinux/docker_helper.pp"
+else
+  mkdir -p "$BUNDLE_DIR/selinux"
+  cp "$OUT_DIR/docker_helper.pp" "$BUNDLE_DIR/selinux/docker_helper.pp"
+fi
 
 # Agent skill
 mkdir -p "$BUNDLE_DIR/skills/docker-helper"
@@ -122,21 +171,32 @@ cp "$SCRIPT_DIR/.claude/skills/docker-helper/SKILL.md" \
    "$BUNDLE_DIR/skills/docker-helper/SKILL.md"
 
 # Man pages
-"$SCRIPT_DIR/build-manpages.sh"
-mkdir -p "$BUNDLE_DIR/man"
-cp "$OUT_DIR/man/docker-helper.1.gz" "$BUNDLE_DIR/man/docker-helper.1.gz"
-cp "$OUT_DIR/man/docker-helper-config.5.gz" "$BUNDLE_DIR/man/docker-helper-config.5.gz"
+if [[ -n "$PAYLOAD_DIR" ]]; then
+  mkdir -p "$BUNDLE_DIR/man"
+  cp "$PAYLOAD_DIR/man/docker-helper.1.gz" "$BUNDLE_DIR/man/docker-helper.1.gz"
+  cp "$PAYLOAD_DIR/man/docker-helper-config.5.gz" "$BUNDLE_DIR/man/docker-helper-config.5.gz"
+else
+  "$SCRIPT_DIR/build-manpages.sh"
+  mkdir -p "$BUNDLE_DIR/man"
+  cp "$OUT_DIR/man/docker-helper.1.gz" "$BUNDLE_DIR/man/docker-helper.1.gz"
+  cp "$OUT_DIR/man/docker-helper-config.5.gz" "$BUNDLE_DIR/man/docker-helper-config.5.gz"
+fi
 
 # Bash completion
-rm -f "$OUT_DIR/completions/docker-helper"
-mkdir -p "$OUT_DIR/completions"
-"$BUNDLE_DIR/docker-helper" completion bash > "$OUT_DIR/completions/docker-helper"
-if [[ ! -s "$OUT_DIR/completions/docker-helper" ]]; then
-  echo "error: completion generation produced empty output" >&2
-  exit 1
+if [[ -n "$PAYLOAD_DIR" ]]; then
+  mkdir -p "$BUNDLE_DIR/completions"
+  cp "$PAYLOAD_DIR/completions/docker-helper" "$BUNDLE_DIR/completions/docker-helper"
+else
+  rm -f "$OUT_DIR/completions/docker-helper"
+  mkdir -p "$OUT_DIR/completions"
+  "$BUNDLE_DIR/docker-helper" completion bash > "$OUT_DIR/completions/docker-helper"
+  if [[ ! -s "$OUT_DIR/completions/docker-helper" ]]; then
+    echo "error: completion generation produced empty output" >&2
+    exit 1
+  fi
+  mkdir -p "$BUNDLE_DIR/completions"
+  cp "$OUT_DIR/completions/docker-helper" "$BUNDLE_DIR/completions/docker-helper"
 fi
-mkdir -p "$BUNDLE_DIR/completions"
-cp "$OUT_DIR/completions/docker-helper" "$BUNDLE_DIR/completions/docker-helper"
 
 # --- Step 3: Create tarball ---
 
