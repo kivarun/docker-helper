@@ -691,7 +691,22 @@ Admin token (same directory as config)
 .B docker-helper
 mediates Docker access; rootful Docker access is root-equivalent host capability
 .IP \(bu 4
-Credentials and session tokens are capabilities—protect them accordingly
+Principal credentials, Launcher credentials, and session tokens are
+capabilities—protect them accordingly. They are stored as SHA-256 hashes
+resolved through database lookup; the admin token uses SHA-256 hashing
+with constant-time comparison in memory.
+.IP \(bu 4
+Every workload runs under the fixed server-owned runtime privilege
+floor: the run argv owner emits \fB\-\-cap\-drop ALL\fR and
+\fB\-\-security\-opt no\-new\-privileges:true\fR before any backend
+option, and no request field can disable or weaken them. The workload
+runs as the server-owned \fIUID:GID\fR (the owning Principal's or the
+daemon owner's), which is authoritative and never substituted by the
+image \fBUSER\fR. The UID:GID identity is not the only runtime
+protection: Linux no-new-privileges and the dropped capability set keep
+an image-delivered or build-staging-delivered SUID/SGID executable at
+the workload's own execution identity, and build-context staging strips
+the SUID/SGID privilege bits from every staged file.
 .IP \(bu 4
 System mode requires exactly one of AppArmor or enforcing SELinux. AppArmor
 uses the \fBdocker-helper-system\fR profile. SELinux requires the daemon in

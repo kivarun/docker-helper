@@ -670,7 +670,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In system mode, the workload MAC coordinator (2.2.6) decides the
+	// In system mode, the workload MAC coordinator decides the
 	// container security options and materializes the accepted exposure plan
 	// through the active backend. A missing coordinator means no supported
 	// MAC backend is active — fail closed before any state exists.
@@ -744,7 +744,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Workload MAC materialization (2.2.6, system mode only): after the
+	// Workload MAC materialization (system mode only): after the
 	// pins, because the SELinux accepted mechanism projects from the pinned
 	// kernel source; before admission and container creation, because no
 	// admitted or running workload may exist without validated workload

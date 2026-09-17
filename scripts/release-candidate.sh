@@ -2,8 +2,11 @@
 #
 # release-candidate.sh — canonical release-candidate producer for docker-helper.
 #
-# Builds the complete releasable set EXACTLY ONCE and stages it as an
-# immutable candidate set:
+# Single owner of the shared release payload. It builds the payload EXACTLY
+# ONCE through the canonical builders, stages it as an immutable payload
+# directory, and every artifact builder then only ASSEMBLES its format from
+# those same bytes — the tarball, the DEB and the RPM all carry one shared
+# payload:
 #
 #   docker-helper-<version>-linux-amd64.tar.gz
 #   docker-helper_<version>_amd64.deb
@@ -11,24 +14,27 @@
 #   SHA256SUMS            (producer-owned; generated exactly once)
 #   candidate.manifest    (binds SOURCE_SHA + VERSION + checksums)
 #
-# Usage:
-#   scripts/release-candidate.sh VERSION SOURCE_SHA
+# Shared payload build (once, through the authoritative single owners):
 #
-#   VERSION     semver without a leading 'v' (e.g. 2.0.0 or 2.0.0-uat).
-#   SOURCE_SHA  full 40-hex commit SHA the candidate is built from.
+#   build-static.sh          -> dist/docker-helper        (static binary)
+#   build-selinux-policy.sh  -> dist/docker_helper.pp    (SELinux module)
+#   build-manpages.sh        -> dist/man/*.gz            (man pages)
+#   <built binary> completion bash -> Bash completion
+#
+# staged into dist/payload/ and handed to the assemblers:
+#
+#   build-bundle.sh   VERSION --payload dist/payload   (tarball)
+#   build-packages.sh VERSION --payload dist/payload   (DEB + RPM)
 #
 # This is the SINGLE producer of the release artifacts. It builds only through
 # the authoritative underlying builders and never reimplements package
-# building:
-#
-#   build-bundle.sh    -> release tarball (+ static binary + SELinux module)
-#   build-packages.sh  -> DEB + RPM (+ static binary + SELinux module)
-#
-# After building it validates exactly-one tarball/DEB/RPM, verifies binary
-# version and package identity, generates SHA256SUMS once, verifies it, and
-# stages the immutable candidate set. No other job/step may construct these
-# artifacts or regenerate SHA256SUMS; consumers and promotion only download the
-# staged bytes and verify against this SHA256SUMS.
+# building. After building it validates exactly-one tarball/DEB/RPM, verifies
+# binary version and package identity, extracts the shared payload members
+# from every format and compares SHA-256 (byte-identical payload across
+# tar/DEB/RPM, fail closed on any mismatch), generates SHA256SUMS once,
+# verifies it, and stages the immutable candidate set. No other job/step may
+# construct these artifacts or regenerate SHA256SUMS; consumers and promotion
+# only download the staged bytes and verify against this SHA256SUMS.
 #
 # Env:
 #   RELEASE_CANDIDATE_DIR  staging directory (default: <repo>/dist/candidate)
@@ -65,7 +71,8 @@ fi
 # Required tooling for identity verification below (the builders bring their
 # own build tooling). rpm is required even though the producer runs on Ubuntu:
 # build-packages.sh emits an RPM and the producer verifies its identity.
-for cmd in sha256sum file tar dpkg-deb rpm; do
+# rpm2cpio + cpio extract the RPM payload for the shared-payload identity check.
+for cmd in sha256sum file tar dpkg-deb rpm rpm2cpio cpio; do
   command -v "$cmd" >/dev/null 2>&1 || fail "$cmd not found (required for release-candidate verification)"
 done
 
@@ -73,13 +80,54 @@ done
 
 rm -rf "$DIST_DIR"
 
-# --- Build each release artifact only here -----------------------------------
+# --- Build the shared release payload exactly once ----------------------------
+# Single owner: the payload members are built through the canonical builders
+# and staged into an immutable payload directory; every artifact builder only
+# assembles its format from these same bytes.
 
-echo "=== Building release tarball (build-bundle.sh) ==="
-"$REPO_ROOT/build-bundle.sh" "$VERSION" || fail "build-bundle.sh $VERSION failed"
+PAYLOAD_DIR="$DIST_DIR/payload"
+rm -rf "$PAYLOAD_DIR"
+mkdir -p "$PAYLOAD_DIR/man" "$PAYLOAD_DIR/completions"
 
-echo "=== Building DEB + RPM (build-packages.sh) ==="
-"$REPO_ROOT/build-packages.sh" "$VERSION" || fail "build-packages.sh $VERSION failed"
+echo "=== Building shared release payload (single build) ==="
+echo "--- static binary (build-static.sh) ---"
+"$REPO_ROOT/build-static.sh" "$VERSION" || fail "build-static.sh $VERSION failed"
+echo "--- SELinux policy (build-selinux-policy.sh) ---"
+"$REPO_ROOT/build-selinux-policy.sh" "$DIST_DIR" || fail "build-selinux-policy.sh failed"
+echo "--- man pages (build-manpages.sh) ---"
+"$REPO_ROOT/build-manpages.sh" || fail "build-manpages.sh failed"
+echo "--- Bash completion (from the built binary) ---"
+mkdir -p "$DIST_DIR/completions"
+"$DIST_DIR/docker-helper" completion bash > "$DIST_DIR/completions/docker-helper" \
+  || fail "completion generation failed"
+[ -s "$DIST_DIR/completions/docker-helper" ] \
+  || fail "completion generation produced empty output"
+
+# Stage the immutable shared payload; fail closed on any missing member.
+cp "$DIST_DIR/docker-helper" "$PAYLOAD_DIR/docker-helper"
+cp "$DIST_DIR/docker_helper.pp" "$PAYLOAD_DIR/docker_helper.pp"
+cp "$DIST_DIR/man/docker-helper.1.gz" "$PAYLOAD_DIR/man/docker-helper.1.gz"
+cp "$DIST_DIR/man/docker-helper-config.5.gz" "$PAYLOAD_DIR/man/docker-helper-config.5.gz"
+cp "$DIST_DIR/completions/docker-helper" "$PAYLOAD_DIR/completions/docker-helper"
+for member in docker-helper docker_helper.pp man/docker-helper.1.gz \
+  man/docker-helper-config.5.gz completions/docker-helper; do
+  [ -s "$PAYLOAD_DIR/$member" ] || fail "shared payload member missing or empty: $member"
+done
+chmod -R a-w "$PAYLOAD_DIR"
+# The payload is immutable while the producer runs; the EXIT trap restores
+# write permission so a later run can clean dist/ again.
+trap 'chmod -R u+w "$PAYLOAD_DIR" 2>/dev/null || true' EXIT
+echo "OK: shared release payload staged at $PAYLOAD_DIR (built exactly once)"
+
+# --- Assemble each release artifact from the shared payload -------------------
+
+echo "=== Assembling release tarball (build-bundle.sh) ==="
+"$REPO_ROOT/build-bundle.sh" "$VERSION" --payload "$PAYLOAD_DIR" \
+  || fail "build-bundle.sh $VERSION failed"
+
+echo "=== Assembling DEB + RPM (build-packages.sh) ==="
+"$REPO_ROOT/build-packages.sh" "$VERSION" --payload "$PAYLOAD_DIR" \
+  || fail "build-packages.sh $VERSION failed"
 
 # --- Validate exactly one artifact of each type ------------------------------
 
@@ -143,6 +191,64 @@ for path in /usr/bin/docker-helper /usr/lib/systemd/system/docker-helper.service
   /usr/share/man/man5/docker-helper-config.5.gz /usr/share/doc/docker-helper/LICENSE; do
   rpm -qpl "$RPM" | grep -F "$path" >/dev/null || fail "RPM missing $path"
 done
+
+# --- Verify shared payload identity across formats -----------------------------
+# The shared payload was built exactly once; every format must carry
+# byte-identical copies of each payload member it ships. Extract from the
+# final artifacts and compare SHA-256 member by member. A member intentionally
+# absent from a format (for example the DEB does not ship the SELinux policy
+# module) is not a mismatch — only the common surface is compared. Any
+# mismatch fails closed: mixed-payload artifacts must never be staged.
+
+PAYLOAD_VERIFY_DIR="$(mktemp -d)"
+mkdir -p "$PAYLOAD_VERIFY_DIR/tar" "$PAYLOAD_VERIFY_DIR/deb" "$PAYLOAD_VERIFY_DIR/rpm"
+
+tar xzf "$TARBALL" -C "$PAYLOAD_VERIFY_DIR/tar" \
+  || fail "cannot extract tarball for payload identity verification"
+dpkg-deb -x "$DEB" "$PAYLOAD_VERIFY_DIR/deb" \
+  || fail "cannot extract DEB for payload identity verification"
+rpm2cpio "$RPM" | ( cd "$PAYLOAD_VERIFY_DIR/rpm" && cpio -idmu --quiet ) \
+  || fail "cannot extract RPM payload for payload identity verification"
+
+TAR_MEMBER_ROOT="$PAYLOAD_VERIFY_DIR/tar/docker-helper-${VERSION}-linux-amd64"
+
+# <member> <tarball-path-under-bundle-root|-> <deb-path|-> <rpm-path|->
+PAYLOAD_MEMBERS=(
+  "binary docker-helper usr/bin/docker-helper usr/bin/docker-helper"
+  "man1 man/docker-helper.1.gz usr/share/man/man1/docker-helper.1.gz usr/share/man/man1/docker-helper.1.gz"
+  "man5 man/docker-helper-config.5.gz usr/share/man/man5/docker-helper-config.5.gz usr/share/man/man5/docker-helper-config.5.gz"
+  "completion completions/docker-helper usr/share/bash-completion/completions/docker-helper usr/share/bash-completion/completions/docker-helper"
+  "selinux-policy selinux/docker_helper.pp - usr/share/selinux/docker_helper.pp"
+)
+
+for entry in "${PAYLOAD_MEMBERS[@]}"; do
+  read -r member tar_rel deb_rel rpm_rel <<< "$entry"
+  observed=""
+  if [ "$tar_rel" != "-" ]; then
+    tar_member="$TAR_MEMBER_ROOT/$tar_rel"
+    [ -s "$tar_member" ] || fail "payload identity check: tarball missing member '$member'"
+    sha="$(sha256sum "$tar_member" | awk '{print $1}')"
+    observed="$observed tar=$sha"
+  fi
+  if [ "$deb_rel" != "-" ]; then
+    deb_member="$PAYLOAD_VERIFY_DIR/deb/$deb_rel"
+    [ -s "$deb_member" ] || fail "payload identity check: DEB missing member '$member' at $deb_rel"
+    sha="$(sha256sum "$deb_member" | awk '{print $1}')"
+    observed="$observed deb=$sha"
+  fi
+  if [ "$rpm_rel" != "-" ]; then
+    rpm_member="$PAYLOAD_VERIFY_DIR/rpm/$rpm_rel"
+    [ -s "$rpm_member" ] || fail "payload identity check: RPM missing member '$member' at $rpm_rel"
+    sha="$(sha256sum "$rpm_member" | awk '{print $1}')"
+    observed="$observed rpm=$sha"
+  fi
+  distinct="$(printf '%s\n' "$observed" | tr -s ' ' '\n' | sed 's/^tar=//;s/^deb=//;s/^rpm=//' | sort -u)"
+  [ "$(printf '%s\n' "$distinct" | grep -c .)" -eq 1 ] \
+    || fail "shared payload identity mismatch for member '$member' ($observed)"
+  echo "OK: shared payload member '$member' byte-identical across formats"
+done
+
+rm -rf "$PAYLOAD_VERIFY_DIR"
 
 # --- Stage the immutable candidate set ----------------------------------------
 

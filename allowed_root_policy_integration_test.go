@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -1414,21 +1413,6 @@ func verifyConfigUnchanged(t *testing.T, configPath string, originalData []byte)
 	if !bytes.Equal(currentData, originalData) {
 		t.Errorf("config should be byte-for-byte unchanged.\noriginal: %s\ncurrent:  %s", string(originalData), string(currentData))
 	}
-}
-
-func openTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	db, err := openDatabase(dbPath)
-	if err != nil {
-		t.Fatalf("openDatabase() error: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
-	return db
 }
 
 // parseStoredAllowedRootPaths decodes the canonical {"path","access"} entries

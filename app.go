@@ -50,10 +50,11 @@ type App struct {
 	// MACCoordinator is the session MAC coordinator owner.
 	// nil in user mode or when no MAC driver is active.
 	MACCoordinator *sessionMACCoordinator
-	// WorkloadMAC is the workload MAC coordinator owner (2.2.6). It owns
+	// WorkloadMAC is the workload MAC coordinator owner. It owns
 	// operation/container-lifetime workload MAC state, separate from the
-	// session MAC coordinator's Session workspace coverage. nil in user
-	// mode or when no MAC backend is active.
+	// session MAC coordinator's Session MAC lifecycle coverage over the
+	// concrete issued trees of the immutable Session filesystem snapshot.
+	// nil in user mode or when no MAC backend is active.
 	WorkloadMAC *workloadMACCoordinator
 	// InspectOperationContainers, when set, overrides the Docker-based
 	// correlated-run container inspection used by the container-absence

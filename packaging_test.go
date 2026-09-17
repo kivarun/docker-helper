@@ -7622,6 +7622,31 @@ func TestReleaseWorkflow(t *testing.T) {
 		t.Error("release-candidate.sh must verify SHA256SUMS")
 	}
 
+	// The producer is the single owner of the shared release payload: it builds
+	// the payload exactly once through the canonical builders and hands it to
+	// the tar/DEB/RPM assemblers via --payload, and it verifies the shared
+	// payload identity across the final formats.
+	if !strings.Contains(producerContent, "build-static.sh") {
+		t.Error("release-candidate.sh must build the payload binary through build-static.sh")
+	}
+	if !strings.Contains(producerContent, "build-selinux-policy.sh") {
+		t.Error("release-candidate.sh must build the payload policy through build-selinux-policy.sh")
+	}
+	if !strings.Contains(producerContent, "build-manpages.sh") {
+		t.Error("release-candidate.sh must build the payload man pages through build-manpages.sh")
+	}
+	if !strings.Contains(producerContent, "completion bash") {
+		t.Error("release-candidate.sh must generate the payload Bash completion from the built binary")
+	}
+	for _, builder := range []string{"build-bundle.sh", "build-packages.sh"} {
+		if !strings.Contains(producerContent, builder+"\" \"$VERSION\" --payload \"$PAYLOAD_DIR\"") {
+			t.Errorf("release-candidate.sh must hand the shared payload to %s via --payload", builder)
+		}
+	}
+	if !strings.Contains(producerContent, "shared payload identity mismatch") {
+		t.Error("release-candidate.sh must fail closed on cross-format payload identity mismatch")
+	}
+
 	// The promote job must publish tar.gz/deb/rpm/SHA256SUMS via gh.
 	promoteJob := findJobSection(releaseContent, "promote")
 	if promoteJob == "" {
@@ -7722,6 +7747,93 @@ func TestReleaseJobSELinuxBuildDeps(t *testing.T) {
 // findJobSection returns the text belonging to the named job (e.g., "release").
 // It finds "  name:" at the 2-space indentation level under "jobs:" and captures
 // content until the next job key at the same indentation or end of file.
+// TestWorkflowRunBlocksReferenceExistingLocalPaths pins that every
+// repository-local path a workflow executes (or a local reusable-workflow
+// `uses:` call resolves to) exists in the same commit. An active workflow must
+// never be dispatchable against implementation files that were never shipped
+// on this branch — the retired Release 3 phase-0 gate failed exactly that way
+// (it ran scripts/d01-engine-gate and cgroup VM harnesses absent from
+// release/2.2). The scan covers run-block content and local workflow refs
+// only; comments and prose are not code paths and are deliberately out of
+// scope.
+func TestWorkflowRunBlocksReferenceExistingLocalPaths(t *testing.T) {
+	entries, err := os.ReadDir(".github/workflows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptRef := regexp.MustCompile(`scripts/[A-Za-z0-9_./-]+`)
+	scanned := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml") {
+			continue
+		}
+		path := filepath.Join(".github/workflows", name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		lines := strings.Split(string(data), "\n")
+
+		// Local reusable-workflow references must resolve to shipped files.
+		for _, line := range lines {
+			idx := strings.Index(line, "uses: ./.github/workflows/")
+			if idx < 0 {
+				continue
+			}
+			ref := strings.TrimSpace(line[idx+len("uses: ") : len(strings.TrimRight(line, " \t"))])
+			ref = strings.TrimSpace(strings.TrimPrefix(ref, "./"))
+			if _, err := os.Stat(ref); err != nil {
+				t.Errorf("%s: local workflow reference %q does not exist in this commit", path, ref)
+			}
+		}
+
+		// Run blocks: a `run: |` / `run: >` literal block spans the following
+		// deeper-indented lines; `run: <inline>` is a single line. Extract
+		// scripts/ tokens from code lines only (comments are skipped).
+		inBlock := false
+		blockIndent := 0
+		checkLine := func(line string, path string) {
+			trimmed := strings.TrimLeft(line, " \t")
+			if strings.HasPrefix(trimmed, "#") {
+				return
+			}
+			for _, token := range scriptRef.FindAllString(line, -1) {
+				if _, err := os.Stat(token); err != nil {
+					t.Errorf("%s: run block references non-existent local path %q", path, token)
+				}
+			}
+		}
+		for _, line := range lines {
+			indent := len(line) - len(strings.TrimLeft(line, " \t"))
+			trimmed := strings.TrimSpace(line)
+			item := strings.TrimPrefix(trimmed, "- ")
+			switch {
+			case inBlock:
+				if strings.TrimSpace(line) == "" || indent > blockIndent {
+					checkLine(line, path)
+					continue
+				}
+				inBlock = false
+				fallthrough
+			case !inBlock:
+				if strings.HasPrefix(item, "run: |") || strings.HasPrefix(item, "run: >") {
+					inBlock = true
+					blockIndent = indent
+					continue
+				}
+				if strings.HasPrefix(item, "run: ") {
+					checkLine(line, path)
+				}
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("no workflow files scanned")
+	}
+}
+
 func findJobSection(content, name string) string {
 	marker := "  " + name + ":"
 	idx := strings.Index(content, marker)
@@ -7822,17 +7934,6 @@ func extractRunBlock(stepContent string) string {
 		result = append(result, line)
 	}
 	return strings.Join(result, "\n")
-}
-
-// findAptInstallLine returns the first line in text that contains
-// "apt-get install", trimmed of leading whitespace. Returns "" if not found.
-func findAptInstallLine(text string) string {
-	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, "apt-get install") {
-			return strings.TrimSpace(line)
-		}
-	}
-	return ""
 }
 
 // workflowPermissionsBlock returns the top-level `permissions:` block of a
@@ -8217,17 +8318,24 @@ func TestPackagingIntegrationCIContract(t *testing.T) {
 	// The ordinary checks job must not install or run the packaging toolchain:
 	// that is the packaging-integration job's responsibility, and it is what
 	// lets environment-dependent packaging tests keep skipping in ordinary
-	// go test runs.
+	// go test runs. Named packaging packages and helpers are banned; the one
+	// permitted install is cpio, a non-packaging helper the release-pipeline
+	// shared-payload extraction tests consume.
 	checksJob := findJobSection(ciContent, "checks")
 	if checksJob == "" {
 		t.Fatal("ci.yml must contain a checks job")
 	}
 	for _, banned := range []string{
-		"musl-tools", "checkpolicy", "semodule-utils", "install-nfpm.sh",
-		"test-packaging-integration.sh", "apt-get",
+		"musl-tools", "checkpolicy", "semodule-utils", "apparmor-utils",
+		"install-nfpm.sh", "test-packaging-integration.sh", "nfpm",
 	} {
 		if strings.Contains(checksJob, banned) {
 			t.Errorf("checks job must not install or run the packaging toolchain (%q)", banned)
+		}
+	}
+	for _, line := range strings.Split(checksJob, "\n") {
+		if strings.Contains(line, "apt-get install") && !strings.Contains(line, "cpio") {
+			t.Errorf("checks job apt-get installs must be limited to the non-packaging helper cpio (%q)", strings.TrimSpace(line))
 		}
 	}
 
@@ -8283,6 +8391,37 @@ func TestPackagingIntegrationCIContract(t *testing.T) {
 		t.Error("scripts/install-nfpm.sh must download a pinned nFPM tag, not 'latest'")
 	}
 
+	// Release toolchain must never point at nfpm@latest; the unpinned
+	// `go install ...@latest` suggestion is banned everywhere, and the
+	// packaging builder must verify its nfpm through the pinned owner's
+	// --check mode instead of accepting any nfpm from PATH.
+	releaseToolchainFiles := []string{
+		"build-packages.sh",
+		"build-bundle.sh",
+		"build-static.sh",
+		"scripts/install-nfpm.sh",
+		"scripts/release-candidate.sh",
+		".github/workflows/artifact-gate.yml",
+		".github/workflows/ci.yml",
+		".github/workflows/release.yml",
+	}
+	for _, path := range releaseToolchainFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "nfpm@latest") || strings.Contains(string(data), "@latest") {
+			t.Errorf("%s must not reference nfpm@latest (the pinned owner is scripts/install-nfpm.sh)", path)
+		}
+	}
+	pkgBuilder, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pkgBuilder), "scripts/install-nfpm.sh\" --check") {
+		t.Error("build-packages.sh must verify its nfpm through scripts/install-nfpm.sh --check (single pinned owner)")
+	}
+
 	// Workflow files must consume the single owner rather than duplicate the
 	// pinned version/hash.
 	for _, path := range []string{".github/workflows/artifact-gate.yml", ".github/workflows/ci.yml"} {
@@ -8301,6 +8440,75 @@ func TestPackagingIntegrationCIContract(t *testing.T) {
 	}
 	if !strings.Contains(string(gate), "scripts/install-nfpm.sh") {
 		t.Error("artifact-gate.yml producer must install nFPM through scripts/install-nfpm.sh")
+	}
+}
+
+// TestInstallNfpmCheckModeFailsClosed proves the pinned owner's --check mode
+// behaviorally: a missing nfpm, a wrong-version nfpm, and an unusable binary
+// all fail closed (the caller is pointed back to scripts/install-nfpm.sh),
+// and the pinned version is accepted. The pinned version constant is read
+// from scripts/install-nfpm.sh itself, so the test never duplicates it.
+func TestInstallNfpmCheckModeFailsClosed(t *testing.T) {
+	installerContent, err := os.ReadFile("scripts/install-nfpm.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := ""
+	for _, line := range strings.Split(string(installerContent), "\n") {
+		if strings.HasPrefix(line, `NFPM_VERSION="`) {
+			pinned = strings.TrimSuffix(strings.TrimPrefix(line, `NFPM_VERSION="`), `"`)
+			break
+		}
+	}
+	if pinned == "" {
+		t.Fatal("scripts/install-nfpm.sh must own NFPM_VERSION")
+	}
+
+	fakeBinDir := t.TempDir()
+	accepted := filepath.Join(fakeBinDir, "nfpm-pinned")
+	if err := os.WriteFile(accepted, []byte("#!/bin/sh\necho \"nfpm version "+pinned+"\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	wrongVersion := filepath.Join(fakeBinDir, "nfpm-wrong")
+	if err := os.WriteFile(wrongVersion, []byte("#!/bin/sh\necho \"nfpm version 1.99.9\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	unusable := filepath.Join(fakeBinDir, "nfpm-unusable")
+	if err := os.WriteFile(unusable, []byte("#!/bin/sh\nexit 3\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runCheck := func(args ...string) (string, int) {
+		t.Helper()
+		full := append([]string{"scripts/install-nfpm.sh", "--check"}, args...)
+		cmd := exec.Command("bash", full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("unexpected run error: %v", err)
+			}
+			code = exitErr.ExitCode()
+		}
+		return string(out), code
+	}
+
+	// A wrong version is rejected and points back to the pinned owner.
+	out, code := runCheck(wrongVersion)
+	if code == 0 {
+		t.Errorf("--check must reject a wrong nfpm version, output: %s", out)
+	}
+	if !strings.Contains(out, "scripts/install-nfpm.sh") {
+		t.Errorf("--check failure must name the single pinned owner, output: %s", out)
+	}
+	// An unusable binary is rejected.
+	if _, code := runCheck(unusable); code == 0 {
+		t.Error("--check must reject an unusable nfpm binary")
+	}
+	// The pinned version is accepted.
+	if out, code := runCheck(accepted); code != 0 {
+		t.Errorf("--check must accept the pinned version %q, output: %s", pinned, out)
 	}
 }
 
@@ -8360,18 +8568,6 @@ func TestSyncReleaseToMainDisabled(t *testing.T) {
 	if _, err := os.Stat(".github/workflows/sync-release-to-main.yml"); !os.IsNotExist(err) {
 		t.Error("sync-release-to-main.yml must stay absent: the automatic release/** -> main synchronization is disabled")
 	}
-}
-
-// gitAt runs git with the given working directory and returns combined output.
-func gitAt(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return string(out)
 }
 
 // runBashIn runs a bash script with the given working directory.

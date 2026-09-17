@@ -90,6 +90,54 @@ func TestDocsNoLegacyAdminPath(t *testing.T) {
 	}
 }
 
+// TestSecurityContractDocumented pins the fixed workload runtime privilege
+// floor and the credential-hash coverage in the operator-facing security
+// documentation: the exact runtime protections the implementation emits
+// (`--cap-drop ALL`, `no-new-privileges:true`), the SUID/SGID staging strip,
+// and Launcher credentials inside the SHA-256 hashing description. Without
+// these statements the operator docs could read as if the UID:GID execution
+// identity were the only runtime protection. Wording is pinned at the level
+// of the exact runtime flags and stable mechanism phrases, not full
+// sentences, to avoid brittle sentence matching.
+func TestSecurityContractDocumented(t *testing.T) {
+	cases := []struct {
+		path     string
+		contains []string
+	}{
+		{
+			path: "README.md",
+			contains: []string{
+				"--cap-drop ALL",
+				"--security-opt no-new-privileges:true",
+				"no request field can disable or weaken them",
+				"strips the SUID/SGID",
+				"Principal credentials, Launcher\n  credentials, and session tokens use SHA-256 hashes",
+			},
+		},
+		{
+			path: "docs/man/docker-helper.1",
+			contains: []string{
+				"\\-\\-cap\\-drop ALL",
+				"no\\-new\\-privileges:true",
+				"strips\nthe SUID/SGID privilege bits",
+				"capabilities\u2014protect them accordingly. They are stored as SHA-256 hashes",
+			},
+		},
+	}
+	for _, tc := range cases {
+		data, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", tc.path, err)
+		}
+		content := string(data)
+		for _, want := range tc.contains {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s must document the security contract, missing %q", tc.path, want)
+			}
+		}
+	}
+}
+
 // TestManpageSynopsesMatchParser proves the man-page command synopses stay
 // aligned with the parser tree:
 //

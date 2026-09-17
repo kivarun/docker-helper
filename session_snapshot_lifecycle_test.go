@@ -239,23 +239,6 @@ func launcherIDForSession(t *testing.T, db *sql.DB, sessionID string) string {
 	return launcherID
 }
 
-// principalNameForSession resolves the owning Principal username of a Session
-// through its Launcher ownership chain.
-func principalNameForSession(t *testing.T, db *sql.DB, sessionID string) string {
-	t.Helper()
-	var username string
-	if err := db.QueryRow(
-		`SELECT p.username FROM sessions s
-		 JOIN launchers l ON l.id = s.launcher_id
-		 JOIN principals p ON p.id = l.principal_id
-		 WHERE s.id = ?`,
-		sessionID,
-	).Scan(&username); err != nil {
-		t.Fatalf("read session principal: %v", err)
-	}
-	return username
-}
-
 // TestSnapshotCascadeLifecycle proves the snapshot rows are Session
 // child state owned solely by the FK ON DELETE CASCADE: every Session removal
 // lifecycle owner (session delete, Launcher delete, Principal disable, expiry

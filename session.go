@@ -190,7 +190,7 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("workspace must be inside an allowed root: %w", ErrInvalidWorkspace)
 	}
 
-	// Shared host-path text grammar (SC1/M11): an admitted spelling carrying
+	// Shared host-path text grammar: an admitted spelling carrying
 	// a control character is refused before any privileged filesystem
 	// probing — the raw validation suffices, no resolver or stat runs.
 	if err := validateHostPathText(rawSpelling); err != nil {
@@ -214,7 +214,7 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
 	}
 
-	// Shared host-path text grammar after symlink resolution (SC1/M11): a
+	// Shared host-path text grammar after symlink resolution: a
 	// harmless-looking caller spelling that resolves into a pathname
 	// containing a control character is rejected after resolution.
 	if err := validateHostPathText(absWorkspace); err != nil {
@@ -549,7 +549,7 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceil
 			return nil, fmt.Errorf("filesystem root %q is outside the effective launcher policy: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
 		}
 
-		// Shared host-path text grammar (SC1/M11): an admitted spelling
+		// Shared host-path text grammar: an admitted spelling
 		// carrying a control character is refused before any privileged
 		// filesystem probing — the raw validation suffices.
 		if err := validateHostPathText(cleaned); err != nil {
@@ -571,7 +571,7 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceil
 		if !info.IsDir() && !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("filesystem root %q is not a directory or regular file: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
 		}
-		// Shared host-path text grammar after symlink resolution (SC1/M11):
+		// Shared host-path text grammar after symlink resolution:
 		// the resolved canonical path becomes the persisted policy identity.
 		if err := validateHostPathText(resolved); err != nil {
 			return nil, fmt.Errorf("filesystem root %q: %v: %w", root.Path, err, ErrInvalidSessionFilesystemPolicy)
