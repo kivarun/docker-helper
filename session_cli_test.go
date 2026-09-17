@@ -78,7 +78,7 @@ func TestSessionCleanupDaemonLockHeld(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCleanup(&stdout, &stderr)
+	code := runSessionCleanup(&stdout, &stderr, false)
 
 	// Cleanup should fail because daemon lock is held.
 	if code == 0 {
@@ -166,7 +166,7 @@ func TestSessionCleanupOffline(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCleanup(&stdout, &stderr)
+	code := runSessionCleanup(&stdout, &stderr, false)
 
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())

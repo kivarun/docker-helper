@@ -279,7 +279,7 @@ fi
 # scenario S3: launcher self (inherit and restricted scopes)
 # =============================================================================
 scenario "S3: launcher self (inherit and restricted scopes)"
-S3_L_OUT="$(dh launcher create --system --principal "$PRINCIPAL" --name restricted-l --issue-credential 2>/dev/null || true)"
+S3_L_OUT="$(dh launcher create --system --principal "$PRINCIPAL" --name restricted-l --issue-credential --json 2>/dev/null || true)"
 S3_L_TOKEN="$(printf '%s\n' "$S3_L_OUT" | json_field token)"
 S3_L_ID="$(printf '%s\n' "$S3_L_OUT" | json_field id)"
 if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then

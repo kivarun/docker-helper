@@ -179,7 +179,7 @@ func TestPrincipalCredentialRotateCLIDefaultAndNameSelector(t *testing.T) {
 	// Default rotation: /auth then one atomic rotate request.
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"principal", "credential", "rotate", "--endpoint", endpoint, "--token-file", tokenPath,
+		"principal", "credential", "rotate", "--endpoint", endpoint, "--token-file", tokenPath, "--json",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("rotate default: exit = %d, stderr=%s", code, stderr.String())
@@ -199,7 +199,7 @@ func TestPrincipalCredentialRotateCLIDefaultAndNameSelector(t *testing.T) {
 	*requests = nil
 	var stdout2, stderr2 bytes.Buffer
 	code = runCommandWithWriters([]string{
-		"principal", "credential", "rotate", "--name", "laptop", "--endpoint", endpoint, "--token-file", tokenPath,
+		"principal", "credential", "rotate", "--name", "laptop", "--endpoint", endpoint, "--token-file", tokenPath, "--json",
 	}, &stdout2, &stderr2)
 	if code != 0 {
 		t.Fatalf("rotate --name laptop: exit = %d, stderr=%s", code, stderr2.String())

@@ -164,7 +164,7 @@ var principalCredentialListCommand = &Command{
 var principalCredentialRevokeCommand = &Command{
 	Name:       "revoke",
 	Summary:    "Revoke a principal credential",
-	Usage:      "docker-helper principal credential revoke [--system] [--endpoint ENDPOINT] [--token-file PATH] CREDENTIAL_ID",
+	Usage:      "docker-helper principal credential revoke [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] CREDENTIAL_ID",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Revoke a principal credential by its credential ID.
@@ -180,6 +180,7 @@ record remains in the database as history, and its name becomes available
 for reuse by a new credential.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -201,6 +202,14 @@ for reuse by a new credential.`,
 					return 1
 				}
 
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
+
 				fmt.Fprintf(stdout, "revoked %s\n", id)
 				if result.Message == "unchanged" {
 					fmt.Fprintln(stdout, "(was already revoked)")
@@ -214,7 +223,7 @@ for reuse by a new credential.`,
 var principalCredentialRotateCommand = &Command{
 	Name:       "rotate",
 	Summary:    "Rotate a principal credential",
-	Usage:      "docker-helper principal credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [PRINCIPAL]",
+	Usage:      "docker-helper principal credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] [PRINCIPAL]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	Help: `Rotate a principal credential in one atomic server-side operation.
@@ -231,6 +240,7 @@ authentication.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		name := fs.String("name", "default", "Credential name")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -261,17 +271,36 @@ authentication.`,
 					return 1
 				}
 
-				if err := encodeJSONOut(stdout, result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					if result.Token != "" {
+						printCredentialInstallHint(stderr, "principal")
+					}
+					return 0
 				}
+
+				printPrincipalCredentialBlock(stdout, result.Credential)
 				if result.Token != "" {
-					printCredentialInstallHint(stderr, "principal")
+					fmt.Fprintf(stdout, "TOKEN:     %s\n", result.Token)
+					printCredentialInstallHint(stdout, "principal")
 				}
 				return 0
 			},
 		}
 	},
+}
+
+// printPrincipalCredentialBlock renders the human principal-credential
+// identity block shared by the credential issuance commands whose default
+// output is the human block.
+func printPrincipalCredentialBlock(w io.Writer, c principalCredentialJSON) {
+	fmt.Fprintf(w, "ID:        %s\n", c.ID)
+	fmt.Fprintf(w, "NAME:      %s\n", c.Name)
+	fmt.Fprintf(w, "PRINCIPAL: %s\n", c.Principal)
+	fmt.Fprintf(w, "CREATED:   %s\n", c.CreatedAt)
 }
 
 // printCredentialInstallHint renders the canonical one-time token install
@@ -336,7 +365,7 @@ principal credential commands. New scripts should use:
 		{
 			Name:          "revoke",
 			Summary:       principalCredentialRevokeCommand.Summary,
-			Usage:         "docker-helper credential revoke [--system] [--endpoint ENDPOINT] [--token-file PATH] CREDENTIAL_ID",
+			Usage:         "docker-helper credential revoke [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] CREDENTIAL_ID",
 			MinPosArgs:    principalCredentialRevokeCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialRevokeCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential revoke.",
@@ -349,7 +378,7 @@ principal credential commands. New scripts should use:
 var credentialInstallCommand = &Command{
 	Name:       "install",
 	Summary:    "Install a non-admin credential token",
-	Usage:      "docker-helper credential install [--force]",
+	Usage:      "docker-helper credential install [--json] [--force]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	Help: `Install a non-admin credential token for docker-helper --system.
@@ -371,6 +400,7 @@ credential source can be selected per invocation with --token-file PATH on
 the operator command.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		force := fs.Bool("force", false, "Replace existing credential")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -399,9 +429,23 @@ the operator command.`,
 					return 1
 				}
 
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, credentialInstallResult{Path: credPath}); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
+
 				fmt.Fprintf(stdout, "installed credential at %s\n", credPath)
 				return 0
 			},
 		}
 	},
+}
+
+// credentialInstallResult is the CLI-owned --json shape of the local
+// install acknowledgement: the installed credential file path.
+type credentialInstallResult struct {
+	Path string `json:"path"`
 }

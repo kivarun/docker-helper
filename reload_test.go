@@ -2056,6 +2056,7 @@ func TestConfigSetRollbackWriteFail(t *testing.T) {
 		failingWriter,
 		&stdout,
 		&stderr,
+		false,
 	)
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d", code)

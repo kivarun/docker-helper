@@ -78,7 +78,7 @@ fi
 # The default Launchers created with each Principal are enough to prove global
 # vs narrowed visibility. Add a Launcher credential for A only to prove that a
 # valid Launcher bearer is rejected by both control-plane list families.
-LC_OUT="$(dh launcher credential create --system --principal "$USER_A" 2>/dev/null)"
+LC_OUT="$(dh launcher credential create --system --principal "$USER_A" --json 2>/dev/null)"
 LC_RC=$?
 LC_TOKEN="$(printf '%s' "$LC_OUT" | json_field token || true)"
 if [ "$LC_RC" -eq 0 ] && [ -n "$LC_TOKEN" ]; then

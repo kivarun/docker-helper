@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,11 +29,12 @@ var principalCommand = &Command{
 var principalCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new principal",
-	Usage:      "docker-helper principal create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--issue-credential | --no-credential] USER",
+	Usage:      "docker-helper principal create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--issue-credential | --no-credential] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		issueCredential := fs.Bool("issue-credential", false, "Issue an initial principal credential")
 		noCredential := fs.Bool("no-credential", false, "Do not issue an initial principal credential")
 		return Invocation{
@@ -63,12 +65,21 @@ var principalCreateCommand = &Command{
 					return 1
 				}
 
-				if err := encodeJSONOut(stdout, result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					if result.Token != "" {
+						printCredentialInstallHint(stderr, "principal")
+					}
+					return 0
 				}
+
+				printPrincipalShow(stdout, result)
 				if result.Token != "" {
-					printCredentialInstallHint(stderr, "principal")
+					fmt.Fprintf(stdout, "TOKEN:     %s\n", result.Token)
+					printCredentialInstallHint(stdout, "principal")
 				}
 				return 0
 			},
@@ -86,6 +97,16 @@ var principalShowCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output the canonical JSON document")
 		return Invocation{
+			Validate: func() error {
+				// The FIELD positional is the human scalar-extraction
+				// convenience; --json always selects the full document. The
+				// conflict is a CLI syntax error: deterministic local
+				// validation before any client resolution or daemon request.
+				if len(fs.Args()) == 2 && *jsonOut {
+					return errors.New("FIELD extraction and --json are mutually exclusive")
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
@@ -104,15 +125,6 @@ var principalShowCommand = &Command{
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
-				}
-
-				// The FIELD positional is the human scalar-extraction
-				// convenience; --json always selects the full document, so
-				// the two are mutually exclusive rather than silently
-				// combined.
-				if len(args) == 2 && *jsonOut {
-					fmt.Fprintln(stderr, "error: FIELD extraction and --json are mutually exclusive")
-					return 2
 				}
 
 				if len(args) == 2 {
@@ -255,11 +267,12 @@ func extractPrincipalField(p *principalResponse, field string) (string, bool) {
 var principalSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Modify principal settings",
-	Usage:      "docker-helper principal set [--system] [--endpoint ENDPOINT] [--token-file PATH] USER FIELD VALUE",
+	Usage:      "docker-helper principal set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER FIELD VALUE",
 	MinPosArgs: 3,
 	MaxPosArgs: 3,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -299,6 +312,14 @@ var principalSetCommand = &Command{
 					return 1
 				}
 
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
+
 				fmt.Fprintf(stdout, "%s %s = %v\n", username, field, enabled)
 				if result.Message == "unchanged" {
 					fmt.Fprintln(stdout, "(unchanged)")
@@ -312,11 +333,12 @@ var principalSetCommand = &Command{
 var principalDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a principal",
-	Usage:      "docker-helper principal delete [--system] [--endpoint ENDPOINT] [--token-file PATH] USER",
+	Usage:      "docker-helper principal delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -335,6 +357,14 @@ var principalDeleteCommand = &Command{
 				if err := client.deletePrincipal(username); err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
+				}
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, deletedResourceResult{Principal: username, Deleted: true}); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
 
 				fmt.Fprintf(stdout, "deleted principal %s\n", username)
@@ -397,13 +427,14 @@ var principalAllowedRootListCommand = &Command{
 var principalAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root for a principal",
-	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] USER PATH",
+	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] [--json] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		access := &accessFlag{}
 		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -424,6 +455,14 @@ var principalAllowedRootAddCommand = &Command{
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
+				}
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
 
 				fmt.Fprintf(stdout, "added %q to %s\n", path, username)
@@ -490,11 +529,12 @@ var principalAllowedRootSetAccessCommand = &Command{
 var principalAllowedRootRemoveCommand = &Command{
 	Name:       "remove",
 	Summary:    "Remove an allowed root for a principal",
-	Usage:      "docker-helper principal allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH",
+	Usage:      "docker-helper principal allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -515,6 +555,14 @@ var principalAllowedRootRemoveCommand = &Command{
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
+				}
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
 
 				fmt.Fprintf(stdout, "removed %q from %s\n", path, username)

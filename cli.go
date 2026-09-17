@@ -612,9 +612,11 @@ func printAllowedRootList(w io.Writer, entries []AllowedRootEntry, jsonOut bool)
 // allowedRootAccessResult is the one shared --json shape of the three
 // allowed-root set-access commands (config, Principal, Launcher): the stored
 // path identity, the resulting access, whether this call changed it, and —
-// config transaction only — whether the write carried a legacy-schema
-// migration. Unchanged remains success (changed=false); a missing target is
-// never routed here, it stays the command's failure.
+// config transaction only — whether this successful write also carried the
+// legacy-schema migration. The two facts are independent: a legacy
+// migration may accompany a changed or an unchanged access. Unchanged
+// remains success (changed=false); a missing target is never routed here,
+// it stays the command's failure.
 type allowedRootAccessResult struct {
 	Path     string            `json:"path"`
 	Access   AllowedRootAccess `json:"access"`
@@ -625,7 +627,9 @@ type allowedRootAccessResult struct {
 // printAllowedRootAccessResult renders the one shared presentation of a
 // successful allowed-root set-access result: human text by default (the
 // subject names the targeted resource and is empty for the global config
-// tree) or the shared JSON shape under the command's --json flag.
+// tree) or the shared JSON shape under the command's --json flag. The
+// legacy-schema migration fact is reported in both modes, consistently
+// with the unchanged wording.
 func printAllowedRootAccessResult(w io.Writer, subject, path string, access AllowedRootAccess, changed, migrated bool, jsonOut bool) error {
 	if jsonOut {
 		return encodeJSONOut(w, allowedRootAccessResult{
@@ -640,7 +644,11 @@ func printAllowedRootAccessResult(w io.Writer, subject, path string, access Allo
 		target = " on " + subject
 	}
 	if changed {
-		fmt.Fprintf(w, "changed %s to access %s%s\n", path, access, target)
+		migratedNote := ""
+		if migrated {
+			migratedNote = " (legacy schema migrated)"
+		}
+		fmt.Fprintf(w, "changed %s to access %s%s%s\n", path, access, migratedNote, target)
 		return nil
 	}
 	if migrated {
@@ -659,18 +667,69 @@ func allowedRootAccessHumanMessage(subject, path string, access AllowedRootAcces
 	return b.String()
 }
 
+// configFieldResult is the CLI-owned --json shape of the local config
+// set/unset acknowledgements: the addressed canonical field, whether this
+// successful operation changed the stored document, and — config
+// transaction only — whether the write also carried the legacy-schema
+// migration. A set carries the applied value; an unset does not.
+type configFieldResult struct {
+	Field    string `json:"field"`
+	Value    string `json:"value,omitempty"`
+	Changed  bool   `json:"changed"`
+	Migrated bool   `json:"migrated,omitempty"`
+}
+
+// allowedRootMutationResult is the CLI-owned --json shape of the global
+// config allowed-root add/remove acknowledgements: the addressed canonical
+// path identity, whether this successful operation changed the stored
+// document, and whether the write also carried the legacy-schema
+// migration. An add carries the access of the stored entry; a remove does
+// not. The same {path, changed, migrated} facts as the set-access result,
+// without the set-access-only unconditional access field.
+type allowedRootMutationResult struct {
+	Path     string            `json:"path"`
+	Access   AllowedRootAccess `json:"access,omitempty"`
+	Changed  bool              `json:"changed"`
+	Migrated bool              `json:"migrated,omitempty"`
+}
+
+// deletedResourceResult is the CLI-owned --json shape of the delete
+// acknowledgements whose daemon route returns no document (principal
+// delete, launcher delete, launcher credential delete): the addressed
+// resource subject and the deleted fact. The exit code carries success;
+// the result names what was deleted.
+type deletedResourceResult struct {
+	Principal string `json:"principal,omitempty"`
+	Launcher  string `json:"launcher,omitempty"`
+	Deleted   bool   `json:"deleted"`
+}
+
 var versionCommand = &Command{
 	Name:    "version",
 	Summary: "Print version",
-	Usage:   "docker-helper version",
+	Usage:   "docker-helper version [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, versionResult{Version: version}); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
 				fmt.Fprintln(stdout, version)
 				return 0
 			},
 		}
 	},
+}
+
+// versionResult is the CLI-owned --json shape of the version scalar: the
+// same version string the human line prints.
+type versionResult struct {
+	Version string `json:"version"`
 }
 
 var reloadCommand = &Command{
@@ -701,13 +760,14 @@ If the new configuration is invalid, the daemon keeps its current
 configuration and this command returns an error.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				return runReload(stdout, stderr, operatorClientOptions{
 					System:    *system,
 					Endpoint:  *endpoint,
 					TokenFile: *tokenFile,
-				})
+				}, *jsonOut)
 			},
 		}
 	},

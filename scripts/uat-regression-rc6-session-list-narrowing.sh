@@ -107,11 +107,11 @@ setup_pair() {
   home_a="$(reg_setup_principal "$user_a")" || return 1
   home_b="$(reg_setup_principal "$user_b")" || return 1
 
-  alpha_out="$(dh launcher create --system --principal "$user_a" --name alpha --no-credential 2>&1)" || {
+  alpha_out="$(dh launcher create --system --principal "$user_a" --name alpha --no-credential --json 2>&1)" || {
     echo "error: alpha launcher create failed: $(printf '%s' "$alpha_out" | head -2 | tr '\n' ' ')" >&2
     return 1
   }
-  beta_out="$(dh launcher create --system --principal "$user_b" --name beta --no-credential 2>&1)" || {
+  beta_out="$(dh launcher create --system --principal "$user_b" --name beta --no-credential --json 2>&1)" || {
     echo "error: beta launcher create failed: $(printf '%s' "$beta_out" | head -2 | tr '\n' ' ')" >&2
     return 1
   }
@@ -296,7 +296,7 @@ subcase_c() {
   # Issue the alpha Launcher credential (the positional selector is the
   # Launcher's global dhl_ ID).
   local lc_out lc_token lc_cred
-  lc_out="$(dh launcher credential create --system --principal "$user_a" "$ALPHA_ID" 2>"$TMPDIR_REG13/lc.err")"
+  lc_out="$(dh launcher credential create --system --principal "$user_a" --json "$ALPHA_ID" 2>"$TMPDIR_REG13/lc.err")"
   lc_token="$(printf '%s' "$lc_out" | json_field token || true)"
   if [ -z "$lc_token" ]; then
     reg_fail "C: launcher credential create failed: $(head -2 "$TMPDIR_REG13/lc.err" 2>/dev/null | tr '\n' ' ')"

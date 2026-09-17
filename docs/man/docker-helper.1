@@ -277,9 +277,11 @@ allowed root, matched by the stored canonical identity. A root that is
 not stored is an error, not an idempotent no-op; an unchanged access is
 reported as success. On success the command prints
 \fBchanged PATH to access MODE\fR or \fBunchanged PATH (access MODE)\fR;
-with \-\-json it prints the shared structured set-access result
-(\fBpath\fR, \fBaccess\fR, \fBchanged\fR, and \fBmigrated\fR when the
-write carried a legacy-schema migration).
+a write that also carried the legacy-schema migration reports that fact
+in the line. With \-\-json the shared structured set-access result
+(\fBpath\fR, \fBaccess\fR, \fBchanged\fR) is printed instead, and
+\fBmigrated\fR is true exactly when the write carried the legacy-schema
+migration.
 .TP
 .B docker-helper config allowed-root remove PATH
 Remove a global allowed root.

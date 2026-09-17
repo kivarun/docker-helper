@@ -23,11 +23,12 @@ var selinuxCommand = &Command{
 var selinuxCheckCommand = &Command{
 	Name:    "check",
 	Summary: "Validate the installed SELinux policy module and file contexts",
-	Usage:   "docker-helper selinux check",
+	Usage:   "docker-helper selinux check [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runSELinuxCheck(stdout, stderr)
+				return runSELinuxCheck(stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -87,12 +88,12 @@ func newProductionSELinuxCheckVerifier() *selinuxCheckVerifier {
 }
 
 // runSELinuxCheck is the CLI entry point for `docker-helper selinux check`.
-func runSELinuxCheck(stdout, stderr io.Writer) int {
-	return runSELinuxCheckWithVerifier(newProductionSELinuxCheckVerifier(), stdout, stderr)
+func runSELinuxCheck(stdout, stderr io.Writer, jsonOut bool) int {
+	return runSELinuxCheckWithVerifier(newProductionSELinuxCheckVerifier(), stdout, stderr, jsonOut)
 }
 
 // runSELinuxCheckWithVerifier is runSELinuxCheck with an injectable verifier.
-func runSELinuxCheckWithVerifier(v *selinuxCheckVerifier, stdout, stderr io.Writer) int {
+func runSELinuxCheckWithVerifier(v *selinuxCheckVerifier, stdout, stderr io.Writer, jsonOut bool) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -101,6 +102,14 @@ func runSELinuxCheckWithVerifier(v *selinuxCheckVerifier, stdout, stderr io.Writ
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	if jsonOut {
+		if err := encodeJSONOut(stdout, policyCheckResult{Valid: true}); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	fmt.Fprintln(stdout, "SELinux policy valid")
 	return 0
 }

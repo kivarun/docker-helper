@@ -491,15 +491,16 @@ may contain session-scoped Docker registry credentials.
 
 Daemon startup already removes expired sessions automatically.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runSessionCleanup(stdout, stderr)
+				return runSessionCleanup(stdout, stderr, *jsonOut)
 			},
 		}
 	},
 }
 
-func runSessionCleanup(stdout, stderr io.Writer) int {
+func runSessionCleanup(stdout, stderr io.Writer, jsonOut bool) int {
 	// Resolve runtime directory before any database mutation.
 	runtimeDir := getRuntimeDirSafe()
 	if runtimeDir == "" {
@@ -543,12 +544,31 @@ func runSessionCleanup(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	removedResult := sessionCleanupResult{Removed: n}
 	if err := cleanupStaleSessionRuntimeDirs(db, runtimeDir); err != nil {
-		fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
+		if jsonOut {
+			_ = encodeJSONOut(stdout, removedResult)
+		} else {
+			fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
+		}
 		fmt.Fprintf(stderr, "error: failed to clean stale runtime dirs: %v\n", err)
 		return 1
 	}
 
+	if jsonOut {
+		if err := encodeJSONOut(stdout, removedResult); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
 	return 0
+}
+
+// sessionCleanupResult is the CLI-owned --json shape of the offline
+// cleanup result: the number of expired sessions removed.
+type sessionCleanupResult struct {
+	Removed int `json:"removed"`
 }

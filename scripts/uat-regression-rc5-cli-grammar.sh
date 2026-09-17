@@ -372,7 +372,7 @@ subcase_d() {
 
   local out rc
   # 1. config show carries only the canonical allowed_roots projection.
-  out="$(dh config show 2>&1)"
+  out="$(dh config show --json 2>&1)"
   if printf '%s' "$out" | grep -q '"allowed_roots"' && ! printf '%s' "$out" | grep -q '"allowed_root_entries"'; then
     reg_ok "D: config show carries allowed_roots only"
   else
@@ -380,7 +380,7 @@ subcase_d() {
   fi
 
   # 2. config show allowed_roots is the rich FIELD and prints the array.
-  out="$(dh config show allowed_roots 2>&1)"
+  out="$(dh config show --json allowed_roots 2>&1)"
   if printf '%s' "$out" | grep -q '"path"' && printf '%s' "$out" | grep -q '"access"'; then
     reg_ok "D: config show allowed_roots FIELD prints the rich array"
   else

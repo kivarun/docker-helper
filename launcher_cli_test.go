@@ -1684,7 +1684,7 @@ func TestPrincipalCreateCLIIssueCredentialSendsTrueAndPrintsSecretOnce(t *testin
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"principal", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--issue-credential", "bob",
+		"--issue-credential", "--json", "bob",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())

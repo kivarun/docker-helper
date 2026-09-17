@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -49,7 +50,9 @@ func TestResourceShowTwoModeContract(t *testing.T) {
 			t.Errorf("--json output must be the bare canonical document, got:\n%s", js.String())
 		}
 
-		// The scalar FIELD extraction keeps working and is exclusive of --json.
+		// The scalar FIELD extraction keeps working and is exclusive of
+		// --json. The conflict is deterministic local validation: exit 2,
+		// the exact message, and zero HTTP requests (no daemon contact).
 		var field, fErr bytes.Buffer
 		if code := runCommandWithWriters(append(append([]string{}, base...), "username"), &field, &fErr); code != 0 {
 			t.Fatalf("field exit = %d (stderr=%s)", code, fErr.String())
@@ -57,10 +60,21 @@ func TestResourceShowTwoModeContract(t *testing.T) {
 		if strings.TrimSpace(field.String()) != "michael" {
 			t.Errorf("FIELD extraction = %q, want michael", field.String())
 		}
+		endpoint2, tokenPath2, conflictRequests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/principals/michael" && r.Method == http.MethodGet {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(principalBody))
+				return
+			}
+			http.NotFound(w, r)
+		})
 		var conflict, cErr bytes.Buffer
-		code := runCommandWithWriters(append(append([]string{}, base...), "--json", "username"), &conflict, &cErr)
-		if code != 2 || !strings.Contains(cErr.String(), "mutually exclusive") {
-			t.Errorf("FIELD + --json must be a local input error, got exit %d stderr=%s", code, cErr.String())
+		code := runCommandWithWriters([]string{"principal", "show", "--endpoint", endpoint2, "--token-file", tokenPath2, "--json", "michael", "username"}, &conflict, &cErr)
+		if code != 2 || strings.TrimSpace(cErr.String()) != "FIELD extraction and --json are mutually exclusive" {
+			t.Errorf("FIELD + --json must be a local input error (exit 2, exact message), got exit %d stderr=%q", code, cErr.String())
+		}
+		if len(*conflictRequests) != 0 {
+			t.Errorf("FIELD + --json conflict must contact no daemon, requests = %+v", *conflictRequests)
 		}
 	})
 
@@ -272,6 +286,74 @@ func TestSetAccessSharedPresentation(t *testing.T) {
 		}
 	})
 
+	t.Run("config legacy + changed access reports both facts", func(t *testing.T) {
+		legacyConfig := func() string {
+			root := testAllowedRootDir(t)
+			data, _ := json.Marshal(map[string]any{"allowed_root": root, "session_ttl": "12h"})
+			setupConfigTestWithData(t, data)
+			return root
+		}
+
+		// Human: the change and the migration are both in the line.
+		root := legacyConfig()
+		var human, hErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_only"}, &human, &hErr); code != 0 {
+			t.Fatalf("human exit = %d (stderr=%s)", code, hErr.String())
+		}
+		if firstLine(human.String()) != "changed "+root+" to access read_only (legacy schema migrated)" {
+			t.Errorf("human output = %q, want the changed line with the migration fact", human.String())
+		}
+
+		// JSON: changed=true and migrated=true are independent facts.
+		root = legacyConfig()
+		var js, jErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_only", "--json"}, &js, &jErr); code != 0 {
+			t.Fatalf("json exit = %d (stderr=%s)", code, jErr.String())
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
+			t.Fatalf("json output is not a document: %v (%s)", err, js.String())
+		}
+		if len(doc) != 4 || doc["changed"] != true || doc["migrated"] != true || doc["access"] != "read_only" {
+			t.Errorf("json result = %v, want {path, access, changed:true, migrated:true}", doc)
+		}
+	})
+
+	t.Run("config JSON output failure is a runtime failure", func(t *testing.T) {
+		// Successful mutation + failed JSON write: the transaction commits
+		// but the command reports exit 1, never success without output.
+		root := testAllowedRootDir(t)
+		data, _ := json.Marshal(map[string]any{"allowed_roots": []string{root}, "session_ttl": "12h"})
+		configPath := setupConfigTestWithData(t, data)
+
+		var stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_only", "--json"}, failingWriter{}, &stderr)
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "cannot encode output") {
+			t.Errorf("stderr = %q, want the output failure", stderr.String())
+		}
+		raw := readConfigJSON(t, configPath)
+		var entries []AllowedRootEntry
+		if err := json.Unmarshal(raw["allowed_roots"], &entries); err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0] != (AllowedRootEntry{Path: root, Access: AllowedRootAccessReadOnly}) {
+			t.Errorf("mutation must still commit on output failure, stored = %+v", entries)
+		}
+
+		// The SkipWrite success point fails the same way.
+		var stderr2 bytes.Buffer
+		code = runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_only", "--json"}, failingWriter{}, &stderr2)
+		if code != 1 {
+			t.Fatalf("unchanged exit = %d, want 1 (stderr=%s)", code, stderr2.String())
+		}
+		if !strings.Contains(stderr2.String(), "cannot encode output") {
+			t.Errorf("stderr = %q, want the output failure", stderr2.String())
+		}
+	})
+
 	t.Run("launcher", func(t *testing.T) {
 		endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(r.URL.Path, "/principals/alice/launchers/") && r.Method == http.MethodPatch {
@@ -304,4 +386,12 @@ func TestSetAccessSharedPresentation(t *testing.T) {
 			t.Errorf("json result = %v, want exactly {path, access, changed}", doc)
 		}
 	})
+}
+
+// failingWriter is an io.Writer whose every write fails, for proving that
+// output/encoding failures fail the command.
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) {
+	return 0, errors.New("write failed: disk full")
 }

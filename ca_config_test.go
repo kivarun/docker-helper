@@ -101,7 +101,7 @@ func TestCAConfigInvalidMode(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"config", "show", "--json"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("expected non-zero exit code for invalid mode")
 	}
@@ -121,7 +121,7 @@ func TestCAConfigAutoWithoutPath(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"config", "show", "--json"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("expected non-zero exit code for auto without path")
 	}
@@ -142,7 +142,7 @@ func TestCAConfigRelativePath(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"config", "show", "--json"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("expected non-zero exit code for relative path")
 	}
@@ -248,7 +248,7 @@ func TestCAConfigAutoEmptyPath(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"config", "show", "--json"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("expected non-zero exit code for auto with empty path")
 	}
@@ -349,7 +349,7 @@ func TestCAConfigShowAllIncludesNewFields(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"config", "show", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
@@ -377,7 +377,7 @@ func TestCAConfigShowDefaults(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"config", "show", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
