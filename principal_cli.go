@@ -442,11 +442,12 @@ var principalAllowedRootAddCommand = &Command{
 var principalAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of a principal allowed root",
-	Usage:      "docker-helper principal allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH read_only|read_write",
+	Usage:      "docker-helper principal allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH read_only|read_write",
 	MinPosArgs: 3,
 	MaxPosArgs: 3,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -475,9 +476,10 @@ var principalAllowedRootSetAccessCommand = &Command{
 					return 1
 				}
 
-				fmt.Fprintf(stdout, "access of %q on %s is %s\n", result.Path, username, result.Access)
-				if result.Message == "unchanged" {
-					fmt.Fprintln(stdout, "(unchanged)")
+				if err := printAllowedRootAccessResult(stdout, "principal "+username, result.Path,
+					AllowedRootAccess(result.Access), result.Changed, false, *jsonOut); err != nil {
+					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+					return 1
 				}
 				return 0
 			},

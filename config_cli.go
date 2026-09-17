@@ -27,6 +27,10 @@ type configMutationResult struct {
 	SkipWrite   bool   // true: skip write/reload, print message and return
 	Message     string // success message to print (may be empty if SkipWrite)
 	StartupOnly bool   // true: skip reload, print "restart required" after message
+	// JSONResult, when non-nil and the command runs with --json, replaces
+	// the human Message at every success print point (the structured form
+	// of the same result; operational notes move to stderr).
+	JSONResult any
 }
 
 // configMutation is a callback that modifies the raw config under the lock.
@@ -395,19 +399,22 @@ func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Wri
 var configAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of an allowed root",
-	Usage:      "docker-helper config allowed-root set-access PATH read_only|read_write",
+	Usage:      "docker-helper config allowed-root set-access [--json] PATH read_only|read_write",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	Help: `Change the access mode of one stored allowed root.
 
 The path is matched by the same canonical stored identity as remove
 (symlink-resolved). Unlike remove, a root that is not stored is an error,
-not an idempotent no-op. An unchanged access is reported as "unchanged".`,
+not an idempotent no-op. An unchanged access is reported as "unchanged".
+With --json the shared set-access result object is printed instead of
+the human line.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				return configAllowedRootSetAccess(args[0], args[1], stdout, stderr)
+				return configAllowedRootSetAccess(args[0], args[1], stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -417,7 +424,7 @@ not an idempotent no-op. An unchanged access is reported as "unchanged".`,
 // at the CLI boundary (a user-error exit before any file transaction) and
 // then performs the targeted access mutation inside the shared config
 // transaction owner.
-func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer) int {
+func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer, jsonOut bool) int {
 	if path == "" {
 		fmt.Fprintln(stderr, "error: path is required")
 		return 2
@@ -438,7 +445,7 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 		return 2
 	}
 
-	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, jsonOut, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
 			return configMutationResult{}, err
@@ -463,16 +470,25 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 		}
 
 		// Find the targeted entry (match by identity) and change only its
-		// access; the stored path spelling and position are preserved.
+		// access; the stored path spelling and position are preserved. The
+		// success presentation is the one shared set-access owner (human
+		// message plus the shared JSON result under --json).
 		for _, rr := range roots {
 			if rr.Identity != requestedIdentity {
 				continue
 			}
 			if rr.Stored.Access == requestedAccess {
-				if migrated {
-					return configMutationResult{Message: fmt.Sprintf("unchanged %s (access %s; legacy schema migrated)\n", rr.Stored.Path, rr.Stored.Access)}, nil
+				result := allowedRootAccessResult{
+					Path:     rr.Stored.Path,
+					Access:   rr.Stored.Access,
+					Changed:  false,
+					Migrated: migrated,
 				}
-				return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("unchanged %s (access %s)\n", rr.Stored.Path, rr.Stored.Access)}, nil
+				return configMutationResult{
+					SkipWrite:  !migrated,
+					Message:    allowedRootAccessHumanMessage("", rr.Stored.Path, rr.Stored.Access, false, migrated),
+					JSONResult: result,
+				}, nil
 			}
 			updated := make([]AllowedRootEntry, 0, len(roots))
 			for _, inner := range roots {
@@ -484,7 +500,14 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 			}
 			rawBytes, _ := json.Marshal(updated)
 			raw["allowed_roots"] = rawBytes
-			return configMutationResult{Message: fmt.Sprintf("changed %s to access %s\n", rr.Stored.Path, requestedAccess)}, nil
+			return configMutationResult{
+				Message: allowedRootAccessHumanMessage("", rr.Stored.Path, requestedAccess, true, false),
+				JSONResult: allowedRootAccessResult{
+					Path:    rr.Stored.Path,
+					Access:  requestedAccess,
+					Changed: true,
+				},
+			}, nil
 		}
 
 		// Unlike remove, a missing stored root is a user-facing failure of
@@ -516,7 +539,7 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, false, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
 			return configMutationResult{}, err
@@ -894,7 +917,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 // changes the access of an already-stored root (only set-access does), so
 // the unchanged message reports the stored access.
 func addAllowedRootToConfig(canonical string, access AllowedRootAccess, stdout, stderr io.Writer) int {
-	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, false, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
 			return configMutationResult{}, err
@@ -1213,7 +1236,33 @@ startup will fail closed if the configured source is not readable under the acti
 //
 // It returns exit code 0 on success, 1 on transaction/internal error,
 // 2 on user-facing error (wrapped in configUserError).
-func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mutate configMutation) int {
+//
+// jsonOut selects the structured success presentation: when the mutation
+// carries a JSONResult, it replaces the human Message at every success
+// print point and the operational notes ("daemon not running…",
+// "restart required") move to stderr so stdout stays pure JSON.
+func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, jsonOut bool, mutate configMutation) int {
+	// printSuccess renders one success point: the structured result under
+	// --json, otherwise the human message.
+	printSuccess := func(result configMutationResult) {
+		if jsonOut && result.JSONResult != nil {
+			if err := encodeJSONOut(stdout, result.JSONResult); err != nil {
+				fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+			}
+			return
+		}
+		if result.Message != "" {
+			fmt.Fprint(stdout, result.Message)
+		}
+	}
+	// printOperationalNote keeps stdout pure JSON under --json.
+	printOperationalNote := func(note string) {
+		if jsonOut {
+			fmt.Fprintln(stderr, note)
+			return
+		}
+		fmt.Fprintln(stdout, note)
+	}
 	configPath := getConfigPathFunc()
 
 	// Acquire process-level lock BEFORE reading config.
@@ -1301,9 +1350,7 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 
 	// Skip write: print message and return.
 	if result.SkipWrite {
-		if result.Message != "" {
-			fmt.Fprint(stdout, result.Message)
-		}
+		printSuccess(result)
 		return 0
 	}
 
@@ -1330,10 +1377,8 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 
 	// Startup-only fields: no reload, print message immediately.
 	if result.StartupOnly {
-		if result.Message != "" {
-			fmt.Fprint(stdout, result.Message)
-		}
-		fmt.Fprintln(stdout, "restart required")
+		printSuccess(result)
+		printOperationalNote("restart required")
 		return 0
 	}
 
@@ -1341,15 +1386,11 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 	outcome := attemptReload()
 	switch outcome.result {
 	case reloadSuccess:
-		if result.Message != "" {
-			fmt.Fprint(stdout, result.Message)
-		}
+		printSuccess(result)
 		return 0
 	case reloadDaemonNotRunning:
-		if result.Message != "" {
-			fmt.Fprint(stdout, result.Message)
-		}
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
+		printSuccess(result)
+		printOperationalNote("daemon not running; change will apply on next start")
 		newCAInj, newCAPath := effectiveTrustedCAFromRaw(raw)
 		if trustedCAPreflightWarningRequired(resolveDeploymentMode(), oldCAInj, oldCAPath, newCAInj, newCAPath) {
 			fmt.Fprintln(stderr, trustedCAPreflightWarning)
@@ -1400,7 +1441,7 @@ func applyConfigChangeTransactionally(
 ) int {
 	startupOnly := field == "http_address"
 
-	return executeConfigTransaction(stdout, stderr, writeFn, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+	return executeConfigTransaction(stdout, stderr, writeFn, false, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		// Apply modification tentatively to check if it repairs the config.
 		tempRaw := make(map[string]json.RawMessage)
 		for k, v := range raw {

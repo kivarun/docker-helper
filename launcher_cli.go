@@ -628,12 +628,13 @@ var launcherAllowedRootListCommand = &Command{
 var launcherAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of a launcher allowed root",
-	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] PATH read_only|read_write [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] PATH read_only|read_write [LAUNCHER]",
 	MinPosArgs: 2,
 	MaxPosArgs: 3,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -663,9 +664,10 @@ var launcherAllowedRootSetAccessCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				fmt.Fprintf(stdout, "access of %q on launcher %s is %s\n", result.Path, selector, result.Access)
-				if result.Message == "unchanged" {
-					fmt.Fprintln(stdout, "(unchanged)")
+				if err := printAllowedRootAccessResult(stdout, "launcher "+selector, result.Path,
+					AllowedRootAccess(result.Access), result.Changed, false, *jsonOut); err != nil {
+					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+					return 1
 				}
 				return 0
 			},

@@ -30,12 +30,13 @@ var principalCredentialCommand = &Command{
 var principalCredentialCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new credential for a principal",
-	Usage:      "docker-helper principal credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] USER",
+	Usage:      "docker-helper principal credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		name := fs.String("name", "default", "Credential name")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -62,6 +63,17 @@ var principalCredentialCreateCommand = &Command{
 					return 1
 				}
 
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					if result.Token != "" {
+						printCredentialInstallHint(stderr, "principal")
+					}
+					return 0
+				}
+
 				fmt.Fprintf(stdout, "Credential created for %s\n", username)
 				fmt.Fprintf(stdout, "  ID:    %s\n", result.Credential.ID)
 				fmt.Fprintf(stdout, "  Name:  %s\n", result.Credential.Name)
@@ -77,15 +89,18 @@ var principalCredentialCreateCommand = &Command{
 // list Query: the daemon authorizes the query against the authenticated
 // bearer (a Principal credential sees its own Principal, admin sees every
 // Principal) and the optional PRINCIPAL positional selector is only a filter
-// that can narrow visibility, never expand it.
+// that can narrow visibility, never expand it. The two-mode presentation
+// contract applies: the human table by default, the daemon's canonical
+// {ok, credentials} list document under --json.
 var principalCredentialListCommand = &Command{
 	Name:       "list",
 	Summary:    "List principal credentials",
-	Usage:      "docker-helper principal credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] [PRINCIPAL]",
+	Usage:      "docker-helper principal credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] [PRINCIPAL]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -110,6 +125,14 @@ var principalCredentialListCommand = &Command{
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
+				}
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
 
 				if len(result.Credentials) == 0 {
@@ -295,7 +318,7 @@ principal credential commands. New scripts should use:
 		{
 			Name:          "create",
 			Summary:       principalCredentialCreateCommand.Summary,
-			Usage:         "docker-helper credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] USER",
+			Usage:         "docker-helper credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] USER",
 			MinPosArgs:    principalCredentialCreateCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialCreateCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential create.",
@@ -304,7 +327,7 @@ principal credential commands. New scripts should use:
 		{
 			Name:          "list",
 			Summary:       principalCredentialListCommand.Summary,
-			Usage:         "docker-helper credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] [PRINCIPAL]",
+			Usage:         "docker-helper credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] [PRINCIPAL]",
 			MinPosArgs:    principalCredentialListCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialListCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential list.",

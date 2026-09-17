@@ -115,7 +115,11 @@ func TestSelfCLIHumanOutput(t *testing.T) {
 	}
 }
 
-// TestSelfCLIJSONOutput proves --json prints the raw response envelope.
+// TestSelfCLIJSONOutput proves --json prints the raw response envelope and
+// pins its invariant: the envelope is exactly {ok, type, resource} — the
+// discriminated union over Principal / Launcher / Session self resources, so
+// the envelope's type selects which resource shape resource carries and the
+// union cannot project one fixed bare resource schema.
 func TestSelfCLIJSONOutput(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/self" && r.Method == http.MethodGet {
@@ -148,8 +152,12 @@ func TestSelfCLIJSONOutput(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
 		t.Fatalf("json output is not a document: %v (%s)", err, stdout.String())
 	}
-	if envelope["type"] != "principal" || envelope["ok"] != true {
-		t.Errorf("json envelope = %v, want ok/type principal", envelope)
+	if len(envelope) != 3 || envelope["type"] != "principal" || envelope["ok"] != true {
+		t.Fatalf("json envelope = %v, want exactly {ok, type, resource}", envelope)
+	}
+	resource, ok := envelope["resource"].(map[string]any)
+	if !ok || resource["username"] != "alice" {
+		t.Errorf("envelope resource = %v, want the decoded principal self resource", envelope["resource"])
 	}
 }
 

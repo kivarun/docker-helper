@@ -111,6 +111,46 @@ func TestPrincipalCredentialListCLILauncherCredentialRejected(t *testing.T) {
 	}
 }
 
+// TestPrincipalCredentialListCLIJSON proves the two-mode presentation
+// contract of the list: --json prints the daemon's canonical {ok, credentials}
+// list document (an empty list is the empty credentials array, never the
+// human notice) and the default output stays the human table.
+func TestPrincipalCredentialListCLIJSON(t *testing.T) {
+	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/credentials" && r.Method == http.MethodGet {
+			// The canonical daemon projection of an empty list is the empty
+			// array, never null.
+			writeJSONResponse(w, http.StatusOK, listPrincipalCredentialsResponse{
+				OK:          true,
+				Credentials: make([]principalCredentialJSON, 0),
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"principal", "credential", "list", "--endpoint", endpoint, "--token-file", tokenPath, "--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if len(*requests) != 1 || (*requests)[0].path != "/credentials" {
+		t.Fatalf("requests = %+v, want exactly one GET /credentials", *requests)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("json output is not a document: %v (%s)", err, stdout.String())
+	}
+	if len(doc) != 2 || doc["ok"] != true {
+		t.Fatalf("json keys = %v, want exactly {ok, credentials}", doc)
+	}
+	if creds, ok := doc["credentials"].([]any); !ok || len(creds) != 0 {
+		t.Errorf("credentials = %v, want the empty array", doc["credentials"])
+	}
+}
+
 // TestPrincipalCredentialRotateCLIDefaultAndNameSelector proves the rotate
 // CLI: default call resolves the Principal via /auth and rotates "default";
 // --name selects another named credential on the same single rotate request.
@@ -241,6 +281,59 @@ func TestPrincipalCredentialCreateCLIProvesSingleCreateRequest(t *testing.T) {
 	}
 	if n := strings.Count(stderr.String(), "create-secret-42"); n != 0 {
 		t.Errorf("token leaked on stderr %d times", n)
+	}
+}
+
+// TestPrincipalCredentialCreateCLIJSON proves the two-mode issuance
+// contract of create: --json prints the canonical {ok, credential, token}
+// issuance document on stdout, moves the install hint to stderr, and still
+// discloses the one-time token exactly once (the token's only disclosure
+// surface stays stdout).
+func TestPrincipalCredentialCreateCLIJSON(t *testing.T) {
+	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/principals/alice/credentials" && r.Method == http.MethodPost {
+			writeJSONResponse(w, http.StatusCreated, principalCredentialTokenResponse{
+				OK:         true,
+				Credential: principalCredentialJSON{ID: "dhcr_7", Name: "default", Principal: "alice"},
+				Token:      "create-secret-42",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"principal", "credential", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--json", "alice",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if len(*requests) != 1 {
+		t.Fatalf("requests = %+v, want single create POST", *requests)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("json output is not a document: %v (%s)", err, stdout.String())
+	}
+	if len(doc) != 3 || doc["ok"] != true {
+		t.Fatalf("json keys = %v, want exactly {ok, credential, token}", doc)
+	}
+	cred, ok := doc["credential"].(map[string]any)
+	if !ok || cred["id"] != "dhcr_7" {
+		t.Errorf("credential = %v, want the decoded credential object", doc["credential"])
+	}
+	if doc["token"] != "create-secret-42" {
+		t.Errorf("token = %v, want the one-time token in the issuance document", doc["token"])
+	}
+	if n := strings.Count(stdout.String(), "create-secret-42"); n != 1 {
+		t.Errorf("token printed %d times on stdout, want 1", n)
+	}
+	if n := strings.Count(stderr.String(), "create-secret-42"); n != 0 {
+		t.Errorf("token leaked on stderr %d times", n)
+	}
+	if !strings.Contains(stderr.String(), "Save the token now") {
+		t.Errorf("install hint must move to stderr under --json, got %q", stderr.String())
 	}
 }
 

@@ -30,12 +30,14 @@ var pathValuedFlags = []string{
 
 var completionCommand = &Command{Name: "completion",
 	Summary:    "Generate shell completion script",
-	Usage:      "docker-helper completion <shell>",
+	Usage:      "docker-helper completion <bash|roots|selectors>",
 	MaxPosArgs: 1,
-	Help: `Generate shell completion script for docker-helper.
+	Help: `Generate the shell completion script and run the machine-facing
+completion introspection queries the script uses.
 
-Supported shells:
-  bash    Bash completion script
+  bash        Generate the Bash completion script
+  roots       Query effective or stored policy roots for completion
+  selectors   Query scope-applicable selector values for completion
 
 Install for Bash:
   source <(docker-helper completion bash)

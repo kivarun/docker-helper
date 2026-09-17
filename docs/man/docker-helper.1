@@ -230,7 +230,10 @@ Session bearer with its Session's own \fBsession show\fR body
 The admin token has no self resource and receives the stable
 \fB404 self_not_available\fR; unknown, revoked, disabled, or expired
 credentials receive the non-disclosing 401 authentication contract. The
-endpoint is read-only. With \-\-json, output the raw response envelope.
+endpoint is read-only. With \-\-json, output the raw response envelope
+(\fBok\fR, \fBtype\fR, \fBresource\fR): the envelope's \fBtype\fR
+discriminates which of the three self resource shapes \fBresource\fR
+carries, so the union cannot project one fixed bare resource schema.
 .TP
 .B docker-helper session cleanup
 Remove expired sessions from the local state database and clean up stale
@@ -268,9 +271,15 @@ never prepares MAC state. In system mode, MAC coverage for a concrete
 workspace is handled by the session lifecycle at session creation.
 Omitted \fB\-\-access\fR is the canonical read_write grant.
 .TP
-.B docker-helper config allowed-root set-access PATH read_only|read_write
+.B docker-helper config allowed-root set-access [\-\-json] PATH read_only|read_write
 Change the access mode (read_write or read_only) of one stored global
-allowed root, matched by the stored canonical identity.
+allowed root, matched by the stored canonical identity. A root that is
+not stored is an error, not an idempotent no-op; an unchanged access is
+reported as success. On success the command prints
+\fBchanged PATH to access MODE\fR or \fBunchanged PATH (access MODE)\fR;
+with \-\-json it prints the shared structured set-access result
+(\fBpath\fR, \fBaccess\fR, \fBchanged\fR, and \fBmigrated\fR when the
+write carried a legacy-schema migration).
 .TP
 .B docker-helper config allowed-root remove PATH
 Remove a global allowed root.
@@ -310,9 +319,14 @@ runtime, then removes the principal (launchers via FK cascade).
 Add an allowed root for a principal. Omitted \fB\-\-access\fR is the
 canonical read_write grant.
 .TP
-.B docker-helper principal allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH read_only|read_write
+.B docker-helper principal allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json] USER PATH read_only|read_write
 Change the access mode (read_write or read_only) of one stored principal
-allowed root, matched by the stored canonical identity.
+allowed root, matched by the stored canonical identity. The success
+presentation is the one shared set-access owner:
+\fBchanged PATH to access MODE on principal USER\fR or
+\fBunchanged PATH (access MODE) on principal USER\fR; with \-\-json the
+shared structured result object (\fBpath\fR, \fBaccess\fR,
+\fBchanged\fR) is printed instead.
 .TP
 .B docker-helper principal allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Remove an allowed root from a principal.
@@ -323,12 +337,14 @@ List a principal's stored allowed roots, one canonical root per line;
 follows the principal show contract: an admin token lists any Principal,
 a principal credential lists exactly its own.
 .TP
-.B docker-helper principal credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] USER
-Create a new credential for a principal. If \-\-name is not specified, defaults to "default".
+.B docker-helper principal credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] [\-\-json] USER
+Create a new credential for a principal. If \-\-name is not specified, defaults to "default". The one-time token appears only in this output; with \-\-json the canonical issuance document (\fBok\fR, \fBcredential\fR, \fBtoken\fR) replaces the human block and the install hint moves to stderr.
 .TP
-.B docker-helper principal credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [USER]
+.B docker-helper principal credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json] [USER]
 List principal credentials as a table with the columns
-ID, NAME, CREATED, REVOKED, and PRINCIPAL. The ID column contains each credential's
+ID, NAME, CREATED, REVOKED, and PRINCIPAL; with \-\-json, output the
+daemon's canonical \fB{ok, credentials}\fR list document instead.
+The ID column contains each credential's
 \fBdhcr_\fR identifier, which is the value used by \fBcredential revoke\fR.
 This is a scope-first list Query: the authenticated authority establishes
 the visible credentials (an admin token sees every principal's, a principal
@@ -412,10 +428,14 @@ default launcher is targeted. An add on an inherit launcher narrows it
 to restricted scope atomically with the insert. Omitted \fB\-\-access\fR
 is the canonical read_write grant.
 .TP
-.B docker-helper launcher allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] PATH read_only|read_write [LAUNCHER]
+.B docker-helper launcher allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] PATH read_only|read_write [LAUNCHER]
 Change the access mode (read_write or read_only) of one stored launcher
 allowed root, matched by the stored canonical identity. The scope mode
-is never changed.
+is never changed. The success presentation is the one shared set-access
+owner: \fBchanged PATH to access MODE on launcher SELECTOR\fR or
+\fBunchanged PATH (access MODE) on launcher SELECTOR\fR; with \-\-json
+the shared structured result object (\fBpath\fR, \fBaccess\fR,
+\fBchanged\fR) is printed instead.
 .TP
 .B docker-helper launcher allowed-root list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
 List a launcher's stored allowed roots, one canonical root per line;
@@ -465,13 +485,16 @@ implementations. The top-level
 .B credential install
 is canonical.
 .TP
-.B docker-helper principal credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] USER
+.B docker-helper principal credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] [\-\-json] USER
 Canonical form of \fBcredential create\fR. Create a new credential for a
-principal. If \-\-name is not specified, defaults to "default".
+principal. If \-\-name is not specified, defaults to "default"; \-\-json
+prints the canonical issuance document (\fBok\fR, \fBcredential\fR,
+\fBtoken\fR) with the install hint on stderr.
 .TP
-.B docker-helper principal credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [USER]
+.B docker-helper principal credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json] [USER]
 Canonical form of \fBcredential list\fR. Run the scope-first principal
-credential list Query; USER is an optional narrowing filter.
+credential list Query; USER is an optional narrowing filter; \-\-json
+prints the daemon's canonical \fB{ok, credentials}\fR list document.
 .TP
 .B docker-helper principal credential rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] [USER]
 Canonical atomic credential rotation (see Principal Commands).

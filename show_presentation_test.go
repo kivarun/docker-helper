@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -94,6 +95,213 @@ func TestResourceShowTwoModeContract(t *testing.T) {
 		}
 		if !strings.Contains(js.String(), `"scope": "restricted"`) || strings.Contains(js.String(), "SCOPE:") {
 			t.Errorf("--json output must be the bare canonical document, got:\n%s", js.String())
+		}
+	})
+}
+
+// firstLine returns the first newline-delimited line of s, so a test can
+// match the result line of a command whose stdout carries trailing
+// operational notes.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// TestSetAccessSharedPresentation proves the one shared presentation owner of
+// the three allowed-root set-access commands (global config, Principal,
+// Launcher): the same human mutation line — the subject qualifier appended
+// only where the targeting names one — and the same structured result object
+// under --json. Unchanged remains success; a missing target stays the
+// command's failure; the config transaction reports its legacy-schema
+// migration in both modes.
+func TestSetAccessSharedPresentation(t *testing.T) {
+	t.Run("config", func(t *testing.T) {
+		legacyConfig := func() string {
+			root := testAllowedRootDir(t)
+			data, _ := json.Marshal(map[string]any{"allowed_roots": []string{root}, "session_ttl": "12h"})
+			setupConfigTestWithData(t, data)
+			return root
+		}
+
+		// Changed: the shared config mutation line; the operational
+		// "daemon not running" note stays on stdout in human mode.
+		root := legacyConfig()
+		var human, hErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_only"}, &human, &hErr); code != 0 {
+			t.Fatalf("human exit = %d (stderr=%s)", code, hErr.String())
+		}
+		if firstLine(human.String()) != "changed "+root+" to access read_only" {
+			t.Errorf("human output = %q, want the shared config mutation line", human.String())
+		}
+		if !strings.Contains(human.String(), "daemon not running") {
+			t.Errorf("human changed run must keep the operational note on stdout: %q", human.String())
+		}
+
+		// Unchanged on the stored access: no write, no note, exact line.
+		var unch, uErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_only"}, &unch, &uErr); code != 0 {
+			t.Fatalf("unchanged exit = %d (stderr=%s)", code, uErr.String())
+		}
+		if unch.String() != "unchanged "+root+" (access read_only)\n" {
+			t.Errorf("unchanged output = %q, want the shared unchanged line", unch.String())
+		}
+
+		// --json selects the shared structured result; the operational note
+		// moves to stderr so stdout stays pure JSON.
+		root = legacyConfig()
+		var js, jErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_only", "--json"}, &js, &jErr); code != 0 {
+			t.Fatalf("json exit = %d (stderr=%s)", code, jErr.String())
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
+			t.Fatalf("json output is not a document: %v (%s)", err, js.String())
+		}
+		if len(doc) != 3 || doc["path"] != root || doc["access"] != "read_only" || doc["changed"] != true {
+			t.Errorf("json result = %v, want exactly {path, access, changed}", doc)
+		}
+		if !strings.Contains(jErr.String(), "daemon not running") {
+			t.Errorf("--json must move the operational note to stderr, got %q", jErr.String())
+		}
+	})
+
+	t.Run("config legacy-schema migration is reported in both modes", func(t *testing.T) {
+		legacyConfig := func() string {
+			root := testAllowedRootDir(t)
+			data, _ := json.Marshal(map[string]any{"allowed_root": root, "session_ttl": "12h"})
+			setupConfigTestWithData(t, data)
+			return root
+		}
+
+		root := legacyConfig()
+		var human, hErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_write"}, &human, &hErr); code != 0 {
+			t.Fatalf("human exit = %d (stderr=%s)", code, hErr.String())
+		}
+		if firstLine(human.String()) != "unchanged "+root+" (access read_write; legacy schema migrated)" {
+			t.Errorf("human output = %q, want the shared migrated unchanged line", human.String())
+		}
+
+		root = legacyConfig()
+		var js, jErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"config", "allowed-root", "set-access", root, "read_write", "--json"}, &js, &jErr); code != 0 {
+			t.Fatalf("json exit = %d (stderr=%s)", code, jErr.String())
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
+			t.Fatalf("json output is not a document: %v (%s)", err, js.String())
+		}
+		if len(doc) != 4 || doc["changed"] != false || doc["migrated"] != true {
+			t.Errorf("json result = %v, want the unchanged legacy migration reported (changed=false, migrated=true)", doc)
+		}
+	})
+
+	t.Run("principal", func(t *testing.T) {
+		endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/principals/alice/allowed-roots" && r.Method == http.MethodPatch {
+				writeJSONResponse(w, http.StatusOK, principalChangedResponse{
+					OK: true, Username: "alice", Field: "allowed_roots", Changed: true,
+					Path: "/a", Access: "read_only",
+				})
+				return
+			}
+			http.NotFound(w, r)
+		})
+
+		var human, hErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"principal", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "alice", "/a", "read_only"}, &human, &hErr); code != 0 {
+			t.Fatalf("human exit = %d (stderr=%s)", code, hErr.String())
+		}
+		if human.String() != "changed /a to access read_only on principal alice\n" {
+			t.Errorf("human output = %q, want the shared line with the principal subject", human.String())
+		}
+
+		var js, jErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"principal", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "--json", "alice", "/a", "read_only"}, &js, &jErr); code != 0 {
+			t.Fatalf("json exit = %d (stderr=%s)", code, jErr.String())
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
+			t.Fatalf("json output is not a document: %v (%s)", err, js.String())
+		}
+		if len(doc) != 3 || doc["path"] != "/a" || doc["access"] != "read_only" || doc["changed"] != true {
+			t.Errorf("json result = %v, want exactly {path, access, changed}", doc)
+		}
+	})
+
+	t.Run("principal unchanged stays success", func(t *testing.T) {
+		endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/principals/alice/allowed-roots" && r.Method == http.MethodPatch {
+				writeJSONResponse(w, http.StatusOK, principalChangedResponse{
+					OK: true, Username: "alice", Field: "allowed_roots", Changed: false,
+					Path: "/a", Access: "read_only", Message: "unchanged",
+				})
+				return
+			}
+			http.NotFound(w, r)
+		})
+
+		var human, hErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"principal", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "alice", "/a", "read_only"}, &human, &hErr); code != 0 {
+			t.Fatalf("human exit = %d (stderr=%s)", code, hErr.String())
+		}
+		if human.String() != "unchanged /a (access read_only) on principal alice\n" {
+			t.Errorf("human output = %q, want the shared unchanged line with the subject", human.String())
+		}
+	})
+
+	t.Run("principal missing target stays the failure", func(t *testing.T) {
+		endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/principals/alice/allowed-roots" && r.Method == http.MethodPatch {
+				writeJSONResponse(w, http.StatusNotFound, map[string]any{
+					"ok": false, "code": "not_found", "message": "not found",
+				})
+				return
+			}
+			http.NotFound(w, r)
+		})
+
+		var human, hErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"principal", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "alice", "/missing", "read_only"}, &human, &hErr); code == 0 {
+			t.Fatalf("missing target exit = 0, want failure (stdout=%q)", human.String())
+		}
+		if strings.Contains(human.String(), "changed ") || strings.Contains(human.String(), "unchanged ") {
+			t.Errorf("failed mutation must not print the shared success line: %q", human.String())
+		}
+	})
+
+	t.Run("launcher", func(t *testing.T) {
+		endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/principals/alice/launchers/") && r.Method == http.MethodPatch {
+				writeJSONResponse(w, http.StatusOK, launcherAllowedRootResponse{
+					OK: true, LauncherID: "dhl_1", Field: "allowed_roots", Changed: true,
+					Path: "/a", Access: "read_only",
+				})
+				return
+			}
+			http.NotFound(w, r)
+		})
+
+		var human, hErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"launcher", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "/a", "read_only", "build-agent"}, &human, &hErr); code != 0 {
+			t.Fatalf("human exit = %d (stderr=%s)", code, hErr.String())
+		}
+		if human.String() != "changed /a to access read_only on launcher build-agent\n" {
+			t.Errorf("human output = %q, want the shared line with the launcher subject", human.String())
+		}
+
+		var js, jErr bytes.Buffer
+		if code := runCommandWithWriters([]string{"launcher", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "--json", "/a", "read_only", "build-agent"}, &js, &jErr); code != 0 {
+			t.Fatalf("json exit = %d (stderr=%s)", code, jErr.String())
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
+			t.Fatalf("json output is not a document: %v (%s)", err, js.String())
+		}
+		if len(doc) != 3 || doc["path"] != "/a" || doc["access"] != "read_only" || doc["changed"] != true {
+			t.Errorf("json result = %v, want exactly {path, access, changed}", doc)
 		}
 	})
 }

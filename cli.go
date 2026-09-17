@@ -609,6 +609,56 @@ func printAllowedRootList(w io.Writer, entries []AllowedRootEntry, jsonOut bool)
 	return nil
 }
 
+// allowedRootAccessResult is the one shared --json shape of the three
+// allowed-root set-access commands (config, Principal, Launcher): the stored
+// path identity, the resulting access, whether this call changed it, and —
+// config transaction only — whether the write carried a legacy-schema
+// migration. Unchanged remains success (changed=false); a missing target is
+// never routed here, it stays the command's failure.
+type allowedRootAccessResult struct {
+	Path     string            `json:"path"`
+	Access   AllowedRootAccess `json:"access"`
+	Changed  bool              `json:"changed"`
+	Migrated bool              `json:"migrated,omitempty"`
+}
+
+// printAllowedRootAccessResult renders the one shared presentation of a
+// successful allowed-root set-access result: human text by default (the
+// subject names the targeted resource and is empty for the global config
+// tree) or the shared JSON shape under the command's --json flag.
+func printAllowedRootAccessResult(w io.Writer, subject, path string, access AllowedRootAccess, changed, migrated bool, jsonOut bool) error {
+	if jsonOut {
+		return encodeJSONOut(w, allowedRootAccessResult{
+			Path:     path,
+			Access:   access,
+			Changed:  changed,
+			Migrated: migrated,
+		})
+	}
+	target := ""
+	if subject != "" {
+		target = " on " + subject
+	}
+	if changed {
+		fmt.Fprintf(w, "changed %s to access %s%s\n", path, access, target)
+		return nil
+	}
+	if migrated {
+		fmt.Fprintf(w, "unchanged %s (access %s; legacy schema migrated)%s\n", path, access, target)
+		return nil
+	}
+	fmt.Fprintf(w, "unchanged %s (access %s)%s\n", path, access, target)
+	return nil
+}
+
+// allowedRootAccessHumanMessage renders the shared set-access human form as
+// one string, for transaction results that carry their success message.
+func allowedRootAccessHumanMessage(subject, path string, access AllowedRootAccess, changed, migrated bool) string {
+	var b strings.Builder
+	_ = printAllowedRootAccessResult(&b, subject, path, access, changed, migrated, false)
+	return b.String()
+}
+
 var versionCommand = &Command{
 	Name:    "version",
 	Summary: "Print version",

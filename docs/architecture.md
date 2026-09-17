@@ -1730,7 +1730,9 @@ list route. The show response carries the canonical rich `allowed_roots`
 projection, and `principal allowed-root
 list` prints the 2.1-compatible one canonical root per line by default,
 with the explicit `--json` opt-in carrying the canonical rich entries
-for access-aware tooling.
+for access-aware tooling. `principal credential list` follows the same
+two-mode contract: the human table by default, the daemon's canonical
+`{ok, credentials}` list document under `--json`.
 
 ### Launcher
 
@@ -1779,7 +1781,7 @@ docker-helper launcher create [--system] [--endpoint ENDPOINT]
 docker-helper launcher list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper launcher show [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher set [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--name NAME]
     [--enabled true|false] [LAUNCHER]
@@ -1788,7 +1790,7 @@ docker-helper launcher delete [--system] [--endpoint ENDPOINT]
 docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--access ACCESS] PATH [LAUNCHER]
 docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] PATH ACCESS [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] PATH ACCESS [LAUNCHER]
 docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
@@ -2064,6 +2066,38 @@ Exit codes:
 | 1 | Runtime error (config load, API call, server failure) | `docker-helper init` with an unwritable configuration directory, `docker-helper session create` with unreachable server |
 | 2 | CLI syntax or argument validation error | unknown command, missing/unknown subcommand, missing required flag, unexpected positional argument, unknown flag |
 
+### CLI presentation contract
+
+Structured console output follows the two-mode presentation contract:
+the default output is the human-readable representation and the explicit
+`--json` flag selects the machine-readable representation. The
+resource `show` commands are the canonical form: the primary resource
+identity is positional (`principal show USER`, `launcher show
+LAUNCHER`, `session show SESSION_ID`), the default output is the
+compact human identity block (through the shared PATH/ACCESS table
+renderer for allowed-root entries), and `--json` prints the unchanged
+canonical JSON document. `principal show USER FIELD` keeps the scalar
+field-extraction convenience, exclusive of `--json`. The legacy
+pre-2.2 `session delete --id` grammar is compatibility and is not
+normalized.
+
+The three `allowed-root set-access` commands (global config, Principal,
+Launcher) share ONE presentation owner: the same human mutation line
+(`changed PATH to access MODE`, with the subject qualifier
+`on principal USER` / `on launcher SELECTOR` appended where the
+targeting names one) and the same structured result object
+`{"path","access","changed"}` under `--json` (the config transaction
+additionally reports `"migrated":true` when the write carried a
+legacy-schema migration). Unchanged remains success; a missing target
+remains the command's failure.
+
+Commands whose console output is not a resource document are exempt
+from the contract: stream workloads (`pull`, `build`, `run`), scalar
+acknowledgements whose operation produces no document (`version`,
+`reload`, `session cleanup`, `apparmor check`, `selinux check`), the
+machine-line completion protocol, and one-time secret issuance that
+keeps its established disclosure surface.
+
 Agent-facing CLI commands are `pull`, `build`, `run`, `registry login`
 (described under [Data-plane execution](#data-plane-execution)), and `self`
 — the read-only credential self-introspection command, usable with a
@@ -2130,7 +2164,12 @@ manages the global allowed_roots array. `add` canonicalizes and validates the
 path; authorization-only, does NOT prepare MAC state.
 `set-access` changes the access mode of exactly one stored root, matched by
 the stored canonical identity; a root that is not stored is a user-facing
-error, never an idempotent no-op.
+error, never an idempotent no-op. Its success presentation is the one
+shared set-access owner (see [CLI presentation contract](#cli-presentation-contract)):
+`changed PATH to access MODE` / `unchanged PATH (access MODE)` by default,
+the shared structured result object under `--json` (the config form
+additionally reports `migrated` when the write carried a legacy-schema
+migration).
 `remove` resolves and matches the stored canonical form; rejects removal of
 the final global root. `list` prints the 2.1-compatible one canonical root
 per line by default; the explicit `--json` opt-in prints the canonical rich

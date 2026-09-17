@@ -30,7 +30,7 @@ never resolves your identity from configuration.
   Session bearer       -> your Session: id, workspace, ownership,
                           creation/expiry, and the persisted immutable
                           filesystem snapshot (same body as
-                          'session show --id' of your own session).
+                          'session show SESSION_ID' of your own session).
 
 The admin token has no self resource and is answered with the stable
 404 self_not_available contract. Unknown, revoked, disabled, or
