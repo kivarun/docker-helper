@@ -2949,7 +2949,12 @@ durable ownership record is removed only after the stages it anchors are
 positively proven done, so a failed proof or failed cleanup leaves it as
 the reconciliation retry marker for whatever helper state remains; the
 backend prepared cleanup itself releases only kernel MAC state and backend
-files and never removes the durable record. A partial durable-state removal
+files and never removes the durable record. The absence proof treats a
+Docker-reported removal of the correlated container that is already in
+progress (the `--rm` auto-removal raced the cleanup) as Docker-owned
+in-flight removal and settles on the observed bounded absence instead of a
+stage failure; a real removal failure still fails the proof and retains
+dependent state. A partial durable-state removal
 fails ordered (transient runtime directory first, durable record
 directory last) so a runtime-removal failure cannot strand surviving state
 without its owner. A failed proof or failed MAC

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // runWorkloadLifecycleFixture wires a system-mode run app whose Docker CLI
@@ -688,5 +689,140 @@ func TestContainerProvenanceWiringsShareOneMechanism(t *testing.T) {
 	}
 	if strings.Join(seamArgv, " ") != "docker rm -f cidSeam" {
 		t.Errorf("ExecCommandContext seam must construct the remove command, got %v", seamArgv)
+	}
+}
+
+// TestForceRemoveClassifiesDockerRemovalRace pins the narrow classification
+// of the Docker daemon's removal-race phrase: "removal of container ... is
+// already in progress" is Docker owning the removal (--rm auto-removal raced
+// the cleanup), not a cleanup-stage failure. A real daemon error must stay
+// unclassified so the stage retains dependent state fail closed.
+func TestForceRemoveClassifiesDockerRemovalRace(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name        string
+		stderr      string
+		wantErrIs   bool
+		wantErrText string
+	}{
+		{
+			name:        "removal race is owned by Docker",
+			stderr:      "Error response from daemon: removal of container 9ccf1d7d8107 is already in progress",
+			wantErrIs:   true,
+			wantErrText: "docker reports removal of the correlated container already in progress",
+		},
+		{
+			name:        "real daemon error stays unclassified",
+			stderr:      "Error response from daemon: Cannot connect to the Docker daemon",
+			wantErrIs:   false,
+			wantErrText: "cannot remove correlated container",
+		},
+		{
+			name:        "partial phrase match stays unclassified",
+			stderr:      "Error response from daemon: removal of container 9ccf1d7d8107 is already queued elsewhere",
+			wantErrIs:   false,
+			wantErrText: "cannot remove correlated container",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			factory := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				script := "printf '%s' " + "'" + tc.stderr + "' 1>&2; exit 1"
+				cmd := exec.Command("sh", "-c", script)
+				return cmd
+			}
+			err := forceRemoveCorrelatedContainer(ctx, factory, "cidX")
+			if err == nil {
+				t.Fatal("a failing docker rm must be reported as an error")
+			}
+			if got := errors.Is(err, errDockerRemovalInProgress); got != tc.wantErrIs {
+				t.Fatalf("errors.Is(err, errDockerRemovalInProgress) = %v, want %v (err: %v)", got, tc.wantErrIs, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrText) {
+				t.Fatalf("error text %q must contain %q", err.Error(), tc.wantErrText)
+			}
+		})
+	}
+}
+
+// TestAbsenceProofSettlesDockerOwnedRemoval proves that the canonical
+// container-absence proof settles a removal Docker already owns: the
+// classified race error must not fail the proof, and the proof must wait
+// for the observed absence (bounded) instead of a single racy inspect.
+func TestAbsenceProofSettlesDockerOwnedRemoval(t *testing.T) {
+	var mu sync.Mutex
+	inspections := 0
+	prov := containerProvenance{
+		inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			inspections++
+			if inspections == 1 {
+				return []helperContainer{{ID: "cid123", State: "running"}}, nil
+			}
+			return nil, nil
+		},
+		remove: func(ctx context.Context, containerID string) error {
+			return errDockerRemovalInProgress
+		},
+	}
+	if err := proveOperationContainerAbsent(context.Background(), prov, "opA", "sessA"); err != nil {
+		t.Fatalf("a Docker-owned in-progress removal must settle on the proven absence, got %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if inspections != 2 {
+		t.Errorf("the proof must settle by inspection, got %d inspections", inspections)
+	}
+}
+
+// TestAbsenceProofRealRemovalFailureRetains is the negative twin: a real
+// Docker removal failure must fail the proof (dependent state retained) and
+// must not be classified as the removal race.
+func TestAbsenceProofRealRemovalFailureRetains(t *testing.T) {
+	prov := containerProvenance{
+		inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+			return []helperContainer{{ID: "cid123", State: "running"}}, nil
+		},
+		remove: func(ctx context.Context, containerID string) error {
+			return fmt.Errorf("cannot remove correlated container: exit status 1: Error response from daemon: permission denied")
+		},
+	}
+	err := proveOperationContainerAbsent(context.Background(), prov, "opA", "sessA")
+	if err == nil {
+		t.Fatal("a real removal failure must fail the absence proof")
+	}
+	if !strings.Contains(err.Error(), "cannot remove proven-owned correlated container") {
+		t.Fatalf("proof must report the removal failure, got %v", err)
+	}
+	if errors.Is(err, errDockerRemovalInProgress) {
+		t.Fatal("a real removal failure must not be classified as the removal race")
+	}
+}
+
+// TestAbsenceProofSettleWindowBounded proves the settle loop is bounded: a
+// container that never disappears must fail the proof when the settle
+// window is exhausted, not spin forever.
+func TestAbsenceProofSettleWindowBounded(t *testing.T) {
+	prov := containerProvenance{
+		inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+			return []helperContainer{{ID: "cid123", State: "running"}}, nil
+		},
+		remove: func(ctx context.Context, containerID string) error {
+			return nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := proveOperationContainerAbsent(ctx, prov, "opA", "sessA")
+	if err == nil {
+		t.Fatal("a container that never disappears must fail the absence proof")
+	}
+	if !strings.Contains(err.Error(), "could not be verified") {
+		t.Fatalf("proof must report the unverifiable removal, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("the settle loop must be bounded by the caller context, took %v", elapsed)
 	}
 }
