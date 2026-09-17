@@ -540,6 +540,11 @@ Pull a Docker image.
 Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
 \-\-context accepts a workspace-relative path or an absolute host path
 inside the session workspace (the daemon validates containment).
+Build arguments are not a secret transport: a value reaches the
+daemon-side Docker CLI child as \-\-build-arg K=V argv and is observable
+through /proc/<pid>/cmdline while that child runs (where host procfs
+policy permits), and Docker/BuildKit may retain ARG-related material in
+image history/provenance.
 Run and build are asynchronous operations under fixed concurrency
 ceilings (4 per session, 8 per daemon, of which 2 may be builds; a mount
 ceiling of 16 caller mounts per run applies): beyond a ceiling the
@@ -581,10 +586,15 @@ as an empty value. The value is not placed in the
 .B docker-helper
 argv, is not printed in diagnostics, is not inherited from the surrounding
 environment, and the daemon does not log environment values. Known
-limitation: the run implementation starts the workload through the legacy
-Docker CLI, which receives the value as \-\-env DEST=value, so the value can
-appear in the argv of that daemon-side child process. When both \-\-env and
-\-\-env-from define the same name, the
+limitation (accepted Release 2.2 residual): the run implementation starts
+the workload through the legacy Docker CLI, which receives the value as
+\-\-env DEST=value, so the value can appear in the argv of that
+daemon-side child process for the child's whole execution and is
+observable through /proc/<pid>/cmdline where host procfs policy permits.
+No alternative secret transport is introduced in Release 2.2; the argv
+class closes with the future migration away from the legacy Docker CLI.
+When both \-\-env and
+\-\-env\-from define the same name, the
 \-\-env\-from value wins.
 .TP
 .B \-\-helper\-socket
@@ -696,7 +706,26 @@ through a hard link. A write through a read-write alias is also observed
 through a read-only alias; docker-helper does not promise inode-level
 immutability or confidentiality between hard-link aliases.
 .IP \(bu 4
-No remote or non-loopback network access in Release 2
+An allowed root and a Session's issued filesystem snapshot are a
+helper-mediated filesystem capability, not a path ceiling over the
+Principal's Unix DAC: in system mode the root-owned daemon reads inside
+the granted capability regardless of the Principal's own Unix DAC
+reach, and a file inside the capability may enter a staged build
+context even when the Principal could not read it. \fBread_only\fR
+denies the workload a writable host-path exposure; it is not a
+confidentiality boundary against the daemon. Workload file access
+remains additionally bounded by kernel DAC under the container
+credentials (Principal UID:GID, privilege floor), with POSIX ACLs
+evaluated against those actual credentials; host supplementary groups
+are not propagated, so permissions depending on those group memberships
+may differ.
+.IP \(bu 4
+The daemon's own listeners are local only: a Unix socket, plus a loopback
+HTTP listener in system mode. No remote or non-loopback listener exists in
+Release 2. This is a statement about the daemon's own transport only: it
+does not promise anything about Docker workload or build networking.
+Builds and containers use the Docker/BuildKit default network position;
+docker-helper provides no workload or build network isolation.
 .SH SEE ALSO
 .BR docker-helper-config (5),
 .BR apparmor (7),

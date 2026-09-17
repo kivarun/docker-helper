@@ -250,3 +250,118 @@ func TestManagedAppArmorBoundaryVocabulary(t *testing.T) {
 		}
 	}
 }
+
+// TestH10CapabilitySemanticsDocumented guards the accepted H10 boundary
+// (SC3, 2026-09-16) in every operator-facing doc that describes the
+// filesystem policy: an allowed root and the issued Session filesystem
+// snapshot are an explicitly granted helper-mediated filesystem capability,
+// NOT a path ceiling layered over the Principal's Unix DAC — and `read_only`
+// is a workload-facing access/integrity mode, not a confidentiality
+// boundary against the daemon. Removing or contradicting this statement in
+// the shipped docs would silently reverse the accepted Release 2.2 contract.
+func TestH10CapabilitySemanticsDocumented(t *testing.T) {
+	cases := []struct {
+		path     string
+		contains []string
+	}{
+		{
+			path: "docs/architecture.md",
+			contains: []string{
+				"filesystem **capability**",
+				"not a path ceiling layered over the Principal's Unix DAC",
+				"not a\n  confidentiality boundary against the helper",
+				"evaluated by kernel DAC,\n  including POSIX ACLs, against the credentials actually supplied to the\n  container",
+				"not a reproduction of the Principal's host login credential set",
+				"host\n  supplementary groups are not propagated",
+			},
+		},
+		{
+			path: "README.md",
+			contains: []string{
+				"helper-mediated filesystem capability",
+				"not a path ceiling layered over the Principal's Unix DAC",
+				"not a confidentiality boundary against the daemon",
+				"with POSIX ACLs\n  evaluated against those actual credentials",
+			},
+		},
+		{
+			path: "docs/man/docker-helper.1",
+			contains: []string{
+				"helper-mediated filesystem capability, not a path ceiling over the",
+				"it is not a\nconfidentiality boundary against the daemon",
+				"with POSIX ACLs\nevaluated against those actual credentials",
+			},
+		},
+	}
+	for _, tc := range cases {
+		data, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", tc.path, err)
+		}
+		content := string(data)
+		for _, want := range tc.contains {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s must carry the accepted H10 capability semantics, missing %q", tc.path, want)
+			}
+		}
+	}
+}
+
+// TestM1DaemonSideArgvResidualDocumented guards the accepted M1 boundary
+// (SC3, 2026-09-16, Option 1a) in every operator-facing doc that documents
+// run environment values or build args: the residual is the daemon-side
+// legacy Docker CLI argv (observable through /proc/<pid>/cmdline while the
+// child runs, where host procfs policy permits), build args are explicitly
+// not a secret transport, and no alternative secret transport is introduced
+// in Release 2.2. Removing or contradicting this statement in the shipped
+// docs would silently reverse the accepted Release 2.2 contract or imply a
+// secret-safety the CLI transport does not provide.
+func TestM1DaemonSideArgvResidualDocumented(t *testing.T) {
+	cases := []struct {
+		path     string
+		contains []string
+	}{
+		{
+			path: "docs/architecture.md",
+			contains: []string{
+				"residual of the daemon-side legacy Docker CLI argv, not a missed check",
+				"residual as run environment values",
+				"explicitly NOT a secret transport",
+				"not disappear when the CLI argv exposure is later removed",
+			},
+		},
+		{
+			path: "README.md",
+			contains: []string{
+				"accepted Release 2.2 residual of the daemon-side legacy Docker CLI argv",
+				"not a secret transport",
+			},
+		},
+		{
+			path: "docs/man/docker-helper.1",
+			contains: []string{
+				"accepted Release 2.2 residual",
+				"Build arguments are not a secret transport",
+			},
+		},
+		{
+			path: ".claude/skills/docker-helper/SKILL.md",
+			contains: []string{
+				"not a mechanism for passing secrets",
+				"accepted Release 2.2 residual",
+			},
+		},
+	}
+	for _, tc := range cases {
+		data, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", tc.path, err)
+		}
+		content := string(data)
+		for _, want := range tc.contains {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s must carry the accepted M1 daemon-side argv residual wording, missing %q", tc.path, want)
+			}
+		}
+	}
+}

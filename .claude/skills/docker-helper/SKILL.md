@@ -294,7 +294,11 @@ docker-helper build \
 ```
 
 `build` waits for the daemon operation to finish and streams operation
-output. Build arguments are not a mechanism for passing secrets.
+output. Build arguments are not a mechanism for passing secrets: a value
+reaches the daemon-side Docker CLI child as `--build-arg K=V` argv and is
+observable through `/proc/<pid>/cmdline` while that child runs (where host
+procfs policy permits), and Docker/BuildKit may retain ARG-related material
+in image history/provenance.
 
 ## Run
 
@@ -325,10 +329,14 @@ docker-helper run --image IMAGE \
   surrounding shell, and the daemon does not log environment values;
 - an unset SOURCE stops the command (exit 2) before any container
   operation is created;
-- known limitation: `run` starts the workload through the legacy Docker
-  CLI, which receives the value as `--env DEST=value`, so the value can
-  appear in that daemon-side child process's argv; `--env-from`
-  guarantees nothing beyond the `docker-helper` process boundary.
+- known limitation (accepted Release 2.2 residual): `run` starts the
+  workload through the legacy Docker CLI, which receives the value as
+  `--env DEST=value`, so the value can appear in that daemon-side child
+  process's argv (observable through `/proc/<pid>/cmdline` while the child
+  runs, where host procfs policy permits); `--env-from` guarantees nothing
+  beyond the `docker-helper` process boundary. No alternative secret
+  transport is introduced in Release 2.2; the argv class closes with the
+  future migration away from the legacy Docker CLI.
 
 **Helper socket (system mode only).** `--helper-socket` makes the Docker
 Helper socket reachable inside the container at

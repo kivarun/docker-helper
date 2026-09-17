@@ -77,8 +77,11 @@ policy:
 
 docker-helper limits the host paths exposed through its supported Docker
 operations. It is not a complete sandbox: Docker/default networking remains
-available, and a validation or command-construction defect in this trusted
-Docker-facing service can compromise the host.
+available — for workload containers and for builds alike (the
+Docker/BuildKit builder executes with its own execution and network
+position, documented as the accepted build boundary pending the Release 2.4
+build sandbox) — and a validation or command-construction defect in this
+trusted Docker-facing service can compromise the host.
 
 ## High-level architecture
 
@@ -1156,6 +1159,45 @@ canonical `AllowedRootEntry` — where `access` is exactly `read_write` or
 `read_only`; there is no other access vocabulary. A legacy path-only entry
 (string in config.json, pre-2.2 database row, or 2.x API input) is the
 `read_write` grant.
+
+#### H10 accepted boundary: filesystem capability, not a DAC-preserving ceiling
+
+An allowed root and the issued Session filesystem snapshot are an explicitly
+granted filesystem **capability** — path tree plus access modes —
+not a path ceiling layered over the Principal's Unix DAC. Accepted semantics
+(SC3/H10, 2026-09-16):
+
+- In system mode the root-owned helper may perform the necessary
+  helper-mediated reads inside the granted capability regardless of whether
+  the specific Principal could read the same inode through its own host
+  Unix credentials (the helper does not assume the Principal identity; root
+  bypasses DAC). A file inside the capability may enter the staged build
+  context (the one current helper content-ingest path, see
+  [Build context](#build-context)) even when the host Principal could not
+  read it under DAC — deliberate capability semantics, not a missed check.
+  No owner-UID check, mode-bit emulation, ACL parser, or check-as-user
+  subsystem exists or will be added to emulate Principal DAC.
+- `read_only` is an access/integrity mode inside the granted capability: it
+  denies the *workload* a writable host-path exposure. It is not a
+  confidentiality boundary against the helper.
+- Actual workload file access is additionally evaluated by kernel DAC,
+  including POSIX ACLs, against the credentials actually supplied to the
+  container: Principal `UID:GID` with no capability bypass, plus the
+  privilege floor (no capabilities, no-new-privileges). This is
+  not a reproduction of the Principal's host login credential set: host
+  supplementary groups are not propagated, so permissions depending on
+  those group memberships may differ.
+- User mode has no separate H10 gap: the non-root daemon is naturally
+  bounded by its own DAC identity (the daemon owner is the only Principal).
+  This is an implementation consequence of the same capability model, not a
+  second filesystem-capability model.
+- Release 2.4 does not automatically "close H10". The build sandbox
+  redesigns the builder execution/root/network boundary (see
+  [`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)); moving
+  staging/read identity under an unprivileged Principal identity may
+  additionally narrow the helper's read authority, but only as a separate
+  explicit contract change — the accepted capability semantics never change
+  silently as a side effect of 2.4.
 
 The workspace authorization hierarchy has three policy ceilings, then one
 concrete selection:
@@ -2424,7 +2466,18 @@ Validation details:
   workspace/context that resolves outside is refused);
 - build-arg names must match `^[A-Za-z_][A-Za-z0-9_]*$`;
 - build-arg keys are sorted for deterministic Docker argv;
-- build-arg values are never logged or audited (only `build_arg_keys`).
+- build-arg values are never logged or audited (only `build_arg_keys`);
+- build-arg values are passed to the daemon-side `docker` child as
+  `--build-arg K=V` argv entries, with the same accepted Release 2.2
+  residual as run environment values (observable through
+  `/proc/<pid>/cmdline` while the build child runs, where host procfs
+  policy permits; accepted M1 disposition, SC3 2026-09-16). Build args
+  are explicitly NOT a secret transport and must not be used for
+  secrets; Docker/BuildKit may additionally retain ARG-related material
+  in image history/provenance — a property of build semantics that does
+  not disappear when the CLI argv exposure is later removed. The argv
+  class closes with the accepted Release 3 Engine API adapter migration;
+  no `--env-file`-style or BuildKit secret knob is introduced for it.
 
 Build context and Dockerfile are read-only host inputs of the helper:
 after `validateBuildRequest` canonicalizes both paths, they are evaluated
@@ -2956,6 +3009,17 @@ copy of the build context. Traversal is FD-relative and restricted with
 receives only the staged context and Dockerfile paths, never the
 original workspace paths.
 
+Staging is the one current helper content-ingest path (H10 accepted
+boundary): the root-owned daemon copies the workspace capability's
+contents into the staging tree, so every file inside the granted
+capability — not only files the host Principal could read under Unix DAC
+— becomes part of the staged context the builder consumes. This is the
+deliberate filesystem-capability semantics, not an access check gap; the
+builder's own execution/network position is the separately accepted H1
+boundary (see [Current limitations and
+non-goals](#current-limitations-and-non-goals) and
+[`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)).
+
 On platforms or kernels where `openat2` is unavailable, the operation
 fails closed without falling back to original workspace paths.
 
@@ -3070,14 +3134,25 @@ process environment is never inherited. When both `--env` and
 `--env-from` define the same name, the `--env-from` value wins.
 
 Known limitation (introduced with the 2.1.x run implementation and still
-current in Release 2.2): `run` starts the workload through the legacy
-Docker CLI, and the daemon passes environment values to that child
-process as `--env DEST=value` argv entries, so a resolved value is
-visible in the argv of the daemon-side `docker` child process.
-`--env-from` therefore scopes its guarantee to the `docker-helper` CLI
-process boundary only; it does not promise the value is absent from every
-process argv on the system. Migrating `run` away from the legacy Docker
-CLI is Release 3 work, not a Release 2.2 goal.
+current in Release 2.2; accepted M1 disposition, SC3 2026-09-16): `run`
+starts the workload through the legacy Docker CLI, and the daemon passes
+environment values to that child process as `--env DEST=value` argv
+entries, so a resolved value is visible in the argv of the daemon-side
+`docker` child process for the child's whole execution — a local process
+may observe it through `/proc/<pid>/cmdline` where the host procfs policy
+permits such observation. This is a deliberately accepted Release 2.2
+residual of the daemon-side legacy Docker CLI argv, not a missed check:
+no `--env-file` transport, dual transport, temporary secret-file
+subsystem, or env-grammar narrowing is introduced, because a partial
+closure of `run` only (and only of the subset of the arbitrary-string
+env contract a file grammar can represent) would leave `build_args`
+exposed and create the false impression that the CLI transport became
+secret-safe. `--env-from` therefore scopes its guarantee to the
+`docker-helper` CLI process boundary only; it does not promise the value
+is absent from every process argv on the system. Migrating `run` (with
+`build`) away from the legacy Docker CLI to a docker-helper-owned Docker
+Engine API adapter is Release 3 work, not a Release 2.2 goal; that
+migration removes the CLI argv exposure.
 `--env-from` introduces no new daemon-side concept: the existing
 `run.environment` contract fully owns delivery.
 
@@ -4165,8 +4240,11 @@ Non-goals of the current implementation:
 - build secrets;
 - registry and credential management beyond per-session
   `registry login` (registry authentication itself is supported);
-- network management (creating or configuring Docker networks; containers
-  use Docker's default networking);
+- network management (creating or configuring Docker networks; workload
+  containers and builds use the Docker/BuildKit default networking — the
+  builder's own execution/network position is the accepted Release 2.2
+  build boundary, owned architecturally by the Release 2.4 build sandbox
+  design);
 - volume management beyond bind mounts.
 
 Project purpose, product boundary, and long-lived design principles are
