@@ -631,9 +631,11 @@ main() {
 	info "  systemctl restart $UNIT_NAME"
 	info ""
 	if [[ "$selected_mac" == "apparmor" ]]; then
-		info "Manage AppArmor workspace boundaries with:"
-		info "  docker-helper apparmor root add PATH"
-		info "  docker-helper apparmor root remove PATH"
+		info "AppArmor MAC coverage is prepared by docker-helper sessions"
+		info "(managed AppArmor MAC boundaries for the issued filesystem trees)."
+		info "Diagnose the installed policy with:"
+		info "  docker-helper apparmor root list"
+		info "  docker-helper apparmor check"
 	else
 		info "SELinux workspace MAC coverage is managed by docker-helper sessions"
 		info "(semanage fcontext + restorecon for non-home workspaces)."

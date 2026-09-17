@@ -92,13 +92,10 @@ func TestAppArmorHelpOutput(t *testing.T) {
 		want []string
 	}{
 		{name: "apparmor", args: []string{"apparmor", "--help"}, want: []string{"Usage:", "root", "check"}},
-		{name: "apparmor root", args: []string{"apparmor", "root", "--help"}, want: []string{"Usage:", "list", "add", "remove"}},
+		{name: "apparmor root", args: []string{"apparmor", "root", "--help"}, want: []string{"Usage:", "list"}},
 		{name: "apparmor check", args: []string{"apparmor", "check", "--help"}, want: []string{"Usage:"}},
 		{name: "apparmor root list", args: []string{"apparmor", "root", "list", "--help"}, want: []string{"Usage:"}},
-		{name: "apparmor root add", args: []string{"apparmor", "root", "add", "--help"}, want: []string{"Usage:"}},
-		{name: "apparmor root remove", args: []string{"apparmor", "root", "remove", "--help"}, want: []string{"Usage:"}},
 		{name: "help apparmor", args: []string{"help", "apparmor"}, want: []string{"AppArmor"}},
-		{name: "help apparmor root add", args: []string{"help", "apparmor", "root", "add"}, want: []string{"Usage:"}},
 	}
 
 	for _, tc := range tests {
@@ -117,6 +114,47 @@ func TestAppArmorHelpOutput(t *testing.T) {
 	}
 }
 
+// TestAppArmorRootMutationsAreNotPublicCommands pins the second-writer
+// removal: the Session MAC lifecycle is the only production writer of
+// managed AppArmor MAC boundaries, so the CLI must not expose `apparmor root
+// add` or `apparmor root remove` as command paths. The read-only diagnostics
+// (`apparmor root list`, `apparmor check`) remain discoverable.
+func TestAppArmorRootMutationsAreNotPublicCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "add subcommand", args: []string{"apparmor", "root", "add", "/tmp/nowhere"}},
+		{name: "remove subcommand", args: []string{"apparmor", "root", "remove", "/tmp/nowhere"}},
+		{name: "add bare", args: []string{"apparmor", "root", "add"}},
+		{name: "help add path", args: []string{"help", "apparmor", "root", "add"}},
+		{name: "help remove path", args: []string{"help", "apparmor", "root", "remove"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(tc.args, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("%s must not be a command path (expected CLI syntax error exit 2), got %d", tc.name, code)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "root list help", args: []string{"apparmor", "root", "list", "--help"}},
+		{name: "check help", args: []string{"apparmor", "check", "--help"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(tc.args, &stdout, &stderr)
+			if code != 0 {
+				t.Errorf("%s must remain discoverable, got exit %d: %s", tc.name, code, stderr.String())
+			}
+		})
+	}
+}
+
 // --- Rejection when effective UID is not 0 ---
 
 func TestAppArmorRequiresRoot(t *testing.T) {
@@ -129,8 +167,6 @@ func TestAppArmorRequiresRoot(t *testing.T) {
 		args []string
 	}{
 		{name: "root list", args: []string{"apparmor", "root", "list"}},
-		{name: "root add", args: []string{"apparmor", "root", "add", "/tmp"}},
-		{name: "root remove", args: []string{"apparmor", "root", "remove", "/tmp"}},
 		{name: "check", args: []string{"apparmor", "check"}},
 	}
 
@@ -148,37 +184,24 @@ func TestAppArmorRequiresRoot(t *testing.T) {
 	}
 }
 
-// --- Absolute/existing-directory validation ---
+// TestAppArmorBoundaryAddRelativePathAndNonExistentPath — the manager-level
+// input validation that used to be exercised through the removed CLI command
+// surface. The Session MAC lifecycle is the only production caller of
+// addManagedBoundary, so the same refusals are proven directly on the
+// manager (the canonical owner), not through a public mutation command.
+func TestAppArmorBoundaryAddRelativePathAndNonExistentPath(t *testing.T) {
+	_, mgr, _ := setupAppArmorTest(t)
 
-func TestAppArmorBoundaryAddRelativePath(t *testing.T) {
-	mockAppArmorActive(t, true)
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = saved }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add", "relative/path"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for relative path, got %d", code)
+	if _, err := mgr.addManagedBoundary(context.Background(), "relative/path"); err == nil {
+		t.Fatal("expected error for relative path")
+	} else if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("expected absolute-path error, got: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "absolute") {
-		t.Errorf("expected absolute path error, got: %s", stderr.String())
-	}
-}
 
-func TestAppArmorBoundaryAddNonExistentPath(t *testing.T) {
-	mockAppArmorActive(t, true)
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = saved }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add", "/nonexistent/path/xyz"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for non-existent path, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "does not exist") {
-		t.Errorf("expected not exist error, got: %s", stderr.String())
+	if _, err := mgr.addManagedBoundary(context.Background(), "/nonexistent/path/xyz"); err == nil {
+		t.Fatal("expected error for non-existent path")
+	} else if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("expected not-exist error, got: %v", err)
 	}
 }
 
@@ -291,26 +314,6 @@ func TestAppArmorBoundaryAddGlobRejected(t *testing.T) {
 				t.Errorf("expected %q in error, got: %v", ch, err)
 			}
 		})
-	}
-}
-
-func TestAppArmorRootAddCLIRejectsGlob(t *testing.T) {
-	mockAppArmorActive(t, true)
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = saved }()
-
-	// Policy-legal base, as in TestAppArmorBoundaryAddGlobRejected.
-	rootDir := testAllowedRootDir(t)
-	path := filepath.Join(rootDir, "test*")
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Skipf("cannot create path with glob: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add", path}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for glob path, got %d", code)
 	}
 }
 

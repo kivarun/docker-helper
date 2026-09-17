@@ -1362,14 +1362,17 @@ under a helper-owned generated AppArmor profile
 read-only container targets; the profile is removed when the operation
 finishes or is reconciled at daemon startup.
 
-Advanced backend-specific management:
+Read-only backend diagnostics:
 
 ```bash
 docker-helper apparmor root list
-docker-helper apparmor root add /path/to/workspace
-docker-helper apparmor root remove /path/to/workspace
 docker-helper apparmor check
 ```
+
+`apparmor root list` inspects the managed AppArmor MAC boundaries the
+Session MAC lifecycle prepared; it is not a mutation surface and not an
+authorization API. The Session MAC lifecycle is the only production
+writer of managed AppArmor MAC boundaries.
 
 User mode does not use AppArmor confinement by default. The release tarball
 includes an optional user-mode AppArmor profile template that can be
@@ -1691,12 +1694,10 @@ Individual projects are not registered persistently. The operator adds
 global roots and principal roots, then creates sessions for specific
 workspaces under those roots.
 
-Advanced backend-specific management remains available:
+Read-only backend diagnostics remain available:
 
 ```bash
 docker-helper apparmor root list
-docker-helper apparmor root add /path/to/workspace
-docker-helper apparmor root remove /path/to/workspace
 ```
 
 The separation is intentional:
@@ -1704,7 +1705,9 @@ The separation is intentional:
 - `principal create` and `principal allowed-root add` define per-principal
   workspace policy;
 - `config allowed-root add` updates the system-wide authorization ceiling only;
-- `apparmor root add` is an advanced backend-specific operation;
+- the Session MAC lifecycle is the only production writer of managed AppArmor
+  MAC boundaries; `apparmor root list` is read-only backend diagnostic
+  inspection, not a mutation surface and not an authorization API;
 - `principal credential create` produces a Principal credential token for
   session creation.
 

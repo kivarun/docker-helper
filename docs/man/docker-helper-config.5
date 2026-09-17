@@ -252,7 +252,10 @@ are stored there, outside \fIconfig.json\fR. Authorization roots do not own
 MAC state.
 \fBconfig allowed-root add\fR changes the authorization ceiling only;
 MAC coverage is prepared at session creation time.
-Advanced backend-specific management: \fBdocker-helper apparmor root\fR.
+Advanced backend-specific diagnostics: \fBdocker-helper apparmor root list\fR
+(read-only inspection of the managed AppArmor MAC boundaries the Session
+MAC lifecycle prepared; the Session MAC lifecycle is the only production
+writer of managed AppArmor MAC boundaries).
 .SS SELinux
 The service runs in \fBdocker_helper_t\fR and system-mode containers run in
 the MCS-constrained \fBdocker_helper_container_t\fR type.

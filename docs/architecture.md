@@ -2073,11 +2073,14 @@ commands are `serve`, `init`, `reload`, `session`, `config`, `principal`,
 `launcher`, `credential`, `admin-token`, `apparmor`, and `selinux`;
 general commands are `version` and `help`.
 
-`apparmor` — manage/check managed AppArmor MAC boundaries for an
-AppArmor system deployment (the public `apparmor root` command spelling is
-a retained compatibility form; it manages AppArmor MAC boundaries —
-confinement resources for concrete issued trees, not authorization roots
-and not workspace-only state).
+`apparmor` — inspect managed AppArmor MAC boundaries for an AppArmor
+system deployment: `apparmor root list` is read-only backend diagnostic
+inspection of the boundary state the Session MAC lifecycle prepared (the
+`apparmor root` spelling is a retained compatibility form; it never
+mutates state and is not an authorization API — the Session MAC lifecycle
+is the only production writer of managed AppArmor MAC boundaries), and
+`apparmor check` validates the shipped profile against the installed
+policy.
 
 `selinux` — inspect SELinux system-policy state for a SELinux system
 deployment. Subcommand: `check` (validate that the `docker_helper` policy

@@ -316,39 +316,11 @@ func TestAppArmorRootListInactive(t *testing.T) {
 	}
 }
 
-func TestAppArmorRootAddInactive(t *testing.T) {
-	mockAppArmorActive(t, false)
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = origUID }()
-
-	rootDir := testAllowedRootDir(t)
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add", rootDir}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "not active") {
-		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
-	}
-}
-
-func TestAppArmorRootRemoveInactive(t *testing.T) {
-	mockAppArmorActive(t, false)
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = origUID }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "remove", "/nonexistent"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "not active") {
-		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
-	}
-}
+// The inactive-backend guard of the former `apparmor root add/remove` CLI
+// surface is gone with the second-writer removal: the manager-level
+// apparmor-active requirement is covered by the check/list paths
+// (TestAppArmorRootListWorksWhenInactive, TestAppArmorCheckInactive) and by
+// the canonical Session MAC driver.
 
 func TestAppArmorCheckInactive(t *testing.T) {
 	mockAppArmorActive(t, false)
