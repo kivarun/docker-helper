@@ -372,12 +372,13 @@ var launcherListCommand = &Command{
 var launcherShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show launcher details",
-	Usage:      "docker-helper launcher show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output the canonical JSON document")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -395,14 +396,31 @@ var launcherShowCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := encodeJSONOut(stdout, l); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, l); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
+				printLauncherShow(stdout, l)
 				return 0
 			},
 		}
 	},
+}
+
+// printLauncherShow renders the human launcher-show block: the identity
+// fields and the stored allowed roots through the shared PATH/ACCESS table
+// renderer. The canonical JSON document remains the explicit --json form.
+func printLauncherShow(w io.Writer, l *launcherJSON) {
+	fmt.Fprintf(w, "ID:        %s\n", l.ID)
+	fmt.Fprintf(w, "NAME:      %s\n", l.Name)
+	fmt.Fprintf(w, "PRINCIPAL: %s\n", l.Principal)
+	fmt.Fprintf(w, "ENABLED:   %t\n", l.Enabled)
+	fmt.Fprintf(w, "SCOPE:     %s\n", l.Scope)
+	fmt.Fprintf(w, "CREATED:   %s\n", l.CreatedAt)
+	printRootEntriesTable(w, "ALLOWED ROOTS", l.AllowedRoots)
 }
 
 var launcherSetCommand = &Command{

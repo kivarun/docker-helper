@@ -285,8 +285,12 @@ In non-interactive use one of these flags is required.
 .B docker-helper principal list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
 List all principals (username, UID, GID, home, enabled).
 .TP
-.B docker-helper principal show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER [FIELD]
-Show principal details. Read authority is scope-first: an admin token
+.B docker-helper principal show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json] USER [FIELD]
+Show principal details. The default output is the compact human identity
+block with the stored allowed-roots PATH/ACCESS table; \fB\-\-json\fR
+prints the canonical JSON document, and the optional FIELD positional
+extracts one scalar value (exclusive of \fB\-\-json\fR). Read authority is
+scope-first: an admin token
 reads any Principal, a principal credential reads exactly the Principal
 it authenticated as (the daemon authorizes the target; the CLI performs
 no local self-check), and a foreign selector is the same non-disclosing
@@ -391,8 +395,10 @@ launcher names are principal-scoped and are never searched globally
 non-disclosing \fB404 launcher_not_found\fR. No principal inference happens
 in the CLI.
 .TP
-.B docker-helper launcher show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [LAUNCHER]
-Show launcher details.
+.B docker-helper launcher show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
+Show launcher details. The default output is the compact human identity
+block with the stored allowed-roots PATH/ACCESS table; \fB\-\-json\fR
+prints the canonical JSON document.
 .TP
 .B docker-helper launcher set [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-name NAME] [\-\-enabled true|false] [LAUNCHER]
 Modify a launcher with at least one of \fB\-\-name\fR or \fB\-\-enabled\fR.

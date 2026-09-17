@@ -79,11 +79,12 @@ var principalCreateCommand = &Command{
 var principalShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show principal details",
-	Usage:      "docker-helper principal show [--system] [--endpoint ENDPOINT] [--token-file PATH] USER [FIELD]",
+	Usage:      "docker-helper principal show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER [FIELD]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output the canonical JSON document")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -105,6 +106,15 @@ var principalShowCommand = &Command{
 					return 1
 				}
 
+				// The FIELD positional is the human scalar-extraction
+				// convenience; --json always selects the full document, so
+				// the two are mutually exclusive rather than silently
+				// combined.
+				if len(args) == 2 && *jsonOut {
+					fmt.Fprintln(stderr, "error: FIELD extraction and --json are mutually exclusive")
+					return 2
+				}
+
 				if len(args) == 2 {
 					field := args[1]
 					val, ok := extractPrincipalField(result, field)
@@ -116,16 +126,31 @@ var principalShowCommand = &Command{
 					return 0
 				}
 
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
+
+				printPrincipalShow(stdout, result)
 				return 0
 			},
 		}
 	},
+}
+
+// printPrincipalShow renders the human principal-show block: the identity
+// fields and the stored allowed roots through the shared PATH/ACCESS table
+// renderer. The canonical JSON document remains the explicit --json form.
+func printPrincipalShow(w io.Writer, p *principalResponse) {
+	fmt.Fprintf(w, "USERNAME: %s\n", p.Username)
+	fmt.Fprintf(w, "UID:      %d\n", p.UID)
+	fmt.Fprintf(w, "GID:      %d\n", p.GID)
+	fmt.Fprintf(w, "HOME:     %s\n", p.Home)
+	fmt.Fprintf(w, "ENABLED:  %t\n", p.Enabled)
+	printRootEntriesTable(w, "ALLOWED ROOTS", p.AllowedRoots)
 }
 
 var principalListCommand = &Command{
