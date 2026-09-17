@@ -747,22 +747,36 @@ func TestForceRemoveClassifiesDockerRemovalRace(t *testing.T) {
 
 // TestAbsenceProofSettlesDockerOwnedRemoval proves that the canonical
 // container-absence proof settles a removal Docker already owns: the
-// classified race error must not fail the proof, and the proof must wait
-// for the observed absence (bounded) instead of a single racy inspect.
+// classified race error must not fail the proof, the proof must retry the
+// inspection while the container is still present after the removal, and it
+// must settle on the observed absence (bounded) instead of a single racy
+// inspect.
 func TestAbsenceProofSettlesDockerOwnedRemoval(t *testing.T) {
 	var mu sync.Mutex
 	inspections := 0
+	removeCalls := 0
 	prov := containerProvenance{
 		inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			inspections++
-			if inspections == 1 {
+			switch inspections {
+			case 1:
+				// Initial correlated-container discovery: present.
 				return []helperContainer{{ID: "cid123", State: "running"}}, nil
+			case 2:
+				// First post-remove inspection: Docker still reports the
+				// container, so the owned removal has not completed yet.
+				return []helperContainer{{ID: "cid123", State: "running"}}, nil
+			default:
+				// Later inspection: the removal Docker owns completed.
+				return nil, nil
 			}
-			return nil, nil
 		},
 		remove: func(ctx context.Context, containerID string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			removeCalls++
 			return errDockerRemovalInProgress
 		},
 	}
@@ -771,17 +785,26 @@ func TestAbsenceProofSettlesDockerOwnedRemoval(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if inspections != 2 {
-		t.Errorf("the proof must settle by inspection, got %d inspections", inspections)
+	if removeCalls != 1 {
+		t.Errorf("the classified race must be tolerated without a second removal attempt, got %d remove calls", removeCalls)
+	}
+	if inspections != 3 {
+		t.Errorf("the proof must retry the inspection after the post-remove presence (initial + still-present + absent), got %d inspections", inspections)
 	}
 }
 
 // TestAbsenceProofRealRemovalFailureRetains is the negative twin: a real
-// Docker removal failure must fail the proof (dependent state retained) and
-// must not be classified as the removal race.
+// Docker removal failure must fail the proof immediately (dependent state
+// retained) without entering the settle loop, and must not be classified as
+// the removal race.
 func TestAbsenceProofRealRemovalFailureRetains(t *testing.T) {
+	var mu sync.Mutex
+	inspections := 0
 	prov := containerProvenance{
 		inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			inspections++
 			return []helperContainer{{ID: "cid123", State: "running"}}, nil
 		},
 		remove: func(ctx context.Context, containerID string) error {
@@ -798,31 +821,56 @@ func TestAbsenceProofRealRemovalFailureRetains(t *testing.T) {
 	if errors.Is(err, errDockerRemovalInProgress) {
 		t.Fatal("a real removal failure must not be classified as the removal race")
 	}
+	mu.Lock()
+	defer mu.Unlock()
+	if inspections != 1 {
+		t.Errorf("a real removal failure must fail immediately, without settle-loop inspections, got %d inspections", inspections)
+	}
 }
 
 // TestAbsenceProofSettleWindowBounded proves the settle loop is bounded: a
-// container that never disappears must fail the proof when the settle
-// window is exhausted, not spin forever.
+// container that never disappears must fail the proof when the caller context
+// expires after several settled re-inspections, not spin forever and not
+// return after a single failed inspection. The deadline check proves the
+// failure completion itself: the caller context is exhausted by the settle
+// loop, so the negative outcome came from caller context exhaustion.
 func TestAbsenceProofSettleWindowBounded(t *testing.T) {
+	var mu sync.Mutex
+	inspections := 0
 	prov := containerProvenance{
 		inspect: func(ctx context.Context, operationID, sessionID string) ([]helperContainer, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			inspections++
 			return []helperContainer{{ID: "cid123", State: "running"}}, nil
 		},
 		remove: func(ctx context.Context, containerID string) error {
 			return nil
 		},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	started := time.Now()
 	err := proveOperationContainerAbsent(ctx, prov, "opA", "sessA")
 	if err == nil {
 		t.Fatal("a container that never disappears must fail the absence proof")
 	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("the proof must end on the caller deadline exhaustion, got caller context state %v (err: %v)", ctx.Err(), err)
+	}
 	if !strings.Contains(err.Error(), "could not be verified") {
 		t.Fatalf("proof must report the unverifiable removal, got %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("the settle loop must be bounded by the caller context, took %v", elapsed)
+	}
+	// The settle-exhaustion error above is only reachable through repeated
+	// settled re-inspections: the initial discovery plus several post-remove
+	// inspections inside the bounded window. A count that low means the proof
+	// returned after a single failed inspection instead of settling.
+	mu.Lock()
+	defer mu.Unlock()
+	if inspections < 3 {
+		t.Errorf("the bounded settle must re-inspect several times before the caller context expires (initial + >=2 post-remove), got %d inspections", inspections)
 	}
 }
