@@ -641,7 +641,6 @@ config.json. If present, configuration validation and daemon startup fail:
 | `database_path` | SQLite database path |
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
-| `allowed_roots` | Rich `{path, access}` projection of the canonical global allowed roots |
 | `mode` | `"user"` or `"system"` |
 
 ### 3. Start the daemon
@@ -1362,14 +1361,17 @@ under a helper-owned generated AppArmor profile
 read-only container targets; the profile is removed when the operation
 finishes or is reconciled at daemon startup.
 
-Advanced backend-specific management:
+Read-only backend diagnostics:
 
 ```bash
 docker-helper apparmor root list
-docker-helper apparmor root add /path/to/workspace
-docker-helper apparmor root remove /path/to/workspace
 docker-helper apparmor check
 ```
+
+`apparmor root list` inspects the managed AppArmor MAC boundaries the
+Session MAC lifecycle prepared; it is not a mutation surface and not an
+authorization API. The Session MAC lifecycle is the only production
+writer of managed AppArmor MAC boundaries.
 
 User mode does not use AppArmor confinement by default. The release tarball
 includes an optional user-mode AppArmor profile template that can be
@@ -1691,12 +1693,10 @@ Individual projects are not registered persistently. The operator adds
 global roots and principal roots, then creates sessions for specific
 workspaces under those roots.
 
-Advanced backend-specific management remains available:
+Read-only backend diagnostics remain available:
 
 ```bash
 docker-helper apparmor root list
-docker-helper apparmor root add /path/to/workspace
-docker-helper apparmor root remove /path/to/workspace
 ```
 
 The separation is intentional:
@@ -1704,7 +1704,9 @@ The separation is intentional:
 - `principal create` and `principal allowed-root add` define per-principal
   workspace policy;
 - `config allowed-root add` updates the system-wide authorization ceiling only;
-- `apparmor root add` is an advanced backend-specific operation;
+- the Session MAC lifecycle is the only production writer of managed AppArmor
+  MAC boundaries; `apparmor root list` is read-only backend diagnostic
+  inspection, not a mutation surface and not an authorization API;
 - `principal credential create` produces a Principal credential token for
   session creation.
 
@@ -1907,6 +1909,8 @@ docker-helper is licensed under GPL-3.0-only. See LICENSE.
 
 ## More information
 
-- [docs/architecture.md](docs/architecture.md) — full architecture, HTTP API reference,
-  audit logging, filesystem and environment policy, error codes,
-  security considerations, and future work.
+- [docs/architecture.md](docs/architecture.md) — the current architecture:
+  HTTP API reference, audit logging, filesystem and environment policy,
+  error codes, security considerations, and current limitations. It is the
+  canonical current-state reference, not a future-work plan.
+- [docs/roadmap.md](docs/roadmap.md) — planned and future work.

@@ -39,8 +39,6 @@ func requireCompletionOmits(t *testing.T, got []string, values ...string) {
 func TestCompletionAvailabilityMetadataLocalPrivilege(t *testing.T) {
 	for _, cmd := range []*Command{
 		appArmorRootListCommand,
-		appArmorRootAddCommand,
-		appArmorRootRemoveCommand,
 		appArmorCheckCommand,
 		selinuxCheckCommand,
 	} {
@@ -179,7 +177,7 @@ func TestCompletionAvailabilityQueryFailureFallsBackToStaticTree(t *testing.T) {
 func TestCompletionAvailabilityDoesNotChangeParserTree(t *testing.T) {
 	for _, path := range [][]string{
 		{"selinux", "check"},
-		{"apparmor", "root", "add"},
+		{"apparmor", "root", "list"},
 		{"admin-token", "rotate"},
 		{"principal", "create"},
 	} {

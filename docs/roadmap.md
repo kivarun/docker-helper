@@ -527,10 +527,13 @@ covers mixed RW/RO mounts and concurrent SELinux Sessions with different
 snapshots over the same host tree without a global per-mode relabel. Production
 implementation of Phases 2.2.1-2.2.6 is complete and architecturally accepted on
 `release/2.2` (see [`docs/release-2.2-implementation-plan.md`](release-2.2-implementation-plan.md)
-for the closure evidence). The feature contract is frozen; before stable
-promotion the release must now complete the mandatory external-security-audit
-closure (SC0-SC4 and hostile exact-artifact UAT) plus the existing Phase 2.2.7
-documentation/release integration, final UAT, and artifact gate.
+for the closure evidence). The feature contract is frozen. The mandatory
+external-security-audit closure SC0-SC4 is complete (see
+[`release-2.2-security-closure.md`](release-2.2-security-closure.md)); the
+remaining pre-stable work is the current-line cleanup/review pass and the
+final hostile exact-artifact UAT on the canonical artifact gate
+(`artifact-gate.yml`), plus the existing Phase 2.2.7 documentation/release
+integration. The stable tag is not declared by this status.
 
 Release 2.2 deliberately does not include Managed Containers, Engine migration,
 networking, resources, durable Operations, or any other Release 3 runtime work.

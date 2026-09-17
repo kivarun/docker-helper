@@ -863,51 +863,20 @@ func TestCompletionAllowedRootListNoPathCompletion(t *testing.T) {
 	}
 }
 
-// TestCompletionApparmorRootAddDirectoryOnly verifies that "apparmor root add"
-// completes directories (a managed workspace root must be a directory).
-func TestCompletionApparmorRootAddDirectoryOnly(t *testing.T) {
+// TestCompletionApparmorRootMutationsNotInScript pins the second-writer
+// removal in the generated Bash completion: `apparmor root add` and
+// `apparmor root remove` are no longer command paths, so the completion
+// script must not carry their cases; the read-only `apparmor root list`
+// case remains.
+func TestCompletionApparmorRootMutationsNotInScript(t *testing.T) {
 	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "apparmor", "root", "add", "/us"})
-	if len(results) == 0 {
-		t.Error("expected apparmor root add directory completions")
-		return
-	}
-	found := false
-	for _, r := range results {
-		if strings.HasPrefix(r, "/usr") {
-			found = true
-			break
+	for _, command := range []string{"\"apparmor root add\"", "\"apparmor root remove\""} {
+		if strings.Contains(script, command) {
+			t.Errorf("completion script must not include the removed command case %s", command)
 		}
 	}
-	if !found {
-		t.Errorf("expected /usr* directory completions, got %v", results)
-	}
-	if !strings.Contains(script, "\"apparmor root add\"") {
-		t.Error("completion script must include an apparmor root add case")
-	}
-}
-
-// TestCompletionApparmorRootRemoveFilesystem verifies that "apparmor root
-// remove" completes filesystem entries.
-func TestCompletionApparmorRootRemoveFilesystem(t *testing.T) {
-	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "apparmor", "root", "remove", "/us"})
-	if len(results) == 0 {
-		t.Error("expected apparmor root remove filesystem completions")
-		return
-	}
-	found := false
-	for _, r := range results {
-		if strings.HasPrefix(r, "/usr") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected /usr* filesystem completions, got %v", results)
-	}
-	if !strings.Contains(script, "\"apparmor root remove\"") {
-		t.Error("completion script must include an apparmor root remove case")
+	if !strings.Contains(script, "\"apparmor root list\"") {
+		t.Error("completion script must include the read-only apparmor root list case")
 	}
 }
 
@@ -1369,8 +1338,6 @@ var treeProviderLeafPaths = []string{
 	"config unset",
 	"config allowed-root add",
 	"config allowed-root remove",
-	"apparmor root add",
-	"apparmor root remove",
 	// The [LAUNCHER] positional completes from the daemon-backed selector
 	// introspection, and the grammar-ambiguous first positional of the
 	// allowed-root add/remove pair offers those selectors as part of its

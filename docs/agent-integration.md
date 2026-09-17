@@ -1,8 +1,15 @@
 # Agent integration
 
-## Release 1 goal
+This document is the current integration contract for coding agents using
+docker-helper: delegated identity, filesystem authority, error
+interpretation, and supported client interfaces. Sections marked
+"historical" record the original Release 1 motivation and constraints;
+they are context, not current requirements, and they do not weaken the
+current contract.
 
-Release 1 provides a first-class way for coding agents to use
+## Historical: Release 1 goal
+
+Release 1 provided the first-class way for coding agents to use
 docker-helper.
 
 The integration belongs at the client edge of the project. Agent-specific
@@ -197,9 +204,11 @@ the Docker Helper protocol.
 OpenCode-specific or Claude-specific code belongs in these adapters, not in the
 daemon core.
 
-## Explicit non-goals for Release 1
+## Historical: explicit non-goals (Release 1)
 
-Do not add the following merely to deliver agent integration:
+These non-goals were the Release 1 integration constraints; they remain
+the standing integration boundary unless a current release explicitly
+changes one. Do not add the following merely to deliver agent integration:
 
 - a second mandatory daemon or shared runtime;
 - MCP server wrapping docker-helper;
@@ -209,5 +218,7 @@ Do not add the following merely to deliver agent integration:
 - separate client configuration unless real use demonstrates the need;
 - a second client binary solely for architectural purity.
 
-The smallest successful Release 1 integration is a stable daemon HTTP API, a
+The smallest successful integration is a stable daemon HTTP API, a
 useful reference CLI, and reusable agent skills supporting both interfaces.
+The canonical reusable agent instruction is
+[`.claude/skills/docker-helper/SKILL.md`](../.claude/skills/docker-helper/SKILL.md).

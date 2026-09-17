@@ -73,8 +73,6 @@ func mustCompletionSubcommand(parent *Command, name string) *Command {
 func configureCompletionAvailability() {
 	setCompletionLocal(completionPrivilegeRoot,
 		appArmorRootListCommand,
-		appArmorRootAddCommand,
-		appArmorRootRemoveCommand,
 		appArmorCheckCommand,
 		selinuxCheckCommand,
 	)

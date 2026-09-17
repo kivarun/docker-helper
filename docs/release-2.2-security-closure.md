@@ -2155,7 +2155,8 @@ in the matrix).
   not propagated, so permissions depending on those group memberships may
   differ — and the boundary
   between the capability semantics and the future build sandbox is
-  recorded in `docs/architecture.md` (H10 accepted boundary).
+  recorded in `docs/architecture.md` (the granted-filesystem-capability
+  boundary section).
 - **M1 secret transport:** RESOLVED (2026-09-16, release owner, Option 1a) —
   the accepted residual is the daemon-side legacy Docker CLI argv: `run`
   environment values are passed as `--env NAME=VALUE` (observable through

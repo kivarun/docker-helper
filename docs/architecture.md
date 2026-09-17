@@ -29,7 +29,7 @@
   - [Session workspace](#session-workspace)
   - [Policy introspection](#policy-introspection)
   - [MAC lifecycle](#mac-lifecycle)
-  - [Bounded MAC-command execution](#bounded-mac-command-execution-h8)
+  - [Bounded MAC-command execution](#bounded-mac-command-execution)
 - [Control-plane API and CLI mapping](#control-plane-api-and-cli-mapping)
   - [Principal](#principal)
   - [Launcher](#launcher)
@@ -465,7 +465,7 @@ workspace access is type-based and does not reproduce AppArmor's per-path
 managed-boundary rule; canonical application-level allowed-root validation
 remains authoritative in both modes.
 
-Descriptor-safe recursive relabeling (C3): SELinux recursive workspace
+Descriptor-safe recursive relabeling: SELinux recursive workspace
 relabeling is delegated to the upstream libselinux `selinux_restorecon`
 implementation; supported SELinux system mode requires a proven
 descriptor-safe implementation — `libselinux1 >= 3.11`, the rewrite that
@@ -484,8 +484,8 @@ Mount-point safety (`checkTreeRelabelBoundary`) and pathname-TOCTOU safety
 are separate invariants with separate owners. Helper-owned recursive
 relabels (trusted-CA runtime tree, deployment state, package scripts) are
 covered by the same packaged/install-time libselinux guarantee and never
-traverse a Principal-mutable tree, so they cannot cross the C3 trust
-boundary. No home-grown recursive relabel traversal exists.
+traverse a Principal-mutable tree, so they cannot cross the descriptor-safe relabel
+trust boundary. No home-grown recursive relabel traversal exists.
 
 The admin-token replacement lifecycle is the one narrow write surface in the
 config directory, and it is NOT a generic writable config grant — the two
@@ -689,7 +689,7 @@ One pipeline serves every authority; only target resolution differs.
 ```
 authority
     ↓
-non-waiting lifecycle admission (H8)
+non-waiting lifecycle admission
     (the create never queues behind the lifecycle serialization: while any
      lifecycle transition holds the coordination, the create is refused
      immediately — `503 lifecycle_busy`, no policy state resolved, no
@@ -704,7 +704,7 @@ resolve effective workspace policy
      launcher scopes; `read_only` dominance)
     ↓
 validate workspace inside the effective roots
-    (H3: the raw request spelling is admitted lexically against the
+    (the raw request spelling is admitted lexically against the
      effective ceiling first — a spelling outside the ceiling is refused
      without any privileged probing and has no resolving-alias
      compatibility admission)
@@ -786,7 +786,7 @@ and lengthen the delay an emergency administrative disable already waits
 behind the one in-flight transition. The refused attempt resolves no state
 and commits no Session; the client decides whether to retry. The MAC
 preparation inside the boundary is bounded (see
-[Bounded MAC-command execution](#bounded-mac-command-execution-h8)): a hung
+[Bounded MAC-command execution](#bounded-mac-command-execution)): a hung
 external MAC command can delay a concurrent administrative disable by at
 most one transition budget, after which the create fails
 (`mac_preparation_failed`) and the coordination is released.
@@ -1160,12 +1160,11 @@ canonical `AllowedRootEntry` — where `access` is exactly `read_write` or
 (string in config.json, pre-2.2 database row, or 2.x API input) is the
 `read_write` grant.
 
-#### H10 accepted boundary: filesystem capability, not a DAC-preserving ceiling
+#### The granted filesystem capability, not a DAC-preserving ceiling
 
 An allowed root and the issued Session filesystem snapshot are an explicitly
 granted filesystem **capability** — path tree plus access modes —
-not a path ceiling layered over the Principal's Unix DAC. Accepted semantics
-(SC3/H10, 2026-09-16):
+not a path ceiling layered over the Principal's Unix DAC. Accepted semantics:
 
 - In system mode the root-owned helper may perform the necessary
   helper-mediated reads inside the granted capability regardless of whether
@@ -1187,11 +1186,11 @@ not a path ceiling layered over the Principal's Unix DAC. Accepted semantics
   not a reproduction of the Principal's host login credential set: host
   supplementary groups are not propagated, so permissions depending on
   those group memberships may differ.
-- User mode has no separate H10 gap: the non-root daemon is naturally
+- User mode has no separate capability-semantics gap: the non-root daemon is naturally
   bounded by its own DAC identity (the daemon owner is the only Principal).
   This is an implementation consequence of the same capability model, not a
   second filesystem-capability model.
-- Release 2.4 does not automatically "close H10". The build sandbox
+- Release 2.4 does not automatically close this boundary. The build sandbox
   redesigns the builder execution/root/network boundary (see
   [`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)); moving
   staging/read identity under an unprivileged Principal identity may
@@ -1321,7 +1320,7 @@ uses), so the confined `docker_helper_t` domain can execute it with the
 already define — never a recursive `/usr/bin` relabel and never a `bin_t`
 execute grant. AppArmor system mode and user mode perform no SELinux
 relabel; on upgrade/reinstall the packaged `restorecon -R
-/etc/docker-helper` migrates an existing pre-H6 admin token to the
+/etc/docker-helper` migrates an existing admin token written before the dedicated type existed to the
 dedicated type without changing its value.
 
 Initialization defaults follow the selected deployment identity:
@@ -1626,7 +1625,7 @@ MAC state follows the concrete Session lifecycle, not the policy ceilings:
   boundary state file), never authorization roots and never config.json
   state.
 
-#### Bounded MAC-command execution (H8)
+#### Bounded MAC-command execution
 
 Every external MAC one-shot command reachable in the live daemon is bounded,
 and every *serialized MAC transition* is bounded as a whole:
@@ -2073,11 +2072,14 @@ commands are `serve`, `init`, `reload`, `session`, `config`, `principal`,
 `launcher`, `credential`, `admin-token`, `apparmor`, and `selinux`;
 general commands are `version` and `help`.
 
-`apparmor` — manage/check managed AppArmor MAC boundaries for an
-AppArmor system deployment (the public `apparmor root` command spelling is
-a retained compatibility form; it manages AppArmor MAC boundaries —
-confinement resources for concrete issued trees, not authorization roots
-and not workspace-only state).
+`apparmor` — inspect managed AppArmor MAC boundaries for an AppArmor
+system deployment: `apparmor root list` is read-only backend diagnostic
+inspection of the boundary state the Session MAC lifecycle prepared (the
+`apparmor root` spelling is a retained compatibility form; it never
+mutates state and is not an authorization API — the Session MAC lifecycle
+is the only production writer of managed AppArmor MAC boundaries), and
+`apparmor check` validates the shipped profile against the installed
+policy.
 
 `selinux` — inspect SELinux system-policy state for a SELinux system
 deployment. Subcommand: `check` (validate that the `docker_helper` policy
@@ -2160,7 +2162,7 @@ the command returns an error. The whole reload transition — including the
 trusted-CA runtime preparation — shares the `lifecycleMu` create/reload
 linearization boundary and is bounded (the trusted-CA restorecon runs under
 the fixed MAC transition budget, see
-[Bounded MAC-command execution](#bounded-mac-command-execution-h8)), so a
+[Bounded MAC-command execution](#bounded-mac-command-execution)), so a
 failed preparation releases the coordination within that bound and the
 previous effective configuration stays active.
 
@@ -2231,7 +2233,7 @@ Canonical containment/policy proof
     │
 Capacity reservation (supervisor — atomic with shutdown/quiesce/ceilings)
     │
-Expensive preparation (MAC lease, pins, workload MAC, H4 staging)
+Expensive preparation (MAC lease, pins, workload MAC, build staging)
     │
 Final admission (supervisor re-checks lifecycle closure; transfers reservation)
     │
@@ -2249,11 +2251,11 @@ supervisor accounting without the Operation stages: capacity reservation
 before any Docker process, whole synchronous execution under the
 reservation, exact-once release when the handler returns, and no
 registration in the supervisor's Operation map (see
-[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision)).
+[Synchronous execution capacity](#synchronous-execution-capacity)).
 
 Authentication validates the session token. Request validation checks
-required fields and path relativity per operation. The H3 authorization
-boundary orders every filesystem decision: the raw caller spelling is
+required fields and path relativity per operation. The authorization-before-probing boundary
+orders every filesystem decision: the raw caller spelling is
 proven lexically against its capability first (the effective allowed-root
 ceiling at Session create, the issued Session filesystem snapshot for an
 absolute run source, the workspace for a workspace-relative run source or
@@ -2272,7 +2274,7 @@ inside the lexical capability that resolves outside stays fail-closed
 through that canonical proof.
 
 Operation admission is the two-step `reserve → admitReserved` flow of the
-operation supervisor (SC2/H5). Both steps are atomic under the same
+operation supervisor. Both steps are atomic under the same
 supervisor mutex:
 
 - `reserve(session, launcher, kind)` checks the Operation lifecycle gates
@@ -2282,7 +2284,7 @@ supervisor mutex:
   reserves can never oversubscribe. The reservation happens BEFORE any
   expensive preparation: run reserves before the session MAC-use lease,
   mount probing, exposure resolution, pins and workload-MAC
-  materialization; build reserves before H4 staging. Cheap
+  materialization; build reserves before build staging. Cheap
   syntactic/request validation may run first, and the caller-mount count
   ceiling is checked before the reservation (the request is already
   known invalid). No half-prepared Operation is ever registered to
@@ -2319,7 +2321,7 @@ Docker execution surface — run, build, pull, and registry login, for
 both the Session scope and the global scope — the capacity topology is
 never exposed — and the client decides whether and when to retry.
 
-**Fixed Release-2.2 capacity ceilings (SC2/H5).** The ceilings are
+**Fixed Release-2.2 capacity ceilings.** The ceilings are
 measured security constants, not Principal/Launcher quotas and not
 configurable:
 
@@ -2327,7 +2329,7 @@ configurable:
 |---------|-------|-------|
 | concurrent executions per Session | 4 | 2× the maximum per-Session concurrency exercised by the UAT (2), sized for realistic agent parallelism |
 | concurrent executions globally | 8 | keeps at least half of global capacity available to other Sessions when one is saturated |
-| concurrent builds globally (sub-ceiling) | 2 | worst-case hostile staging = 2 × 128 MiB (H4) = 256 MiB = 42% of the smallest supported /run tmpfs (3 GiB RAM, ~614 MB); ≥3 concurrent maximal builds would exceed half of it |
+| concurrent builds globally (sub-ceiling) | 2 | worst-case hostile staging = 2 × 128 MiB = 256 MiB = 42% of the smallest supported /run tmpfs (3 GiB RAM, ~614 MB); ≥3 concurrent maximal builds would exceed half of it |
 | caller mounts per run request | 16 | 16× the maximum single-request mount usage in all tests and UAT; worst kernel mount-table cost (3 entries per mount under SELinux) at the global ceiling is 384 entries = 0.4% of fs.mount-max (100000) |
 | raw log bytes per HTTP logs response | 256 KiB | measured worst-case JSON-encoding expansion is 6× (control characters/invalid UTF-8), so one response stays under ~1.6 MiB encoded regardless of retention |
 
@@ -2344,14 +2346,14 @@ returns. Retained Operation metadata and logs never keep capacity, and
 release is never coupled to `pruneCompleted()`. Operation release paths
 include: preparation failure after reservation, pin failure,
 workload-MAC preparation failure (rolled-back and retained variants),
-build staging failure including the H4 refusal, final-admission
+build staging failure including the staging-ceiling refusal, final-admission
 refusal, `cmd.Start` failure, pre-start cancellation/shutdown, normal
 success, Docker failure, explicit cancel, and daemon-shutdown
 termination. The user-mode deployment obeys the same fixed ceilings
 without gaining system-mode mechanics.
 
 The narrow build sub-ceiling exists so the generic run concurrency stays
-usable while worst-case H4 composition stays safe (see
+usable while worst-case staging composition stays safe (see
 [Build-context staging ceilings](#build-context-staging-ceilings)); there is no second build scheduler, no build queue and no staging quota
 manager.
 
@@ -2417,7 +2419,7 @@ in a bounded buffer of `operation_log_max_bytes`; when the limit is
 exceeded, the oldest data is evicted, and `truncated` is true when the
 requested offset refers to evicted data.
 
-**Bounded response chunks (SC2/H5).** One HTTP logs response carries at
+**Bounded response chunks.** One HTTP logs response carries at
 most 256 KiB of raw retained log bytes, independent of the configured
 `operation_log_max_bytes` retention. The measured worst-case JSON
 encoding of adversarial bytes expands 6× (control characters and invalid
@@ -2471,7 +2473,7 @@ Validation details:
   `--build-arg K=V` argv entries, with the same accepted Release 2.2
   residual as run environment values (observable through
   `/proc/<pid>/cmdline` while the build child runs, where host procfs
-  policy permits; accepted M1 disposition, SC3 2026-09-16). Build args
+  policy permits; an accepted Release 2.2 residual). Build args
   are explicitly NOT a secret transport and must not be used for
   secrets; Docker/BuildKit may additionally retain ARG-related material
   in image history/provenance — a property of build semantics that does
@@ -2620,7 +2622,7 @@ that label, never a PID.
 
 `POST /pull` authenticates, validates that the image field is non-empty,
 reserves one shared capacity slot (see
-[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision)),
+[Synchronous execution capacity](#synchronous-execution-capacity)),
 and runs `docker pull` with the image reference. The endpoint remains
 synchronous and returns the execution result directly in the response;
 pull output is captured into a bounded buffer of
@@ -2633,7 +2635,7 @@ field is non-empty. Docker CLI validates the reference when the command
 executes. If Docker rejects the reference, the endpoint returns its
 standard Docker failure response.
 
-**Synchronous execution capacity (SC2/H5 release-owner decision).**
+**Synchronous execution capacity.**
 Pull and registry login remain synchronous and are never registered
 Operations. Their execution concurrency is finite under the same fixed
 Release-2.2 ceilings: each request reserves one capacity slot through
@@ -2672,7 +2674,7 @@ Docker invocation
 Request validation checks that `registry`, `username`, and `password` are
 all non-empty. The synchronous capacity reservation happens before the
 Docker invocation (see
-[Synchronous execution capacity](#synchronous-execution-capacity-sc2h5-release-owner-decision));
+[Synchronous execution capacity](#synchronous-execution-capacity));
 the endpoint never registers an Operation.
 
 The session Docker config directory is per-session, located at
@@ -2873,7 +2875,7 @@ backends do not load snapshots or recompute writable-parent semantics.
 
 #### System-mode run mounts
 
-The caller-mount count ceiling (SC2/H5) is checked immediately after
+The caller-mount count ceiling is checked immediately after
 request decoding/basic validation, before the Session MAC-use lease,
 mount probing, exposure resolution, any pin, workload-MAC preparation,
 and the Operation reservation: a run request carrying more than the
@@ -3009,25 +3011,25 @@ copy of the build context. Traversal is FD-relative and restricted with
 receives only the staged context and Dockerfile paths, never the
 original workspace paths.
 
-Staging is the one current helper content-ingest path (H10 accepted
-boundary): the root-owned daemon copies the workspace capability's
+Staging is the one current helper content-ingest path (the accepted
+filesystem-capability boundary): the root-owned daemon copies the workspace capability's
 contents into the staging tree, so every file inside the granted
 capability — not only files the host Principal could read under Unix DAC
 — becomes part of the staged context the builder consumes. This is the
 deliberate filesystem-capability semantics, not an access check gap; the
-builder's own execution/network position is the separately accepted H1
-boundary (see [Current limitations and
+builder's own execution/network position is the separately accepted build
+execution boundary (see [Current limitations and
 non-goals](#current-limitations-and-non-goals) and
 [`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)).
 
 On platforms or kernels where `openat2` is unavailable, the operation
 fails closed without falling back to original workspace paths.
 
-**Staging ceilings (Release 2.2, H4).** One staging operation has hard,
+**Staging ceilings (Release 2.2).** One staging operation has hard,
 measured, non-configurable security ceilings for exactly three
 dimensions, enforced by one per-staging budget inside the existing
 descriptor-relative walker (`productionBuildStagingCeilings` in
-`staging_linux.go`). H5 composes with these ceilings multiplicatively:
+`staging_linux.go`). The fixed capacity ceilings compose with these staging ceilings multiplicatively:
 the global build sub-ceiling (2 concurrent builds) bounds the worst-case
 hostile staging occupancy at 2 × 128 MiB = 256 MiB on the runtime tmpfs
 (see [Operation lifecycle](#operation-lifecycle)); the staging budget
@@ -3134,7 +3136,7 @@ process environment is never inherited. When both `--env` and
 `--env-from` define the same name, the `--env-from` value wins.
 
 Known limitation (introduced with the 2.1.x run implementation and still
-current in Release 2.2; accepted M1 disposition, SC3 2026-09-16): `run`
+current in Release 2.2; an accepted Release 2.2 residual): `run`
 starts the workload through the legacy Docker CLI, and the daemon passes
 environment values to that child process as `--env DEST=value` argv
 entries, so a resolved value is visible in the argv of the daemon-side
@@ -3370,7 +3372,7 @@ docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 - external MAC children cannot outlive the stopped daemon: every MAC
   command carries `Pdeathsig=SIGKILL` and every serialized MAC transition
   is bounded (see
-  [Bounded MAC-command execution](#bounded-mac-command-execution-h8)), and
+  [Bounded MAC-command execution](#bounded-mac-command-execution)), and
   the shipped units' `KillMode` default (`control-group`) kills any process
   remaining in the unit's cgroup when the service stops.
 
