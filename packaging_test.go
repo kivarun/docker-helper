@@ -7747,6 +7747,93 @@ func TestReleaseJobSELinuxBuildDeps(t *testing.T) {
 // findJobSection returns the text belonging to the named job (e.g., "release").
 // It finds "  name:" at the 2-space indentation level under "jobs:" and captures
 // content until the next job key at the same indentation or end of file.
+// TestWorkflowRunBlocksReferenceExistingLocalPaths pins that every
+// repository-local path a workflow executes (or a local reusable-workflow
+// `uses:` call resolves to) exists in the same commit. An active workflow must
+// never be dispatchable against implementation files that were never shipped
+// on this branch — the retired Release 3 phase-0 gate failed exactly that way
+// (it ran scripts/d01-engine-gate and cgroup VM harnesses absent from
+// release/2.2). The scan covers run-block content and local workflow refs
+// only; comments and prose are not code paths and are deliberately out of
+// scope.
+func TestWorkflowRunBlocksReferenceExistingLocalPaths(t *testing.T) {
+	entries, err := os.ReadDir(".github/workflows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptRef := regexp.MustCompile(`scripts/[A-Za-z0-9_./-]+`)
+	scanned := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml") {
+			continue
+		}
+		path := filepath.Join(".github/workflows", name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		lines := strings.Split(string(data), "\n")
+
+		// Local reusable-workflow references must resolve to shipped files.
+		for _, line := range lines {
+			idx := strings.Index(line, "uses: ./.github/workflows/")
+			if idx < 0 {
+				continue
+			}
+			ref := strings.TrimSpace(line[idx+len("uses: ") : len(strings.TrimRight(line, " \t"))])
+			ref = strings.TrimSpace(strings.TrimPrefix(ref, "./"))
+			if _, err := os.Stat(ref); err != nil {
+				t.Errorf("%s: local workflow reference %q does not exist in this commit", path, ref)
+			}
+		}
+
+		// Run blocks: a `run: |` / `run: >` literal block spans the following
+		// deeper-indented lines; `run: <inline>` is a single line. Extract
+		// scripts/ tokens from code lines only (comments are skipped).
+		inBlock := false
+		blockIndent := 0
+		checkLine := func(line string, path string) {
+			trimmed := strings.TrimLeft(line, " \t")
+			if strings.HasPrefix(trimmed, "#") {
+				return
+			}
+			for _, token := range scriptRef.FindAllString(line, -1) {
+				if _, err := os.Stat(token); err != nil {
+					t.Errorf("%s: run block references non-existent local path %q", path, token)
+				}
+			}
+		}
+		for _, line := range lines {
+			indent := len(line) - len(strings.TrimLeft(line, " \t"))
+			trimmed := strings.TrimSpace(line)
+			item := strings.TrimPrefix(trimmed, "- ")
+			switch {
+			case inBlock:
+				if strings.TrimSpace(line) == "" || indent > blockIndent {
+					checkLine(line, path)
+					continue
+				}
+				inBlock = false
+				fallthrough
+			case !inBlock:
+				if strings.HasPrefix(item, "run: |") || strings.HasPrefix(item, "run: >") {
+					inBlock = true
+					blockIndent = indent
+					continue
+				}
+				if strings.HasPrefix(item, "run: ") {
+					checkLine(line, path)
+				}
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("no workflow files scanned")
+	}
+}
+
 func findJobSection(content, name string) string {
 	marker := "  " + name + ":"
 	idx := strings.Index(content, marker)
