@@ -1,7 +1,6 @@
 package main
 
-// workload_mac.go — the backend-neutral workload MAC lifecycle owner
-// (Release 2.2 Phase 2.2.6).
+// workload_mac.go — the backend-neutral workload MAC lifecycle owner.
 //
 // The coordinator materializes an already-accepted 2.2.5 filesystem exposure
 // plan through the active MAC backend. It is deliberately narrow:

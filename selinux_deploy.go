@@ -37,7 +37,7 @@ var deploymentRestorecon = func(args ...string) ([]byte, error) {
 // -R relabels recursively (both trees are helper-owned); -m skips the
 // /proc/mounts scan, matching the trusted CA restorecon owner.
 //
-// C3 trust boundary: both trees are helper/root-owned deployment state
+// Descriptor-safe relabel trust boundary: both trees are helper/root-owned deployment state
 // relabeled by init before the service exists (or by the package scripts at
 // install time, after the package/install libselinux floor gate); no hostile
 // Principal can create or replace pathnames inside them, so the libselinux

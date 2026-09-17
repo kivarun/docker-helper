@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// TestAppArmorPathLiteralEscapesUnsafeBytes proves the M0 byte-safe literal
+// TestAppArmorPathLiteralEscapesUnsafeBytes proves the byte-safe literal
 // encoder never lets a caller-controlled target byte become AppArmor syntax.
 func TestAppArmorPathLiteralEscapesUnsafeBytes(t *testing.T) {
 	cases := []struct {
@@ -44,7 +44,7 @@ func TestAppArmorPathLiteralEscapesUnsafeBytes(t *testing.T) {
 
 // TestAppArmorPathLiteralNeverEmitsGlobOrDelimiter proves the deny rule
 // rendered from an adversarial target cannot become an AppArmor glob,
-// comment, quote, or delimiter (the M0 literal*star sentinel failure mode).
+// comment, quote, or delimiter (the literal*star sentinel failure mode).
 func TestAppArmorPathLiteralNeverEmitsGlobOrDelimiter(t *testing.T) {
 	targets := []string{
 		`/literal*star`,
@@ -102,7 +102,7 @@ func TestRenderWorkloadAppArmorProfileDeterministic(t *testing.T) {
 		t.Fatal("renderer must be deterministic")
 	}
 	if !strings.Contains(a, `audit deny "/inputs/{,**}" wkl,`) {
-		t.Error("RO target must render the exact M0 deny rule")
+		t.Error("RO target must render the exact deny rule")
 	}
 	if !strings.Contains(a, `audit deny "/has\x20space/{,**}" wkl,`) {
 		t.Errorf("RO target must be byte-escaped, got profile:\n%s", a)

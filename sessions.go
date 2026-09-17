@@ -478,7 +478,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", sessionFilesystemPolicyMessage)
 		} else if errors.Is(cerr, ErrLifecycleBusy) {
-			// Non-waiting lifecycle admission (H8): the create arrived while
+			// Non-waiting lifecycle admission: the create arrived while
 			// the lifecycle coordination was held by another transition and
 			// was refused without queueing, so the queued create count can
 			// never lengthen an emergency administrative transition's delay.

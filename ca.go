@@ -676,7 +676,8 @@ var trustedCARestorecon = func(ctx context.Context, args ...string) ([]byte, err
 // non-seclabel mounts excluded from relabel checks. The trusted CA tree
 // is helper-owned and is not expected to contain nested mounts.
 //
-// C3 trust boundary: this tree is helper-owned runtime material created and
+// Descriptor-safe relabel trust boundary: this tree is helper-owned runtime
+// material created and
 // maintained only by the confined daemon; no hostile Principal can create or
 // replace pathnames inside it, so the libselinux pathname-labeling fallback
 // (used when /proc is not real procfs) cannot be raced there and the

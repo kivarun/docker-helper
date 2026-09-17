@@ -57,7 +57,7 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reserve fixed Release-2.2 capacity (SC2/H5) before any Docker process
+	// Reserve fixed Release-2.2 capacity before any Docker process
 	// is started. Registry login is a synchronous Session-token execution
 	// surface, not an Operation: it consumes the SAME Session/global
 	// capacity as Operation-backed execution through the shared accounting

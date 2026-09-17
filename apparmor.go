@@ -102,7 +102,7 @@ type boundaryResult struct {
 
 // validateBoundaryLexical checks a path string without filesystem access.
 // It is the authoritative lexical validator for stored managed boundaries.
-// Control characters are the shared host-path text grammar (SC1/M11); the
+// Control characters are the shared host-path text grammar; the
 // shared owner validates them, and this validator wraps the diagnostic in
 // the boundary input-error class.
 func validateBoundaryLexical(path string) error {

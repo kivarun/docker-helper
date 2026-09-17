@@ -112,7 +112,7 @@ func TestDecodeJSONRequest_BuildRequest(t *testing.T) {
 }
 
 // TestDecodeJSONRequest_BuildRequestHasNoCallerNetworkOrPrivilegeKnobs proves
-// the accepted Release 2.2 build boundary (H1 disposition): the public build
+// the accepted Release 2.2 build boundary: the public build
 // request grammar carries no caller-controlled builder network or privileged
 // entitlement knob — a caller-supplied network/privilege field is an unknown
 // field refused by the strict request decode. A builder network mode or

@@ -20,7 +20,7 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/docker-helper/ r,
 	/etc/docker-helper/** r,
 
-	# Admin-token replacement lifecycle (SC1/H6): the ONLY writable config
+	# Admin-token replacement lifecycle: the ONLY writable config
 	# namespace objects are the canonical admin token file and the ONE fixed
 	# staging pathname the daemon renames onto it. The staging pathname is an
 	# internal implementation pathname, not a config/API/CLI surface.
@@ -60,7 +60,7 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/var/lib/docker-helper/apparmor/ rw,
 	/var/lib/docker-helper/apparmor/* rw,
 
-	# Workload MAC state (Release 2.2 Phase 2.2.6): generated workload
+	# Workload MAC state: generated workload
 	# profiles and ownership records under the durable state root, plus the
 	# apparmor_parser invocation against the generated profile source.
 	# Helper-owned files only; no lock character is needed for these files.

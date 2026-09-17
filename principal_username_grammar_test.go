@@ -128,7 +128,7 @@ func TestPrincipalCreateControlUsernameRefusedBeforeOSUserLookup(t *testing.T) {
 	}
 }
 
-// TestPrincipalCreateNULAliasCannotCoexistWithCanonical proves the M5
+// TestPrincipalCreateNULAliasCannotCoexistWithCanonical proves the
 // identity invariant on the fixed line: the canonical spelling is created
 // (with its optional credential) and the NUL-bearing alias spelling — which
 // the seam resolves to the SAME OS identity — is refused 400 invalid_username

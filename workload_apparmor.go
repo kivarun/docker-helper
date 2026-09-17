@@ -1,14 +1,13 @@
 package main
 
-// workload_apparmor.go — the AppArmor workload MAC backend (Release 2.2
-// Phase 2.2.6, mechanism accepted by M0-A).
+// workload_apparmor.go — the AppArmor workload MAC backend.
 //
 // The backend renders one helper-owned workload profile from the final
 // container-target/access plan, loads it through apparmor_parser before the
 // correlated container can start, and verifies the load through the kernel
 // profile inventory. The baseline follows the Moby docker-default AppArmor
-// template exactly as proven by the M0-A proof; the only projection is the
-// bounded write-denial set for accepted read-only container targets.
+// template; the only projection is the bounded write-denial set for accepted
+// read-only container targets.
 //
 // The daemon's docker-helper-system profile and its managed workspace
 // boundaries are a separate concern; this backend never reads or modifies
@@ -307,7 +306,7 @@ type workloadAppArmorBackend struct {
 	// /sys/kernel/security/apparmor/profiles; tests inject a seam.
 	loadedProfiles func() ([]string, error)
 	// abi30Present reports whether the AppArmor ABI 3.0 definition exists
-	// on this host (determines the abi include line, as in the M0 proof).
+	// on this host (determines the abi include line).
 	abi30Present func() bool
 }
 
@@ -559,7 +558,7 @@ func (b *workloadAppArmorBackend) cleanupOwnedState(ctx context.Context, record 
 //     paths carry no directory trailing slash, so the directory-shaped
 //     "{,**}" rule alone would leave the file itself writable);
 //   - a directory target without any read-write transition beneath it
-//     keeps the M0-A proven recursive rule;
+//     keeps the recursive deny rule;
 //   - a directory target with read-write transitions beneath it walks the
 //     read-write hole paths and emits, per node, the entry rule plus
 //     subtree rules whose segment exclusion keeps every accepted RW

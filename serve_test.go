@@ -1449,7 +1449,7 @@ func TestCreateUnixListenerPermissionsSystem(t *testing.T) {
 	}
 }
 
-// --- H7: the optional loopback TCP listener is never authoritative ---
+// --- the optional loopback TCP listener is never authoritative ---
 
 // stubH7Listener is a net.Listener whose Close state is observable. It is
 // never served; these tests only exercise listener acquisition.
@@ -1509,7 +1509,7 @@ func h7AddrInUse(addr string) error {
 	}
 }
 
-// TestH7TCPPortCaptureLeavesUnixListenerAuthoritative is the H7 contract: the
+// TestH7TCPPortCaptureLeavesUnixListenerAuthoritative is the contract: the
 // Unix listener is authoritative, so after a successful Unix bind a TCP
 // EADDRINUSE is DEGRADED STARTUP, not daemon failure — the Unix listener
 // stays live, its socket is not removed, the API keeps serving over Unix,

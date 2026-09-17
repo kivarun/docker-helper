@@ -432,7 +432,7 @@ func TestInitRejectsExactOptNonRoot(t *testing.T) {
 	}
 }
 
-// --- M11: host capability path text grammar ---
+// --- host capability path text grammar ---
 //
 // A host capability path must not contain control characters that can
 // desynchronize line-oriented/tool output (the SELinux fcontext record is a

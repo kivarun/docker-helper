@@ -29,9 +29,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reserve fixed Release-2.2 capacity (SC2/H5) before any expensive
+	// Reserve fixed Release-2.2 capacity before any expensive
 	// preparation: the session-use lease, build-request probing, snapshot
-	// exposure resolution, and the H4 staging all happen while the
+	// exposure resolution, and the build staging all happen while the
 	// reservation is held, and every failure path releases it exactly once.
 	// At a security ceiling the request is refused immediately; there is no
 	// queue and no waiting admission. Tests without a supervisor skip the
@@ -172,7 +172,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			op.macLeaseRelease()
 		}
 		op.releaseCapacity()
-		// The typed build-staging ceiling refusal (H4) is an expected
+		// The typed build-staging ceiling refusal is an expected
 		// client-input refusal of the single canonical build-context-limit
 		// code; its message names only the exhausted dimension. Every other
 		// staging failure stays internal_error.
@@ -193,8 +193,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register the operation: a single final admission after the H4 staging
-	// is complete. The capacity was reserved before any of that preparation;
+	// Register the operation: a single final admission after the build
+	// staging is complete. The capacity was reserved before any of that preparation;
 	// final admission re-checks only the lifecycle closure (shutdown/quiesce
 	// may still refuse) and the reservation has already transferred to the
 	// operation, which releases it exactly once at its terminal state.
@@ -437,7 +437,7 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The bounded response chunk (SC2/H5): one HTTP logs response carries at
+	// The bounded response chunk: one HTTP logs response carries at
 	// most logResponseChunkBytes raw retained bytes. next_offset follows the
 	// returned bytes; the CLI and API consumers walk the chunks.
 	data, nextOffset, truncated := op.LogBuffer.Range(offset, logResponseChunkBytes)
@@ -546,7 +546,7 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 	var err error
 	var contextPath string
 
-	// Authorization ceiling first (H3): the raw context spelling must be
+	// Authorization ceiling first: the raw context spelling must be
 	// lexically inside the canonical session workspace before any
 	// privileged host-filesystem probing. A spelling outside the workspace
 	// is refused immediately without EvalSymlinks/stat; there is no

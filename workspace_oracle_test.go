@@ -68,7 +68,7 @@ func workspaceOracleCases(t *testing.T, root string) []struct {
 // filesystem state of the requested path — existing, missing, dangling
 // symlink, or permission-denied. A distinct outcome for any of these states
 // discloses host filesystem detail for paths the authority was never issued:
-// the audited H3 filesystem oracle.
+// the filesystem oracle this test pins.
 func TestUnauthorizedWorkspaceRefusalsAreIndistinguishable(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)

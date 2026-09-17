@@ -141,7 +141,7 @@ type docker_helper_config_t, file_type;
 type docker_helper_state_t, file_type;
 type docker_helper_runtime_t, file_type;
 
-# Dedicated type for the admin-token replacement objects (SC1/H6): the
+# Dedicated type for the admin-token replacement objects: the
 # canonical admin.token and the ONE fixed staging pathname the daemon
 # renames onto it. This is MAC implementation state for the token
 # replacement lifecycle, not a product/domain noun. docker_helper_config_t
@@ -211,7 +211,7 @@ allow docker_helper_t init_t:unix_stream_socket { getattr ioctl read write };
 allow docker_helper_t docker_helper_config_t:dir { search };
 allow docker_helper_t docker_helper_config_t:file { read open getattr };
 
-# Admin-token replacement lifecycle (SC1/H6).
+# Admin-token replacement lifecycle.
 #
 # The token type carries the full replacement lifecycle: create/write/setattr
 # on the fixed staging pathname, the rename onto admin.token, unlink of
@@ -411,7 +411,7 @@ allow docker_helper_t docker_helper_workspace_t:lnk_file { read };
 # process2:nnp_transition (mirrors the existing init_t -> docker_helper_t rule).
 type_transition docker_helper_t semanage_exec_t:process semanage_t;
 allow docker_helper_t semanage_t:process { transition siginh noatsecure rlimitinh };
-# The daemon's bounded MAC-command execution (Release 2.2 H8) kills a hung
+# The daemon's bounded MAC-command execution kills a hung
 # frontend child at the fixed MAC transition budget with kill(2) SIGKILL. The
 # real semanage frontend runs in the semanage_t domain (the type transition
 # above), so the budget kill requires the signal permission toward that
@@ -671,7 +671,7 @@ allow init_t docker_helper_trusted_ca_t:dir { write remove_name rmdir };
 allow init_t docker_helper_trusted_ca_t:file { unlink };
 allow init_t docker_helper_trusted_ca_t:lnk_file { unlink };
 
-# --- Workload read-only projection (Release 2.2 Phase 2.2.6, M0-S accepted) ---
+# --- Workload read-only projection ---
 #
 # Mechanism: the helper builds one bindfs FUSE passthrough projection per
 # accepted read-only exposure from the pinned kernel materialization source.

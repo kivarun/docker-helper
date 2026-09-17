@@ -1058,7 +1058,7 @@ func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 	}
 }
 
-// --- H4 build-staging ceiling refusals on the handler path -------------------
+// --- build-staging ceiling refusals on the handler path -------------------
 
 // TestBuildStagingCeilingRefusalClassification proves the handler classifies
 // the typed staging ceiling refusal — and only it — into the single

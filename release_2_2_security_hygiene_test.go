@@ -71,9 +71,9 @@ func TestUATScratchIsIgnored(t *testing.T) {
 }
 
 // shippedBearerGuidanceFiles is the explicit shipped current-guidance set the
-// M2 regression scans: the operator quick start, the shipped agent skill, the
-// agent-integration guide, and the man pages. Historical/plan/audit documents
-// and internal test/UAT scripts are deliberately outside this set.
+// bearer-argv regression scans: the operator quick start, the shipped agent
+// skill, the agent-integration guide, and the man pages. Historical/plan/audit
+// documents and internal test/UAT scripts are deliberately outside this set.
 var shippedBearerGuidanceFiles = []string{
 	"README.md",
 	".claude/skills/docker-helper/SKILL.md",
@@ -82,7 +82,8 @@ var shippedBearerGuidanceFiles = []string{
 	"docs/man/docker-helper-config.5",
 }
 
-// TestShippedDocsNeverExpandBearerIntoCurlArgv rejects the M2 failure class in
+// TestShippedDocsNeverExpandBearerIntoCurlArgv rejects the shell-expanded-bearer
+// failure class in
 // CURRENT shipped guidance: an Authorization Bearer header argument that
 // shell-expands the bearer value ($VAR, ${VAR}, $(...), backticks) into a
 // process argument. Conceptual protocol notation — "Authorization: Bearer
@@ -114,7 +115,7 @@ func TestShippedDocsNeverExpandBearerIntoCurlArgv(t *testing.T) {
 //   - the exact Authorization header still reaches a local HTTP receiver;
 //   - the live curl /proc/<pid>/cmdline carries the literal -H and @- argv
 //     elements and never the bearer value;
-//   - the held-curl inspection method itself is sensitive: the pre-M2
+//   - the held-curl inspection method itself is sensitive: the pre-fix
 //     shell-expanded argv form IS detected leaking the bearer;
 //   - the file-backed helper leaves no derived header file behind.
 //
@@ -206,7 +207,7 @@ func TestShippedHeaderProducersDeliverBearerWithoutArgvExpansion(t *testing.T) {
 
 		var curlCmd *exec.Cmd
 		if wantLeak {
-			// The pre-M2 form: the SHELL expands the bearer into curl's argv
+			// The pre-fix form: the SHELL expands the bearer into curl's argv
 			// (the script text itself carries only the variable name; curl is
 			// held by reading its request body from the never-closed stdin).
 			curlCmd = exec.Command("bash", "-c", `exec curl --silent --max-time 4 -o /dev/null -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" -d @- `+receiver.URL)
@@ -298,7 +299,7 @@ func TestShippedHeaderProducersDeliverBearerWithoutArgvExpansion(t *testing.T) {
 		}
 	})
 
-	t.Run("pre-M2 shell-expanded argv form leaks the bearer (detector sensitivity)", func(t *testing.T) {
+	t.Run("pre-fix shell-expanded argv form leaks the bearer (detector sensitivity)", func(t *testing.T) {
 		runPipeline(t, "sleep 4\n", true)
 	})
 }

@@ -266,7 +266,7 @@ func TestSELinuxPolicySemanageTransition(t *testing.T) {
 		"allow docker_helper_t semanage_t:process2 { nnp_transition };",
 		"allow docker_helper_t semanage_exec_t:file { execute read open getattr map };",
 		"allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };",
-		// The H8 bounded MAC-command execution must be able to kill a hung
+		// The bounded MAC-command execution must be able to kill a hung
 		// semanage child at the fixed transition budget; the semanage frontend
 		// runs in the semanage_t domain (the type transition above), so the
 		// budget SIGKILL requires this signal grant (hostile-UAT evidence:
@@ -486,7 +486,7 @@ func TestEnsureWorkspaceFcontextNewRule(t *testing.T) {
 	}
 }
 
-// TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission is the C3
+// TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission is the
 // defect demonstration: an enforcing manager walks a Principal-mutable
 // workspace all the way to the recursive restorecon invocation, with no
 // descriptor-safe-implementation admission proof anywhere on the path. The
@@ -495,7 +495,7 @@ func TestEnsureWorkspaceFcontextNewRule(t *testing.T) {
 // installed libselinux restorecon implementation is descriptor safe against
 // the pathname-replacement race, and nothing establishes that the runtime has
 // a real procfs for the descriptor-backed /proc/self/fd labeling the safe
-// implementation depends on. After the C3 gate exists this demonstration
+// implementation depends on. After the descriptor-safe gate exists this demonstration
 // stays green (the relabel legitimately proceeds once the procfs prerequisite
 // holds), and the fail-closed refusal is proven by
 // TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs.
@@ -543,12 +543,12 @@ func TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission(t *testing
 	}
 }
 
-// TestC3RestoreconTreeInvokedForEveryWorkspaceRelabelShape proves the C3
+// TestC3RestoreconTreeInvokedForEveryWorkspaceRelabelShape proves the
 // hostile surface is the one recursive relabel owner: the idempotent
 // existing-boundary relabel and the removal rollback relabel both reach
 // restoreconTree's recursive form for directory boundaries (the fresh-boundary
 // relabel is covered by TestC3EnforcingManagerReachesRecursiveRestoreconWithoutAdmission),
-// so the C3 admission gate must live on that owner (never a per-call-site
+// so the admission gate must live on that owner (never a per-call-site
 // variant).
 func TestC3RestoreconTreeInvokedForEveryWorkspaceRelabelShape(t *testing.T) {
 	var restoreconArgv [][]string
@@ -1073,9 +1073,9 @@ func TestParseFcontextLine(t *testing.T) {
 	}
 }
 
-// --- SC1/M12: the real semanage producer grammar (captured evidence) ---
+// --- the real semanage producer grammar (captured evidence) ---
 //
-// The M12 tests parse the EXACT bytes of a real producer capture:
+// The producer-grammar tests parse the EXACT bytes of a real producer capture:
 // `semanage fcontext -l -C -n` over local rules created through the real
 // `semanage fcontext -a` on the supported Tumbleweed/SELinux UAT guest
 // (policycoreutils 3.11-2.2, selinux-policy-targeted 20260910-1.1; capture
@@ -2813,7 +2813,7 @@ func TestSELinuxPolicyAdminTokenReplacement(t *testing.T) {
 	}
 }
 
-// TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs is the C3
+// TestC3RecursiveWorkspaceRelabelFailsClosedWithoutRealProcfs is the
 // fail-closed proof for the runtime prerequisite: when /proc is not provably
 // real procfs (the filesystem-identity seam refuses), the recursive workspace
 // relabel is refused BEFORE the restorecon command — zero restorecon

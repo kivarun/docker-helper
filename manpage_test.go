@@ -251,8 +251,8 @@ func TestManagedAppArmorBoundaryVocabulary(t *testing.T) {
 	}
 }
 
-// TestH10CapabilitySemanticsDocumented guards the accepted H10 boundary
-// (SC3, 2026-09-16) in every operator-facing doc that describes the
+// TestH10CapabilitySemanticsDocumented guards the accepted
+// filesystem-capability boundary in every operator-facing doc that describes the
 // filesystem policy: an allowed root and the issued Session filesystem
 // snapshot are an explicitly granted helper-mediated filesystem capability,
 // NOT a path ceiling layered over the Principal's Unix DAC — and `read_only`
@@ -301,14 +301,14 @@ func TestH10CapabilitySemanticsDocumented(t *testing.T) {
 		content := string(data)
 		for _, want := range tc.contains {
 			if !strings.Contains(content, want) {
-				t.Errorf("%s must carry the accepted H10 capability semantics, missing %q", tc.path, want)
+				t.Errorf("%s must carry the accepted filesystem-capability semantics, missing %q", tc.path, want)
 			}
 		}
 	}
 }
 
-// TestM1DaemonSideArgvResidualDocumented guards the accepted M1 boundary
-// (SC3, 2026-09-16, Option 1a) in every operator-facing doc that documents
+// TestM1DaemonSideArgvResidualDocumented guards the accepted daemon-side
+// argv residual boundary in every operator-facing doc that documents
 // run environment values or build args: the residual is the daemon-side
 // legacy Docker CLI argv (observable through /proc/<pid>/cmdline while the
 // child runs, where host procfs policy permits), build args are explicitly
@@ -360,7 +360,7 @@ func TestM1DaemonSideArgvResidualDocumented(t *testing.T) {
 		content := string(data)
 		for _, want := range tc.contains {
 			if !strings.Contains(content, want) {
-				t.Errorf("%s must carry the accepted M1 daemon-side argv residual wording, missing %q", tc.path, want)
+				t.Errorf("%s must carry the accepted daemon-side argv residual wording, missing %q", tc.path, want)
 			}
 		}
 	}

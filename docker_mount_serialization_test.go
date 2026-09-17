@@ -105,11 +105,11 @@ func dockerMountValues(t *testing.T, args []string) []string {
 }
 
 // TestRunHostileTargetKeepsIntendedBindMountThroughDockerGrammar proves the
-// M13 security property through the real production run path: a crafted
+// bind-mount serialization security property through the real production run path: a crafted
 // target/source must reach the Docker CLI as exactly ONE CSV field, so the
 // CLI parses exactly the intended source, target, and readonly semantics —
 // the crafted data cannot truncate the record, flip the consumption mode,
-// or add a second logical field (the historical M13 class: an unquoted
+// or add a second logical field (the historical failure class: an unquoted
 // control character in the target ends the CSV record the CLI parses, the
 // trailing readonly flag is silently dropped, and the workspace mounts
 // WRITABLE at a different target).
@@ -279,7 +279,7 @@ func TestDockerBindMountSpecContract(t *testing.T) {
 	}
 }
 
-// TestRunSerializerFailureBeforeAdmissionLeavesNoOperation proves the M13
+// TestRunSerializerFailureBeforeAdmissionLeavesNoOperation proves the
 // admission-order property through the real production run path: the Docker
 // argv is built and serialized after the pins and the workload MAC state are
 // prepared — when every actual bind source is known — but BEFORE the

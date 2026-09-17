@@ -108,7 +108,7 @@ func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 // TestRaceNarrowedSessionCreateLinearizesAfterParentMutation proves the mirror
 // linearization: the parent-policy mutation holds the boundary and commits
 // while the create is pinned at its pre-boundary authentication read. The
-// concurrent create's non-waiting admission (H8) refuses it before any
+// concurrent create's non-waiting admission refuses it before any
 // ceiling read — the refused attempt resolves no state, so it can never mix
 // ceiling generations — and the retried create, admitted only after the
 // mutation committed, resolves the ceiling wholly inside the post-mutation
