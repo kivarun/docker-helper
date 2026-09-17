@@ -2467,7 +2467,18 @@ Validation details:
   workspace/context that resolves outside is refused);
 - build-arg names must match `^[A-Za-z_][A-Za-z0-9_]*$`;
 - build-arg keys are sorted for deterministic Docker argv;
-- build-arg values are never logged or audited (only `build_arg_keys`).
+- build-arg values are never logged or audited (only `build_arg_keys`);
+- build-arg values are passed to the daemon-side `docker` child as
+  `--build-arg K=V` argv entries, with the same accepted Release 2.2
+  residual as run environment values (observable through
+  `/proc/<pid>/cmdline` while the build child runs, where host procfs
+  policy permits; accepted M1 disposition, SC3 2026-09-16). Build args
+  are explicitly NOT a secret transport and must not be used for
+  secrets; Docker/BuildKit may additionally retain ARG-related material
+  in image history/provenance — a property of build semantics that does
+  not disappear when the CLI argv exposure is later removed. The argv
+  class closes with the accepted Release 3 Engine API adapter migration;
+  no `--env-file`-style or BuildKit secret knob is introduced for it.
 
 Build context and Dockerfile are read-only host inputs of the helper:
 after `validateBuildRequest` canonicalizes both paths, they are evaluated
@@ -3124,14 +3135,25 @@ process environment is never inherited. When both `--env` and
 `--env-from` define the same name, the `--env-from` value wins.
 
 Known limitation (introduced with the 2.1.x run implementation and still
-current in Release 2.2): `run` starts the workload through the legacy
-Docker CLI, and the daemon passes environment values to that child
-process as `--env DEST=value` argv entries, so a resolved value is
-visible in the argv of the daemon-side `docker` child process.
-`--env-from` therefore scopes its guarantee to the `docker-helper` CLI
-process boundary only; it does not promise the value is absent from every
-process argv on the system. Migrating `run` away from the legacy Docker
-CLI is Release 3 work, not a Release 2.2 goal.
+current in Release 2.2; accepted M1 disposition, SC3 2026-09-16): `run`
+starts the workload through the legacy Docker CLI, and the daemon passes
+environment values to that child process as `--env DEST=value` argv
+entries, so a resolved value is visible in the argv of the daemon-side
+`docker` child process for the child's whole execution — a local process
+may observe it through `/proc/<pid>/cmdline` where the host procfs policy
+permits such observation. This is a deliberately accepted Release 2.2
+residual of the daemon-side legacy Docker CLI argv, not a missed check:
+no `--env-file` transport, dual transport, temporary secret-file
+subsystem, or env-grammar narrowing is introduced, because a partial
+closure of `run` only (and only of the subset of the arbitrary-string
+env contract a file grammar can represent) would leave `build_args`
+exposed and create the false impression that the CLI transport became
+secret-safe. `--env-from` therefore scopes its guarantee to the
+`docker-helper` CLI process boundary only; it does not promise the value
+is absent from every process argv on the system. Migrating `run` (with
+`build`) away from the legacy Docker CLI to a docker-helper-owned Docker
+Engine API adapter is Release 3 work, not a Release 2.2 goal; that
+migration removes the CLI argv exposure.
 `--env-from` introduces no new daemon-side concept: the existing
 `run.environment` contract fully owns delivery.
 

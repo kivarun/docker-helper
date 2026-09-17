@@ -302,3 +302,62 @@ func TestH10CapabilitySemanticsDocumented(t *testing.T) {
 		}
 	}
 }
+
+// TestM1DaemonSideArgvResidualDocumented guards the accepted M1 boundary
+// (SC3, 2026-09-16, Option 1a) in every operator-facing doc that documents
+// run environment values or build args: the residual is the daemon-side
+// legacy Docker CLI argv (observable through /proc/<pid>/cmdline while the
+// child runs, where host procfs policy permits), build args are explicitly
+// not a secret transport, and no alternative secret transport is introduced
+// in Release 2.2. Removing or contradicting this statement in the shipped
+// docs would silently reverse the accepted Release 2.2 contract or imply a
+// secret-safety the CLI transport does not provide.
+func TestM1DaemonSideArgvResidualDocumented(t *testing.T) {
+	cases := []struct {
+		path     string
+		contains []string
+	}{
+		{
+			path: "docs/architecture.md",
+			contains: []string{
+				"residual of the daemon-side legacy Docker CLI argv, not a missed check",
+				"residual as run environment values",
+				"explicitly NOT a secret transport",
+				"not disappear when the CLI argv exposure is later removed",
+			},
+		},
+		{
+			path: "README.md",
+			contains: []string{
+				"accepted Release 2.2 residual of the daemon-side legacy Docker CLI argv",
+				"not a secret transport",
+			},
+		},
+		{
+			path: "docs/man/docker-helper.1",
+			contains: []string{
+				"accepted Release 2.2 residual",
+				"Build arguments are not a secret transport",
+			},
+		},
+		{
+			path: ".claude/skills/docker-helper/SKILL.md",
+			contains: []string{
+				"not a mechanism for passing secrets",
+				"accepted Release 2.2 residual",
+			},
+		},
+	}
+	for _, tc := range cases {
+		data, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", tc.path, err)
+		}
+		content := string(data)
+		for _, want := range tc.contains {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s must carry the accepted M1 daemon-side argv residual wording, missing %q", tc.path, want)
+			}
+		}
+	}
+}

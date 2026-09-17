@@ -868,11 +868,16 @@ An unset SOURCE fails closed before any container operation is created; a
 SOURCE set to the empty string is delivered as an empty value.
 `--env-from` composes with `--env`.
 
-Limitation: the 2.1.x `run` implementation starts the workload through
-the legacy Docker CLI, which receives environment values as
-`--env DEST=value` argv entries, so a resolved value is visible in the
-argv of that daemon-side child process. `--env-from` guarantees nothing
-beyond the `docker-helper` process boundary.
+Limitation (accepted Release 2.2 residual, SC3/M1): the 2.1.x `run`
+implementation starts the workload through the legacy Docker CLI, which
+receives environment values as `--env DEST=value` argv entries, so a
+resolved value is visible in the argv of that daemon-side child process
+for the child's whole execution — a local process may observe it through
+`/proc/<pid>/cmdline` where the host procfs policy permits such
+observation. `--env-from` guarantees nothing beyond the `docker-helper`
+process boundary; no `--env-file`-style transport is introduced in
+Release 2.2, and the argv class closes with the accepted future
+migration away from the legacy Docker CLI.
 
 ### Reaching the helper socket from a workload (system mode)
 
@@ -994,6 +999,17 @@ Build-arg names must match `[A-Za-z_][A-Za-z0-9_]*`. Empty values are valid.
 Build args are not intended for secrets. Values may become visible in Docker
 build output depending on the Dockerfile/build process. Docker Helper audit
 records contain only `build_arg_keys`, never build-arg values.
+
+The daemon passes build args to its Docker CLI child as `--build-arg K=V`
+argv entries, so a value is observable through `/proc/<pid>/cmdline` while
+that child runs (where host procfs policy permits such observation) — an
+accepted Release 2.2 residual of the daemon-side legacy Docker CLI argv
+(the same accepted residual applies to run environment values, see
+"Passing secrets to a workload"). Build args are explicitly
+not a secret transport, and Docker/BuildKit may additionally retain
+ARG-related material in image history/provenance. A future release
+migration away from the legacy Docker CLI removes the argv exposure
+without making build args a secret mechanism.
 
 **Build-context ceilings.** The build context is staged into a helper-owned
 runtime directory before Docker sees it, and one build request has fixed,
