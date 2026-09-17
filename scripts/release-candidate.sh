@@ -75,6 +75,11 @@ fi
 for cmd in sha256sum file tar dpkg-deb rpm rpm2cpio cpio; do
   command -v "$cmd" >/dev/null 2>&1 || fail "$cmd not found (required for release-candidate verification)"
 done
+# The RPM payload extraction needs the GNU --no-absolute-filenames option;
+# a busybox cpio cannot extract the absolute-entry-name payload and must not
+# satisfy this producer.
+cpio --version >/dev/null 2>&1 \
+  || fail "GNU cpio required for RPM payload extraction (busybox cpio lacks --no-absolute-filenames)"
 
 # --- Clean dist --------------------------------------------------------------
 
@@ -207,7 +212,10 @@ tar xzf "$TARBALL" -C "$PAYLOAD_VERIFY_DIR/tar" \
   || fail "cannot extract tarball for payload identity verification"
 dpkg-deb -x "$DEB" "$PAYLOAD_VERIFY_DIR/deb" \
   || fail "cannot extract DEB for payload identity verification"
-rpm2cpio "$RPM" | ( cd "$PAYLOAD_VERIFY_DIR/rpm" && cpio -idmu --quiet ) \
+# nFPM's RPM payload carries ABSOLUTE cpio entry names; --no-absolute-filenames
+# extracts them under the verification directory instead of the real system
+# paths (a non-root producer must never write to /).
+rpm2cpio "$RPM" | ( cd "$PAYLOAD_VERIFY_DIR/rpm" && cpio -idmu --no-absolute-filenames --quiet ) \
   || fail "cannot extract RPM payload for payload identity verification"
 
 TAR_MEMBER_ROOT="$PAYLOAD_VERIFY_DIR/tar/docker-helper-${VERSION}-linux-amd64"
