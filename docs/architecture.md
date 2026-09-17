@@ -3275,7 +3275,8 @@ scenario — observes the recreated socket through its existing directory
 bind where a socket inode bind would go stale. This says nothing about
 the workload lifecycle: a normal graceful `systemctl restart
 docker-helper` still terminates helper-owned run workloads under the
-2.1.x shutdown lifecycle, and `helper_socket` does not change that
+current shutdown lifecycle (see [Shutdown](#shutdown)), and
+`helper_socket` does not change that
 lifecycle. No workload survival across a service restart or a package
 upgrade is promised.
 
@@ -3429,9 +3430,9 @@ System unit:
   preserved across service restarts, so a consumer that does survive
   daemon replacement observes the recreated socket through its existing
   directory bind; a normal graceful `systemctl restart docker-helper`
-  still terminates helper-owned run workloads under the 2.1.x shutdown
-  lifecycle, and normal cleanup semantics still apply on a real service
-  stop.
+  still terminates helper-owned run workloads under the current shutdown
+  lifecycle (see [Shutdown](#shutdown)), and normal cleanup semantics
+  still apply on a real service stop.
 - MAC binding: `AppArmorProfile=docker-helper-system` on AppArmor systems
   and `SELinuxContext=system_u:system_r:docker_helper_t:s0` on SELinux
   systems, guarded by `ConditionSecurity=|apparmor` / `ConditionSecurity=|selinux`.
