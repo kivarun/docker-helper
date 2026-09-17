@@ -239,8 +239,13 @@ if [ "$1" = "-qpl" ]; then
 fi
 exit 1
 EOF
-  # rpm2cpio shim: emit the RPM payload as a real cpio archive built from the
-  # embedded base64 member blocks; the producer's real cpio extracts it.
+  # rpm2cpio shim: emit the RPM payload as a real newc cpio archive built from
+  # the embedded base64 member blocks; the producer's real cpio extracts it.
+  # The archive models the REAL nFPM payload shape — cpio entries carry
+  # ABSOLUTE names, so the producer must extract with --no-absolute-filenames.
+  # (GNU cpio -o cannot archive absolute names without the files existing at
+  # those paths, so the mock generates the archive bytes directly; python3 is
+  # preinstalled on CI runners and the archive generation is deterministic.)
   cat > "$repo/shims/rpm2cpio" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -256,7 +261,40 @@ extract MAN1 usr/share/man/man1/docker-helper.1.gz
 extract MAN5 usr/share/man/man5/docker-helper-config.5.gz
 extract COMPLETION usr/share/bash-completion/completions/docker-helper
 extract PP usr/share/selinux/docker_helper.pp
-( cd "$tmp" && find . -print | cpio -o -H newc --quiet )
+python3 - "$tmp" <<'PYEOF'
+import os, sys
+
+root = sys.argv[1]
+members = []
+for dirpath, dirnames, filenames in os.walk(root):
+    for fn in sorted(filenames):
+        full = os.path.join(dirpath, fn)
+        rel = os.path.relpath(full, root)
+        with open(full, 'rb') as f:
+            members.append(('/' + rel, f.read(), 0o100644 if rel.endswith('.gz') else 0o100755))
+
+def pad4(n):
+    return b'\x00' * ((4 - n % 4) % 4)
+
+out = b''
+ino = 0
+for name, data, mode in members:
+    ino += 1
+    nb = name.encode() + b'\x00'
+    namesize = len(nb)
+    hdr = b'070701' + ''.join(
+        '%08X' % v for v in [ino, mode, 0, 0, 1, 0, len(data), 0, 0, 0, 0, namesize, 0]
+    ).encode()
+    out += hdr + nb + pad4(len(hdr) + namesize) + data + pad4(len(data))
+nb = b'TRAILER!!!\x00'
+namesize = len(nb)
+hdr = b'070701' + ''.join(
+    '%08X' % v for v in [ino + 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, namesize, 0]
+).encode()
+out += hdr + nb + pad4(len(hdr) + namesize)
+out += pad4(len(out)) if len(out) % 512 else b''
+sys.stdout.buffer.write(out)
+PYEOF
 EOF
   chmod +x "$repo/shims/dpkg-deb" "$repo/shims/rpm" "$repo/shims/rpm2cpio"
 }
@@ -330,7 +368,7 @@ VERIFY="$WORK/identity"
 mkdir -p "$VERIFY/tar" "$VERIFY/deb" "$VERIFY/rpm"
 tar xzf "$CAND"/*.tar.gz -C "$VERIFY/tar"
 dpkg-deb -x "$CAND"/*.deb "$VERIFY/deb"
-rpm2cpio "$CAND"/*.rpm | ( cd "$VERIFY/rpm" && cpio -idmu --quiet )
+rpm2cpio "$CAND"/*.rpm | ( cd "$VERIFY/rpm" && cpio -idmu --no-absolute-filenames --quiet )
 tar_bin="$(sha256sum "$VERIFY/tar/docker-helper-${VERSION}-linux-amd64/docker-helper" | awk '{print $1}')"
 deb_bin="$(sha256sum "$VERIFY/deb/usr/bin/docker-helper" | awk '{print $1}')"
 rpm_bin="$(sha256sum "$VERIFY/rpm/usr/bin/docker-helper" | awk '{print $1}')"
