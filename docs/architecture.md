@@ -1160,6 +1160,46 @@ canonical `AllowedRootEntry` — where `access` is exactly `read_write` or
 (string in config.json, pre-2.2 database row, or 2.x API input) is the
 `read_write` grant.
 
+#### H10 accepted boundary: filesystem capability, not a DAC-preserving ceiling
+
+An allowed root and the issued Session filesystem snapshot are an explicitly
+granted filesystem **capability** — path tree plus access modes —
+not a path ceiling layered over the Principal's Unix DAC. Accepted semantics
+(SC3/H10, 2026-09-16):
+
+- In system mode the root-owned helper may perform the necessary
+  helper-mediated reads inside the granted capability regardless of whether
+  the specific Principal could read the same inode through its own host
+  Unix credentials (the helper does not assume the Principal identity; root
+  bypasses DAC). A file inside the capability may enter the staged build
+  context (the one current helper content-ingest path, see
+  [Build context](#build-context)) even when the host Principal could not
+  read it under DAC — deliberate capability semantics, not a missed check.
+  No owner-UID check, mode-bit emulation, ACL parser, or check-as-user
+  subsystem exists or will be added to emulate Principal DAC.
+- `read_only` is an access/integrity mode inside the granted capability: it
+  denies the *workload* a writable host-path exposure. It is not a
+  confidentiality boundary against the helper.
+- Actual workload file access is additionally bounded by kernel DAC under
+  the container credentials and by the privilege floor (no capabilities,
+  no-new-privileges). The current workload identity is the Principal
+  `UID:GID` with no capability bypass — this is NOT a
+  reproduction of the Principal's Unix login view: the helper and the
+  workload do not carry the Principal's supplementary groups or ACL
+  semantics, so group- or ACL-mediated access the Principal has through its
+  own login credential set is not reproduced.
+- User mode has no separate H10 gap: the non-root daemon is naturally
+  bounded by its own DAC identity (the daemon owner is the only Principal).
+  This is an implementation consequence of the same capability model, not a
+  second filesystem-capability model.
+- Release 2.4 does not automatically "close H10". The build sandbox
+  redesigns the builder execution/root/network boundary (see
+  [`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)); moving
+  staging/read identity under an unprivileged Principal identity may
+  additionally narrow the helper's read authority, but only as a separate
+  explicit contract change — the accepted capability semantics never change
+  silently as a side effect of 2.4.
+
 The workspace authorization hierarchy has three policy ceilings, then one
 concrete selection:
 
@@ -2958,6 +2998,17 @@ copy of the build context. Traversal is FD-relative and restricted with
 `openat2` flags (`RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`). Docker
 receives only the staged context and Dockerfile paths, never the
 original workspace paths.
+
+Staging is the one current helper content-ingest path (H10 accepted
+boundary): the root-owned daemon copies the workspace capability's
+contents into the staging tree, so every file inside the granted
+capability — not only files the host Principal could read under Unix DAC
+— becomes part of the staged context the builder consumes. This is the
+deliberate filesystem-capability semantics, not an access check gap; the
+builder's own execution/network position is the separately accepted H1
+boundary (see [Current limitations and
+non-goals](#current-limitations-and-non-goals) and
+[`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)).
 
 On platforms or kernels where `openat2` is unavailable, the operation
 fails closed without falling back to original workspace paths.

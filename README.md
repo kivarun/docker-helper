@@ -1231,6 +1231,21 @@ Note: `docker-helper config show` (without a field) displays
 
 **Known limitations:**
 
+- **Granted filesystem capability, not a DAC-preserving ceiling** — an
+  allowed root and the issued Session filesystem snapshot are
+  helper-mediated filesystem capability (path tree plus access modes),
+  not a path ceiling layered over the Principal's Unix DAC. In system
+  mode the root-owned daemon reads inside the granted capability
+  regardless of whether the Principal could read the same file under its
+  own Unix DAC, and a file inside the capability may enter a staged
+  build context even when the Principal could not read it. `read_only`
+  denies the workload a writable host-path exposure — it is
+  not a confidentiality boundary against the daemon. Workload file access
+  remains additionally bounded by kernel DAC under the container
+  credentials (Principal UID:GID, privilege floor) — the workload does
+  not carry the Principal's supplementary groups or ACL semantics. User
+  mode has no separate gap: the non-root daemon is naturally bounded by
+  its own DAC identity.
 - docker-helper does not sandbox a coding tool that already has direct
   access to the host filesystem.
 - In user mode there is no inode pinning, so the Session filesystem

@@ -250,3 +250,55 @@ func TestManagedAppArmorBoundaryVocabulary(t *testing.T) {
 		}
 	}
 }
+
+// TestH10CapabilitySemanticsDocumented guards the accepted H10 boundary
+// (SC3, 2026-09-16) in every operator-facing doc that describes the
+// filesystem policy: an allowed root and the issued Session filesystem
+// snapshot are an explicitly granted helper-mediated filesystem capability,
+// NOT a path ceiling layered over the Principal's Unix DAC — and `read_only`
+// is a workload-facing access/integrity mode, not a confidentiality
+// boundary against the daemon. Removing or contradicting this statement in
+// the shipped docs would silently reverse the accepted Release 2.2 contract.
+func TestH10CapabilitySemanticsDocumented(t *testing.T) {
+	cases := []struct {
+		path     string
+		contains []string
+	}{
+		{
+			path: "docs/architecture.md",
+			contains: []string{
+				"filesystem **capability**",
+				"not a path ceiling layered over the Principal's Unix DAC",
+				"not a\n  confidentiality boundary against the helper",
+				"NOT a\n  reproduction of the Principal's Unix login view",
+			},
+		},
+		{
+			path: "README.md",
+			contains: []string{
+				"helper-mediated filesystem capability",
+				"not a path ceiling layered over the Principal's Unix DAC",
+				"not a confidentiality boundary against the daemon",
+			},
+		},
+		{
+			path: "docs/man/docker-helper.1",
+			contains: []string{
+				"helper-mediated filesystem capability, not a path ceiling over the",
+				"it is not a\nconfidentiality boundary against the daemon",
+			},
+		},
+	}
+	for _, tc := range cases {
+		data, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", tc.path, err)
+		}
+		content := string(data)
+		for _, want := range tc.contains {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s must carry the accepted H10 capability semantics, missing %q", tc.path, want)
+			}
+		}
+	}
+}

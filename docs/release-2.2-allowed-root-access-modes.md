@@ -61,6 +61,13 @@ Canonical access values are exactly:
 - `read_only` — reads are allowed, but a workload may not obtain a writable
   host-path exposure through this policy.
 
+`read_only` is an access/integrity mode inside the granted filesystem
+capability: it denies the *workload* a writable host-path exposure. It is
+not a confidentiality boundary against the daemon itself (H10 accepted
+boundary, see `docs/architecture.md`): in system mode the root-owned
+helper reads inside the granted capability regardless of the Principal's
+own Unix DAC reach.
+
 There is no boolean spelling (`readonly`, `writable`, `rw`) in the HTTP or
 stored policy model. Human CLI shorthands may not create a second semantic
 name.
