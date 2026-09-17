@@ -8318,17 +8318,24 @@ func TestPackagingIntegrationCIContract(t *testing.T) {
 	// The ordinary checks job must not install or run the packaging toolchain:
 	// that is the packaging-integration job's responsibility, and it is what
 	// lets environment-dependent packaging tests keep skipping in ordinary
-	// go test runs.
+	// go test runs. Named packaging packages and helpers are banned; the one
+	// permitted install is cpio, a non-packaging helper the release-pipeline
+	// shared-payload extraction tests consume.
 	checksJob := findJobSection(ciContent, "checks")
 	if checksJob == "" {
 		t.Fatal("ci.yml must contain a checks job")
 	}
 	for _, banned := range []string{
-		"musl-tools", "checkpolicy", "semodule-utils", "install-nfpm.sh",
-		"test-packaging-integration.sh", "apt-get",
+		"musl-tools", "checkpolicy", "semodule-utils", "apparmor-utils",
+		"install-nfpm.sh", "test-packaging-integration.sh", "nfpm",
 	} {
 		if strings.Contains(checksJob, banned) {
 			t.Errorf("checks job must not install or run the packaging toolchain (%q)", banned)
+		}
+	}
+	for _, line := range strings.Split(checksJob, "\n") {
+		if strings.Contains(line, "apt-get install") && !strings.Contains(line, "cpio") {
+			t.Errorf("checks job apt-get installs must be limited to the non-packaging helper cpio (%q)", strings.TrimSpace(line))
 		}
 	}
 
@@ -8384,6 +8391,37 @@ func TestPackagingIntegrationCIContract(t *testing.T) {
 		t.Error("scripts/install-nfpm.sh must download a pinned nFPM tag, not 'latest'")
 	}
 
+	// Release toolchain must never point at nfpm@latest; the unpinned
+	// `go install ...@latest` suggestion is banned everywhere, and the
+	// packaging builder must verify its nfpm through the pinned owner's
+	// --check mode instead of accepting any nfpm from PATH.
+	releaseToolchainFiles := []string{
+		"build-packages.sh",
+		"build-bundle.sh",
+		"build-static.sh",
+		"scripts/install-nfpm.sh",
+		"scripts/release-candidate.sh",
+		".github/workflows/artifact-gate.yml",
+		".github/workflows/ci.yml",
+		".github/workflows/release.yml",
+	}
+	for _, path := range releaseToolchainFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "nfpm@latest") || strings.Contains(string(data), "@latest") {
+			t.Errorf("%s must not reference nfpm@latest (the pinned owner is scripts/install-nfpm.sh)", path)
+		}
+	}
+	pkgBuilder, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pkgBuilder), "scripts/install-nfpm.sh\" --check") {
+		t.Error("build-packages.sh must verify its nfpm through scripts/install-nfpm.sh --check (single pinned owner)")
+	}
+
 	// Workflow files must consume the single owner rather than duplicate the
 	// pinned version/hash.
 	for _, path := range []string{".github/workflows/artifact-gate.yml", ".github/workflows/ci.yml"} {
@@ -8402,6 +8440,75 @@ func TestPackagingIntegrationCIContract(t *testing.T) {
 	}
 	if !strings.Contains(string(gate), "scripts/install-nfpm.sh") {
 		t.Error("artifact-gate.yml producer must install nFPM through scripts/install-nfpm.sh")
+	}
+}
+
+// TestInstallNfpmCheckModeFailsClosed proves the pinned owner's --check mode
+// behaviorally: a missing nfpm, a wrong-version nfpm, and an unusable binary
+// all fail closed (the caller is pointed back to scripts/install-nfpm.sh),
+// and the pinned version is accepted. The pinned version constant is read
+// from scripts/install-nfpm.sh itself, so the test never duplicates it.
+func TestInstallNfpmCheckModeFailsClosed(t *testing.T) {
+	installerContent, err := os.ReadFile("scripts/install-nfpm.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := ""
+	for _, line := range strings.Split(string(installerContent), "\n") {
+		if strings.HasPrefix(line, `NFPM_VERSION="`) {
+			pinned = strings.TrimSuffix(strings.TrimPrefix(line, `NFPM_VERSION="`), `"`)
+			break
+		}
+	}
+	if pinned == "" {
+		t.Fatal("scripts/install-nfpm.sh must own NFPM_VERSION")
+	}
+
+	fakeBinDir := t.TempDir()
+	accepted := filepath.Join(fakeBinDir, "nfpm-pinned")
+	if err := os.WriteFile(accepted, []byte("#!/bin/sh\necho \"nfpm version "+pinned+"\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	wrongVersion := filepath.Join(fakeBinDir, "nfpm-wrong")
+	if err := os.WriteFile(wrongVersion, []byte("#!/bin/sh\necho \"nfpm version 1.99.9\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	unusable := filepath.Join(fakeBinDir, "nfpm-unusable")
+	if err := os.WriteFile(unusable, []byte("#!/bin/sh\nexit 3\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	runCheck := func(args ...string) (string, int) {
+		t.Helper()
+		full := append([]string{"scripts/install-nfpm.sh", "--check"}, args...)
+		cmd := exec.Command("bash", full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("unexpected run error: %v", err)
+			}
+			code = exitErr.ExitCode()
+		}
+		return string(out), code
+	}
+
+	// A wrong version is rejected and points back to the pinned owner.
+	out, code := runCheck(wrongVersion)
+	if code == 0 {
+		t.Errorf("--check must reject a wrong nfpm version, output: %s", out)
+	}
+	if !strings.Contains(out, "scripts/install-nfpm.sh") {
+		t.Errorf("--check failure must name the single pinned owner, output: %s", out)
+	}
+	// An unusable binary is rejected.
+	if _, code := runCheck(unusable); code == 0 {
+		t.Error("--check must reject an unusable nfpm binary")
+	}
+	// The pinned version is accepted.
+	if out, code := runCheck(accepted); code != 0 {
+		t.Errorf("--check must accept the pinned version %q, output: %s", pinned, out)
 	}
 }
 
