@@ -2,7 +2,7 @@ package main
 
 // workload_mac.go — the backend-neutral workload MAC lifecycle owner.
 //
-// The coordinator materializes an already-accepted 2.2.5 filesystem exposure
+// The coordinator materializes an already-accepted filesystem exposure
 // plan through the active MAC backend. It is deliberately narrow:
 //
 //   - it never reads allowed-root tables, Session snapshots, LookupAccess,
@@ -11,8 +11,9 @@ package main
 //   - its lifetime is one run Operation and its correlated container, never
 //     a Principal, Launcher, Session, or allowed root.
 //
-// Session workspace coverage (boundaries, bindings, leases, labeling, daemon
-// managed boundaries) remains owned exclusively by sessionMACCoordinator.
+// Session MAC lifecycle state (boundaries, bindings, leases, labeling, daemon
+// managed boundaries) over the concrete issued trees of the immutable Session
+// filesystem snapshot remains owned exclusively by sessionMACCoordinator.
 //
 // Durable ownership state is written before the first kernel-side MAC
 // resource of an operation so a daemon crash always leaves startup
@@ -63,7 +64,7 @@ const workloadWorkerExitTimeout = 5 * time.Second
 
 // workloadPreparation carries the accepted application-decision facts one
 // backend needs. It contains no policy authority: the exposure plan was
-// already accepted by the 2.2.5 application layer.
+// already accepted by the application layer.
 type workloadPreparation struct {
 	OperationID string
 	SessionID   string
@@ -214,8 +215,8 @@ type workloadMACBackend interface {
 // workloadMACCoordinator is the single owner of operation-lifetime workload
 // MAC state. It selects the already-detected active backend, owns the
 // helper-owned state hierarchy and startup reconciliation, and produces the
-// one backend-neutral prepared result. Session workspace coverage stays with
-// sessionMACCoordinator.
+// one backend-neutral prepared result. Session MAC lifecycle coverage over
+// the issued Session filesystem snapshot stays with sessionMACCoordinator.
 type workloadMACCoordinator struct {
 	backend workloadMACBackend
 	// stateRoot is <helper state dir>/workload-mac (durable ownership).

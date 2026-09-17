@@ -126,7 +126,7 @@ type operation struct {
 	// run operations. They are cleaned up after cmd.Wait completes.
 	pinnedMounts []*pinnedMount
 	// workloadMAC is the prepared workload MAC state of a system-mode run
-	// operation (2.2.6). It is bounded runtime cleanup state only: it
+	// operation. It is bounded runtime cleanup state only: it
 	// carries the Docker materialization facts of the already-accepted
 	// exposure plan, never policy authority.
 	workloadMAC *preparedWorkloadMAC

@@ -383,10 +383,6 @@ func (b *workloadAppArmorBackend) prepare(ctx context.Context, p workloadPrepara
 		SecurityOpts: []string{"label=disable", "apparmor=" + profileName},
 		MountSources: p.PinnedSources,
 		// The cleanup releases only the kernel MAC state and the backend
-		// files that depend on it. The durable ownership record stays
-		// behind as the reconciliation retry marker until the run-level
-		// finalization boundary proves the dependent cleanup done.
-		// The cleanup releases only the kernel MAC state and the backend
 		// files that depend on it. It runs under its own daemon-owned MAC
 		// transition budget at cleanup time (operation completion, shutdown
 		// force-cleanup, or startup reconciliation), so an orphaned parser

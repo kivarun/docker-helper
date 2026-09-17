@@ -338,10 +338,10 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
-		// Workload MAC coordinator (2.2.6): operation/container-lifetime
+		// Workload MAC coordinator: operation/container-lifetime
 		// workload MAC state, separate from the session MAC coordinator.
 		// Startup reconciliation of helper-owned workload state happens
-		// before the session MAC reconciliation, so workspace coverage a
+		// before the session MAC reconciliation, so issued-tree coverage a
 		// pending workload relies on is never removed while that workload
 		// state is still unproven.
 		workloadMAC, err := newWorkloadMACCoordinatorForMode(cfg, detectLSM)
@@ -367,8 +367,8 @@ func runDaemon(stdout, stderr io.Writer) error {
 		}
 
 		// Startup coverage gate source: the session MAC coordinator must not
-		// release workspace coverage while a workload ownership record is
-		// still pending for that workspace's Session.
+		// release issued-tree coverage while a workload ownership record is
+		// still pending for that Session.
 		if macCoordinator != nil && workloadMAC != nil {
 			macCoordinator.pendingWorkloadSessions = workloadMAC.PendingWorkloadSessions
 		}
