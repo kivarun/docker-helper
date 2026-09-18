@@ -1053,3 +1053,43 @@ func TestBuildContextHelpDescribesAbsoluteWithinWorkspace(t *testing.T) {
 		t.Errorf("build help must keep the session-workspace containment scope:\n%s", help)
 	}
 }
+
+// TestBuildHelpDocumentsRequiredOperands pins the public build syntax: the
+// Usage line presents --dockerfile FILE and --image NAME as required (never
+// inside optional brackets), the help text states the three required
+// operands (CONTEXT, --dockerfile FILE, --image NAME), and omitting a
+// required flag stays a local exit-2 validation error naming it — so a
+// required flag cannot silently become documented as optional again.
+func TestBuildHelpDocumentsRequiredOperands(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCommandWithWriters([]string{"build", "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("build --help exit = %d, stderr=%s", code, stderr.String())
+	}
+	help := stdout.String()
+	if !strings.Contains(help, "--dockerfile FILE") || strings.Contains(help, "[--dockerfile FILE]") {
+		t.Errorf("build usage must present --dockerfile FILE as required, not optional:\n%s", help)
+	}
+	if !strings.Contains(help, "--image NAME") || strings.Contains(help, "[--image NAME]") {
+		t.Errorf("build usage must present --image NAME as required, not optional:\n%s", help)
+	}
+	for _, want := range []string{
+		"build requires the CONTEXT positional operand, --dockerfile FILE, and\n--image NAME",
+		"Dockerfile path relative to context (required)",
+		"Image name and tag (required)",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("build help must state the required operands, missing %q:\n%s", want, help)
+		}
+	}
+
+	// Omitting a required flag is a local validation error naming it; no
+	// default Dockerfile behavior exists.
+	var errOut bytes.Buffer
+	var out bytes.Buffer
+	if code := runCommandWithWriters([]string{"build", "."}, &out, &errOut); code != 2 {
+		t.Errorf("build without --dockerfile/--image: exit = %d, want 2", code)
+	}
+	if !strings.Contains(errOut.String(), "--dockerfile is required") {
+		t.Errorf("build without --dockerfile must fail naming it, got: %s", errOut.String())
+	}
+}

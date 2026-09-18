@@ -300,21 +300,22 @@ var pullCommand = &Command{
 var buildCommand = &Command{
 	Name:       "build",
 	Summary:    "Build a Docker image",
-	Usage:      "docker-helper build [--system] [--endpoint ENDPOINT] [--dockerfile FILE] --image NAME [--build-arg KEY=VALUE]... CONTEXT",
+	Usage:      "docker-helper build [--system] [--endpoint ENDPOINT] --dockerfile FILE --image NAME [--build-arg KEY=VALUE]... CONTEXT",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `SIGINT/SIGTERM cancels the running build operation.
 
-CONTEXT is the build context path: a workspace-relative path or an
-absolute path inside the session workspace (the daemon canonicalizes the
-context and enforces workspace containment).`,
+build requires the CONTEXT positional operand, --dockerfile FILE, and
+--image NAME. CONTEXT is the build context path: a workspace-relative
+path or an absolute path inside the session workspace (the daemon
+canonicalizes the context and enforces workspace containment).`,
 
 	Presentation: exceptionPresentation("stream: build log data, not one finite result renderer"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
-		dockerfile := fs.String("dockerfile", "", "Dockerfile path relative to context")
-		image := fs.String("image", "", "Image name and tag")
+		dockerfile := fs.String("dockerfile", "", "Dockerfile path relative to context (required)")
+		image := fs.String("image", "", "Image name and tag (required)")
 		var buildArgs stringSlice
 		fs.Var(&buildArgs, "build-arg", "Build argument KEY=VALUE (repeatable)")
 

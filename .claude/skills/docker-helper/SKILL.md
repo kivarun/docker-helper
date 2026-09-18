@@ -211,6 +211,15 @@ request is refused `invalid_filesystem_policy` before the Session exists.
 Omitting the flag keeps the inherited behavior. There is no post-create
 Session filesystem mutation.
 
+The issued snapshot is the daemon-normalized effective authority, not a
+verbatim echo of your request: an explicit root equal to the workspace
+replaces the implicit workspace grant, redundant authority already covered
+by another entry with the same effective access may collapse during
+normalization, and a narrower nested `read_only` region stays represented
+because it changes effective authority. Read your issued scope back
+through `docker-helper self` (or `session show`) instead of
+reconstructing it from the create request.
+
 ## Path model
 
 Both interfaces share the same path semantics. Define once, apply everywhere.
