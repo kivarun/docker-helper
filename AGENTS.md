@@ -229,6 +229,8 @@ synonym still names the same concept outside an explicit compatibility adapter.
 Names identify one domain entity or one semantic responsibility. Name the
 thing for what it is in the product model, not for its current caller, storage
 shape, backend mechanism, implementation history, or incidental topology.
+Names should not encode transient context unless that context is part of the
+named entity's own semantics or lifecycle.
 Prefer the project's accepted vocabulary; use an industry term only when its
 established meaning matches the project concept. Keep namespace grammars
 predictable and names no longer than clarity requires. Abbreviate only with an
