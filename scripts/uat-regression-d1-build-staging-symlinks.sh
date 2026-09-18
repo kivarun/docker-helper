@@ -80,7 +80,6 @@ reg_session "$cred" "$WS" || { reg_fail "session create failed"; reg_result; }
 export DOCKER_HELPER_SESSION_TOKEN="$REG_SESSION_TOKEN"
 
 dh_build() { dh build "$@" 2>/tmp/d1-build.err; }
-
 # --- audit window helpers (same source-selection pattern as uat-mac-selinux.sh:
 # ausearch when it yields records, else dmesg, else journalctl -k; the window
 # is applied locally from the record's audit(epoch) timestamp, so a shared
@@ -114,10 +113,17 @@ audit_records_since() { # START_EPOCH
   done | sort -u
 }
 
-# fresh_d1_denials EPOCH prints fresh AVC denials relevant to docker-helper in
-# the window starting at EPOCH.
+# fresh_d1_denials EPOCH prints fresh AVC denials relevant to the D1 staging
+# subject in the window starting at EPOCH. The scope is the daemon's own
+# domain (scontext type docker_helper_t — the pre-fix denials were exactly
+# lnk_file getattr/setattr from comm="docker-helper", and restorecon runs
+# WITHIN docker_helper_t via execute_no_trans, so its denials stay covered).
+# Denials of OTHER domains merely plumbing data to the daemon
+# (setfiles_t/load_policy_t writing the pipe the daemon passed them) are the
+# pre-existing MAC-preparation pattern of earlier groups, not D1 staging.
 fresh_d1_denials() { # START_EPOCH
-  audit_records_since "$1" | grep 'denied' | grep -F 'docker_helper_'
+  audit_records_since "$1" | grep 'denied' \
+    | grep -E 'scontext=[^:]+:[^:]+:docker_helper_t' | grep -F 'docker_helper_'
 }
 
 require_healthy_after_build() { # LABEL START_EPOCH MARK
@@ -155,7 +161,7 @@ require_healthy_after_build() { # LABEL START_EPOCH MARK
 
 run_image_expects() { # IMAGE EXPECT_SUBSTRING LABEL [CONTAINER_PATH]
   local image="$1" expect="$2" label="$3" path="${4:-/payload.txt}" out
-  if out="$(dh run --image "$image" -- cat "$path" 2>/tmp/d1-run.err)"; then
+  if out="$(dh run "$image" -- cat "$path" 2>/tmp/d1-run.err)"; then
     if printf '%s' "$out" | grep -qF "$expect"; then
       reg_ok "$label: produced image runs and serves the staged payload"
     else
@@ -176,7 +182,7 @@ link_copy_build_dangling() { # LABEL CTXDIR IMAGE
   local label="$1" ctx="$2" image="$3" epoch mark
   epoch="$(date +%s)"
   mark="$(date '+%Y-%m-%d %H:%M:%S')"
-  if dh_build --context "$ctx" --dockerfile Dockerfile --image "$image"; then
+  if dh_build "$ctx" --dockerfile Dockerfile --image "$image"; then
     reg_fail "$label: the consuming build must fail: importing the host-side target would make COPY succeed"
   else
     if grep -q 'docker_build_failed' /tmp/d1-build.err; then
@@ -217,7 +223,7 @@ chown -R "$USER:$USER" "$WS/case1"
 
 EPOCH="$(date +%s)"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
-if dh_build --context case1/ctx --dockerfile Dockerfile --image uat-d1-1:2.2; then
+if dh_build case1/ctx --dockerfile Dockerfile --image uat-d1-1:2.2; then
   reg_ok "case 1: build accepted and succeeded (internal same-directory symlink)"
 else
   reg_fail "case 1: build failed: $(head -3 /tmp/d1-build.err | redact)"
@@ -225,7 +231,7 @@ fi
 require_healthy_after_build "case 1" "$EPOCH" "$MARK"
 run_image_expects uat-d1-1:2.2 "d1-payload" "case 1"
 
-if dh_build --context case1/ctx-linkcopy --dockerfile Dockerfile --image uat-d1-1-copy:2.2; then
+if dh_build case1/ctx-linkcopy --dockerfile Dockerfile --image uat-d1-1-copy:2.2; then
   reg_ok "case 1: link-copy build succeeded"
 else
   reg_fail "case 1: link-copy build failed: $(head -3 /tmp/d1-build.err | redact)"
@@ -241,7 +247,7 @@ chown -R "$USER:$USER" "$WS/case2"
 
 EPOCH="$(date +%s)"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
-if dh_build --context case2/ctx --dockerfile Dockerfile --image uat-d1-2:2.2; then
+if dh_build case2/ctx --dockerfile Dockerfile --image uat-d1-2:2.2; then
   reg_ok "case 2: build accepted and succeeded (internal relative symlink across a directory)"
 else
   reg_fail "case 2: build failed: $(head -3 /tmp/d1-build.err | redact)"
@@ -267,7 +273,7 @@ chown -R "$USER:$USER" "$WS/case3" "$OUTSIDE_ABS"
 
 EPOCH="$(date +%s)"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
-if dh_build --context case3/ctx --dockerfile Dockerfile --image uat-d1-3:2.2; then
+if dh_build case3/ctx --dockerfile Dockerfile --image uat-d1-3:2.2; then
   reg_ok "case 3: build accepted and succeeded (absolute target outside the context; target not dereferenced)"
 else
   reg_fail "case 3: build failed: $(head -3 /tmp/d1-build.err | redact)"
@@ -292,7 +298,7 @@ chown -R "$USER:$USER" "$WS/case4" "$WS/outside-file"
 
 EPOCH="$(date +%s)"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
-if dh_build --context case4/ctx --dockerfile Dockerfile --image uat-d1-4:2.2; then
+if dh_build case4/ctx --dockerfile Dockerfile --image uat-d1-4:2.2; then
   reg_ok "case 4: build accepted and succeeded (relative target outside the context; target not dereferenced)"
 else
   reg_fail "case 4: build failed: $(head -3 /tmp/d1-build.err | redact)"
@@ -307,7 +313,7 @@ chown -R "$USER:$USER" "$WS/case5"
 
 EPOCH="$(date +%s)"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
-if dh_build --context case5/ctx --dockerfile Dockerfile --image uat-d1-5:2.2; then
+if dh_build case5/ctx --dockerfile Dockerfile --image uat-d1-5:2.2; then
   reg_ok "case 5: control build accepted and succeeded (symlink-free context)"
 else
   reg_fail "case 5: control build failed: $(head -3 /tmp/d1-build.err | redact)"
