@@ -96,26 +96,152 @@ func TestStageBuildContextOperationIDUnsafe(t *testing.T) {
 	}
 }
 
-func TestStageBuildContextSymlinkInContext(t *testing.T) {
-	workspace, runtimeDir := setupStagingTest(t)
-	ctxDir := createBuildContext(t, workspace)
-
-	symlinkPath := filepath.Join(ctxDir, "link")
-	os.Symlink("target", symlinkPath)
-
-	staged, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1")
-	if err != nil {
-		t.Fatalf("StageBuildContext: %v", err)
+// D1 (v2.2.0-rc.8 UAT) regression: a symlink entry located inside an
+// authorized build context is part of the build-context data. Staging must
+// preserve the symlink itself — its link text and its own metadata — and
+// must never dereference the host-side target: an absolute or relative
+// target outside the build context must not cause the target's contents to
+// be copied into staging; the target string stays symlink metadata.
+func TestStageBuildContextSymlinkEntries(t *testing.T) {
+	// setup creates the case's build-context content and returns the
+	// context-relative path of the symlink entry under test together with
+	// the exact link text that must survive staging. nil is the
+	// symlink-free control context.
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, workspace, ctxDir string) (linkRel string, wantTarget string)
+	}{
+		{
+			name: "control symlink-free context",
+		},
+		{
+			name: "internal same-directory symlink",
+			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
+				target := filepath.Join(ctxDir, "target.txt")
+				if err := os.WriteFile(target, []byte("same-dir payload\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(ctxDir, "link")
+				if err := os.Symlink("target.txt", link); err != nil {
+					t.Fatal(err)
+				}
+				return "link", "target.txt"
+			},
+		},
+		{
+			name: "internal relative symlink across a directory",
+			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
+				target := filepath.Join(ctxDir, "target.txt")
+				if err := os.WriteFile(target, []byte("nested payload\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(ctxDir, "subdir"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(ctxDir, "subdir", "link")
+				if err := os.Symlink("../target.txt", link); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join("subdir", "link"), "../target.txt"
+			},
+		},
+		{
+			name: "absolute symlink target outside the build context",
+			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
+				// An existing target outside the authorized workspace (and
+				// therefore outside the build context) with real content,
+				// so a dereferencing implementation would import it.
+				outsideDir := filepath.Join(filepath.Dir(workspace), "outside-abs")
+				if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("host payload\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(ctxDir, "link")
+				if err := os.Symlink(outsideDir, link); err != nil {
+					t.Fatal(err)
+				}
+				return "link", outsideDir
+			},
+		},
+		{
+			name: "relative symlink target outside the build context",
+			setup: func(t *testing.T, workspace, ctxDir string) (string, string) {
+				// Target outside the build context but inside the
+				// authorized workspace, with real content, so a
+				// dereferencing implementation would import it.
+				outside := filepath.Join(workspace, "outside-file")
+				if err := os.WriteFile(outside, []byte("workspace payload\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(ctxDir, "link")
+				if err := os.Symlink("../outside-file", link); err != nil {
+					t.Fatal(err)
+				}
+				return "link", "../outside-file"
+			},
+		},
 	}
-	defer staged.Cleanup()
 
-	stagedLink := filepath.Join(staged.ContextPath, "link")
-	linkTarget, err := os.Readlink(stagedLink)
-	if err != nil {
-		t.Fatalf("cannot read symlink in staging: %v", err)
-	}
-	if linkTarget != "target" {
-		t.Errorf("symlink target mismatch: got %q, want %q", linkTarget, "target")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, runtimeDir := setupStagingTest(t)
+			ctxDir := createBuildContext(t, workspace)
+
+			linkRel, wantTarget := "", ""
+			if tc.setup != nil {
+				linkRel, wantTarget = tc.setup(t, workspace, ctxDir)
+			}
+
+			staged, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1")
+			if err != nil {
+				t.Fatalf("StageBuildContext: %v", err)
+			}
+			defer staged.Cleanup()
+
+			content, err := os.ReadFile(staged.DockerfilePath)
+			if err != nil {
+				t.Fatalf("cannot read staged Dockerfile: %v", err)
+			}
+			if string(content) != "FROM alpine:3.24\n" {
+				t.Fatalf("unexpected staged Dockerfile content: %q", string(content))
+			}
+
+			if tc.setup == nil {
+				return
+			}
+
+			stagedLink := filepath.Join(staged.ContextPath, linkRel)
+			info, err := os.Lstat(stagedLink)
+			if err != nil {
+				t.Fatalf("staged symlink entry missing: %v", err)
+			}
+			if info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("staged entry is not a symlink (mode %v): the host-side target must not be dereferenced or imported", info.Mode())
+			}
+
+			linkTarget, err := os.Readlink(stagedLink)
+			if err != nil {
+				t.Fatalf("cannot read staged symlink: %v", err)
+			}
+			if linkTarget != wantTarget {
+				t.Errorf("link text mismatch: got %q, want %q (the link text must be preserved verbatim as symlink metadata)", linkTarget, wantTarget)
+			}
+
+			// The staged symlink carries the source symlink's own metadata:
+			// setTimesFromStat applies the source timestamps to the staged
+			// link itself with utimensat(AT_SYMLINK_NOFOLLOW) — the exact
+			// operation the shipped SELinux policy denied before D1. It must
+			// never land on the link target's inode.
+			srcInfo, err := os.Lstat(filepath.Join(ctxDir, linkRel))
+			if err != nil {
+				t.Fatalf("cannot stat source symlink: %v", err)
+			}
+			if !info.ModTime().Equal(srcInfo.ModTime()) {
+				t.Errorf("staged symlink mtime %v != source symlink mtime %v: the no-follow metadata operation must apply the source symlink's own timestamps to the staged symlink", info.ModTime(), srcInfo.ModTime())
+			}
+		})
 	}
 }
 
