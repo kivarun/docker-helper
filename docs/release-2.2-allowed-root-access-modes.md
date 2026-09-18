@@ -265,8 +265,8 @@ how a caller explicitly narrows the workspace to read-only:
 
 ```bash
 docker-helper session create \
-  --workspace /home/michael/work/git/BoxProbe \
-  --filesystem-root /home/michael/work/git/BoxProbe=read_only
+  --filesystem-root /home/michael/work/git/BoxProbe=read_only \
+  /home/michael/work/git/BoxProbe
 ```
 
 There is no separate `--workspace-access` flag.
@@ -278,9 +278,9 @@ Launcher ceiling:
 
 ```bash
 docker-helper session create \
-  --workspace /home/michael/work/git/BoxProbe \
   --filesystem-root /home/michael/work/git/docker-helper=read_only \
-  --filesystem-root /opt/michael/cache=read_write
+  --filesystem-root /opt/michael/cache=read_write \
+  /home/michael/work/git/BoxProbe
 ```
 
 With the example ceiling
@@ -429,7 +429,7 @@ Existing commands remain and existing invocations default to `read_write`:
 ```text
 docker-helper config allowed-root add [--access read_write|read_only] PATH
 docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access read_write|read_only] USER PATH
-docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access read_write|read_only] PATH [LAUNCHER]
+docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access read_write|read_only] [LAUNCHER] PATH
 ```
 
 Since the RC5 CLI grammar change, the project CLI parser accepts flags
@@ -443,7 +443,7 @@ Changing the mode of an existing exact root is explicit:
 ```text
 docker-helper config allowed-root set-access PATH ACCESS
 docker-helper principal allowed-root set-access USER PATH ACCESS
-docker-helper launcher allowed-root set-access PATH ACCESS [LAUNCHER]
+docker-helper launcher allowed-root set-access [LAUNCHER] PATH ACCESS
 ```
 
 ```text
@@ -473,8 +473,8 @@ Session creation exposes the issuance-time filesystem roots through one
 repeatable flag on the existing command:
 
 ```text
-docker-helper session create [--system] ... --workspace PATH \
-  [--filesystem-root PATH=ACCESS ...] [--principal USER] [--launcher LAUNCHER] [--json]
+docker-helper session create [--system] ... [--filesystem-root PATH=ACCESS ...] \
+  [--principal USER] [--launcher LAUNCHER] [--json] PATH
 ```
 
 `--filesystem-root` is repeatable and its value is `PATH=ACCESS` where PATH is
@@ -483,9 +483,9 @@ an absolute host path inside the target Launcher's effective allowed roots
 vocabulary parsed by the existing access parser. The CLI performs syntax
 validation of `PATH=ACCESS` only: whether the request is a valid narrowing of
 the resolved Launcher ceiling is a server-side authorization/domain decision,
-and the CLI never decides it locally. `--workspace` remains mandatory and is
-the anchor for relative paths; it receives the maximum access the target
-Launcher's effective policy permits unless an explicit
+and the CLI never decides it locally. The positional WORKSPACE remains
+mandatory and is the anchor for relative paths; it receives the maximum
+access the target Launcher's effective policy permits unless an explicit
 `--filesystem-root WORKSPACE=ACCESS` replaces that implicit grant. Omitting
 the flag preserves the inherited create behavior.
 

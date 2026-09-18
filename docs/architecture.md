@@ -175,8 +175,9 @@ occupy disjoint lexical spaces.
 A Launcher name is unique within one Principal and may repeat under
 different Principals; there is never a global lookup by Launcher name
 (`alice/default` and `bob/default` are different Launchers). `default` is
-only the conventional default name — the name used when creation omits
-`--name` and when an individual Launcher command omits the selector —
+only the conventional default name — the name used by an explicit
+`launcher create default` (whose daemon conflict path decides the
+duplicate) and when an individual Launcher command omits the selector —
 not a subtype or a global singleton.
 
 Every Principal has a real Launcher named `default`, provisioned atomically
@@ -1248,9 +1249,9 @@ parent-policy mutations (see
   launcher-level narrowing. Evaluated at session-creation time against
   current state. Does not prepare MAC.
 - **Session workspace** (ephemeral, not a persisted policy level) —
-  selected only at session creation time via `session create --workspace
-  PATH`. Must be under a global, the principal, and (when restricted) the
-  launcher allowed root.
+  selected only at session creation time via the positional
+  `session create WORKSPACE` operand. Must be under a global, the
+  principal, and (when restricted) the launcher allowed root.
 - **Session filesystem snapshot** (persisted, immutable Session child
   state) — derived from the effective entries at the creation
   linearization point, further shaped when the Session-create request
@@ -1825,8 +1826,8 @@ CLI surface (every Launcher command accepts the common operator flags):
 
 ```
 docker-helper launcher create [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [--name NAME]
-    [--allowed-root PATH]... [--issue-credential | --no-credential] [--json]
+    [--token-file PATH] [--principal USER]
+    [--allowed-root PATH]... [--issue-credential | --no-credential] [--json] NAME
 docker-helper launcher list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper launcher show [--system] [--endpoint ENDPOINT]
@@ -1837,13 +1838,13 @@ docker-helper launcher set [--system] [--endpoint ENDPOINT]
 docker-helper launcher delete [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [--access ACCESS] [--json] PATH [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--access ACCESS] [--json] [LAUNCHER] PATH
 docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [--json] PATH ACCESS [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER] PATH ACCESS
 docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [--json] PATH [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER] PATH
 docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher credential create [--system] [--endpoint ENDPOINT]
@@ -1892,10 +1893,10 @@ conflict.
 CLI surface (every command accepts the common operator flags):
 
 ```
-docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]
+docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json] WORKSPACE
 docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]
-docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
+docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]
 docker-helper session cleanup [--json]
 ```
 
@@ -1909,8 +1910,8 @@ Session filesystem roots: PATH is an absolute host path inside the target
 Launcher's effective allowed roots (a directory or a regular file) and
 ACCESS the canonical access vocabulary; the CLI validates `PATH=ACCESS`
 syntax only, and the daemon decides narrowing against the resolved
-Launcher ceiling. `--workspace` remains mandatory and receives the maximum
-access the effective policy permits unless an explicit
+Launcher ceiling. The positional WORKSPACE remains mandatory and receives
+the maximum access the effective policy permits unless an explicit
 `--filesystem-root WORKSPACE=ACCESS` replaces that implicit grant. Omitting
 the flag preserves the inherited create behavior.
 Returns the session ID,
@@ -2033,28 +2034,33 @@ The daemon-backed policy completions are exactly:
 | Command flag | Policy query consumed |
 |---|---|
 | `launcher create --allowed-root` | Principal effective-root query |
-| `session create --workspace` | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
-| `session create --filesystem-root` | Session create-policy query (the same policy source as `--workspace` for the path side; the access side after the `=` delimiter completes the canonical `read_only`/`read_write` vocabulary) |
+| `session create` (positional WORKSPACE) | Session create-policy query (typed `--principal`/`--launcher` forwarded; the daemon resolves the same target a real create would) |
+| `session create --filesystem-root` | Session create-policy query (the same policy source as the positional WORKSPACE for the path side; the access side after the `=` delimiter completes the canonical `read_only`/`read_write` vocabulary) |
 
 Positional completion of the allowed-root families follows the shared
 grammar-universe rule: each position completes the universe that the
 command semantics actually authorize.
 
-`launcher allowed-root add PATH [LAUNCHER]`: PATH completes from the
-effective Principal ceiling — the same policy query the `--workspace`
-flag value consumes — rendered as navigable boundary segments, with no
-generic host-filesystem fallback: the daemon stays the authorization
-authority, so an authority context with no resolvable Principal offers
-nothing. The optional trailing LAUNCHER positional completes from the
-same selector introspection as the `--launcher` flag.
+`launcher allowed-root add [LAUNCHER] PATH` (target-first): the ambiguous
+first positional offers the union of the Launcher selector domain and the
+effective Principal ceiling rendered as navigable boundary segments — the
+same policy query the positional WORKSPACE of `session create` consumes —
+with no generic host-filesystem fallback: the daemon stays the
+authorization authority, so an authority context with no resolvable
+Principal offers nothing. A `/`-prefixed first word is PATH data only; a
+slash-free first word that resolves as the selector completes the PATH
+operand from the ceiling. A Launcher-selector second word for the
+launcher-omitted two-positional form is no grammar: two positionals are
+LAUNCHER PATH.
 
-`launcher allowed-root remove PATH [LAUNCHER]` and `launcher allowed-root
-set-access PATH ACCESS [LAUNCHER]` are existing-entity mutations: PATH
-completes exactly the target Launcher's stored roots (`completion roots
+`launcher allowed-root remove [LAUNCHER] PATH` and `launcher allowed-root
+set-access [LAUNCHER] PATH ACCESS` are existing-entity mutations with the
+same target-first ambiguity: the first positional offers the selector
+domain plus the target Launcher's stored roots (`completion roots
 launcher`, the default-Launcher target of the launcher-omitted
-invocation), with no generic fallback; the ACCESS word completes the
-canonical `read_only`/`read_write` vocabulary; the optional trailing
-LAUNCHER positional completes the selector introspection.
+invocation); a typed selector completes the PATH operand from those
+stored roots, with no generic fallback; the ACCESS word completes the
+canonical `read_only`/`read_write` vocabulary.
 
 `principal allowed-root add USER PATH` completes USER from the
 `--principal` selector introspection and PATH as generic directories
@@ -2182,9 +2188,10 @@ declaration itself: finite-result leaves must declare human-default +
 explicit `--json`, register the `--json` flag, and advertise it in Usage;
 exception leaves must declare a non-empty reason and must not expose
 `--json`. Branch commands declare no leaf presentation metadata.
-`session delete --id SESSION_ID` remains the one explicitly retained
-targeting-grammar compatibility exception; presentation entropy is not a
-compatibility requirement.
+`session show SESSION_ID` and `session delete SESSION_ID` share the
+positional targeting grammar (the RC8 grammar normalization removed the
+`--id` flag and the parallel spellings for the primary operands); no
+targeting-grammar compatibility exception remains.
 
 Agent-facing CLI commands are `pull`, `build`, `run`, `registry login`
 (described under [Data-plane execution](#data-plane-execution)), and `self`

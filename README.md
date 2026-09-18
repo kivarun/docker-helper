@@ -184,7 +184,7 @@ Uses the current user's home directory as the default allowed root.
 docker-helper init
 systemctl --user enable --now docker-helper
 mkdir -p ~/myproject
-docker-helper session create --workspace ~/myproject
+docker-helper session create ~/myproject
 ```
 
 Export the `TOKEN` printed by `session create` (starts with `dht_...`):
@@ -192,7 +192,7 @@ Export the `TOKEN` printed by `session create` (starts with `dht_...`):
 ```bash
 export DOCKER_HELPER_SESSION_TOKEN='dht_...'
 docker-helper pull alpine:3.24
-docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
+docker-helper run alpine:3.24 -- echo hello-from-docker-helper
 ```
 
 User mode does not require principals or credentials. Ownership is
@@ -218,7 +218,7 @@ again. On alice's machine (not as root):
 ```bash
 docker-helper credential install
 mkdir -p ~/myproject
-docker-helper session create --workspace ~/myproject
+docker-helper session create ~/myproject
 ```
 
 Sessions created with a Principal credential are owned by that principal's
@@ -232,7 +232,7 @@ Export the `TOKEN` printed by `session create` (starts with `dht_...`):
 ```bash
 export DOCKER_HELPER_SESSION_TOKEN='dht_...'
 docker-helper pull alpine:3.24
-docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
+docker-helper run alpine:3.24 -- echo hello-from-docker-helper
 ```
 
 `credential install` reads the token from stdin and stores it for
@@ -714,7 +714,7 @@ systemctl --user reload docker-helper
 ### Create a session
 
 ```bash
-docker-helper session create --workspace /path/to/project
+docker-helper session create /path/to/project
 ```
 
 Returns the session ID, token (shown once), workspace, creation time,
@@ -767,7 +767,7 @@ changes afterwards — see
 ### Delete a session
 
 ```bash
-docker-helper session delete --id dhs_...
+docker-helper session delete dhs_...
 ```
 
 Permanently removes the session. Subsequent requests with its token
@@ -850,9 +850,9 @@ commands use `DOCKER_HELPER_SESSION_TOKEN` available in the client environment a
 
 ```bash
 docker-helper pull IMAGE
-docker-helper build --context . --dockerfile Dockerfile --image NAME
-docker-helper run --image NAME -- command args...
-docker-helper registry login --registry REG --username USER
+docker-helper build . --dockerfile Dockerfile --image NAME
+docker-helper run NAME -- command args...
+docker-helper registry login --username USER REG
 ```
 
 `build` and `run` appear synchronous: the CLI polls for completion, streams
@@ -1700,7 +1700,7 @@ The allowed-root narrowing model (global → principal → launcher → session)
   [Delegated ownership: launchers](#delegated-ownership-launchers));
   does not prepare MAC.
 - **Project workspace** — selected only at session creation time via
-  `session create --workspace PATH`; must be under the global and principal
+  `session create WORKSPACE`; must be under the global and principal
   allowed roots (and, for restricted launchers, the launcher's roots).
   The create request may further issue additional absolute filesystem
   roots and an explicit workspace grant per Session through
@@ -1820,7 +1820,7 @@ As the operator (or the principal, using their credential):
 # (Admin form. A Principal-credential caller normally omits
 #  sudo and --principal, which is then inferred from the credential.)
 sudo docker-helper launcher create --principal alice \
-    --name build-agent --issue-credential
+    build-agent --issue-credential
 ```
 
 The command prints the launcher and shows the credential token once
@@ -1829,7 +1829,7 @@ The command prints the launcher and shows the credential token once
 ```bash
 docker-helper credential install   # paste the launcher credential token
 mkdir -p ~/myproject
-docker-helper session create --workspace ~/myproject
+docker-helper session create ~/myproject
 ```
 
 The agent can verify its delegated identity through the HTTP API
@@ -1866,10 +1866,10 @@ Launcher-scoped sessions use the launcher's effective roots:
 
 ```bash
 sudo docker-helper launcher allowed-root add --principal alice \
-    /srv/workspaces/alice/agent build-agent
+    build-agent /srv/workspaces/alice/agent
 sudo docker-helper launcher allowed-root list --principal alice build-agent
 sudo docker-helper launcher allowed-root remove --principal alice \
-    /srv/workspaces/alice/agent build-agent
+    build-agent /srv/workspaces/alice/agent
 sudo docker-helper launcher allowed-root inherit --principal alice build-agent
 ```
 
@@ -1895,10 +1895,12 @@ unique `dhl_...` ID, where the owning principal is resolved by the daemon.
 Launcher names are never searched globally.
 
 `launcher create` infers the principal from the authenticated credential
-when `--principal` is omitted. Without `--name` it targets the
-auto-provisioned `default` launcher and refuses locally with an actionable
-hint to pass `--name NAME` when that principal already has one, instead of
-prompting for a credential and failing on the daemon. Upgrading from v2.0.0:
+when `--principal` is omitted. The launcher NAME is the required
+positional operand; `launcher create default` is an ordinary explicit
+attempt to create the auto-provisioned `default` launcher, decided by the
+daemon's canonical conflict path. (v2.1 behavior — a local pre-flight
+hint instead of the daemon conflict — was removed with the RC8 grammar
+normalization.) Upgrading from v2.0.0:
 existing principal
 credentials and attributable sessions migrate automatically at first
 2.1 daemon startup (credentials preserved byte-for-byte; sessions move to

@@ -35,7 +35,7 @@ access for them.
 docker-helper init
 systemctl --user enable --now docker-helper
 mkdir \-p ~/myproject
-docker-helper session create --workspace ~/myproject
+docker-helper session create ~/myproject
 .fi
 .RE
 .PP
@@ -45,7 +45,7 @@ Export the \fBTOKEN\fR printed by \fBsession create\fR (starts with \fIdht_...\f
 .nf
 export DOCKER_HELPER_SESSION_TOKEN='dht_...'
 docker-helper pull alpine:3.24
-docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
+docker-helper run alpine:3.24 -- echo hello-from-docker-helper
 .fi
 .RE
 .PP
@@ -71,7 +71,7 @@ On alice's machine (not as root):
 .nf
 docker-helper credential install
 mkdir \-p ~/myproject
-docker-helper session create --workspace ~/myproject
+docker-helper session create ~/myproject
 .fi
 .RE
 .PP
@@ -81,7 +81,7 @@ Export the \fBTOKEN\fR printed by \fBsession create\fR (starts with \fIdht_...\f
 .nf
 export DOCKER_HELPER_SESSION_TOKEN='dht_...'
 docker-helper pull alpine:3.24
-docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
+docker-helper run alpine:3.24 -- echo hello-from-docker-helper
 .fi
 .RE
 .PP
@@ -144,7 +144,7 @@ Machine-facing completion query: print the target Principal's effective allowed 
 Machine-facing completion query: print the effective allowed roots of the Launcher a Session created right now with this authority would use, one path per line. The typed \fB\-\-principal\fR/\fB\-\-launcher\fR selectors are forwarded to the daemon, which resolves the same target a real session create with those selectors would use.
 .TP
 .B docker-helper completion roots launcher [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
-Machine-facing completion query: print the stored allowed roots of the target Launcher (the default Launcher of the \fB\-\-principal\fR-named Principal, otherwise the Principal inferred from the credential), one path per line — the universe of the launcher allowed-root existing-entity mutations.
+Machine-facing completion query: print the stored allowed roots of the target Launcher (the default Launcher of the \fB\-\-principal\fR-named Principal, otherwise the Principal inferred from the credential, or the typed positional LAUNCHER), one path per line — the universe of the launcher allowed-root existing-entity mutations.
 .TP
 .B docker-helper completion selectors principal [\-\-command PATH] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Machine-facing completion query: print the Principal names the authenticated authority may target with a \-\-principal selector on the completed command path, one per line. Only an admin authority receives the daemon's Principal list; a Principal credential receives exactly its own username on the Launcher command families and on the \fBprincipal show\fR USER positional, and nothing where the selector is contractually illegal (both Session command paths); every other authority degrades silently.
@@ -153,8 +153,12 @@ Machine-facing completion query: print the Principal names the authenticated aut
 Machine-facing completion query: print the Launcher selectors the authenticated authority may target with a \-\-launcher selector or the positional [LAUNCHER] argument, one per line, honoring the typed \-\-principal context. An admin with a context receives that Principal's Launcher names; an admin without one receives only globally resolvable \fBdhl_\fR Launcher IDs; a Principal credential receives its own Launchers' names; a Launcher credential and any foreign scope receive nothing.
 .SS Session Commands
 .TP
-.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-filesystem-root PATH=ACCESS]... [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
-Create a new session for a workspace. With \-\-json, output in JSON format.
+.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-filesystem-root PATH=ACCESS]... [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json] WORKSPACE
+Create a new session for a workspace. WORKSPACE is the one required
+positional operand: a workspace-relative path or an absolute host path
+inside the authenticated authority's effective allowed roots (the daemon
+canonicalizes the workspace and enforces containment). With \-\-json,
+output in JSON format.
 The repeatable \fB\-\-filesystem-root PATH=ACCESS\fR flag issues additional
 filesystem roots for the Session: PATH is an absolute host path inside the
 resolved target Launcher's effective allowed roots (an existing directory
@@ -221,8 +225,9 @@ authority), and a missing or foreign session is the non-disclosing
 the daemon's canonical snapshot loader, never a recomputation of current
 policy.
 .TP
-.B docker-helper session delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-id SESSION_ID [\-\-json]
-Delete a session by ID. With \-\-json, output in JSON format.
+.B docker-helper session delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] SESSION_ID [\-\-json]
+Delete a session by ID. SESSION_ID is the one required positional operand,
+matching \fBsession show SESSION_ID\fR. With \-\-json, output in JSON format.
 .TP
 .B docker-helper self [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
 Introspect the authenticated credential's own identity. The daemon
@@ -404,21 +409,19 @@ and
 .BR \-\-token-file\ FILE ;
 they appear in each synopsis below.
 .TP
-.B docker-helper launcher create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-name NAME] [\-\-allowed-root PATH]... [\-\-issue-credential | \-\-no-credential] [\-\-json]
-Create a launcher for a principal. If \fB\-\-principal\fR is omitted it is
-inferred from the authenticated credential via \fBGET /auth\fR. The launcher
-name defaults to \fBdefault\fR; a principal's \fBdefault\fR launcher is
-provisioned automatically at principal creation, so an omitted
-name conflicts if the principal already has a launcher named \fBdefault\fR.
+.B docker-helper launcher create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-allowed-root PATH]... [\-\-issue-credential | \-\-no-credential] [\-\-json] NAME
+Create a launcher with the name NAME (the one required positional
+operand) for a principal. If \fB\-\-principal\fR is omitted it is
+inferred from the authenticated credential via \fBGET /auth\fR.
+\fBlauncher create default\fR is an ordinary explicit attempt to create the
+\fBdefault\fR Launcher; the daemon's canonical conflict path decides it.
+A principal's \fBdefault\fR launcher is provisioned automatically at
+principal creation, so the explicit attempt conflicts if the principal
+already has a launcher named \fBdefault\fR with
+\fBlauncher "<name>" already exists for principal "<user>"\fR.
 That launcher is a normal, mutable launcher and can later be renamed or
 deleted; only the reserved user-mode daemon-owner default Launcher is
-permanently protected.
-Before prompting for a credential the CLI checks for an existing
-\fBdefault\fR launcher and, when one exists, fails with
-\fBlauncher "<name>" already exists for principal "<user>"\fR and a hint to
-use \fB\-\-name NAME\fR instead of issuing a doomed create request; a
-transient pre-flight failure does not block the create, which remains
-atomic on the daemon. Launcher names are path-safe identifiers:
+permanently protected. Launcher names are path-safe identifiers:
 1..63 characters of lowercase letters, digits, and internal hyphens, with
 alphanumeric first and last characters; the exact supplied value is
 accepted or rejected. With no \fB\-\-allowed-root\fR the scope is
@@ -458,14 +461,16 @@ canonical launcher document.
 Delete a launcher. With \-\-json the structured delete result
 (\fBlauncher\fR, \fBdeleted\fR) replaces the human line.
 .TP
-.B docker-helper launcher allowed-root add [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-access ACCESS] [\-\-json] PATH [LAUNCHER]
-Add one allowed root to a launcher. With no LAUNCHER the Principal's
-default launcher is targeted. An add on an inherit launcher narrows it
+.B docker-helper launcher allowed-root add [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-access ACCESS] [\-\-json] [LAUNCHER] PATH
+Add one allowed root to a launcher. The target-first operand order is
+[LAUNCHER] PATH: with no LAUNCHER the Principal's default launcher is
+targeted; with one, LAUNCHER is a launcher name or ID (\fBdhl_\fR...) and
+PATH the added root. An add on an inherit launcher narrows it
 to restricted scope atomically with the insert. Omitted \fB\-\-access\fR
 is the canonical read_write grant. With \-\-json the daemon's canonical
 narrow mutation document replaces the human acknowledgement.
 .TP
-.B docker-helper launcher allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] PATH read_only|read_write [LAUNCHER]
+.B docker-helper launcher allowed-root set-access [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER] PATH read_only|read_write
 Change the access mode (read_write or read_only) of one stored launcher
 allowed root, matched by the stored canonical identity. The scope mode
 is never changed. The success presentation is the one shared set-access
@@ -478,7 +483,7 @@ the shared structured result object (\fBpath\fR, \fBaccess\fR,
 List a launcher's stored allowed roots, one canonical root per line;
 \-\-json prints the canonical rich entries with access modes.
 .TP
-.B docker-helper launcher allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] PATH [LAUNCHER]
+.B docker-helper launcher allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER] PATH
 Remove one allowed root from a launcher. Removing the last root leaves
 the launcher restricted with an empty root set (fail-closed); only an
 explicit inherit returns the launcher to the Principal ceiling. With
@@ -614,10 +619,11 @@ root-management API. \fBselinux check\fR remains a read-only diagnostic.
 .B docker-helper pull [\-\-system] [\-\-endpoint ENDPOINT] IMAGE
 Pull a Docker image.
 .TP
-.B docker-helper build [\-\-system] [\-\-endpoint ENDPOINT] \-\-context PATH \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...]
-Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
-\-\-context accepts a workspace-relative path or an absolute host path
-inside the session workspace (the daemon validates containment).
+.B docker-helper build [\-\-system] [\-\-endpoint ENDPOINT] [\-\-dockerfile FILE] \-\-image NAME [\-\-build-arg KEY=VALUE ...] CONTEXT
+Build a Docker image. CONTEXT is the one required positional operand: a
+workspace-relative path or an absolute host path inside the session
+workspace (the daemon validates containment). \-\-build-arg may be
+repeated to pass multiple build arguments.
 Build arguments are not a secret transport: a value reaches the
 daemon-side Docker CLI child as \-\-build-arg K=V argv and is observable
 through /proc/<pid>/cmdline while that child runs (where host procfs
@@ -634,8 +640,12 @@ same ceilings also bound the synchronous pull and registry-login
 executions, which reserve the same shared capacity before their Docker
 process starts and never register an operation.
 .TP
-.B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] \-\- [command]
- Run a Docker container. \-\-env, \-\-env-from and \-\-mount may be repeated.
+.B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-env-from DEST=SOURCE ...] [\-\-mount SOURCE:TARGET[:ro] ...] [\-\-helper\-socket] IMAGE [\-\-] [command...]
+ Run a Docker container. IMAGE is the one required positional operand: all
+docker-helper flags occur before IMAGE, and everything after it belongs
+to the workload command; a single optional bare \fB\-\-\fR separator after
+IMAGE may be used for clarity. \-\-env, \-\-env-from and \-\-mount may be
+repeated.
 A run request carries at most 16 caller mounts (duplicates and read-only
 mounts included; the server-owned helper-socket projection is not a
 caller mount): a longer list is refused with
@@ -685,8 +695,9 @@ credential, passed separately (for example with
 .BR \-\-env\-from ).
 Not supported in user mode; the operation is rejected there.
 .TP
-.B docker-helper registry login [\-\-system] [\-\-endpoint ENDPOINT] \-\-registry REGISTRY \-\-username USER [\-\-password-stdin] [\-\-json]
-Log in to a container registry for the current session.
+.B docker-helper registry login [\-\-system] [\-\-endpoint ENDPOINT] \-\-username USER [\-\-password-stdin] [\-\-json] REGISTRY
+Log in to a container registry for the current session. REGISTRY is the
+one required positional operand.
 With \-\-password-stdin, read the password from stdin.
 With \-\-json, output in JSON format.
 .PP
