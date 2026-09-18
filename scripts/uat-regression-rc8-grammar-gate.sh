@@ -196,8 +196,11 @@ subcase_b() {
     reg_fail "B: registry login unexpectedly succeeded: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
-  # build CONTEXT (positional) with the retained build parameters.
-  local ctx="$TMPDIR_REG28/ctx"
+  # build CONTEXT (positional) with the retained build parameters. The
+  # context is workspace-relative data of the build Session: it must lie
+  # inside the issued workspace, so the fixture builds from home/ws/ctx.
+  local ctx
+  ctx="$home/ws/ctx"
   mkdir -p "$ctx"
   printf 'FROM scratch\n' > "$ctx/Dockerfile"
   out="$(dh session create --system --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
