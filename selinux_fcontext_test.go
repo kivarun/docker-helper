@@ -60,6 +60,28 @@ func TestSELinuxPolicyDaemonWorkspaceAccess(t *testing.T) {
 	}
 }
 
+// D1 (v2.2.0-rc.8 UAT): build-context staging preserves build-context
+// symlinks themselves (the host-side target is never dereferenced). The
+// shipped policy must grant exactly the two lnk_file permissions the staging
+// walk consumes: getattr for the source-side fstat of a workspace symlink
+// entry (the O_PATH fd fstat in copyEntry, staging_linux.go), and setattr
+// for the staged symlink's own no-follow metadata operation
+// (utimensat AT_SYMLINK_NOFOLLOW in setTimesFromStat). Without either, every
+// build context containing a symlink fails staging before BuildKit starts.
+func TestSELinuxPolicyBuildStagingSymlink(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_runtime_t:lnk_file { create read setattr unlink };") {
+		t.Error("policy must grant docker_helper_t runtime_t lnk_file setattr (staged build-context symlink metadata)")
+	}
+	if !strings.Contains(content, "allow docker_helper_t user_home_type:lnk_file { getattr read };") {
+		t.Error("policy must grant docker_helper_t user_home_type lnk_file getattr (fstat of workspace symlink entries)")
+	}
+}
+
 func TestSELinuxPolicyContainerWorkspaceAccess(t *testing.T) {
 	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
 	if err != nil {

@@ -262,7 +262,16 @@ type_transition docker_helper_t docker_helper_config_t:file docker_helper_admin_
 allow docker_helper_t docker_helper_runtime_t:dir { getattr search read open write add_name remove_name create mounton rmdir setattr };
 allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink mounton getattr setattr rename };
 allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink };
-allow docker_helper_t docker_helper_runtime_t:lnk_file { create read unlink };
+# D1 (v2.2.0-rc.8 UAT): build-context staging preserves build-context
+# symlinks themselves. The staging walker re-creates each source symlink with
+# its original link text (Symlinkat — create) and then applies the source
+# symlink's own timestamps to the staged link via
+# utimensat(..., AT_SYMLINK_NOFOLLOW) (setTimesFromStat, staging_linux.go),
+# which is mediated as setattr on the staged lnk_file object itself — never
+# on the link target, which is never dereferenced or imported. Without
+# setattr every build context containing a symlink fails staging with EACCES
+# before BuildKit starts (HTTP 500 internal_error).
+allow docker_helper_t docker_helper_runtime_t:lnk_file { create read setattr unlink };
 
 # State (from live AVC evidence)
 # dir create/rmdir: the 2.2 workload-MAC lifecycle creates the durable
@@ -353,7 +362,14 @@ allow docker_helper_t user_home_type:dir { getattr search read open };
 allow docker_helper_t user_home_type:file { getattr read open };
 
 # user_home_type:lnk_file — symlink traversal in workspace
-allow docker_helper_t user_home_type:lnk_file { read };
+# D1 (v2.2.0-rc.8 UAT): a build-context symlink entry is staged as a symlink.
+# The staging walker fstats every source entry through its O_PATH fd before
+# readlinkat (copyEntry, staging_linux.go), which requires getattr on the
+# workspace lnk_file object itself — never on the link target, which is never
+# dereferenced. The supported SELinux UAT setup labels home workspaces
+# user_home_t (user_home_type attribute); without getattr every build context
+# containing a symlink fails staging there before BuildKit starts.
+allow docker_helper_t user_home_type:lnk_file { getattr read };
 
 # Home directory traversal (proven in enforcing UAT)
 allow docker_helper_t user_home_dir_t:dir { getattr search };
