@@ -29,6 +29,22 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Request-shape validation before any capacity reservation or
+	// filesystem work, mirroring the run surface's convention: a missing
+	// required field is a malformed request, not a build-context
+	// authorization/path failure. The message names the missing field.
+	switch {
+	case req.Context == "":
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "missing_field", "context is required", session.PrincipalName)
+		return
+	case req.Dockerfile == "":
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "missing_field", "dockerfile is required", session.PrincipalName)
+		return
+	case req.Image == "":
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "missing_field", "image is required", session.PrincipalName)
+		return
+	}
+
 	// Reserve fixed Release-2.2 capacity before any expensive
 	// preparation: the session-use lease, build-request probing, snapshot
 	// exposure resolution, and the build staging all happen while the
@@ -535,10 +551,6 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateBuildRequest(workspace string, req buildRequest) (string, string, error) {
-	if req.Context == "" || req.Dockerfile == "" || req.Image == "" {
-		return "", "", errors.New("context, dockerfile and image are required")
-	}
-
 	if filepath.IsAbs(req.Dockerfile) {
 		return "", "", errors.New("dockerfile must be relative to context")
 	}

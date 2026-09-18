@@ -1081,6 +1081,46 @@ func postBuild(t *testing.T, app *App, token string, body string) response {
 	return resp
 }
 
+// TestErrorContractBuildMissingField proves the malformed-request family of
+// the build surface: a missing required field is the missing_field request
+// error naming the field, not the invalid_build_context authorization/path
+// contract; ordinary invalid context spellings keep invalid_build_context
+// with its stable bounded message.
+func TestErrorContractBuildMissingField(t *testing.T) {
+	app := newTestAppWithAdminTokenAndStaging(t)
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	for _, missing := range []string{"context", "dockerfile", "image"} {
+		t.Run(missing, func(t *testing.T) {
+			fields := map[string]string{"context": "buildctx", "dockerfile": "Dockerfile", "image": "example:test"}
+			delete(fields, missing)
+			body, _ := json.Marshal(fields)
+			resp := postBuild(t, app, result.Token, string(body))
+
+			if resp.Code != "missing_field" {
+				t.Errorf("expected code 'missing_field', got %q", resp.Code)
+			}
+			if resp.Message != missing+" is required" {
+				t.Errorf("expected message naming the missing field, got %q", resp.Message)
+			}
+		})
+	}
+
+	// Control: an ordinary invalid context spelling keeps the stable
+	// invalid_build_context contract with its bounded message.
+	resp := postBuild(t, app, result.Token,
+		`{"context":"../outside","dockerfile":"Dockerfile","image":"example:test"}`)
+	if resp.Code != "invalid_build_context" {
+		t.Errorf("expected code 'invalid_build_context', got %q", resp.Code)
+	}
+	if resp.Message != "invalid build context" {
+		t.Errorf("expected the bounded build-context message, got %q", resp.Message)
+	}
+}
+
 // TestErrorContractWorkspacePathDoesNotExist proves the missing-path
 // diagnosis of an admitted workspace spelling: the public cause identifies
 // the nonexistent path itself — not a symlink-resolution problem — while
