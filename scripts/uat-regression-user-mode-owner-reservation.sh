@@ -231,7 +231,7 @@ expect_reserved "B principal allowed-root remove" principal allowed-root remove 
 expect_reserved "B default launcher disable"      launcher set --principal "$OWNER" --enabled false default
 expect_reserved "B default launcher rename"       launcher set --principal "$OWNER" --name moved default
 expect_reserved "B default launcher delete"       launcher delete --principal "$OWNER" default
-expect_reserved "B default launcher restricted"   launcher allowed-root add --principal "$OWNER" "$WS" default
+expect_reserved "B default launcher restricted"   launcher allowed-root add --principal "$OWNER" "$WS"
 assert_owner_invariant "B after rejections"
 
 # --- C. harmless no-ops remain coherent --------------------------------------

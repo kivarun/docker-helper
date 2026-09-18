@@ -200,13 +200,19 @@ subcase_b() {
   local ctx="$TMPDIR_REG28/ctx"
   mkdir -p "$ctx"
   printf 'FROM scratch\n' > "$ctx/Dockerfile"
-  out="$(dh build --system "$ctx" --dockerfile Dockerfile --image uat-reg28:2.2 2>&1)"; rc=$?
+  out="$(dh session create --system --token-file /etc/docker-helper/admin.token "$home/ws" --json 2>&1)" || {
+    reg_fail "B: build session create failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+    return
+  }
+  local bid="$(printf '%s' "$out" | json_field id)"
+  out="$(DOCKER_HELPER_SESSION_TOKEN="$bid" dh build --system "$ctx" --dockerfile Dockerfile --image uat-reg28:2.2 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ]; then
     reg_ok "B: build CONTEXT --dockerfile --image builds from the positional context"
     docker rmi uat-reg28:2.2 >/dev/null 2>&1 || true
   else
     reg_fail "B: build CONTEXT failed (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
+  dh session delete --system "$bid" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -230,13 +236,14 @@ subcase_c() {
   done
 
   # target-first arity: the allowed-root mutations share the same exit
-  # semantics.
+  # semantics. `set-access PATH ACCESS` is a valid default-Launcher form, so
+  # its arity errors are zero, one, and four positionals.
   for probe in \
     "launcher allowed-root add" \
     "launcher allowed-root add a b c" \
     "launcher allowed-root remove" \
     "launcher allowed-root set-access" \
-    "launcher allowed-root set-access a b" \
+    "launcher allowed-root set-access a" \
     "launcher allowed-root set-access a b c d"; do
     rc=0; out="$(dh $probe 2>&1 </dev/null)" || rc=$?
     expect_syntax_exit "C: '$probe' is a CLI syntax exit (rc=2)" "$rc" "$out"
@@ -353,11 +360,29 @@ subcase_d() {
 # ---------------------------------------------------------------------------
 subcase_e() {
   reg_info "subcase E: run passes post-IMAGE arguments to the workload"
-  local out rc
+  local out rc home cred_json cred_token sid_json sid
+
+  home="$(fixture)" || return
+  cred_json="$(dh principal credential create --system --name gate28 "$FIX_USER" 2>&1)" || {
+    reg_fail "E: principal credential create failed: $(printf '%s' "$cred_json" | head -2 | tr '\n' ' ' | redact)"
+    return
+  }
+  cred_token="$(printf '%s' "$cred_json" | json_field token)"
+  [ -n "$cred_token" ] || { reg_fail "E: principal credential create returned no token"; return; }
+  sid_json="$(dh session create --system --token-file /etc/docker-helper/admin.token "$home/ws" --json 2>&1)" || {
+    reg_fail "E: session create failed: $(printf '%s' "$sid_json" | head -2 | tr '\n' ' ' | redact)"
+    return
+  }
+  sid="$(printf '%s' "$sid_json" | json_field id)"
+  [ -n "$sid" ] || { reg_fail "E: session create returned no id"; return; }
+
+  run_workload() {
+    DOCKER_HELPER_SESSION_TOKEN="$sid" dh "$@"
+  }
 
   # 1. flag-like workload arguments after IMAGE reach the container
   #    verbatim, without the bare -- separator.
-  out="$(dh run "$IMAGE" sh -c 'printf "ARGS:%s:%s:%s" "$1" "$2" "$3"' sh -- --json --image X 2>&1)"; rc=$?
+  out="$(run_workload run "$IMAGE" sh -c 'printf "ARGS:%s:%s:%s" "$1" "$2" "$3"' sh -- --json --image X 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ARGS:--json:--image:X'; then
     reg_ok "E: workload args survive unchanged without the -- separator"
   else
@@ -365,7 +390,7 @@ subcase_e() {
   fi
 
   # 2. the same with the bare -- separator.
-  out="$(dh run "$IMAGE" -- sh -c 'printf "ARGS:%s:%s:%s" "$1" "$2" "$3"' sh -- --json --image X 2>&1)"; rc=$?
+  out="$(run_workload run "$IMAGE" -- sh -c 'printf "ARGS:%s:%s:%s" "$1" "$2" "$3"' sh -- --json --image X 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ARGS:--json:--image:X'; then
     reg_ok "E: workload args survive unchanged with the -- separator"
   else
@@ -373,7 +398,7 @@ subcase_e() {
   fi
 
   # 3. all docker-helper flags precede IMAGE.
-  out="$(dh run --env UAT_REG28=1 "$IMAGE" sh -c 'test "$UAT_REG28" = 1 && echo ENV-OK' 2>&1)"; rc=$?
+  out="$(run_workload run --env UAT_REG28=1 "$IMAGE" sh -c 'test "$UAT_REG28" = 1 && echo ENV-OK' 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ENV-OK'; then
     reg_ok "E: flags before IMAGE are docker-helper flags"
   else

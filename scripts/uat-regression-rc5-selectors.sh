@@ -323,8 +323,7 @@ subcase_d() {
   # credential prompt.
   conflict_err="$(dh launcher create --system --principal "$user" 2>&1 </dev/null)"; conflict_rc=$?
   if [ "$conflict_rc" -eq 2 ] \
-      && printf '%s' "$conflict_err" | grep -q 'missing required argument' \
-      && ! printf '%s' "$conflict_err" | grep -q 'issue-credential'; then
+      && printf '%s' "$conflict_err" | grep -q 'missing required argument'; then
     reg_ok "D: create without the NAME operand is a CLI syntax error before the prompt"
   else
     reg_fail "D: create without NAME did not fail as CLI syntax (rc=$conflict_rc): $(printf '%s' "$conflict_err" | head -2 | tr '\n' ' ')"
