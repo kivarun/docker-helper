@@ -165,7 +165,7 @@ subcase_b() {
 
   # session create WORKSPACE (positional) + session delete SESSION_ID
   # (positional, same grammar as session show).
-  out="$(dh session create --system --token-file /etc/docker-helper/admin.token "$home/ws" --json 2>&1)" || {
+  out="$(dh session create --system --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
     reg_fail "B: session create WORKSPACE failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
@@ -200,7 +200,7 @@ subcase_b() {
   local ctx="$TMPDIR_REG28/ctx"
   mkdir -p "$ctx"
   printf 'FROM scratch\n' > "$ctx/Dockerfile"
-  out="$(dh session create --system --token-file /etc/docker-helper/admin.token "$home/ws" --json 2>&1)" || {
+  out="$(dh session create --system --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
     reg_fail "B: build session create failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
@@ -369,7 +369,7 @@ subcase_e() {
   }
   cred_token="$(printf '%s' "$cred_json" | json_field token)"
   [ -n "$cred_token" ] || { reg_fail "E: principal credential create returned no token"; return; }
-  sid_json="$(dh session create --system --token-file /etc/docker-helper/admin.token "$home/ws" --json 2>&1)" || {
+  sid_json="$(dh session create --system --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
     reg_fail "E: session create failed: $(printf '%s' "$sid_json" | head -2 | tr '\n' ' ' | redact)"
     return
   }
