@@ -1051,34 +1051,73 @@ func TestImageReferenceNotRejectedByHelper(t *testing.T) {
 
 // ---------- D2/D3/D4/D7 path-resolution diagnostics ----------
 
+// postedRequestResult pairs the public body of a posted request with the
+// HTTP status it was answered with, so the path-diagnostics regressions
+// assert the full public contract — HTTP status plus JSON code/message —
+// instead of the decoded body alone. A success body decodes into the
+// embedded response with OK=true and empty code/message; the raw body is
+// kept so a success control can prove the real creation contract.
+type postedRequestResult struct {
+	response
+	status int
+	raw    []byte
+}
+
+// decodePostedBody decodes a posted request's public body leniently: both a
+// refusal envelope (ok=false with code/message) and a success body (ok=true;
+// the embedded response simply ignores the success-only fields) decode.
+func decodePostedBody(t *testing.T, body []byte) response {
+	t.Helper()
+	var resp response
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode posted response: %v (body=%s)", err, body)
+	}
+	return resp
+}
+
 // postSessionCreate posts a session-create body to the real production
-// handler and decodes the public refusal.
-func postSessionCreate(t *testing.T, app *App, body string) response {
+// handler and returns the HTTP status and decoded public body.
+func postSessionCreate(t *testing.T, app *App, body string) postedRequestResult {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(body)))
 	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response %s: %v", w.Body.String(), err)
+	return postedRequestResult{
+		response: decodePostedBody(t, w.Body.Bytes()),
+		status:   w.Code,
+		raw:      w.Body.Bytes(),
 	}
-	return resp
 }
 
-// postBuild posts a build body to the real production handler and decodes
-// the public refusal.
-func postBuild(t *testing.T, app *App, token string, body string) response {
+// postBuild posts a build body to the real production handler and returns
+// the HTTP status and decoded public body.
+func postBuild(t *testing.T, app *App, token string, body string) postedRequestResult {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(body)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response %s: %v", w.Body.String(), err)
+	return postedRequestResult{
+		response: decodePostedBody(t, w.Body.Bytes()),
+		status:   w.Code,
+		raw:      w.Body.Bytes(),
 	}
-	return resp
+}
+
+// requireRefused asserts the refusal half of the public contract: the HTTP
+// status and the JSON code/message.
+func requireRefused(t *testing.T, resp postedRequestResult, wantStatus int, wantCode string) {
+	t.Helper()
+	if resp.status != wantStatus {
+		t.Errorf("expected HTTP %d, got %d", wantStatus, resp.status)
+	}
+	if resp.Code != wantCode {
+		t.Errorf("expected code %q, got %q", wantCode, resp.Code)
+	}
+	if resp.OK {
+		t.Error("expected ok=false for a refusal")
+	}
 }
 
 // TestErrorContractBuildMissingField proves the malformed-request family of
@@ -1100,9 +1139,7 @@ func TestErrorContractBuildMissingField(t *testing.T) {
 			body, _ := json.Marshal(fields)
 			resp := postBuild(t, app, result.Token, string(body))
 
-			if resp.Code != "missing_field" {
-				t.Errorf("expected code 'missing_field', got %q", resp.Code)
-			}
+			requireRefused(t, resp, http.StatusBadRequest, "missing_field")
 			if resp.Message != missing+" is required" {
 				t.Errorf("expected message naming the missing field, got %q", resp.Message)
 			}
@@ -1113,9 +1150,7 @@ func TestErrorContractBuildMissingField(t *testing.T) {
 	// invalid_build_context contract with its bounded message.
 	resp := postBuild(t, app, result.Token,
 		`{"context":"../outside","dockerfile":"Dockerfile","image":"example:test"}`)
-	if resp.Code != "invalid_build_context" {
-		t.Errorf("expected code 'invalid_build_context', got %q", resp.Code)
-	}
+	requireRefused(t, resp, http.StatusBadRequest, "invalid_build_context")
 	if resp.Message != "invalid build context" {
 		t.Errorf("expected the bounded build-context message, got %q", resp.Message)
 	}
@@ -1131,9 +1166,7 @@ func TestErrorContractWorkspacePathDoesNotExist(t *testing.T) {
 	ws := testWorkspaceDir(t, root)
 
 	resp := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(filepath.Join(ws, "does-not-exist"))+`"}`)
-	if resp.Code != "invalid_workspace" {
-		t.Errorf("expected code 'invalid_workspace', got %q", resp.Code)
-	}
+	requireRefused(t, resp, http.StatusBadRequest, "invalid_workspace")
 	if !strings.Contains(resp.Message, "does not exist") {
 		t.Errorf("expected the missing-path cause, got %q", resp.Message)
 	}
@@ -1143,10 +1176,32 @@ func TestErrorContractWorkspacePathDoesNotExist(t *testing.T) {
 		}
 	}
 
-	// Control: a valid workspace still creates through the same handler.
+	// Control: a valid workspace still creates through the same handler —
+	// the real success contract, not merely the absence of two refusals.
 	valid := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(ws)+`"}`)
-	if valid.Code == "invalid_workspace" || valid.Code == "internal_error" {
-		t.Errorf("valid workspace create refused: %s (%s)", valid.Code, valid.Message)
+	requireSessionCreated(t, valid, ws)
+}
+
+// requireSessionCreated asserts the real success contract of a
+// session-create control: HTTP 201 with ok=true and a decoded created
+// Session carrying its own ID and bearer token for the requested workspace.
+func requireSessionCreated(t *testing.T, resp postedRequestResult, workspace string) {
+	t.Helper()
+	if resp.status != http.StatusCreated {
+		t.Errorf("expected HTTP 201 for a successful Session creation, got %d", resp.status)
+	}
+	if !resp.OK {
+		t.Errorf("expected ok=true for a successful Session creation, got body=%s", resp.raw)
+	}
+	var created createSessionResponse
+	if err := json.Unmarshal(resp.raw, &created); err != nil {
+		t.Fatalf("decode created Session %s: %v", resp.raw, err)
+	}
+	if created.Session.ID == "" || created.Token == "" {
+		t.Errorf("successful creation must carry the created Session identity and token, got %s", resp.raw)
+	}
+	if workspace != "" && created.Session.Workspace != workspace {
+		t.Errorf("created Session workspace = %q, want %q", created.Session.Workspace, workspace)
 	}
 }
 
@@ -1170,9 +1225,7 @@ func TestErrorContractWorkspaceSymlinkEscapeStillRefused(t *testing.T) {
 	}
 
 	resp := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(escape)+`"}`)
-	if resp.Code != "invalid_workspace" {
-		t.Errorf("expected code 'invalid_workspace', got %q", resp.Code)
-	}
+	requireRefused(t, resp, http.StatusBadRequest, "invalid_workspace")
 	if resp.Message != "workspace must be inside an allowed root" {
 		t.Errorf("expected the stable containment refusal, got %q", resp.Message)
 	}
@@ -1248,9 +1301,7 @@ func TestErrorContractWorkspaceDeniedResolutionIsPolicyRefusal(t *testing.T) {
 			t.Cleanup(func() { evalSymlinksFn, osStatFn = origEval, origStat })
 
 			resp := postSessionCreate(t, app, `{"workspace":"`+tc.spellTarget()+`"}`)
-			if resp.Code != "invalid_workspace" {
-				t.Errorf("expected code 'invalid_workspace', got %q", resp.Code)
-			}
+			requireRefused(t, resp, http.StatusBadRequest, "invalid_workspace")
 			if resp.Message != tc.wantMessage {
 				t.Errorf("expected message %q, got %q", tc.wantMessage, resp.Message)
 			}
@@ -1278,9 +1329,7 @@ func TestErrorContractFilesystemRootMissing(t *testing.T) {
 
 	resp := postSessionCreate(t, app,
 		`{"workspace":"`+filepath.ToSlash(ws)+`","filesystem_roots":[{"path":"`+missingRoot+`","access":"read_write"}]}`)
-	if resp.Code != "invalid_filesystem_policy" {
-		t.Errorf("expected code 'invalid_filesystem_policy', got %q", resp.Code)
-	}
+	requireRefused(t, resp, http.StatusBadRequest, "invalid_filesystem_policy")
 	if resp.Message != "requested filesystem root does not exist or cannot be resolved" {
 		t.Errorf("expected the bounded resolution message, got %q", resp.Message)
 	}
@@ -1302,21 +1351,19 @@ func TestErrorContractFilesystemRootMissing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := postSessionCreate(t, app, tc.body)
-			if resp.Code != "invalid_filesystem_policy" {
-				t.Errorf("expected code 'invalid_filesystem_policy', got %q", resp.Code)
-			}
+			requireRefused(t, resp, http.StatusBadRequest, "invalid_filesystem_policy")
 			if resp.Message != "invalid session filesystem policy" {
 				t.Errorf("expected the generic bounded policy message, got %q", resp.Message)
 			}
 		})
 	}
 
-	// Control: a valid requested root still creates through the same handler.
+	// Control: a valid requested root still creates through the same
+	// handler — the real success contract, not merely the absence of the
+	// refusal code.
 	resp = postSessionCreate(t, app,
 		`{"workspace":"`+filepath.ToSlash(ws)+`","filesystem_roots":[{"path":"`+filepath.ToSlash(ws)+`","access":"read_write"}]}`)
-	if resp.Code != "" && resp.Code != "invalid_filesystem_policy" {
-		t.Errorf("valid filesystem-root create refused: %s (%s)", resp.Code, resp.Message)
-	}
+	requireSessionCreated(t, resp, filepath.ToSlash(ws))
 }
 
 // TestErrorContractFilesystemRootDeniedResolutionStaysPolicyRefusal proves
@@ -1387,9 +1434,7 @@ func TestErrorContractFilesystemRootDeniedResolutionStaysPolicyRefusal(t *testin
 			t.Cleanup(func() { evalSymlinksFn, osStatFn = origEval, origStat })
 
 			resp := postSessionCreate(t, app, body(tc.spelling))
-			if resp.Code != "invalid_filesystem_policy" {
-				t.Errorf("expected code 'invalid_filesystem_policy', got %q", resp.Code)
-			}
+			requireRefused(t, resp, http.StatusBadRequest, "invalid_filesystem_policy")
 			if resp.Message != "invalid session filesystem policy" {
 				t.Errorf("expected the generic bounded policy message, got %q", resp.Message)
 			}

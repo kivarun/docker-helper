@@ -3629,7 +3629,7 @@ Current error codes (non-exhaustive):
 |------|----------|-----------|
 | `unauthorized` | all protected | missing/invalid token |
 | `invalid_json` | all JSON endpoints | request body is not valid JSON |
-| `invalid_build_context` | `POST /build` | build context authorization/path validation failure (the context spelling is outside the workspace, does not resolve inside it, or is not a directory) |
+| `invalid_build_context` | `POST /build` | build context **or Dockerfile** authorization/path/type validation failure (the context spelling is outside the workspace, does not resolve inside it, or is not a directory; the Dockerfile spelling is absolute, escapes the build context, does not resolve or access inside it, or is not a regular file) |
 | `missing_field` | `POST /build` | a required build field (`context`, `dockerfile`, or `image`) is missing; the message names the field (`<field> is required`) — a malformed request, not a build-context failure |
 | `build_context_too_large` | `POST /build` | the build context exceeds one of the fixed build-staging security ceilings (staged payload bytes, entries, or depth); the message names only the exhausted dimension — one canonical code for all three dimensions (see [Build context](#build-context)) |
 | `invalid_build_args` | `POST /build` | build-arg name invalid |
