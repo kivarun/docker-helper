@@ -775,8 +775,10 @@ subcase_f() {
   local eff_roots expected_top
   eff_roots="$(dh completion roots principal --token-file "$cred" 2>/dev/null)"
   expected_top="$(printf '%s\n' "$eff_roots" | sed -n 's|^/||p' | sed 's|/.*$||' | LC_ALL=C sort -u | sed 's|^|/|')"
+  local sel_domain
+  sel_domain="$(dh completion selectors launcher --token-file "$cred" 2>/dev/null)"
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" "")"
-  if [ -n "$expected_top" ] && [ "$out" = "$(printf '%s\n' "$expected_top" "killme" | LC_ALL=C sort -u)" ]; then
+  if [ -n "$expected_top" ] && [ "$out" = "$(printf '%s\n%s\n' "$expected_top" "$sel_domain" | LC_ALL=C sort -u)" ]; then
     reg_ok "F: launcher allowed-root add <TAB> offers the selector + ceiling-boundary union"
   else
     reg_fail "F: launcher allowed-root add <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want selector union with [$expected_top]"
@@ -807,10 +809,10 @@ subcase_f() {
   #    filesystem); a PATH-led form is already complete and offers nothing
   #    further.
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" "")"
-  if [ "$out" = "killme" ]; then
+  if [ "$out" = "$sel_domain" ]; then
     reg_ok "F: launcher allowed-root remove <TAB> offers the selector domain (no stored roots)"
   else
-    reg_fail "F: launcher allowed-root remove <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want [killme]"
+    reg_fail "F: launcher allowed-root remove <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want [$sel_domain]"
   fi
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" "$opt" "")"
   if [ -z "$out" ]; then

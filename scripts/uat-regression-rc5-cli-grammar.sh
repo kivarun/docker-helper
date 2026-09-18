@@ -484,10 +484,13 @@ subcase_e() {
   fi
 
   # 6. launcher allowed-root remove: the ambiguous first positional offers
-  #    the selector domain plus the default Launcher's stored roots.
+  #    the selector domain plus the default Launcher's STORED roots (exact
+  #    canonical paths, unlike add's navigable boundary segments).
   dh launcher allowed-root add --system --principal "$user" "$home/e1" >/dev/null 2>&1
+  local expected_remove
+  expected_remove="$(printf '%s\n%s\n' "$(dh completion selectors launcher --principal "$user" 2>/dev/null)" "$(dh completion roots launcher --principal "$user" 2>/dev/null)" | LC_ALL=C sort -u)"
   out="$(run_completion "$script" /usr/bin/docker-helper launcher allowed-root remove --principal "$user" "")"
-  assert_completion "E: launcher remove first positional offers selectors + stored roots" "$expected_union" "$out" || true
+  assert_completion "E: launcher remove first positional offers selectors + stored roots" "$expected_remove" "$out" || true
 
   # 7. principal allowed-root mutations: USER completes from the daemon
   #    selector introspection; PATH completes the stored Principal roots

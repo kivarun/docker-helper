@@ -66,7 +66,7 @@ fixture() {
   useradd -m "$FIX_USER" >/dev/null 2>&1 || { reg_fail "fixture: useradd failed"; return 1; }
   home="$(getent passwd "$FIX_USER" | cut -d: -f6)"
   mkdir -p "$home/ws" && chown -R "$FIX_USER:$FIX_USER" "$home"
-  out="$(dh principal create --system "$FIX_USER" 2>&1)" || {
+  out="$(dh principal create --system --no-credential "$FIX_USER" 2>&1)" || {
     reg_fail "fixture: principal create failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return 1
   }
