@@ -82,14 +82,16 @@ func TestFinalGateUATWiringIsComplete(t *testing.T) {
 		"27:H2 commit-boundary credential revocation race:uat-regression-h2-parked-revocation.sh",
 	})
 
-	// C3/H8/H2 on SELinux: the SELinux guest regression runner owns groups
-	// 7-9 (the C3 descriptor-safe restorecon race, the H8 liveness proof,
-	// and the H2 parked revocation race).
+	// C3/H8/H2/D1 on SELinux: the SELinux guest regression runner owns groups
+	// 7-10 (the C3 descriptor-safe restorecon race, the H8 liveness proof,
+	// the H2 parked revocation race, and the D1 build-staging symlink
+	// exact-artifact regression closed during the Release 2.2 RC cycle).
 	selRunner := readRepoFile(t, filepath.Join("scripts", "uat-regressions-runner-selinux.sh"))
 	requireAll(t, "scripts/uat-regressions-runner-selinux.sh", selRunner, []string{
 		"7:SELinux C3 descriptor-safe restorecon:uat-regression-selinux-c3-restorecon-race.sh",
 		"8:H8 bounded MAC-command liveness:uat-regression-h8-mac-liveness.sh",
 		"9:H2 commit-boundary credential revocation race:uat-regression-h2-parked-revocation.sh",
+		"10:D1 build staging preserves build-context symlinks:uat-regression-d1-build-staging-symlinks.sh",
 	})
 
 	// H6: the confined admin-token rotation proof stays part of the common
