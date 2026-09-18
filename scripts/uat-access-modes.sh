@@ -211,7 +211,7 @@ api() {
 # issue_launcher_credential USER LAUNCHER_ID CREDFILE
 issue_launcher_credential() {
   local out token
-  out="$(dh launcher credential create --system --principal "$1" "$2" 2>/dev/null || true)"
+  out="$(dh launcher credential create --system --principal "$1" --json "$2" 2>/dev/null || true)"
   token="$(printf '%s' "$out" | json_field token)"
   [ -n "$token" ] || return 1
   printf '%s\n' "$token" > "$3"; chmod 600 "$3"
@@ -234,7 +234,7 @@ create_session() {
 
 # show_snapshot SESSION_ID — prints the issued snapshot as PATH/ACCESS lines.
 show_snapshot() {
-  dh session show --system --id "$1" 2>/dev/null \
+  dh session show --system "$1" 2>/dev/null \
     | sed -n '/^FILESYSTEM SNAPSHOT/,$p' | tail -n +2
 }
 
@@ -1264,7 +1264,7 @@ if dh config allowed-root add --access read_write "$MR_OPT" >/dev/null 2>&1 \
 else
   acc_fail "MR setup: second effective root setup failed"
 fi
-MR_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name multiroot --no-credential 2>/dev/null || true)"
+MR_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name multiroot --no-credential --json 2>/dev/null || true)"
 MR_L_ID="$(printf '%s' "$MR_L_JSON" | json_field id)"
 if [ -n "$MR_L_ID" ] \
     && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_HOME" "$MR_L_ID" >/dev/null 2>&1 \

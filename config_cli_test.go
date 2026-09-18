@@ -146,7 +146,7 @@ func TestConfigShowAllJSON(t *testing.T) {
   "audit_enabled": false
 }`
 	setupConfigTestWithData(t, []byte(cfg))
-	stdout, _ := runConfigCLI(t, 0, "config", "show")
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
@@ -192,7 +192,7 @@ func TestConfigShowAllRedactedToken(t *testing.T) {
   "session_ttl": "24h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
-	stdout, _ := runConfigCLI(t, 0, "config", "show")
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
 	if strings.Contains(stdout, "dht_testtoken123") {
 		t.Error("real token must not appear in general show output")
 	}
@@ -214,20 +214,36 @@ func TestConfigShowSingleField(t *testing.T) {
 		field string
 		want  string
 	}{
-		// allowed_roots is the authoritative rich projection of the stored
-		// roots; the retired allowed_root_entries spelling is no longer a
-		// show field.
-		{"allowed_roots", "[\n  {\n    \"path\": \"/home/user/work\",\n    \"access\": \"read_write\"\n  }\n]\n"},
+		// Scalar fields print the raw value line by default. allowed_roots
+		// is the shared PATH/ACCESS table by default and the rich array
+		// under --json; the retired allowed_root_entries spelling is no
+		// longer a show field.
+		{"allowed_roots", "ALLOWED ROOTS\nPATH      ACCESS\n/home/user/work read_write\n"},
 		{"session_ttl", "12h\n"},
 		{"log_level", "warn\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.field, func(t *testing.T) {
 			stdout, _ := runConfigCLI(t, 0, "config", "show", tt.field)
+			if tt.field == "allowed_roots" {
+				for _, want := range []string{"ALLOWED ROOTS", "PATH", "ACCESS", "/home/user/work", "read_write"} {
+					if !strings.Contains(stdout, want) {
+						t.Errorf("allowed_roots human field output missing %q:\n%s", want, stdout)
+					}
+				}
+				return
+			}
 			if stdout != tt.want {
 				t.Errorf("expected %q, got %q", tt.want, stdout)
 			}
 		})
+	}
+
+	// The allowed_roots FIELD --json form is the canonical rich array.
+	var jsonRoots, jRootsErr bytes.Buffer
+	runCommandWithWriters([]string{"config", "show", "--json", "allowed_roots"}, &jsonRoots, &jRootsErr)
+	if strings.TrimSpace(jsonRoots.String()) != "[\n  {\n    \"path\": \"/home/user/work\",\n    \"access\": \"read_write\"\n  }\n]" {
+		t.Errorf("allowed_roots --json = %q, want the rich array", jsonRoots.String())
 	}
 
 	// The retired spelling is not an alias: it is an unknown-field refusal,
@@ -844,7 +860,7 @@ func TestConfigShowAllNoRuntimeDir(t *testing.T) {
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
-	stdout, _ := runConfigCLI(t, 0, "config", "show")
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
 	var result map[string]any
 	json.Unmarshal([]byte(stdout), &result)
 	if result["runtime_dir"] != "" {
@@ -867,7 +883,7 @@ func TestConfigShowAllWithRuntimeDir(t *testing.T) {
 	runtimeDir := "/tmp/test-runtime"
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	stdout, _ := runConfigCLI(t, 0, "config", "show")
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
 	var result map[string]any
 	json.Unmarshal([]byte(stdout), &result)
 	if result["runtime_dir"] != filepath.Join(runtimeDir, "docker-helper") {
@@ -898,7 +914,7 @@ func TestRegressionCustomConfigRelocatesPaths(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
-	stdout, _ := runConfigCLI(t, 0, "config", "show")
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
 	var result map[string]any
 	json.Unmarshal([]byte(stdout), &result)
 	if result["config_dir"] != filepath.Join(dir, "custom") {
@@ -1639,11 +1655,11 @@ func TestConfigShowHelp(t *testing.T) {
 	}
 
 	out := stdout
-	if !strings.Contains(out, "Without FIELD") {
-		t.Error("help should explain general behavior")
-	}
 	if !strings.Contains(out, "With FIELD") {
 		t.Error("help should explain single-field behavior")
+	}
+	if !strings.Contains(out, "--json prints the complete effective") {
+		t.Error("help should explain the JSON document form")
 	}
 	if !strings.Contains(out, "redacts admin_token") {
 		t.Error("help should mention token redaction")
@@ -2069,7 +2085,7 @@ func TestConfigShowEffectiveInvariant(t *testing.T) {
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
-	stdout, _ := runConfigCLI(t, 0, "config", "show")
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {

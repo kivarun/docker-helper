@@ -1314,7 +1314,7 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
   fi
 
   # G8: migrated default Launcher is fully functional.
-  G_ISSUE_OUT="$(dh launcher credential create --system --principal "$G_USER" "$G_DEFAULT_ID" 2>/dev/null || true)"
+  G_ISSUE_OUT="$(dh launcher credential create --system --principal "$G_USER" --json "$G_DEFAULT_ID" 2>/dev/null || true)"
   G_LC_TOKEN="$(printf '%s' "$G_ISSUE_OUT" | json_field token || true)"
   G_LC_ID="$(printf '%s' "$G_ISSUE_OUT" | json_field id || true)"
   if [ -n "$G_LC_TOKEN" ] && [ -n "$G_LC_ID" ]; then
@@ -1325,7 +1325,7 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
     else
       acc_fail "launcher credential on migrated default Launcher cannot create sessions"
     fi
-    G_ROT_OUT="$(dh launcher credential rotate --system --principal "$G_USER" "$G_DEFAULT_ID" 2>/dev/null || true)"
+    G_ROT_OUT="$(dh launcher credential rotate --system --principal "$G_USER" --json "$G_DEFAULT_ID" 2>/dev/null || true)"
     G_ROT_TOKEN="$(printf '%s' "$G_ROT_OUT" | json_field token || true)"
     G_ROT_ID="$(printf '%s' "$G_ROT_OUT" | json_field id || true)"
     if [ "$G_ROT_ID" = "$G_LC_ID" ] && [ -n "$G_ROT_TOKEN" ] && [ "$G_ROT_TOKEN" != "$G_LC_TOKEN" ]; then
@@ -1458,7 +1458,7 @@ if [ -n "$M_BASELINE_DEB" ]; then
 
   # Restricted Launcher with a path-only root, plus its credential.
   M_L_OUT="$(dh launcher create --system --principal "$M_USER" --name mlaunch \
-    --allowed-root "$M_POLICY/sub" --no-credential 2>/dev/null || true)"
+    --allowed-root "$M_POLICY/sub" --no-credential --json 2>/dev/null || true)"
   M_L_ID="$(printf '%s\n' "$M_L_OUT" | json_field id)"
   if [ -n "$M_L_ID" ] \
       && dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>/dev/null | grep -qx "$M_POLICY/sub"; then
@@ -1466,7 +1466,7 @@ if [ -n "$M_BASELINE_DEB" ]; then
   else
     acc_fail "M1 restricted Launcher root seeding failed"
   fi
-  M_LC_OUT="$(dh launcher credential create --system --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
+  M_LC_OUT="$(dh launcher credential create --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
   M_LC_TOKEN="$(printf '%s\n' "$M_LC_OUT" | json_field token)"
   if [ -n "$M_LC_TOKEN" ]; then
     printf '%s\n' "$M_LC_TOKEN" > "$M_LCRED"; chmod 600 "$M_LCRED"
@@ -1636,8 +1636,8 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   fi
 
   # --- M5: compatibility workspace/read_write snapshots ------------------------
-  M_S1_SHOW="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
-  M_S2_SHOW="$(dh session show --system --id "$M_S2_ID" 2>/dev/null || true)"
+  M_S1_SHOW="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
+  M_S2_SHOW="$(dh session show --system "$M_S2_ID" 2>/dev/null || true)"
   if printf '%s\n' "$M_S1_SHOW" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$" \
       && printf '%s\n' "$M_S2_SHOW" | grep -Eq "^$(printf '%s' "$M_HOME/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
     acc_ok "M5 pre-existing Sessions carry the compatibility workspace/read_write snapshot"
@@ -1697,7 +1697,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
     sleep 1
   done
   if wait_health "$SOCK"; then
-    M_S1_SHOW2="$(dh session show --system --id "$M_S1_ID" 2>/dev/null || true)"
+    M_S1_SHOW2="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
     if printf '%s\n' "$M_S1_SHOW2" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
       acc_ok "M8 snapshot stable across restart (idempotent migration)"
     else
@@ -1777,9 +1777,9 @@ mkdir -p "$H_SUB/ws"; chown -R "$H_USER:$H_USER" "$H_SUB"
 H_ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 
 # H1: two launchers with separate namespaces.
-H_ALPHA_OUT="$(dh launcher create --system --principal "$H_USER" --name alpha --no-credential 2>/dev/null || true)"
+H_ALPHA_OUT="$(dh launcher create --system --principal "$H_USER" --name alpha --no-credential --json 2>/dev/null || true)"
 H_ALPHA_ID="$(printf '%s' "$H_ALPHA_OUT" | json_field id || true)"
-H_BETA_OUT="$(dh launcher create --system --principal "$H_USER" --name beta --allowed-root "$H_SUB" --no-credential 2>/dev/null || true)"
+H_BETA_OUT="$(dh launcher create --system --principal "$H_USER" --name beta --allowed-root "$H_SUB" --no-credential --json 2>/dev/null || true)"
 H_BETA_ID="$(printf '%s' "$H_BETA_OUT" | json_field id || true)"
 if [ -n "$H_ALPHA_ID" ] && [ -n "$H_BETA_ID" ] && [ "$H_ALPHA_ID" != "$H_BETA_ID" ]; then
   acc_ok "two distinct launchers created (alpha=$H_ALPHA_ID, beta=$H_BETA_ID)"
@@ -1816,8 +1816,8 @@ else
   acc_fail "launcher selector resolution broken (default=$H_SEL_DEF_ID by-name=$H_SEL_DEF_NAME_ID alpha-by-name=$H_SEL_ALPHA_NAME_ID/$H_ALPHA_ID upgrade-default=$H_SEL_UPG_DEF_ID foreign=$H_SEL_FOREIGN_HTTP malformed=$H_SEL_MALFORMED_HTTP)"
 fi
 
-H_ALPHA_TOK="$(dh launcher credential create --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
-H_BETA_TOK="$(dh launcher credential create --system --principal "$H_USER" "$H_BETA_ID" 2>/dev/null | json_field token || true)"
+H_ALPHA_TOK="$(dh launcher credential create --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
+H_BETA_TOK="$(dh launcher credential create --system --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null | json_field token || true)"
 [ -n "$H_ALPHA_TOK" ] && [ -n "$H_BETA_TOK" ] \
   && acc_ok "credentials issued for both launchers" \
   || acc_fail "launcher credential issuance failed"
@@ -1861,7 +1861,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
 
   # H3: rotation continuity.
-  H_ROT_OUT="$(dh launcher credential rotate --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
+  H_ROT_OUT="$(dh launcher credential rotate --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
   H_ALPHA_TOK2="$(printf '%s' "$H_ROT_OUT" | json_field token || true)"
   if [ -n "$H_ALPHA_TOK2" ] && [ "$H_ALPHA_TOK2" != "$H_ALPHA_TOK" ]; then
     printf '%s\n' "$H_ALPHA_TOK2" > "$CRED_DIR/lnc-alpha2.tok"; chmod 600 "$CRED_DIR/lnc-alpha2.tok"

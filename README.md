@@ -431,8 +431,15 @@ continue to follow `XDG_RUNTIME_DIR` and `XDG_STATE_HOME`.
 docker-helper config show
 ```
 
-Displays all configuration fields as JSON. The `admin_token` is shown as
-`"<redacted>"`. To see the real token:
+The default output is the human field block (the canonical field names as
+labels). The `admin_token` is shown as `<redacted>`. The JSON document
+form:
+
+```bash
+docker-helper config show --json
+```
+
+also shows `admin_token` as `"<redacted>"`. To see the real token:
 
 ```bash
 docker-helper config show admin_token
@@ -744,7 +751,7 @@ with the non-disclosing not-found error.
 ### Show a session
 
 ```bash
-docker-helper session show --id dhs_...
+docker-helper session show dhs_...
 ```
 
 Displays the session metadata plus the persisted immutable filesystem
@@ -1212,7 +1219,7 @@ curl --unix-socket "$SOCKET" \
   http://localhost/sessions
 ```
 
-Note: `docker-helper config show` (without a field) displays
+Note: `docker-helper config show --json` (without a field) displays
 `"admin_token": "<redacted>"` to prevent accidental leakage. Use
 `docker-helper config show admin_token` to print the real token.
 

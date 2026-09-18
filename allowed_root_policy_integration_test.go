@@ -1010,7 +1010,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/opt", nil, &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", nil, &stdout, &stderr, false)
 		if code != 0 {
 			t.Fatalf("expected exit 0 for /opt as authorization root, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1046,7 +1046,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/home", nil, &stdout, &stderr)
+		code := configAllowedRootAdd("/home", nil, &stdout, &stderr, false)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1075,7 +1075,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(testRoot, nil, &stdout, &stderr)
+		code := configAllowedRootAdd(testRoot, nil, &stdout, &stderr, false)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1124,7 +1124,7 @@ func TestConfigAllowedRootValidationBeforeConfigChange(t *testing.T) {
 		// Use a non-/opt path to test config validation failure.
 		newRoot := testAllowedRootDir(t)
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(newRoot, nil, &stdout, &stderr)
+		code := configAllowedRootAdd(newRoot, nil, &stdout, &stderr, false)
 		if code == 0 {
 			t.Fatalf("expected non-zero exit, got 0")
 		}
@@ -1148,7 +1148,7 @@ func TestConfigAllowedRootValidationBeforeConfigChange(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := addAllowedRootToConfig(testRoot, AllowedRootAccessReadWrite, &stdout, &stderr)
+		code := addAllowedRootToConfig(testRoot, AllowedRootAccessReadWrite, &stdout, &stderr, false)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1168,7 +1168,7 @@ func TestConfigAllowedRootValidationBeforeConfigChange(t *testing.T) {
 		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		var stdout, stderr bytes.Buffer
-		code := addAllowedRootToConfig(testRoot, AllowedRootAccessReadWrite, &stdout, &stderr)
+		code := addAllowedRootToConfig(testRoot, AllowedRootAccessReadWrite, &stdout, &stderr, false)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1227,7 +1227,7 @@ func TestOptAuthorizationCeiling(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/opt", nil, &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", nil, &stdout, &stderr, false)
 		if code != 0 {
 			t.Fatalf("expected exit 0 for /opt as authorization root, got %d, stderr: %s", code, stderr.String())
 		}

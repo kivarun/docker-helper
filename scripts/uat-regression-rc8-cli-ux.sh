@@ -216,7 +216,7 @@ assert_boundary_chain() {
 # field).
 launcher_credential_token() {
   local user="$1" launcher="$2" out
-  out="$(dh launcher credential create --system --principal "$user" "$launcher" 2>/dev/null)" || return 1
+  out="$(dh launcher credential create --system --principal "$user" --json "$launcher" 2>/dev/null)" || return 1
   printf '%s' "$out" | json_field token
 }
 
@@ -317,7 +317,7 @@ subcase_b() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential 2>&1)" || {
+  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "B: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -567,7 +567,7 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential 2>&1)" || {
+  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "E: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -680,7 +680,7 @@ subcase_f() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential 2>&1)" || {
+  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "F: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return

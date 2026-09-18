@@ -30,7 +30,7 @@ never resolves your identity from configuration.
   Session bearer       -> your Session: id, workspace, ownership,
                           creation/expiry, and the persisted immutable
                           filesystem snapshot (same body as
-                          'session show --id' of your own session).
+                          'session show SESSION_ID' of your own session).
 
 The admin token has no self resource and is answered with the stable
 404 self_not_available contract. Unknown, revoked, disabled, or
@@ -42,6 +42,9 @@ credential does not already have and never mutates state.
 `,
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output raw JSON response")

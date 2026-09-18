@@ -302,10 +302,10 @@ dh principal create --system --no-credential "$PRINCIPAL" >/dev/null 2>&1 || tru
 dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
 dh principal allowed-root add --system "$PRINCIPAL" "$TREE" >/dev/null 2>&1 || true
 dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" >/dev/null 2>&1 || true
-MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential 2>/dev/null || true)"
+MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential --json 2>/dev/null || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON" >&2; exit 1; }
-MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null || true)"
+MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
 MAIN_LC_TOKEN="$(printf '%s' "$MAIN_LC_OUT" | json_field token)"
 [ -n "$MAIN_LC_TOKEN" ] || { echo "error: launcher credential create failed" >&2; exit 1; }
 printf '%s\n' "$MAIN_LC_TOKEN" > /tmp/uat-wla-cred-main; chmod 600 /tmp/uat-wla-cred-main
@@ -431,7 +431,7 @@ if dh config allowed-root add --access read_write "$WE_OPT" >/dev/null 2>&1 \
 else
   acc_fail "WE setup: second effective root setup failed"
 fi
-WE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name we-multiroot --no-credential 2>/dev/null || true)"
+WE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name we-multiroot --no-credential --json 2>/dev/null || true)"
 WE_L_ID="$(printf '%s' "$WE_L_JSON" | json_field id)"
 if [ -n "$WE_L_ID" ] \
     && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$ALLOWED_ROOT" "$WE_L_ID" >/dev/null 2>&1 \
@@ -440,7 +440,7 @@ if [ -n "$WE_L_ID" ] \
 else
   acc_fail "WE setup: multiroot launcher setup failed: $WE_L_JSON"
 fi
-WE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" "$WE_L_ID" 2>/dev/null || true)"
+WE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$WE_L_ID" 2>/dev/null || true)"
 WE_LC_TOKEN="$(printf '%s' "$WE_LC_OUT" | json_field token)"
 if [ -n "$WE_LC_TOKEN" ]; then
   printf '%s\n' "$WE_LC_TOKEN" > /tmp/uat-wla-cred-multiroot; chmod 600 /tmp/uat-wla-cred-multiroot

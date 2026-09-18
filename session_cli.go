@@ -158,6 +158,9 @@ var sessionCreateCommand = &Command{
 	Name:    "create",
 	Summary: "Create a new session",
 	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		workspace := fs.String("workspace", "", "Workspace directory")
@@ -249,6 +252,9 @@ var sessionListCommand = &Command{
 	Name:    "list",
 	Summary: "List active sessions",
 	Usage:   "docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
@@ -309,6 +315,9 @@ var sessionDeleteCommand = &Command{
 	Name:    "delete",
 	Summary: "Delete a session",
 	Usage:   "docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		id := fs.String("id", "", "Session ID to delete")
@@ -363,21 +372,19 @@ var sessionDeleteCommand = &Command{
 }
 
 var sessionShowCommand = &Command{
-	Name:    "show",
-	Summary: "Show one session with its issued filesystem snapshot",
-	Usage:   "docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]",
+	Name:       "show",
+	Summary:    "Show one session with its issued filesystem snapshot",
+	Usage:      "docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		id := fs.String("id", "", "Session ID to show")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
-			Validate: func() error {
-				if *id == "" || strings.HasPrefix(*id, "-") {
-					return fmt.Errorf("--id is required")
-				}
-				return nil
-			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -389,11 +396,16 @@ var sessionShowCommand = &Command{
 					return 1
 				}
 
+				// The Session ID is the primary resource identity and is
+				// positional, like the other resource show commands; flags
+				// carry options and transport only.
+				sessionID := fs.Arg(0)
+
 				// The daemon authorizes the read against the authenticated
 				// bearer and loads the persisted immutable snapshot through
 				// the canonical snapshot owner; the CLI performs no
 				// client-side ownership check and never recomputes policy.
-				result, err := client.getSession(*id)
+				result, err := client.getSession(sessionID)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -474,7 +486,7 @@ func printSessionsTable(w io.Writer, sessions []sessionJSON) {
 var sessionCleanupCommand = &Command{
 	Name:    "cleanup",
 	Summary: "Remove expired sessions from the database",
-	Usage:   "docker-helper session cleanup",
+	Usage:   "docker-helper session cleanup [--json]",
 	Help: `Remove expired sessions from the local state database.
 
 This is an OFFLINE maintenance command. The daemon must not be running.
@@ -490,16 +502,20 @@ Stale session runtime directories are also cleaned up. These directories
 may contain session-scoped Docker registry credentials.
 
 Daemon startup already removes expired sessions automatically.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runSessionCleanup(stdout, stderr)
+				return runSessionCleanup(stdout, stderr, *jsonOut)
 			},
 		}
 	},
 }
 
-func runSessionCleanup(stdout, stderr io.Writer) int {
+func runSessionCleanup(stdout, stderr io.Writer, jsonOut bool) int {
 	// Resolve runtime directory before any database mutation.
 	runtimeDir := getRuntimeDirSafe()
 	if runtimeDir == "" {
@@ -543,12 +559,31 @@ func runSessionCleanup(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	removedResult := sessionCleanupResult{Removed: n}
 	if err := cleanupStaleSessionRuntimeDirs(db, runtimeDir); err != nil {
-		fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
+		if jsonOut {
+			_ = encodeJSONOut(stdout, removedResult)
+		} else {
+			fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
+		}
 		fmt.Fprintf(stderr, "error: failed to clean stale runtime dirs: %v\n", err)
 		return 1
 	}
 
+	if jsonOut {
+		if err := encodeJSONOut(stdout, removedResult); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
 	return 0
+}
+
+// sessionCleanupResult is the CLI-owned --json shape of the offline
+// cleanup result: the number of expired sessions removed.
+type sessionCleanupResult struct {
+	Removed int `json:"removed"`
 }

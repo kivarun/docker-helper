@@ -10,7 +10,7 @@ import (
 )
 
 // runReload is the CLI entry point for the reload command.
-func runReload(stdout, stderr io.Writer, opts operatorClientOptions) int {
+func runReload(stdout, stderr io.Writer, opts operatorClientOptions, jsonOut bool) int {
 	client, err := resolveOperatorClient(opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -30,8 +30,23 @@ func runReload(stdout, stderr io.Writer, opts operatorClientOptions) int {
 		return 1
 	}
 
+	if jsonOut {
+		if err := encodeJSONOut(stdout, reloadedResult{Reloaded: true}); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	fmt.Fprintln(stdout, "reloaded")
 	return 0
+}
+
+// reloadedResult is the CLI-owned --json shape of the reload
+// acknowledgement: the daemon's POST /reload returns no document, so the
+// CLI presentation layer owns the smallest stable result.
+type reloadedResult struct {
+	Reloaded bool `json:"reloaded"`
 }
 
 // reloadDeps are the production dependencies for handleReload.

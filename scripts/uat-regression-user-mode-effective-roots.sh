@@ -170,7 +170,7 @@ fi
 
 mkdir -p "$WORK" || reg_fail "B: cannot create the restricted workspace $WORK"
 mkdir -p "$WORK/proj" || reg_fail "B: cannot create the restricted workspace $WORK/proj"
-B_OUT="$(dhx launcher create --principal "$OWNER" --name work --allowed-root "$WORK" --no-credential 2>&1)"
+B_OUT="$(dhx launcher create --principal "$OWNER" --name work --allowed-root "$WORK" --no-credential --json 2>&1)"
 WORK_ID="$(printf '%s' "$B_OUT" | uer_field id || true)"
 if [ -n "$WORK_ID" ]; then
   # `launcher show` always emits the JSON document (no --json flag); flags
@@ -203,7 +203,7 @@ fi
 
 # --- C. restricted-scope conversion of an inherit Launcher -------------------
 
-C_OUT="$(dhx launcher create --principal "$OWNER" --name conv --no-credential 2>&1)"
+C_OUT="$(dhx launcher create --principal "$OWNER" --name conv --no-credential --json 2>&1)"
 if [ -n "$(printf '%s' "$C_OUT" | uer_field id || true)" ]; then
   # `launcher allowed-root add` prints a short confirmation; the committed
   # scope and root set are asserted through the launcher show document.

@@ -106,7 +106,7 @@ func TestShutdownTimeoutConfigShowBoundsLegacy(t *testing.T) {
 }`
 			setupConfigTestWithData(t, []byte(cfg))
 
-			stdout, _ := runConfigCLI(t, 0, "config", "show")
+			stdout, _ := runConfigCLI(t, 0, "config", "show", "--json")
 			var result map[string]any
 			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 				t.Fatalf("invalid JSON: %v", err)

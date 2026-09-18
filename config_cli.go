@@ -27,6 +27,10 @@ type configMutationResult struct {
 	SkipWrite   bool   // true: skip write/reload, print message and return
 	Message     string // success message to print (may be empty if SkipWrite)
 	StartupOnly bool   // true: skip reload, print "restart required" after message
+	// JSONResult, when non-nil and the command runs with --json, replaces
+	// the human Message at every success print point (the structured form
+	// of the same result; operational notes move to stderr).
+	JSONResult any
 }
 
 // configMutation is a callback that modifies the raw config under the lock.
@@ -99,13 +103,18 @@ func isPureComputed(name string) bool {
 var configShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show configuration values",
-	Usage:      "docker-helper config show [FIELD]",
+	Usage:      "docker-helper config show [--json] [FIELD]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
-	Help: `Without FIELD, prints the complete effective configuration as JSON.
-With FIELD, prints only that field's value followed by a newline.
+	Help: `Show the effective configuration.
 
-The general JSON output redacts admin_token.
+Without FIELD, the default output is the human field block (the canonical
+field names as labels, allowed_roots through the shared PATH/ACCESS
+table); --json prints the complete effective configuration document.
+With FIELD, the default prints that field's value followed by a newline
+and --json prints the field's JSON value.
+
+The JSON document redacts admin_token.
 "config show admin_token" intentionally prints the complete real token.
 
 allowed_roots is the rich projection of the stored global allowed
@@ -134,14 +143,18 @@ Fields:
   trusted_ca_injection
   mode
   http_address`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				if len(args) == 0 {
-					return configShowAll(stdout, stderr)
+					return configShowAll(stdout, stderr, *jsonOut)
 				}
-				return configShowField(args[0], stdout, stderr)
+				return configShowField(args[0], stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -150,7 +163,7 @@ Fields:
 var configSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Set a configuration value",
-	Usage:      "docker-helper config set FIELD VALUE",
+	Usage:      "docker-helper config set [--json] FIELD VALUE",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	Help: `Writable fields:
@@ -192,11 +205,15 @@ but confined MAC readability cannot be verified until daemon startup, and
 startup fails closed if the source is not readable under the active MAC
 policy. When the daemon is running, reload under confinement is
 authoritative and reload failures roll back the change.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				return configSet(args[0], args[1], stdout, stderr)
+				return configSet(args[0], args[1], stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -205,7 +222,7 @@ authoritative and reload failures roll back the change.`,
 var configUnsetCommand = &Command{
 	Name:       "unset",
 	Summary:    "Unset a configuration value",
-	Usage:      "docker-helper config unset FIELD",
+	Usage:      "docker-helper config unset [--json] FIELD",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Unsettable fields:
@@ -230,11 +247,15 @@ If the daemon is running, the change is applied immediately,
 except for startup-only fields such as http_address.
 If the daemon is not running, the change is written to disk and
 will apply on the next start.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				return configUnset(args[0], stdout, stderr)
+				return configUnset(args[0], stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -271,6 +292,9 @@ var configAllowedRootListCommand = &Command{
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	Help:       `List all allowed roots, one canonical root per line; --json prints the canonical rich entries with their access modes.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -284,21 +308,26 @@ var configAllowedRootListCommand = &Command{
 var configAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root",
-	Usage:      "docker-helper config allowed-root add [--access ACCESS] PATH",
+	Usage:      "docker-helper config allowed-root add [--json] [--access ACCESS] PATH",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Add an allowed root.
 
 Canonicalizes and validates the path. Idempotent (prints "already present"
 if the root exists; an add never changes the access of a stored root).
-Preserves existing roots.`,
+Preserves existing roots. With --json, the shared structured add result
+replaces the human acknowledgement.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		access := &accessFlag{}
 		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				return configAllowedRootAdd(args[0], access, stdout, stderr)
+				return configAllowedRootAdd(args[0], access, stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -307,19 +336,24 @@ Preserves existing roots.`,
 var configAllowedRootRemoveCommand = &Command{
 	Name:       "remove",
 	Summary:    "Remove an allowed root",
-	Usage:      "docker-helper config allowed-root remove PATH",
+	Usage:      "docker-helper config allowed-root remove [--json] PATH",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Remove an allowed root.
 
 Resolves/matches the stored canonical form. Idempotent (prints "not found"
 if the root does not exist). Rejects removal of the final global root.
-Does not invalidate already-issued sessions.`,
+Does not invalidate already-issued sessions. With --json, the shared
+structured remove result replaces the human acknowledgement.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				return configAllowedRootRemove(args[0], stdout, stderr)
+				return configAllowedRootRemove(args[0], stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -362,7 +396,7 @@ func configAllowedRootList(jsonOut bool, stdout, stderr io.Writer) int {
 
 // configAllowedRootAdd adds a root to allowed_roots.
 // MAC preparation is now handled at session creation time, not at config time.
-func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Writer) int {
+func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Writer, jsonOut bool) int {
 	if path == "" {
 		fmt.Fprintln(stderr, "error: path is required")
 		return 2
@@ -385,7 +419,7 @@ func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Wri
 		return 2
 	}
 
-	return addAllowedRootToConfig(canonical, requestedAccess, stdout, stderr)
+	return addAllowedRootToConfig(canonical, requestedAccess, stdout, stderr, jsonOut)
 }
 
 // configAllowedRootSetAccessCommand changes the access mode of exactly one
@@ -395,19 +429,25 @@ func configAllowedRootAdd(path string, access *accessFlag, stdout, stderr io.Wri
 var configAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of an allowed root",
-	Usage:      "docker-helper config allowed-root set-access PATH read_only|read_write",
+	Usage:      "docker-helper config allowed-root set-access [--json] PATH read_only|read_write",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	Help: `Change the access mode of one stored allowed root.
 
 The path is matched by the same canonical stored identity as remove
 (symlink-resolved). Unlike remove, a root that is not stored is an error,
-not an idempotent no-op. An unchanged access is reported as "unchanged".`,
+not an idempotent no-op. An unchanged access is reported as "unchanged".
+With --json the shared set-access result object is printed instead of
+the human line.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				return configAllowedRootSetAccess(args[0], args[1], stdout, stderr)
+				return configAllowedRootSetAccess(args[0], args[1], stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -417,7 +457,7 @@ not an idempotent no-op. An unchanged access is reported as "unchanged".`,
 // at the CLI boundary (a user-error exit before any file transaction) and
 // then performs the targeted access mutation inside the shared config
 // transaction owner.
-func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer) int {
+func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer, jsonOut bool) int {
 	if path == "" {
 		fmt.Fprintln(stderr, "error: path is required")
 		return 2
@@ -438,7 +478,7 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 		return 2
 	}
 
-	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, jsonOut, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
 			return configMutationResult{}, err
@@ -463,16 +503,25 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 		}
 
 		// Find the targeted entry (match by identity) and change only its
-		// access; the stored path spelling and position are preserved.
+		// access; the stored path spelling and position are preserved. The
+		// success presentation is the one shared set-access owner (human
+		// message plus the shared JSON result under --json).
 		for _, rr := range roots {
 			if rr.Identity != requestedIdentity {
 				continue
 			}
 			if rr.Stored.Access == requestedAccess {
-				if migrated {
-					return configMutationResult{Message: fmt.Sprintf("unchanged %s (access %s; legacy schema migrated)\n", rr.Stored.Path, rr.Stored.Access)}, nil
+				result := allowedRootAccessResult{
+					Path:     rr.Stored.Path,
+					Access:   rr.Stored.Access,
+					Changed:  false,
+					Migrated: migrated,
 				}
-				return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("unchanged %s (access %s)\n", rr.Stored.Path, rr.Stored.Access)}, nil
+				return configMutationResult{
+					SkipWrite:  !migrated,
+					Message:    allowedRootAccessHumanMessage("", rr.Stored.Path, rr.Stored.Access, false, migrated),
+					JSONResult: result,
+				}, nil
 			}
 			updated := make([]AllowedRootEntry, 0, len(roots))
 			for _, inner := range roots {
@@ -484,7 +533,18 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 			}
 			rawBytes, _ := json.Marshal(updated)
 			raw["allowed_roots"] = rawBytes
-			return configMutationResult{Message: fmt.Sprintf("changed %s to access %s\n", rr.Stored.Path, requestedAccess)}, nil
+			// A legacy-schema migration and the access change are
+			// independent facts of this one successful write: both are
+			// reported, in the human line and in the JSON result.
+			return configMutationResult{
+				Message: allowedRootAccessHumanMessage("", rr.Stored.Path, requestedAccess, true, migrated),
+				JSONResult: allowedRootAccessResult{
+					Path:     rr.Stored.Path,
+					Access:   requestedAccess,
+					Changed:  true,
+					Migrated: migrated,
+				},
+			}, nil
 		}
 
 		// Unlike remove, a missing stored root is a user-facing failure of
@@ -497,7 +557,7 @@ func configAllowedRootSetAccess(path, accessArg string, stdout, stderr io.Writer
 }
 
 // configAllowedRootRemove removes a root from allowed_roots.
-func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
+func configAllowedRootRemove(path string, stdout, stderr io.Writer, jsonOut bool) int {
 	if path == "" {
 		fmt.Fprintln(stderr, "error: path is required")
 		return 2
@@ -516,7 +576,7 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, jsonOut, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
 			return configMutationResult{}, err
@@ -551,11 +611,12 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		}
 
 		if !found {
+			result := allowedRootMutationResult{Path: requestedIdentity, Changed: false, Migrated: migrated}
 			if migrated {
 				// Write the migration, report not found.
-				return configMutationResult{Message: fmt.Sprintf("not found %s\n", requestedIdentity)}, nil
+				return configMutationResult{Message: fmt.Sprintf("not found %s\n", requestedIdentity), JSONResult: result}, nil
 			}
-			return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("not found %s\n", requestedIdentity)}, nil
+			return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("not found %s\n", requestedIdentity), JSONResult: result}, nil
 		}
 
 		// Reject removal of the final global root.
@@ -565,7 +626,10 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 
 		rawBytes, _ := json.Marshal(newStored)
 		raw["allowed_roots"] = rawBytes
-		return configMutationResult{Message: fmt.Sprintf("removed %s\n", requestedIdentity)}, nil
+		return configMutationResult{
+			Message:    fmt.Sprintf("removed %s\n", requestedIdentity),
+			JSONResult: allowedRootMutationResult{Path: requestedIdentity, Changed: true, Migrated: migrated},
+		}, nil
 	})
 }
 
@@ -651,7 +715,7 @@ func getRuntimeDirSafe() string {
 	return filepath.Join(dir, "docker-helper")
 }
 
-func configShowAll(stdout, stderr io.Writer) int {
+func configShowAll(stdout, stderr io.Writer, jsonOut bool) int {
 	raw, configPath, err := loadRawConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -719,13 +783,49 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"http_address":            ec.HTTPAddress,
 	}
 
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(result); err != nil {
-		fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
-		return 1
+	if jsonOut {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(result); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
+			return 1
+		}
+		return 0
 	}
+
+	// The human default: one line per canonical field name, allowed_roots
+	// through the shared PATH/ACCESS table renderer. The redaction is the
+	// same `<redacted>` value the JSON document carries.
+	for _, f := range []struct {
+		name  string
+		value any
+	}{
+		{"session_ttl", fc.SessionTTL},
+		{"log_level", ec.LogLevel},
+		{"audit_enabled", ec.AuditEnabled},
+		{"audit_enabled_source", ec.AuditEnabledSource},
+		{"config_path", configPath},
+		{"config_dir", configDir},
+		{"runtime_dir", runtimeDir},
+		{"socket_path", socketPath},
+		{"lock_path", lockPath},
+		{"state_dir", stateDir},
+		{"database_path", databasePath},
+		{"admin_token_path", adminTokenPath},
+		{"admin_token", "<redacted>"},
+		{"shutdown_timeout", ec.ShutdownTimeout},
+		{"operation_retention_ttl", ec.OperationRetentionTTL},
+		{"operation_max_completed", ec.OperationMaxCompleted},
+		{"operation_log_max_bytes", ec.OperationLogMaxBytes},
+		{"trusted_ca_path", fc.TrustedCAPath},
+		{"trusted_ca_injection", ec.TrustedCAInjection},
+		{"mode", resolveDeploymentMode()},
+		{"http_address", ec.HTTPAddress},
+	} {
+		fmt.Fprintf(stdout, "%s: %v\n", f.name, f.value)
+	}
+	printRootEntriesTable(stdout, "ALLOWED ROOTS", entries)
 	return 0
 }
 
@@ -741,7 +841,7 @@ func resolveHTTPAddress(configured string) string {
 	return ""
 }
 
-func configShowField(field string, stdout, stderr io.Writer) int {
+func configShowField(field string, stdout, stderr io.Writer, jsonOut bool) int {
 	if msg := deprecatedFieldMessage(field); msg != "" {
 		fmt.Fprint(stderr, msg)
 		return 2
@@ -749,6 +849,20 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	if !showFieldAccepted(field) {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
+	}
+
+	// printField renders one scalar field value: the raw value line by
+	// default, its JSON value under --json.
+	printField := func(value any) int {
+		if jsonOut {
+			if err := encodeJSONOut(stdout, value); err != nil {
+				fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+				return 1
+			}
+			return 0
+		}
+		fmt.Fprintln(stdout, value)
+		return 0
 	}
 
 	// Bootstrap fields: never parse config.json.
@@ -767,8 +881,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: admin token file is empty\n")
 			return 1
 		}
-		fmt.Fprintln(stdout, token)
-		return 0
+		return printField(token)
 	}
 
 	// Pure computed fields: resolve from paths without reading config.json.
@@ -777,13 +890,13 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		configDir := filepath.Dir(configPath)
 		switch field {
 		case "config_path":
-			fmt.Fprintln(stdout, configPath)
+			return printField(configPath)
 		case "config_dir":
-			fmt.Fprintln(stdout, configDir)
+			return printField(configDir)
 		case "admin_token_path":
-			fmt.Fprintln(stdout, filepath.Join(configDir, "admin.token"))
+			return printField(filepath.Join(configDir, "admin.token"))
 		case "mode":
-			fmt.Fprintln(stdout, resolveDeploymentMode())
+			return printField(resolveDeploymentMode())
 		}
 		return 0
 	}
@@ -806,8 +919,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
-		fmt.Fprintln(stdout, resolveHTTPAddress(fc.HTTPAddress))
-		return 0
+		return printField(resolveHTTPAddress(fc.HTTPAddress))
 	}
 
 	// Runtime-dependent fields: validate config first, then check XDG_RUNTIME_DIR.
@@ -820,11 +932,11 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		}
 		switch field {
 		case "runtime_dir":
-			fmt.Fprintln(stdout, runtimeDir)
+			return printField(runtimeDir)
 		case "socket_path":
-			fmt.Fprintln(stdout, filepath.Join(runtimeDir, "docker-helper.sock"))
+			return printField(filepath.Join(runtimeDir, "docker-helper.sock"))
 		case "lock_path":
-			fmt.Fprintln(stdout, filepath.Join(runtimeDir, "docker-helper.sock.lock"))
+			return printField(filepath.Join(runtimeDir, "docker-helper.sock.lock"))
 		}
 		return 0
 	}
@@ -856,45 +968,47 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 
 	switch field {
 	case "allowed_roots":
-		data, _ := json.MarshalIndent(entries, "", "  ")
-		fmt.Fprintln(stdout, string(data))
+		if jsonOut {
+			return printField(entries)
+		}
+		printRootEntriesTable(stdout, "ALLOWED ROOTS", entries)
+		return 0
 	case "session_ttl":
-		fmt.Fprintln(stdout, fc.SessionTTL)
+		return printField(fc.SessionTTL)
 	case "log_level":
-		fmt.Fprintln(stdout, ec.LogLevel)
+		return printField(ec.LogLevel)
 	case "audit_enabled":
-		fmt.Fprintln(stdout, ec.AuditEnabled)
+		return printField(ec.AuditEnabled)
 	case "audit_enabled_source":
-		fmt.Fprintln(stdout, ec.AuditEnabledSource)
+		return printField(ec.AuditEnabledSource)
 	case "state_dir":
-		fmt.Fprintln(stdout, stateDir)
+		return printField(stateDir)
 	case "database_path":
-		fmt.Fprintln(stdout, filepath.Join(stateDir, "docker-helper.db"))
+		return printField(filepath.Join(stateDir, "docker-helper.db"))
 	case "shutdown_timeout":
-		fmt.Fprintln(stdout, ec.ShutdownTimeout)
+		return printField(ec.ShutdownTimeout)
 	case "operation_retention_ttl":
-		fmt.Fprintln(stdout, ec.OperationRetentionTTL)
+		return printField(ec.OperationRetentionTTL)
 	case "operation_max_completed":
-		fmt.Fprintln(stdout, ec.OperationMaxCompleted)
+		return printField(ec.OperationMaxCompleted)
 	case "operation_log_max_bytes":
-		fmt.Fprintln(stdout, ec.OperationLogMaxBytes)
+		return printField(ec.OperationLogMaxBytes)
 	case "trusted_ca_path":
-		fmt.Fprintln(stdout, fc.TrustedCAPath)
+		return printField(fc.TrustedCAPath)
 	case "trusted_ca_injection":
-		fmt.Fprintln(stdout, ec.TrustedCAInjection)
+		return printField(ec.TrustedCAInjection)
 	default:
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
-	return 0
 }
 
 // addAllowedRootToConfig adds a root to allowed_roots using the shared
 // config transaction owner. The add is an idempotent create: it never
 // changes the access of an already-stored root (only set-access does), so
 // the unchanged message reports the stored access.
-func addAllowedRootToConfig(canonical string, access AllowedRootAccess, stdout, stderr io.Writer) int {
-	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+func addAllowedRootToConfig(canonical string, access AllowedRootAccess, stdout, stderr io.Writer, jsonOut bool) int {
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, jsonOut, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
 			return configMutationResult{}, err
@@ -920,13 +1034,15 @@ func addAllowedRootToConfig(canonical string, access AllowedRootAccess, stdout, 
 		if present {
 			if !migrated {
 				return configMutationResult{
-					SkipWrite: true,
-					Message:   fmt.Sprintf("already present %s (access %s)\n", canonical, storedAccess),
+					SkipWrite:  true,
+					Message:    fmt.Sprintf("already present %s (access %s)\n", canonical, storedAccess),
+					JSONResult: allowedRootMutationResult{Path: canonical, Access: storedAccess, Changed: false},
 				}, nil
 			}
 			// Legacy migration needed: write migrated config.
 			return configMutationResult{
-				Message: fmt.Sprintf("already present %s (access %s; legacy schema migrated)\n", canonical, storedAccess),
+				Message:    fmt.Sprintf("already present %s (access %s; legacy schema migrated)\n", canonical, storedAccess),
+				JSONResult: allowedRootMutationResult{Path: canonical, Access: storedAccess, Changed: false, Migrated: true},
 			}, nil
 		}
 
@@ -936,12 +1052,13 @@ func addAllowedRootToConfig(canonical string, access AllowedRootAccess, stdout, 
 		raw["allowed_roots"] = rawBytes
 
 		return configMutationResult{
-			Message: fmt.Sprintf("added %s (access %s)\n", canonical, access),
+			Message:    fmt.Sprintf("added %s (access %s)\n", canonical, access),
+			JSONResult: allowedRootMutationResult{Path: canonical, Access: access, Changed: true, Migrated: migrated},
 		}, nil
 	})
 }
 
-func configSet(field, value string, stdout, stderr io.Writer) int {
+func configSet(field, value string, stdout, stderr io.Writer, jsonOut bool) int {
 	if msg := deprecatedFieldMessage(field); msg != "" {
 		fmt.Fprint(stderr, msg)
 		return 2
@@ -1070,10 +1187,11 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		safeWriteConfig,
 		stdout,
 		stderr,
+		jsonOut,
 	)
 }
 
-func configUnset(field string, stdout, stderr io.Writer) int {
+func configUnset(field string, stdout, stderr io.Writer, jsonOut bool) int {
 	if msg := deprecatedFieldMessage(field); msg != "" {
 		fmt.Fprint(stderr, msg)
 		return 2
@@ -1107,6 +1225,7 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		safeWriteConfig,
 		stdout,
 		stderr,
+		jsonOut,
 	)
 }
 
@@ -1213,7 +1332,39 @@ startup will fail closed if the configured source is not readable under the acti
 //
 // It returns exit code 0 on success, 1 on transaction/internal error,
 // 2 on user-facing error (wrapped in configUserError).
-func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mutate configMutation) int {
+//
+// jsonOut selects the structured success presentation: when the mutation
+// carries a JSONResult, it replaces the human Message at every success
+// print point and the operational notes ("daemon not running…",
+// "restart required") move to stderr so stdout stays pure JSON. An output
+// encoding/write failure of that presentation is a runtime failure: the
+// caller reports exit 1 through printSuccess's error.
+func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, jsonOut bool, mutate configMutation) int {
+	// printSuccess renders one success point: the structured result under
+	// --json, otherwise the human message. It returns the output failure
+	// (encoding or stdout write) so every success branch can fail the
+	// command instead of reporting success without output.
+	printSuccess := func(result configMutationResult) error {
+		if jsonOut && result.JSONResult != nil {
+			if err := encodeJSONOut(stdout, result.JSONResult); err != nil {
+				fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+				return err
+			}
+			return nil
+		}
+		if result.Message != "" {
+			fmt.Fprint(stdout, result.Message)
+		}
+		return nil
+	}
+	// printOperationalNote keeps stdout pure JSON under --json.
+	printOperationalNote := func(note string) {
+		if jsonOut {
+			fmt.Fprintln(stderr, note)
+			return
+		}
+		fmt.Fprintln(stdout, note)
+	}
 	configPath := getConfigPathFunc()
 
 	// Acquire process-level lock BEFORE reading config.
@@ -1301,8 +1452,8 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 
 	// Skip write: print message and return.
 	if result.SkipWrite {
-		if result.Message != "" {
-			fmt.Fprint(stdout, result.Message)
+		if err := printSuccess(result); err != nil {
+			return 1
 		}
 		return 0
 	}
@@ -1330,10 +1481,10 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 
 	// Startup-only fields: no reload, print message immediately.
 	if result.StartupOnly {
-		if result.Message != "" {
-			fmt.Fprint(stdout, result.Message)
+		if err := printSuccess(result); err != nil {
+			return 1
 		}
-		fmt.Fprintln(stdout, "restart required")
+		printOperationalNote("restart required")
 		return 0
 	}
 
@@ -1341,15 +1492,15 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 	outcome := attemptReload()
 	switch outcome.result {
 	case reloadSuccess:
-		if result.Message != "" {
-			fmt.Fprint(stdout, result.Message)
+		if err := printSuccess(result); err != nil {
+			return 1
 		}
 		return 0
 	case reloadDaemonNotRunning:
-		if result.Message != "" {
-			fmt.Fprint(stdout, result.Message)
+		if err := printSuccess(result); err != nil {
+			return 1
 		}
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
+		printOperationalNote("daemon not running; change will apply on next start")
 		newCAInj, newCAPath := effectiveTrustedCAFromRaw(raw)
 		if trustedCAPreflightWarningRequired(resolveDeploymentMode(), oldCAInj, oldCAPath, newCAInj, newCAPath) {
 			fmt.Fprintln(stderr, trustedCAPreflightWarning)
@@ -1397,10 +1548,11 @@ func applyConfigChangeTransactionally(
 	modify func(map[string]json.RawMessage),
 	writeFn configWriter,
 	stdout, stderr io.Writer,
+	jsonOut bool,
 ) int {
 	startupOnly := field == "http_address"
 
-	return executeConfigTransaction(stdout, stderr, writeFn, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+	return executeConfigTransaction(stdout, stderr, writeFn, jsonOut, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		// Apply modification tentatively to check if it repairs the config.
 		tempRaw := make(map[string]json.RawMessage)
 		for k, v := range raw {
@@ -1433,9 +1585,17 @@ func applyConfigChangeTransactionally(
 				return configMutationResult{}, err
 			}
 			if op == configOpUnset {
-				return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("unchanged %s is already unset\n", field)}, nil
+				return configMutationResult{
+					SkipWrite:  true,
+					Message:    fmt.Sprintf("unchanged %s is already unset\n", field),
+					JSONResult: configFieldResult{Field: field, Changed: false},
+				}, nil
 			}
-			return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("unchanged %s=%s\n", field, value)}, nil
+			return configMutationResult{
+				SkipWrite:  true,
+				Message:    fmt.Sprintf("unchanged %s=%s\n", field, value),
+				JSONResult: configFieldResult{Field: field, Value: value, Changed: false},
+			}, nil
 		}
 
 		// Apply modification.
@@ -1465,6 +1625,12 @@ func applyConfigChangeTransactionally(
 		return configMutationResult{
 			Message:     msg,
 			StartupOnly: startupOnly,
+			JSONResult: configFieldResult{
+				Field:    field,
+				Value:    value,
+				Changed:  fieldChanged,
+				Migrated: migrated,
+			},
 		}, nil
 	})
 }

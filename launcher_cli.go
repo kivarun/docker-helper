@@ -247,9 +247,12 @@ func launcherDefaultExists(client *apiClient, username string) bool {
 var launcherCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a launcher",
-	Usage:      "docker-helper launcher create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--allowed-root PATH]... [--issue-credential | --no-credential]",
+	Usage:      "docker-helper launcher create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--allowed-root PATH]... [--issue-credential | --no-credential] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -259,6 +262,7 @@ var launcherCreateCommand = &Command{
 		fs.Var(allowedRoots, "allowed-root", "Allowed root path (restricted scope)")
 		issueCredential := fs.Bool("issue-credential", false, "Issue a launcher credential")
 		noCredential := fs.Bool("no-credential", false, "Do not issue a launcher credential")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -308,12 +312,22 @@ var launcherCreateCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := encodeJSONOut(stdout, result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					if result.Token != "" {
+						printCredentialInstallHint(stderr, "launcher")
+					}
+					return 0
 				}
+
+				printLauncherShow(stdout, &result.Launcher)
 				if result.Token != "" {
-					printCredentialInstallHint(stderr, "launcher")
+					fmt.Fprintf(stdout, "TOKEN:     %s\n", result.Token)
+					printCredentialInstallHint(stdout, "launcher")
 				}
 				return 0
 			},
@@ -327,6 +341,9 @@ var launcherListCommand = &Command{
 	Usage:      "docker-helper launcher list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username filter (narrowing only; the daemon authorizes visibility)")
@@ -372,12 +389,16 @@ var launcherListCommand = &Command{
 var launcherShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show launcher details",
-	Usage:      "docker-helper launcher show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output the canonical JSON document")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -395,28 +416,67 @@ var launcherShowCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := encodeJSONOut(stdout, l); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, l); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
+				printLauncherShow(stdout, l)
 				return 0
 			},
 		}
 	},
 }
 
+// printLauncherCredentialBlock renders the human launcher-credential
+// metadata block shared by the launcher credential commands whose default
+// output is the human block. No secret is part of the block; the one-time
+// token is rendered separately by the issuing commands.
+func printLauncherCredentialBlock(w io.Writer, c *launcherCredentialJSON) {
+	if c == nil {
+		fmt.Fprintln(w, "CREDENTIAL: -")
+		return
+	}
+	fmt.Fprintf(w, "ID:        %s\n", c.ID)
+	fmt.Fprintf(w, "CREATED:   %s\n", c.CreatedAt)
+	revoked := "-"
+	if c.RevokedAt != nil {
+		revoked = *c.RevokedAt
+	}
+	fmt.Fprintf(w, "REVOKED:   %s\n", revoked)
+}
+
+// printLauncherShow renders the human launcher-show block: the identity
+// fields and the stored allowed roots through the shared PATH/ACCESS table
+// renderer. The canonical JSON document remains the explicit --json form.
+func printLauncherShow(w io.Writer, l *launcherJSON) {
+	fmt.Fprintf(w, "ID:        %s\n", l.ID)
+	fmt.Fprintf(w, "NAME:      %s\n", l.Name)
+	fmt.Fprintf(w, "PRINCIPAL: %s\n", l.Principal)
+	fmt.Fprintf(w, "ENABLED:   %t\n", l.Enabled)
+	fmt.Fprintf(w, "SCOPE:     %s\n", l.Scope)
+	fmt.Fprintf(w, "CREATED:   %s\n", l.CreatedAt)
+	printRootEntriesTable(w, "ALLOWED ROOTS", l.AllowedRoots)
+}
+
 var launcherSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Modify a launcher name or enabled state",
-	Usage:      "docker-helper launcher set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--enabled true|false] [LAUNCHER]",
+	Usage:      "docker-helper launcher set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--enabled true|false] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		name := &explicitStringFlag{}
 		fs.Var(name, "name", "New launcher name")
 		enabled := fs.String("enabled", "", "Enable or disable the launcher (true|false)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if !name.set && *enabled == "" {
@@ -452,10 +512,16 @@ var launcherSetCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := encodeJSONOut(stdout, l); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, l); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
+
+				printLauncherShow(stdout, l)
 				return 0
 			},
 		}
@@ -465,12 +531,16 @@ var launcherSetCommand = &Command{
 var launcherDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a launcher",
-	Usage:      "docker-helper launcher delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -487,6 +557,15 @@ var launcherDeleteCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, deletedResourceResult{Launcher: selector, Deleted: true}); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
+
 				fmt.Fprintf(stdout, "deleted launcher %s\n", selector)
 				return 0
 			},
@@ -529,14 +608,18 @@ var launcherAllowedRootCommand = &Command{
 var launcherAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root to a launcher",
-	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] PATH [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [--json] PATH [LAUNCHER]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		access := &accessFlag{}
 		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -555,6 +638,14 @@ var launcherAllowedRootAddCommand = &Command{
 					return 1
 				}
 
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
+
 				fmt.Fprintf(stdout, "added %q to launcher %s\n", path, selector)
 				if result.Message == "unchanged" {
 					fmt.Fprintf(stdout, "(already present with access %s)\n", result.Access)
@@ -571,6 +662,9 @@ var launcherAllowedRootListCommand = &Command{
 	Usage:      "docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -610,12 +704,16 @@ var launcherAllowedRootListCommand = &Command{
 var launcherAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of a launcher allowed root",
-	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] PATH read_only|read_write [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] PATH read_only|read_write [LAUNCHER]",
 	MinPosArgs: 2,
 	MaxPosArgs: 3,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -645,9 +743,10 @@ var launcherAllowedRootSetAccessCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				fmt.Fprintf(stdout, "access of %q on launcher %s is %s\n", result.Path, selector, result.Access)
-				if result.Message == "unchanged" {
-					fmt.Fprintln(stdout, "(unchanged)")
+				if err := printAllowedRootAccessResult(stdout, "launcher "+selector, result.Path,
+					AllowedRootAccess(result.Access), result.Changed, false, *jsonOut); err != nil {
+					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+					return 1
 				}
 				return 0
 			},
@@ -658,12 +757,16 @@ var launcherAllowedRootSetAccessCommand = &Command{
 var launcherAllowedRootRemoveCommand = &Command{
 	Name:       "remove",
 	Summary:    "Remove an allowed root from a launcher",
-	Usage:      "docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] PATH [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] PATH [LAUNCHER]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -682,6 +785,14 @@ var launcherAllowedRootRemoveCommand = &Command{
 					return 1
 				}
 
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
+
 				fmt.Fprintf(stdout, "removed %q from launcher %s\n", path, selector)
 				if result.Message == "unchanged" {
 					fmt.Fprintln(stdout, "(was not present)")
@@ -695,12 +806,16 @@ var launcherAllowedRootRemoveCommand = &Command{
 var launcherAllowedRootInheritCommand = &Command{
 	Name:       "inherit",
 	Summary:    "Return a launcher to inherited allowed roots",
-	Usage:      "docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -721,10 +836,16 @@ var launcherAllowedRootInheritCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := encodeJSONOut(stdout, l); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, l); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
+
+				printLauncherShow(stdout, l)
 				return 0
 			},
 		}
@@ -749,12 +870,16 @@ var launcherCredentialCommand = &Command{
 var launcherCredentialCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a launcher credential",
-	Usage:      "docker-helper launcher credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -772,12 +897,22 @@ var launcherCredentialCreateCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := encodeJSONOut(stdout, result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					if result.Token != "" {
+						printCredentialInstallHint(stderr, "launcher")
+					}
+					return 0
 				}
+
+				printLauncherCredentialBlock(stdout, result.Credential)
 				if result.Token != "" {
-					printCredentialInstallHint(stderr, "launcher")
+					fmt.Fprintf(stdout, "TOKEN:     %s\n", result.Token)
+					printCredentialInstallHint(stdout, "launcher")
 				}
 				return 0
 			},
@@ -788,12 +923,16 @@ var launcherCredentialCreateCommand = &Command{
 var launcherCredentialShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show a launcher credential",
-	Usage:      "docker-helper launcher credential show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher credential show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -811,10 +950,16 @@ var launcherCredentialShowCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := encodeJSONOut(stdout, result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
 				}
+
+				printLauncherCredentialBlock(stdout, result.Credential)
 				return 0
 			},
 		}
@@ -824,12 +969,16 @@ var launcherCredentialShowCommand = &Command{
 var launcherCredentialRotateCommand = &Command{
 	Name:       "rotate",
 	Summary:    "Rotate a launcher credential",
-	Usage:      "docker-helper launcher credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -847,12 +996,22 @@ var launcherCredentialRotateCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := encodeJSONOut(stdout, result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-					return 1
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					if result.Token != "" {
+						printCredentialInstallHint(stderr, "launcher")
+					}
+					return 0
 				}
+
+				printLauncherCredentialBlock(stdout, result.Credential)
 				if result.Token != "" {
-					printCredentialInstallHint(stderr, "launcher")
+					fmt.Fprintf(stdout, "TOKEN:     %s\n", result.Token)
+					printCredentialInstallHint(stdout, "launcher")
 				}
 				return 0
 			},
@@ -863,12 +1022,16 @@ var launcherCredentialRotateCommand = &Command{
 var launcherCredentialDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a launcher credential",
-	Usage:      "docker-helper launcher credential delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [LAUNCHER]",
+	Usage:      "docker-helper launcher credential delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
@@ -885,6 +1048,15 @@ var launcherCredentialDeleteCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
+
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, deletedResourceResult{Launcher: selector, Deleted: true}); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
+
 				fmt.Fprintf(stdout, "deleted launcher credential for %s\n", selector)
 				return 0
 			},

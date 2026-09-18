@@ -27,11 +27,15 @@ var appArmorRootCommand = &Command{
 var appArmorRootListCommand = &Command{
 	Name:    "list",
 	Summary: "List managed AppArmor MAC boundaries",
-	Usage:   "docker-helper apparmor root list",
+	Usage:   "docker-helper apparmor root list [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runAppArmorRootList(stdout, stderr)
+				return runAppArmorRootList(stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -40,11 +44,15 @@ var appArmorRootListCommand = &Command{
 var appArmorCheckCommand = &Command{
 	Name:    "check",
 	Summary: "Validate the AppArmor profile",
-	Usage:   "docker-helper apparmor check",
+	Usage:   "docker-helper apparmor check [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runAppArmorCheck(stdout, stderr)
+				return runAppArmorCheck(stdout, stderr, *jsonOut)
 			},
 		}
 	},
@@ -57,7 +65,7 @@ func requireRoot() error {
 	return nil
 }
 
-func runAppArmorRootList(stdout, stderr io.Writer) int {
+func runAppArmorRootList(stdout, stderr io.Writer, jsonOut bool) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -70,6 +78,14 @@ func runAppArmorRootList(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if jsonOut {
+		if err := encodeJSONOut(stdout, boundaries); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	for _, boundary := range boundaries {
 		fmt.Fprintln(stdout, boundary)
 	}
@@ -77,7 +93,7 @@ func runAppArmorRootList(stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runAppArmorCheck(stdout, stderr io.Writer) int {
+func runAppArmorCheck(stdout, stderr io.Writer, jsonOut bool) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -95,6 +111,21 @@ func runAppArmorCheck(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if jsonOut {
+		if err := encodeJSONOut(stdout, policyCheckResult{Valid: true}); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	fmt.Fprintln(stdout, "AppArmor profile valid")
 	return 0
+}
+
+// policyCheckResult is the CLI-owned --json shape of the MAC policy check
+// diagnostics: the valid fact the human status line reports. The exit code
+// carries failure; a failed check prints no result.
+type policyCheckResult struct {
+	Valid bool `json:"valid"`
 }

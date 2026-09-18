@@ -247,7 +247,7 @@ assert_owner_invariant "C after no-ops"
 
 # --- D. non-reserved Launcher mutability under the same Principal ------------
 
-second_out="$(dhx launcher create --principal "$OWNER" --name second --no-credential 2>&1)"
+second_out="$(dhx launcher create --principal "$OWNER" --name second --no-credential --json 2>&1)"
 second_id="$(printf '%s' "$second_out" | um_field id || true)"
 if [ -n "$second_id" ]; then
   if dhx launcher set --principal "$OWNER" --enabled false "$second_id" >/dev/null 2>&1 \

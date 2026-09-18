@@ -16,6 +16,31 @@ type Invocation struct {
 	Run      func(stdout, stderr io.Writer) int
 }
 
+// commandPresentation is declarative metadata owned by each leaf command.
+// Finite-result commands declare the canonical human-default + explicit
+// --json contract. True exceptions declare their reason next to the command;
+// an unspecified leaf is a contract error caught by the command-tree test.
+type commandPresentationMode uint8
+
+const (
+	presentationUnspecified commandPresentationMode = iota
+	presentationHumanDefaultJSON
+	presentationException
+)
+
+type commandPresentation struct {
+	Mode   commandPresentationMode
+	Reason string
+}
+
+func humanJSONPresentation() commandPresentation {
+	return commandPresentation{Mode: presentationHumanDefaultJSON}
+}
+
+func exceptionPresentation(reason string) commandPresentation {
+	return commandPresentation{Mode: presentationException, Reason: reason}
+}
+
 type Command struct {
 	Name          string
 	Summary       string
@@ -25,6 +50,7 @@ type Command struct {
 	MaxPosArgs    int
 	Subcommands   []*Command
 	NewInvocation func(*flag.FlagSet) Invocation
+	Presentation  commandPresentation
 }
 
 // resolveSubcommand finds a direct subcommand by name.
@@ -461,6 +487,9 @@ var serveCommand = &Command{
 	Name:    "serve",
 	Summary: "Start the docker-helper daemon",
 	Usage:   "docker-helper serve",
+
+	Presentation: exceptionPresentation("process: long-running daemon, not a finite command result"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -497,6 +526,9 @@ System mode (effective UID 0):
 
 User mode (non-root):
   No MAC preparation is required.`,
+
+	Presentation: exceptionPresentation("interactive setup workflow with one-time admin-token disclosure"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		allowedRoot := fs.String("allowed-root", "", "Allowed root directory for agent workspaces")
 
@@ -609,13 +641,119 @@ func printAllowedRootList(w io.Writer, entries []AllowedRootEntry, jsonOut bool)
 	return nil
 }
 
+// allowedRootAccessResult is the one shared --json shape of the three
+// allowed-root set-access commands (config, Principal, Launcher): the stored
+// path identity, the resulting access, whether this call changed it, and —
+// config transaction only — whether this successful write also carried the
+// legacy-schema migration. The two facts are independent: a legacy
+// migration may accompany a changed or an unchanged access. Unchanged
+// remains success (changed=false); a missing target is never routed here,
+// it stays the command's failure.
+type allowedRootAccessResult struct {
+	Path     string            `json:"path"`
+	Access   AllowedRootAccess `json:"access"`
+	Changed  bool              `json:"changed"`
+	Migrated bool              `json:"migrated,omitempty"`
+}
+
+// printAllowedRootAccessResult renders the one shared presentation of a
+// successful allowed-root set-access result: human text by default (the
+// subject names the targeted resource and is empty for the global config
+// tree) or the shared JSON shape under the command's --json flag. The
+// legacy-schema migration fact is reported in both modes, consistently
+// with the unchanged wording.
+func printAllowedRootAccessResult(w io.Writer, subject, path string, access AllowedRootAccess, changed, migrated bool, jsonOut bool) error {
+	if jsonOut {
+		return encodeJSONOut(w, allowedRootAccessResult{
+			Path:     path,
+			Access:   access,
+			Changed:  changed,
+			Migrated: migrated,
+		})
+	}
+	target := ""
+	if subject != "" {
+		target = " on " + subject
+	}
+	if changed {
+		migratedNote := ""
+		if migrated {
+			migratedNote = " (legacy schema migrated)"
+		}
+		fmt.Fprintf(w, "changed %s to access %s%s%s\n", path, access, migratedNote, target)
+		return nil
+	}
+	if migrated {
+		fmt.Fprintf(w, "unchanged %s (access %s; legacy schema migrated)%s\n", path, access, target)
+		return nil
+	}
+	fmt.Fprintf(w, "unchanged %s (access %s)%s\n", path, access, target)
+	return nil
+}
+
+// allowedRootAccessHumanMessage renders the shared set-access human form as
+// one string, for transaction results that carry their success message.
+func allowedRootAccessHumanMessage(subject, path string, access AllowedRootAccess, changed, migrated bool) string {
+	var b strings.Builder
+	_ = printAllowedRootAccessResult(&b, subject, path, access, changed, migrated, false)
+	return b.String()
+}
+
+// configFieldResult is the CLI-owned --json shape of the local config
+// set/unset acknowledgements: the addressed canonical field, whether this
+// successful operation changed the stored document, and — config
+// transaction only — whether the write also carried the legacy-schema
+// migration. A set carries the applied value; an unset does not.
+type configFieldResult struct {
+	Field    string `json:"field"`
+	Value    string `json:"value,omitempty"`
+	Changed  bool   `json:"changed"`
+	Migrated bool   `json:"migrated,omitempty"`
+}
+
+// allowedRootMutationResult is the CLI-owned --json shape of the global
+// config allowed-root add/remove acknowledgements: the addressed canonical
+// path identity, whether this successful operation changed the stored
+// document, and whether the write also carried the legacy-schema
+// migration. An add carries the access of the stored entry; a remove does
+// not. The same {path, changed, migrated} facts as the set-access result,
+// without the set-access-only unconditional access field.
+type allowedRootMutationResult struct {
+	Path     string            `json:"path"`
+	Access   AllowedRootAccess `json:"access,omitempty"`
+	Changed  bool              `json:"changed"`
+	Migrated bool              `json:"migrated,omitempty"`
+}
+
+// deletedResourceResult is the CLI-owned --json shape of the delete
+// acknowledgements whose daemon route returns no document (principal
+// delete, launcher delete, launcher credential delete): the addressed
+// resource subject and the deleted fact. The exit code carries success;
+// the result names what was deleted.
+type deletedResourceResult struct {
+	Principal string `json:"principal,omitempty"`
+	Launcher  string `json:"launcher,omitempty"`
+	Deleted   bool   `json:"deleted"`
+}
+
 var versionCommand = &Command{
 	Name:    "version",
 	Summary: "Print version",
-	Usage:   "docker-helper version",
+	Usage:   "docker-helper version [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
+				if *jsonOut {
+					if err := encodeJSONOut(stdout, versionResult{Version: version}); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+						return 1
+					}
+					return 0
+				}
 				fmt.Fprintln(stdout, version)
 				return 0
 			},
@@ -623,10 +761,16 @@ var versionCommand = &Command{
 	},
 }
 
+// versionResult is the CLI-owned --json shape of the version scalar: the
+// same version string the human line prints.
+type versionResult struct {
+	Version string `json:"version"`
+}
+
 var reloadCommand = &Command{
 	Name:    "reload",
 	Summary: "Reload configuration from disk",
-	Usage:   "docker-helper reload [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:   "docker-helper reload [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	Help: `Ask the running daemon to re-read config.json and apply changes without restarting.
 
 The following configurable fields are applied at runtime:
@@ -649,15 +793,19 @@ Runtime paths (socket, database, state) are not changed.
 If the daemon is not running, this command fails with a non-zero exit code.
 If the new configuration is invalid, the daemon keeps its current
 configuration and this command returns an error.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				return runReload(stdout, stderr, operatorClientOptions{
 					System:    *system,
 					Endpoint:  *endpoint,
 					TokenFile: *tokenFile,
-				})
+				}, *jsonOut)
 			},
 		}
 	},
@@ -673,6 +821,9 @@ var helpCommand = &Command{
 Run 'docker-helper help <command> [<subcommand> ...]' to navigate the
 command tree, or 'docker-helper <command> --help' for command-specific
 help.`,
+
+	Presentation: exceptionPresentation("navigation: help text, not a command result"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {

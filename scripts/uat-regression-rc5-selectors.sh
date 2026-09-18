@@ -96,7 +96,7 @@ subcase_a() {
   chown -R "$user:$user" "$home"
 
   alpha_out="$(dh launcher create --system --principal "$user" --name alpha \
-      --allowed-root "$sub" --no-credential 2>&1)"
+      --allowed-root "$sub" --no-credential --json 2>&1)"
   alpha_id="$(printf '%s' "$alpha_out" | json_field id || true)"
   if [ -n "$alpha_id" ]; then
     reg_ok "A: restricted Launcher alpha created ($alpha_id)"
@@ -158,7 +158,7 @@ subcase_b() {
   home="$(reg_setup_principal "$user")" || { reg_fail "B: setup principal failed"; return; }
   mkdir -p "$home/ws"; chown -R "$user:$user" "$home"
 
-  beta_out="$(dh launcher create --system --principal "$user" --name beta --no-credential 2>&1)"
+  beta_out="$(dh launcher create --system --principal "$user" --name beta --no-credential --json 2>&1)"
   beta_id="$(printf '%s' "$beta_out" | json_field id || true)"
   [ -n "$beta_id" ] || { reg_fail "B: launcher create failed: $(printf '%s' "$beta_out" | head -2 | tr '\n' ' ')"; return; }
 
@@ -231,17 +231,17 @@ subcase_c() {
   chown -R "$user:$user" "$home"
   chown -R "$foreign_user:$foreign_user" "$fhome"
 
-  gamma_out="$(dh launcher create --system --principal "$user" --name gamma --no-credential 2>&1)"
+  gamma_out="$(dh launcher create --system --principal "$user" --name gamma --no-credential --json 2>&1)"
   gamma_id="$(printf '%s' "$gamma_out" | json_field id || true)"
   [ -n "$gamma_id" ] || { reg_fail "C: launcher create failed: $(printf '%s' "$gamma_out" | head -2 | tr '\n' ' ')"; return; }
 
-  lc_out="$(dh launcher credential create --system --principal "$user" "$gamma_id" 2>/dev/null)"
+  lc_out="$(dh launcher credential create --system --principal "$user" --json "$gamma_id" 2>/dev/null)"
   lc_token="$(printf '%s' "$lc_out" | json_field token || true)"
   [ -n "$lc_token" ] || { reg_fail "C: launcher credential create failed"; return; }
   cred="/tmp/uat-reg10/c.token"
   printf '%s\n' "$lc_token" > "$cred"; chmod 600 "$cred"
 
-  f_out="$(dh launcher create --system --principal "$foreign_user" --name fgamma --no-credential 2>&1)"
+  f_out="$(dh launcher create --system --principal "$foreign_user" --name fgamma --no-credential --json 2>&1)"
   f_id="$(printf '%s' "$f_out" | json_field id || true)"
   [ -n "$f_id" ] || { reg_fail "C: foreign launcher create failed"; return; }
 
@@ -366,7 +366,7 @@ subcase_d() {
   fi
 
   # A fresh explicit name still creates normally.
-  delta_out="$(dh launcher create --system --principal "$user" --name delta --no-credential 2>&1)"
+  delta_out="$(dh launcher create --system --principal "$user" --name delta --no-credential --json 2>&1)"
   if printf '%s' "$delta_out" | json_field name | grep -q '^delta$'; then
     reg_ok "D: explicit fresh name still creates a Launcher"
   else

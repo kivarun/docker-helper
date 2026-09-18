@@ -287,7 +287,7 @@ func TestSELinuxCheckValidState(t *testing.T) {
 	v := newTestSELinuxCheckVerifier(rec)
 
 	var stdout, stderr bytes.Buffer
-	code := runSELinuxCheckWithVerifier(v, &stdout, &stderr)
+	code := runSELinuxCheckWithVerifier(v, &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d: stderr=%q", code, stderr.String())
 	}

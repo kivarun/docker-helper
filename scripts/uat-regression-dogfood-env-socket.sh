@@ -51,7 +51,7 @@ chown -R "$USER:$USER" "$ws"
 # orchestrator workload. Created through the canonical launcher-credential
 # owner; the token is kept in a 0600 file and never echoed.
 rm -f /tmp/uat-reg17-cred.token
-launcher_cred_json="$(dh launcher credential create --system --principal "$USER" 2>/dev/null)" \
+launcher_cred_json="$(dh launcher credential create --system --principal "$USER" --json 2>/dev/null)" \
   || { reg_fail "launcher credential create failed"; reg_result; }
 CRED_TOKEN="$(printf '%s\n' "$launcher_cred_json" | json_field token)"
 CRED_ID="$(printf '%s\n' "$launcher_cred_json" | json_field id)"

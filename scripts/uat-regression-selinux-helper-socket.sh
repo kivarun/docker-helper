@@ -56,7 +56,7 @@ dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 \
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
 # Launcher credential for the explicit in-workload bearer (value kept out of argv).
-LC_JSON="$(dh launcher credential create --system --principal "$SEL_P" 2>/dev/null)" \
+LC_JSON="$(dh launcher credential create --system --principal "$SEL_P" --json 2>/dev/null)" \
   || { reg_fail "launcher credential create failed"; reg_result; }
 LC_TOKEN="$(printf '%s\n' "$LC_JSON" | json_field token)"
 [ -n "$LC_TOKEN" ] || { reg_fail "launcher credential token missing"; reg_result; }

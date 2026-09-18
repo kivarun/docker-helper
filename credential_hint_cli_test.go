@@ -98,7 +98,7 @@ func TestPrincipalCreateCredentialHint(t *testing.T) {
 			http.NotFound(w, r)
 		})
 		args := append([]string{"principal", "create", "--endpoint", endpoint, "--token-file", tokenPath}, flags...)
-		args = append(args, "bob")
+		args = append(args, "--json", "bob")
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters(args, &stdout, &stderr)
 		return code, stdout, stderr
@@ -152,7 +152,7 @@ func TestPrincipalCredentialRotateCredentialHint(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"principal", "credential", "rotate", "--endpoint", endpoint, "--token-file", tokenPath,
+		"principal", "credential", "rotate", "--endpoint", endpoint, "--token-file", tokenPath, "--json",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
@@ -231,7 +231,7 @@ func TestLauncherCreateCredentialHint(t *testing.T) {
 			}
 		})
 		args := append([]string{"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath}, flags...)
-		args = append(args, "--name", "agent")
+		args = append(args, "--json", "--name", "agent")
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters(args, &stdout, &stderr)
 		return code, stdout, stderr
@@ -308,7 +308,7 @@ func TestLauncherCredentialCreateAndRotateHint(t *testing.T) {
 			args := []string{
 				"launcher", "credential", tc.verb,
 				"--endpoint", endpoint, "--token-file", tokenPath,
-				"--principal", "alice", "dhl_1",
+				"--principal", "alice", "--json", "dhl_1",
 			}
 			var stdout, stderr bytes.Buffer
 			code := runCommandWithWriters(args, &stdout, &stderr)

@@ -1730,7 +1730,9 @@ list route. The show response carries the canonical rich `allowed_roots`
 projection, and `principal allowed-root
 list` prints the 2.1-compatible one canonical root per line by default,
 with the explicit `--json` opt-in carrying the canonical rich entries
-for access-aware tooling.
+for access-aware tooling. `principal credential list` follows the same
+two-mode contract: the human table by default, the daemon's canonical
+`{ok, credentials}` list document under `--json`.
 
 ### Launcher
 
@@ -1775,34 +1777,34 @@ CLI surface (every Launcher command accepts the common operator flags):
 ```
 docker-helper launcher create [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--name NAME]
-    [--allowed-root PATH]... [--issue-credential | --no-credential]
+    [--allowed-root PATH]... [--issue-credential | --no-credential] [--json]
 docker-helper launcher list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper launcher show [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher set [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--name NAME]
-    [--enabled true|false] [LAUNCHER]
+    [--enabled true|false] [--json] [LAUNCHER]
 docker-helper launcher delete [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [--access ACCESS] PATH [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--access ACCESS] [--json] PATH [LAUNCHER]
 docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] PATH ACCESS [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] PATH ACCESS [LAUNCHER]
 docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] PATH [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] PATH [LAUNCHER]
 docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher credential create [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher credential show [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher credential rotate [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 docker-helper launcher credential delete [--system] [--endpoint ENDPOINT]
-    [--token-file PATH] [--principal USER] [LAUNCHER]
+    [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 ```
 
 `LAUNCHER` is a Launcher name or ID, and omitting it selects the
@@ -1843,9 +1845,9 @@ CLI surface (every command accepts the common operator flags):
 ```
 docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]
 docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
-docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
+docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]
 docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
-docker-helper session cleanup
+docker-helper session cleanup [--json]
 ```
 
 `session create` — target resolution, selector mapping, and default
@@ -1906,7 +1908,7 @@ outcome (no existence disclosure).
 `session cleanup` — removes expired sessions from the local state
 database; does not require a running daemon or admin token. Deletes rows
 whose `expires_at` has passed; active sessions are untouched; reports the
-number of removed rows.
+number of removed rows (`{removed}` under `--json`).
 
 ### Completion introspection
 
@@ -2064,6 +2066,77 @@ Exit codes:
 | 1 | Runtime error (config load, API call, server failure) | `docker-helper init` with an unwritable configuration directory, `docker-helper session create` with unreachable server |
 | 2 | CLI syntax or argument validation error | unknown command, missing/unknown subcommand, missing required flag, unexpected positional argument, unknown flag |
 
+### CLI presentation contract
+
+The canonical CLI presentation rule: **every finite command result uses
+the two-mode contract — the default output is the human-readable
+representation of the result, and the explicit `--json` flag selects the
+structured JSON representation of the same result.** This applies to the
+whole verb surface, not only resource documents: show, list, create,
+add, set, set-access, remove, delete, revoke, rotate, inherit, cleanup,
+reload, version, check/status commands, credential installation and
+issuance, and every other finite-result leaf command. `--json` stdout is
+exactly one JSON document with no human text mixed in; warnings, hints,
+and operational diagnostics move to stderr where necessary to keep the
+JSON stdout clean. A finite CLI result supports the two modes unless a
+strong semantic reason prevents it.
+
+The `--json` form reuses the daemon's canonical response document where
+one already exists (never a second machine schema); where the daemon
+returns only an acknowledgement and no canonical public document exists,
+the CLI presentation layer owns the smallest stable result using the
+canonical project vocabulary (for example the config transaction results
+`{field,value?,changed,migrated?}` / `{path,access?,changed,migrated?}`,
+the delete acknowledgements `{principal|launcher,deleted}`, the scalar
+results `{version}`, `{reloaded}`, `{removed}`, `{path}`, `{valid}`).
+
+The resource `show` commands are the canonical form: the primary resource
+identity is positional (`principal show USER`, `launcher show
+LAUNCHER`, `session show SESSION_ID`), the default output is the
+compact human identity block (through the shared PATH/ACCESS table
+renderer for allowed-root entries), and `--json` prints the unchanged
+canonical JSON document. `principal show USER FIELD` keeps the scalar
+field-extraction convenience, exclusive of `--json` and validated
+locally before any daemon request.
+
+The three `allowed-root set-access` commands (global config, Principal,
+Launcher) share ONE presentation owner: the same human mutation line
+(`changed PATH to access MODE`, with the subject qualifier
+`on principal USER` / `on launcher SELECTOR` appended where the
+targeting names one) and the same structured result object
+`{"path","access","changed"}` under `--json` (the config transaction
+additionally reports `"migrated":true` when the write carried a
+legacy-schema migration — the changed and migrated facts are
+independent). Unchanged remains success; a missing target remains the
+command's failure. The config transaction presentation owner propagates
+JSON output/encoding failures as exit 1 at every success point.
+
+The command tree owns this invariant declaratively. Every leaf command
+sets its `Command.Presentation` metadata to either the canonical
+human-default + explicit-`--json` mode or a true exception whose semantic
+reason is colocated with that command. Unspecified leaf metadata is invalid.
+The intentionally small exception set is output that is not a finite result
+presentation:
+
+* stream workloads (`pull`, `build`, `run`): stdout/stderr carry
+  execution/progress/workload data; the final status is the exit code;
+* the completion protocol/generator (`completion bash`,
+  `completion roots ...`, `completion selectors ...`): stdout itself is
+  the generated artifact or the machine-line protocol;
+* navigation/documentation (`help`, command `--help`);
+* the process command (`serve`): a long-running daemon, not a result;
+* the interactive `init` setup workflow: a setup wizard with one-time
+  admin-token disclosure rather than one finite result.
+
+A project-wide structural test walks the command tree and verifies the
+declaration itself: finite-result leaves must declare human-default +
+explicit `--json`, register the `--json` flag, and advertise it in Usage;
+exception leaves must declare a non-empty reason and must not expose
+`--json`. Branch commands declare no leaf presentation metadata.
+`session delete --id SESSION_ID` remains the one explicitly retained
+targeting-grammar compatibility exception; presentation entropy is not a
+compatibility requirement.
+
 Agent-facing CLI commands are `pull`, `build`, `run`, `registry login`
 (described under [Data-plane execution](#data-plane-execution)), and `self`
 — the read-only credential self-introspection command, usable with a
@@ -2077,30 +2150,37 @@ system deployment: `apparmor root list` is read-only backend diagnostic
 inspection of the boundary state the Session MAC lifecycle prepared (the
 `apparmor root` spelling is a retained compatibility form; it never
 mutates state and is not an authorization API — the Session MAC lifecycle
-is the only production writer of managed AppArmor MAC boundaries), and
+is the only production writer of managed AppArmor MAC boundaries; the
+names print one per line, the bare name array under `--json`), and
 `apparmor check` validates the shipped profile against the installed
-policy.
+policy (the human status line by default, `{valid}` under `--json`).
 
 `selinux` — inspect SELinux system-policy state for a SELinux system
 deployment. Subcommand: `check` (validate that the `docker_helper` policy
 module is loaded and docker-helper-owned file contexts are consistent with
 the active policy; read-only operator diagnostics that never mutates
-SELinux state and never inspects dynamic Session MAC resources).
+SELinux state and never inspects dynamic Session MAC resources; the human
+status line by default, `{valid}` under `--json`).
 
 ### Config and reload
 
 `docker-helper config <subcommand>` — inspect and modify configuration.
 Requires a subcommand: `show`, `set`, `unset`, `allowed-root`.
 
-`docker-helper config show [FIELD]` — without FIELD, prints the complete
-effective configuration as JSON (admin_token redacted). With FIELD, prints
-only that field's value followed by a newline; most fields are scalar, and
-`allowed_roots` prints its rich JSON array.
+`docker-helper config show [--json] [FIELD]` — the two-mode presentation
+contract: without FIELD, the default output is the human field block (the
+canonical field names as labels, `allowed_roots` through the shared
+PATH/ACCESS table, admin_token redacted) and `--json` prints the complete
+effective configuration document; with FIELD, the default prints that
+field's value followed by a newline and `--json` prints the field's JSON
+value (`allowed_roots` prints its rich `{"path","access"}` array).
 
-`docker-helper config set FIELD VALUE` — sets a writable field.
-Reports `updated` or `unchanged`. If the daemon is running, the change is
-applied automatically for reloadable fields. `http_address` is startup-only
-and requires a daemon restart.
+`docker-helper config set [--json] FIELD VALUE` — sets a writable field.
+Reports `updated` or `unchanged`; `--json` prints the shared structured
+result (`{field,value,changed}` plus `migrated` on a legacy-schema write)
+and moves the operational notes to stderr. If the daemon is running, the
+change is applied automatically for reloadable fields. `http_address` is
+startup-only and requires a daemon restart.
 
 The operation is transactional: the entire read-modify-write-reload cycle
 runs under a process-level lock. If the daemon rejects the reload (e.g.
@@ -2120,17 +2200,23 @@ authority. When the daemon is running, reload under daemon confinement is the
 authoritative proof, and a reload/CA-preparation failure still rolls the
 change back (see [Environment and trusted CA](#environment-and-trusted-ca)).
 
-`docker-helper config unset FIELD` — removes an optional field to restore
-its default. `allowed_roots` and `session_ttl` are required and cannot be
-unset. Reports `unset` or `unchanged`. The same transactional rollback
-semantics apply.
+`docker-helper config unset [--json] FIELD` — removes an optional field
+to restore its default. `allowed_roots` and `session_ttl` are required
+and cannot be unset. Reports `unset` or `unchanged`; `--json` prints the
+shared structured result (`{field,changed}` plus `migrated`). The same
+transactional rollback semantics apply.
 
 `docker-helper config allowed-root <list|add|set-access|remove> [PATH]` —
 manages the global allowed_roots array. `add` canonicalizes and validates the
 path; authorization-only, does NOT prepare MAC state.
 `set-access` changes the access mode of exactly one stored root, matched by
 the stored canonical identity; a root that is not stored is a user-facing
-error, never an idempotent no-op.
+error, never an idempotent no-op. Its success presentation is the one
+shared set-access owner (see [CLI presentation contract](#cli-presentation-contract)):
+`changed PATH to access MODE` / `unchanged PATH (access MODE)` by default,
+the shared structured result object under `--json` (the config form
+additionally reports `migrated` when the write carried a legacy-schema
+migration).
 `remove` resolves and matches the stored canonical form; rejects removal of
 the final global root. `list` prints the 2.1-compatible one canonical root
 per line by default; the explicit `--json` opt-in prints the canonical rich
