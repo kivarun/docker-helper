@@ -161,6 +161,11 @@ var sessionCreateCommand = &Command{
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
+	Help: `Authenticates through the operator credential source: the explicit
+--token-file where supplied, otherwise the installed operator credential.
+DOCKER_HELPER_SESSION_TOKEN does not participate in this command; only
+the self command selects between the credential sources.`,
+
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

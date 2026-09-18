@@ -20,6 +20,22 @@ daemon classifies the bearer credential itself and answers with the
 matching self resource; the CLI performs no local classification and
 never resolves your identity from configuration.
 
+Credential source selection: self is the one dual-authority
+introspection surface, so the source is selected explicitly — the
+--token-file wins; without it, a non-empty DOCKER_HELPER_SESSION_TOKEN
+is the Session bearer; with neither, the normal operator credential
+source answers. The daemon still classifies the selected bearer; the
+CLI only selects the credential source. This is not shared with the
+other command families: agent/data-plane commands (pull, build, run,
+registry login) authenticate only with DOCKER_HELPER_SESSION_TOKEN and
+never fall back to an installed credential, and session control
+commands (session create, list, show, delete) authenticate only
+through the operator credential source, which
+DOCKER_HELPER_SESSION_TOKEN never overrides. Automated harnesses: to
+exercise a specific authority, provide only the intended source or
+select it explicitly with --token-file; do not rely on ambient
+credentials.
+
   Principal credential -> your Principal: username, uid/gid, home,
                           enabled state, stored allowed-root entries,
                           and effective allowed-root entries.

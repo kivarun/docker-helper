@@ -848,6 +848,18 @@ Neither is deprecated or fallback. Choice depends on deployment and environment.
 The `docker-helper` binary includes a client CLI for agent use. The client
 commands use `DOCKER_HELPER_SESSION_TOKEN` available in the client environment and communicate with the running daemon.
 
+Authentication sources are per command family, and `DOCKER_HELPER_SESSION_TOKEN`
+never overrides an operator credential: agent/data-plane commands
+(`pull`, `build`, `run`, `registry login`) authenticate only with the
+Session token from `DOCKER_HELPER_SESSION_TOKEN`; session control commands
+(`session create/list/show/delete`) authenticate only through the operator
+credential source (`--token-file` or the installed operator credential);
+`docker-helper self` is the one dual-authority surface and selects the
+source explicitly (`--token-file` first, then the Session token, then the
+operator credential). To exercise a specific authority, provide only the
+intended source or select it explicitly — see `docker-helper help self`
+and the man page.
+
 ```bash
 docker-helper pull IMAGE
 docker-helper build . --dockerfile Dockerfile --image NAME

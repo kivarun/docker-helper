@@ -64,6 +64,27 @@ The admin token has no self resource (`404 self_not_available`). A self
 read is read-only and grants no authority over peers: it never permits
 listing or managing other Sessions, Launchers, or Principals.
 
+Authentication sources are per command family, and
+`DOCKER_HELPER_SESSION_TOKEN` never overrides an operator credential:
+
+- Agent/data-plane commands (`pull`, `build`, `run`, `registry login`)
+  authenticate **only** with the Session token from
+  `DOCKER_HELPER_SESSION_TOKEN`; they never fall back to an installed
+  credential and never become operator-authority requests because one is
+  installed.
+- Session control commands (`session create/list/show/delete`)
+  authenticate **only** through the operator credential source (explicit
+  `--token-file`, otherwise the installed operator credential);
+  `DOCKER_HELPER_SESSION_TOKEN` does not participate in these commands.
+- `self` is the one dual-authority surface: `--token-file` wins, then a
+  non-empty `DOCKER_HELPER_SESSION_TOKEN`, then the installed operator
+  credential. The daemon classifies the selected bearer; the CLI only
+  selects the source.
+
+If your harness must exercise a specific authority, provide only the
+intended source or select it explicitly (`--token-file`); never rely on
+ambient credentials. Never inspect or print token values.
+
 ## Client interfaces
 
 Docker Helper provides two first-class client interfaces — the

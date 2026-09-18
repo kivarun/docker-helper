@@ -246,6 +246,20 @@ endpoint is read-only. With \-\-json, output the raw response envelope
 (\fBok\fR, \fBtype\fR, \fBresource\fR): the envelope's \fBtype\fR
 discriminates which of the three self resource shapes \fBresource\fR
 carries, so the union cannot project one fixed bare resource schema.
+.PP
+self is the one dual-authority introspection surface, so the credential
+source is selected explicitly: \fB\-\-token\-file\fR wins; without it a
+non-empty \fBDOCKER_HELPER_SESSION_TOKEN\fR is the Session bearer; with
+neither, the normal operator credential source answers. The daemon still
+classifies the selected bearer; the CLI only selects the credential
+source. This is not shared with the other command families: agent/data-plane
+commands (pull, build, run, registry login) authenticate only with
+\fBDOCKER_HELPER_SESSION_TOKEN\fR and never fall back to an installed
+credential, and session control commands (session create/list/show/delete)
+authenticate only through the operator credential source, which
+\fBDOCKER_HELPER_SESSION_TOKEN\fR never overrides. To exercise a specific
+authority, provide only the intended source or select it explicitly with
+\fB\-\-token\-file\fR; do not rely on ambient credentials.
 .TP
 .B docker-helper session cleanup [\-\-json]
 Remove expired sessions from the local state database and clean up stale
@@ -731,7 +745,10 @@ admin-token rotate commands, select the target daemon:
 \fB\-\-token-file FILE\fR: Read authentication token from file (optional for Unix sockets)
 .PP
 \fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
-\fB\-\-system\fR may use \fB\-\-token-file\fR for authentication.
+\fB\-\-system\fR may use \fB\-\-token\-file\fR for authentication.
+Session control commands authenticate only through this operator
+credential source; \fBDOCKER_HELPER_SESSION_TOKEN\fR never overrides or
+participates in it.
 Without explicit endpoint selection, a deterministic default is used:
 an existing user socket is selected first; otherwise the system socket is
 selected. The token source follows that selection: user admin token for the
