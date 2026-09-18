@@ -276,7 +276,13 @@ In system mode, MAC coverage for a concrete workspace is handled by the
 session lifecycle at session creation. In user mode, no MAC preparation
 is required.
 
-remove does not invalidate already-issued sessions.`,
+Removing a global root, or otherwise narrowing the set of admitted global
+paths, is a parent-ceiling transition: when the daemon applies the new ceiling
+it prunes stored Principal roots the ceiling no longer contains and then
+prunes restricted-Launcher descendants outside the
+surviving per-Principal ceilings. A running daemon does this before publishing
+the reloaded policy; a config narrowed while the daemon is stopped is
+reconciled at startup. Already-issued Session snapshots are never rewritten.`,
 	Subcommands: []*Command{
 		configAllowedRootListCommand,
 		configAllowedRootAddCommand,
@@ -343,8 +349,12 @@ var configAllowedRootRemoveCommand = &Command{
 
 Resolves/matches the stored canonical form. Idempotent (prints "not found"
 if the root does not exist). Rejects removal of the final global root.
-Does not invalidate already-issued sessions. With --json, the shared
-structured remove result replaces the human acknowledgement.`,
+Narrowing the global ceiling prunes stored Principal roots it no longer
+contains and then restricted-Launcher descendants outside the surviving
+per-Principal ceilings before the new runtime policy is published; if the
+daemon is stopped, the same reconciliation runs at startup. Already-issued
+Session snapshots are not rewritten. With --json, the shared structured
+remove result replaces the human acknowledgement.`,
 
 	Presentation: humanJSONPresentation(),
 

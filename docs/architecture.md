@@ -1303,12 +1303,16 @@ stored-root reconciliation primitive
 > stored descendant roots that are no longer covered. Existing Session
 > filesystem snapshots are immutable and are not rewritten.
 
-Persisted stale state outside these canonical mutation paths — manual DB
-corruption, unsupported direct DB modification, incomplete legacy state —
-is not silently accepted: the Session-create revalidation
-(`effectiveLauncherAllowedRoots`) still fails closed with the existing
-`launcher_unavailable` contract. Canonical mutations reconcile; unexpected
-persisted stale state fails closed.
+Runtime reload and daemon startup are themselves global-ceiling
+reconciliation boundaries: stored descendants present when either activates
+a global ceiling are converged through the same canonical owner before that
+ceiling is served. Persisted stale state that reaches a live Session-create
+path outside such a reconciliation boundary — for example unsupported direct
+DB modification after startup — is never silently accepted: the
+Session-create revalidation (`effectiveLauncherAllowedRoots`) still fails
+closed with the existing `launcher_unavailable` contract. Canonical
+mutations and global-ceiling activation reconcile; unexpected stale state
+that reaches Session creation fails closed.
 
 MAC state is derived from the concrete issued-Session-tree lifecycle, not
 from the authorization ceilings. The canonical statement, corrected by the

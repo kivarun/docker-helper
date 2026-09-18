@@ -111,6 +111,15 @@ Manage workspace roots with:
 .br
 \fBdocker-helper config allowed-root remove PATH\fR \- remove a global allowed root
 .PP
+Narrowing the global ceiling is a parent-policy transition, not only a
+configuration-file edit. When the daemon applies a narrower ceiling it
+atomically prunes stored Principal roots no global root wholly contains and
+then prunes restricted-Launcher roots outside the surviving per-Principal
+effective ceilings before publishing the new runtime policy. If the config is
+narrowed while the daemon is stopped, the same reconciliation runs before the
+next daemon start begins serving. Already-issued Session filesystem snapshots
+are immutable and are never rewritten by this reconciliation.
+.PP
 \fBconfig show\fR projects the stored entries as
 \fBallowed_roots\fR, the canonical rich projection with the
 access modes.
@@ -199,7 +208,14 @@ Loopback TCP listen address for system mode. The host must be exactly
 Changes to \fBhttp_address\fR require daemon restart.
 .SH RELOAD BEHAVIOR
 Most configuration changes can be applied via \fBdocker-helper reload\fR without
-restart. Exceptions:
+restart. A reload that narrows \fBallowed_roots\fR first reconciles the stored
+Principal/Launcher hierarchy to the new ceiling in one database transaction
+and only then publishes that ceiling. A reconciliation failure commits no
+partial descendant deletion and leaves the current runtime configuration
+active. A config narrowed while the daemon is stopped is reconciled by the
+same owner during startup before the listener is served.
+.PP
+Exceptions:
 .IP \(bu 4
 \fBhttp_address\fR: Requires daemon restart
 .SH DERIVED PATHS

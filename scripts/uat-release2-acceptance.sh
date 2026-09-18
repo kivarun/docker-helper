@@ -22,8 +22,9 @@
 #      behavior of the old Session, restart idempotency
 #   H  launcher hierarchy, isolation, rotation, and lifecycle on the candidate
 #      (separate namespaces, cross-launcher non-disclosure, rotation continuity,
-#      restricted scope, stale-root rejection, disable propagation, checked
-#      delete, bearer/provenance audit checks)
+#      restricted scope, Principal/global parent-ceiling cascade through live
+#      reload and real startup, disable propagation, checked delete,
+#      bearer/provenance audit checks)
 #   F  DEB native lifecycle: install(upgrade baseline v2.0.0) ->
 #      upgrade(candidate) -> reinstall(candidate) -> remove -> purge
 #
@@ -172,6 +173,60 @@ json_field() { # field
   grep -oP "\"$1\": \"\K[^\"]+" | head -1
 }
 
+# offline_remove_config_allowed_root PATH removes exactly one global
+# allowed_roots entry while the daemon is stopped. This intentionally bypasses
+# the CLI/reload path so the following daemon start must exercise the real
+# startup reconciliation boundary. The write preserves config ownership/mode
+# and is atomic; absence of PATH is a hard test-fixture failure.
+offline_remove_config_allowed_root() {
+  python3 - "$1" <<'PY'
+import json
+import os
+import stat
+import sys
+
+config_path = "/etc/docker-helper/config.json"
+target = sys.argv[1]
+
+with open(config_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+roots = data.get("allowed_roots")
+if not isinstance(roots, list):
+    raise SystemExit("allowed_roots is not a list")
+
+def root_path(entry):
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return entry.get("path")
+    return None
+
+filtered = [entry for entry in roots if root_path(entry) != target]
+if len(filtered) == len(roots):
+    raise SystemExit("target global root not found")
+if not filtered:
+    raise SystemExit("refusing to remove final global root in UAT fixture")
+
+data["allowed_roots"] = filtered
+st = os.stat(config_path)
+tmp = config_path + ".uat-global-cascade"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+os.chmod(tmp, stat.S_IMODE(st.st_mode))
+os.chown(tmp, st.st_uid, st.st_gid)
+os.replace(tmp, config_path)
+dirfd = os.open(os.path.dirname(config_path), os.O_DIRECTORY)
+try:
+    os.fsync(dirfd)
+finally:
+    os.close(dirfd)
+PY
+}
+
 # classify_registry_failure STREAM — the single classifier for a captured
 # docker CLI failure stream in the registry scenarios. Emits one of:
 #   network — a network/backend marker is present (checked FIRST). This is
@@ -214,7 +269,8 @@ cleanup() {
   apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>/dev/null || true
   pkill -u uatcoex docker-helper 2>/dev/null || true
   kill "${D_OP_CLI_PID:-}" 2>/dev/null || true
-  rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper "$CRED_DIR"
+  rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper "$CRED_DIR" \
+    /tmp/docker-helper-r2-global-cascade
 }
 trap cleanup EXIT
 
@@ -1749,11 +1805,13 @@ fi
 #   H4  restricted scope narrows the principal ceiling for new sessions; a
 #       workspace outside the restricted Launcher scope but otherwise valid
 #       gets the exact contract: HTTP 400 invalid_workspace
-#   H5  an already-stored Launcher root becomes stale fail-closed when the
-#       exact narrow Principal root containing it is removed: creation is
-#       first proven to succeed inside the narrow ceiling (positive
-#       precondition), then fails with 422 launcher_unavailable; the original
-#       Principal root state is restored
+#   H5  removing the exact Principal parent root cascades the restricted
+#       Launcher's stored descendant in the same transition; the Launcher stays
+#       restricted with zero roots and follow-up create is invalid_workspace
+#   H5R live global-ceiling narrowing through config mutation/reload prunes the
+#       Principal row and then its restricted-Launcher descendant
+#   H5S offline global-ceiling narrowing is reconciled by the real daemon
+#       startup before serving, with the committed prune visible operationally
 #   H6  disabling a launcher deletes its sessions and rejects its bearer; an
 #       individually disabled launcher stays disabled through a principal
 #       disable/enable cycle
@@ -1980,6 +2038,107 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       acc_fail "could not restore the principal root after the cascade check"
     fi
   fi
+
+  # H5R: live global-ceiling narrowing must reconcile the stored hierarchy
+  # through the installed candidate's real config-mutation -> reload path.
+  H5_GLOBAL_ROOT="/tmp/docker-helper-r2-global-cascade"
+  H5_GLOBAL_CHILD="$H5_GLOBAL_ROOT/launcher"
+  rm -rf "$H5_GLOBAL_ROOT"
+  mkdir -p "$H5_GLOBAL_CHILD"
+
+  H5R_ID=""
+  H5R_READY=false
+  if dh config allowed-root add "$H5_GLOBAL_ROOT" >/dev/null 2>&1 \
+      && dh principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
+    H5R_OUT="$(dh launcher create --system --principal "$H_USER" --name h5-runtime-cascade \
+      --allowed-root "$H5_GLOBAL_CHILD" --no-credential --json 2>/dev/null || true)"
+    H5R_ID="$(printf '%s' "$H5R_OUT" | json_field id || true)"
+    H5R_PROOTS_BEFORE="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
+    H5R_SHOW_BEFORE="$(dh launcher show --system --principal "$H_USER" --json "$H5R_ID" 2>/dev/null || true)"
+    if [ -n "$H5R_ID" ] \
+        && grep -q "\"path\": \"$H5_GLOBAL_ROOT\"" <<<"$H5R_PROOTS_BEFORE" \
+        && grep -q "\"path\": \"$H5_GLOBAL_CHILD\"" <<<"$H5R_SHOW_BEFORE"; then
+      H5R_READY=true
+      acc_ok "live-global cascade precondition: Principal and restricted-Launcher descendants are stored"
+    else
+      acc_fail "live-global cascade precondition failed"
+    fi
+  else
+    acc_fail "could not install live-global cascade fixture"
+  fi
+
+  if [ "$H5R_READY" = true ]; then
+    if dh config allowed-root remove "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
+      H5R_PROOTS="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
+      H5R_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H5R_ID" 2>/dev/null || true)"
+      if ! grep -q "\"path\": \"$H5_GLOBAL_ROOT\"" <<<"$H5R_PROOTS" \
+          && grep -q '"scope": "restricted"' <<<"$H5R_SHOW" \
+          && grep -q '"allowed_roots": \[\]' <<<"$H5R_SHOW"; then
+        acc_ok "live reload pruned the Principal root and restricted-Launcher descendant atomically"
+      else
+        acc_fail "live global cascade did not converge stored descendants"
+      fi
+    else
+      acc_fail "live global-ceiling removal/reload failed"
+    fi
+  fi
+  [ -z "$H5R_ID" ] || dh launcher delete --system --principal "$H_USER" "$H5R_ID" >/dev/null 2>&1 || true
+
+  # H5S: the same global transition must converge through the actual daemon
+  # startup path when config.json is narrowed while the daemon is stopped.
+  H5S_ID=""
+  H5S_READY=false
+  if dh config allowed-root add "$H5_GLOBAL_ROOT" >/dev/null 2>&1 \
+      && dh principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
+    H5S_OUT="$(dh launcher create --system --principal "$H_USER" --name h5-startup-cascade \
+      --allowed-root "$H5_GLOBAL_CHILD" --no-credential --json 2>/dev/null || true)"
+    H5S_ID="$(printf '%s' "$H5S_OUT" | json_field id || true)"
+    H5S_PROOTS_BEFORE="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
+    H5S_SHOW_BEFORE="$(dh launcher show --system --principal "$H_USER" --json "$H5S_ID" 2>/dev/null || true)"
+    if [ -n "$H5S_ID" ] \
+        && grep -q "\"path\": \"$H5_GLOBAL_ROOT\"" <<<"$H5S_PROOTS_BEFORE" \
+        && grep -q "\"path\": \"$H5_GLOBAL_CHILD\"" <<<"$H5S_SHOW_BEFORE"; then
+      H5S_READY=true
+      acc_ok "startup-global cascade precondition: Principal and restricted-Launcher descendants are stored"
+    else
+      acc_fail "startup-global cascade precondition failed"
+    fi
+  else
+    acc_fail "could not install startup-global cascade fixture"
+  fi
+
+  if [ "$H5S_READY" = true ]; then
+    systemctl stop docker-helper.service >/dev/null 2>&1 || true
+    H5S_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if offline_remove_config_allowed_root "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
+      if systemctl start docker-helper.service >/dev/null 2>&1 && wait_health "$SOCK"; then
+        H5S_PROOTS="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
+        H5S_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H5S_ID" 2>/dev/null || true)"
+        H5S_JOURNAL="$(journalctl --utc -u docker-helper.service --since "$H5S_SINCE" --no-pager 2>/dev/null || true)"
+        if ! grep -q "\"path\": \"$H5_GLOBAL_ROOT\"" <<<"$H5S_PROOTS" \
+            && grep -q '"scope": "restricted"' <<<"$H5S_SHOW" \
+            && grep -q '"allowed_roots": \[\]' <<<"$H5S_SHOW" \
+            && grep -q '"operation":"startup"' <<<"$H5S_JOURNAL" \
+            && grep -q 'stored allowed-root reconciliation committed' <<<"$H5S_JOURNAL" \
+            && grep -Fq "$H5_GLOBAL_ROOT" <<<"$H5S_JOURNAL"; then
+          acc_ok "real daemon startup reconciled global descendants before serving and logged the committed prune"
+        else
+          acc_fail "startup global cascade state/log proof failed"
+        fi
+      else
+        acc_fail "daemon did not become healthy after offline global-ceiling narrowing"
+      fi
+    else
+      acc_fail "could not atomically narrow config.json while daemon was stopped"
+      systemctl start docker-helper.service >/dev/null 2>&1 || true
+      wait_health "$SOCK" >/dev/null 2>&1 || true
+    fi
+  fi
+  # Return the global config to the pre-fixture state even if one of the
+  # preceding proof steps failed after installing the temporary root.
+  dh config allowed-root remove "$H5_GLOBAL_ROOT" >/dev/null 2>&1 || true
+  [ -z "$H5S_ID" ] || dh launcher delete --system --principal "$H_USER" "$H5S_ID" >/dev/null 2>&1 || true
+  rm -rf "$H5_GLOBAL_ROOT"
 
   # H6: disable propagation + persistence of individual disablement.
   H_BETA_DIS_OUT="$(dh launcher set --system --principal "$H_USER" --enabled false --json "$H_BETA_ID" 2>/dev/null || true)"

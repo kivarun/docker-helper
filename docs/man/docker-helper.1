@@ -117,8 +117,14 @@ init does not prepare MAC state, which is handled by the session lifecycle
 at session creation. User mode requires no MAC preparation.
 .TP
 .B docker-helper reload [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
-Reload configuration. With \-\-json the structured acknowledgement
-(\fBreloaded\fR) replaces the human line.
+Reload configuration. Narrowing the global allowed-root ceiling atomically
+prunes stored Principal roots the new ceiling no longer contains and then
+restricted-Launcher descendants outside the surviving per-Principal ceilings
+before the new runtime policy is published; existing Session filesystem
+snapshots are not rewritten. A reconciliation failure commits no descendant
+deletions and leaves the current runtime configuration active. With
+\-\-json the structured acknowledgement (\fBreloaded\fR) replaces the human
+line.
 .TP
 .B docker-helper version [\-\-json]
 Print version information (\fB{version}\fR under \-\-json).

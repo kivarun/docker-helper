@@ -427,7 +427,7 @@ func TestStartupReconciliationConvergesStoredRootsBeforeServing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startup reconciliation: %v", err)
 	}
-	if !pathSetEqual(result.PrincipalRoots, []string{filepath.Join(root, "home", "bootrec"), pb}) {
+	if !pathSetEqual(principalPrunedPaths(result), []string{filepath.Join(root, "home", "bootrec"), pb}) {
 		t.Fatalf("reconciliation pruned principal roots = %v, want the out-of-ceiling pair", result.PrincipalRoots)
 	}
 	if !pathSetEqual(launcherPrunedPaths(result), []string{cache}) {
@@ -439,6 +439,15 @@ func TestStartupReconciliationConvergesStoredRootsBeforeServing(t *testing.T) {
 	if got := mustLauncherStoredRootPaths(t, app, l.ID); !pathSetEqual(got, []string{proj}) {
 		t.Fatalf("launcher roots after startup reconciliation = %v, want [%s]", got, proj)
 	}
+}
+
+// principalPrunedPaths projects the reconciliation result's Principal rows.
+func principalPrunedPaths(result storedRootCascadeResult) []string {
+	paths := make([]string, 0, len(result.PrincipalRoots))
+	for _, p := range result.PrincipalRoots {
+		paths = append(paths, p.Path)
+	}
+	return paths
 }
 
 // launcherPrunedPaths projects the reconciliation result's Launcher rows.

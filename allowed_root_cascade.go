@@ -33,18 +33,25 @@ import (
 // reconciliation deleted, in canonical lexical order per Principal. The
 // surfaces log it; it is not an API or audit contract.
 type storedRootCascadeResult struct {
-	// PrincipalRoots are the canonical Principal stored-root paths deleted
-	// by the global-ceiling prune.
-	PrincipalRoots []string
+	// PrincipalRoots are the stored Principal roots deleted by the
+	// global-ceiling prune, with the owning Principal ID retained for
+	// operational provenance.
+	PrincipalRoots []principalStoredRootPruned
 	// LauncherRoots are the stored restricted-Launcher roots deleted by the
 	// Launcher-level cascade.
 	LauncherRoots []launcherStoredRootPruned
 }
 
+// principalStoredRootPruned is one cascaded-away stored Principal root.
+type principalStoredRootPruned struct {
+	PrincipalID int64  `json:"principal_id"`
+	Path        string `json:"path"`
+}
+
 // launcherStoredRootPruned is one cascaded-away stored Launcher root.
 type launcherStoredRootPruned struct {
-	LauncherID string
-	Path       string
+	LauncherID string `json:"launcher_id"`
+	Path       string `json:"path"`
 }
 
 // pruneStoredAllowedRootsToCeilings deletes every stored descendant
@@ -129,7 +136,7 @@ func prunePrincipalStoredRootsToCeiling(tx *sql.Tx, globalEntries []AllowedRootE
 				); err != nil {
 					return fmt.Errorf("cannot prune principal allowed root: %w", err)
 				}
-				result.PrincipalRoots = append(result.PrincipalRoots, root.Path)
+				result.PrincipalRoots = append(result.PrincipalRoots, principalStoredRootPruned{PrincipalID: principalID, Path: root.Path})
 				continue
 			}
 			surviving = append(surviving, root)
@@ -202,7 +209,7 @@ func userModeDefaultOwnerID(owner *userModeDefaultLauncher) int64 {
 
 // logStoredRootReconciliation records the committed reconciliation outcome on
 // the operational log. It never carries bearer or secret material: the
-// cascaded paths and Launcher IDs are policy identities.
+// cascaded policy-row identities and owner IDs are operational policy facts.
 func logStoredRootReconciliation(ctx context.Context, operation string, result storedRootCascadeResult) {
 	if len(result.PrincipalRoots) == 0 && len(result.LauncherRoots) == 0 {
 		return

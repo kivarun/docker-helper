@@ -346,12 +346,14 @@ func runDaemon(stdout, stderr io.Writer) error {
 		// final tables and before the daemon begins serving, so canonical
 		// state is valid under the new ceiling before Session creation is
 		// possible. Failure is fail-closed startup.
-		if _, err := reconcileStoredAllowedRootsToGlobalCeiling(
+		startupRootReconciliation, err := reconcileStoredAllowedRootsToGlobalCeiling(
 			db, cfg.AllowedRoots, cfg.Mode == ModeUser, userModeDefaultOwnerID(userModeDefault),
-		); err != nil {
+		)
+		if err != nil {
 			serveStartupError(err, "")
 			return err
 		}
+		logStoredRootReconciliation(context.Background(), "startup", startupRootReconciliation)
 
 		// Workload MAC coordinator: operation/container-lifetime
 		// workload MAC state, separate from the session MAC coordinator.

@@ -9136,9 +9136,12 @@ func TestReleaseReadmeIncludesCurlSnippet(t *testing.T) {
 // narrowed-authority contract, and restored Principal root state), the G5
 // bearer invalidation proof on the session data plane (never via /auth), and
 // the migration cleanup proof for the invalidated session's runtime artifact.
-// The stale-root 422 launcher_unavailable corruption defense is not a
-// canonical mutation outcome any more; it is pinned by the unit/integration
-// suite (allowed_root_cascade_test.go).
+// H5R/H5S additionally pin the installed-candidate global cascade through the
+// live reload path and through the real daemon startup path (including the
+// startup operational reconciliation record). The stale-root 422
+// launcher_unavailable corruption defense is not a canonical mutation outcome
+// any more; it is pinned by the unit/integration suite
+// (allowed_root_cascade_test.go).
 func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	data, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
 	if err != nil {
@@ -9185,6 +9188,35 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("H5 cascade proof is missing a required step (%s)", must)
+		}
+	}
+
+	// H5R: exact-candidate live global cascade.
+	for _, must := range []string{
+		`dh config allowed-root add "$H5_GLOBAL_ROOT"`,
+		`principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT"`,
+		`--name h5-runtime-cascade`,
+		`dh config allowed-root remove "$H5_GLOBAL_ROOT"`,
+		`live reload pruned the Principal root and restricted-Launcher descendant atomically`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("H5R live-global cascade proof is missing a required step (%s)", must)
+		}
+	}
+
+	// H5S: offline narrowing followed by the real service startup.
+	for _, must := range []string{
+		`--name h5-startup-cascade`,
+		`systemctl stop docker-helper.service`,
+		`offline_remove_config_allowed_root "$H5_GLOBAL_ROOT"`,
+		`systemctl start docker-helper.service`,
+		`wait_health "$SOCK"`,
+		`grep -q '"operation":"startup"'`,
+		`grep -q 'stored allowed-root reconciliation committed'`,
+		`real daemon startup reconciled global descendants before serving and logged the committed prune`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("H5S startup-global cascade proof is missing a required step (%s)", must)
 		}
 	}
 

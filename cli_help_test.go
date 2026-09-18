@@ -909,6 +909,41 @@ func TestHelpConfigAllowedRootGlobalCeiling(t *testing.T) {
 	}
 }
 
+// TestHelpAllowedRootCascadeSideEffects keeps the destructive parent-ceiling
+// reconciliation discoverable on the exact commands that can trigger it.
+func TestHelpAllowedRootCascadeSideEffects(t *testing.T) {
+	tests := []struct {
+		args []string
+		want []string
+	}{
+		{
+			args: []string{"config", "allowed-root", "remove", "--help"},
+			want: []string{"prunes stored Principal roots", "restricted-Launcher", "startup", "Session snapshots"},
+		},
+		{
+			args: []string{"principal", "allowed-root", "remove", "--help"},
+			want: []string{"same transaction", "restricted", "zero roots", "Session filesystem snapshots"},
+		},
+		{
+			args: []string{"reload", "--help"},
+			want: []string{"stored Principal roots", "restricted-Launcher", "reconciliation fails", "Session snapshots"},
+		},
+	}
+
+	for _, tt := range tests {
+		var stdout, stderr bytes.Buffer
+		if code := runCommandWithWriters(tt.args, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v: help exit = %d, stderr=%s", tt.args, code, stderr.String())
+		}
+		help := stdout.String()
+		for _, want := range tt.want {
+			if !strings.Contains(help, want) {
+				t.Errorf("%v: help missing %q:\n%s", tt.args, want, help)
+			}
+		}
+	}
+}
+
 // TestHelpUsageReflectsArbitraryDepth pins the help usage line: the command
 // accepts an arbitrary-depth command path.
 func TestHelpUsageReflectsArbitraryDepth(t *testing.T) {

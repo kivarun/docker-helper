@@ -790,6 +790,13 @@ Startup-only fields (require daemon restart):
 
 Runtime paths (socket, database, state) are not changed.
 
+When allowed_roots is narrowed, reload reconciles persisted policy before
+publishing the new runtime ceiling: stored Principal roots outside the new
+global ceiling are pruned, then restricted-Launcher descendants outside the
+surviving per-Principal ceilings are pruned. Already-issued Session snapshots
+are immutable and are not rewritten. If reconciliation fails, no descendant
+deletion is committed and the current runtime configuration remains active.
+
 If the daemon is not running, this command fails with a non-zero exit code.
 If the new configuration is invalid, the daemon keeps its current
 configuration and this command returns an error.`,

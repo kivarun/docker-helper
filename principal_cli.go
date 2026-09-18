@@ -556,6 +556,14 @@ var principalAllowedRootRemoveCommand = &Command{
 	Usage:      "docker-helper principal allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
+	Help: `Remove one stored Principal allowed root.
+
+The remove is idempotent when PATH is absent. When a stored root is removed,
+the same transaction also deletes stored roots of that Principal's restricted
+Launchers that the resulting effective Principal ceiling no longer contains.
+A restricted Launcher whose last stored root is cascaded away stays restricted
+with zero roots. Already-issued Session filesystem snapshots are immutable and
+are not rewritten.`,
 
 	Presentation: humanJSONPresentation(),
 
