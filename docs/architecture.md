@@ -1912,7 +1912,12 @@ conflict.
 
 ### Session
 
-CLI surface (every command accepts the common operator flags):
+CLI surface: `session create`, `session list`, `session show`, and
+`session delete` are API-backed operator commands and accept the common
+operator flags (see [CLI conventions](#cli-conventions)). `session
+cleanup` is the separate offline/local maintenance command and accepts
+only its own output option (`--json`) — no endpoint or authentication
+flags:
 
 ```
 docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json] WORKSPACE
@@ -1978,7 +1983,14 @@ owned by its launcher; foreign sessions return the same `not_found`
 outcome (no existence disclosure).
 
 `session cleanup` — removes expired sessions from the local state
-database; does not require a running daemon or admin token. Deletes rows
+database; the offline local-state maintenance owner, deliberately not an
+API-backed command: it has no endpoint or authentication flags, must run
+locally with the daemon stopped, and does not require an admin token.
+Offline cleanup of the system deployment must run with the identity and
+privilege that owns the system deployment state (normally root); a
+non-root invocation is user-mode local-state maintenance of the caller's
+own user-mode state and never operates on the system deployment's
+`/var/lib/docker-helper`. Deletes rows
 whose `expires_at` has passed; active sessions are untouched; reports the
 number of removed rows (`{removed}` under `--json`).
 
@@ -3650,7 +3662,7 @@ Current error codes (non-exhaustive):
 | Code | Endpoint | Condition |
 |------|----------|-----------|
 | `unauthorized` | all protected | missing/invalid token |
-| `invalid_json` | all JSON endpoints | request body is not valid JSON |
+| `invalid_json` | all JSON endpoints | the request body fails strict JSON request decoding: malformed JSON, a wrong JSON type for a schema field, an unknown top-level field rejected by the endpoint schema, or trailing second JSON values/data. Successfully decoded requests with missing required build fields are the separate `missing_field` family, Session workspace semantic failures are `invalid_workspace`, and filesystem-policy semantic/shape failures keep their typed `invalid_filesystem_policy` family |
 | `invalid_build_context` | `POST /build` | build context **or Dockerfile** authorization/path/type validation failure (the context spelling is outside the workspace, does not resolve inside it, or is not a directory; the Dockerfile spelling is absolute, escapes the build context, does not resolve or access inside it, or is not a regular file) |
 | `missing_field` | `POST /build` | a required build field (`context`, `dockerfile`, or `image`) is missing; the message names the field (`<field> is required`) — a malformed request, not a build-context failure |
 | `build_context_too_large` | `POST /build` | the build context exceeds one of the fixed build-staging security ceilings (staged payload bytes, entries, or depth); the message names only the exhausted dimension — one canonical code for all three dimensions (see [Build context](#build-context)) |
@@ -3884,7 +3896,7 @@ Result codes:
 | Code | Condition |
 |------|-----------|
 | `success` | session created |
-| `invalid_json` | request body is not valid JSON |
+| `invalid_json` | the request body fails strict JSON request decoding (malformed JSON, wrong JSON type for a schema field, unknown top-level field rejected by the endpoint schema, or trailing second JSON values/data) |
 | `conflicting_selectors` | both `launcher_id` and `principal` selectors present |
 | `invalid_selector` | an explicitly present selector is empty or malformed |
 | `missing_launcher_selector` | system-mode admin request supplies no selector |
@@ -3960,7 +3972,7 @@ Result codes:
 | `unchanged` | enabled already at requested value |
 | `missing_username` | username is empty in the URL |
 | `missing_enabled` | enabled field not present in request body |
-| `invalid_json` | request body is not valid JSON |
+| `invalid_json` | the request body fails strict JSON request decoding (malformed JSON, wrong JSON type for a schema field, unknown top-level field rejected by the endpoint schema, or trailing second JSON values/data) |
 | `not_found` | no principal with the given username |
 | `error` | database failure during update |
 

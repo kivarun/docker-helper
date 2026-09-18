@@ -108,7 +108,11 @@ API exposes; it hides transport details (operation polling, log offsets).
 
 ### Socket discovery
 
-Resolve the Docker Helper Unix socket in this order:
+Endpoint selection differs by command family; do not conflate them.
+
+Agent/data-plane commands (`pull`, `build`, `run`, `registry login`,
+authenticated with the Session bearer) resolve the Unix socket in this
+order:
 
 1. `DOCKER_HELPER_SOCKET_PATH`, if set — the authoritative override;
 2. the user-mode socket
@@ -122,6 +126,20 @@ same order itself. Never declare Docker Helper unavailable only because
 the system-mode socket is absent while the daemon runs in user mode: check
 the user-mode socket first. A transport/connectivity failure on every
 resolved socket is the only unavailability evidence.
+
+Operator/control-plane commands (`session create/list/show/delete`,
+`principal`, `launcher`, `credential`, `reload`, `admin-token rotate`,
+completion introspection) authenticate with Principal/Launcher credentials
+through explicit endpoint selection: `--endpoint` / `--system` when given,
+otherwise the documented operator default (an existing user socket first,
+otherwise the system socket). `DOCKER_HELPER_SOCKET_PATH` does **not**
+select their endpoint. `session cleanup` is not an API-backed command at
+all: it is offline local-state maintenance with no endpoint selection.
+
+`self` follows whichever credential source its documented precedence
+selects: with the explicit `--token-file` or with neither source it uses
+the operator resolution; with a non-empty `DOCKER_HELPER_SESSION_TOKEN` it
+uses the agent/data-plane resolution above.
 
 ## Delegated identity
 

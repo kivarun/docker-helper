@@ -820,7 +820,11 @@ the system socket. The same operator credential file
 (`${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`) may
 hold whichever non-admin operator bearer applies.
 
-`--endpoint` requires `--token-file`. `--system` and `--endpoint` are
+`--endpoint` endpoint rules: an HTTP endpoint
+(`http://127.0.0.1:PORT`) requires an explicit `--token-file`; a Unix
+endpoint (`/path` or `unix:///path`) may auto-resolve the appropriate
+operator credential unless `--token-file` is explicitly supplied.
+`--system` and `--endpoint` are
 mutually exclusive. Selection happens before the request; if the selected
 endpoint is unavailable, the command fails rather than retrying another daemon.
 

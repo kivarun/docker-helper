@@ -463,9 +463,13 @@ func verifySessionFilesystemSnapshots(q txQuerier) error {
 // and proves the persisted representation before handing it to the canonical
 // constructor. Positions must be exactly 0,1,2,...,N-1 with no gap, the table
 // must carry at least one entry, and newSessionFilesystemSnapshot proves the
-// workspace-anchored canonical shape (canonical absolute workspace, entry 0 ==
-// workspace, containment, valid access values, no duplicate paths, canonical
-// normalized order without redundant transitions). The loader never repairs
+// canonical snapshot shape against the independent trusted Session
+// workspace: positions are the contiguous persisted order, entries are
+// non-empty and exactly the canonical normalized representation, the
+// workspace is a canonical absolute path, and the snapshot must authorize
+// the workspace. The workspace need not be entry 0, and it need not appear
+// as a separate entry when an ancestor entry already authorizes it; entries
+// may represent multiple disjoint issued trees. The loader never repairs
 // persisted state: sorting, deduplicating, renumbering, or normalizing a
 // corrupt snapshot would invent issued authority, so any noncanonical state
 // fails closed.
