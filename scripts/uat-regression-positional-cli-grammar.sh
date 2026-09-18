@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# uat-regression-rc8-grammar-gate.sh — Release 2.2 RC8 CLI grammar gate.
+# uat-regression-positional-cli-grammar.sh — Release 2.2 positional CLI
+# grammar gate.
 #
 # What is proven (against the installed system service and the real Docker
 # daemon):
@@ -39,7 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
 
-reg_init "28. RC8 CLI grammar gate: positional operands and target-first allowed-roots"
+reg_init "28. Positional CLI grammar gate: positional operands and target-first allowed-roots"
 
 reg_require_root
 reg_require_service

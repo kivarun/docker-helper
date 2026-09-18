@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// cliRemovedFlagSpellings is the RC8 grammar-removal matrix: command paths
+// cliRemovedFlagSpellings is the grammar-removal matrix: command paths
 // whose legacy flag spelling for the primary operand was removed. The
 // structural sweep below proves none of these flags is registered anymore
 // and the usage line carries the positional operand instead.
@@ -35,7 +35,8 @@ func cliCommandByPath(t *testing.T, path []string) *Command {
 }
 
 // TestCLIPrimaryOperandIsPositional is the structural grammar invariant:
-// every command whose primary operand was positionalized in RC8 registers
+// every command whose primary operand was positionalized by the grammar
+// normalization registers
 // no legacy flag spelling for it, requires exactly one positional operand
 // (or one plus the workload words), and documents the positional operand in
 // the usage line. A regression reintroducing a flag+positional duplicate or

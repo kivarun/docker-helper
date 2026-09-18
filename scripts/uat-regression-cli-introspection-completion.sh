@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# uat-regression-rc8-cli-ux.sh — Release-2.1 RC8 targeted regression group 14:
-# CLI/UX acceptance (Ubuntu / DEB / AppArmor).
+# uat-regression-cli-introspection-completion.sh — Release-2.1 targeted
+# regression group 14: CLI introspection and completion acceptance
+# (Ubuntu / DEB / AppArmor).
 #
 # The manual UAT for RC8 found two contract defects that unit tests had
 # missed because they only exist end to end on the packaged CLI/daemon:
@@ -24,7 +25,7 @@
 #   C. unique deterministic candidates — nested roots (a root under a
 #      wider root) must not produce duplicate suggestions, and the same
 #      typed line yields the same COMPREPLY.
-#   D. RC8 CLI surface — `launcher scope` is gone, the launcher
+#   D. CLI surface — `launcher scope` is gone, the launcher
 #      allowed-root add/list/remove/inherit commands and the principal
 #      allowed-root list command are discoverable.
 #   E. selector-value completion — the values of the --principal/--launcher
@@ -66,7 +67,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
 
-reg_init "14. RC8 CLI/UX acceptance"
+reg_init "14. CLI introspection and completion acceptance"
 
 reg_require_root
 reg_require_service
@@ -516,10 +517,10 @@ subcase_c() {
 }
 
 # ---------------------------------------------------------------------------
-# D. RC8 CLI surface
+# D. CLI surface
 # ---------------------------------------------------------------------------
 subcase_d() {
-  reg_info "subcase D: RC8 CLI surface"
+  reg_info "subcase D: CLI surface"
   local out rc
 
   # 1. `launcher scope` is gone entirely (no alias, no help entry).

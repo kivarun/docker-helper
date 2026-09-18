@@ -264,7 +264,7 @@ func TestBlackBoxFlagAfterPositionalParses(t *testing.T) {
 }
 
 // TestCLIParserInterspersedFlagsGrammar is the parser regression matrix of
-// the RC5 CLI grammar change: options may appear before or after positional
+// the interspersed-flags grammar change: options may appear before or after positional
 // arguments until an explicit "--"; after "--" everything is positional
 // data; option value parsing stays unambiguous; unknown options stay parse
 // errors; and the flags-first forms every existing command relies on keep

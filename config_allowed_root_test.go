@@ -403,7 +403,7 @@ func TestConfigAllowedRootAddWritesObjectForm(t *testing.T) {
 	}
 }
 
-// TestConfigAllowedRootTmpNamespacePolicy proves the RC5 /tmp namespace
+// TestConfigAllowedRootTmpNamespacePolicy proves the /tmp namespace
 // classification at the real CLI add boundary: the exact /tmp namespace is
 // refused as too broad (like /mnt), a real /tmp descendant is accepted as an
 // ordinary candidate root, and a canonical alias of /tmp is refused by the

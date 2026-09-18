@@ -1071,7 +1071,7 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 
 // TestLauncherAllowedRootCLISingleRequest proves the launcher allowed-root
 // commands issue exactly one request each — no GET and no read-modify-write:
-// the daemon owns the policy mutation and its concurrency semantics. The RC8
+// the daemon owns the policy mutation and its concurrency semantics. The
 // positional grammar is target-first: the optional leading positional is the
 // LAUNCHER selector (name or dhl_ ID) and the operation operands follow
 // (omission keeps the documented default-Launcher semantics); the old

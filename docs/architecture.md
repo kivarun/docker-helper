@@ -2192,7 +2192,7 @@ explicit `--json`, register the `--json` flag, and advertise it in Usage;
 exception leaves must declare a non-empty reason and must not expose
 `--json`. Branch commands declare no leaf presentation metadata.
 `session show SESSION_ID` and `session delete SESSION_ID` share the
-positional targeting grammar (the RC8 grammar normalization removed the
+positional targeting grammar (the grammar normalization removed the
 `--id` flag and the parallel spellings for the primary operands); no
 targeting-grammar compatibility exception remains.
 

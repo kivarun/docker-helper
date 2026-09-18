@@ -1195,7 +1195,7 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
 	fmt.Fprintln(w, `        "launcher allowed-root add"|"launcher allowed-root remove"|"launcher allowed-root set-access")`)
-	fmt.Fprintln(w, "            # Target-first RC8 grammar: an optional leading LAUNCHER")
+	fmt.Fprintln(w, "            # Target-first grammar: an optional leading LAUNCHER")
 	fmt.Fprintln(w, "            # selector (name or dhl_ ID) followed by the operation")
 	fmt.Fprintln(w, "            # operands. The first positional is ambiguous between the")
 	fmt.Fprintln(w, "            # selector and the PATH operand; the deterministic shape")

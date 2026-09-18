@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# uat-regression-rc5-selectors.sh — Release-2.1 RC5 targeted regression
-# group 10: launcher/session selector and completion acceptance
-# (Ubuntu / DEB / AppArmor).
+# uat-regression-selector-completion-acceptance.sh — Release-2 targeted
+# UAT regression group 10: launcher/session selector and completion
+# acceptance (Ubuntu / DEB / AppArmor).
 #
 # Black-box acceptance coverage for the RC5 selector defects, exercised
 # through the installed packaged CLI/daemon (the exact public R2.1 paths
@@ -48,15 +48,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
 
-reg_init "10. RC5 selector and completion acceptance"
+reg_init "10. Selector and completion acceptance"
 
 reg_require_root
 reg_require_service
 reg_require_cmd bash "completion acceptance drives a real Bash"
 reg_require_cmd realpath "completion roots canonicalization"
 
-TMPDIR_RC5="/tmp/uat-reg10"
-mkdir -p "$TMPDIR_RC5"
+TMPDIR="/tmp/uat-reg10"
+mkdir -p "$TMPDIR"
 
 # session_field SESSION_JSON: parse a --json session create/list document.
 session_field() { # field
@@ -318,7 +318,7 @@ subcase_d() {
   home="$(reg_setup_principal "$user")" || { reg_fail "D: setup principal failed"; return; }
   mkdir -p "$home/ws"; chown -R "$user:$user" "$home"
 
-  # RC8 positional grammar: `launcher create` without the NAME operand is a
+  # Positional grammar: `launcher create` without the NAME operand is a
   # CLI syntax error (exit 2) before any daemon request and before the
   # credential prompt.
   conflict_err="$(dh launcher create --system --principal "$user" 2>&1 </dev/null)"; conflict_rc=$?
@@ -395,7 +395,7 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   # Generate the real completion script from the installed CLI.
-  script="$TMPDIR_RC5/completion.bash"
+  script="$TMPDIR/completion.bash"
   if ! dh completion bash > "$script" 2>/dev/null || [ ! -s "$script" ]; then
     reg_fail "E: completion script generation failed"
     return
@@ -406,7 +406,7 @@ subcase_e() {
   # `complete -p` (asserting exactly one registration and a -F function),
   # invoke the registered function with COMP_WORDS/COMP_CWORD, and inspect
   # COMPREPLY. The test never assumes an internal helper name.
-  local e_err="$TMPDIR_RC5/e.err"
+  local e_err="$TMPDIR/e.err"
   out="$(bash -c '
     set -u
     source "$1" || exit 3
@@ -466,5 +466,5 @@ subcase_c
 subcase_d
 subcase_e
 
-rm -rf "$TMPDIR_RC5"
+rm -rf "$TMPDIR"
 reg_result

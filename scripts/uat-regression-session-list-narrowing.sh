@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# uat-regression-rc6-session-list-narrowing.sh — Release-2.1 RC6 targeted
+# uat-regression-session-list-narrowing.sh — Release-2.1 targeted
 # regression group 13: scope-first session-list narrowing acceptance
 # (Ubuntu / DEB / AppArmor).
 #
@@ -46,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
 
-reg_init "13. RC6 session-list narrowing acceptance"
+reg_init "13. Session-list narrowing acceptance"
 
 reg_require_root
 reg_require_service

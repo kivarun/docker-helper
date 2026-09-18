@@ -1913,7 +1913,7 @@ when `--principal` is omitted. The launcher NAME is the required
 positional operand; `launcher create default` is an ordinary explicit
 attempt to create the auto-provisioned `default` launcher, decided by the
 daemon's canonical conflict path. (v2.1 behavior — a local pre-flight
-hint instead of the daemon conflict — was removed with the RC8 grammar
+hint instead of the daemon conflict — was removed by the CLI grammar
 normalization.) Upgrading from v2.0.0:
 existing principal
 credentials and attributable sessions migrate automatically at first

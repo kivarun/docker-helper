@@ -1363,8 +1363,8 @@ var treeProviderLeafPaths = []string{
 	"config allowed-root set-access",
 	"principal allowed-root set-access",
 	"launcher allowed-root set-access",
-	// WORKSPACE (session create) and CONTEXT (build) are the RC8 primary
-	// operands: the workspace completes from the daemon-backed session
+	// WORKSPACE (session create) and CONTEXT (build) are the positional
+	// primary operands: the workspace completes from the daemon-backed session
 	// policy query (the old --workspace flag-value owner) and the context
 	// completes generic directories.
 	"session create",
@@ -1429,7 +1429,7 @@ func TestCompletionTreeLeafLongFlags(t *testing.T) {
 	}
 }
 
-// TestCompletionSessionListNarrowingSelectors protects the exact RC6 escaped
+// TestCompletionSessionListNarrowingSelectors protects the exact escaped
 // defect: `docker-helper session list --` must offer the narrowing selectors
 // --principal and --launcher in addition to the operator and JSON flags, so
 // the flags cannot disappear from the generated completion script unnoticed.
@@ -3567,7 +3567,7 @@ func TestCompletionFilesystemRootPathContainingEquals(t *testing.T) {
 }
 
 // =============================================================================
-// RC5 CLI usability: allowed-root completion universes and flag completion
+// CLI usability: allowed-root completion universes and flag completion
 // =============================================================================
 
 // TestCompletionConfigAllowedRootRemoveStoredRoots proves the existing-entity
@@ -3914,8 +3914,8 @@ func TestCompletionFlagsOfferedAfterPositional(t *testing.T) {
 	}
 }
 
-// TestCompletionRemovedOperandFlagsNotSuggested is the RC8 completion
-// regression gate: the removed primary-operand spellings are derived from the
+// TestCompletionRemovedOperandFlagsNotSuggested is the completion
+// regression gate for the removed primary-operand spellings: the removed primary-operand spellings are derived from the
 // live command tree (no separate completion parser), so a removed flag can
 // never be suggested and a reintroduced flag is caught here.
 func TestCompletionRemovedOperandFlagsNotSuggested(t *testing.T) {

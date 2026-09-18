@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# uat-regression-user-mode-effective-roots.sh — Release-2.1 RC6 targeted
+# uat-regression-user-mode-effective-roots.sh — Release-2.1 targeted
 # regression group 12: user-mode effective Principal roots (single semantic
 # owner) (Ubuntu / DEB / AppArmor).
 #

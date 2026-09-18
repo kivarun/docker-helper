@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# uat-regression-user-mode-owner-reservation.sh — Release-2.1 RC6 targeted
+# uat-regression-user-mode-owner-reservation.sh — Release-2.1 targeted
 # regression group 11: user-mode transparent owner reservation
 # (Ubuntu / DEB / AppArmor).
 #

@@ -11415,15 +11415,15 @@ func TestMigrationAndAcceptanceListHarnessContracts(t *testing.T) {
 	}
 }
 
-// TestShippedSkillRC8Contract pins the canonical agent skill
+// TestShippedSkillCLIGrammarContract pins the canonical agent skill
 // (.claude/skills/docker-helper/SKILL.md, packaged as
 // skills/docker-helper/SKILL.md by build-bundle.sh) to the current Release
-// 2.2 contract: the RC8 positional CLI grammar, the explicit --json
+// 2.2 contract: the positional CLI grammar, the explicit --json
 // machine-consumption rule with the stream/protocol exceptions, and the
 // parent-ceiling cascade consequences. The removed legacy spellings must
 // not appear as current-state examples, and the skill must keep steering
 // agents away from operator surfaces.
-func TestShippedSkillRC8Contract(t *testing.T) {
+func TestShippedSkillCLIGrammarContract(t *testing.T) {
 	data, err := os.ReadFile(".claude/skills/docker-helper/SKILL.md")
 	if err != nil {
 		t.Fatalf("the canonical agent skill must exist at its canonical path: %v", err)
@@ -11443,7 +11443,7 @@ func TestShippedSkillRC8Contract(t *testing.T) {
 		t.Error("build-bundle.sh must ship the canonical .claude skill verbatim at skills/docker-helper/SKILL.md")
 	}
 
-	// RC8 positional grammar as the current-state examples.
+	// Positional grammar as the current-state examples.
 	for _, must := range []string{
 		"docker-helper session create .",
 		"docker-helper build . --dockerfile Dockerfile --image IMAGE",
@@ -11452,7 +11452,7 @@ func TestShippedSkillRC8Contract(t *testing.T) {
 		"docker-helper registry login --username USER REGISTRY",
 	} {
 		if !strings.Contains(skill, must) {
-			t.Errorf("the skill must carry the RC8 positional example (%s)", must)
+			t.Errorf("the skill must carry the positional-grammar example (%s)", must)
 		}
 	}
 

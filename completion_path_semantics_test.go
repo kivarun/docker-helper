@@ -136,7 +136,7 @@ func startPolicyRootsServer(t *testing.T, root string) (endpoint, tokenPath stri
 // example /home/michael/work//git/. The regression is driven through the
 // actually registered completion entrypoint with the filename-semantics
 // seam, so it proves the path-value stage was reached rather than failing
-// earlier with no candidates. The RC8 grammar completes the positional
+// earlier with no candidates. The grammar completes the positional
 // WORKSPACE operand.
 func TestCompletionPolicyWorkspaceDoubledSeparatorNotPropagated(t *testing.T) {
 	base := t.TempDir()

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# uat-regression-rc5-cli-grammar.sh — Release 2.2 RC5 CLI grammar and
-# stored-roots completion acceptance.
+# uat-regression-cli-grammar-stored-roots-completion.sh — Release 2.2 CLI
+# grammar and stored-roots completion acceptance.
 #
 # What is proven (against the installed system service and the real
 # generated completion script):
@@ -40,7 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
 
-reg_init "20. RC5 CLI grammar and stored-roots completion acceptance"
+reg_init "20. CLI grammar and stored-roots completion acceptance"
 
 reg_require_root
 reg_require_service

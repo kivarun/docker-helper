@@ -152,7 +152,7 @@ func TestSessionShowHelpDocumentsPositionalIdentity(t *testing.T) {
 		t.Errorf("session show help must not carry the retired --id selector:\n%s", help)
 	}
 
-	// The RC8 grammar normalizes delete onto the same positional identity:
+	// The positional grammar normalizes delete onto the same positional identity:
 	// session delete SESSION_ID (no --id flag survives as an alias).
 	var delOut, delErr bytes.Buffer
 	delUsage := runCommandWithWriters([]string{"session", "delete", "--help"}, &delOut, &delErr)
@@ -164,12 +164,12 @@ func TestSessionShowHelpDocumentsPositionalIdentity(t *testing.T) {
 	}
 }
 
-// TestShippedScriptSessionDeleteGrammar protects the canonical RC8
+// TestShippedScriptSessionDeleteGrammar protects the canonical positional
 // targeting grammar across the shipped UAT corpus: every `session delete`
 // invocation addresses the Session through the positional SESSION_ID
 // operand. The retired `--id` flag must not survive in the corpus — a
 // mechanical leftover would silently reintroduce the parallel spelling the
-// RC8 grammar normalization removed.
+// grammar normalization removed.
 func TestShippedScriptSessionDeleteGrammar(t *testing.T) {
 	var sessionDelete = regexp.MustCompile(`(?:\bdh\b|\bdhx\b|\bdocker-helper\b|\$DH\b|\$DHX\b)\s+session delete\b`)
 	entries, err := os.ReadDir("scripts")
@@ -191,7 +191,7 @@ func TestShippedScriptSessionDeleteGrammar(t *testing.T) {
 			if !sessionDelete.MatchString(line) {
 				continue
 			}
-			// The RC8 grammar gate's subcase A drives the retired spelling
+			// The positional CLI grammar gate's subcase A drives the retired spelling
 			// deliberately to prove its local rejection; its probe lines are
 			// marked and exempt from the corpus invariant.
 			if strings.Contains(line, "gate probe: removed spelling") {
