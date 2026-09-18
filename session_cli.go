@@ -164,7 +164,21 @@ var sessionCreateCommand = &Command{
 	Help: `Authenticates through the operator credential source: the explicit
 --token-file where supplied, otherwise the installed operator credential.
 DOCKER_HELPER_SESSION_TOKEN does not participate in this command; only
-the self command selects between the credential sources.`,
+the self command selects between the credential sources.
+
+WORKSPACE must resolve to a proper descendant of an effective allowed
+root; the allowed root itself is an authority ceiling, not a valid
+Session workspace.
+
+The target Launcher is chosen by the authenticated authority. With a
+Launcher credential, omit --launcher: the authenticated Launcher is
+selected automatically, and supplying that Launcher's own dhl_... ID is
+accepted as explicit self-selection that does not change the target.
+A foreign Launcher ID reaches daemon authorization and answers with the
+non-disclosing launcher-not-found refusal; Launcher names cannot be
+resolved under Launcher credential authority and are rejected locally
+with the dhl_... ID guidance. A Launcher credential gains no Launcher
+control-plane authority.`,
 
 	Presentation: humanJSONPresentation(),
 

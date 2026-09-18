@@ -718,7 +718,9 @@ docker-helper session create /path/to/project
 ```
 
 Returns the session ID, token (shown once), workspace, creation time,
-and expiration time. The workspace must be inside an allowed root.
+and expiration time. The workspace must be a proper descendant of an
+allowed root; the allowed root itself is an authority ceiling, not a
+valid workspace.
 
 Assign the printed token to an environment variable for use in later
 examples:

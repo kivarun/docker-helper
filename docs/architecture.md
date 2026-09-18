@@ -1511,6 +1511,9 @@ handle the prefix trap: `pathWithin("/data", "/data2")` returns false.
 When a session is created, the workspace path is admitted lexically
 against the effective allowed-root ceiling, then resolved through
 `EvalSymlinks`, and the canonical workspace is stored in the database.
+The workspace must resolve to a proper descendant of an effective
+allowed root; the allowed root itself is an authority ceiling, not a
+valid Session workspace.
 When a build or run request specifies a path relative to the workspace,
 the joined spelling is admitted lexically inside the workspace before any
 probing, and the resolved path is compared against the canonical
@@ -3868,7 +3871,7 @@ Result codes:
 | `missing_launcher_selector` | system-mode admin request supplies no selector |
 | `launcher_not_found` | the selected launcher does not exist under the resolved principal (404) |
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
-| `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
+| `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is not strictly inside the effective allowed roots (the allowed root itself is an authority ceiling, not a valid Session workspace) |
 | `invalid_filesystem_policy` | `filesystem_roots` is malformed or is not a valid narrowing of the effective Launcher ceiling; the Session was not issued |
 | `lifecycle_busy` | the lifecycle coordination was held by another transition; the non-waiting Session-create admission refused the create without queueing (HTTP 503) — no Session, no snapshot, no resolved policy state; the audit record and the HTTP answer carry the same class |
 | `mac_preparation_failed` | MAC boundary preparation failed before the create transaction (no Session exists) — HTTP 500; the audit record and the HTTP answer carry the same class |

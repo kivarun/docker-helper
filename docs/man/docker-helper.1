@@ -156,9 +156,11 @@ Machine-facing completion query: print the Launcher selectors the authenticated 
 .B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-filesystem-root PATH=ACCESS]... [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json] WORKSPACE
 Create a new session for a workspace. WORKSPACE is the one required
 positional operand: a workspace-relative path or an absolute host path
-inside the authenticated authority's effective allowed roots (the daemon
-canonicalizes the workspace and enforces containment). With \-\-json,
-output in JSON format.
+inside the authenticated authority's effective allowed roots. WORKSPACE
+must resolve to a proper descendant of an effective allowed root; the
+allowed root itself is an authority ceiling, not a valid Session
+workspace (the daemon canonicalizes the workspace and enforces the
+strict-inside containment). With \-\-json, output in JSON format.
 The repeatable \fB\-\-filesystem-root PATH=ACCESS\fR flag issues additional
 filesystem roots for the Session: PATH is an absolute host path inside the
 resolved target Launcher's effective allowed roots (an existing directory
@@ -192,11 +194,13 @@ missing_launcher_selector\fR). With an admin token,
 is resolved to the Launcher's global ID through the daemon's scope-first
 launcher list query, so a foreign or missing Launcher is the non-disclosing
 \fBlauncher not found\fR. A launcher credential has no Launcher
-control-plane authority: its \fB\-\-launcher\fR must be the Launcher's
-\fIdhl_...\fR ID (reported for the credential by \fBGET /auth\fR) and is
-forwarded as-is, so a foreign ID is the non-disclosing \fBlauncher not
-found\fR, while a name is rejected locally with a hint to use the
-\fIdhl_...\fR ID. \fB\-\-principal\fR is only valid with an admin
+control-plane authority: no selector is needed, because the authenticated
+Launcher is forced by the credential itself; supplying that Launcher's own
+\fIdhl_...\fR ID is accepted as explicit self-selection and does not
+change the target (the ID is reported for the credential by
+\fBGET /auth\fR). A foreign ID reaches daemon authorization and answers
+with the non-disclosing \fBlauncher not found\fR, while a name is rejected
+locally with a hint to use the \fIdhl_...\fR ID. \fB\-\-principal\fR is only valid with an admin
 token. The two selectors are mutually exclusive on the wire: the resolved
 target is sent as either \fBprincipal\fR or \fBlauncher_id\fR, never both.
 .TP

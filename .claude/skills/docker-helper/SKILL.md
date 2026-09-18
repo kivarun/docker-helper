@@ -132,7 +132,8 @@ agent never installs or rotates it):
 
 - **Launcher credential** (narrowest): session creation and session
   management are automatically scoped to one launcher. No selector is
-  needed; do not pass one.
+  needed; do not pass one. Supplying that Launcher's own `dhl_...` ID is
+  accepted as explicit self-selection and does not change the target.
 - **Principal credential** (broader): session creation resolves the
   principal's default launcher automatically. Do not pass a selector
   unless explicitly instructed.
@@ -155,8 +156,10 @@ CLI:
 docker-helper session create .
 ```
 
-The workspace is resolved against your own current directory; it must lie
-inside the Launcher's effective allowed roots. The response shows the
+The workspace is resolved against your own current directory; it must
+resolve to a proper descendant of an effective allowed root — the allowed
+root itself is an authority ceiling, not a valid Session workspace. The
+response shows the
 session token once — export it as `DOCKER_HELPER_SESSION_TOKEN` and never
 display it.
 
