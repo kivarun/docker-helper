@@ -225,7 +225,7 @@ func TestRunOldSessionKeepsIssuedSnapshotUnderParentPolicyChange(t *testing.T) {
 
 	// Real parent-policy mutation to policy B: remove the nested read_only
 	// root through the production mutation owner.
-	if _, _, err := removePrincipalAllowedRoot(app.DB, "policyshifter", inputs); err != nil {
+	if _, _, err := removePrincipalAllowedRootForTest(t, app, "policyshifter", inputs); err != nil {
 		t.Fatalf("removePrincipalAllowedRoot(inputs): %v", err)
 	}
 

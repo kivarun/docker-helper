@@ -9129,11 +9129,16 @@ func TestReleaseReadmeIncludesCurlSnippet(t *testing.T) {
 // TestRelease2AcceptanceStrictProofContracts pins the fail-closed proof
 // contracts of the Release-2 acceptance scenarios that run only on the
 // privileged release-gate runners: the H4 exact out-of-scope workspace
-// contract (400 invalid_workspace), the H5 stale-Launcher-root fixture
-// (narrow Principal ceiling, positive precondition, exact 422
-// launcher_unavailable, restored Principal root state), the G5 bearer
-// invalidation proof on the session data plane (never via /auth), and the
-// migration cleanup proof for the invalidated session's runtime artifact.
+// contract (400 invalid_workspace), the H5 canonical parent-mutation cascade
+// proof (narrow Principal ceiling, positive precondition, the parent-root
+// removal cascading the launcher descendant out of stored state as
+// restricted-with-zero-roots, the follow-up create refused by the ordinary
+// narrowed-authority contract, and restored Principal root state), the G5
+// bearer invalidation proof on the session data plane (never via /auth), and
+// the migration cleanup proof for the invalidated session's runtime artifact.
+// The stale-root 422 launcher_unavailable corruption defense is not a
+// canonical mutation outcome any more; it is pinned by the unit/integration
+// suite (allowed_root_cascade_test.go).
 func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	data, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
 	if err != nil {
@@ -9157,25 +9162,29 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 		}
 	}
 
-	// H5: the stale-root proof must first install the Launcher root as the
+	// H5: the cascade proof must first install the Launcher root as the
 	// Principal's exact narrow ceiling (the Principal holds the setup-added
 	// $ALLOWED_ROOT root and the principal-create-auto-installed home root;
 	// both must be removed), prove session creation succeeds inside it, then
-	// remove that exact Principal root and demand HTTP 422 with structured
-	// code launcher_unavailable, and finally restore the Principal root
-	// state.
+	// remove that exact Principal root and demand the canonical cascade
+	// outcome — the launcher stays restricted with zero stored roots and the
+	// follow-up create is refused by the ordinary narrowed-authority
+	// contract (400 invalid_workspace) — and finally restore the Principal
+	// root state.
 	for _, must := range []string{
 		`principal allowed-root remove --system "$H_USER" "$H_HOME"`,
 		`principal allowed-root add --system "$H_USER" "$H_SUB"`,
 		`[ "$H_POS_HTTP" = 201 ]`,
 		`grep -q '"id":"dhs_' /tmp/r2ac-h-pos.json`,
 		`principal allowed-root remove --system "$H_USER" "$H_SUB"`,
-		`[ "$H_STALE_HTTP" = 422 ]`,
-		`grep -q '"code":"launcher_unavailable"' /tmp/r2ac-h-stale.json`,
+		`grep -q '"scope": "restricted"'`,
+		`grep -q '"allowed_roots": \[\]'`,
+		`[ "$H_CASCADE_HTTP" = 400 ]`,
+		`grep -q '"code":"invalid_workspace"' /tmp/r2ac-h-cascade.json`,
 		`principal allowed-root add --system "$H_USER" "$H_HOME"`,
 	} {
 		if !strings.Contains(content, must) {
-			t.Errorf("H5 stale-root proof is missing a required step (%s)", must)
+			t.Errorf("H5 cascade proof is missing a required step (%s)", must)
 		}
 	}
 

@@ -278,7 +278,7 @@ func TestRemoveAllowedRoot(t *testing.T) {
 		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
-	changed, _, err := removePrincipalAllowedRoot(app.DB, "remuser", extraRoot)
+	changed, _, err := removePrincipalAllowedRootForTest(t, app, "remuser", extraRoot)
 	if err != nil {
 		t.Fatalf("removePrincipalAllowedRoot() error: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
 	}
 
 	// Remove should still work even though directory no longer exists
-	changed, _, err := removePrincipalAllowedRoot(app.DB, "deluser", extraRoot)
+	changed, _, err := removePrincipalAllowedRootForTest(t, app, "deluser", extraRoot)
 	if err != nil {
 		t.Fatalf("removePrincipalAllowedRoot() error: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestRemoveAllowedRootAbsent(t *testing.T) {
 	}
 
 	nonRoot := filepath.Join(app.Config.AllowedRoots[0].Path, "never-added")
-	changed, _, err := removePrincipalAllowedRoot(app.DB, "absuser", nonRoot)
+	changed, _, err := removePrincipalAllowedRootForTest(t, app, "absuser", nonRoot)
 	if err != nil {
 		t.Fatalf("removePrincipalAllowedRoot() error: %v", err)
 	}
@@ -1315,12 +1315,12 @@ func TestPrincipalErrorWrapping(t *testing.T) {
 		t.Fatal("expected error for empty path in addAllowedRoot")
 	}
 
-	_, _, err = removePrincipalAllowedRoot(app.DB, "", "/tmp")
+	_, _, err = removePrincipalAllowedRootForTest(t, app, "", "/tmp")
 	if err == nil {
 		t.Fatal("expected error for empty username in removeAllowedRoot")
 	}
 
-	_, _, err = removePrincipalAllowedRoot(app.DB, "user", "")
+	_, _, err = removePrincipalAllowedRootForTest(t, app, "user", "")
 	if err == nil {
 		t.Fatal("expected error for empty path in removeAllowedRoot")
 	}

@@ -95,8 +95,8 @@ var (
 
 // readLauncherAllowedRoots returns the canonical stored allowed-root entries
 // of a Launcher.
-func readLauncherAllowedRoots(db *sql.DB, launcherID string) ([]AllowedRootEntry, error) {
-	rows, err := db.Query(
+func readLauncherAllowedRoots(q txQuerier, launcherID string) ([]AllowedRootEntry, error) {
+	rows, err := q.Query(
 		`SELECT root_path, access FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`,
 		launcherID,
 	)
@@ -306,8 +306,8 @@ func queryLaunchersForScope(db *sql.DB, principalID *int64, launcherSelector str
 
 // readPrincipalAllowedRoots returns the canonical stored allowed-root entries
 // of a Principal.
-func readPrincipalAllowedRoots(db *sql.DB, principalID int64) ([]AllowedRootEntry, error) {
-	rows, err := db.Query(
+func readPrincipalAllowedRoots(q txQuerier, principalID int64) ([]AllowedRootEntry, error) {
+	rows, err := q.Query(
 		`SELECT root_path, access FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
 		principalID,
 	)

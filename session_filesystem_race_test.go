@@ -75,7 +75,7 @@ func TestRaceNarrowedSessionCreateLinearizesBeforeParentMutation(t *testing.T) {
 		mutationDone := make(chan narrowingResult, 1)
 		go func() {
 			close(mutationStarted)
-			changed, _, err := app.removePrincipalAllowedRootWithLifecycle("snapracer", inputs)
+			changed, _, _, err := app.removePrincipalAllowedRootWithLifecycle("snapracer", inputs)
 			mutationDone <- narrowingResult{changed: changed, err: err}
 		}()
 		<-mutationStarted
@@ -136,7 +136,7 @@ func TestRaceNarrowedSessionCreateLinearizesAfterParentMutation(t *testing.T) {
 		//    before its durable DELETE.
 		mutationDone := make(chan narrowingResult, 1)
 		go func() {
-			changed, _, err := app.removePrincipalAllowedRootWithLifecycle("snapracer", inputs)
+			changed, _, _, err := app.removePrincipalAllowedRootWithLifecycle("snapracer", inputs)
 			mutationDone <- narrowingResult{changed: changed, err: err}
 		}()
 		<-mutationPoint.parked

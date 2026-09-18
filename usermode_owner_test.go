@@ -674,11 +674,9 @@ func TestRaceReloadSerializesPrincipalRootAdd(t *testing.T) {
 		}
 	}
 	// createPrincipal provisions the principal home as the initial stored
-	// root; the race must leave exactly that set unchanged.
-	before, err := findPrincipalByUsername(app.DB, "mutator")
-	if err != nil {
-		t.Fatalf("find principal mutator: %v", err)
-	}
+	// root; the refused add must leave exactly the reload-reconciled set: the
+	// narrowing reload cascaded the stored home root (no longer contained in
+	// the narrowed ceiling) and the refused add stored nothing.
 
 	narrowRoot := narrow
 	rec, reloadCode := raceNarrowingReload(t, app, narrowRoot, func(started, opened chan struct{}) *http.Request {
@@ -701,13 +699,8 @@ func TestRaceReloadSerializesPrincipalRootAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("find principal mutator: %v", err)
 	}
-	if len(p.AllowedRoots) != len(before.AllowedRoots) {
-		t.Fatalf("stale root stored outside the narrowed ceiling: %v (was %v)", p.AllowedRoots, before.AllowedRoots)
-	}
-	for _, r := range before.AllowedRoots {
-		if !slices.Contains(p.AllowedRoots, r) {
-			t.Fatalf("principal roots changed by the refused add: %v (was %v)", p.AllowedRoots, before.AllowedRoots)
-		}
+	if len(p.AllowedRoots) != 0 {
+		t.Fatalf("stored roots after the narrowed reload and the refused add: %v, want the reconciled empty set", p.AllowedRoots)
 	}
 }
 
@@ -878,11 +871,13 @@ func TestRaceReloadSerializesPrincipalCreate(t *testing.T) {
 // TestPrincipalCreateLinearizesBeforeReload proves the opposite linearization
 // rule: a Principal creation that completes before a narrowing reload commits
 // atomically under the policy it validated against — Principal, stored home
-// root, default Launcher, and initial credential all present — and the later
-// reload is the subsequent policy transition: the stored home root survives
-// the narrowing (never silently truncated) while the narrowed ceiling takes
-// effect at session time (the stale root no longer yields an effective
-// session ceiling).
+// root, default Launcher, and initial credential all present at the moment of
+// its commit — and the later reload is the subsequent policy transition: the
+// reload's canonical stored-root reconciliation cascades the stored home root
+// that the narrowed global ceiling no longer contains, while the Principal, its
+// default Launcher, and its initial credential remain, and the narrowed ceiling
+// takes effect at session time (a session through the former root is refused
+// by the ordinary narrowed-authority contract).
 func TestPrincipalCreateLinearizesBeforeReload(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
@@ -918,14 +913,17 @@ func TestPrincipalCreateLinearizesBeforeReload(t *testing.T) {
 		t.Fatalf("reload: expected 200, got %d (body=%s)", rec.Code, rec.Body.String())
 	}
 
-	// The committed creation survives atomically: Principal with its stored
-	// home root, default Launcher, and initial credential.
+	// The committed creation survives atomically: Principal with its default
+	// Launcher and initial credential. The stored home root is the reload's
+	// canonical cascade outcome: the narrowed global ceiling no longer wholly
+	// contains it, so the reconciliation deleted it in the reload's
+	// transition (never stale persisted state).
 	p, err := findPrincipalByUsername(app.DB, "newuser")
 	if err != nil {
 		t.Fatalf("find principal newuser: %v", err)
 	}
-	if !slices.Equal(p.AllowedRoots, []AllowedRootEntry{allowedRootEntry(home)}) {
-		t.Fatalf("stored home root not intact after the later reload: %v, want [%s]", p.AllowedRoots, home)
+	if len(p.AllowedRoots) != 0 {
+		t.Fatalf("stored home root not cascaded away by the narrowing reload: %v, want no stored roots", p.AllowedRoots)
 	}
 	if _, err := findDefaultLauncher(app.DB, int64(p.ID)); err != nil {
 		t.Fatalf("default Launcher not intact after the later reload: %v", err)

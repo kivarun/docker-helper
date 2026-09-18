@@ -338,6 +338,21 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
+		// Stored allowed-root reconciliation: a config narrowed while the
+		// daemon was stopped must not leave stored Principal/Launcher
+		// descendants that the new global ceiling no longer contains. The
+		// same reconciliation owner as the runtime reload prunes them in one
+		// transaction after the schema/ownership migrations established the
+		// final tables and before the daemon begins serving, so canonical
+		// state is valid under the new ceiling before Session creation is
+		// possible. Failure is fail-closed startup.
+		if _, err := reconcileStoredAllowedRootsToGlobalCeiling(
+			db, cfg.AllowedRoots, cfg.Mode == ModeUser, userModeDefaultOwnerID(userModeDefault),
+		); err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+
 		// Workload MAC coordinator: operation/container-lifetime
 		// workload MAC state, separate from the session MAC coordinator.
 		// Startup reconciliation of helper-owned workload state happens

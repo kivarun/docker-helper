@@ -552,47 +552,6 @@ func storedPrincipalAllowedRootAccess(db *sql.DB, principalID int, canonicalPath
 	return stored, nil
 }
 
-// removePrincipalAllowedRoot removes an allowed root from a Principal's scope.
-func removePrincipalAllowedRoot(db *sql.DB, username string, rootPath string) (changed bool, canonicalPath string, err error) {
-	if username == "" {
-		return false, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
-	}
-	if rootPath == "" {
-		return false, "", fmt.Errorf("path is required: %w", ErrInvalidAllowedRoot)
-	}
-	if !filepath.IsAbs(rootPath) {
-		return false, "", fmt.Errorf("path must be absolute: %w", ErrInvalidAllowedRoot)
-	}
-
-	// For REMOVE, we do NOT require the path to exist on the filesystem.
-	// We match against the stored canonical path.
-	resolved, err := resolveAllowedRootIdentity(rootPath)
-	if err != nil {
-		return false, "", err
-	}
-
-	principalID, err := findPrincipalIDByUsername(db, username)
-	if err != nil {
-		return false, "", err
-	}
-
-	result, err := db.Exec(
-		`DELETE FROM principal_allowed_roots
-		 WHERE principal_id = ? AND root_path = ?`,
-		principalID, resolved,
-	)
-	if err != nil {
-		return false, "", fmt.Errorf("cannot remove allowed root: %w", err)
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, "", fmt.Errorf("cannot check delete result: %w", err)
-	}
-
-	return affected > 0, resolved, nil
-}
-
 // setPrincipalAllowedRootAccess changes the access mode of exactly one stored
 // Principal root, addressed by the same canonical stored identity as the
 // remove (symlink-resolved when the path still exists, cleaned absolute

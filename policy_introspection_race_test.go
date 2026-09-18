@@ -350,7 +350,7 @@ func TestRacePrincipalRootNarrowingSerializesCreatePolicyIntrospection(t *testin
 		//    durable DELETE commits.
 		narrowingDone := make(chan narrowingResult, 1)
 		go func() {
-			changed, _, err := app.removePrincipalAllowedRootWithLifecycle("raceowner", extra)
+			changed, _, _, err := app.removePrincipalAllowedRootWithLifecycle("raceowner", extra)
 			narrowingDone <- narrowingResult{changed: changed, err: err}
 		}()
 		<-mutationPoint.parked
@@ -678,7 +678,7 @@ func TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing(t *testing.T
 		//    boundary.
 		narrowingDone := make(chan narrowingResult, 1)
 		go func() {
-			changed, _, err := app.removePrincipalAllowedRootWithLifecycle("raceowner", extra)
+			changed, _, _, err := app.removePrincipalAllowedRootWithLifecycle("raceowner", extra)
 			narrowingDone <- narrowingResult{changed: changed, err: err}
 		}()
 

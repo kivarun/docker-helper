@@ -391,6 +391,20 @@ func principalIDPtr(t *testing.T, db *sql.DB, username string) *int64 {
 	return &id
 }
 
+// removePrincipalAllowedRootForTest invokes the canonical Principal-root
+// remove persistence owner (removePrincipalAllowedRootCascaded) with the test
+// app's own policy state, so DB-level remove tests exercise the production
+// persistence path instead of a reimplementation. The test app's global
+// entries are already canonical resolved paths.
+func removePrincipalAllowedRootForTest(t *testing.T, app *App, username, rootPath string) (changed bool, canonicalPath string, err error) {
+	t.Helper()
+	cfg := app.getConfig()
+	changed, canonicalPath, _, err = removePrincipalAllowedRootCascaded(
+		app.DB, username, rootPath, cfg.AllowedRoots, cfg.Mode == ModeUser, app.userModeDaemonOwnerPrincipalID(),
+	)
+	return changed, canonicalPath, err
+}
+
 // newTestAppWithAdminToken creates an admin-authorized test app with the
 // admin token hash set.
 func newTestAppWithAdminToken(t *testing.T) *App {

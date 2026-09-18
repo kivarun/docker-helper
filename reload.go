@@ -124,6 +124,35 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	oldCfg := a.getConfig()
 	newCfg.HTTPAddress = oldCfg.HTTPAddress
 
+	// The authoritative global-ceiling transition: the new global
+	// allowed-root policy becomes durable policy state only together with its
+	// cascaded stored descendants. The reconciliation owner commits the
+	// stored-root prune in one transaction before the new runtime policy is
+	// published; a reconciliation failure publishes nothing, so a concurrent
+	// Session create observes either the old complete hierarchy or the new
+	// complete cascaded hierarchy, never a new parent ceiling with stale
+	// child rows.
+	reconcileResult, err := reconcileStoredAllowedRootsToGlobalCeiling(a.DB, newCfg.AllowedRoots, oldCfg.Mode == ModeUser, a.userModeDaemonOwnerPrincipalID())
+	if err != nil {
+		a.lifecycleMu.Unlock()
+		duration := time.Since(started).Round(time.Millisecond).String()
+		opLog(ctx).Error("reload allowed-root reconciliation failed",
+			slog.String("operation", "reload"),
+			slog.String("error", err.Error()),
+		)
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:    "config.reload",
+			Result:   "reconciliation_failed",
+			Duration: duration,
+		})
+		writeError(ctx, w, http.StatusInternalServerError,
+			"database_error",
+			"stored allowed-root reconciliation failed; configuration not reloaded",
+		)
+		return
+	}
+	logStoredRootReconciliation(ctx, "reload", reconcileResult)
+
 	a.setConfig(newCfg)
 	a.lifecycleMu.Unlock()
 

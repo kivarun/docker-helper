@@ -578,8 +578,11 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 	// Same lifecycle serialization boundary as Session creation and the
 	// Principal allowed-root add (see handleAddPrincipalAllowedRoot);
 	// removePrincipalAllowedRootWithLifecycle owns it and refuses the reserved
-	// user-mode daemon-owner Principal before any change.
-	changed, canonicalPath, err := a.removePrincipalAllowedRootWithLifecycle(username, req.Path)
+	// user-mode daemon-owner Principal before any change. The committed
+	// transition carries the canonical cascade: when the stored root changed
+	// state, the restricted-Launcher descendants outside the resulting
+	// effective Principal ceiling were deleted in the same transaction.
+	changed, canonicalPath, pruned, err := a.removePrincipalAllowedRootWithLifecycle(username, req.Path)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -617,6 +620,8 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 	if !changed {
 		resp.Message = "unchanged"
 	}
+
+	logStoredRootReconciliation(ctx, "principal_allowed_root_remove", pruned)
 
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:                "principal.allowed_root_remove",

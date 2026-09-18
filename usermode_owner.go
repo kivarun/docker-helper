@@ -131,13 +131,30 @@ func (a *App) addPrincipalAllowedRootWithLifecycle(username, rootPath string, ac
 
 // removePrincipalAllowedRootWithLifecycle is the lock-owning App-level
 // Principal allowed-root remove. See addPrincipalAllowedRootWithLifecycle.
-func (a *App) removePrincipalAllowedRootWithLifecycle(username, rootPath string) (changed bool, canonicalPath string, err error) {
+// The removal is the canonical Principal-root lifecycle transition: the
+// persistence owner (removePrincipalAllowedRootCascaded) commits the exact
+// stored-root deletion and — when it changed state — the restricted-Launcher
+// descendant reconciliation to the resulting effective Principal ceiling in
+// the same transaction, against the global ceiling resolved under this
+// lifecycle serialization boundary. The reconciliation result reports what
+// the transition cascaded away.
+func (a *App) removePrincipalAllowedRootWithLifecycle(username, rootPath string) (changed bool, canonicalPath string, pruned storedRootCascadeResult, err error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 	if err := a.rejectReservedPrincipalMutation(username); err != nil {
-		return false, "", err
+		return false, "", storedRootCascadeResult{}, err
 	}
-	return removePrincipalAllowedRoot(a.DB, username, rootPath)
+	globalEntries, err := a.appResolvedGlobalRootEntries()
+	if err != nil {
+		return false, "", storedRootCascadeResult{}, err
+	}
+	cfg := a.getConfig()
+	userMode := cfg.Mode == ModeUser
+	var daemonOwnerPrincipalID int64
+	if userMode && a.userModeDefault != nil {
+		daemonOwnerPrincipalID = a.userModeDefault.principalID
+	}
+	return removePrincipalAllowedRootCascaded(a.DB, username, rootPath, globalEntries, userMode, daemonOwnerPrincipalID)
 }
 
 // setPrincipalAllowedRootAccessWithLifecycle is the lock-owning App-level

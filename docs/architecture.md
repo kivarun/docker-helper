@@ -1122,7 +1122,10 @@ Session token semantics:
 - disabling the owning principal or its launcher deletes the affected
   sessions and blocks their tokens; disabled launchers also reject
   credential authentication;
-- removing an allowed root does not invalidate issued sessions;
+- removing or narrowing an allowed root does not invalidate issued sessions
+  and never rewrites their snapshots; the canonical parent-ceiling
+  mutations additionally cascade stored descendant roots that are no longer
+  covered (see [Root-policy hierarchy](#root-policy-hierarchy));
 - an already-started Docker operation continues its lifecycle.
 
 ### Ownership migration
@@ -1230,9 +1233,16 @@ parent-policy mutations (see
   list/add/set-access/remove` (canonical rich `{path, access}` values;
   legacy string input means `read_write`; `config show` projects the same
   canonical `allowed_roots` values). Changing allowed roots is a
-  policy-only operation; it does NOT prepare MAC state.
+  stored-policy transition: the authoritative global-ceiling owner
+  (runtime reload; the same reconciliation at startup for a config changed
+  while the daemon was stopped) cascades stored descendants that are no
+  longer covered before the new ceiling is published. It does NOT prepare
+  MAC state.
 - **Principal allowed roots** (database) — per-principal narrowing, managed
-  by `principal allowed-root add/set-access/remove`. Does not prepare MAC.
+  by `principal allowed-root add/set-access/remove`; the remove is the
+  canonical parent mutation and cascades that principal's stored
+  restricted-Launcher descendants in the same transaction. Does not prepare
+  MAC.
 - **Launcher allowed roots** (database, `restricted` scope only) —
   per-launcher narrowing beneath one principal; `inherit` scope applies no
   launcher-level narrowing. Evaluated at session-creation time against
@@ -1262,8 +1272,43 @@ access meet — with one documented exception: in user mode the
 daemon-owner Principal with zero stored roots collapses onto the global
 roots. `effective Launcher roots` are the Principal ceiling for `inherit`
 scope, or the meet of that ceiling with the Launcher's stored entries for
-`restricted` scope (stale out-of-ceiling Launcher roots are rejected,
-never truncated).
+`restricted` scope.
+
+#### Parent-ceiling narrowing cascades stored descendants
+
+Removing or narrowing a parent ceiling is a canonical policy transition
+whose persisted outcome is the whole cascaded hierarchy, owned by one
+stored-root reconciliation primitive
+(`pruneStoredAllowedRootsToCeilings`):
+
+- removing a Principal stored root deletes, in the same transaction, every
+  stored root of that principal's `restricted` Launchers that the
+  resulting effective Principal ceiling no longer wholly contains;
+- a new global ceiling (runtime reload, or startup for a config narrowed
+  while the daemon was stopped) first deletes every stored Principal root
+  no global root wholly contains, then — per Principal, from the surviving
+  roots — the restricted-Launcher roots the resulting effective ceiling no
+  longer wholly contains, and only then publishes the new runtime policy;
+  a reconciliation failure publishes nothing;
+- containment is the canonical path predicate only (a child covered by
+  another surviving parent root stays; access-mode narrowing never deletes
+  a child, the access meet governs the effective mode); stored roots are
+  never transformed or shortened — a root either remains valid as stored
+  or is deleted;
+- the cascade never changes a Launcher scope mode (a restricted Launcher
+  whose last root is cascaded away stays `restricted` with zero roots) and
+  never touches Sessions or Session filesystem snapshots.
+
+> Removing/narrowing a parent allowed-root ceiling cascades deletion of
+> stored descendant roots that are no longer covered. Existing Session
+> filesystem snapshots are immutable and are not rewritten.
+
+Persisted stale state outside these canonical mutation paths — manual DB
+corruption, unsupported direct DB modification, incomplete legacy state —
+is not silently accepted: the Session-create revalidation
+(`effectiveLauncherAllowedRoots`) still fails closed with the existing
+`launcher_unavailable` contract. Canonical mutations reconcile; unexpected
+persisted stale state fails closed.
 
 MAC state is derived from the concrete issued-Session-tree lifecycle, not
 from the authorization ceilings. The canonical statement, corrected by the

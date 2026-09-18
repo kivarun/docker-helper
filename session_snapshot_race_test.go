@@ -94,7 +94,7 @@ func TestRaceSessionCreateCommitsSnapshotWhollyBeforeNarrowing(t *testing.T) {
 		narrowingDone := make(chan narrowingResult, 1)
 		go func() {
 			close(narrowingStarted)
-			changed, _, err := app.removePrincipalAllowedRootWithLifecycle("snapracer", inputs)
+			changed, _, _, err := app.removePrincipalAllowedRootWithLifecycle("snapracer", inputs)
 			narrowingDone <- narrowingResult{changed: changed, err: err}
 		}()
 		<-narrowingStarted
@@ -155,7 +155,7 @@ func TestRaceSessionCreateCommitsSnapshotWhollyAfterNarrowing(t *testing.T) {
 		//    before its durable DELETE.
 		narrowingDone := make(chan narrowingResult, 1)
 		go func() {
-			changed, _, err := app.removePrincipalAllowedRootWithLifecycle("snapracer", inputs)
+			changed, _, _, err := app.removePrincipalAllowedRootWithLifecycle("snapracer", inputs)
 			narrowingDone <- narrowingResult{changed: changed, err: err}
 		}()
 		<-mutationPoint.parked

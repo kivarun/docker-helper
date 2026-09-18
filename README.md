@@ -110,7 +110,11 @@ After a session token is issued:
   session;
 - disabling the principal or its launcher deletes the affected active
   sessions and blocks their tokens;
-- removing an allowed root does not invalidate the session;
+- removing or narrowing an allowed root does not invalidate the session and
+  never rewrites its filesystem snapshot; canonical parent-ceiling
+  mutations cascade stored descendant roots that the resulting ceiling no
+  longer contains, so future session creation follows the narrowed
+  authority;
 - session expiry or deletion blocks future requests;
 - an already-started Docker operation continues its lifecycle.
 
@@ -1732,6 +1736,16 @@ they may remove it:
 sudo docker-helper principal allowed-root remove \
     --system alice /home/alice
 ```
+
+Removing or narrowing a parent allowed-root ceiling cascades deletion of
+stored descendant roots that are no longer covered: removing a Principal
+root also deletes the stored roots of that principal's restricted launchers
+that the resulting effective ceiling no longer contains, and narrowing the
+global ceiling (config edit + reload, or a config change while the daemon
+is stopped) prunes stored Principal and launcher roots the new ceiling no
+longer contains before the new policy is published. Existing Session
+filesystem snapshots are immutable and are not rewritten; a restricted
+launcher whose last root is cascaded away stays restricted with zero roots.
 
 To remove a principal and all associated sessions, credentials, and allowed
 roots:

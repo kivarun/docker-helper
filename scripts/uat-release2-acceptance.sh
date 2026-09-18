@@ -1908,17 +1908,21 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     acc_fail "restricted launcher out-of-scope workspace contract wrong (http=$H_NARROW_HTTP)"
   fi
 
-  # H5: an already-stored Launcher root becomes stale fail-closed when the
-  # exact narrow Principal root containing it is removed. The Principal holds
-  # two roots at this point: $ALLOWED_ROOT (added by set_up_principal) and the
-  # OS user's home directory (auto-installed as the default allowed root by
-  # principal create). Narrowing to exactly {H_SUB} removes both; the Launcher
-  # root ($H_SUB) is then the Principal's only root, the effective Principal
-  # ceiling is exactly {H_SUB} and the stored Launcher root is demonstrably
-  # inside it; a positive precondition proves session creation through the
-  # Launcher succeeds. Removing that exact Principal root empties the ceiling,
-  # the stored Launcher root becomes stale, and the same creation must fail
-  # with HTTP 422 and structured code launcher_unavailable. The original
+  # H5: canonical parent-ceiling narrowing cascades stored descendants.
+  # The Principal holds two roots at this point: $ALLOWED_ROOT (added by
+  # set_up_principal) and the OS user's home directory (auto-installed as the
+  # default allowed root by principal create). Narrowing to exactly {H_SUB}
+  # removes both (plain lifecycle removals, not the cascade under test); the
+  # Launcher root ($H_SUB) is then the Principal's only root, the effective
+  # Principal ceiling is exactly {H_SUB}, and a positive precondition proves
+  # session creation through the Launcher succeeds. Removing that exact
+  # Principal root is the canonical parent mutation: the Launcher descendant
+  # root is cascaded out of stored state in the same transition, the Launcher
+  # stays restricted with zero roots (never demoted to inherit), and the
+  # follow-up create under the former root is refused by the ordinary
+  # narrowed-authority contract (400 invalid_workspace), never the stale-root
+  # 422 (that contract remains the corruption defense for state outside
+  # canonical mutation paths, proven by the unit suite). The original
   # Principal root state is restored afterwards (later H checks reuse this
   # Principal).
   H5_REMOVED=false
@@ -1929,10 +1933,10 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     if dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
       H5_NARROWED=true
     else
-      acc_fail "could not install the narrow principal ceiling for the stale-root check"
+      acc_fail "could not install the narrow principal ceiling for the cascade check"
     fi
   else
-    acc_fail "could not narrow the principal ceiling for the stale-root check"
+    acc_fail "could not narrow the principal ceiling for the cascade check"
   fi
   if [ "$H5_NARROWED" = true ]; then
     mkdir -p "$H_SUB/ws5"; chown -R "$H_USER:$H_USER" "$H_SUB/ws5"
@@ -1941,31 +1945,38 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       -H 'Content-Type: application/json' \
       -d "{\"workspace\":\"$H_SUB/ws5\"}" http://localhost/sessions 2>/dev/null || true)"
     if [ "$H_POS_HTTP" = 201 ] && grep -q '"id":"dhs_' /tmp/r2ac-h-pos.json; then
-      acc_ok "stale-root precondition: session creation through the Launcher succeeds inside the narrow ceiling"
+      acc_ok "cascade precondition: session creation through the Launcher succeeds inside the narrow ceiling"
     else
-      acc_fail "stale-root precondition failed: Launcher unusable inside the narrow ceiling (http=$H_POS_HTTP)"
+      acc_fail "cascade precondition failed: Launcher unusable inside the narrow ceiling (http=$H_POS_HTTP)"
     fi
     if dh principal allowed-root remove --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
-      H_STALE_HTTP="$(curl --silent --output /tmp/r2ac-h-stale.json --write-out '%{http_code}' --max-time 5 \
+      H5_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null || true)"
+      if printf '%s\n' "$H5_SHOW" | grep -q '"scope": "restricted"' \
+          && printf '%s\n' "$H5_SHOW" | grep -q '"allowed_roots": \[\]'; then
+        acc_ok "parent-root removal cascaded the Launcher descendant out of stored state (restricted, zero roots)"
+      else
+        acc_fail "launcher descendant root not cascaded out of stored state: $(printf '%s' "$H5_SHOW" | head -3 | tr '\n' ' ' | redact)"
+      fi
+      H_CASCADE_HTTP="$(curl --silent --output /tmp/r2ac-h-cascade.json --write-out '%{http_code}' --max-time 5 \
         --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" \
         -H 'Content-Type: application/json' \
         -d "{\"workspace\":\"$H_SUB/ws5\"}" http://localhost/sessions 2>/dev/null || true)"
-      if [ "$H_STALE_HTTP" = 422 ] \
-          && grep -q '"code":"launcher_unavailable"' /tmp/r2ac-h-stale.json; then
-        acc_ok "stale out-of-ceiling launcher root rejected fail-closed (422 launcher_unavailable)"
+      if [ "$H_CASCADE_HTTP" = 400 ] \
+          && grep -q '"code":"invalid_workspace"' /tmp/r2ac-h-cascade.json; then
+        acc_ok "follow-up create under the former root refused by the narrowed-authority contract (400 invalid_workspace)"
       else
-        acc_fail "stale launcher root contract wrong (http=$H_STALE_HTTP)"
+        acc_fail "follow-up create contract after the cascade wrong (http=$H_CASCADE_HTTP)"
       fi
     else
-      acc_fail "could not remove the narrow principal root for the stale-root check"
+      acc_fail "could not remove the narrow principal root for the cascade check"
     fi
   fi
   if [ "$H5_REMOVED" = true ]; then
     if dh principal allowed-root add --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
         && dh principal allowed-root add --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
-      acc_ok "principal root state restored after the stale-root check"
+      acc_ok "principal root state restored after the cascade check"
     else
-      acc_fail "could not restore the principal root after the stale-root check"
+      acc_fail "could not restore the principal root after the cascade check"
     fi
   fi
 

@@ -288,9 +288,12 @@ in the line. With \-\-json the shared structured set-access result
 migration.
 .TP
 .B docker-helper config allowed-root remove [\-\-json] PATH
-Remove a global allowed root. With \-\-json the shared structured
-remove result (\fBpath\fR, \fBchanged\fR) replaces the human
-acknowledgement.
+Remove a global allowed root. Narrowing the global ceiling cascades the
+stored principal and launcher roots the new ceiling no longer contains
+before the narrowed policy is published (runtime reload; a config change
+made while the daemon is stopped reconciles at startup). With \-\-json
+the shared structured remove result (\fBpath\fR, \fBchanged\fR) replaces
+the human acknowledgement.
 .SS Principal Commands
 .TP
 .B docker-helper principal create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-issue-credential | \-\-no-credential] [\-\-json] USER
@@ -340,7 +343,13 @@ shared structured result object (\fBpath\fR, \fBaccess\fR,
 \fBchanged\fR) is printed instead.
 .TP
 .B docker-helper principal allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json] USER PATH
-Remove an allowed root from a principal.
+Remove an allowed root from a principal. The removal is one atomic
+policy transition: stored roots of that principal's restricted launchers
+that the resulting effective principal ceiling no longer contains are
+deleted in the same transaction (a restricted launcher whose last root is
+cascaded away stays restricted with zero roots). Removing an absent root
+is the unchanged no-op. Already-issued sessions are not invalidated and
+their filesystem snapshots are not rewritten.
 .TP
 .B docker-helper principal allowed-root list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json] USER
 List a principal's stored allowed roots, one canonical root per line;

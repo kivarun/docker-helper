@@ -114,7 +114,7 @@ func TestPrincipalHTTPAddAccessPresence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Reset the stored root between cases so each case exercises a
 			// fresh add on the same path.
-			removePrincipalAllowedRoot(app.DB, username, inner)
+			removePrincipalAllowedRootForTest(t, app, username, inner)
 
 			w := launcherRequest(t, app, http.MethodPost, "/principals/"+username+"/allowed-roots", testAdminToken, tc.body)
 			if w.Code != tc.wantCode {
