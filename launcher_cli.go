@@ -250,6 +250,9 @@ var launcherCreateCommand = &Command{
 	Usage:      "docker-helper launcher create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--allowed-root PATH]... [--issue-credential | --no-credential] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -338,6 +341,9 @@ var launcherListCommand = &Command{
 	Usage:      "docker-helper launcher list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username filter (narrowing only; the daemon authorizes visibility)")
@@ -386,6 +392,9 @@ var launcherShowCommand = &Command{
 	Usage:      "docker-helper launcher show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -458,6 +467,9 @@ var launcherSetCommand = &Command{
 	Usage:      "docker-helper launcher set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--enabled true|false] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -522,6 +534,9 @@ var launcherDeleteCommand = &Command{
 	Usage:      "docker-helper launcher delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -596,6 +611,9 @@ var launcherAllowedRootAddCommand = &Command{
 	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [--json] PATH [LAUNCHER]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -644,6 +662,9 @@ var launcherAllowedRootListCommand = &Command{
 	Usage:      "docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -686,6 +707,9 @@ var launcherAllowedRootSetAccessCommand = &Command{
 	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] PATH read_only|read_write [LAUNCHER]",
 	MinPosArgs: 2,
 	MaxPosArgs: 3,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -736,6 +760,9 @@ var launcherAllowedRootRemoveCommand = &Command{
 	Usage:      "docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] PATH [LAUNCHER]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -782,6 +809,9 @@ var launcherAllowedRootInheritCommand = &Command{
 	Usage:      "docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -843,6 +873,9 @@ var launcherCredentialCreateCommand = &Command{
 	Usage:      "docker-helper launcher credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -893,6 +926,9 @@ var launcherCredentialShowCommand = &Command{
 	Usage:      "docker-helper launcher credential show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -936,6 +972,9 @@ var launcherCredentialRotateCommand = &Command{
 	Usage:      "docker-helper launcher credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -986,6 +1025,9 @@ var launcherCredentialDeleteCommand = &Command{
 	Usage:      "docker-helper launcher credential delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")

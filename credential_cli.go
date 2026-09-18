@@ -33,6 +33,9 @@ var principalCredentialCreateCommand = &Command{
 	Usage:      "docker-helper principal credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		name := fs.String("name", "default", "Credential name")
@@ -98,6 +101,9 @@ var principalCredentialListCommand = &Command{
 	Usage:      "docker-helper principal credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] [PRINCIPAL]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -178,6 +184,9 @@ listed with:
 Revoking a credential permanently invalidates its token. The credential
 record remains in the database as history, and its name becomes available
 for reuse by a new credential.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -237,6 +246,9 @@ The credential name defaults to "default"; --name selects another named
 credential. The Principal defaults to the owner of the authenticated
 Principal credential; an explicit PRINCIPAL is required for admin
 authentication.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		name := fs.String("name", "default", "Credential name")
@@ -351,6 +363,9 @@ principal credential commands. New scripts should use:
 			MinPosArgs:    principalCredentialCreateCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialCreateCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential create.",
+
+			Presentation: principalCredentialCreateCommand.Presentation,
+
 			NewInvocation: principalCredentialCreateCommand.NewInvocation,
 		},
 		{
@@ -360,6 +375,9 @@ principal credential commands. New scripts should use:
 			MinPosArgs:    principalCredentialListCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialListCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential list.",
+
+			Presentation: principalCredentialListCommand.Presentation,
+
 			NewInvocation: principalCredentialListCommand.NewInvocation,
 		},
 		{
@@ -369,6 +387,9 @@ principal credential commands. New scripts should use:
 			MinPosArgs:    principalCredentialRevokeCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialRevokeCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential revoke.",
+
+			Presentation: principalCredentialRevokeCommand.Presentation,
+
 			NewInvocation: principalCredentialRevokeCommand.NewInvocation,
 		},
 		credentialInstallCommand,
@@ -398,6 +419,9 @@ with mode 0600. The directory is created with mode 0700 if it does not exist.
 With --force, an existing credential is replaced atomically. An alternative
 credential source can be selected per invocation with --token-file PATH on
 the operator command.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		force := fs.Bool("force", false, "Replace existing credential")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")

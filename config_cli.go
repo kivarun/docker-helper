@@ -143,6 +143,9 @@ Fields:
   trusted_ca_injection
   mode
   http_address`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -160,7 +163,7 @@ Fields:
 var configSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Set a configuration value",
-	Usage:      "docker-helper config set FIELD VALUE",
+	Usage:      "docker-helper config set [--json] FIELD VALUE",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	Help: `Writable fields:
@@ -202,6 +205,9 @@ but confined MAC readability cannot be verified until daemon startup, and
 startup fails closed if the source is not readable under the active MAC
 policy. When the daemon is running, reload under confinement is
 authoritative and reload failures roll back the change.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -216,7 +222,7 @@ authoritative and reload failures roll back the change.`,
 var configUnsetCommand = &Command{
 	Name:       "unset",
 	Summary:    "Unset a configuration value",
-	Usage:      "docker-helper config unset FIELD",
+	Usage:      "docker-helper config unset [--json] FIELD",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Unsettable fields:
@@ -241,6 +247,9 @@ If the daemon is running, the change is applied immediately,
 except for startup-only fields such as http_address.
 If the daemon is not running, the change is written to disk and
 will apply on the next start.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -283,6 +292,9 @@ var configAllowedRootListCommand = &Command{
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	Help:       `List all allowed roots, one canonical root per line; --json prints the canonical rich entries with their access modes.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -305,6 +317,9 @@ Canonicalizes and validates the path. Idempotent (prints "already present"
 if the root exists; an add never changes the access of a stored root).
 Preserves existing roots. With --json, the shared structured add result
 replaces the human acknowledgement.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		access := &accessFlag{}
 		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
@@ -330,6 +345,9 @@ Resolves/matches the stored canonical form. Idempotent (prints "not found"
 if the root does not exist). Rejects removal of the final global root.
 Does not invalidate already-issued sessions. With --json, the shared
 structured remove result replaces the human acknowledgement.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -421,6 +439,9 @@ The path is matched by the same canonical stored identity as remove
 not an idempotent no-op. An unchanged access is reported as "unchanged".
 With --json the shared set-access result object is printed instead of
 the human line.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{

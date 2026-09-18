@@ -55,6 +55,9 @@ var completionBashCommand = &Command{
 	Name:    "bash",
 	Summary: "Generate Bash completion script",
 	Usage:   "docker-helper completion bash",
+
+	Presentation: exceptionPresentation("generator: stdout is the generated Bash completion script"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -111,6 +114,9 @@ var completionRootsPrincipalCommand = &Command{
 	Usage:      "docker-helper completion roots principal [--principal USER] [--stored] [--authority-only] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: exceptionPresentation("machine-line protocol: Principal roots/authority for shell completion"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
@@ -193,6 +199,9 @@ var completionRootsSessionCommand = &Command{
 	Usage:      "docker-helper completion roots session [--principal USER] [--launcher LAUNCHER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: exceptionPresentation("machine-line protocol: Session roots for shell completion"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
@@ -241,6 +250,9 @@ var completionRootsLauncherCommand = &Command{
 	Usage:      "docker-helper completion roots launcher [--principal USER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: exceptionPresentation("machine-line protocol: Launcher roots for shell completion"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
@@ -314,6 +326,9 @@ var completionSelectorsPrincipalCommand = &Command{
 	Usage:      "docker-helper completion selectors principal [--command PATH] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: exceptionPresentation("machine-line protocol: Principal selectors for shell completion"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		command := &explicitStringFlag{}
@@ -391,6 +406,9 @@ var completionSelectorsLauncherCommand = &Command{
 	Usage:      "docker-helper completion selectors launcher [--principal USER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: exceptionPresentation("machine-line protocol: Launcher selectors for shell completion"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}

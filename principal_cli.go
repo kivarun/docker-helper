@@ -32,6 +32,9 @@ var principalCreateCommand = &Command{
 	Usage:      "docker-helper principal create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--issue-credential | --no-credential] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -93,6 +96,9 @@ var principalShowCommand = &Command{
 	Usage:      "docker-helper principal show [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER [FIELD]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output the canonical JSON document")
@@ -171,6 +177,9 @@ var principalListCommand = &Command{
 	Usage:      "docker-helper principal list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -270,6 +279,9 @@ var principalSetCommand = &Command{
 	Usage:      "docker-helper principal set [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER FIELD VALUE",
 	MinPosArgs: 3,
 	MaxPosArgs: 3,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -336,6 +348,9 @@ var principalDeleteCommand = &Command{
 	Usage:      "docker-helper principal delete [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -391,6 +406,9 @@ var principalAllowedRootListCommand = &Command{
 	Usage:      "docker-helper principal allowed-root list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -430,6 +448,9 @@ var principalAllowedRootAddCommand = &Command{
 	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--access ACCESS] [--json] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		access := &accessFlag{}
@@ -484,6 +505,9 @@ var principalAllowedRootSetAccessCommand = &Command{
 	Usage:      "docker-helper principal allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH read_only|read_write",
 	MinPosArgs: 3,
 	MaxPosArgs: 3,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
@@ -532,6 +556,9 @@ var principalAllowedRootRemoveCommand = &Command{
 	Usage:      "docker-helper principal allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")

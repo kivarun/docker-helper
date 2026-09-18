@@ -42,6 +42,9 @@ credential does not already have and never mutates state.
 `,
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output raw JSON response")

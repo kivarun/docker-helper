@@ -2111,8 +2111,12 @@ independent). Unchanged remains success; a missing target remains the
 command's failure. The config transaction presentation owner propagates
 JSON output/encoding failures as exit 1 at every success point.
 
-The intentional exception registry is small and reviewed — output that
-is not a finite result presentation:
+The command tree owns this invariant declaratively. Every leaf command
+sets its `Command.Presentation` metadata to either the canonical
+human-default + explicit-`--json` mode or a true exception whose semantic
+reason is colocated with that command. Unspecified leaf metadata is invalid.
+The intentionally small exception set is output that is not a finite result
+presentation:
 
 * stream workloads (`pull`, `build`, `run`): stdout/stderr carry
   execution/progress/workload data; the final status is the exit code;
@@ -2124,11 +2128,14 @@ is not a finite result presentation:
 * the interactive `init` setup workflow: a setup wizard with one-time
   admin-token disclosure rather than one finite result.
 
-A project-wide structural test walks the command tree and fails when a
-finite-result leaf command lacks `--json` and is not in the exception
-registry. `session delete --id SESSION_ID` remains the one explicitly
-retained targeting-grammar compatibility exception; presentation
-entropy is not a compatibility requirement.
+A project-wide structural test walks the command tree and verifies the
+declaration itself: finite-result leaves must declare human-default +
+explicit `--json`, register the `--json` flag, and advertise it in Usage;
+exception leaves must declare a non-empty reason and must not expose
+`--json`. Branch commands declare no leaf presentation metadata.
+`session delete --id SESSION_ID` remains the one explicitly retained
+targeting-grammar compatibility exception; presentation entropy is not a
+compatibility requirement.
 
 Agent-facing CLI commands are `pull`, `build`, `run`, `registry login`
 (described under [Data-plane execution](#data-plane-execution)), and `self`

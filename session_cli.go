@@ -158,6 +158,9 @@ var sessionCreateCommand = &Command{
 	Name:    "create",
 	Summary: "Create a new session",
 	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		workspace := fs.String("workspace", "", "Workspace directory")
@@ -249,6 +252,9 @@ var sessionListCommand = &Command{
 	Name:    "list",
 	Summary: "List active sessions",
 	Usage:   "docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
@@ -309,6 +315,9 @@ var sessionDeleteCommand = &Command{
 	Name:    "delete",
 	Summary: "Delete a session",
 	Usage:   "docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		id := fs.String("id", "", "Session ID to delete")
@@ -368,6 +377,9 @@ var sessionShowCommand = &Command{
 	Usage:      "docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -490,6 +502,9 @@ Stale session runtime directories are also cleaned up. These directories
 may contain session-scoped Docker registry credentials.
 
 Daemon startup already removes expired sessions automatically.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{

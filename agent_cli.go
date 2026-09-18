@@ -244,6 +244,9 @@ var pullCommand = &Command{
 	Usage:      "docker-helper pull [--system] [--endpoint ENDPOINT] IMAGE",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
+
+	Presentation: exceptionPresentation("stream: pull progress data, not one finite result renderer"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
 		return Invocation{
@@ -299,6 +302,9 @@ var buildCommand = &Command{
 	Summary: "Build a Docker image",
 	Usage:   "docker-helper build --context PATH --dockerfile FILE --image NAME [flags]",
 	Help:    `SIGINT/SIGTERM cancels the running build operation.`,
+
+	Presentation: exceptionPresentation("stream: build log data, not one finite result renderer"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
 		ctx := fs.String("context", "", "Build context path, relative to or absolute within the session workspace")
@@ -398,6 +404,9 @@ var runContainerCommand = &Command{
 	Usage:      "docker-helper run --image NAME [flags] -- [command]",
 	MaxPosArgs: -1, // Unlimited positional args after --
 	Help:       `SIGINT/SIGTERM cancels the running container operation.`,
+
+	Presentation: exceptionPresentation("stream: workload stdout/stderr, not one finite result renderer"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
 		image := fs.String("image", "", "Image name and tag")

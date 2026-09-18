@@ -28,6 +28,9 @@ var appArmorRootListCommand = &Command{
 	Name:    "list",
 	Summary: "List managed AppArmor MAC boundaries",
 	Usage:   "docker-helper apparmor root list [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -42,6 +45,9 @@ var appArmorCheckCommand = &Command{
 	Name:    "check",
 	Summary: "Validate the AppArmor profile",
 	Usage:   "docker-helper apparmor check [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{

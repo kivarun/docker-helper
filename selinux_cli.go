@@ -24,6 +24,9 @@ var selinuxCheckCommand = &Command{
 	Name:    "check",
 	Summary: "Validate the installed SELinux policy module and file contexts",
 	Usage:   "docker-helper selinux check [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{

@@ -16,6 +16,31 @@ type Invocation struct {
 	Run      func(stdout, stderr io.Writer) int
 }
 
+// commandPresentation is declarative metadata owned by each leaf command.
+// Finite-result commands declare the canonical human-default + explicit
+// --json contract. True exceptions declare their reason next to the command;
+// an unspecified leaf is a contract error caught by the command-tree test.
+type commandPresentationMode uint8
+
+const (
+	presentationUnspecified commandPresentationMode = iota
+	presentationHumanDefaultJSON
+	presentationException
+)
+
+type commandPresentation struct {
+	Mode   commandPresentationMode
+	Reason string
+}
+
+func humanJSONPresentation() commandPresentation {
+	return commandPresentation{Mode: presentationHumanDefaultJSON}
+}
+
+func exceptionPresentation(reason string) commandPresentation {
+	return commandPresentation{Mode: presentationException, Reason: reason}
+}
+
 type Command struct {
 	Name          string
 	Summary       string
@@ -25,6 +50,7 @@ type Command struct {
 	MaxPosArgs    int
 	Subcommands   []*Command
 	NewInvocation func(*flag.FlagSet) Invocation
+	Presentation  commandPresentation
 }
 
 // resolveSubcommand finds a direct subcommand by name.
@@ -461,6 +487,9 @@ var serveCommand = &Command{
 	Name:    "serve",
 	Summary: "Start the docker-helper daemon",
 	Usage:   "docker-helper serve",
+
+	Presentation: exceptionPresentation("process: long-running daemon, not a finite command result"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -497,6 +526,9 @@ System mode (effective UID 0):
 
 User mode (non-root):
   No MAC preparation is required.`,
+
+	Presentation: exceptionPresentation("interactive setup workflow with one-time admin-token disclosure"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		allowedRoot := fs.String("allowed-root", "", "Allowed root directory for agent workspaces")
 
@@ -708,6 +740,9 @@ var versionCommand = &Command{
 	Name:    "version",
 	Summary: "Print version",
 	Usage:   "docker-helper version [--json]",
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
@@ -735,7 +770,7 @@ type versionResult struct {
 var reloadCommand = &Command{
 	Name:    "reload",
 	Summary: "Reload configuration from disk",
-	Usage:   "docker-helper reload [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:   "docker-helper reload [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	Help: `Ask the running daemon to re-read config.json and apply changes without restarting.
 
 The following configurable fields are applied at runtime:
@@ -758,6 +793,9 @@ Runtime paths (socket, database, state) are not changed.
 If the daemon is not running, this command fails with a non-zero exit code.
 If the new configuration is invalid, the daemon keeps its current
 configuration and this command returns an error.`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
@@ -783,6 +821,9 @@ var helpCommand = &Command{
 Run 'docker-helper help <command> [<subcommand> ...]' to navigate the
 command tree, or 'docker-helper <command> --help' for command-specific
 help.`,
+
+	Presentation: exceptionPresentation("navigation: help text, not a command result"),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {

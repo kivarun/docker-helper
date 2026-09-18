@@ -52,6 +52,9 @@ Examples:
       --registry registry.example.com \
       --username user \
       --password-stdin`,
+
+	Presentation: humanJSONPresentation(),
+
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
 		registry := fs.String("registry", "", "Registry address")
