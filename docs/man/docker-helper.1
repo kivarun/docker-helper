@@ -268,8 +268,13 @@ authority, provide only the intended source or select it explicitly with
 .B docker-helper session cleanup [\-\-json]
 Remove expired sessions from the local state database and clean up stale
 session runtime directories. Session runtime directories may contain
-session-scoped Docker registry credentials. This command does not require
-a running daemon or authentication token. With \-\-json the structured
+session-scoped Docker registry credentials. This is intentionally offline
+local-state maintenance: the daemon must be stopped while the command runs,
+and the command must run locally on the daemon host/environment whose state
+database is being maintained. It has no endpoint/authentication flags
+(\fB\-\-system\fR, \fB\-\-endpoint\fR, \fB\-\-token\-file\fR): it operates
+directly on the local SQLite database and runtime directory, not through
+the API, and requires no token. With \-\-json the structured
 result (\fBremoved\fR) replaces the human count line.
 .SS Config Commands
 .TP
@@ -637,10 +642,12 @@ root-management API. \fBselinux check\fR remains a read-only diagnostic.
 .B docker-helper pull [\-\-system] [\-\-endpoint ENDPOINT] IMAGE
 Pull a Docker image.
 .TP
-.B docker-helper build [\-\-system] [\-\-endpoint ENDPOINT] [\-\-dockerfile FILE] \-\-image NAME [\-\-build-arg KEY=VALUE ...] CONTEXT
-Build a Docker image. CONTEXT is the one required positional operand: a
+.B docker-helper build [\-\-system] [\-\-endpoint ENDPOINT] \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...] CONTEXT
+Build a Docker image. build requires the CONTEXT positional operand,
+\fB\-\-dockerfile FILE\fR, and \fB\-\-image NAME\fR: CONTEXT is a
 workspace-relative path or an absolute host path inside the session
-workspace (the daemon validates containment). \-\-build-arg may be
+workspace (the daemon validates containment), and the Dockerfile path is
+relative to the context. \-\-build-arg may be
 repeated to pass multiple build arguments.
 Build arguments are not a secret transport: a value reaches the
 daemon-side Docker CLI child as \-\-build-arg K=V argv and is observable
@@ -755,7 +762,9 @@ credential source; \fBDOCKER_HELPER_SESSION_TOKEN\fR never overrides or
 participates in it.
 Without explicit endpoint selection, a deterministic default is used:
 an existing user socket is selected first; otherwise the system socket is
-selected. The token source follows that selection: user admin token for the
+selected. A non-root caller without \fBXDG_RUNTIME_DIR\fR has no resolvable
+user socket and selects the system socket. The token source follows that
+selection: user admin token for the
 user socket, or the installed credential (a Principal or Launcher
 credential) for the non-root system-daemon caller, or the root admin token
 for the system socket. A failed request is not retried against another

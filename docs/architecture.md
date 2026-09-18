@@ -382,8 +382,10 @@ Endpoint and token resolution for default (no `--system`) mode:
  1. `--token-file` — explicit path, always wins.
  2. If the user socket exists, select it and use `admin.token` in the user
     config directory.
- 3. Otherwise, if the system socket exists, select it and use non-root
-    `credential.token` or root `/etc/docker-helper/admin.token`.
+ 3. Otherwise — including when no user runtime directory is resolvable
+    (a non-root operator without `XDG_RUNTIME_DIR`) — if the system socket
+    exists, select it and use non-root `credential.token` or root
+    `/etc/docker-helper/admin.token`.
  4. Once selected, an unavailable/failing endpoint is returned as an error;
     the client does not retry another daemon.
 
@@ -888,6 +890,23 @@ The HTTP body of `POST /sessions` accepts
   access, unknown nested fields). An explicit root whose canonical path
   equals the canonical workspace replaces the implicit workspace grant
   under the same privilege rule.
+
+`filesystem_roots` is an issuance request, not the issued authority. The
+persisted Session filesystem snapshot is the canonical normalized
+composition of the implicit workspace grant with the admitted request:
+the explicit workspace entry replaces the implicit grant; the composition
+uses access-mode meet semantics against the effective ceiling; and the
+stored snapshot is the canonically normalized representation, so
+redundant same-access authority already covered by another entry may
+collapse during normalization (for example a requested read_write subtree
+whose ancestor is already issued read_write), while a narrower nested
+`read_only` region remains represented because it changes the effective
+authority of the paths below it. Duplicate canonical request entries are
+refused rather than silently merged, and the snapshot is never a verbatim
+echo of the request. Callers must consume `GET /self` or
+`GET /sessions/{id}` (`session show`) — the exact persisted canonical
+`filesystem_snapshot` projection — as the authoritative issued snapshot,
+never a reconstruction from their own request.
 
 The CLI maps its selectors onto those wire fields after authenticating
 (`GET /auth`). The two selectors are mutually exclusive on the wire: the

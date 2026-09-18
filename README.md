@@ -787,8 +787,15 @@ session-scoped Docker registry credentials. Active sessions are untouched.
 Expired sessions are already rejected for authentication and excluded from
 session lists by their `expires_at` value; this command is useful for
 explicitly reclaiming storage during long daemon uptimes. The daemon also
-removes expired sessions automatically at startup. No running daemon or
-admin token is required.
+removes expired sessions automatically at startup.
+
+`session cleanup` is intentionally an offline, local-state maintenance
+command. The daemon **must be stopped** while it runs, and the command must
+run locally on the daemon host/environment whose state database is being
+maintained. It intentionally has no endpoint or authentication flags
+(`--system`, `--endpoint`, `--token-file`): it operates directly on the
+local SQLite database and session runtime directory, not through the API,
+and requires no token.
 
 ## Operator CLI
 
@@ -798,8 +805,12 @@ reload, admin-token rotate, completion roots) support explicit endpoint selectio
 ```
 --system              connect to system daemon (Unix socket)
 --endpoint ENDPOINT   explicit endpoint (unix:///path or http://127.0.0.1:port)
---token-file PATH     token file path
 ```
+
+Without `--system`/`--endpoint` the documented operator default applies: the
+user-mode daemon socket when it exists, otherwise the system socket. This
+default resolves to the system socket even when `XDG_RUNTIME_DIR` is absent
+and no user socket can be resolved.
 
 Default behavior: select the user socket when it exists; otherwise select the
 system socket. The token source changes with the selected socket: user-mode
@@ -922,8 +933,12 @@ docker-helper run \
 
 `--helper-socket` is not supported in user mode and is rejected there.
 
-Agent-facing commands (`pull`, `build`, `run`, `registry login`) select the
-daemon endpoint the same way operator commands do, but authenticate with the
+Agent-facing commands (`pull`, `build`, `run`, `registry login`) carry the
+same explicit `--system`/`--endpoint` flags, but their ambient socket
+override `DOCKER_HELPER_SOCKET_PATH` is an agent/data-plane convenience
+only: operator and control-plane commands do not consult it and keep their
+own explicit `--system`/`--endpoint` selectors and operator credential
+authentication. Agent commands authenticate with the
 Session token from `DOCKER_HELPER_SESSION_TOKEN` (never a Principal
 credential):
 
@@ -1639,7 +1654,15 @@ outside the ceiling, is refused with `invalid_filesystem_policy` before
 the Session exists. Omitting the flag keeps the inherited behavior. A
 Launcher credential can issue its own Session this way and can never
 widen Launcher/Principal/global authority; there is no post-create
-Session filesystem mutation. Run mounts may use the relative spelling
+Session filesystem mutation. The issued snapshot is the daemon-normalized
+effective authority, not a verbatim echo of the request: an explicit root
+at the canonical workspace replaces the implicit workspace grant,
+redundant same-access authority already covered by another entry may
+collapse during normalization, and a narrower nested `read_only` region
+remains represented because it changes effective authority. Consume
+`docker-helper self` or `session show` (`filesystem_snapshot`) as the
+authoritative issued snapshot rather than reconstructing it from the
+create request. Run mounts may use the relative spelling
 for workspace sources and the absolute host spelling for any issued
 filesystem root:
 

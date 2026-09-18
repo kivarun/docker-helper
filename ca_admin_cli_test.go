@@ -112,6 +112,15 @@ func TestSessionCleanupNoCASideEffectCLI(t *testing.T) {
 
 func TestReloadNoXDGRuntimeDir(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
+	// The XDG runtime-directory resolution error is the documented default
+	// failure only when the system-socket fallback is also unavailable; an
+	// environment with a system socket must resolve the system socket
+	// instead (pinned by the operator default-endpoint tests). Mock the
+	// availability seam so this failure mode stays deterministic in any
+	// environment.
+	origSystemSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	t.Cleanup(func() { systemSocketExists = origSystemSocket })
 
 	reloadOut, reloadErr := &bytes.Buffer{}, &bytes.Buffer{}
 	code := runCommandWithWriters([]string{"reload"}, reloadOut, reloadErr)
@@ -125,6 +134,12 @@ func TestReloadNoXDGRuntimeDir(t *testing.T) {
 
 func TestSessionListNoXDGRuntimeDir(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
+	// Same deterministic fallback contract as TestReloadNoXDGRuntimeDir:
+	// the XDG resolution error applies only when the system-socket
+	// fallback is unavailable too.
+	origSystemSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	t.Cleanup(func() { systemSocketExists = origSystemSocket })
 
 	listOut, listErr := &bytes.Buffer{}, &bytes.Buffer{}
 	code := runCommandWithWriters([]string{"session", "list"}, listOut, listErr)

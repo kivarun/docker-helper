@@ -134,17 +134,31 @@ func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
 }
 
 func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
-	runtimeDir, err := getRuntimeDir()
-	if err != nil {
+	// Documented operator default: the user-mode daemon socket when it
+	// exists, otherwise the system socket. A non-root operator without a
+	// resolvable user runtime directory (no XDG_RUNTIME_DIR) has no user
+	// socket to consider, so the default resolves to the system socket;
+	// only when that fallback is also unavailable does the runtime
+	// directory resolution error surface.
+	userSocketPath := ""
+	if runtimeDir, err := getRuntimeDir(); err == nil {
+		userSocketPath = filepath.Join(runtimeDir, "docker-helper.sock")
+	} else if !systemSocketExists() {
 		return nil, err
 	}
-	userSocketPath := filepath.Join(runtimeDir, "docker-helper.sock")
 
 	// Determine which socket to use.
 	// If user socket exists, use it. Otherwise fall back to system socket.
-	socketPath := userSocketPath
-	if !userSocketExists(userSocketPath) && systemSocketExists() {
+	var socketPath string
+	switch {
+	case userSocketPath == "":
 		socketPath = systemSocketPath
+	case userSocketExists(userSocketPath):
+		socketPath = userSocketPath
+	case systemSocketExists():
+		socketPath = systemSocketPath
+	default:
+		socketPath = userSocketPath
 	}
 
 	tokenPath := opts.TokenFile

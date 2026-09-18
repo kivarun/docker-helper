@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -664,6 +665,133 @@ func TestNoPlaintextTokenFlag(t *testing.T) {
 	if !strings.Contains(out, "token") && !strings.Contains(out, "flag") {
 		t.Errorf("unexpected error: %s", out)
 	}
+}
+
+// --- Integration: agentClient unchanged ---
+
+// TestResolveDefaultEndpointSystemFallbackWithoutRuntimeDir proves the
+// documented operator default survives a non-root environment without
+// XDG_RUNTIME_DIR: the user runtime directory is unresolvable, so the
+// default operator client resolves the system socket and authenticates with
+// the installed credential instead of failing before the documented
+// system-socket fallback. The system socket is proven available by a real
+// listener swapped into systemSocketPath (stat-based availability), and the
+// request is driven through the resolved client's transport to prove the
+// actual dial target and bearer, not just the resolution outcome.
+func TestResolveDefaultEndpointSystemFallbackWithoutRuntimeDir(t *testing.T) {
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 1000 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+
+	// getRuntimeDir treats an empty value exactly like an unset variable
+	// (the "dir == \"\"" branch), which is the environment under test.
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	// The installed credential is the only operator token source: creating
+	// credential.token without admin.token in the same config directory
+	// makes a resolution to the user-config admin.token path fail loudly.
+	xdgConfigHome := t.TempDir()
+	credDir := filepath.Join(xdgConfigHome, "docker-helper")
+	if err := os.MkdirAll(credDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestTokenFile(t, filepath.Join(credDir, "credential.token"), "test-token")
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	// A live system socket (real availability, no existence-seam mock).
+	socketPath := filepath.Join(t.TempDir(), "system.sock")
+	var bearer atomic.Value
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		bearer.Store(r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	origSystemSocket := systemSocketPath
+	systemSocketPath = socketPath
+	t.Cleanup(func() { systemSocketPath = origSystemSocket })
+
+	client, err := resolveOperatorClient(operatorClientOptions{})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient without XDG_RUNTIME_DIR must fall back to the system socket: %v", err)
+	}
+	resp, err := client.doAuthenticatedRequest("GET", "/health", nil)
+	if err != nil {
+		t.Fatalf("request through the system-socket default: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (authenticated with the installed credential)", resp.StatusCode)
+	}
+	requireBearerSource(t, "default operator client without XDG_RUNTIME_DIR", bearer.Load().(string), "Bearer test-token")
+}
+
+// TestOperatorCommandDefaultSystemEndpointWithoutRuntimeDir proves the
+// documented default at the command level: a non-root operator command
+// without --system/--endpoint/XDG_RUNTIME_DIR resolves the system socket and
+// authenticates normally with the installed credential.
+func TestOperatorCommandDefaultSystemEndpointWithoutRuntimeDir(t *testing.T) {
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 1000 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+
+	// getRuntimeDir treats an empty value exactly like an unset variable.
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	xdgConfigHome := t.TempDir()
+	credDir := filepath.Join(xdgConfigHome, "docker-helper")
+	if err := os.MkdirAll(credDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestTokenFile(t, filepath.Join(credDir, "credential.token"), "dhc_installed-fixture-token")
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	socketPath := filepath.Join(t.TempDir(), "system.sock")
+	var bearer atomic.Value
+	requests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /sessions", func(w http.ResponseWriter, r *http.Request) {
+		bearer.Store(r.Header.Get("Authorization"))
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"sessions":[]}`))
+	})
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	origSystemSocket := systemSocketPath
+	systemSocketPath = socketPath
+	t.Cleanup(func() { systemSocketPath = origSystemSocket })
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0, stderr: %s", code, stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want exactly one GET /sessions", requests)
+	}
+	requireBearerSource(t, "session list default without XDG_RUNTIME_DIR", bearer.Load().(string), "Bearer dhc_installed-fixture-token")
 }
 
 // --- Integration: agentClient unchanged ---
