@@ -152,6 +152,7 @@ jobs:
           bash scripts/test-uat-opensuse-repo.sh
           bash scripts/test-uat-regressions-aggregation.sh
           bash scripts/test-upgrade-baseline-fixture.sh
+          bash scripts/test-uat-runtime-dir-file-diag.sh
   selinux-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 5

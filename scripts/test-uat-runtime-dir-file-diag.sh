@@ -59,8 +59,18 @@ ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1" >&2; }
 
 # --- fixture RPMs (dummy bytes; identity verified through the real sha256sum) --
+# The candidate and baseline identities are owned by THIS self-test and are
+# synthetic: the fixture RPM names, the stubbed `rpm -qp` version-release,
+# the installed-package version, the `docker-helper version` output, and the
+# explicitly supplied UAT_VERSION / UAT_BASELINE_VERSION all agree by
+# construction, so the self-test never depends on the real regression's
+# current default version identity.
+CANDIDATE_VR="9.9.9~diag-1"
+CANDIDATE_VER="9.9.9-diag"
+BASELINE_VR="8.8.8~diag-1"
+BASELINE_VER="8.8.8-diag"
 BASELINE_RPM="$WORK/docker-helper-baseline.rpm"
-CANDIDATE_RPM="$WORK/docker-helper-2.1.0~uat-1.x86_64.rpm"
+CANDIDATE_RPM="$WORK/docker-helper-$CANDIDATE_VR.x86_64.rpm"
 printf 'baseline-fixture\n' > "$BASELINE_RPM"
 printf 'candidate-fixture\n' > "$CANDIDATE_RPM"
 BASELINE_SHA="$(sha256sum "$BASELINE_RPM" | awk '{print $1}')"
@@ -130,50 +140,50 @@ EOF
 
 printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/curl"
 
-cat > "$STUB/docker-helper" <<'EOF'
+cat > "$STUB/docker-helper" <<EOF
 #!/usr/bin/env bash
-case "$1" in
+case "\$1" in
   init) exit 0 ;;
   version)
-    case "$(cat "$WORK/state/vr" 2>/dev/null)" in
-      '2.0.0-1')     echo 2.0.0; exit 0 ;;
-      '2.1.0~uat-1') echo 2.1.0-uat; exit 0 ;;
+    case "\$(cat "\$WORK/state/vr" 2>/dev/null)" in
+      '$BASELINE_VR') echo $BASELINE_VER; exit 0 ;;
+      '$CANDIDATE_VR') echo $CANDIDATE_VER; exit 0 ;;
     esac
     exit 1 ;;
 esac
 exit 1
 EOF
 
-cat > "$STUB/rpm" <<'EOF'
+cat > "$STUB/rpm" <<EOF
 #!/usr/bin/env bash
-case "$1" in
-  -e)  rm -f "$WORK/state/vr"; exit 0 ;;
-  -q)  cat "$WORK/state/vr" 2>/dev/null; exit 0 ;;
+case "\$1" in
+  -e)  rm -f "\$WORK/state/vr"; exit 0 ;;
+  -q)  cat "\$WORK/state/vr" 2>/dev/null; exit 0 ;;
   -qp)
-    case "${4##*/}" in
-      *baseline*) echo '2.0.0-1' ;;
-      *)          echo '2.1.0~uat-1' ;;
+    case "\${4##*/}" in
+      *baseline*) echo '$BASELINE_VR' ;;
+      *)          echo '$CANDIDATE_VR' ;;
     esac
     exit 0 ;;
 esac
 exit 1
 EOF
 
-cat > "$STUB/zypper" <<'EOF'
+cat > "$STUB/zypper" <<EOF
 #!/usr/bin/env bash
-# zypper stub: `install` performs the package transaction; for a candidate
+# zypper stub: \`install\` performs the package transaction; for a candidate
 # install it also models the scriptlet-driven restart (socket recreated,
 # MainPID/InvocationID changed). The regression passes the global option
 # --non-interactive before the command word; skip it like real zypper does.
-case "${1:-}" in
+case "\${1:-}" in
   --non-interactive) shift ;;
 esac
-case "${1:-}" in
+case "\${1:-}" in
   install)
-    for arg in "$@"; do
-      case "${arg##*/}" in
-        *baseline*) printf '2.0.0-1\n' > "$WORK/state/vr" ;;
-        *uat*)      printf '2.1.0~uat-1\n' > "$WORK/state/vr"; bump_socket_state ;;
+    for arg in "\$@"; do
+      case "\${arg##*/}" in
+        *baseline*) printf '$BASELINE_VR\n' > "\$WORK/state/vr" ;;
+        *$CANDIDATE_VR*) printf '$CANDIDATE_VR\n' > "\$WORK/state/vr"; bump_socket_state ;;
       esac
     done
     echo 'Installation OK.'
@@ -251,6 +261,7 @@ run_case() {
   out="$(FILEDIAG_MODE="$1" \
     UAT_RPM="$CANDIDATE_RPM" UAT_RPM_SHA256="$CANDIDATE_SHA" \
     UAT_BASELINE_RPM="$BASELINE_RPM" UAT_BASELINE_SHA256="$BASELINE_SHA" \
+    UAT_VERSION="$CANDIDATE_VER" UAT_BASELINE_VERSION="$BASELINE_VER" \
     bash "$REG" 2>&1)"
   ec=$?
   printf '%s\n' "$out" > "$WORK/case-$1.log"
