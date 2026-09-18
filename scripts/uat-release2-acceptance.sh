@@ -370,7 +370,13 @@ set_up_principal() {
     printf '%s\n' "$LAUNCHER_JSON" | grep -q '"ok":true' \
       || { [ "$LAUNCHER_HTTP" = "409" ] || { echo "error: default launcher create for principal '$user' failed (http=$LAUNCHER_HTTP): $LAUNCHER_JSON" >&2; return 1; }; }
   fi
-  json="$(dh session create --system --token-file "$credfile" --workspace "$home/ws" --json 2>/dev/null)" || return 1
+  # Candidate CLI: WORKSPACE is the positional operand; the v2.0.0/v2.1.1
+  # upgrade baselines (scenarios F/G/M) predate it and reject the positional
+  # form locally (exit 2, no daemon request) — the baseline --workspace flag
+  # form is the fallback, mirroring the create-flags fallback above.
+  json="$(dh session create --system --token-file "$credfile" "$home/ws" --json 2>/dev/null)" \
+    || json="$(dh session create --system --token-file "$credfile" --workspace "$home/ws" --json 2>/dev/null)" \
+    || return 1
   GLOBAL_SESSION_ID="$(printf '%s' "$json" | json_field id)"
   GLOBAL_SESSION_TOKEN="$(printf '%s' "$json" | json_field token)"
   [ -n "$GLOBAL_SESSION_ID" ] && [ -n "$GLOBAL_SESSION_TOKEN" ] || return 1
@@ -399,7 +405,7 @@ B_TOKEN="$(printf '%s\n' "$B_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]'
 printf '%s\n' "$B_TOKEN" > "$A_CRED_B"; chmod 600 "$A_CRED_B"
 
 # B authenticates as the same principal and creates a valid session.
-B_SESS_JSON="$(dh session create --system --token-file "$A_CRED_B" --workspace "$A_WORKSPACE/ws" --json 2>/dev/null)"
+B_SESS_JSON="$(dh session create --system --token-file "$A_CRED_B" "$A_WORKSPACE/ws" --json 2>/dev/null)"
 B_SESS_ID="$(printf '%s' "$B_SESS_JSON" | json_field id)"
 if [ -n "$B_SESS_ID" ]; then
   acc_ok "credential B authenticates as principal $A_PRINC and created session $B_SESS_ID"
@@ -409,7 +415,7 @@ fi
 
 # A already-issued session (created through A) must remain valid.
 if DOCKER_HELPER_SESSION_TOKEN="$A_TOK_A" \
-    dh run --image alpine:3.24 -- sh -ec 'echo A-OK' | grep -q 'A-OK'; then
+    dh run alpine:3.24 -- sh -ec 'echo A-OK' | grep -q 'A-OK'; then
   acc_ok "pre-revoke session token created through A works"
 else
   acc_fail "pre-revoke session token created through A failed"
@@ -420,14 +426,14 @@ dh credential revoke --system "$GLOBAL_CRED_ID" >/dev/null 2>&1 \
   && acc_ok "credential A revoked" || acc_fail "credential A revoke failed"
 
 # A can no longer create a new session.
-if dh session create --system --token-file "$A_CRED_A" --workspace "$A_WORKSPACE/ws" --json >/dev/null 2>&1; then
+if dh session create --system --token-file "$A_CRED_A" "$A_WORKSPACE/ws" --json >/dev/null 2>&1; then
   acc_fail "revoked credential A still created a session"
 else
   acc_ok "revoked credential A can no longer create a session"
 fi
 
 # B continues to work.
-if dh session create --system --token-file "$A_CRED_B" --workspace "$A_WORKSPACE/ws" --json >/dev/null 2>&1; then
+if dh session create --system --token-file "$A_CRED_B" "$A_WORKSPACE/ws" --json >/dev/null 2>&1; then
   acc_ok "credential B still creates sessions after A revoked"
 else
   acc_fail "credential B stopped working after A revoked"
@@ -466,7 +472,7 @@ BEFORE="$(date -u +'%Y-%m-%d %H:%M:%S')"
 sleep 0.1
 
 if DOCKER_HELPER_SESSION_TOKEN="$B_AUDIT_TOKEN" \
-    dh run --image alpine:3.24 -- sh -ec 'echo AUDIT-OP-OK' | grep -q 'AUDIT-OP-OK'; then
+    dh run alpine:3.24 -- sh -ec 'echo AUDIT-OP-OK' | grep -q 'AUDIT-OP-OK'; then
   acc_ok "principal-owned Docker operation executed"
 else
   acc_fail "principal-owned Docker operation failed"
@@ -657,7 +663,7 @@ if [ "$REG_UP" = 1 ]; then
   #      the no-credentials path. The classifier is fail-closed: only its
   #      "auth" result may satisfy this assertion (network/unknown cannot).
   A_NOAUTH_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
-    dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
+    dh run "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
   A_NOAUTH_EC=$?
   A_NOAUTH_KIND="$(classify_registry_failure "$A_NOAUTH_OUT")"
   if [ "$A_NOAUTH_EC" -eq 0 ]; then
@@ -672,7 +678,7 @@ if [ "$REG_UP" = 1 ]; then
 
   # 5. docker-helper registry login for session A (password via stdin).
   if printf '%s\n' "$REG_HTPASS" | DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
-      dh registry login --registry "$REG_ADDR" --username "$REG_HTUSER" --password-stdin >/tmp/r2ac-reglogin.out 2>&1; then
+      dh registry login "$REG_ADDR" --username "$REG_HTUSER" --password-stdin >/tmp/r2ac-reglogin.out 2>&1; then
     acc_ok "docker-helper registry login succeeded for session A"
   else
     acc_fail "docker-helper registry login failed for session A: $(tail -3 /tmp/r2ac-reglogin.out | redact)"
@@ -680,7 +686,7 @@ if [ "$REG_UP" = 1 ]; then
 
   # 6. Private pull now succeeds in session A.
   if DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
-      dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'echo REG-A-OK' | grep -q 'REG-A-OK'; then
+      dh run "$REG_ADDR/uat/private:v1" -- sh -ec 'echo REG-A-OK' | grep -q 'REG-A-OK'; then
     acc_ok "private pull+run succeeds in session A after registry login"
   else
     acc_fail "private pull+run failed in session A after registry login"
@@ -697,7 +703,7 @@ if [ "$REG_UP" = 1 ]; then
   #    satisfy this assertion (network/unknown cannot).
   docker rmi "$REG_ADDR/uat/private:v1" >/dev/null 2>&1 || true
   B_ISO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_B" \
-    dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
+    dh run "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
   B_ISO_EC=$?
   B_ISO_KIND="$(classify_registry_failure "$B_ISO_OUT")"
   if [ "$B_ISO_EC" -eq 0 ]; then
@@ -725,7 +731,7 @@ if [ "$REG_UP" = 1 ]; then
   # its output, so the absence-of-leak assertion is only meaningful after the
   # authenticated pull/run actually succeeded.
   OP_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
-    dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
+    dh run "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
   OP_EC=$?
   if [ "$OP_EC" -ne 0 ]; then
     acc_fail "authenticated re-pull (session A) failed (rc=$OP_EC): $(printf '%s\n' "$OP_OUT" | redact | tail -3)"
@@ -745,7 +751,7 @@ if [ "$REG_UP" = 1 ]; then
   C_SESS_DIR="/run/docker-helper/sessions/$C_SESSION_A"
   if [ -f "$C_SESS_DIR/docker/config.json" ]; then
     acc_ok "session-scoped Docker auth material written under the session runtime dir"
-    if dh session delete --system --id "$C_SESSION_A" >/dev/null 2>&1; then
+    if dh session delete --system "$C_SESSION_A" >/dev/null 2>&1; then
       if [ -e "$C_SESS_DIR" ]; then
         acc_fail "session runtime dir (docker auth material) survived session deletion"
       else
@@ -756,7 +762,7 @@ if [ "$REG_UP" = 1 ]; then
     fi
   else
     acc_fail "session-scoped Docker auth material not present under $C_SESS_DIR/docker/config.json"
-    dh session delete --system --id "$C_SESSION_A" >/dev/null 2>&1 || true
+    dh session delete --system "$C_SESSION_A" >/dev/null 2>&1 || true
   fi
 
   # Restore the Docker daemon configuration (UAT-harness-owned setup).
@@ -792,7 +798,7 @@ start_long_op() { # sets D_CID from the daemon cidfile
   local before now
   before="$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)"
   DOCKER_HELPER_SESSION_TOKEN="$D_TOKEN" \
-    dh run --image alpine:3.24 -- sh -ec 'while true; do sleep 1; done' \
+    dh run alpine:3.24 -- sh -ec 'while true; do sleep 1; done' \
     >/tmp/r2ac-longop.out 2>&1 &
   D_OP_CLI_PID=$!
   # Wait until the daemon actually created the container (cidfile) and the
@@ -857,11 +863,11 @@ if [ -n "$D_CID" ]; then
     acc_fail "stale mount pins after restart: $LEAK"
   fi
   # A fresh operation succeeds afterwards.
-  FRESH_JSON="$(dh session create --system --token-file "$D_CRED" --workspace "$(getent passwd "$D_USER" | cut -d: -f6)/ws" --json 2>/dev/null)" \
+  FRESH_JSON="$(dh session create --system --token-file "$D_CRED" "$(getent passwd "$D_USER" | cut -d: -f6)/ws" --json 2>/dev/null)" \
     && FRESH_TOKEN="$(printf '%s' "$FRESH_JSON" | json_field token)"
   if [ -n "${FRESH_TOKEN:-}" ] && \
       DOCKER_HELPER_SESSION_TOKEN="$FRESH_TOKEN" \
-      dh run --image alpine:3.24 -- sh -ec 'echo FRESH-OK' | grep -q 'FRESH-OK'; then
+      dh run alpine:3.24 -- sh -ec 'echo FRESH-OK' | grep -q 'FRESH-OK'; then
     acc_ok "fresh operation succeeds after restart"
   else
     acc_fail "fresh operation failed after restart"
@@ -973,7 +979,7 @@ done
 # 4. prove user-mode socket/config/state/database work (a user session + run).
 E_USER_SESS=""
 if [ "$E_USER_READY" = 1 ]; then
-  E_USER_SESS_JSON="$(sudo -u "$E_USER" $E_ENV docker-helper session create --workspace "$E_HOME/ws" --json 2>/tmp/r2ac-coex-usr-sess.err)" \
+  E_USER_SESS_JSON="$(sudo -u "$E_USER" $E_ENV docker-helper session create "$E_HOME/ws" --json 2>/tmp/r2ac-coex-usr-sess.err)" \
     && E_USER_SESS="$(printf '%s' "$E_USER_SESS_JSON" | json_field id)" \
     && E_USER_TOK="$(printf '%s' "$E_USER_SESS_JSON" | json_field token)"
   if [ -n "$E_USER_SESS" ]; then
@@ -985,7 +991,7 @@ if [ "$E_USER_READY" = 1 ]; then
       acc_fail "user-mode database not found under user state path"
     fi
     if sudo -u "$E_USER" env -i DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        docker-helper run --image alpine:3.24 -- sh -ec 'echo USER-MODE-OK' | grep -q 'USER-MODE-OK'; then
+        docker-helper run alpine:3.24 -- sh -ec 'echo USER-MODE-OK' | grep -q 'USER-MODE-OK'; then
       acc_ok "user-mode docker-helper operation works"
     else
       acc_fail "user-mode docker-helper operation failed"
@@ -1039,7 +1045,7 @@ fi
 
 # 8. default endpoint for that user selects the existing user socket.
 if [ "$E_USER_READY" = 1 ]; then
-  DEFAULT_SESS_JSON="$(sudo -u "$E_USER" $E_ENV docker-helper session create --workspace "$E_HOME/ws" --json 2>/dev/null)" \
+  DEFAULT_SESS_JSON="$(sudo -u "$E_USER" $E_ENV docker-helper session create "$E_HOME/ws" --json 2>/dev/null)" \
     && DEFAULT_SESS="$(printf '%s' "$DEFAULT_SESS_JSON" | json_field id)"
   if [ -n "${DEFAULT_SESS:-}" ]; then
     # The default-endpoint session must live in the USER daemon, not the
@@ -1076,7 +1082,7 @@ if set_up_principal "$E_USER" "$E_OPERATOR_CRED" >/dev/null 2>&1; then
     fi
     # A system-mode session token must NOT be consumed by the user daemon.
     if sudo -u "$E_USER" env -i DOCKER_HELPER_SESSION_TOKEN="$GLOBAL_SESSION_TOKEN" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        docker-helper run --image alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
+        docker-helper run alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
       acc_fail "system-mode session token was consumed by the user-mode daemon"
     else
       acc_ok "system-mode session token rejected by the user-mode daemon"
@@ -1089,7 +1095,7 @@ fi
 # 10. a user-mode session token must NOT be consumed by the system daemon.
 if [ -n "${E_USER_TOK:-}" ]; then
   if DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" \
-      dh run --image alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
+      dh run alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
     acc_fail "user-mode session token was consumed by the system daemon"
   else
     acc_ok "user-mode session token rejected by the system daemon"
@@ -1283,7 +1289,7 @@ if [ -n "$G_BASELINE_DEB" ]; then
   fi
 
   # G3: pre-upgrade credential still creates sessions.
-  G_NEW_JSON="$(dh session create --system --token-file "$G_CRED" --workspace "$G_HOME/ws" --json 2>/dev/null || true)"
+  G_NEW_JSON="$(dh session create --system --token-file "$G_CRED" "$G_HOME/ws" --json 2>/dev/null || true)"
   G_NEW_ID="$(printf '%s' "$G_NEW_JSON" | json_field id || true)"
   if [ -n "$G_NEW_ID" ]; then
     acc_ok "pre-upgrade credential still creates sessions ($G_NEW_ID)"
@@ -1375,7 +1381,7 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
   G_LC_ID="$(printf '%s' "$G_ISSUE_OUT" | json_field id || true)"
   if [ -n "$G_LC_TOKEN" ] && [ -n "$G_LC_ID" ]; then
     printf '%s\n' "$G_LC_TOKEN" > "$CRED_DIR/upg-lc.tok"; chmod 600 "$CRED_DIR/upg-lc.tok"
-    G_LC_JSON="$(dh session create --system --token-file "$CRED_DIR/upg-lc.tok" --workspace "$G_HOME/ws" --json 2>/dev/null || true)"
+    G_LC_JSON="$(dh session create --system --token-file "$CRED_DIR/upg-lc.tok" "$G_HOME/ws" --json 2>/dev/null || true)"
     if printf '%s' "$G_LC_JSON" | grep -q '"launcher": "default"'; then
       acc_ok "migrated default Launcher issues a working credential"
     else
@@ -1390,12 +1396,12 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
     else
       acc_fail "rotation on migrated Launcher misbehaved (id=$G_ROT_ID)"
     fi
-    if dh session create --system --token-file "$CRED_DIR/upg-lc.tok" --workspace "$G_HOME/ws" --json >/dev/null 2>&1; then
+    if dh session create --system --token-file "$CRED_DIR/upg-lc.tok" "$G_HOME/ws" --json >/dev/null 2>&1; then
       acc_fail "old launcher bearer still accepted after rotation"
     else
       acc_ok "old launcher bearer rejected after rotation"
     fi
-    G_LC_JSON2="$(dh session create --system --token-file "$CRED_DIR/upg-lc2.tok" --workspace "$G_HOME/ws" --json 2>/dev/null || true)"
+    G_LC_JSON2="$(dh session create --system --token-file "$CRED_DIR/upg-lc2.tok" "$G_HOME/ws" --json 2>/dev/null || true)"
     if printf '%s' "$G_LC_JSON2" | grep -q '"launcher": "default"'; then
       acc_ok "rotated launcher credential creates sessions"
     else
@@ -1731,7 +1737,7 @@ sys.exit(0 if isinstance(roots, list) and len(roots) == 2 and all(isinstance(r, 
   # --- M7: the old Session keeps the 2.1 writable behavior ---------------------
   if [ -n "${M_S1_TOKEN:-}" ]; then
     M_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$M_S1_TOKEN" \
-      dh run --image alpine:3.24 --mount .:/mnt/ws -- \
+      dh run --mount .:/mnt/ws alpine:3.24 -- \
       sh -ec 'echo migrated-write > /mnt/ws/after-migration.txt && cat /mnt/ws/input.txt && echo MIG-RW-OK' 2>&1)"
     if printf '%s\n' "$M_RUN_OUT" | grep -q 'MIG-RW-OK' \
         && [ "$(cat "$M_POLICY/sub/ws/after-migration.txt" 2>/dev/null)" = "migrated-write" ]; then
@@ -1838,9 +1844,9 @@ mkdir -p "$H_SUB/ws"; chown -R "$H_USER:$H_USER" "$H_SUB"
 H_ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 
 # H1: two launchers with separate namespaces.
-H_ALPHA_OUT="$(dh launcher create --system --principal "$H_USER" --name alpha --no-credential --json 2>/dev/null || true)"
+H_ALPHA_OUT="$(dh launcher create --system --principal "$H_USER" alpha --no-credential --json 2>/dev/null || true)"
 H_ALPHA_ID="$(printf '%s' "$H_ALPHA_OUT" | json_field id || true)"
-H_BETA_OUT="$(dh launcher create --system --principal "$H_USER" --name beta --allowed-root "$H_SUB" --no-credential --json 2>/dev/null || true)"
+H_BETA_OUT="$(dh launcher create --system --principal "$H_USER" beta --allowed-root "$H_SUB" --no-credential --json 2>/dev/null || true)"
 H_BETA_ID="$(printf '%s' "$H_BETA_OUT" | json_field id || true)"
 if [ -n "$H_ALPHA_ID" ] && [ -n "$H_BETA_ID" ] && [ "$H_ALPHA_ID" != "$H_BETA_ID" ]; then
   acc_ok "two distinct launchers created (alpha=$H_ALPHA_ID, beta=$H_BETA_ID)"
@@ -1885,11 +1891,11 @@ H_BETA_TOK="$(dh launcher credential create --system --principal "$H_USER" --jso
 printf '%s\n' "$H_ALPHA_TOK" > "$CRED_DIR/lnc-alpha.tok"; chmod 600 "$CRED_DIR/lnc-alpha.tok"
 printf '%s\n' "$H_BETA_TOK" > "$CRED_DIR/lnc-beta.tok"; chmod 600 "$CRED_DIR/lnc-beta.tok"
 
-H_ALPHA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
+H_ALPHA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha.tok" "$H_WS" --json 2>/dev/null || true)"
 H_ALPHA_SESS="$(printf '%s' "$H_ALPHA_SESS_JSON" | json_field id || true)"
 # The beta workspace must be a proper subdirectory of the Launcher allowed
 # root; the root itself ($H_SUB) is rejected with 400 invalid_workspace.
-H_BETA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-beta.tok" --workspace "$H_SUB/ws" --json 2>/dev/null || true)"
+H_BETA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-beta.tok" "$H_SUB/ws" --json 2>/dev/null || true)"
 H_BETA_SESS="$(printf '%s' "$H_BETA_SESS_JSON" | json_field id || true)"
 if [ -n "$H_ALPHA_SESS" ] && [ -n "$H_BETA_SESS" ]; then
   acc_ok "each launcher created its own session (alpha=$H_ALPHA_SESS, beta=$H_BETA_SESS)"
@@ -1928,7 +1934,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     printf '%s\n' "$H_ALPHA_TOK2" > "$CRED_DIR/lnc-alpha2.tok"; chmod 600 "$CRED_DIR/lnc-alpha2.tok"
     H_OLD_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ALPHA_TOK" http://localhost/auth 2>/dev/null || true)"
-    H_NEW_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
+    H_NEW_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" "$H_WS" --json 2>/dev/null || true)"
     H_NEW_SESS="$(printf '%s' "$H_NEW_JSON" | json_field id || true)"
     H_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
     if [ "$H_OLD_HTTP" = 401 ] \
@@ -2050,7 +2056,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   H5R_READY=false
   if dh config allowed-root add "$H5_GLOBAL_ROOT" >/dev/null 2>&1 \
       && dh principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
-    H5R_OUT="$(dh launcher create --system --principal "$H_USER" --name h5-runtime-cascade \
+    H5R_OUT="$(dh launcher create --system --principal "$H_USER" h5-runtime-cascade \
       --allowed-root "$H5_GLOBAL_CHILD" --no-credential --json 2>/dev/null || true)"
     H5R_ID="$(printf '%s' "$H5R_OUT" | json_field id || true)"
     H5R_PROOTS_BEFORE="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
@@ -2090,7 +2096,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   H5S_READY=false
   if dh config allowed-root add "$H5_GLOBAL_ROOT" >/dev/null 2>&1 \
       && dh principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT" >/dev/null 2>&1; then
-    H5S_OUT="$(dh launcher create --system --principal "$H_USER" --name h5-startup-cascade \
+    H5S_OUT="$(dh launcher create --system --principal "$H_USER" h5-startup-cascade \
       --allowed-root "$H5_GLOBAL_CHILD" --no-credential --json 2>/dev/null || true)"
     H5S_ID="$(printf '%s' "$H5S_OUT" | json_field id || true)"
     H5S_PROOTS_BEFORE="$(dh principal allowed-root list --system --json "$H_USER" 2>/dev/null || true)"
@@ -2169,13 +2175,13 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
 
   # H7: checked delete with active runtime.
   H_BEFORE_CID="$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)"
-  H_RT_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
+  H_RT_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" "$H_WS" --json 2>/dev/null || true)"
   H_RT_SESS="$(printf '%s' "$H_RT_SESS_JSON" | json_field id || true)"
   H_RT_TOKEN="$(printf '%s' "$H_RT_SESS_JSON" | json_field token || true)"
   H_RT_CID=""
   if [ -n "$H_RT_TOKEN" ]; then
     DOCKER_HELPER_SESSION_TOKEN="$H_RT_TOKEN" \
-      dh run --image alpine:3.24 -- sh -ec 'while true; do sleep 1; done' \
+      dh run alpine:3.24 -- sh -ec 'while true; do sleep 1; done' \
       >/tmp/r2ac-h-op.out 2>&1 &
     H_OP_PID=$!
     for _ in $(seq 1 100); do

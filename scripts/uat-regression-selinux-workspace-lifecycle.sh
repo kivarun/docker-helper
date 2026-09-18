@@ -119,7 +119,7 @@ reg_expect_no_se_rule_for "$SIBLING" "no fcontext rule matches the sibling path"
 chown -R "$SEL_P:$SEL_P" "$WS" >/dev/null 2>&1 || { reg_fail "workspace chown to principal failed"; reg_result; }
 
 RW_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$STOK" \
-  dh run --image "$IMAGE" --mount rw:/mnt/rw -- sh -ec 'echo rw-ok > /mnt/rw/f; cat /mnt/rw/f' 2>&1)"
+  dh run --mount rw:/mnt/rw "$IMAGE" -- sh -ec 'echo rw-ok > /mnt/rw/f; cat /mnt/rw/f' 2>&1)"
 RW_EC=$?
 if [ "$RW_EC" -eq 0 ] && printf '%s' "$RW_OUT" | grep -q 'rw-ok'; then
   reg_ok "container RW through the workspace works"
@@ -133,7 +133,7 @@ fi
 # Restore root ownership before teardown so the delete-time restorecon relabel does
 # not need the (un-granted) SELinux fowner capability on the principal-owned tree.
 chown -R root:root "$WS" >/dev/null 2>&1 || true
-if dh session delete --system --id "$SID" >/dev/null 2>&1; then
+if dh session delete --system "$SID" >/dev/null 2>&1; then
   reg_ok "session deleted"
 else
   reg_fail "session delete failed"
@@ -173,7 +173,7 @@ CTRL_LIST_BEFORE="$(dh session list --system --token-file "$SEL_CRED" 2>/dev/nul
 if [ "$CTRL_INV_RC" -ne 0 ]; then
   reg_fail "fcontext inventory unavailable before the control-character refusal; absence is never assumed"
 fi
-CTRL_OUT="$(dh session create --system --token-file "$SEL_CRED" --workspace "$WS_CTRL" --json 2>&1)"
+CTRL_OUT="$(dh session create --system --token-file "$SEL_CRED" "$WS_CTRL" --json 2>&1)"
 CTRL_RC=$?
 if [ "$CTRL_RC" -eq 0 ]; then
   reg_fail "session create with a control-character workspace was accepted (must be refused by the host-path text grammar)"
@@ -253,7 +253,7 @@ fi
 
 # Consumer-count release: removing the second consumer while the first still
 # holds the boundary keeps the helper-owned rule.
-if dh session delete --system --id "$LONG_SESSION_B_ID" >/dev/null 2>&1; then
+if dh session delete --system "$LONG_SESSION_B_ID" >/dev/null 2>&1; then
   reg_ok "second session deleted"
 else
   reg_fail "second session delete failed"
@@ -263,7 +263,7 @@ reg_expect_se_rule present "$WS_LONG(/.*)?" \
 
 # Final cleanup: removing the last consumer releases the proven rule and
 # relabels the tree back.
-if dh session delete --system --id "$LONG_SESSION_A_ID" >/dev/null 2>&1; then
+if dh session delete --system "$LONG_SESSION_A_ID" >/dev/null 2>&1; then
   reg_ok "first session deleted"
 else
   reg_fail "first session delete failed"

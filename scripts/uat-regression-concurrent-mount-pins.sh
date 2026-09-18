@@ -43,10 +43,10 @@ SB='cat /mnt/shared/file > /mnt/shared/phaseB; echo startedB > /mnt/shared/start
 
 RUN_A="/tmp/uat-reg7-a.log"; RUN_B="/tmp/uat-reg7-b.log"
 DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh run --image "$IMAGE" --mount shared:/mnt/shared -- sh -ec "$SA" >"$RUN_A" 2>&1 &
+  dh run --mount shared:/mnt/shared "$IMAGE" -- sh -ec "$SA" >"$RUN_A" 2>&1 &
 PID_A=$!
 DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh run --image "$IMAGE" --mount shared:/mnt/shared -- sh -ec "$SB" >"$RUN_B" 2>&1 &
+  dh run --mount shared:/mnt/shared "$IMAGE" -- sh -ec "$SB" >"$RUN_B" 2>&1 &
 PID_B=$!
 
 # Wait for both containers to report readiness and their first reads.

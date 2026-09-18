@@ -72,7 +72,7 @@ chown "$USER:$USER" "$ws/docker-helper"
 
 # --- basic isolation: no socket without the capability -----------------------
 if DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-   dh run --image "$IMAGE" -- sh -ec 'test ! -e /run/docker-helper/docker-helper.sock' >/dev/null 2>&1; then
+   dh run "$IMAGE" -- sh -ec 'test ! -e /run/docker-helper/docker-helper.sock' >/dev/null 2>&1; then
   reg_ok "workload without --helper-socket does not receive the helper runtime"
 else
   reg_fail "workload without --helper-socket saw the helper runtime/socket"
@@ -80,7 +80,7 @@ fi
 
 # --- with the capability the socket is present -------------------------------
 if DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-   dh run --image "$IMAGE" --helper-socket -- sh -ec 'test -S /run/docker-helper/docker-helper.sock' >/dev/null 2>&1; then
+   dh run --helper-socket "$IMAGE" -- sh -ec 'test -S /run/docker-helper/docker-helper.sock' >/dev/null 2>&1; then
   reg_ok "workload with --helper-socket sees /run/docker-helper/docker-helper.sock"
 else
   reg_fail "workload with --helper-socket did NOT see /run/docker-helper/docker-helper.sock"
@@ -91,7 +91,7 @@ fi
 # inside the issued Session filesystem snapshot, so the request is refused
 # with the stable invalid_mount code before any pin/container state exists.
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-  dh run --image "$IMAGE" --mount "/run/docker-helper:/run/docker-helper" -- true \
+  dh run --mount "/run/docker-helper:/run/docker-helper" "$IMAGE" -- true \
   >/tmp/uat-reg16-absmount.out 2>/tmp/uat-reg16-absmount.err
 ABS_RC=$?
 if [ "$ABS_RC" != 0 ] && grep -q "invalid_mount" /tmp/uat-reg16-absmount.err 2>/dev/null; then
@@ -102,7 +102,7 @@ fi
 
 # --- workspace escape remains rejected ---------------------------------------
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-  dh run --image "$IMAGE" --mount "../uatreg16-escape:/escape" -- true \
+  dh run --mount "../uatreg16-escape:/escape" "$IMAGE" -- true \
   >/tmp/uat-reg16-escape.out 2>/tmp/uat-reg16-escape.err
 ESC_RC=$?
 if [ "$ESC_RC" != 0 ]; then
@@ -116,7 +116,7 @@ fi
 OVERLAP_OK=1
 for OV_TARGET in "/run/docker-helper" "/run/docker-helper/foo" "/run/docker-helper/docker-helper.sock" "/run" "/"; do
   DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-    dh run --image "$IMAGE" --helper-socket --mount ".:${OV_TARGET}" -- true \
+    dh run --helper-socket --mount ".:${OV_TARGET}" "$IMAGE" -- true \
     >/tmp/uat-reg16-overlap.out 2>/tmp/uat-reg16-overlap.err
   OV_RC=$?
   if [ "$OV_RC" != 0 ] && grep -q "invalid_mount" /tmp/uat-reg16-overlap.out /tmp/uat-reg16-overlap.err 2>/dev/null; then
@@ -129,7 +129,7 @@ done
 # Sibling paths must stay allowed under the unchanged 2.1.0 mount contract.
 for OV_TARGET in "/run-other" "/run/docker-helper-other"; do
   DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-    dh run --image "$IMAGE" --helper-socket --mount ".:${OV_TARGET}" -- true \
+    dh run --helper-socket --mount ".:${OV_TARGET}" "$IMAGE" -- true \
     >/tmp/uat-reg16-overlap.out 2>/tmp/uat-reg16-overlap.err
   OV_RC=$?
   if [ "$OV_RC" = 0 ]; then
@@ -142,8 +142,8 @@ done
 
 # --- transport only: a bogus bearer credential means no protected operation ---
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-  dh run --image "$IMAGE" --helper-socket --mount .:/workspace \
-  -- sh -ec 'DOCKER_HELPER_SESSION_TOKEN=dht_uat_reg16_invalid /workspace/docker-helper pull alpine:3.24' \
+  dh run --helper-socket --mount .:/workspace \
+  "$IMAGE" -- sh -ec 'DOCKER_HELPER_SESSION_TOKEN=dht_uat_reg16_invalid /workspace/docker-helper pull alpine:3.24' \
   >/tmp/uat-reg16-noauth.out 2>/tmp/uat-reg16-noauth.err
 NOAUTH_RC=$?
 # The inner docker-helper's diagnostic travels through the streamed
@@ -156,7 +156,7 @@ fi
 
 # --- runtime directory protection: read-only bind ----------------------------
 if DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-   dh run --image "$IMAGE" --helper-socket -- sh -ec '
+   dh run --helper-socket "$IMAGE" -- sh -ec '
     touch /run/docker-helper/uat16-nope 2>/dev/null && exit 1
     mkdir /run/docker-helper/uat16-dir 2>/dev/null && exit 1
     rm /run/docker-helper/docker-helper.sock 2>/dev/null && exit 1
@@ -168,7 +168,7 @@ fi
 
 # --- helper-private runtime state stays unreadable ---------------------------
 if DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-   dh run --image "$IMAGE" --helper-socket -- sh -ec '
+   dh run --helper-socket "$IMAGE" -- sh -ec '
     cat /run/docker-helper/docker-helper.sock.lock >/dev/null 2>&1 && exit 1
     ls /run/docker-helper/builds >/dev/null 2>&1 && exit 1
     ls /run/docker-helper/mounts >/dev/null 2>&1 && exit 1
@@ -184,9 +184,9 @@ RUNTIME_DIR_INODE_BEFORE="$(stat -c %i /run/docker-helper)"
 SOCKET_INODE_BEFORE="$(stat -c %i /run/docker-helper/docker-helper.sock)"
 rm -f "$ws/reg16-restart-started" 2>/dev/null || true
 
-DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" dh run --image "$IMAGE" \
+DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" dh run \
   --helper-socket --mount .:/workspace \
-  -- sh -ec 'echo started > /workspace/reg16-restart-started; sleep 60' \
+  "$IMAGE" -- sh -ec 'echo started > /workspace/reg16-restart-started; sleep 60' \
   >/tmp/uat-reg16-restart.out 2>/tmp/uat-reg16-restart.err &
 RESTART_CLI_PID=$!
 
@@ -238,7 +238,7 @@ else
 fi
 
 if DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-   dh run --image "$IMAGE" --helper-socket -- sh -ec 'test -S /run/docker-helper/docker-helper.sock' >/dev/null 2>&1; then
+   dh run --helper-socket "$IMAGE" -- sh -ec 'test -S /run/docker-helper/docker-helper.sock' >/dev/null 2>&1; then
   reg_ok "fresh --helper-socket workload sees the recreated socket after restart"
 else
   reg_fail "fresh --helper-socket workload did NOT see the recreated socket"
@@ -257,10 +257,10 @@ fi
 rm -f "$ws/reg16-orphan-old" "$ws/reg16-orphan-ready" "$ws/reg16-orphan-cid" 2>/dev/null || true
 
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_LAUNCHER_CRED_SOURCE="$LAUNCHER_CRED_TOKEN" \
-  dh run --image "$IMAGE" \
+  dh run \
   --helper-socket --mount .:/workspace \
   --env-from "UAT_REG16_CRED=UAT_LAUNCHER_CRED_SOURCE" \
-  -- sh -ec '
+  "$IMAGE" -- sh -ec '
     set -eu
     OLD_I=$(stat -c %i /run/docker-helper/docker-helper.sock)
     printf "%s" "$OLD_I" > /workspace/reg16-orphan-old

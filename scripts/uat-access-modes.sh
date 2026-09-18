@@ -221,7 +221,7 @@ issue_launcher_credential() {
 # prints the session ID on success (the bearer is stored in /tmp/uat-am-<id>).
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json 2>&1 || true)"
+  out="$(dh session create --system --token-file "$cred" "$ws" --json 2>&1 || true)"
   id="$(printf '%s' "$out" | json_field id)"
   if [ -z "$id" ]; then
     printf 'session create failed (workspace %s): %s\n' \
@@ -268,7 +268,7 @@ expect_read_only_root() {
     return 1
   fi
   out="$(DOCKER_HELPER_SESSION_TOKEN="$token" \
-    dh run --image alpine:3.24 --mount "$source:$target" -- sh -ec "$snippet" 2>&1)"
+    dh run --mount "$source:$target" alpine:3.24 -- sh -ec "$snippet" 2>&1)"
   ec=$?
   [ "$ec" -ne 0 ] || { printf '  writable request on %s unexpectedly succeeded\n' "$source" >&2; return 1; }
   printf '%s\n' "$out" | grep -q 'read_only_root' \
@@ -512,7 +512,7 @@ WIDEN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
 WIDEN_L_ID="$(printf '%s' "$WIDEN_L_JSON" | json_field id)"
 [ -n "$WIDEN_L_ID" ] || { echo "error: launcher 'widen' create failed: $WIDEN_L_JSON" >&2; exit 1; }
 if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
-    "$WS/pipeline-inputs" "$WIDEN_L_ID" >/dev/null 2>&1; then
+    "$WIDEN_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1; then
   acc_ok "P7 setup: launcher stored a read_write grant on the Principal read_only region"
 else
   acc_fail "P7 setup: launcher could not store the read_write grant"
@@ -532,9 +532,9 @@ SUB_L_ID="$(printf '%s' "$SUB_L_JSON" | json_field id)"
 dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
   "$WS/pipeline-inputs/sub" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
-  "$WS/pipeline-inputs" "$SUB_L_ID" >/dev/null 2>&1 || true
+  "$SUB_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1 || true
 dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
-  "$WS/pipeline-inputs/sub" "$SUB_L_ID" >/dev/null 2>&1 || true
+  "$SUB_L_ID" "$WS/pipeline-inputs/sub" >/dev/null 2>&1 || true
 acc_ok "P8 setup: launcher sub carries RW -> RO -> RW transitions"
 
 # buildro: the read-only build policy owner (snapshot with only RO). A
@@ -546,7 +546,7 @@ BUILD_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
 BUILD_L_ID="$(printf '%s' "$BUILD_L_JSON" | json_field id)"
 [ -n "$BUILD_L_ID" ] || { echo "error: launcher 'buildro' create failed: $BUILD_L_JSON" >&2; exit 1; }
 if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
-    "$BUILDROOT" read_only "$BUILD_L_ID" >/dev/null 2>&1; then
+    "$BUILD_L_ID" "$BUILDROOT" read_only >/dev/null 2>&1; then
   acc_ok "build-RO setup: launcher buildro carries a single read_only root"
 else
   acc_fail "build-RO setup failed"
@@ -607,7 +607,7 @@ scenario "1-3: project RW / pipeline-inputs RO / read_only_root"
 
 SA_TOKEN="$(cat "/tmp/uat-am-tok-$SA_ID")"
 RW_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project -- \
+  dh run --mount project:/mnt/project alpine:3.24 -- \
   sh -ec 'echo rw-write > /mnt/project/written.txt && cat /mnt/project/keep.txt')" \
   || acc_fail "1 project writable mount failed: $RW_OUT"
 if [ -f "$WS/project/written.txt" ] && [ "$(cat "$WS/project/written.txt")" = "rw-write" ]; then
@@ -617,7 +617,7 @@ else
 fi
 
 RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'test "$(cat /mnt/inputs/input.txt)" = "ro-input" && echo RO-READ-OK')" \
   || acc_fail "2 pipeline-inputs read-only mount failed: $RO_OUT"
 printf '%s\n' "$RO_OUT" | grep -q 'RO-READ-OK' \
@@ -655,7 +655,7 @@ fi
 # ==============================================================================
 scenario "5: direct project RW remains allowed"
 P5_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project -- sh -ec 'test -w /mnt/project && echo PROJECT-RW-OK')" \
+  dh run --mount project:/mnt/project alpine:3.24 -- sh -ec 'test -w /mnt/project && echo PROJECT-RW-OK')" \
   || acc_fail "5 direct project RW mount failed: $P5_OUT"
 printf '%s\n' "$P5_OUT" | grep -q 'PROJECT-RW-OK' \
   && acc_ok "5 direct project RW mount allowed" \
@@ -677,7 +677,7 @@ else
   fi
 fi
 ALIAS_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
-  dh run --image alpine:3.24 --mount alias-inputs:/mnt/alias:ro -- \
+  dh run --mount alias-inputs:/mnt/alias:ro alpine:3.24 -- \
   sh -ec 'test "$(cat /mnt/alias/input.txt)" = "ro-input" && echo ALIAS-RO-OK')" \
   || acc_fail "6 read-only symlink alias mount failed: $ALIAS_OUT"
 printf '%s\n' "$ALIAS_OUT" | grep -q 'ALIAS-RO-OK' \
@@ -705,7 +705,7 @@ fi
 scenario "8: most-specific transitions (sub RW below RO parent)"
 SC_TOKEN="$(cat "/tmp/uat-am-tok-$SC_ID")"
 SUB_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SC_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs/sub:/mnt/sub -- \
+  dh run --mount pipeline-inputs/sub:/mnt/sub alpine:3.24 -- \
   sh -ec 'echo sub-write > /mnt/sub/new.txt && cat /mnt/sub/sub.txt')" \
   || acc_fail "8 sub read_write mount failed: $SUB_OUT"
 if [ -f "$WS/pipeline-inputs/sub/new.txt" ] && [ "$(cat "$WS/pipeline-inputs/sub/new.txt")" = "sub-write" ]; then
@@ -714,7 +714,7 @@ else
   acc_fail "8 sub write did not persist (SC: $(show_snapshot "$SC_ID" | tr '\n' '; '))"
 fi
 SC_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SC_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'test "$(cat /mnt/inputs/input.txt)" = "ro-input" && echo SUB-RO-OK')" \
   || acc_fail "8 RO parent read failed under the RW sub: $SC_RO_OUT"
 printf '%s\n' "$SC_RO_OUT" | grep -q 'SUB-RO-OK' \
@@ -736,7 +736,7 @@ fi
 scenario "9: legacy path-only policy remains read_write"
 SL_TOKEN="$(cat "/tmp/uat-am-tok-$SL_ID")"
 LEGACY_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SL_TOKEN" \
-  dh run --image alpine:3.24 --mount .:/mnt/legacy -- \
+  dh run --mount .:/mnt/legacy alpine:3.24 -- \
   sh -ec 'echo legacy-write > /mnt/legacy/written.txt && echo LEGACY-RW-OK')" \
   || acc_fail "9 legacy path-only writable mount failed: $LEGACY_OUT"
 printf '%s\n' "$LEGACY_OUT" | grep -q 'LEGACY-RW-OK' \
@@ -757,7 +757,7 @@ SA2_ID="$(create_session /tmp/uat-am-cred-main "$WS")" \
   || { echo "error: session SA2 creation failed" >&2; exit 1; }
 SA2_TOKEN="$(cat "/tmp/uat-am-tok-$SA2_ID")"
 IMM_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project -- \
+  dh run --mount project:/mnt/project alpine:3.24 -- \
   sh -ec 'echo still-writable > /mnt/project/imm.txt && echo OLD-SNAPSHOT-WRITES')" \
   || acc_fail "10 old session lost its issued read_write (immutability broken): $IMM_OUT"
 printf '%s\n' "$IMM_OUT" | grep -q 'OLD-SNAPSHOT-WRITES' \
@@ -782,7 +782,7 @@ if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/project" read
     || { echo "error: session SA3 creation failed" >&2; exit 1; }
   SA3_TOKEN="$(cat "/tmp/uat-am-tok-$SA3_ID")"
   SA3_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA3_TOKEN" \
-    dh run --image alpine:3.24 --mount project:/mnt/project -- sh -ec 'echo NEW-MODE-OK')" \
+    dh run --mount project:/mnt/project alpine:3.24 -- sh -ec 'echo NEW-MODE-OK')" \
     || acc_fail "10 restored session failed: $SA3_OUT"
   printf '%s\n' "$SA3_OUT" | grep -q 'NEW-MODE-OK' \
     && acc_ok "10 sessions created after the restore get the restored read_write" \
@@ -813,7 +813,7 @@ chmod -R u+rwX,go+rX "$RUNDIR"
 
 # N-create: Launcher credential + per-Session issuance-time narrowing.
 NARROW_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
-  --workspace "$RUNDIR" --json \
+  "$RUNDIR" --json \
   --filesystem-root "$RUNDIR=read_only" \
   --filesystem-root "$RUNDIR/project=read_write" \
   --filesystem-root "$RUNDIR/pipeline-inputs=read_only" \
@@ -844,7 +844,7 @@ fi
 if [ -n "${SN_ID:-}" ]; then
   SN_TOKEN="$(cat "/tmp/uat-am-tok-$SN_ID")"
   NP_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN_TOKEN" \
-    dh run --image alpine:3.24 --mount project:/mnt/project -- \
+    dh run --mount project:/mnt/project alpine:3.24 -- \
     sh -ec 'echo run-write > /mnt/project/run.txt && cat /mnt/project/run.txt')" \
     || acc_fail "13 narrowed project RW write failed: $NP_OUT"
   if [ -f "$RUNDIR/project/run.txt" ] && [ "$(cat "$RUNDIR/project/run.txt")" = "run-write" ]; then
@@ -853,7 +853,7 @@ if [ -n "${SN_ID:-}" ]; then
     acc_fail "13 narrowed project write did not persist to the host"
   fi
   NI_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN_TOKEN" \
-    dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+    dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
     sh -ec 'test "$(cat /mnt/inputs/task.md)" = "run-input" && echo RUN-INPUT-RO-OK')" \
     || acc_fail "13 narrowed pipeline-inputs read failed: $NI_OUT"
   printf '%s\n' "$NI_OUT" | grep -q 'RUN-INPUT-RO-OK' \
@@ -869,7 +869,7 @@ if [ -n "${SN_ID:-}" ]; then
     fi
   fi
   NO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN_TOKEN" \
-    dh run --image alpine:3.24 --mount pipeline-outputs:/mnt/outputs -- \
+    dh run --mount pipeline-outputs:/mnt/outputs alpine:3.24 -- \
     sh -ec 'echo declared-output > /mnt/outputs/out.txt && cat /mnt/outputs/out.txt')" \
     || acc_fail "13 narrowed pipeline-outputs RW write failed: $NO_OUT"
   if [ -f "$RUNDIR/pipeline-outputs/out.txt" ] && [ "$(cat "$RUNDIR/pipeline-outputs/out.txt")" = "declared-output" ]; then
@@ -896,7 +896,7 @@ SN2_ID="$(create_session /tmp/uat-am-cred-main "$RUNDIR")" \
 if snapshot_has "$SN2_ID" "$RUNDIR" read_write; then
   SN2_TOKEN="$(cat "/tmp/uat-am-tok-$SN2_ID")"
   SN2_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SN2_TOKEN" \
-    dh run --image alpine:3.24 --mount .:/mnt/runroot -- \
+    dh run --mount .:/mnt/runroot alpine:3.24 -- \
     sh -ec 'echo inherited-write > /mnt/runroot/inherited.txt && echo INHERITED-RW-OK')" \
     || acc_fail "13 inherited workspace-root write failed: $SN2_OUT"
   printf '%s\n' "$SN2_OUT" | grep -q 'INHERITED-RW-OK' \
@@ -923,7 +923,7 @@ fi
 if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then
   N_AUDIT_SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
   WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
-    --workspace "$WS" --json \
+    "$WS" --json \
     --filesystem-root "$WS=read_write" \
     --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
   if printf '%s\n' "$WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
@@ -1017,7 +1017,7 @@ else
 fi
 G_TOKEN="$(cat "/tmp/uat-am-tok-$G_ID")"
 G_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$G_TOKEN" \
-  dh run --image alpine:3.24 --mount .:/mnt/g:ro -- \
+  dh run --mount .:/mnt/g:ro alpine:3.24 -- \
   sh -ec 'test "$(cat /mnt/g/input.txt)" = "global-ro-input" && echo GLOBAL-RO-OK')" \
   || acc_fail "G read-only exposure failed: $G_RO_OUT"
 printf '%s\n' "$G_RO_OUT" | grep -q 'GLOBAL-RO-OK' \
@@ -1063,7 +1063,7 @@ scenario "SYM: Admin and Principal credential narrowing symmetry"
 
 # Admin authority: same valid narrowing as scenario N, on the main workspace.
 SYM_ADMIN_OUT="$(dh session create --system --token-file /etc/docker-helper/admin.token \
-  --launcher "$MAIN_L_ID" --workspace "$WS" --json \
+  --launcher "$MAIN_L_ID" "$WS" --json \
   --filesystem-root "$WS=read_only" \
   --filesystem-root "$WS/project=read_write" \
   --filesystem-root "$WS/pipeline-inputs=read_only" \
@@ -1086,7 +1086,7 @@ else
 fi
 if SYM_ADMIN_BEFORE="$(session_list_count)"; then
   SYM_ADMIN_WIDEN_OUT="$(dh session create --system --token-file /etc/docker-helper/admin.token \
-    --launcher "$MAIN_L_ID" --workspace "$WS" --json \
+    --launcher "$MAIN_L_ID" "$WS" --json \
     --filesystem-root "$WS=read_only" \
     --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
   if printf '%s\n' "$SYM_ADMIN_WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
@@ -1111,7 +1111,7 @@ else
   acc_fail "16 Principal credential issuance failed"
 fi
 SYM_PRIN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-principal \
-  --workspace "$WS" --json \
+  "$WS" --json \
   --filesystem-root "$WS=read_only" \
   --filesystem-root "$WS/project=read_write" \
   --filesystem-root "$WS/pipeline-inputs=read_only" \
@@ -1134,7 +1134,7 @@ else
 fi
 if SYM_PRIN_BEFORE="$(session_list_count)"; then
   SYM_PRIN_WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-principal \
-    --workspace "$WS" --json \
+    "$WS" --json \
     --filesystem-root "$WS=read_only" \
     --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
   if printf '%s\n' "$SYM_PRIN_WIDEN_OUT" | grep -q 'invalid_filesystem_policy' \
@@ -1158,7 +1158,7 @@ scenario "B: build over a read-only snapshot"
 SD_TOKEN="$(cat "/tmp/uat-am-tok-$SD_ID")"
 SNAP_BEFORE="$(cd "$BUILD_WS" && find . -printf '%p %m %T@\n' 2>/dev/null | sort)"
 BUILD_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SD_TOKEN" \
-  dh build --context . --dockerfile Dockerfile --image uat-am-robuild:2.2 2>&1)" \
+  dh build . --dockerfile Dockerfile --image uat-am-robuild:2.2 2>&1)" \
   || acc_fail "B1 build over the read-only snapshot failed: $(printf '%s\n' "$BUILD_OUT" | redact | tail -3)"
 SNAP_AFTER="$(cd "$BUILD_WS" && find . -printf '%p %m %T@\n' 2>/dev/null | sort)"
 if [ "$SNAP_BEFORE" = "$SNAP_AFTER" ]; then
@@ -1194,7 +1194,7 @@ else
 expect_read_only_root "$SA_TOKEN" pipeline-inputs /mnt/inputs 'echo x > /mnt/inputs/forbidden4.txt' "$AUD_NEG_BASE" \
   || acc_fail "A negative audit precondition failed"
 AUD_POS_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project -- sh -ec 'echo AUDIT-WINDOW-OK')" \
+  dh run --mount project:/mnt/project alpine:3.24 -- sh -ec 'echo AUDIT-WINDOW-OK')" \
   || acc_fail "A positive audit precondition failed: $AUD_POS_OUT"
 fi
 sleep 1
@@ -1264,11 +1264,11 @@ if dh config allowed-root add --access read_write "$MR_OPT" >/dev/null 2>&1 \
 else
   acc_fail "MR setup: second effective root setup failed"
 fi
-MR_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name multiroot --no-credential --json 2>/dev/null || true)"
+MR_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" multiroot --no-credential --json 2>/dev/null || true)"
 MR_L_ID="$(printf '%s' "$MR_L_JSON" | json_field id)"
 if [ -n "$MR_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_HOME" "$MR_L_ID" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_OPT" "$MR_L_ID" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_L_ID" "$MR_HOME" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_L_ID" "$MR_OPT" >/dev/null 2>&1; then
   acc_ok "MR setup: multiroot Launcher carries $MR_HOME + $MR_OPT"
 else
   acc_fail "MR setup: multiroot Launcher setup failed: $MR_L_JSON"
@@ -1278,7 +1278,7 @@ issue_launcher_credential "$PRINCIPAL" "$MR_L_ID" /tmp/uat-am-cred-multiroot \
 
 # MR1: workspace implicit grant + two external roots through the public CLI.
 MR1_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
-  --workspace "$MR_WS" --json \
+  "$MR_WS" --json \
   --filesystem-root "$MR_HELPER=read_only" \
   --filesystem-root "$MR_CACHE=read_write" 2>&1 || true)"
 MR1_ID="$(printf '%s' "$MR1_OUT" | json_field id)"
@@ -1301,7 +1301,7 @@ fi
 
 # MR1a: the workspace relative RW mount still works.
 MR1A_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
-  dh run --image alpine:3.24 --mount .:/work -- \
+  dh run --mount .:/work alpine:3.24 -- \
   sh -ec 'echo ws-write > /work/written.txt && echo MR1A-OK')" \
   || acc_fail "MR1a workspace relative RW mount failed: $MR1A_OUT"
 if [ -f "$MR_WS/written.txt" ] && [ "$(cat "$MR_WS/written.txt")" = "ws-write" ]; then
@@ -1313,7 +1313,7 @@ fi
 # MR1b: the external helper root mounts read-only through the absolute
 # spelling and the read succeeds.
 MR1B_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
-  dh run --image alpine:3.24 --mount "$MR_HELPER:/helper:ro" -- \
+  dh run --mount "$MR_HELPER:/helper:ro" alpine:3.24 -- \
   sh -ec 'test "$(cat /helper/main.go)" = "helper-src" && echo MR1B-RO-OK')" \
   || acc_fail "MR1b external RO absolute mount failed: $MR1B_OUT"
 printf '%s\n' "$MR1B_OUT" | grep -q 'MR1B-RO-OK' \
@@ -1336,7 +1336,7 @@ fi
 # MR1d: the external cache root mounts writable through the absolute
 # spelling and the write persists to the host.
 MR1D_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
-  dh run --image alpine:3.24 --mount "$MR_CACHE:/cache" -- \
+  dh run --mount "$MR_CACHE:/cache" alpine:3.24 -- \
   sh -ec 'echo cache-write > /cache/written.txt && cat /cache/seed.txt')" \
   || acc_fail "MR1d external RW absolute mount failed: $MR1D_OUT"
 if [ -f "$MR_CACHE/written.txt" ] && [ "$(cat "$MR_CACHE/written.txt")" = "cache-write" ]; then
@@ -1352,7 +1352,7 @@ if ! MR1E_BASE="$(residue_state)"; then
   acc_blocked "MR1e pre-attempt residue baseline inventory unavailable (fail-closed)"
 else
   MR1E_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
-    dh run --image alpine:3.24 --mount "$MR_EXTRA:/extra" -- \
+    dh run --mount "$MR_EXTRA:/extra" alpine:3.24 -- \
     sh -ec 'echo x > /extra/forbidden.txt' 2>&1 || true)"
   if printf '%s\n' "$MR1E_OUT" | grep -q 'invalid_mount' \
       && residue_unchanged "$MR1E_BASE"; then
@@ -1365,7 +1365,7 @@ fi
 # MR2: an explicit workspace root at read_only replaces the implicit grant:
 # the relative workspace writable mount is refused read_only_root.
 MR2_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
-  --workspace "$MR_WS" --json \
+  "$MR_WS" --json \
   --filesystem-root "$MR_WS=read_only" \
   --filesystem-root "$MR_CACHE=read_write" 2>&1 || true)"
 MR2_ID="$(printf '%s' "$MR2_OUT" | json_field id)"
@@ -1416,7 +1416,7 @@ if ! MR3_BASE="$(residue_state)" || ! MR3_BEFORE="$(session_list_count)"; then
   acc_blocked "MR3 pre-attempt inventory unavailable (fail-closed residue/session)"
 else
   MR3_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
-    --workspace "$MR_WS" --json \
+    "$MR_WS" --json \
     --filesystem-root "$MR_OUTSIDE=read_write" 2>&1 || true)"
   if printf '%s\n' "$MR3_OUT" | grep -q 'invalid_filesystem_policy' \
       && ! printf '%s\n' "$MR3_OUT" | grep -q '"id"' \
@@ -1432,7 +1432,7 @@ else
   # never in the public code or in created state.
   MR3_MISSING="$MR_OPT/uat-am-does-not-exist"
   MR3_OUT2="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
-    --workspace "$MR_WS" --json \
+    "$MR_WS" --json \
     --filesystem-root "$MR3_MISSING=read_write" 2>&1 || true)"
   if printf '%s\n' "$MR3_OUT2" | grep -q 'invalid_filesystem_policy' \
       && ! printf '%s\n' "$MR3_OUT2" | grep -q '"id"' \
@@ -1453,14 +1453,14 @@ rm -rf "$MR_OUTSIDE"
 # preserves the protected transition inside the issued snapshot and a
 # writable parent exposure of it is refused.
 if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
-    "$MR_OPT/repos" "$MR_L_ID" >/dev/null 2>&1; then
+    "$MR_L_ID" "$MR_OPT/repos" >/dev/null 2>&1; then
   acc_ok "MR4 setup: launcher carries the nested read_only repos root"
 else
   acc_fail "MR4 setup: nested read_only launcher root failed"
 fi
 MR4_BEFORE="$(session_list_count)"
 MR4_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
-  --workspace "$MR_WS" --json \
+  "$MR_WS" --json \
   --filesystem-root "$MR_HELPER=read_write" 2>&1 || true)"
 if printf '%s\n' "$MR4_OUT" | grep -q 'invalid_filesystem_policy' \
     && MR4_AFTER="$(session_list_count)" \
@@ -1470,7 +1470,7 @@ else
   acc_fail "MR4 widening under the nested launcher RO was not refused"
 fi
 MR5_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
-  --workspace "$MR_WS" --json \
+  "$MR_WS" --json \
   --filesystem-root "$MR_OPT=read_write" 2>&1 || true)"
 MR5_ID="$(printf '%s' "$MR5_OUT" | json_field id)"
 if [ -n "$MR5_ID" ]; then
@@ -1497,7 +1497,7 @@ else
   fi
 fi
 MR5_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$MR5_TOKEN" \
-  dh run --image alpine:3.24 --mount "$MR_HELPER:/helper:ro" -- \
+  dh run --mount "$MR_HELPER:/helper:ro" alpine:3.24 -- \
   sh -ec 'test "$(cat /helper/main.go)" = "helper-src" && echo MR5-RO-OK')" \
   || acc_fail "MR5 nested RO read failed: $MR5_RO_OUT"
 printf '%s\n' "$MR5_RO_OUT" | grep -q 'MR5-RO-OK' \
@@ -1508,12 +1508,12 @@ printf '%s\n' "$MR5_RO_OUT" | grep -q 'MR5-RO-OK' \
 # (flip MR_OPT to read_only, verify, flip back). The snapshot is immutable
 # and the issued RW cache stays writable.
 if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
-    "$MR_OPT" read_only "$MR_L_ID" >/dev/null 2>&1 \
+    "$MR_L_ID" "$MR_OPT" read_only >/dev/null 2>&1 \
     && [ -n "${MR1_ID:-}" ] \
     && snapshot_has "$MR1_ID" "$MR_CACHE" read_write \
     && snapshot_has "$MR1_ID" "$MR_WS" read_write; then
   MR6_W="$(DOCKER_HELPER_SESSION_TOKEN="$MR1_TOKEN" \
-    dh run --image alpine:3.24 --mount "$MR_CACHE:/cache" -- \
+    dh run --mount "$MR_CACHE:/cache" alpine:3.24 -- \
     sh -ec 'echo after-policy > /cache/after.txt' >/dev/null 2>&1 \
     && [ "$(cat "$MR_CACHE/after.txt" 2>/dev/null)" = "after-policy" ] && echo MR6-OK)"
   if [ "$(printf '%s' "$MR6_W")" = "MR6-OK" ]; then
@@ -1525,7 +1525,7 @@ else
   acc_fail "MR6 parent-policy change or snapshot verification failed"
 fi
 dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
-  "$MR_OPT" read_write "$MR_L_ID" >/dev/null 2>&1 || true
+  "$MR_L_ID" "$MR_OPT" read_write >/dev/null 2>&1 || true
 
 # MR7: packaged completion smoke — the candidate's generated Bash completion,
 # sourced in a fresh shell, drives the daemon-backed Session create-policy
@@ -1556,7 +1556,7 @@ MR7_PROBE='
 # MR7a negative contrast: a broken credential fails the daemon query and the
 # completion degrades to the generic filesystem candidates at /.
 MR7_NEG_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
-  docker-helper session create --system --token-file /tmp/uat-am-no-such-credential --workspace / 2>/dev/null || true)"
+  docker-helper session create --system --token-file /tmp/uat-am-no-such-credential / 2>/dev/null || true)"
 if printf '%s\n' "$MR7_NEG_OUT" | grep -qE '^/(etc|usr|var|tmp|proc|sys|dev|run|sbin|bin)$'; then
   acc_ok "MR7a negative contrast: failed credential query degrades to generic filesystem candidates"
 else
@@ -1565,7 +1565,7 @@ fi
 # MR7b positive: the multiroot Launcher credential reaches the daemon-backed
 # create-policy query; at / exactly the two boundary segments are rendered.
 MR7_POS_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
-  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot --workspace / 2>/dev/null || true)"
+  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot / 2>/dev/null || true)"
 if printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | grep -qx '/home' \
     && printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | grep -qx '/opt' \
     && [ "$(printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 2 ] \
@@ -1578,7 +1578,7 @@ fi
 # MR7c partial component: /h resolves toward the home boundary through the
 # same policy source.
 MR7_H_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
-  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot --workspace /h 2>/dev/null || true)"
+  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot /h 2>/dev/null || true)"
 if printf '%s\n' "$MR7_H_OUT" | grep -v '^$' | sort -u | grep -qx '/home' \
     && [ "$(printf '%s\n' "$MR7_H_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 1 ]; then
   acc_ok "MR7c partial component '/h' resolves toward the home boundary (daemon-backed)"
@@ -1606,7 +1606,7 @@ rm -f "$MR_CRED_SCRIPT"
 scenario "Z: no container/mount-pin/workload-MAC/runtime residue"
 for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}" "${SN_ID:-}" "${SN2_ID:-}" "${G_ID:-}" "${SYM_ADMIN_ID:-}" "${SYM_PRIN_ID:-}" "${MR1_ID:-}" "${MR2_ID:-}" "${MR5_ID:-}"; do
   [ -n "$sid" ] || continue
-  dh session delete --system --id "$sid" >/dev/null 2>&1 || acc_fail "Z session $sid delete failed"
+  dh session delete --system "$sid" >/dev/null 2>&1 || acc_fail "Z session $sid delete failed"
 done
 wait_no_helper_containers
 Z_WAIT_RC=$?

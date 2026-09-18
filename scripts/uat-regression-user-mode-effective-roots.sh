@@ -170,7 +170,7 @@ fi
 
 mkdir -p "$WORK" || reg_fail "B: cannot create the restricted workspace $WORK"
 mkdir -p "$WORK/proj" || reg_fail "B: cannot create the restricted workspace $WORK/proj"
-B_OUT="$(dhx launcher create --principal "$OWNER" --name work --allowed-root "$WORK" --no-credential --json 2>&1)"
+B_OUT="$(dhx launcher create --principal "$OWNER" work --allowed-root "$WORK" --no-credential --json 2>&1)"
 WORK_ID="$(printf '%s' "$B_OUT" | uer_field id || true)"
 if [ -n "$WORK_ID" ]; then
   # The show document is requested with the explicit --json of the canonical
@@ -194,7 +194,7 @@ fi
 # policy rejection or a nonexistent path.
 B_OUTSIDE="/home/${U_USER}-outside"
 mkdir -p "$B_OUTSIDE" && chown "$U_USER:$U_USER" "$B_OUTSIDE"
-B_OUT="$(dhx launcher create --principal "$OWNER" --name bad --allowed-root "$B_OUTSIDE" --no-credential 2>&1)"
+B_OUT="$(dhx launcher create --principal "$OWNER" bad --allowed-root "$B_OUTSIDE" --no-credential 2>&1)"
 if [ "$?" -ne 0 ] && printf '%s' "$B_OUT" | grep -q 'code outside_principal_root'; then
   reg_ok "B: restricted Launcher create outside the global ceiling is refused with outside_principal_root"
 else
@@ -203,11 +203,11 @@ fi
 
 # --- C. restricted-scope conversion of an inherit Launcher -------------------
 
-C_OUT="$(dhx launcher create --principal "$OWNER" --name conv --no-credential --json 2>&1)"
+C_OUT="$(dhx launcher create --principal "$OWNER" conv --no-credential --json 2>&1)"
 if [ -n "$(printf '%s' "$C_OUT" | uer_field id || true)" ]; then
   # `launcher allowed-root add` prints a short confirmation; the committed
   # scope and root set are asserted through the launcher show document.
-  if C_ADD="$(dhx launcher allowed-root add --principal "$OWNER" "$WORK" conv 2>&1)" \
+  if C_ADD="$(dhx launcher allowed-root add --principal "$OWNER" conv "$WORK" 2>&1)" \
       && C_SHOW="$(dhx launcher show --principal "$OWNER" --json conv 2>&1)" \
       && [ "$(printf '%s' "$C_SHOW" | uer_field scope)" = "restricted" ] \
       && uer_roots_single "$C_SHOW" "$WORK"; then
@@ -224,7 +224,7 @@ fi
 uer_session_run() {
   local what="$1" ws json sid tok run_out
   ws="$2"
-  if ! json="$(dhx session create --workspace "$ws" --launcher "$WORK_ID" --json 2>"$TMPDIR_UER/sess.err")"; then
+  if ! json="$(dhx session create "$ws" --launcher "$WORK_ID" --json 2>"$TMPDIR_UER/sess.err")"; then
     reg_fail "$what: session create under the restricted Launcher failed: $(head -2 "$TMPDIR_UER/sess.err" 2>/dev/null | tr '\n' ' ' | redact)"
     return
   fi
@@ -235,13 +235,13 @@ uer_session_run() {
     return
   fi
   if run_out="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$tok" \
-      /usr/bin/docker-helper run --image alpine:3.24 -- sh -ec 'echo UER-RUN-OK' 2>&1)" \
+      /usr/bin/docker-helper run alpine:3.24 -- sh -ec 'echo UER-RUN-OK' 2>&1)" \
       && printf '%s' "$run_out" | grep -q 'UER-RUN-OK'; then
     reg_ok "$what: Session inside the restricted root ran a trivial container ($sid)"
   else
     reg_fail "$what: trivial container run failed: $(printf '%s' "$run_out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  dhx session delete --id "$sid" >/dev/null 2>&1 || true
+  dhx session delete "$sid" >/dev/null 2>&1 || true
 }
 
 if [ -n "$WORK_ID" ]; then
@@ -249,7 +249,7 @@ if [ -n "$WORK_ID" ]; then
 
   # A workspace inside the global root but outside the Launcher restriction
   # is rejected with the stable workspace code.
-  D_OUT="$(dhx session create --workspace "$WS" --launcher "$WORK_ID" --json 2>&1)"
+  D_OUT="$(dhx session create "$WS" --launcher "$WORK_ID" --json 2>&1)"
   if [ "$?" -ne 0 ] && printf '%s' "$D_OUT" | grep -q 'code invalid_workspace'; then
     reg_ok "D: workspace outside the Launcher restriction (inside the global root) is rejected with invalid_workspace"
   else
@@ -259,7 +259,7 @@ fi
 
 # --- E. the reserved default Launcher is still not restrictable --------------
 
-E_OUT="$(dhx launcher allowed-root add --principal "$OWNER" "$WORK" default 2>&1)"
+E_OUT="$(dhx launcher allowed-root add --principal "$OWNER" default "$WORK" 2>&1)"
 if [ "$?" -ne 0 ] && printf '%s' "$E_OUT" | grep -q 'code user_mode_owner_reserved'; then
   reg_ok "E: the reserved default Launcher still refuses an allowed-root add (user_mode_owner_reserved)"
 else

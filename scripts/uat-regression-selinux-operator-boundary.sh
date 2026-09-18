@@ -97,7 +97,7 @@ else
 fi
 
 # --- Session cleanup must not delete the operator rule ----------------------------------
-if dh session delete --system --id "$SID" >/dev/null 2>&1; then
+if dh session delete --system "$SID" >/dev/null 2>&1; then
   reg_ok "session deleted"
 else
   reg_fail "session delete failed"

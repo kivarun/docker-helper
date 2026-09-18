@@ -164,17 +164,12 @@ func TestSessionShowHelpDocumentsPositionalIdentity(t *testing.T) {
 	}
 }
 
-// TestShippedScriptSessionDeleteGrammar protects the legacy targeting
-// grammar across the shipped UAT corpus: every `session delete` invocation
-// addresses the Session through the pre-2.2 compatibility `--id` flag.
-// A mechanical positional conversion (the `session show SESSION_ID`
-// normalization applied to `delete`) would silently change a compatibility
-// contract; this check fails such a replacement.
-//
-// RC8 supersedes this decision: the candidate consumers flip to the
-// canonical positional SESSION_ID grammar together with the UAT grammar
-// gate, and this check inverts there. Until that commit the corpus is
-// intentionally unchanged.
+// TestShippedScriptSessionDeleteGrammar protects the canonical RC8
+// targeting grammar across the shipped UAT corpus: every `session delete`
+// invocation addresses the Session through the positional SESSION_ID
+// operand. The retired `--id` flag must not survive in the corpus — a
+// mechanical leftover would silently reintroduce the parallel spelling the
+// RC8 grammar normalization removed.
 func TestShippedScriptSessionDeleteGrammar(t *testing.T) {
 	var sessionDelete = regexp.MustCompile(`(?:\bdh\b|\bdhx\b|\bdocker-helper\b|\$DH\b|\$DHX\b)\s+session delete\b`)
 	entries, err := os.ReadDir("scripts")
@@ -196,8 +191,14 @@ func TestShippedScriptSessionDeleteGrammar(t *testing.T) {
 			if !sessionDelete.MatchString(line) {
 				continue
 			}
-			if !strings.Contains(line, "--id") {
-				t.Errorf("scripts/%s:%d: session delete must keep the legacy --id grammar: %s", entry.Name(), i+1, strings.TrimSpace(line))
+			// The RC8 grammar gate's subcase A drives the retired spelling
+			// deliberately to prove its local rejection; its probe lines are
+			// marked and exempt from the corpus invariant.
+			if strings.Contains(line, "gate probe: removed spelling") {
+				continue
+			}
+			if strings.Contains(line, "--id") {
+				t.Errorf("scripts/%s:%d: session delete must use the positional SESSION_ID grammar: %s", entry.Name(), i+1, strings.TrimSpace(line))
 			}
 		}
 	}

@@ -53,10 +53,10 @@ reg_info "using unique synthetic sentinels (values are not secrets)"
 
 # --- positive control: resolved value reaches the workload -------------------
 ENV_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_SENTINEL_SOURCE="$SENTINEL" \
-  dh run --image "$IMAGE" \
+  dh run \
     --env "NEIGHBOR_SENTINEL=$NEIGHBOR" \
     --env-from "LLM_KEY=UAT_SENTINEL_SOURCE" \
-    -- sh -ec 'env' 2>/dev/null)"
+    "$IMAGE" -- sh -ec 'env' 2>/dev/null)"
 
 if printf '%s\n' "$ENV_OUT" | grep -qF "LLM_KEY=$SENTINEL"; then
   reg_ok "--env-from resolved value delivered to the workload"
@@ -73,9 +73,9 @@ fi
 # --- neighboring CLI environment must not leak -------------------------------
 NEIGHBOR_ONLY_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
   UAT_NEIGHBOR_ONLY="$NEIGHBOR" UAT_NEIGHBOR_FREE_SOURCE="$SENTINEL" \
-  dh run --image "$IMAGE" \
+  dh run \
     --env-from "LLM_KEY=UAT_NEIGHBOR_FREE_SOURCE" \
-    -- sh -ec 'env' 2>/dev/null)"
+    "$IMAGE" -- sh -ec 'env' 2>/dev/null)"
 
 if printf '%s\n' "$NEIGHBOR_ONLY_OUT" | grep -qF "UAT_NEIGHBOR_ONLY="; then
   reg_fail "neighboring CLI process environment leaked into the workload"
@@ -91,9 +91,9 @@ fi
 # --- secret value absent from the CLI argv -----------------------------------
 MARKER_EPOCH="$(date +%s)"
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_SENTINEL_SOURCE="$SENTINEL" \
-  dh run --image "$IMAGE" \
+  dh run \
     --env-from "LLM_KEY=UAT_SENTINEL_SOURCE" \
-    -- sh -ec 'sleep 6' >/tmp/uat-reg15-run.out 2>/tmp/uat-reg15-run.err &
+    "$IMAGE" -- sh -ec 'sleep 6' >/tmp/uat-reg15-run.out 2>/tmp/uat-reg15-run.err &
 CLI_PID=$!
 sleep 2
 if kill -0 "$CLI_PID" 2>/dev/null; then
@@ -122,9 +122,9 @@ fi
 MISSING_EPOCH="$(date +%s)"
 set +e
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-  dh run --image "$IMAGE" \
+  dh run \
     --env-from "LLM_KEY=$MISSING_VAR" \
-    -- sh -ec 'true' >/tmp/uat-reg15-missing.out 2>/tmp/uat-reg15-missing.err
+    "$IMAGE" -- sh -ec 'true' >/tmp/uat-reg15-missing.out 2>/tmp/uat-reg15-missing.err
 MISSING_RC=$?
 if [ "$MISSING_RC" != 0 ]; then
   reg_ok "missing SOURCE variable rejected (exit $MISSING_RC)"
@@ -140,9 +140,9 @@ fi
 
 # --- explicitly empty SOURCE variable delivered as empty ---------------------
 EMPTY_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_EMPTY_SOURCE="" \
-  dh run --image "$IMAGE" \
+  dh run \
     --env-from "FLAG=UAT_EMPTY_SOURCE" \
-    -- sh -ec 'printf "set=%s len=%s" "${FLAG+set}" "${#FLAG}"' 2>/dev/null)"
+    "$IMAGE" -- sh -ec 'printf "set=%s len=%s" "${FLAG+set}" "${#FLAG}"' 2>/dev/null)"
 if printf '%s\n' "$EMPTY_OUT" | grep -qF "set=set len=0"; then
   reg_ok "explicitly empty SOURCE variable delivered as an empty value"
 else
@@ -152,11 +152,11 @@ fi
 # --- invalid DEST rejected like invalid --env --------------------------------
 set +e
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-  dh run --image "$IMAGE" --env "BAD-NAME=from-env" -- sh -ec 'true' \
+  dh run --env "BAD-NAME=from-env" "$IMAGE" -- sh -ec 'true' \
   >/tmp/uat-reg15-badenv.out 2>/tmp/uat-reg15-badenv.err
 ENV_BAD_RC=$?
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_SENTINEL_SOURCE="$SENTINEL" \
-  dh run --image "$IMAGE" --env-from "BAD-NAME=UAT_SENTINEL_SOURCE" -- sh -ec 'true' \
+  dh run --env-from "BAD-NAME=UAT_SENTINEL_SOURCE" "$IMAGE" -- sh -ec 'true' \
   >/tmp/uat-reg15-badfrom.out 2>/tmp/uat-reg15-badfrom.err
 FROM_BAD_RC=$?
 if [ "$ENV_BAD_RC" = "$FROM_BAD_RC" ] && [ "$FROM_BAD_RC" != 0 ]; then
@@ -173,7 +173,7 @@ fi
 # --- missing separator rejected at the CLI boundary --------------------------
 set +e
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-  dh run --image "$IMAGE" --env-from "NOSEPARATOR" -- sh -ec 'true' \
+  dh run --env-from "NOSEPARATOR" "$IMAGE" -- sh -ec 'true' \
   >/tmp/uat-reg15-noeq.out 2>/tmp/uat-reg15-noeq.err
 NOEQ_RC=$?
 if [ "$NOEQ_RC" = 2 ] && grep -q "invalid env-from format" /tmp/uat-reg15-noeq.err 2>/dev/null; then

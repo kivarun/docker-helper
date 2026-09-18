@@ -180,7 +180,7 @@ workload_residue_clean() {
 
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json 2>&1 || true)"
+  out="$(dh session create --system --token-file "$cred" "$ws" --json 2>&1 || true)"
   id="$(printf '%s' "$out" | json_field id)"
   [ -n "$id" ] || { echo "session create failed for $ws: $(printf '%s' "$out" | redact | tail -2)" >&2; return 1; }
   printf '%s' "$out" | json_field token > "/tmp/uat-wls-tok-$id"; chmod 600 "/tmp/uat-wls-tok-$id"
@@ -190,7 +190,7 @@ create_session() {
 expect_read_only_root() {
   local token="$1" source="$2" target="$3" snippet="$4" base="$5" out ec
   out="$(DOCKER_HELPER_SESSION_TOKEN="$token" \
-    dh run --image alpine:3.24 --mount "$source:$target" -- sh -ec "$snippet" 2>&1)"
+    dh run --mount "$source:$target" alpine:3.24 -- sh -ec "$snippet" 2>&1)"
   ec=$?
   [ "$ec" -ne 0 ] || { printf '  writable request on %s unexpectedly succeeded\n' "$source" >&2; return 1; }
   printf '%s\n' "$out" | grep -q 'read_only_root' \
@@ -431,7 +431,7 @@ dh principal allowed-root add --system "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setu
   echo "error: principal TREE root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
 dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/work/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || {
   echo "error: principal pipeline-inputs root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
-MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential --json 2>>/tmp/uat-wls-setup.err || true)"
+MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" main --no-credential --json 2>>/tmp/uat-wls-setup.err || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON ($(redact </tmp/uat-wls-setup.err | tail -10))" >&2; exit 1; }
 MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
@@ -451,7 +451,7 @@ AUDIT_START_EPOCH="$(date +%s)"
 # ==============================================================================
 say "S1: RW exposure really writable"
 if DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-    dh run --image alpine:3.24 --mount project:/mnt/project -- \
+    dh run --mount project:/mnt/project alpine:3.24 -- \
     sh -ec 'echo s1-write > /mnt/project/written.txt && cat /mnt/project/keep.txt' >/tmp/uat-wls-s1.log 2>&1 \
     && [ "$(cat "$TREE/work/project/written.txt" 2>/dev/null)" = "s1-write" ]; then
   acc_ok "S1 RW exposure mounted writable and the write persisted"
@@ -464,7 +464,7 @@ fi
 # ==============================================================================
 say "S2: RO exposure readable"
 S2_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'test "$(cat /mnt/inputs/input.txt)" = "ro-input" && echo S2-RO-READ-OK' 2>&1)"
 if printf '%s\n' "$S2_OUT" | grep -q 'S2-RO-READ-OK'; then
   acc_ok "S2 RO exposure readable (bindfs projection path)"
@@ -477,7 +477,7 @@ fi
 # ==============================================================================
 say "S3: RO exposure immutable"
 DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'echo forbidden > /mnt/inputs/forbidden.txt' >/dev/null 2>&1
 S3_EC=$?
 if [ "$S3_EC" -ne 0 ] && [ ! -e "$TREE/work/pipeline-inputs/forbidden.txt" ]; then
@@ -491,7 +491,7 @@ fi
 # ==============================================================================
 say "S4: mixed RW + RO in one workload"
 S4_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount project:/mnt/project --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'echo s4-write > /mnt/project/written.txt; test "$(cat /mnt/inputs/input.txt)" = "ro-input" || exit 3; if echo x > /mnt/inputs/forbidden.txt 2>/dev/null; then exit 4; fi; echo S4-MIXED-OK' 2>&1)"
 S4_EC=$?
 if [ "$S4_EC" -eq 0 ] && printf '%s\n' "$S4_OUT" | grep -q 'S4-MIXED-OK' \
@@ -543,11 +543,11 @@ if dh config allowed-root add --access read_write "$SE_OPT" >/dev/null 2>&1 \
 else
   acc_fail "SE setup: second effective root setup failed"
 fi
-SE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name se-multiroot --no-credential --json 2>/dev/null || true)"
+SE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" se-multiroot --no-credential --json 2>/dev/null || true)"
 SE_L_ID="$(printf '%s' "$SE_L_JSON" | json_field id)"
 if [ -n "$SE_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$ALLOWED_ROOT" "$SE_L_ID" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_OPT" "$SE_L_ID" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$SE_OPT" >/dev/null 2>&1; then
   acc_ok "SE setup: multiroot launcher carries both effective roots"
 else
   acc_fail "SE setup: multiroot launcher setup failed: $SE_L_JSON"
@@ -565,7 +565,7 @@ mkdir -p "$SE_WS"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT/se-runs"
 chmod -R u+rwX,go+rX "$ALLOWED_ROOT/se-runs"
 SE_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_HELPER=read_only" \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE_ID="$(printf '%s' "$SE_OUT" | json_field id)"
@@ -584,7 +584,7 @@ fi
 # the external source — projection VFS writable underneath, the projection
 # type itself the refuser — is proven by the S13 external-root live proof.
 SE_RO="$(DOCKER_HELPER_SESSION_TOKEN="$SE_TOKEN" \
-  dh run --image alpine:3.24 --mount "$SE_HELPER:/helper:ro" -- \
+  dh run --mount "$SE_HELPER:/helper:ro" alpine:3.24 -- \
   sh -ec 'test "$(cat /helper/main.go)" = "se-helper-src" && echo SE-RO-READ-OK' 2>&1)"
 if printf '%s\n' "$SE_RO" | grep -q 'SE-RO-READ-OK'; then
   acc_ok "SE external RO root readable through its projection"
@@ -592,7 +592,7 @@ else
   acc_fail "SE external RO read failed: $(printf '%s\n' "$SE_RO" | redact | tail -3)"
 fi
 DOCKER_HELPER_SESSION_TOKEN="$SE_TOKEN" \
-  dh run --image alpine:3.24 --mount "$SE_HELPER:/helper:ro" -- \
+  dh run --mount "$SE_HELPER:/helper:ro" alpine:3.24 -- \
   sh -ec 'echo forbidden > /helper/forbidden.txt' >/dev/null 2>&1
 SE_EC=$?
 if [ "$SE_EC" -ne 0 ] && [ ! -e "$SE_HELPER/forbidden.txt" ]; then
@@ -603,7 +603,7 @@ fi
 
 # SE-RW: the external RW root stays writable; the write persists to the host.
 SE_W="$(DOCKER_HELPER_SESSION_TOKEN="$SE_TOKEN" \
-  dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
+  dh run --mount "$SE_CACHE:/cache" alpine:3.24 -- \
   sh -ec 'echo se-write > /cache/written.txt && echo SE-RW-OK' >/tmp/uat-wls-se-w.log 2>&1)"
 if [ -f "$SE_CACHE/written.txt" ] && [ "$(cat "$SE_CACHE/written.txt" 2>/dev/null)" = "se-write" ]; then
   acc_ok "SE external RW root writable through the workload owner"
@@ -722,24 +722,24 @@ se_expect_context_type "$SE_CACHE" docker_helper_workspace_t \
 # SE share: a second Session issuing the same external tree must prevent
 # early release of the coverage when the first Session is deleted.
 SE2_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE2_ID="$(printf '%s' "$SE2_OUT" | json_field id)"
 if [ -n "$SE2_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE2_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_CACHE(/.*)?" \
     "SE shared external tree survives the first Session deletion (second Session keeps it)" \
     "SE external fcontext coverage was released while a second Session still issues the tree"
   SE2_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE2_ID")" \
-    dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
+    dh run --mount "$SE_CACHE:/cache" alpine:3.24 -- \
     sh -ec 'echo se2-write > /cache/se2.txt' >/tmp/uat-wls-se2.log 2>&1; echo $?)"
   if [ "$SE2_W" -eq 0 ] && [ "$(cat "$SE_CACHE/se2.txt" 2>/dev/null)" = "se2-write" ]; then
     acc_ok "SE second Session still writes the shared external tree"
   else
     acc_fail "SE second Session lost write access to the shared tree (ec=$SE2_W)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE2_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE2_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE external fcontext coverage relinquished after the last Session deletion" \
     "SE external fcontext coverage must be relinquished after the last Session released it"
@@ -753,7 +753,7 @@ fi
 
 # SE overlap: issued ancestor/descendant trees survive either deletion order.
 SE3_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_OPT=read_write" \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE3_ID="$(printf '%s' "$SE3_OUT" | json_field id)"
@@ -767,7 +767,7 @@ if [ -n "$SE3_ID" ]; then
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE the collapsed descendant carries no independent rule" \
     "SE nested issued roots did not collapse"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE3_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE3_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_OPT(/.*)?" \
     "SE ancestor boundary removed after the only session deletion" \
     "SE ancestor boundary must be removed after the only session released it"
@@ -779,11 +779,11 @@ fi
 # SE reverse overlap: issue the child first, then the parent; deleting the
 # child must keep the parent usable, deleting the parent cleans up.
 SE4_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE4_ID="$(printf '%s' "$SE4_OUT" | json_field id)"
 SE5_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_OPT=read_write" 2>&1 || true)"
 SE5_ID="$(printf '%s' "$SE5_OUT" | json_field id)"
 if [ -n "$SE4_ID" ] && [ -n "$SE5_ID" ]; then
@@ -797,12 +797,12 @@ if [ -n "$SE4_ID" ] && [ -n "$SE5_ID" ]; then
     "SE reverse-order issuance prepares both disjoint boundaries" \
     "SE reverse-order issuance boundaries missing"
   # Delete the child session first: the parent boundary stays.
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE4_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE4_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_OPT(/.*)?" \
     "SE child deletion first keeps the parent boundary" \
     "SE child deletion removed the parent boundary needed by the parent session"
   # Delete the parent session: everything is released and restored.
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE5_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE5_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_OPT(/.*)?" \
     "SE final deletion relinquishes every external boundary" \
     "SE final deletion leaves fcontext residue"
@@ -822,13 +822,13 @@ SE_FILE="$SE_OPT/worker.env"
 printf 'se-file-src\n' > "$SE_FILE"
 chown "$PRINCIPAL:$PRINCIPAL" "$SE_FILE" 2>/dev/null || true
 SE6_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_FILE=read_write" 2>&1 || true)"
 SE6_ID="$(printf '%s' "$SE6_OUT" | json_field id)"
 if [ -n "$SE6_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE6_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE6_ID"; chmod 600 "/tmp/uat-wls-tok-$SE6_ID"
   SE6_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE6_ID")" \
-    dh run --image alpine:3.24 --mount "$SE_FILE:/etc/worker.env" -- \
+    dh run --mount "$SE_FILE:/etc/worker.env" alpine:3.24 -- \
     sh -ec 'echo file-write > /etc/worker.env' >/tmp/uat-wls-se6.log 2>&1; echo $?)"
   if [ "$SE6_W" -eq 0 ] && [ "$(cat "$SE_FILE" 2>/dev/null)" = "file-write" ]; then
     acc_ok "SE issued regular-file RW root is writable through the backend"
@@ -838,21 +838,21 @@ if [ -n "$SE6_ID" ]; then
   # Unrelated boundary mutation (a second session prepares and releases an
   # unrelated tree) must not disturb the issued file root's usability.
   SE6B_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-    --workspace "$SE_WS" --json \
+    "$SE_WS" --json \
     --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
   SE6B_ID="$(printf '%s' "$SE6B_OUT" | json_field id)"
   if [ -n "$SE6B_ID" ]; then
-    dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE6B_ID" >/dev/null 2>&1
+    dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE6B_ID" >/dev/null 2>&1
   fi
   SE6_W2="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE6_ID")" \
-    dh run --image alpine:3.24 --mount "$SE_FILE:/etc/worker.env" -- \
+    dh run --mount "$SE_FILE:/etc/worker.env" alpine:3.24 -- \
     sh -ec 'echo file-write2 > /etc/worker.env' >/tmp/uat-wls-se6.log 2>&1; echo $?)"
   if [ "$SE6_W2" -eq 0 ] && [ "$(cat "$SE_FILE" 2>/dev/null)" = "file-write2" ]; then
     acc_ok "SE regular-file root survives an unrelated boundary mutation"
   else
     acc_fail "SE regular-file root lost write access after an unrelated boundary mutation (ec=$SE6_W2)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE6_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE6_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_FILE" \
     "SE regular-file boundary relinquished after deletion" \
     "SE regular-file boundary must be relinquished after deletion"
@@ -872,7 +872,7 @@ semanage fcontext -a -t docker_helper_workspace_t "$SE_SIB(/.*)?" >/dev/null 2>&
 restorecon -R "$SE_SIB" >/dev/null 2>&1
 
 SE8_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_SIB/a=read_write" \
   --filesystem-root "$SE_SIB/b=read_write" 2>&1 || true)"
 SE8_ID="$(printf '%s' "$SE8_OUT" | json_field id)"
@@ -885,7 +885,7 @@ if [ -n "$SE8_ID" ]; then
     "SE both sibling issued trees relabeled under the operator covering rule" \
     "SE sibling coverage skipped the concrete issued tree $SE_SIB/b"
   SE8_W="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE8_ID")" \
-    dh run --image alpine:3.24 --mount "$SE_SIB/a:/sib_a" --mount "$SE_SIB/b:/sib_b" -- \
+    dh run --mount "$SE_SIB/a:/sib_a" --mount "$SE_SIB/b:/sib_b" alpine:3.24 -- \
     sh -ec 'echo sib-a > /sib_a/a.txt && echo sib-b > /sib_b/b.txt' >/tmp/uat-wls-se8.log 2>&1; echo $?)"
   if [ "$SE8_W" -eq 0 ] && [ "$(cat "$SE_SIB/a/a.txt" 2>/dev/null)" = "sib-a" ] \
       && [ "$(cat "$SE_SIB/b/b.txt" 2>/dev/null)" = "sib-b" ]; then
@@ -896,7 +896,7 @@ if [ -n "$SE8_ID" ]; then
   se_only_rule_for "$SE_SIB" "$SE_SIB(/.*)?" \
     "SE sibling coverage uses the operator rule without claiming helper state" \
     "SE sibling coverage created or claimed extra state"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE8_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE8_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_SIB(/.*)?" \
     "SE operator-owned sibling coverage rule survives the session deletion" \
     "SE helper deleted the operator-owned sibling rule"
@@ -928,7 +928,7 @@ rm -rf "$SE_MIX"
 mkdir -p "$SE_MIX"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_MIX" 2>/dev/null || true
 SE9A_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_MIX=read_write" 2>&1 || true)"
 SE9A_ID="$(printf '%s' "$SE9A_OUT" | json_field id)"
 if [ -n "$SE9A_ID" ]; then
@@ -954,7 +954,7 @@ if [ -n "$SE9A_ID" ]; then
     "SE9A helper recursive rule still inventoried after the operator kind change"
   se_expect_rule_present "$SE_MIX" \
     "SE9A operator exact-file rule still inventoried after the operator kind change"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE9A_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE9A_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_MIX(/.*)?" \
     "SE9A helper-owned recursive-directory rule removed after the session deletion" \
     "SE9A helper-owned recursive-directory rule survived the session deletion"
@@ -970,7 +970,7 @@ rm -rf "$SE_MIXF"
 printf 'mixfile-content\n' > "$SE_MIXF"
 chown "$PRINCIPAL:$PRINCIPAL" "$SE_MIXF" 2>/dev/null || true
 SE9B_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_MIXF=read_write" 2>&1 || true)"
 SE9B_ID="$(printf '%s' "$SE9B_OUT" | json_field id)"
 if [ -n "$SE9B_ID" ]; then
@@ -993,7 +993,7 @@ if [ -n "$SE9B_ID" ]; then
     "SE9B helper exact-file rule still inventoried after the operator kind change"
   se_expect_rule_present "$SE_MIXF(/.*)?" \
     "SE9B operator recursive rule still inventoried after the operator kind change"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE9B_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE9B_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_MIXF" \
     "SE9B helper-owned exact-file rule removed after the session deletion" \
     "SE9B helper-owned exact-file rule survived the session deletion"
@@ -1015,7 +1015,7 @@ rm -f "/tmp/uat-wls-tok-$SE8_ID" "/tmp/uat-wls-tok-$SE9A_ID" "/tmp/uat-wls-tok-$
 # SE restart: a live session's external coverage survives restart and the
 # reconciled binding keeps the write path working.
 SE7_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
-  --workspace "$SE_WS" --json \
+  "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE7_ID="$(printf '%s' "$SE7_OUT" | json_field id)"
 if [ -n "$SE7_ID" ]; then
@@ -1030,14 +1030,14 @@ if [ -n "$SE7_ID" ]; then
     "SE restart/reconciliation keeps the issued external coverage" \
     "SE restart lost the external coverage"
   if DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE7_ID")" \
-      dh run --image alpine:3.24 --mount "$SE_CACHE:/cache" -- \
+      dh run --mount "$SE_CACHE:/cache" alpine:3.24 -- \
       sh -ec 'echo restart-write > /cache/restart.txt' >/tmp/uat-wls-se7.log 2>&1 \
       && [ "$(cat "$SE_CACHE/restart.txt" 2>/dev/null)" = "restart-write" ]; then
     acc_ok "SE restart/reconciliation restores live issued external coverage and write access"
   else
     acc_fail "SE restart lost the external coverage or write access: $(redact </tmp/uat-wls-se7.log | tail -2)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot --id "$SE7_ID" >/dev/null 2>&1
+  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE7_ID" >/dev/null 2>&1
   rm -f "$SE_CACHE/restart.txt"
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE no external fcontext residue after the final cleanup" \
@@ -1054,7 +1054,7 @@ rm -f "/tmp/uat-wls-tok-$SE_ID" "/tmp/uat-wls-tok-$SE2_ID" "/tmp/uat-wls-tok-$SE
 # ==============================================================================
 say "S7: bindfs projection used on the packaged RPM path"
 DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'sleep 12; cat /mnt/inputs/input.txt' >/tmp/uat-wls-s7.log 2>&1 &
 BG_PID=$!
 PROJ_EVIDENCE="$(wait_bindfs_projection "$BG_PID" || true)"
@@ -1109,9 +1109,9 @@ fi
 # ==============================================================================
 say "S6: docker_helper_container_t + Docker-owned MCS"
 S6_L1="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project -- /bin/cat /proc/self/attr/current 2>/dev/null || true)"
+  dh run --mount project:/mnt/project alpine:3.24 -- /bin/cat /proc/self/attr/current 2>/dev/null || true)"
 S6_L2="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- /bin/cat /proc/self/attr/current 2>/dev/null || true)"
+  dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- /bin/cat /proc/self/attr/current 2>/dev/null || true)"
 case "$S6_L1" in *docker_helper_container_t:*) ;; *)
   acc_fail "S6 RW workload process label wrong: '$S6_L1'" ;;
 esac
@@ -1133,11 +1133,11 @@ WSB_ID="$(create_session /tmp/uat-wls-cred-main "$TREE/work/project")" \
 WSB_TOKEN="$(cat "/tmp/uat-wls-tok-$WSB_ID")"
 rm -f "$TREE/work/project/a-file" "$TREE/work/project/b-file"
 DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/p -- \
+  dh run --mount project:/mnt/p alpine:3.24 -- \
   sh -ec 'echo session-A > /mnt/p/a-file; sleep 5; cat /mnt/p/a-file' >/tmp/uat-wls-s8a.log 2>&1 &
 S8A_PID=$!
 DOCKER_HELPER_SESSION_TOKEN="$WSB_TOKEN" \
-  dh run --image alpine:3.24 --mount .:/mnt/self -- \
+  dh run --mount .:/mnt/self alpine:3.24 -- \
   sh -ec 'echo session-B > /mnt/self/b-file; sleep 5; cat /mnt/self/b-file' >/tmp/uat-wls-s8b.log 2>&1 &
 S8B_PID=$!
 S8A_OK=0; S8B_OK=0
@@ -1156,7 +1156,7 @@ fi
 # ==============================================================================
 say "S9: regular-file RO exposure"
 S9_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs/input.txt:/mnt/file:ro -- \
+  dh run --mount pipeline-inputs/input.txt:/mnt/file:ro alpine:3.24 -- \
   sh -ec 'test "$(cat /mnt/file)" = "ro-input" || exit 3; if echo x > /mnt/file 2>/dev/null; then exit 4; fi; echo S9-FILE-OK' 2>&1)"
 S9_EC=$?
 if [ "$S9_EC" -eq 0 ] && printf '%s\n' "$S9_OUT" | grep -q 'S9-FILE-OK' \
@@ -1197,7 +1197,7 @@ else
   acc_fail "S12 workload residue after the positive scenarios"
 fi
 DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project -- sh -ec 'exit 9' >/dev/null 2>&1
+  dh run --mount project:/mnt/project alpine:3.24 -- sh -ec 'exit 9' >/dev/null 2>&1
 S12_FAIL_EC=$?
 [ "$S12_FAIL_EC" -ne 0 ] \
   && acc_ok "S12 failing workload propagates the container failure (ec=$S12_FAIL_EC)" \
@@ -1436,7 +1436,7 @@ WUID="$(id -u "$PRINCIPAL")"
 say "S14: hostile SUID source image cannot elevate"
 if build_hostile_image; then
   S14_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-    dh run --image "$HOSTILE_IMAGE" -- \
+    dh run "$HOSTILE_IMAGE" -- \
     sh -ec '/usr/local/bin/reporter' 2>&1)"
   S14_EC=$?
   if [ "$S14_EC" -eq 0 ] \
@@ -1476,12 +1476,12 @@ RUN test ! -g /out/sgid-staged || (echo STAGED-SGID-DELIVERED; exit 1)
 EOF
 S15_BUILD_RC=0
 DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh build --context staged-proof --dockerfile Dockerfile --image uat-staged-proof:2.2 \
+  dh build staged-proof --dockerfile Dockerfile --image uat-staged-proof:2.2 \
   >/tmp/uat-wls-w15-build.log 2>&1 || S15_BUILD_RC=1
 S15_RUN_OUT=""
 if [ "$S15_BUILD_RC" -eq 0 ]; then
   S15_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-    dh run --image uat-staged-proof:2.2 -- \
+    dh run uat-staged-proof:2.2 -- \
     sh -ec 'test ! -u /out/suid-staged && test ! -g /out/sgid-staged && echo S15-STAGED-CLEAN' 2>&1)"
 fi
 if [ "$S15_BUILD_RC" -eq 0 ] \
@@ -1495,7 +1495,7 @@ fi
 say "S16: helper-socket hostile runtime composition"
 if docker image inspect "$HOSTILE_IMAGE" >/dev/null 2>&1; then
   S16_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-    dh run --helper-socket --env TARGET_SESSION="$WSA_ID" --image "$HOSTILE_IMAGE" -- \
+    dh run --helper-socket --env TARGET_SESSION="$WSA_ID" "$HOSTILE_IMAGE" -- \
     /bin/sh /usr/local/bin/hostile-probe.sh 2>&1)"
   S16_EC=$?
   if [ "$S16_EC" -eq 0 ] && printf '%s\n' "$S16_OUT" | grep -q 'S16-HOSTILE-CLEAN'; then

@@ -87,7 +87,7 @@ assert_narrowed() {
 cleanup_sessions() {
   local sid
   for sid in "$@"; do
-    [ -n "$sid" ] && dh session delete --system --id "$sid" >/dev/null 2>&1 || true
+    [ -n "$sid" ] && dh session delete --system "$sid" >/dev/null 2>&1 || true
   done
 }
 
@@ -107,11 +107,11 @@ setup_pair() {
   home_a="$(reg_setup_principal "$user_a")" || return 1
   home_b="$(reg_setup_principal "$user_b")" || return 1
 
-  alpha_out="$(dh launcher create --system --principal "$user_a" --name alpha --no-credential --json 2>&1)" || {
+  alpha_out="$(dh launcher create --system --principal "$user_a" alpha --no-credential --json 2>&1)" || {
     echo "error: alpha launcher create failed: $(printf '%s' "$alpha_out" | head -2 | tr '\n' ' ')" >&2
     return 1
   }
-  beta_out="$(dh launcher create --system --principal "$user_b" --name beta --no-credential --json 2>&1)" || {
+  beta_out="$(dh launcher create --system --principal "$user_b" beta --no-credential --json 2>&1)" || {
     echo "error: beta launcher create failed: $(printf '%s' "$beta_out" | head -2 | tr '\n' ' ')" >&2
     return 1
   }
@@ -125,7 +125,7 @@ setup_pair() {
 create_session() { # cred workspace extra-args...
   local cred="$1" ws="$2" out rc
   shift 2
-  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json "$@" 2>"$TMPDIR_REG13/last-session-create.err")"
+  out="$(dh session create --system --token-file "$cred" "$ws" --json "$@" 2>"$TMPDIR_REG13/last-session-create.err")"
   rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
     head -2 "$TMPDIR_REG13/last-session-create.err" >&2

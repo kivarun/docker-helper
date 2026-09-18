@@ -139,7 +139,7 @@ IMAGE="alpine:3.24"
 # make $! the intermediate subshell, and the signal would orphan the CLI).
 hold_run() { # TOKEN LOGFILE MOUNT_SOURCE
   DOCKER_HELPER_SESSION_TOKEN="$1" exec /usr/bin/docker-helper run \
-    --image "$IMAGE" --mount "$3:/mnt/shared" -- sh -ec 'sleep 300' >"$2" 2>&1
+    --mount "$3:/mnt/shared" "$IMAGE" -- sh -ec 'sleep 300' >"$2" 2>&1
 }
 
 # --- baselines ----------------------------------------------------------------
@@ -182,7 +182,7 @@ CONTAINERS_AT_REFUSAL="$(cont_count)"
 PINS_AT_REFUSAL="$(pin_count)"
 MAC_AT_REFUSAL="$(mac_state_inventory)"
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh run --image "$IMAGE" --mount "shareda1:/mnt/refused" -- sh -ec "true" \
+  dh run --mount "shareda1:/mnt/refused" "$IMAGE" -- sh -ec "true" \
   >/tmp/h5-run-refused.out 2>/tmp/h5-run-refused.err
 RC=$?
 if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-run-refused.err && grep -q 'code capacity_unavailable' /tmp/h5-run-refused.err; then
@@ -219,7 +219,7 @@ fi
 
 # Refusal-before-expensive-work for the build: no staging tree.
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh build --context . --dockerfile Dockerfile --image uat-h5-refused:2.2 \
+  dh build . --dockerfile Dockerfile --image uat-h5-refused:2.2 \
   >/tmp/h5-build-refused.out 2>/tmp/h5-build-refused.err
 RC=$?
 if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-build-refused.err && grep -q 'code capacity_unavailable' /tmp/h5-build-refused.err; then
@@ -255,7 +255,7 @@ fi
 
 printf '%s\n' 'uat-sync-capacity-password' | \
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh registry login --registry registry.example.com --username "$USER_A" --password-stdin \
+  dh registry login registry.example.com --username "$USER_A" --password-stdin \
   >/tmp/h5-login-refused.out 2>/tmp/h5-login-refused.err
 RC=$?
 if [ "$RC" -ne 0 ] && grep -q 'status 429' /tmp/h5-login-refused.err && grep -q 'code capacity_unavailable' /tmp/h5-login-refused.err; then
@@ -303,7 +303,7 @@ else
 fi
 
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_B" \
-  dh run --image "$IMAGE" -- sh -ec "true" >/tmp/h5-run-b5.out 2>/tmp/h5-run-b5.err
+  dh run "$IMAGE" -- sh -ec "true" >/tmp/h5-run-b5.out 2>/tmp/h5-run-b5.err
 if grep -q 'status 429' /tmp/h5-run-b5.err && grep -q 'code capacity_unavailable' /tmp/h5-run-b5.err; then
   reg_ok "9th operation refused at the ceilings (no queue, no wait)"
 else
@@ -326,7 +326,7 @@ else
   reg_result
 fi
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh run --image "$IMAGE" -- sh -ec "true" >/tmp/h5-run-reuse.out 2>/tmp/h5-run-reuse.err
+  dh run "$IMAGE" -- sh -ec "true" >/tmp/h5-run-reuse.out 2>/tmp/h5-run-reuse.err
 if [ "$?" -eq 0 ]; then
   reg_ok "freed capacity is reusable immediately (terminal release, not retention release)"
 else
@@ -345,7 +345,7 @@ for i in $(seq 0 $((MOUNT_CEILING - 1))); do
 done
 
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh run --image "$IMAGE" "${mount_args[@]}" -- sh -ec "true" \
+  dh run "${mount_args[@]}" "$IMAGE" -- sh -ec "true" \
   >/tmp/h5-mounts-ok.out 2>/tmp/h5-mounts-ok.err
 if [ "$?" -eq 0 ]; then
   reg_ok "exactly-at-mount-limit run accepted ($MOUNT_CEILING caller mounts)"
@@ -357,7 +357,7 @@ PINS_MOUNT_BEFORE="$(pin_count)"
 MOUNTINFO_MOUNT_BEFORE="$(mountinfo_count)"
 over_args=("${mount_args[@]}" --mount "mdir0:/m$MOUNT_CEILING")
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh run --image "$IMAGE" "${over_args[@]}" -- sh -ec "true" \
+  dh run "${over_args[@]}" "$IMAGE" -- sh -ec "true" \
   >/tmp/h5-mounts-over.out 2>/tmp/h5-mounts-over.err
 RC=$?
 if [ "$RC" -ne 0 ] && grep -q 'status 400' /tmp/h5-mounts-over.err && grep -q 'code too_many_mounts' /tmp/h5-mounts-over.err; then
@@ -465,7 +465,7 @@ fi
 
 # The ordinary CLI fully delivers terminal output spanning several chunks.
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh run --image "$IMAGE" -- sh -ec 'printf CLI-HEAD; head -c 700000 /dev/zero | tr "\0" "-"; printf CLI-TAIL' \
+  dh run "$IMAGE" -- sh -ec 'printf CLI-HEAD; head -c 700000 /dev/zero | tr "\0" "-"; printf CLI-TAIL' \
   >/tmp/h5-cli-drain.out 2>/tmp/h5-cli-drain.err
 RC=$?
 if [ "$RC" -eq 0 ]; then
@@ -542,14 +542,14 @@ printf 'h5-payload\n' > "$WS_A/payload.txt"
 printf 'FROM scratch\nCOPY payload.txt /payload.txt\n' > "$WS_A/Dockerfile"
 chown -R "$USER_A:$USER_A" "$WS_A"
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh run --image "$IMAGE" -- sh -ec "true" >/tmp/h5-final-run.out 2>/tmp/h5-final-run.err
+  dh run "$IMAGE" -- sh -ec "true" >/tmp/h5-final-run.out 2>/tmp/h5-final-run.err
 if [ "$?" -eq 0 ]; then
   reg_ok "recovery: a subsequent ordinary run succeeds"
 else
   reg_fail "recovery: the ordinary run failed: $(head -2 /tmp/h5-final-run.err | redact)"
 fi
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh build --context . --dockerfile Dockerfile --image uat-h5-final:2.2 \
+  dh build . --dockerfile Dockerfile --image uat-h5-final:2.2 \
   >/tmp/h5-final-build.out 2>/tmp/h5-final-build.err
 if [ "$?" -eq 0 ]; then
   reg_ok "recovery: a subsequent ordinary build succeeds"
@@ -573,7 +573,7 @@ fi
 LOGIN_RECOVERY_MARK="$(date '+%Y-%m-%d %H:%M:%S')"
 printf '%s\n' 'uat-recovery-password' | \
 DOCKER_HELPER_SESSION_TOKEN="$TOKEN_A" \
-  dh registry login --registry 127.0.0.1:1 --username "$USER_A" --password-stdin \
+  dh registry login 127.0.0.1:1 --username "$USER_A" --password-stdin \
   >/tmp/h5-login-recovery.out 2>/tmp/h5-login-recovery.err
 if ! grep -q 'status 429' /tmp/h5-login-recovery.err && ! grep -q 'code capacity_unavailable' /tmp/h5-login-recovery.err; then
   reg_ok "recovery: a registry login is admitted again (docker execution reached, no capacity refusal)"

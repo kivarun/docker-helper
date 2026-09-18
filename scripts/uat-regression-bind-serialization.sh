@@ -117,10 +117,10 @@ RUN_LOG="/tmp/uat-reg22-ro.log"
 # the write attempt fails, reports both through the writable control mount,
 # and stays alive until the host inspected the real Docker state.
 DOCKER_HELPER_SESSION_TOKEN="$TOK_RO" \
-  dh run --image "$IMAGE" \
+  dh run \
     --mount "$src:$HOSTILE_RO_TARGET:ro" \
     --mount "$ctl:/mnt/ctl" \
-    -- sh -c 'p=$(printf "/mnt/probe\nreadonly-evil"); cat "$p/marker" > /mnt/ctl/ro-read 2>/mnt/ctl/ro-read-err; if touch "$p/w-probe" 2>/dev/null; then echo WRITE-SUCCEEDED > /mnt/ctl/ro-write; else echo WRITE-DENIED > /mnt/ctl/ro-write; fi; while [ ! -f /mnt/ctl/release-ro ]; do sleep 1; done' \
+    "$IMAGE" -- sh -c 'p=$(printf "/mnt/probe\nreadonly-evil"); cat "$p/marker" > /mnt/ctl/ro-read 2>/mnt/ctl/ro-read-err; if touch "$p/w-probe" 2>/dev/null; then echo WRITE-SUCCEEDED > /mnt/ctl/ro-write; else echo WRITE-DENIED > /mnt/ctl/ro-write; fi; while [ ! -f /mnt/ctl/release-ro ]; do sleep 1; done' \
   >"$RUN_LOG" 2>&1 &
 RUN_PID=$!
 
@@ -168,10 +168,10 @@ RUN2_LOG="/tmp/uat-reg22-rw.log"
 # The container path literally is "/mnt/dta,readonly": the marker is readable
 # at exactly that path, proving no "/mnt/data,readonly" option split happened.
 DOCKER_HELPER_SESSION_TOKEN="$TOK_RW" \
-  dh run --image "$IMAGE" \
+  dh run \
     --mount "$src:$INJECT_TARGET" \
     --mount "$ctl:/mnt/ctl" \
-    -- sh -c 'cat "/mnt/dta,readonly/marker" > /mnt/ctl/rw-read 2>/mnt/ctl/rw-read-err; echo RW-RAN > /mnt/ctl/rw-report; while [ ! -f /mnt/ctl/release-rw ]; do sleep 1; done' \
+    "$IMAGE" -- sh -c 'cat "/mnt/dta,readonly/marker" > /mnt/ctl/rw-read 2>/mnt/ctl/rw-read-err; echo RW-RAN > /mnt/ctl/rw-report; while [ ! -f /mnt/ctl/release-rw ]; do sleep 1; done' \
   >"$RUN2_LOG" 2>&1 &
 RUN2_PID=$!
 
@@ -206,9 +206,9 @@ SID_CRLF="$REG_SESSION_ID"; TOK_CRLF="$REG_SESSION_TOKEN"
 CRLF_TARGET="$(printf '/mnt/probe\r\ncrlf-evil')"
 RUN3_LOG="/tmp/uat-reg22-crlf.log"
 DOCKER_HELPER_SESSION_TOKEN="$TOK_CRLF" \
-  dh run --image "$IMAGE" \
+  dh run \
     --mount "$src:$CRLF_TARGET:ro" \
-    -- sh -c 'echo SHOULD-NOT-RUN' \
+    "$IMAGE" -- sh -c 'echo SHOULD-NOT-RUN' \
   >"$RUN3_LOG" 2>&1
 RC_CRLF=$?
 
@@ -233,9 +233,9 @@ SID_SP="$REG_SESSION_ID"; TOK_SP="$REG_SESSION_TOKEN"
 SP_TARGET="/mnt/probe "
 RUN4_LOG="/tmp/uat-reg22-space.log"
 DOCKER_HELPER_SESSION_TOKEN="$TOK_SP" \
-  dh run --image "$IMAGE" \
+  dh run \
     --mount "$src:$SP_TARGET:ro" \
-    -- sh -c 'echo SHOULD-NOT-RUN' \
+    "$IMAGE" -- sh -c 'echo SHOULD-NOT-RUN' \
   >"$RUN4_LOG" 2>&1
 RC_SP=$?
 

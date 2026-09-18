@@ -47,7 +47,7 @@ stok="$REG_SESSION_TOKEN"
 
 # --- 2. prove Session/run works (baseline) --------------------------------------
 if DOCKER_HELPER_SESSION_TOKEN="$stok" \
-    dh run --image "$IMAGE" -- sh -ec 'true' >/dev/null 2>&1; then
+    dh run "$IMAGE" -- sh -ec 'true' >/dev/null 2>&1; then
   reg_ok "baseline session run works before SIGKILL"
 else
   reg_fail "baseline session run failed before SIGKILL"
@@ -109,7 +109,7 @@ fi
 reg_session "$cred" "$ws" || { reg_fail "fresh session create failed after restart"; reg_result; }
 freshtok="$REG_SESSION_TOKEN"
 if DOCKER_HELPER_SESSION_TOKEN="$freshtok" \
-    dh run --image "$IMAGE" -- sh -ec 'echo FRESH-OK' | grep -q 'FRESH-OK'; then
+    dh run "$IMAGE" -- sh -ec 'echo FRESH-OK' | grep -q 'FRESH-OK'; then
   reg_ok "fresh session run succeeds after restart"
 else
   reg_fail "fresh session run failed after restart"

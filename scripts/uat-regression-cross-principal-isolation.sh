@@ -231,7 +231,7 @@ else
 fi
 
 # --- A cannot delete B's Session (anti-enumeration: 404 not found) -----------
-DEL_ERR="$(dh session delete --system --token-file "$CRED_A" --id "$sidB" 2>&1)"
+DEL_ERR="$(dh session delete --system --token-file "$CRED_A" "$sidB" 2>&1)"
 if printf '%s' "$DEL_ERR" | grep -q 'session_not_found\|not found'; then
   reg_ok "A deleting B's session is indistinguishable from not-found (anti-enumeration)"
 else
@@ -253,7 +253,7 @@ else
 fi
 
 # --- A cannot use B's authorization scope -------------------------------------
-if dh session create --system --token-file "$CRED_A" --workspace "$wsB" --json >/dev/null 2>&1; then
+if dh session create --system --token-file "$CRED_A" "$wsB" --json >/dev/null 2>&1; then
   reg_fail "A created a session using B's authorization scope"
 else
   reg_ok "A cannot create a session inside B's authorization scope"
@@ -267,7 +267,7 @@ else
   reg_fail "admin cannot list B's session"
 fi
 
-if dh session delete --system --id "$sidB" >/dev/null 2>&1; then
+if dh session delete --system "$sidB" >/dev/null 2>&1; then
   reg_ok "admin deletes B's session"
 else
   reg_fail "admin cannot delete B's session"

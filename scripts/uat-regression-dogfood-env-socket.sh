@@ -81,12 +81,12 @@ rm -f "$ws"/reg17-* 2>/dev/null || true
 MARKER_EPOCH="$(date +%s)"
 set +e
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_LAUNCHER_CRED_SOURCE="$CRED_TOKEN" \
-  dh run --image "$IMAGE" \
+  dh run \
   --helper-socket \
   --env "UAT_CHILD_WS=$CHILD_WS" \
   --env-from "UAT_LAUNCHER_CRED=UAT_LAUNCHER_CRED_SOURCE" \
   --mount .:/workspace \
-  -- sh -ec '
+  "$IMAGE" -- sh -ec '
     set -eu
     test -S /run/docker-helper/docker-helper.sock
     printf "%s\n" "$UAT_LAUNCHER_CRED" > /tmp/launcher-cred
@@ -98,7 +98,7 @@ DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_LAUNCHER_CRED_SOURCE="$CRED_TOK
     CHILD_JSON=$("$DH" session create \
       --endpoint /run/docker-helper/docker-helper.sock \
       --token-file /tmp/launcher-cred \
-      --workspace "$UAT_CHILD_WS" --json)
+      "$UAT_CHILD_WS" --json)
     CHILD_ID=$(printf "%s" "$CHILD_JSON" | sed -n "s/.*\"id\": \"\([^\"]*\)\".*/\1/p")
     CHILD_TOKEN=$(printf "%s" "$CHILD_JSON" | sed -n "s/.*\"token\": \"\([^\"]*\)\".*/\1/p")
     printf "%s" "$CHILD_ID" > /workspace/reg17-child-id
@@ -107,12 +107,12 @@ DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" UAT_LAUNCHER_CRED_SOURCE="$CRED_TOK
     # locator is consumed from the daemon-injected
     # DOCKER_HELPER_SOCKET_PATH (the workload never assigns it manually).
     DOCKER_HELPER_SESSION_TOKEN="$CHILD_TOKEN" \
-      "$DH" run --image alpine:3.24 -- true
+      "$DH" run alpine:3.24 -- true
 
     # Cleanup through the launcher authority.
     "$DH" session delete \
       --endpoint /run/docker-helper/docker-helper.sock \
-      --token-file /tmp/launcher-cred --id "$CHILD_ID"
+      --token-file /tmp/launcher-cred "$CHILD_ID"
     echo done > /workspace/reg17-result
     rm -f /tmp/launcher-cred
   ' >/tmp/uat-reg17.out 2>/tmp/uat-reg17.err &
@@ -180,7 +180,7 @@ CID_LIST="$(docker ps -q --filter "label=com.dockerhelper.session.id=$SESSION_ID
 if [ -n "$CID_LIST" ]; then
   docker rm -f $CID_LIST >/dev/null 2>&1 || true
 fi
-dh session delete --system --token-file /tmp/uat-reg17-cred.token --id "$SESSION_ID" >/dev/null 2>&1 || true
+dh session delete --system --token-file /tmp/uat-reg17-cred.token "$SESSION_ID" >/dev/null 2>&1 || true
 rm -f /tmp/uat-reg17-cred.token /tmp/uat-reg17.* 2>/dev/null || true
 rm -f "$ws"/reg17-* 2>/dev/null || true
 

@@ -263,7 +263,7 @@ DISABLE_OUT="/tmp/uat-h8-disable.$$"
 create_start="$(date +%s)"
 HOLD_DEADLINE_BREACHED=0
 (
-  dh session create --system --token-file "$CREDFILE" --workspace "$WS_A" >"$CREATE_OUT" 2>&1
+  dh session create --system --token-file "$CREDFILE" "$WS_A" >"$CREATE_OUT" 2>&1
 ) &
 CREATE_PID=$!
 # The create parks inside the shimmed MAC command.
@@ -299,7 +299,7 @@ QUEUE_OUT_PREFIX="/tmp/uat-h8-q.$$"
 queue_pids=""
 for i in $(seq 1 "$QUEUE_COUNT"); do
   (
-    dh session create --system --token-file "$CREDFILE" --workspace "$WS_A" >"${QUEUE_OUT_PREFIX}-$i" 2>&1
+    dh session create --system --token-file "$CREDFILE" "$WS_A" >"${QUEUE_OUT_PREFIX}-$i" 2>&1
   ) &
   queue_pids="$queue_pids $!"
 done
@@ -485,7 +485,7 @@ WS_STOP="$home_a/ws-stop-$$"
 mkdir -p "$WS_STOP"
 arm_shim
 (
-  dh session create --system --token-file "$CREDFILE" --workspace "$WS_STOP" >/dev/null 2>&1
+  dh session create --system --token-file "$CREDFILE" "$WS_STOP" >/dev/null 2>&1
 ) &
 CREATE_PID2=$!
 for _ in $(seq 1 50); do
@@ -540,7 +540,7 @@ service_healthy "after the shutdown proof and restart"
 
 # --- cleanup ---------------------------------------------------------------------
 if [ -n "${RECOVERY_SESSION_ID:-}" ]; then
-  dh session delete --system --id "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
+  dh session delete --system "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
 fi
 dh principal delete --system "$USER_A" >/dev/null 2>&1 || true
 rm -rf "$BIGTREE" "$WS_A" "$WS_STOP" "$CREATE_OUT" "$DISABLE_OUT" "$CREDFILE" "$QUEUE_OUT_PREFIX"-* 2>/dev/null || true

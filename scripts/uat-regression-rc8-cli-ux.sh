@@ -13,8 +13,8 @@
 #      allowed_roots) consumes the same response, a foreign selector is the
 #      established non-disclosing not-found, a Launcher credential has no
 #      Principal-read authority, and admin read is unchanged.
-#   B. restricted-Launcher workspace completion — `session create
-#      --workspace <TAB>` must resolve exactly the Session-create target
+#   B. restricted-Launcher workspace completion — `session create <TAB>`
+#      (positional WORKSPACE) must resolve exactly the Session-create target
 #      the typed selectors resolve (the invariant completion(selectors)
 #      == real create(selectors)): the typed --launcher (name or
 #      --launcher= form) reaches the daemon's canonical Session-create
@@ -180,7 +180,8 @@ assert_unique() {
 # root itself is the terminal offer at its parent prefix. Walk that chain:
 # for every proper ancestor prefix of ROOT (empty prefix first), the single
 # offered candidate must be exactly the next component boundary, ending at
-# ROOT itself. ARGS are the completion words before --workspace.
+# ROOT itself. ARGS are the completion words before the positional
+# WORKSPACE operand.
 assert_boundary_chain() {
   local label="$1" script="$2" root="$3"
   shift 3
@@ -201,7 +202,7 @@ assert_boundary_chain() {
     else
       expected="$prefix/$first"
     fi
-    out="$(run_completion "$script" "$@" --workspace "$prefix")"
+    out="$(run_completion "$script" "$@" "$prefix")"
     have="$(printf '%s' "$out" | LC_ALL=C sort -u)"
     if [ "$have" = "$expected" ]; then
       reg_ok "$label (prefix '$prefix' offers '$expected')"
@@ -305,10 +306,10 @@ subcase_a() {
 }
 
 # ---------------------------------------------------------------------------
-# B. restricted-Launcher workspace completion
+# B. restricted-Launcher workspace completion (positional WORKSPACE)
 # ---------------------------------------------------------------------------
 subcase_b() {
-  reg_info "subcase B: restricted-Launcher workspace completion"
+  reg_info "subcase B: restricted-Launcher workspace completion (positional WORKSPACE)"
   local user="uatreg14b" script
   local home
   home="$(reg_setup_principal "$user")" || { reg_fail "B: fixture setup failed"; return; }
@@ -317,7 +318,7 @@ subcase_b() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
+  create_out="$(dh launcher create --system --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "B: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -355,7 +356,7 @@ subcase_b() {
   #    renders as the navigable boundary chain — the empty prefix offers the
   #    first component, and the chain resolves to the restricted root.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
-    --principal "$user" --launcher killme --workspace "")"
+    --principal "$user" --launcher killme "")"
   assert_completion "B: admin --principal+--launcher offers the first component boundary" \
     "$(dirname -- "$home")" "$out" || true
 
@@ -373,7 +374,7 @@ subcase_b() {
   # 3. --launcher=NAME reaches the same query (identical suggestions).
   local out_eq
   out_eq="$(run_completion "$script" /usr/bin/docker-helper --system session create \
-    --principal="$user" --launcher=killme --workspace "")"
+    --principal="$user" --launcher=killme "")"
   if [ "$out" = "$out_eq" ]; then
     reg_ok "B: --launcher=NAME form offers the same suggestions"
   else
@@ -383,7 +384,7 @@ subcase_b() {
   # 4. Principal credential + --launcher NAME: the daemon resolves the
   #    selector inside the credential's own scope.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
-    --token-file "$cred" --launcher killme --workspace "")"
+    --token-file "$cred" --launcher killme "")"
   assert_completion "B: principal credential --launcher offers the first component boundary" \
     "$(dirname -- "$home")" "$out" || true
   if printf '%s' "$out" | grep -qx "$home"; then
@@ -404,7 +405,7 @@ subcase_b() {
     reg_fail "B: introspection query (principal credential, selectorless) failed (rc=$roots_rc): $(printf '%s' "$roots_out" | head -2 | tr '\n' ' ' | redact)"
   fi
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
-    --token-file "$cred" --workspace "")"
+    --token-file "$cred" "")"
   assert_completion "B: selectorless principal-credential completion offers the first component boundary" \
     "$(dirname -- "$home")" "$out" || true
   assert_boundary_chain "B: selectorless boundary chain reaches the default target" \
@@ -413,7 +414,7 @@ subcase_b() {
 
   # 6. continuation inside the restricted root: only its subdirectories.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
-    --token-file "$cred" --launcher killme --workspace "$opt/")"
+    --token-file "$cred" --launcher killme "$opt/")"
   assert_completion "B: continuation offers the restricted subdirectories" "$opt/proj" "$out" || true
 
   # 7. a foreign selector never leaks policy-derived suggestions: the
@@ -426,7 +427,7 @@ subcase_b() {
     reg_fail "B: foreign selector introspection did not degrade (rc=$roots_rc): $(printf '%s' "$roots_out" | head -2 | tr '\n' ' ' | redact)"
   fi
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
-    --token-file "$cred" --launcher does-not-exist --workspace "")"
+    --token-file "$cred" --launcher does-not-exist "")"
   if printf '%s' "$out" | grep -qx "$opt"; then
     reg_fail "B: foreign --launcher selector suggested the restricted root [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
   else
@@ -492,7 +493,7 @@ subcase_c() {
   # home, and everything inside the permitted home root is fair game — the
   # invariant is uniqueness, not an exact candidate set.
   out="$(run_completion "$script" /usr/bin/docker-helper --system session create \
-    --token-file "$cred" --workspace "$home/")"
+    --token-file "$cred" "$home/")"
   assert_unique "C: nested roots produce no duplicate suggestions" "$out"
   if printf '%s\n' "$out" | grep -qx "$home/opt"; then
     reg_ok "C: nested root is offered exactly once"
@@ -502,7 +503,7 @@ subcase_c() {
 
   # Deterministic: the same typed line yields the same COMPREPLY.
   out2="$(run_completion "$script" /usr/bin/docker-helper --system session create \
-    --token-file "$cred" --workspace "$home/")"
+    --token-file "$cred" "$home/")"
   if [ "$out" = "$out2" ]; then
     reg_ok "C: the same input yields the same ordered COMPREPLY"
   else
@@ -567,7 +568,7 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
+  create_out="$(dh launcher create --system --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "E: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -680,7 +681,7 @@ subcase_f() {
   chown -R "$user:$user" "$home"
 
   local create_out
-  create_out="$(dh launcher create --system --principal "$user" --name killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
+  create_out="$(dh launcher create --system --principal "$user" killme --allowed-root "$opt" --no-credential --json 2>&1)" || {
     reg_fail "F: restricted launcher create failed: $(printf '%s' "$create_out" | head -2 | tr '\n' ' ' | redact)"
     cleanup_principal "$user"
     return
@@ -766,44 +767,56 @@ subcase_f() {
     reg_fail "F: launcher credential create failed"
   fi
 
-  # 6. launcher allowed-root add <TAB>: PATH-first grammar. The PATH
-  #    completes from the credential's effective Principal ceiling — the
-  #    boundary segment toward each effective root — never the generic
-  #    host filesystem and never a Launcher selector.
+  # 6. launcher allowed-root add <TAB>: target-first grammar. The first
+  #    positional is ambiguous between the LAUNCHER selector and the PATH
+  #    operand, so the union of both domains is offered: the daemon-backed
+  #    Launcher selectors plus the effective Principal ceiling's boundary
+  #    segments — never the generic host filesystem.
   local eff_roots expected_top
   eff_roots="$(dh completion roots principal --token-file "$cred" 2>/dev/null)"
   expected_top="$(printf '%s\n' "$eff_roots" | sed -n 's|^/||p' | sed 's|/.*$||' | LC_ALL=C sort -u | sed 's|^|/|')"
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" "")"
-  if [ -n "$expected_top" ] && [ "$out" = "$expected_top" ]; then
-    reg_ok "F: launcher allowed-root add <TAB> offers exactly the ceiling boundary segments"
+  if [ -n "$expected_top" ] && [ "$out" = "$(printf '%s\n' "$expected_top" "killme" | LC_ALL=C sort -u)" ]; then
+    reg_ok "F: launcher allowed-root add <TAB> offers the selector + ceiling-boundary union"
   else
-    reg_fail "F: launcher allowed-root add <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want [$expected_top]"
+    reg_fail "F: launcher allowed-root add <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want selector union with [$expected_top]"
   fi
 
-  # 7. launcher allowed-root add PATH <TAB>: the optional trailing
-  #    positional is the LAUNCHER selector.
+  # 7. a word starting with '/' is PATH data only: the selector domain is
+  #    not offered.
+  out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" "/o")"
+  if [ "$out" = "$(printf '%s\n' "$expected_top" | grep '^/o' | head -1)" ] || [ "$out" = "$(printf '%s\n' "$expected_top" | grep '^/o')" ]; then
+    reg_ok "F: add <slash-prefix> offers only the PATH domain"
+  else
+    reg_fail "F: add <slash-prefix> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want only the PATH boundary [$expected_top]"
+  fi
+
+  # 8. launcher allowed-root add SELECTOR <TAB>: a slash-free word may be
+  #    the LAUNCHER selector; after it the PATH operand completes the
+  #    ceiling's boundary segments.
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root add --token-file "$cred" killme "")"
-  if printf '%s\n' "$out" | grep -qx 'killme'; then
-    reg_ok "F: launcher allowed-root add PATH <TAB> completes the LAUNCHER selector"
+  if [ "$out" = "$expected_top" ]; then
+    reg_ok "F: launcher allowed-root add LAUNCHER <TAB> completes the PATH operand"
   else
-    reg_fail "F: launcher allowed-root add PATH <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+    reg_fail "F: launcher allowed-root add LAUNCHER <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want [$expected_top]"
   fi
 
-  # 8. launcher allowed-root remove: the existing-entity universe. With no
-  #    stored roots on the default Launcher the PATH position offers
-  #    nothing (fail quiet, no host filesystem); the optional trailing
-  #    positional after a typed PATH is the LAUNCHER selector.
+  # 9. launcher allowed-root remove: the existing-entity universe. With no
+  #    stored roots on the default Launcher the ambiguous first positional
+  #    offers the selector domain only (no stored roots, no host
+  #    filesystem); a PATH-led form is already complete and offers nothing
+  #    further.
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" "")"
-  if [ -z "$out" ]; then
-    reg_ok "F: launcher allowed-root remove <TAB> offers nothing (no default-Launcher stored roots)"
+  if [ "$out" = "killme" ]; then
+    reg_ok "F: launcher allowed-root remove <TAB> offers the selector domain (no stored roots)"
   else
-    reg_fail "F: launcher allowed-root remove <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want nothing"
+    reg_fail "F: launcher allowed-root remove <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want [killme]"
   fi
   out="$(run_completion "$script" /usr/bin/docker-helper --system launcher allowed-root remove --token-file "$cred" "$opt" "")"
-  if printf '%s\n' "$out" | grep -qx 'killme'; then
-    reg_ok "F: launcher allowed-root remove PATH <TAB> completes the LAUNCHER selector"
+  if [ -z "$out" ]; then
+    reg_ok "F: launcher allowed-root remove PATH <TAB> offers nothing (the one-operand form is complete)"
   else
-    reg_fail "F: launcher allowed-root remove PATH <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)]"
+    reg_fail "F: launcher allowed-root remove PATH <TAB> = [$(printf '%s' "$out" | tr '\n' ' ' | redact)] want nothing"
   fi
 
   # 9. command-context-aware --principal: the own username on the launcher

@@ -126,24 +126,64 @@ func (p *completionPTY) send(t *testing.T, s string) {
 	}
 }
 
-// waitNext waits until want appears in the output after the consumed offset,
-// then consumes through it and returns the segment. Bounded polling of the
-// actual PTY state, never an estimated sleep.
+// normalizePTYStream reconstructs the logical character stream behind a raw
+// PTY capture. Readline drives the terminal with redraw control codes, and
+// under load a redraw can land between the characters it just inserted: the
+// scrolled-window redraw writes a space and a bare carriage return (a CR not
+// followed by a line feed) before re-echoing the inserted tail. The logical
+// content is therefore reconstructed by dropping ANSI control sequences and
+// by collapsing a bare CR together with an immediately preceding space. A
+// CR that terminates a real line (CR followed by LF) is kept as the line
+// break.
+func normalizePTYStream(raw string) string {
+	logical := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		switch {
+		case c == 0x1b && i+1 < len(raw) && raw[i+1] == '[':
+			// ANSI CSI sequence: skip through the final byte.
+			j := i + 2
+			for j < len(raw) && !((raw[j] >= 'A' && raw[j] <= 'Z') || (raw[j] >= 'a' && raw[j] <= 'z')) {
+				j++
+			}
+			if j < len(raw) {
+				j++
+			}
+			i = j - 1
+		case c == '\r':
+			// A bare CR (no following LF) is a redraw cursor return. The
+			// scrolled-window redraw precedes it with a space that carries
+			// no content: drop both.
+			if i+1 < len(raw) && raw[i+1] == '\n' {
+				logical = append(logical, c)
+			} else if n := len(logical); n > 0 && logical[n-1] == ' ' {
+				logical = logical[:n-1]
+			}
+		default:
+			logical = append(logical, c)
+		}
+	}
+	return string(logical)
+}
+
+// waitNext waits until want appears in the normalized logical output after
+// the consumed offset, then consumes through it and returns the segment.
+// Bounded polling of the actual PTY state, never an estimated sleep.
 func (p *completionPTY) waitNext(t *testing.T, want string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
 		p.mu.Lock()
-		out := p.out.String()
-		idx := strings.Index(out[p.consumed:], want)
+		logical := normalizePTYStream(p.out.String())
+		idx := strings.Index(logical[p.consumed:], want)
 		if idx >= 0 {
 			p.consumed += idx + len(want)
 			p.mu.Unlock()
-			return out[:p.consumed]
+			return logical[:p.consumed]
 		}
 		p.mu.Unlock()
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %q after offset %d; pty output:\n%s", want, p.consumed, out)
+			t.Fatalf("timed out waiting for %q after offset %d; pty output:\n%s", want, p.consumed, p.out.String())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

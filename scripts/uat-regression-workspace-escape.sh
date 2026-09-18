@@ -58,24 +58,24 @@ expect_reject() {
 # --- ../outside (relative escape) via mount source ---------------------------
 expect_reject "mount source ../outside" \
   env DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh run --image "$IMAGE" --mount ../outside:/mnt/x -- sh -ec 'true'
+  dh run --mount ../outside:/mnt/x "$IMAGE" -- sh -ec 'true'
 
 # --- absolute outside via mount source (rejected at the CLI) -----------------
 expect_reject "absolute mount source" \
   env DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh run --image "$IMAGE" --mount "$OUTSIDE:/mnt/x" -- sh -ec 'true'
+  dh run --mount "$OUTSIDE:/mnt/x" "$IMAGE" -- sh -ec 'true'
 
 # --- absolute outside as session workspace -----------------------------------
 expect_reject "session workspace absolute outside allowed root" \
-  dh session create --system --token-file "$cred" --workspace "$OUTSIDE/ws" --json
+  dh session create --system --token-file "$cred" "$OUTSIDE/ws" --json
 
 # --- symlink inside -> outside ------------------------------------------------
 ln -s "$OUTSIDE" "$ws/escape"
 expect_reject "session workspace via symlink to outside" \
-  dh session create --system --token-file "$cred" --workspace "$ws/escape" --json
+  dh session create --system --token-file "$cred" "$ws/escape" --json
 expect_reject "mount source via symlink to outside" \
   env DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh run --image "$IMAGE" --mount escape:/mnt/x -- sh -ec 'true'
+  dh run --mount escape:/mnt/x "$IMAGE" -- sh -ec 'true'
 
 # --- symlink inside -> inside (accept) ----------------------------------------
 mkdir -p "$ws/real"
@@ -83,7 +83,7 @@ printf 'inside\n' > "$ws/real/f.txt"
 chown -R "$USER:$USER" "$ws/real"
 ln -s "$ws/real" "$ws/link"
 if DOCKER_HELPER_SESSION_TOKEN="$stok" \
-    dh run --image "$IMAGE" --mount link:/mnt/link -- sh -ec 'cat /mnt/link/f.txt && echo SYMLINK-INSIDE-OK' \
+    dh run --mount link:/mnt/link "$IMAGE" -- sh -ec 'cat /mnt/link/f.txt && echo SYMLINK-INSIDE-OK' \
     | grep -q 'SYMLINK-INSIDE-OK'; then
   reg_ok "mount source via symlink to inside workspace accepted"
 else
@@ -93,13 +93,13 @@ fi
 # --- build-context escapes -----------------------------------------------------
 expect_reject "build context ../outside" \
   env DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh build --context ../outside --dockerfile Dockerfile --image reg5-esc:1
+  dh build ../outside --dockerfile Dockerfile --image reg5-esc:1
 expect_reject "build context via symlink to outside" \
   env DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh build --context escape --dockerfile Dockerfile --image reg5-esc:2
+  dh build escape --dockerfile Dockerfile --image reg5-esc:2
 expect_reject "build dockerfile escaping context" \
   env DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh build --context real --dockerfile ../../outside/Dockerfile --image reg5-esc:3
+  dh build real --dockerfile ../../outside/Dockerfile --image reg5-esc:3
 
 # --- rejected cases must not leak/mutate the outside path ----------------------
 MARKER_AFTER="$(cat "$OUTSIDE/marker.txt" 2>/dev/null || true)"

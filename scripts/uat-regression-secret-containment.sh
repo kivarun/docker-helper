@@ -54,7 +54,7 @@ START_EPOCH="$(date +%s)"
 
 # --- container env dump via a docker-helper run --------------------------------
 ENV_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-  dh run --image "$IMAGE" --env UAT_SENTINEL_VAR="$SENTINEL" -- sh -ec 'env' 2>/dev/null)"
+  dh run --env UAT_SENTINEL_VAR="$SENTINEL" "$IMAGE" -- sh -ec 'env' 2>/dev/null)"
 
 for label in "session bearer" "admin token" "principal credential"; do
   tok=""

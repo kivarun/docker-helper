@@ -221,7 +221,7 @@ CREATE_OUT="/tmp/uat-h2-create.$$"
 REVOKE_OUT="/tmp/uat-h2-revoke.$$"
 create_start="$(date +%s)"
 (
-  dh session create --system --token-file "$CREDFILE" --workspace "$WS_A" >"$CREATE_OUT" 2>&1
+  dh session create --system --token-file "$CREDFILE" "$WS_A" >"$CREATE_OUT" 2>&1
 ) &
 CREATE_PID=$!
 # The create parks inside the shimmed MAC command: this proves the request
@@ -458,7 +458,7 @@ fi
 
 # --- cleanup -----------------------------------------------------------------------
 if [ -n "${RECOVERY_SESSION_ID:-}" ]; then
-  dh session delete --system --id "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
+  dh session delete --system "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
 fi
 dh principal delete --system "$USER_A" >/dev/null 2>&1 || true
 rm -rf "$WS_A" "${WS_REC:-}" "$CREDFILE" "$RECOVERY_CRED" "$CREATE_OUT" "$REVOKE_OUT" 2>/dev/null || true

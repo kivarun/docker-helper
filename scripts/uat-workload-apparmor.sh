@@ -195,7 +195,7 @@ workload_residue_clean() {
 # (bearer stored in /tmp/uat-wla-<id>), prints the session ID.
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" --workspace "$ws" --json 2>/dev/null || true)"
+  out="$(dh session create --system --token-file "$cred" "$ws" --json 2>/dev/null || true)"
   id="$(printf '%s' "$out" | json_field id)"
   [ -n "$id" ] || return 1
   printf '%s' "$out" | json_field token > "/tmp/uat-wla-tok-$id"; chmod 600 "/tmp/uat-wla-tok-$id"
@@ -207,7 +207,7 @@ create_session() {
 expect_read_only_root() {
   local token="$1" source="$2" target="$3" snippet="$4" base="$5" out ec
   out="$(DOCKER_HELPER_SESSION_TOKEN="$token" \
-    dh run --image alpine:3.24 --mount "$source:$target" -- sh -ec "$snippet" 2>&1)"
+    dh run --mount "$source:$target" alpine:3.24 -- sh -ec "$snippet" 2>&1)"
   ec=$?
   [ "$ec" -ne 0 ] || { printf '  writable request on %s unexpectedly succeeded\n' "$source" >&2; return 1; }
   printf '%s\n' "$out" | grep -q 'read_only_root' \
@@ -302,7 +302,7 @@ dh principal create --system --no-credential "$PRINCIPAL" >/dev/null 2>&1 || tru
 dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
 dh principal allowed-root add --system "$PRINCIPAL" "$TREE" >/dev/null 2>&1 || true
 dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/pipeline-inputs" >/dev/null 2>&1 || true
-MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name main --no-credential --json 2>/dev/null || true)"
+MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" main --no-credential --json 2>/dev/null || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON" >&2; exit 1; }
 MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
@@ -339,7 +339,7 @@ fi
 # ==============================================================================
 say "W1: RW exposure really writable"
 if DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-    dh run --image alpine:3.24 --mount project:/mnt/project -- \
+    dh run --mount project:/mnt/project alpine:3.24 -- \
     sh -ec 'echo w1-write > /mnt/project/written.txt && cat /mnt/project/keep.txt' >/tmp/uat-wla-w1.log 2>&1 \
     && [ "$(cat "$TREE/project/written.txt" 2>/dev/null)" = "w1-write" ]; then
   acc_ok "W1 RW exposure mounted writable and the write persisted"
@@ -352,7 +352,7 @@ fi
 # ==============================================================================
 say "W2: RO exposure readable"
 W2_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'test "$(cat /mnt/inputs/input.txt)" = "ro-input" && echo W2-RO-READ-OK' 2>&1)"
 if printf '%s\n' "$W2_OUT" | grep -q 'W2-RO-READ-OK'; then
   acc_ok "W2 RO exposure readable"
@@ -365,7 +365,7 @@ fi
 # ==============================================================================
 say "W3: RO exposure immutable"
 DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'echo forbidden > /mnt/inputs/forbidden.txt' >/dev/null 2>&1
 W3_EC=$?
 if [ "$W3_EC" -ne 0 ] && [ ! -e "$TREE/pipeline-inputs/forbidden.txt" ]; then
@@ -379,7 +379,7 @@ fi
 # ==============================================================================
 say "W4: mixed RW + RO in one workload"
 W4_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project --mount pipeline-inputs:/mnt/inputs:ro -- \
+  dh run --mount project:/mnt/project --mount pipeline-inputs:/mnt/inputs:ro alpine:3.24 -- \
   sh -ec 'echo w4-write > /mnt/project/written.txt; test "$(cat /mnt/inputs/input.txt)" = "ro-input" || exit 3; if echo x > /mnt/inputs/forbidden.txt 2>/dev/null; then exit 4; fi; echo W4-MIXED-OK' 2>&1)"
 W4_EC=$?
 if [ "$W4_EC" -eq 0 ] && printf '%s\n' "$W4_OUT" | grep -q 'W4-MIXED-OK' \
@@ -431,11 +431,11 @@ if dh config allowed-root add --access read_write "$WE_OPT" >/dev/null 2>&1 \
 else
   acc_fail "WE setup: second effective root setup failed"
 fi
-WE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" --name we-multiroot --no-credential --json 2>/dev/null || true)"
+WE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" we-multiroot --no-credential --json 2>/dev/null || true)"
 WE_L_ID="$(printf '%s' "$WE_L_JSON" | json_field id)"
 if [ -n "$WE_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$ALLOWED_ROOT" "$WE_L_ID" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_OPT" "$WE_L_ID" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$WE_L_ID" "$WE_OPT" >/dev/null 2>&1; then
   acc_ok "WE setup: multiroot launcher carries both effective roots"
 else
   acc_fail "WE setup: multiroot launcher setup failed: $WE_L_JSON"
@@ -453,7 +453,7 @@ mkdir -p "$WE_WS"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT/we-runs"
 chmod -R u+rwX,go+rX "$ALLOWED_ROOT/we-runs"
 WE_OUT="$(dh session create --system --token-file /tmp/uat-wla-cred-multiroot \
-  --workspace "$WE_WS" --json \
+  "$WE_WS" --json \
   --filesystem-root "$WE_HELPER=read_only" \
   --filesystem-root "$WE_CACHE=read_write" 2>&1 || true)"
 WE_ID="$(printf '%s' "$WE_OUT" | json_field id)"
@@ -468,7 +468,7 @@ fi
 # WE-RW: the external RW root mounts writable through the same workload-MAC
 # owner; the write persists to the host.
 WE_W="$(DOCKER_HELPER_SESSION_TOKEN="$WE_TOKEN" \
-  dh run --image alpine:3.24 --mount "$WE_CACHE:/cache" -- \
+  dh run --mount "$WE_CACHE:/cache" alpine:3.24 -- \
   sh -ec 'echo we-write > /cache/written.txt && echo WE-RW-OK' >/tmp/uat-wla-we-w.log 2>&1)"
 if [ -f "$WE_CACHE/written.txt" ] && [ "$(cat "$WE_CACHE/written.txt" 2>/dev/null)" = "we-write" ]; then
   acc_ok "WE external RW root writable through the workload MAC owner"
@@ -483,7 +483,7 @@ fi
 # itself the refuser, attributable to this proof's profile — is proven by the
 # W6 external-root live proof below.
 DOCKER_HELPER_SESSION_TOKEN="$WE_TOKEN" \
-  dh run --image alpine:3.24 --mount "$WE_HELPER:/helper:ro" -- \
+  dh run --mount "$WE_HELPER:/helper:ro" alpine:3.24 -- \
   sh -ec 'echo forbidden > /helper/forbidden.txt' >/dev/null 2>&1
 WE_EC=$?
 if [ "$WE_EC" -ne 0 ] && [ ! -e "$WE_HELPER/forbidden.txt" ]; then
@@ -522,7 +522,7 @@ fi
 # ==============================================================================
 say "W7b: cleanup after a failing workload"
 DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh run --image alpine:3.24 --mount project:/mnt/project -- sh -ec 'exit 7' >/dev/null 2>&1
+  dh run --mount project:/mnt/project alpine:3.24 -- sh -ec 'exit 7' >/dev/null 2>&1
 W7_FAIL_EC=$?
 [ "$W7_FAIL_EC" -ne 0 ] \
   && acc_ok "W7b failing workload propagates the container failure (ec=$W7_FAIL_EC)" \
@@ -740,7 +740,7 @@ WUID="$(id -u "$PRINCIPAL")"
 say "W11: hostile SUID source image cannot elevate"
 if build_hostile_image; then
   W11_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-    dh run --image "$HOSTILE_IMAGE" -- \
+    dh run "$HOSTILE_IMAGE" -- \
     sh -ec '/usr/local/bin/reporter' 2>&1)"
   W11_EC=$?
   if [ "$W11_EC" -eq 0 ] \
@@ -778,12 +778,12 @@ RUN test ! -g /out/sgid-staged || (echo STAGED-SGID-DELIVERED; exit 1)
 EOF
 W12_BUILD_RC=0
 DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-  dh build --context staged-proof --dockerfile Dockerfile --image uat-staged-proof:2.2 \
+  dh build staged-proof --dockerfile Dockerfile --image uat-staged-proof:2.2 \
   >/tmp/uat-wla-w12-build.log 2>&1 || W12_BUILD_RC=1
 W12_RUN_OUT=""
 if [ "$W12_BUILD_RC" -eq 0 ]; then
   W12_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-    dh run --image uat-staged-proof:2.2 -- \
+    dh run uat-staged-proof:2.2 -- \
     sh -ec 'test ! -u /out/suid-staged && test ! -g /out/sgid-staged && echo W12-STAGED-CLEAN' 2>&1)"
 fi
 if [ "$W12_BUILD_RC" -eq 0 ] \
@@ -797,7 +797,7 @@ fi
 say "W13: helper-socket hostile runtime composition"
 if docker image inspect "$HOSTILE_IMAGE" >/dev/null 2>&1; then
   W13_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$WSA_TOKEN" \
-    dh run --helper-socket --env TARGET_SESSION="$WSA_ID" --image "$HOSTILE_IMAGE" -- \
+    dh run --helper-socket --env TARGET_SESSION="$WSA_ID" "$HOSTILE_IMAGE" -- \
     /bin/sh /usr/local/bin/hostile-probe.sh 2>&1)"
   W13_EC=$?
   if [ "$W13_EC" -eq 0 ] && printf '%s\n' "$W13_OUT" | grep -q 'S3-HOSTILE-CLEAN'; then

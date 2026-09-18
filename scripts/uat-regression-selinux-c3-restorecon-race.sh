@@ -243,7 +243,7 @@ for round in $(seq 1 "$RACE_ROUNDS"); do
   # it only after the final round, so release failures surface here too.
   if [ -n "${SID:-}" ]; then
     chown -R root:root "$WS" >/dev/null 2>&1 || true
-    if dh session delete --system --id "$SID" >/dev/null 2>&1; then
+    if dh session delete --system "$SID" >/dev/null 2>&1; then
       reg_ok "round $round: session deleted (coverage released)"
     else
       reg_fail "round $round: session delete failed"
@@ -297,14 +297,14 @@ if [ -n "$POST_SID" ]; then
     "actual workspace type is docker_helper_workspace_t"
   chown -R "$C3_P:$C3_P" "$WS" >/dev/null 2>&1 || { reg_fail "workspace chown to principal failed"; }
   RW_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$STOK" \
-    dh run --image "$IMAGE" --mount rw:/mnt/rw -- sh -ec 'echo c3-rw-ok > /mnt/rw/f; cat /mnt/rw/f' 2>&1)"
+    dh run --mount rw:/mnt/rw "$IMAGE" -- sh -ec 'echo c3-rw-ok > /mnt/rw/f; cat /mnt/rw/f' 2>&1)"
   if [ $? -eq 0 ] && printf '%s' "$RW_OUT" | grep -q 'c3-rw-ok'; then
     reg_ok "container RW through the workspace works after the race"
   else
     reg_fail "container RW run failed after the race: $(printf '%s' "$RW_OUT" | redact | head -4)"
   fi
   chown -R root:root "$WS" >/dev/null 2>&1 || true
-  if dh session delete --system --id "$POST_SID" >/dev/null 2>&1; then
+  if dh session delete --system "$POST_SID" >/dev/null 2>&1; then
     reg_ok "post-race session deleted"
   else
     reg_fail "post-race session delete failed"

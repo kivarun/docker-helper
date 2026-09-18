@@ -9195,7 +9195,7 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	for _, must := range []string{
 		`dh config allowed-root add "$H5_GLOBAL_ROOT"`,
 		`principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT"`,
-		`--name h5-runtime-cascade`,
+		`h5-runtime-cascade`,
 		`dh config allowed-root remove "$H5_GLOBAL_ROOT"`,
 		`live reload pruned the Principal root and restricted-Launcher descendant atomically`,
 	} {
@@ -9206,7 +9206,7 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 
 	// H5S: offline narrowing followed by the real service startup.
 	for _, must := range []string{
-		`--name h5-startup-cascade`,
+		`h5-startup-cascade`,
 		`systemctl stop docker-helper.service`,
 		`offline_remove_config_allowed_root "$H5_GLOBAL_ROOT"`,
 		`systemctl start docker-helper.service`,
@@ -10733,9 +10733,9 @@ func TestAccessModesHarnessMultiRootRoots(t *testing.T) {
 		`dh config allowed-root add --access read_write "$MR_OPT"`,
 		`--filesystem-root "$MR_HELPER=read_only"`,
 		`--filesystem-root "$MR_CACHE=read_write"`,
-		`dh run --image alpine:3.24 --mount "$MR_HELPER:/helper:ro" --`,
-		`dh run --image alpine:3.24 --mount "$MR_CACHE:/cache" --`,
-		`dh run --image alpine:3.24 --mount "$MR_EXTRA:/extra" --`,
+		`dh run --mount "$MR_HELPER:/helper:ro" alpine:3.24 --`,
+		`dh run --mount "$MR_CACHE:/cache" alpine:3.24 --`,
+		`dh run --mount "$MR_EXTRA:/extra" alpine:3.24 --`,
 		`acc_ok "MR1e unissued Launcher path refused (invalid_mount, no pin/container/residue)"`,
 		`MR_OUTSIDE="/srv/uat-am-outside-ceiling-$$"`,
 		`acc_ok "MR3 setup: existing unauthorized fixture $MR_OUTSIDE positively outside every effective root"`,
@@ -11198,7 +11198,7 @@ func TestAccessModesHarnessAuthoritySymmetry(t *testing.T) {
 	// bearer with no selector.
 	for _, must := range []string{
 		`dh session create --system --token-file /etc/docker-helper/admin.token`,
-		`--launcher "$MAIN_L_ID" --workspace "$WS" --json`,
+		`--launcher "$MAIN_L_ID" "$WS" --json`,
 		`reg_principal_credential "$PRINCIPAL" /tmp/uat-am-cred-principal`,
 		`dh session create --system --token-file /tmp/uat-am-cred-principal`,
 	} {

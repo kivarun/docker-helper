@@ -300,10 +300,10 @@ cleanup() {
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   if [ -n "$ADMIN_CREATED_ID" ]; then
-    docker-helper session delete --system --id "$ADMIN_CREATED_ID" >/dev/null 2>&1 || true
+    docker-helper session delete --system "$ADMIN_CREATED_ID" >/dev/null 2>&1 || true
   fi
   if [ -n "$SESSION_PRINC_ID" ]; then
-    docker-helper session delete --system --id "$SESSION_PRINC_ID" >/dev/null 2>&1 || true
+    docker-helper session delete --system "$SESSION_PRINC_ID" >/dev/null 2>&1 || true
   fi
   if [ -n "$PRINCIPAL" ]; then
     docker-helper principal delete --system "$PRINCIPAL" >/dev/null 2>&1 || true
@@ -501,7 +501,7 @@ info "default launcher for $PRINCIPAL proved present via launcher show (eager pr
 
 # Negative: an admin create with NO selector must fail closed with
 # 400 missing_launcher_selector — never create a selector-less session.
-NO_SEL_OUT="$(docker-helper session create --system --workspace "$WS" 2>&1)"; NO_SEL_RC=$?
+NO_SEL_OUT="$(docker-helper session create --system "$WS" 2>&1)"; NO_SEL_RC=$?
 [ "$NO_SEL_RC" -ne 0 ] \
   || fail_uat "admin selector-less session create unexpectedly succeeded"
 printf '%s\n' "$NO_SEL_OUT" | grep -q 'missing_launcher_selector' \
@@ -532,7 +532,7 @@ info "admin-created session (control-plane proof): $ADMIN_CREATED_ID -> launcher
 
 # Principal session (credential token -> principal scope). Container identity
 # = the principal's OS uid/gid. Proves the credential -> session -> run path.
-SESSION_PRINC_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" --workspace "$WS" --json)" \
+SESSION_PRINC_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" "$WS" --json)" \
   || fail_uat "principal session create failed"
 SESSION_PRINC_ID="$(printf '%s\n' "$SESSION_PRINC_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
 SESSION_PRINC_TOKEN="$(printf '%s\n' "$SESSION_PRINC_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
@@ -598,15 +598,15 @@ docker-helper pull alpine:3.24 || fail_uat "docker-helper pull alpine:3.24 faile
 # Principal's OS uid/gid. There is no root/admin Session owner or root
 # execution special case anymore.
 say "phase 4: run identity via the principal-credential session"
-docker-helper run --image alpine:3.24 --workdir /tmp -- sh -ec "test \"\$(id -u)\" = \"$PUID\" && test \"\$(id -g)\" = \"$PGID\" && echo BASIC-PRINC-OK" \
+docker-helper run --workdir /tmp alpine:3.24 -- sh -ec "test \"\$(id -u)\" = \"$PUID\" && test \"\$(id -g)\" = \"$PGID\" && echo BASIC-PRINC-OK" \
   | grep -q 'BASIC-PRINC-OK' \
   || fail_uat "principal-session identity check failed (expected uid=$PUID gid=$PGID)"
 
 # Container exit-code propagation (exit 42 must surface as 42).
-docker-helper run --image alpine:3.24 -- sh -ec 'exit 42' >/dev/null 2>&1 \
+docker-helper run alpine:3.24 -- sh -ec 'exit 42' >/dev/null 2>&1 \
   && fail_uat "expected non-zero container exit code but run succeeded"
 EC=0
-docker-helper run --image alpine:3.24 -- sh -ec 'exit 42' >/dev/null 2>&1
+docker-helper run alpine:3.24 -- sh -ec 'exit 42' >/dev/null 2>&1
 EC=$?
 [ "$EC" = "42" ] || fail_uat "expected container exit code 42, got $EC"
 
@@ -614,13 +614,13 @@ EC=$?
 # Principal (uid/gid), not root and not the daemon/admin identity.
 say "phase 4: admin-created Session execution identity = owning Principal"
 ADMIN_CREATED_RUN="$(DOCKER_HELPER_SESSION_TOKEN="$ADMIN_CREATED_TOKEN" \
-  docker-helper run --image alpine:3.24 --workdir /tmp -- sh -ec "test \"\$(id -u)\" = \"$PUID\" && test \"\$(id -g)\" = \"$PGID\" && echo ADMIN-CREATED-IDENTITY-OK")" \
+  docker-helper run --workdir /tmp alpine:3.24 -- sh -ec "test \"\$(id -u)\" = \"$PUID\" && test \"\$(id -g)\" = \"$PGID\" && echo ADMIN-CREATED-IDENTITY-OK")" \
   || fail_uat "admin-created session run failed"
 printf '%s\n' "$ADMIN_CREATED_RUN" | grep -q 'ADMIN-CREATED-IDENTITY-OK' \
   || fail_uat "admin-created session identity check failed (expected uid=$PUID gid=$PGID): $ADMIN_CREATED_RUN"
 
 # The focused admin-created Session proof is complete; delete it.
-docker-helper session delete --system --id "$ADMIN_CREATED_ID" >/dev/null 2>&1 \
+docker-helper session delete --system "$ADMIN_CREATED_ID" >/dev/null 2>&1 \
   || fail_uat "admin-created session delete failed"
 unset ADMIN_CREATED_TOKEN
 
@@ -640,7 +640,7 @@ if echo x > /mnt/ro/forbidden.txt 2>/dev/null; then
   exit 1
 fi
 echo MOUNT-OK'
-MOUNT_OUT="$(docker-helper run --image alpine:3.24 --mount rw:/mnt/rw --mount ro:/mnt/ro:ro -- sh -ec "$MOUNT_SCRIPT")" \
+MOUNT_OUT="$(docker-helper run --mount rw:/mnt/rw --mount ro:/mnt/ro:ro alpine:3.24 -- sh -ec "$MOUNT_SCRIPT")" \
   || fail_uat "mount behavior run failed"
 printf '%s\n' "$MOUNT_OUT" | grep -q 'MOUNT-OK' \
   || fail_uat "mount behavior did not reach MOUNT-OK: $MOUNT_OUT"
@@ -673,7 +673,7 @@ docker-helper config allowed-root add --access read_only "$WS/ro" \
 # its writable behavior is unchanged (run with a caller-requested :ro mount
 # already passed in phase 5; a writable request on the same source is still
 # allowed because the OLD snapshot carries no RO region).
-PRE_OLD_OUT="$(docker-helper run --image alpine:3.24 --mount ro:/mnt/ro -- sh -ec 'echo OLD-SNAPSHOT-RW-OK' 2>&1)"
+PRE_OLD_OUT="$(docker-helper run --mount ro:/mnt/ro alpine:3.24 -- sh -ec 'echo OLD-SNAPSHOT-RW-OK' 2>&1)"
 PRE_OLD_EC=$?
 if [ "$PRE_OLD_EC" -ne 0 ] && printf '%s\n' "$PRE_OLD_OUT" | grep -q 'read_only_root'; then
   fail_uat "pre-policy session unexpectedly inherited the new RO region (snapshot immutability broken)"
@@ -681,7 +681,7 @@ fi
 info "existing session keeps its issued snapshot (writable behavior unchanged)"
 
 # New session after the mutation: the RO region is part of the issued snapshot.
-NEW_SESS_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" --workspace "$WS" --json)" \
+NEW_SESS_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" "$WS" --json)" \
   || fail_uat "post-policy session create failed"
 NEW_SESS_ID="$(printf '%s\n' "$NEW_SESS_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
 NEW_SESS_TOKEN="$(printf '%s\n' "$NEW_SESS_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
@@ -693,7 +693,7 @@ docker-helper session show --system "$NEW_SESS_ID" \
 
 # 1. The RO region mounts read-only: reads pass.
 SMOKE_RO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$NEW_SESS_TOKEN" \
-  docker-helper run --image alpine:3.24 --mount ro:/mnt/ro:ro -- sh -ec 'test "$(cat /mnt/ro/readme.txt)" = "ro-content" && echo SMOKE-RO-READ-OK')" \
+  docker-helper run --mount ro:/mnt/ro:ro alpine:3.24 -- sh -ec 'test "$(cat /mnt/ro/readme.txt)" = "ro-content" && echo SMOKE-RO-READ-OK')" \
   || fail_uat "policy RO region read failed: $SMOKE_RO_OUT"
 printf '%s\n' "$SMOKE_RO_OUT" | grep -q 'SMOKE-RO-READ-OK' \
   || fail_uat "policy RO read did not reach SMOKE-RO-READ-OK: $SMOKE_RO_OUT"
@@ -705,7 +705,7 @@ CONTAINERS_BEFORE="$(docker ps -a --filter 'label=com.dockerhelper.schema=1' -q 
 PINS_BEFORE="$(ls /run/docker-helper/mounts 2>/dev/null | wc -l)"
 WLMAC_BEFORE="$(ls /run/docker-helper/workload-mac 2>/dev/null | wc -l)"
 RO_REJECT_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$NEW_SESS_TOKEN" \
-  docker-helper run --image alpine:3.24 --mount ro:/mnt/ro -- sh -ec 'echo must-not-run' 2>&1)"
+  docker-helper run --mount ro:/mnt/ro alpine:3.24 -- sh -ec 'echo must-not-run' 2>&1)"
 RO_REJECT_EC=$?
 [ "$RO_REJECT_EC" -ne 0 ] || fail_uat "writable request on the policy RO region unexpectedly succeeded"
 printf '%s\n' "$RO_REJECT_OUT" | grep -q 'read_only_root' \
@@ -719,7 +719,7 @@ printf '%s\n' "$RO_REJECT_OUT" | grep -q 'read_only_root' \
 info "read_only_root refused before workload creation (no container/pin/MAC residue)"
 
 # Cleanup the smoke session.
-docker-helper session delete --system --id "$NEW_SESS_ID" >/dev/null 2>&1 \
+docker-helper session delete --system "$NEW_SESS_ID" >/dev/null 2>&1 \
   || fail_uat "smoke session delete failed"
 unset NEW_SESS_TOKEN
 
@@ -735,10 +735,10 @@ USER 65534:65534
 EOF
 chown -R "$PRINCIPAL:$PRINCIPAL" "$WS/buildctx"
 
-docker-helper build --context buildctx --dockerfile Dockerfile --image uat-curl:alpine3.24 \
+docker-helper build buildctx --dockerfile Dockerfile --image uat-curl:alpine3.24 \
   || fail_uat "docker-helper build failed"
 
-BUILD_OUT="$(docker-helper run --image uat-curl:alpine3.24 -- sh -ec 'test -x /usr/bin/curl && echo BUILD-IMAGE-OK')" \
+BUILD_OUT="$(docker-helper run uat-curl:alpine3.24 -- sh -ec 'test -x /usr/bin/curl && echo BUILD-IMAGE-OK')" \
   || fail_uat "built image not usable through docker-helper"
 printf '%s\n' "$BUILD_OUT" | grep -q 'BUILD-IMAGE-OK' \
   || fail_uat "built image check failed: $BUILD_OUT"
@@ -790,7 +790,7 @@ curl -k -fsS --max-time 5 "https://127.0.0.1:$TLS_PORT/" >/dev/null 2>&1 \
 # rejected. This proves the cert is genuinely untrusted and that the later
 # success is caused by docker-helper's injection.
 say "phase 7: control run — ephemeral CA must NOT be trusted without injection"
-CONTROL_OUT="$(docker-helper run --image uat-curl:alpine3.24 -- sh -ec "curl -fsS https://$GATEWAY:$TLS_PORT/ >/dev/null" 2>&1)"
+CONTROL_OUT="$(docker-helper run uat-curl:alpine3.24 -- sh -ec "curl -fsS https://$GATEWAY:$TLS_PORT/ >/dev/null" 2>&1)"
 CONTROL_EC=$?
 [ "$CONTROL_EC" -ne 0 ] \
   || fail_uat "control run unexpectedly succeeded (ephemeral CA trusted without injection)"
@@ -810,7 +810,7 @@ docker-helper config set trusted_ca_injection auto || fail_uat "config set trust
 # Positive: an ordinary TLS request must succeed with zero manual CA flags or
 # overrides — success must come only from docker-helper's automatic injection.
 say "phase 7: positive run — ordinary TLS request via automatic injection"
-TLS_OUT="$(docker-helper run --image uat-curl:alpine3.24 -- sh -ec "curl -fsS https://$GATEWAY:$TLS_PORT/ >/dev/null && echo TLS-OK")" \
+TLS_OUT="$(docker-helper run uat-curl:alpine3.24 -- sh -ec "curl -fsS https://$GATEWAY:$TLS_PORT/ >/dev/null && echo TLS-OK")" \
   || fail_uat "trusted TLS request failed: $TLS_OUT"
 printf '%s\n' "$TLS_OUT" | grep -q 'TLS-OK' \
   || fail_uat "trusted TLS request did not reach TLS-OK: $TLS_OUT"
@@ -953,7 +953,7 @@ fi
 
 # 3. One Principal/session flow over the explicit HTTP endpoint: create a
 #    principal session through HTTP using the credential token file.
-HTTP_SESS_JSON="$(docker-helper session create --endpoint "$HTTP_EP" --token-file "$CRED_FILE" --workspace "$WS" --json)" \
+HTTP_SESS_JSON="$(docker-helper session create --endpoint "$HTTP_EP" --token-file "$CRED_FILE" "$WS" --json)" \
   || fail_uat "principal session create over HTTP failed"
 HTTP_SESS_ID="$(printf '%s\n' "$HTTP_SESS_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
 HTTP_SESS_TOKEN="$(printf '%s\n' "$HTTP_SESS_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
@@ -963,7 +963,7 @@ info "principal session over HTTP: $HTTP_SESS_ID"
 
 # 4. One session-authenticated operation over the explicit HTTP endpoint.
 HTTP_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$HTTP_SESS_TOKEN" \
-  docker-helper run --endpoint "$HTTP_EP" --image alpine:3.24 --workdir /tmp -- sh -ec 'echo HTTP-RUN-OK')" \
+  docker-helper run --endpoint "$HTTP_EP" --workdir /tmp alpine:3.24 -- sh -ec 'echo HTTP-RUN-OK')" \
   || fail_uat "session-authenticated run over HTTP failed"
 printf '%s\n' "$HTTP_RUN_OUT" | grep -q 'HTTP-RUN-OK' \
   || fail_uat "HTTP run did not reach HTTP-RUN-OK: $HTTP_RUN_OUT"
@@ -975,9 +975,9 @@ printf '%s\n' "$HTTP_RUN_OUT" | grep -q 'HTTP-RUN-OK' \
 #    result, not a transport/token-source difference.)
 DENIED_WS="$ALLOWED_ROOT/../denied-ws-$RANDOM"
 mkdir -p "$DENIED_WS"
-UNIX_DENIED_OUT="$(docker-helper session create --system --token-file "$CRED_FILE" --workspace "$DENIED_WS" 2>&1)"
+UNIX_DENIED_OUT="$(docker-helper session create --system --token-file "$CRED_FILE" "$DENIED_WS" 2>&1)"
 UNIX_DENIED_RC=$?
-HTTP_DENIED_OUT="$(docker-helper session create --endpoint "$HTTP_EP" --token-file "$CRED_FILE" --workspace "$DENIED_WS" 2>&1)"
+HTTP_DENIED_OUT="$(docker-helper session create --endpoint "$HTTP_EP" --token-file "$CRED_FILE" "$DENIED_WS" 2>&1)"
 HTTP_DENIED_RC=$?
 if [ "$UNIX_DENIED_RC" -ne 0 ] && [ "$HTTP_DENIED_RC" -ne 0 ] \
     && [ "$UNIX_DENIED_RC" = "$HTTP_DENIED_RC" ]; then
@@ -986,7 +986,7 @@ else
   fail_uat "authorization result differs between transports (unix rc=$UNIX_DENIED_RC http rc=$HTTP_DENIED_RC) unix='$UNIX_DENIED_OUT' http='$HTTP_DENIED_OUT'"
 fi
 rm -rf "$DENIED_WS"
-docker-helper session delete --system --id "$HTTP_SESS_ID" >/dev/null 2>&1 || true
+docker-helper session delete --system "$HTTP_SESS_ID" >/dev/null 2>&1 || true
 info "loopback HTTP acceptance ok"
 
 # ==============================================================================

@@ -120,7 +120,7 @@ done
 
 # --- container-created object ----------------------------------------------------------
 RW_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$STOK" \
-  dh run --image "$IMAGE" --mount rw:/mnt/rw -- sh -ec 'echo container-object > /mnt/rw/container-file; cat /mnt/rw/container-file' 2>&1)"
+  dh run --mount rw:/mnt/rw "$IMAGE" -- sh -ec 'echo container-object > /mnt/rw/container-file; cat /mnt/rw/container-file' 2>&1)"
 RW_EC=$?
 CONTAINER_FILE="$WS/rw/container-file"
 if [ "$RW_EC" -eq 0 ] && printf '%s' "$RW_OUT" | grep -q 'container-object'; then
@@ -137,7 +137,7 @@ else
 fi
 
 # --- REAL lifecycle: session delete (teardown relabel workspace_t -> usr_t) -----------
-if dh session delete --system --id "$SID" >/dev/null 2>&1; then
+if dh session delete --system "$SID" >/dev/null 2>&1; then
   reg_ok "session deleted (teardown relabel docker_helper_workspace_t -> usr_t completed)"
 else
   reg_fail "session delete failed"

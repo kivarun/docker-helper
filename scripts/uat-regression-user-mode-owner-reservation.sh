@@ -197,7 +197,7 @@ expect_reserved() {
 # transparent default chain and runs a trivial container.
 um_session_run() {
   local what="$1" json sid tok ldefault run_out
-  if ! json="$(dhx session create --workspace "$WS" --json 2>"$TMPDIR_UMO/sess.err")"; then
+  if ! json="$(dhx session create "$WS" --json 2>"$TMPDIR_UMO/sess.err")"; then
     reg_fail "$what: selector-less session create failed: $(head -2 "$TMPDIR_UMO/sess.err" 2>/dev/null | tr '\n' ' ' | redact)"
     return
   fi
@@ -209,13 +209,13 @@ um_session_run() {
     return
   fi
   if run_out="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$tok" \
-      /usr/bin/docker-helper run --image alpine:3.24 -- sh -ec 'echo UMO-RUN-OK' 2>&1)" \
+      /usr/bin/docker-helper run alpine:3.24 -- sh -ec 'echo UMO-RUN-OK' 2>&1)" \
       && printf '%s' "$run_out" | grep -q 'UMO-RUN-OK'; then
     reg_ok "$what: selector-less Session ran a trivial container ($sid)"
   else
     reg_fail "$what: trivial container run failed: $(printf '%s' "$run_out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  dhx session delete --id "$sid" >/dev/null 2>&1 || true
+  dhx session delete "$sid" >/dev/null 2>&1 || true
 }
 
 # --- A. transparent chain identification -------------------------------------
@@ -247,7 +247,7 @@ assert_owner_invariant "C after no-ops"
 
 # --- D. non-reserved Launcher mutability under the same Principal ------------
 
-second_out="$(dhx launcher create --principal "$OWNER" --name second --no-credential --json 2>&1)"
+second_out="$(dhx launcher create --principal "$OWNER" second --no-credential --json 2>&1)"
 second_id="$(printf '%s' "$second_out" | um_field id || true)"
 if [ -n "$second_id" ]; then
   if dhx launcher set --principal "$OWNER" --enabled false "$second_id" >/dev/null 2>&1 \

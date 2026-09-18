@@ -148,7 +148,7 @@ INODES_BEFORE="$(run_inodes)"
 MAC_BEFORE="$(mac_state_inventory)"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
 
-if dh_build --context ctx-bytes --dockerfile Dockerfile --image uat-h4-bytes:2.2; then
+if dh_build ctx-bytes --dockerfile Dockerfile --image uat-h4-bytes:2.2; then
   reg_fail "bytes case: the over-ceiling sparse payload must be refused"
 else
   if grep -q 'status 400' /tmp/h4-build.err && grep -q 'code build_context_too_large' /tmp/h4-build.err; then
@@ -203,7 +203,7 @@ reg_ok "entries fixture: Dockerfile + ${ENTRY_CEILING} zero-byte files (one entr
 MAC_BEFORE="$(mac_state_inventory)"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
 
-if dh_build --context ctx-entries --dockerfile Dockerfile --image uat-h4-entries:2.2; then
+if dh_build ctx-entries --dockerfile Dockerfile --image uat-h4-entries:2.2; then
   reg_fail "entries case: the over-ceiling entry count must be refused"
 else
   if grep -q 'status 400' /tmp/h4-build.err && grep -q 'code build_context_too_large' /tmp/h4-build.err; then
@@ -235,7 +235,7 @@ reg_ok "depth fixture: chain $((DEPTH_CEILING + 1)) levels deep with a leaf file
 MAC_BEFORE="$(mac_state_inventory)"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
 
-if dh_build --context ctx-depth --dockerfile Dockerfile --image uat-h4-depth:2.2; then
+if dh_build ctx-depth --dockerfile Dockerfile --image uat-h4-depth:2.2; then
   reg_fail "depth case: the over-ceiling depth must be refused"
 else
   if grep -q 'status 400' /tmp/h4-build.err && grep -q 'code build_context_too_large' /tmp/h4-build.err; then
@@ -259,7 +259,7 @@ printf 'h4-valid\n' > "$WS/ctx-valid/payload.txt"
 chown -R "$USER:$USER" "$WS/ctx-valid"
 MARK="$(date '+%Y-%m-%d %H:%M:%S')"
 
-if dh_build --context ctx-valid --dockerfile Dockerfile --image uat-h4-valid:2.2; then
+if dh_build ctx-valid --dockerfile Dockerfile --image uat-h4-valid:2.2; then
   reg_ok "a subsequent small valid build succeeds"
 else
   reg_fail "the subsequent small valid build failed: $(head -3 /tmp/h4-build.err | redact)"

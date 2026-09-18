@@ -57,7 +57,7 @@ reg_info "source dir inode A: $INODE_A_DIR  source file inode A: $INODE_A_FILE (
 S1='cat /mnt/src/file > /mnt/ctl/phase1; echo started > /mnt/ctl/started1; while [ ! -f /mnt/ctl/release1 ]; do sleep 1; done; cat /mnt/src/file > /mnt/ctl/phase2; echo OP1-DONE'
 RUN1="/tmp/uat-reg6-run1.log"
 DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh run --image "$IMAGE" --mount src:/mnt/src --mount ctl:/mnt/ctl -- sh -ec "$S1" \
+  dh run --mount src:/mnt/src --mount ctl:/mnt/ctl "$IMAGE" -- sh -ec "$S1" \
   >"$RUN1" 2>&1 &
 RUN1_PID=$!
 
@@ -130,7 +130,7 @@ fi
 # 6. new helper operation using the same pathname sees B
 # ---------------------------------------------------------------------------
 NEW_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$stok" \
-  dh run --image "$IMAGE" --mount src:/mnt/src -- sh -ec 'cat /mnt/src/file' 2>/dev/null)"
+  dh run --mount src:/mnt/src "$IMAGE" -- sh -ec 'cat /mnt/src/file' 2>/dev/null)"
 if [ "$NEW_OUT" = "CONTENT-B" ]; then
   reg_ok "new helper operation sees replaced content B"
 else

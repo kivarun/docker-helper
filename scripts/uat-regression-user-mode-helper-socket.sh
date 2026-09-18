@@ -130,15 +130,15 @@ fi
 WS="$U_HOME/ws"
 
 # --- A. ordinary user-mode run keeps working, no helper projection ----------
-A_JSON="$(dhx session create --workspace "$WS" --json 2>"$TMPDIR_UHS/a-sess.err")" \
+A_JSON="$(dhx session create "$WS" --json 2>"$TMPDIR_UHS/a-sess.err")" \
   || { reg_fail "A: user-mode session create failed: $(head -2 "$TMPDIR_UHS/a-sess.err" 2>/dev/null | tr '\n' ' ' | redact)"; reg_result; }
 A_SID="$(printf '%s' "$A_JSON" | json_field id)"
 A_TOK="$(printf '%s' "$A_JSON" | json_field token)"
 [ -n "$A_SID" ] && [ -n "$A_TOK" ] || { reg_fail "A: session create returned no identity"; reg_result; }
 
 A_OUT="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$A_TOK" \
-  /usr/bin/docker-helper run --image alpine:3.24 \
-  -- sh -ec 'echo U18-RUN-OK; test ! -e /run/docker-helper && echo U18-NO-PROJECTION' 2>&1)"
+  /usr/bin/docker-helper run \
+  alpine:3.24 -- sh -ec 'echo U18-RUN-OK; test ! -e /run/docker-helper && echo U18-NO-PROJECTION' 2>&1)"
 if printf '%s' "$A_OUT" | grep -q 'U18-RUN-OK'; then
   reg_ok "A: ordinary user-mode run works without --helper-socket"
 else
@@ -155,7 +155,7 @@ fi
 # add another one (no run Operation is created for it).
 STARTS_BEFORE="$(grep -c '"event":"run.start"' "$TMPDIR_UHS/serve.log" 2>/dev/null || true)"
 B_OUT="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$A_TOK" \
-  /usr/bin/docker-helper run --image alpine:3.24 --helper-socket -- true 2>&1)"
+  /usr/bin/docker-helper run --helper-socket alpine:3.24 -- true 2>&1)"
 B_RC=$?
 if [ "$B_RC" -ne 0 ] && printf '%s' "$B_OUT" | grep -q 'code invalid_helper_socket'; then
   reg_ok "B: --helper-socket rejected by the user-mode daemon (invalid_helper_socket, rc=$B_RC)"
@@ -185,13 +185,13 @@ fi
 
 # --- D. ordinary run still works after the fail-closed rejection ---------------
 D_OUT="$(sudo -u "$U_USER" "${U_ENV[@]}" DOCKER_HELPER_SESSION_TOKEN="$A_TOK" \
-  /usr/bin/docker-helper run --image alpine:3.24 -- sh -ec 'echo U18-AFTER-OK' 2>&1)"
+  /usr/bin/docker-helper run alpine:3.24 -- sh -ec 'echo U18-AFTER-OK' 2>&1)"
 if printf '%s' "$D_OUT" | grep -q 'U18-AFTER-OK'; then
   reg_ok "D: ordinary user-mode run still works after the rejection"
 else
   reg_fail "D: ordinary user-mode run broke after the rejection: $(printf '%s' "$D_OUT" | head -3 | tr '\n' ' ' | redact)"
 fi
 
-dhx session delete --id "$A_SID" >/dev/null 2>&1 || true
+dhx session delete "$A_SID" >/dev/null 2>&1 || true
 
 reg_result

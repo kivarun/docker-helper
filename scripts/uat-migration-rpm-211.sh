@@ -397,7 +397,7 @@ fi
 
 if [ -n "${M_S1_TOKEN:-}" ]; then
   M_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$M_S1_TOKEN" \
-    dh run --image alpine:3.24 --mount .:/mnt/ws -- \
+    dh run --mount .:/mnt/ws alpine:3.24 -- \
     sh -ec 'echo migrated-write > /mnt/ws/after-migration.txt && cat /mnt/ws/input.txt && echo MIG211-RW-OK' 2>&1)"
   if printf '%s\n' "$M_RUN_OUT" | grep -q 'MIG211-RW-OK' \
       && [ "$(cat "$M_POLICY/sub/ws/after-migration.txt" 2>/dev/null)" = "migrated-write" ]; then

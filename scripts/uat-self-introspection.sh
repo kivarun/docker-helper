@@ -159,7 +159,7 @@ cleanup() {
   local sid
   if [ -n "$SELF_SESSION_IDS" ]; then
     for sid in $SELF_SESSION_IDS; do
-      dh session delete --system --id "$sid" >/dev/null 2>&1 || true
+      dh session delete --system "$sid" >/dev/null 2>&1 || true
     done
   fi
   dh principal delete --system "$SELF_PRINC" >/dev/null 2>&1 || true
@@ -279,7 +279,7 @@ fi
 # scenario S3: launcher self (inherit and restricted scopes)
 # =============================================================================
 scenario "S3: launcher self (inherit and restricted scopes)"
-S3_L_OUT="$(dh launcher create --system --principal "$PRINCIPAL" --name restricted-l --issue-credential --json 2>/dev/null || true)"
+S3_L_OUT="$(dh launcher create --system --principal "$PRINCIPAL" restricted-l --issue-credential --json 2>/dev/null || true)"
 S3_L_TOKEN="$(printf '%s\n' "$S3_L_OUT" | json_field token)"
 S3_L_ID="$(printf '%s\n' "$S3_L_OUT" | json_field id)"
 if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
@@ -308,7 +308,7 @@ if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
   # Restricted scope: the restricted root narrows the effective composition.
   S3_RES_DIR="$FIXTURE_ROOT/res-only"
   mkdir -p "$S3_RES_DIR"; chown "$PRINCIPAL:$PRINCIPAL" "$S3_RES_DIR"
-  if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only "$S3_RES_DIR" restricted-l >/dev/null 2>&1; then
+  if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only restricted-l "$S3_RES_DIR" >/dev/null 2>&1; then
     if S3_SELF="$(dh self --system --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
       if printf '%s\n' "$S3_SELF" | grep -q '"scope": "restricted"' \
           && printf '%s' "$S3_SELF" | EXPECTED_RO="$S3_RES_DIR" python3 -c '
@@ -373,7 +373,7 @@ fi
 # =============================================================================
 scenario "S5: session self equals the session show body"
 S5_WS="$FIXTURE_ROOT/ws"
-S5_CREATE="$(dh session create --system --token-file /tmp/uat-self-principal.token --workspace "$S5_WS" --json 2>/dev/null || true)"
+S5_CREATE="$(dh session create --system --token-file /tmp/uat-self-principal.token "$S5_WS" --json 2>/dev/null || true)"
 S5_ID="$(printf '%s\n' "$S5_CREATE" | json_field id)"
 S5_TOKEN="$(printf '%s\n' "$S5_CREATE" | json_field token)"
 if [ -n "$S5_ID" ] && [ -n "$S5_TOKEN" ]; then
@@ -540,7 +540,7 @@ if [ -n "$S7_TTL_BEFORE" ] \
     && dh config set session_ttl 2s >/dev/null 2>&1 \
     && dh reload --system >/dev/null 2>&1 \
     && si_wait_health; then
-  S7_EXP_CREATE="$(dh session create --system --token-file /tmp/uat-self-principal.token --workspace "$S5_WS" --json 2>/dev/null || true)"
+  S7_EXP_CREATE="$(dh session create --system --token-file /tmp/uat-self-principal.token "$S5_WS" --json 2>/dev/null || true)"
   S7_EXP_ID="$(printf '%s\n' "$S7_EXP_CREATE" | json_field id)"
   S7_EXP_TOKEN="$(printf '%s\n' "$S7_EXP_CREATE" | json_field token)"
   if [ -n "$S7_EXP_ID" ] && [ -n "$S7_EXP_TOKEN" ]; then
@@ -595,7 +595,7 @@ fi
 scenario "Z: no residue after the self-introspection scenarios"
 if [ -n "$SELF_SESSION_IDS" ]; then
   for sid in $SELF_SESSION_IDS; do
-    if ! dh session delete --system --id "$sid" >/dev/null 2>&1; then
+    if ! dh session delete --system "$sid" >/dev/null 2>&1; then
       # An expired session may already have been reaped by the daemon; the
       # delete only failed when the Session is still provably present.
       if dh session show --system "$sid" >/dev/null 2>&1; then

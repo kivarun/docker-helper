@@ -162,6 +162,7 @@ REGRESSIONS=(
   "25:H5 fixed resource admission ceilings:uat-regression-h5-resource-admission.sh"
   "26:H8 bounded MAC-command liveness:uat-regression-h8-mac-liveness.sh"
   "27:H2 commit-boundary credential revocation race:uat-regression-h2-parked-revocation.sh"
+  "28:RC8 CLI grammar gate:uat-regression-rc8-grammar-gate.sh"
 )
 
 declare -A RESULT

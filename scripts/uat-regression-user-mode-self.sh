@@ -126,7 +126,7 @@ WS="$U_HOME/ws"
 
 # --- scenario A: session bearer self on the user-mode daemon -----------------
 
-S_CREATE="$(dhx session create --workspace "$WS" --json 2>/dev/null || true)"
+S_CREATE="$(dhx session create "$WS" --json 2>/dev/null || true)"
 S_ID="$(printf '%s\n' "$S_CREATE" | json_field id)"
 S_TOKEN="$(printf '%s\n' "$S_CREATE" | json_field token)"
 if [ -n "$S_ID" ] && [ -n "$S_TOKEN" ]; then
@@ -194,6 +194,6 @@ fi
 
 # --- cleanup: remove the probe session ---------------------------------------
 
-dhx session delete --id "$S_ID" >/dev/null 2>&1 || reg_fail "cleanup: probe session delete failed"
+dhx session delete "$S_ID" >/dev/null 2>&1 || reg_fail "cleanup: probe session delete failed"
 
 reg_result

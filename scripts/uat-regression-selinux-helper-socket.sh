@@ -74,8 +74,8 @@ rm -f "$WS/reg6-child-id" 2>/dev/null || true
 # (The /run/docker-helper DIRECTORY may exist by design: the trusted-CA
 # projection mounts into /run/docker-helper/trusted-ca.)
 if DOCKER_HELPER_SESSION_TOKEN="$STOK" \
-   dh run --image "$IMAGE" --mount .:/workspace \
-   -- sh -ec '
+   dh run --mount .:/workspace \
+   "$IMAGE" -- sh -ec '
      test ! -S /run/docker-helper/docker-helper.sock
      label="$(cat /proc/self/attr/current 2>/dev/null || true)"
      case "$label" in *docker_helper_container_t*) true;; *) echo "unexpected domain: $label" >&2; exit 1;; esac
@@ -87,8 +87,8 @@ fi
 
 # --- 2. run with --helper-socket: the injected socket is reachable -------------
 if DOCKER_HELPER_SESSION_TOKEN="$STOK" \
-   dh run --image "$IMAGE" --helper-socket \
-   -- sh -ec '
+   dh run --helper-socket \
+   "$IMAGE" -- sh -ec '
      test -S /run/docker-helper/docker-helper.sock
      label="$(cat /proc/self/attr/current 2>/dev/null || true)"
      case "$label" in *docker_helper_container_t*) true;; *) echo "unexpected domain: $label" >&2; exit 1;; esac
@@ -100,9 +100,9 @@ fi
 
 # --- 3. real authorized request through the injected socket --------------------
 if DOCKER_HELPER_SESSION_TOKEN="$STOK" UAT_LAUNCHER_CRED_SOURCE="$LC_TOKEN" \
-   dh run --image "$IMAGE" --helper-socket --mount .:/workspace \
+   dh run --helper-socket --mount .:/workspace \
    --env-from "UAT_LC=UAT_LAUNCHER_CRED_SOURCE" \
-   -- sh -ec '
+   "$IMAGE" -- sh -ec '
      printf "%s\n" "$UAT_LC" > /tmp/launcher-cred
      chmod 600 /tmp/launcher-cred
      LIST=$(/workspace/docker-helper session list \
@@ -118,7 +118,7 @@ fi
 
 # --- 4. helper-private runtime state stays unreadable ---------------------------
 if DOCKER_HELPER_SESSION_TOKEN="$STOK" \
-   dh run --image "$IMAGE" --helper-socket -- sh -ec '
+   dh run --helper-socket "$IMAGE" -- sh -ec '
      ls /run/docker-helper/builds >/dev/null 2>&1 && exit 1
      ls /run/docker-helper/mounts >/dev/null 2>&1 && exit 1
      ls /run/docker-helper/sessions >/dev/null 2>&1 && exit 1
@@ -138,7 +138,7 @@ else
 fi
 
 # --- cleanup --------------------------------------------------------------------
-dh session delete --system --id "$SID" >/dev/null 2>&1 || reg_fail "session delete failed"
+dh session delete --system "$SID" >/dev/null 2>&1 || reg_fail "session delete failed"
 rm -f "$SEL_CRED"
 rm -rf "$(dirname "$WS")"
 

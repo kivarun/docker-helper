@@ -568,7 +568,7 @@ reg_principal_credential() {
 # file and sets REG_SESSION_ID / REG_SESSION_TOKEN.
 reg_session() {
   local credfile="$1" ws="$2" json
-  json="$(dh session create --system --token-file "$credfile" --workspace "$ws" --json 2>/dev/null)" || return 1
+  json="$(dh session create --system --token-file "$credfile" "$ws" --json 2>/dev/null)" || return 1
   REG_SESSION_ID="$(printf '%s' "$json" | json_field id)"
   REG_SESSION_TOKEN="$(printf '%s' "$json" | json_field token)"
   [ -n "$REG_SESSION_ID" ] && [ -n "$REG_SESSION_TOKEN" ] || return 1

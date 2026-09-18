@@ -162,7 +162,7 @@ CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
 printf '%s\n' "$CRED_TOKEN" > "$CRED_FILE"
 chmod 600 "$CRED_FILE"
 
-SESSION_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" --workspace "$WS" --json)" \
+SESSION_JSON="$(docker-helper session create --system --token-file "$CRED_FILE" "$WS" --json)" \
   || { echo "error: session create failed" >&2; exit 1; }
 SESSION_TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
 [ -n "$SESSION_TOKEN" ] || { echo "error: session create returned no token" >&2; exit 1; }
@@ -177,7 +177,7 @@ while [ ! -f /mnt/rw/release ]; do sleep 1; done
 cat /mnt/rw/probe.txt
 echo PIN-READ-OK'
 DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-  docker-helper run --image "$IMAGE" --mount rw:/mnt/rw -- sh -ec "$CONTAINER_SCRIPT" \
+  docker-helper run --mount rw:/mnt/rw "$IMAGE" -- sh -ec "$CONTAINER_SCRIPT" \
   > "$RUN_LOG" 2>&1 &
 RUN_PID=$!
 
@@ -366,7 +366,7 @@ else
   info "original run did not survive the reinstall (exit=$ORIG_EC); %post restarts the daemon, which terminates in-flight operations"
   info "proving post-install container access with a fresh docker-helper run"
   FRESH_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_TOKEN" \
-    docker-helper run --image "$IMAGE" --mount rw:/mnt/rw -- sh -ec 'cat /mnt/rw/probe.txt && echo PIN-READ-OK' 2>&1)"
+    docker-helper run --mount rw:/mnt/rw "$IMAGE" -- sh -ec 'cat /mnt/rw/probe.txt && echo PIN-READ-OK' 2>&1)"
   FRESH_EC=$?
   printf '%s\n' "$FRESH_OUT"
   if [ "$FRESH_EC" -eq 0 ] && printf '%s\n' "$FRESH_OUT" | grep -q 'PIN-READ-OK' \

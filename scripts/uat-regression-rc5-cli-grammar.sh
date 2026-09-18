@@ -272,18 +272,18 @@ subcase_b() {
   home="$(reg_setup_principal "$user")" || { reg_fail "B: fixture setup failed"; return; }
   mkdir -p "$home/b1" "$home/b2"
   chown -R "$user:$user" "$home"
-  if ! dh launcher create --principal "$user" --name build-agent --no-credential >/dev/null 2>&1; then
+  if ! dh launcher create --principal "$user" build-agent --no-credential >/dev/null 2>&1; then
     reg_fail "B: launcher create failed"
     cleanup_principal "$user"
     return
   fi
 
   local out rc
-  # 1. add PATH LAUNCHER: the new grammar targets the named launcher.
-  if out="$(dh launcher allowed-root add --principal "$user" "$home/b1" build-agent 2>&1)" && printf '%s' "$out" | grep -q 'added'; then
-    reg_ok "B: launcher allowed-root add PATH LAUNCHER adds to the named launcher"
+  # 1. add LAUNCHER PATH: the target-first grammar targets the named launcher.
+  if out="$(dh launcher allowed-root add --principal "$user" build-agent "$home/b1" 2>&1)" && printf '%s' "$out" | grep -q 'added'; then
+    reg_ok "B: launcher allowed-root add LAUNCHER PATH adds to the named launcher"
   else
-    reg_fail "B: add PATH LAUNCHER failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+    reg_fail "B: add LAUNCHER PATH failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
   out="$(dh launcher allowed-root list --principal "$user" build-agent 2>&1)"
   if printf '%s' "$out" | grep -qx "$home/b1"; then
@@ -292,27 +292,29 @@ subcase_b() {
     reg_fail "B: list build-agent missing the root: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
-  # 2. the retired [LAUNCHER] PATH order is not silently accepted.
+  # 2. the retired PATH-first order is not silently accepted: two
+  #    positionals are LAUNCHER PATH, so a leading PATH-shaped word is a
+  #    launcher selector and the daemon rejects the invalid name.
   rc=0
-  out="$(dh launcher allowed-root add --principal "$user" build-agent "$home/b2" 2>&1)" || rc=$?
+  out="$(dh launcher allowed-root add --principal "$user" "$home/b2" build-agent 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    reg_ok "B: the retired [LAUNCHER] PATH order is no longer the accepted meaning"
+    reg_ok "B: the retired PATH-first order is no longer the accepted meaning"
   else
-    reg_fail "B: the retired [LAUNCHER] PATH order still mutated something: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+    reg_fail "B: the retired PATH-first order still mutated something: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
-  # 3. set-access PATH ACCESS [LAUNCHER].
-  if out="$(dh launcher allowed-root set-access --principal "$user" "$home/b1" read_only build-agent 2>&1)" && printf '%s' "$out" | grep -q 'read_only'; then
-    reg_ok "B: launcher allowed-root set-access PATH ACCESS LAUNCHER works"
+  # 3. set-access LAUNCHER PATH ACCESS (target-first).
+  if out="$(dh launcher allowed-root set-access --principal "$user" build-agent "$home/b1" read_only 2>&1)" && printf '%s' "$out" | grep -q 'read_only'; then
+    reg_ok "B: launcher allowed-root set-access LAUNCHER PATH ACCESS works"
   else
-    reg_fail "B: set-access PATH ACCESS LAUNCHER failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+    reg_fail "B: set-access LAUNCHER PATH ACCESS failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
-  # 4. remove PATH [LAUNCHER].
-  if out="$(dh launcher allowed-root remove --principal "$user" "$home/b1" build-agent 2>&1)" && printf '%s' "$out" | grep -q 'removed'; then
-    reg_ok "B: launcher allowed-root remove PATH LAUNCHER works"
+  # 4. remove LAUNCHER PATH (target-first).
+  if out="$(dh launcher allowed-root remove --principal "$user" build-agent "$home/b1" 2>&1)" && printf '%s' "$out" | grep -q 'removed'; then
+    reg_ok "B: launcher allowed-root remove LAUNCHER PATH works"
   else
-    reg_fail "B: remove PATH LAUNCHER failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+    reg_fail "B: remove LAUNCHER PATH failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
 
   cleanup_principal "$user"
@@ -368,7 +370,7 @@ subcase_d() {
   home="$(reg_setup_principal "$user")" || { reg_fail "D: fixture setup failed"; return; }
   mkdir -p "$home/d1"
   chown -R "$user:$user" "$home"
-  dh launcher create --system --principal "$user" --name legacyprobe --allowed-root "$home/d1" --no-credential >/dev/null 2>&1
+  dh launcher create --system --principal "$user" legacyprobe --allowed-root "$home/d1" --no-credential >/dev/null 2>&1
 
   local out rc
   # 1. config show carries only the canonical allowed_roots projection.
@@ -434,10 +436,10 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   # Seed stored roots in every family through the real CLI.
-  dh launcher create --system --principal "$user" --name build-agent --no-credential >/dev/null 2>&1
+  dh launcher create --system --principal "$user" build-agent --no-credential >/dev/null 2>&1
   dh config allowed-root add "$home/e2" >/dev/null 2>&1
   dh principal allowed-root add --system "$user" "$home/e1" >/dev/null 2>&1
-  dh launcher allowed-root add --system --principal "$user" "$home/e2" build-agent >/dev/null 2>&1
+  dh launcher allowed-root add --system --principal "$user" build-agent "$home/e2" >/dev/null 2>&1
 
   local script="$TMPDIR_REG20/completion-20.bash"
   if ! dh completion bash > "$script" 2>/dev/null || [ ! -s "$script" ]; then
@@ -465,23 +467,27 @@ subcase_e() {
   out="$(run_completion "$script" /usr/bin/docker-helper launcher allowed-root add "$home/e1" -- --)"
   assert_completion "E: after -- no flags are offered" "" "$out" || true
 
-  # 5. launcher allowed-root add PATH completes the effective Principal
-  #    ceiling as boundary segments — never the host filesystem.
-  local eff_roots expected_top
+  # 5. launcher allowed-root add: the target-first first positional is
+  #    ambiguous between the LAUNCHER selector and the PATH operand, so the
+  #    union of both domains is offered: the daemon-backed Launcher
+  #    selectors plus the effective Principal ceiling's boundary segments —
+  #    never the host filesystem.
+  local eff_roots expected_top expected_union
   eff_roots="$(dh completion roots principal --principal "$user" 2>/dev/null)"
   expected_top="$(printf '%s\n' "$eff_roots" | sed -n 's|^/||p' | sed 's|/.*$||' | LC_ALL=C sort -u | sed 's|^|/|')"
+  expected_union="$(printf '%s\n%s\n' "$expected_top" "$(dh completion selectors launcher --principal "$user" 2>/dev/null)" | LC_ALL=C sort -u)"
   out="$(run_completion "$script" /usr/bin/docker-helper launcher allowed-root add --principal "$user" "")"
   if [ -n "$expected_top" ]; then
-    assert_completion "E: launcher add PATH offers exactly the ceiling boundary segments" "$expected_top" "$out" || true
+    assert_completion "E: launcher add first positional offers the selector + ceiling union" "$expected_union" "$out" || true
   else
     reg_fail "E: launcher add ceiling probe failed (completion roots principal empty)"
   fi
 
-  # 6. launcher allowed-root remove PATH completes the stored Launcher
-  #    roots of the default Launcher; the stored root completes exactly.
+  # 6. launcher allowed-root remove: the ambiguous first positional offers
+  #    the selector domain plus the default Launcher's stored roots.
   dh launcher allowed-root add --system --principal "$user" "$home/e1" >/dev/null 2>&1
   out="$(run_completion "$script" /usr/bin/docker-helper launcher allowed-root remove --principal "$user" "")"
-  assert_completion "E: launcher remove PATH offers exactly the default-Launcher stored roots" "$home/e1" "$out" || true
+  assert_completion "E: launcher remove first positional offers selectors + stored roots" "$expected_union" "$out" || true
 
   # 7. principal allowed-root mutations: USER completes from the daemon
   #    selector introspection; PATH completes the stored Principal roots

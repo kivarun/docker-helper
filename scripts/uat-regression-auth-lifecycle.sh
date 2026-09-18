@@ -48,7 +48,7 @@ mkdir -p "$CRED_DIR"
 # run_ok returns 0 when the given docker-helper data-plane op (session token in
 # DOCKER_HELPER_SESSION_TOKEN) succeeds.
 run_ok() {
-  DOCKER_HELPER_SESSION_TOKEN="$1" dh run --image "$IMAGE" -- sh -ec 'true' >/dev/null 2>&1
+  DOCKER_HELPER_SESSION_TOKEN="$1" dh run "$IMAGE" -- sh -ec 'true' >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ subcase_a() {
     return
   fi
 
-  if dh session create --system --token-file "$CRED_BASIC" --workspace "$ws" --json >/dev/null 2>&1; then
+  if dh session create --system --token-file "$CRED_BASIC" "$ws" --json >/dev/null 2>&1; then
     reg_fail "A: revoked credential performed a new control-plane operation (session create)"
   else
     reg_ok "A: revoked credential rejected for new control-plane operation"
@@ -110,7 +110,7 @@ subcase_b() {
   fi
   reg_ok "B: allowed root narrowed to $narrow"
 
-  if dh session create --system --token-file "$cred" --workspace "$ws2" --json >/dev/null 2>&1; then
+  if dh session create --system --token-file "$cred" "$ws2" --json >/dev/null 2>&1; then
     reg_fail "B: new session outside narrowed ceiling was accepted"
   else
     reg_ok "B: new session outside narrowed ceiling rejected"
@@ -138,7 +138,7 @@ subcase_c() {
   reg_session "$cred" "$ws" || { reg_fail "C: session create failed"; return; }
   local sid="$REG_SESSION_ID" stok="$REG_SESSION_TOKEN"
 
-  if ! dh session delete --system --id "$sid" >/dev/null 2>&1; then
+  if ! dh session delete --system "$sid" >/dev/null 2>&1; then
     reg_fail "C: session delete failed"
     return
   fi
@@ -177,7 +177,7 @@ subcase_d() {
   local runlog="/tmp/uat-reg3/d-run.log"
   local script='echo started > /mnt/ctl/started; n=0; while [ ! -f /mnt/ctl/release ]; do n=$((n+1)); echo "$n" >> /mnt/ctl/heartbeat; sleep 1; done; echo OP-DONE > /mnt/ctl/op-done'
   DOCKER_HELPER_SESSION_TOKEN="$stok" \
-    dh run --image "$IMAGE" --mount ctl:/mnt/ctl -- sh -ec "$script" >"$runlog" 2>&1 &
+    dh run --mount ctl:/mnt/ctl "$IMAGE" -- sh -ec "$script" >"$runlog" 2>&1 &
   local runpid=$!
 
   # Wait for the container to report readiness (started marker in the mount).
@@ -197,7 +197,7 @@ subcase_d() {
   hb_before="$(wc -l < "$ctl/heartbeat" 2>/dev/null || echo 0)"
 
   # Lifecycle change: delete the session while the operation is running.
-  dh session delete --system --id "$sid" >/dev/null 2>&1 || true
+  dh session delete --system "$sid" >/dev/null 2>&1 || true
   reg_ok "D: session deleted while operation running"
 
   # The Docker operation must continue: the heartbeat in the pinned control
@@ -259,7 +259,7 @@ subcase_e() {
     reg_ok "E: active session invalidated per contract after principal disable"
   fi
 
-  if dh session create --system --token-file "$cred" --workspace "$ws" --json >/dev/null 2>&1; then
+  if dh session create --system --token-file "$cred" "$ws" --json >/dev/null 2>&1; then
     reg_fail "E: disabled principal credential still controls resources"
   else
     reg_ok "E: disabled principal credential cannot create resources"
@@ -334,19 +334,19 @@ subcase_f() {
     return
   fi
 
-  if dh session create --system --token-file "$cred_b_file" --workspace "$ws" --json >/dev/null 2>&1; then
+  if dh session create --system --token-file "$cred_b_file" "$ws" --json >/dev/null 2>&1; then
     reg_fail "F: pre-rotate bearer B remained valid"
   else
     reg_ok "F: pre-rotate bearer B rejected immediately"
   fi
-  if dh session create --system --token-file "$cred_a_file" --workspace "$ws" --json >/dev/null 2>&1; then
+  if dh session create --system --token-file "$cred_a_file" "$ws" --json >/dev/null 2>&1; then
     reg_fail "F: revoked historical bearer A was resurrected"
   else
     reg_ok "F: historical revoked bearer A remains rejected"
   fi
 
   printf '%s\n' "$rotate_tok" > "$cred_new_file"; chmod 600 "$cred_new_file"
-  sid_new="$(dh session create --system --token-file "$cred_new_file" --workspace "$ws" --json 2>/dev/null | json_field id || true)"
+  sid_new="$(dh session create --system --token-file "$cred_new_file" "$ws" --json 2>/dev/null | json_field id || true)"
   if [ -n "$sid_new" ]; then
     reg_ok "F: replacement bearer authenticates and creates a Session"
   else
