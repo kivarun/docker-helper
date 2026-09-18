@@ -61,6 +61,35 @@ func workspaceOracleCases(t *testing.T, root string) []struct {
 	return cases
 }
 
+// TestWorkspaceAtAllowedRootItselfIsRefused proves the strict-inside
+// workspace relation of Session creation: an effective allowed root is an
+// authority ceiling, not a valid Session workspace — a request spelling at
+// the root itself is refused with the bounded authorization-shape refusal,
+// while a proper descendant of the same root is still issued.
+func TestWorkspaceAtAllowedRootItselfIsRefused(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0].Path
+
+	resp := createSessionThroughMux(app, testAdminToken, root)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("workspace at the allowed root itself: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
+	}
+	errResp := decodeAPIError(t, resp.Body.Bytes())
+	if errResp.Code != "invalid_workspace" {
+		t.Fatalf("workspace at the allowed root itself: expected invalid_workspace, got %q (body=%s)", errResp.Code, resp.Body.String())
+	}
+	if errResp.Message != "workspace must be inside an allowed root" {
+		t.Fatalf("workspace at the allowed root itself: expected the bounded authorization-shape refusal, got %q", errResp.Message)
+	}
+
+	workspace := testWorkspaceDir(t, root)
+	resp = createSessionThroughMux(app, testAdminToken, workspace)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("proper descendant of the allowed root: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
+	}
+}
+
 // TestUnauthorizedWorkspaceRefusalsAreIndistinguishable proves the
 // authorization-gated resolver-detail boundary: for workspace request
 // spellings that are not inside the effective allowed-root ceiling, the

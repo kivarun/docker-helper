@@ -492,6 +492,32 @@ func TestBlackBoxCreateHelpNoRun(t *testing.T) {
 	}
 }
 
+// TestBlackBoxSessionCreateHelpStatesWorkspaceAndSelectorContracts proves the
+// session create help states the two user-visible Session-create contracts
+// verbatim: the strict-inside workspace relation (the allowed root itself is
+// an authority ceiling, not a valid Session workspace) and the
+// Launcher-credential selector semantics (no selector is needed; own
+// dhl_... ID is explicit self-selection; foreign ID and name behavior).
+func TestBlackBoxSessionCreateHelpStatesWorkspaceAndSelectorContracts(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/config.json")
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "create", "/tmp", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	for _, want := range []string{
+		"WORKSPACE must resolve to a proper descendant of an effective allowed\nroot; the allowed root itself is an authority ceiling, not a valid\nSession workspace.",
+		"With a\nLauncher credential, omit --launcher: the authenticated Launcher is\nselected automatically",
+		"supplying that Launcher's own dhl_... ID is\naccepted as explicit self-selection that does not change the target",
+		"A foreign Launcher ID reaches daemon authorization and answers with the\nnon-disclosing launcher-not-found refusal",
+		"rejected locally\nwith the dhl_... ID guidance",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("session create help must state the contract, missing: %q", want)
+		}
+	}
+}
+
 func TestBlackBoxSessionMissingSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session"}, &stdout, &stderr)
