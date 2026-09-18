@@ -204,8 +204,9 @@ subcase_b() {
     reg_fail "B: build session create failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
-  local bid="$(printf '%s' "$out" | json_field id)"
-  out="$(DOCKER_HELPER_SESSION_TOKEN="$bid" dh build --system "$ctx" --dockerfile Dockerfile --image uat-reg28:2.2 2>&1)"; rc=$?
+  local bid="$(printf '%s' "$out" | json_field id)" btoken="$(printf '%s' "$out" | json_field token)"
+  [ -n "$btoken" ] || { reg_fail "B: build session create returned no token"; return; }
+  out="$(DOCKER_HELPER_SESSION_TOKEN="$btoken" dh build --system "$ctx" --dockerfile Dockerfile --image uat-reg28:2.2 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ]; then
     reg_ok "B: build CONTEXT --dockerfile --image builds from the positional context"
     docker rmi uat-reg28:2.2 >/dev/null 2>&1 || true
