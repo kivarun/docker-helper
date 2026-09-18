@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -282,4 +285,155 @@ func TestSelfCLIEnvSessionBearer(t *testing.T) {
 	if len(*requests) != before {
 		t.Errorf("the refused env value must not issue any request")
 	}
+}
+
+// requireBearerSource asserts the recorded Authorization header equals
+// "Bearer "+want and never echoes bearer material in diagnostics: on a
+// mismatch only the bearer's length is reported.
+func requireBearerSource(t *testing.T, what, got, want string) {
+	t.Helper()
+	if got != want {
+		t.Errorf("%s: unexpected bearer source (got %d-byte bearer, want the %s)", what, len(got), what)
+	}
+}
+
+// TestSelfCLITokenFileWinsOverSessionEnv proves the first precedence rule of
+// the dual-authority self surface: with both the explicit --token-file and a
+// DOCKER_HELPER_SESSION_TOKEN present, the explicit token file is the
+// selected bearer and the session env value does not reach the daemon.
+func TestSelfCLITokenFileWinsOverSessionEnv(t *testing.T) {
+	envBearer := "dht_env-fixture-token"
+	var gotBearer atomic.Value
+	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBearer.Store(r.Header.Get("Authorization"))
+		if r.URL.Path == "/self" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(mustJSON(t, selfResponse{
+				OK:       true,
+				Type:     "session",
+				Resource: []byte(`{"id":"dhs_probe","workspace":"/tmp/ws"}`),
+			})))
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", envBearer)
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"self", "--endpoint", "http://" + strings.TrimPrefix(endpoint, "http://"), "--token-file", tokenPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0, stderr: %s", code, stderr.String())
+	}
+	if len(*requests) != 1 || (*requests)[0].path != "/self" {
+		t.Fatalf("requests = %+v, want exactly one GET /self", *requests)
+	}
+	requireBearerSource(t, "self with --token-file and session env", gotBearer.Load().(string), "Bearer test-token")
+	for _, out := range []string{stdout.String(), stderr.String()} {
+		if strings.Contains(out, envBearer) {
+			t.Errorf("bearer material leaked into command output")
+		}
+	}
+}
+
+// startSelfUnixStub starts a unix-socket self stub for the operator
+// credential-resolution cases: it captures the Authorization bearer and the
+// request count and answers GET /self with a session self resource.
+func startSelfUnixStub(t *testing.T, socketPath string) (bearer *atomic.Value, requestCount *int) {
+	t.Helper()
+	bearer = &atomic.Value{}
+	counter := 0
+	requestCount = &counter
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bearer.Store(r.Header.Get("Authorization"))
+		*requestCount++
+		if r.URL.Path == "/self" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(mustJSON(t, selfResponse{
+				OK:       true,
+				Type:     "session",
+				Resource: []byte(`{"id":"dhs_probe","workspace":"/tmp/ws"}`),
+			})))
+			return
+		}
+		http.NotFound(w, r)
+	})}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close() })
+	waitForDialReady(t, "unix", socketPath)
+	return bearer, requestCount
+}
+
+// installOperatorCredentialFixture writes the installed operator credential
+// the operator credential resolution would find (XDG_CONFIG_HOME) and sets
+// the environment for it. The token value is a fabricated test fixture and
+// is never printed in diagnostics.
+func installOperatorCredentialFixture(t *testing.T) string {
+	t.Helper()
+	xdgConfigHome := t.TempDir()
+	dir := filepath.Join(xdgConfigHome, "docker-helper")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credential.token"), []byte("dhc_installed-fixture-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	return "Bearer dhc_installed-fixture-token"
+}
+
+// TestSelfCLISessionEnvWinsOverInstalledCredential proves the second
+// precedence rule: with a non-empty DOCKER_HELPER_SESSION_TOKEN and an
+// installed operator credential present (the operator fallback source), self
+// uses the Session env bearer — an installed credential must never silently
+// turn the dual-authority introspection into the operator credential path.
+func TestSelfCLISessionEnvWinsOverInstalledCredential(t *testing.T) {
+	envBearer := "Bearer dht_env-fixture-token"
+	installed := installOperatorCredentialFixture(t)
+
+	dir := t.TempDir()
+	bearer, requestCount := startSelfUnixStub(t, filepath.Join(dir, "self.sock"))
+
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "dht_env-fixture-token")
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"self", "--endpoint", "unix://" + filepath.Join(dir, "self.sock")}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0, stderr: %s", code, stderr.String())
+	}
+	if *requestCount != 1 {
+		t.Fatalf("requests = %d, want exactly one /self request", *requestCount)
+	}
+	requireBearerSource(t, "self with session env and installed credential", bearer.Load().(string), envBearer)
+	// The installed operator credential must not be the selected bearer.
+	if got := bearer.Load().(string); got == installed {
+		t.Errorf("the installed operator credential was selected instead of the session env bearer")
+	}
+}
+
+// TestSelfCLINoSessionEnvFallsBackToOperatorCredential proves the third
+// precedence rule: with no --token-file and no DOCKER_HELPER_SESSION_TOKEN,
+// self falls back to the normal operator credential source (the installed
+// credential file resolution).
+func TestSelfCLINoSessionEnvFallsBackToOperatorCredential(t *testing.T) {
+	installed := installOperatorCredentialFixture(t)
+
+	dir := t.TempDir()
+	bearer, requestCount := startSelfUnixStub(t, filepath.Join(dir, "self.sock"))
+
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"self", "--endpoint", "unix://" + filepath.Join(dir, "self.sock")}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0, stderr: %s", code, stderr.String())
+	}
+	if *requestCount != 1 {
+		t.Fatalf("requests = %d, want exactly one /self request", *requestCount)
+	}
+	requireBearerSource(t, "self without session env", bearer.Load().(string), installed)
 }

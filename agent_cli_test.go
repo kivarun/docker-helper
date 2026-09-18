@@ -1658,3 +1658,45 @@ func TestPullCLINonTruncated(t *testing.T) {
 		t.Errorf("expected no truncation warning, got: %s", stderr.String())
 	}
 }
+
+// TestAgentCommandWithInstalledCredentialDoesNotFallback proves the
+// data-plane authentication-source contract: an installed operator
+// credential (the source operator/session-control commands resolve) must
+// never turn a data-plane command into an authenticated request — with no
+// DOCKER_HELPER_SESSION_TOKEN, pull fails locally naming the missing
+// session env, and no request reaches the daemon at all.
+func TestAgentCommandWithInstalledCredentialDoesNotFallback(t *testing.T) {
+	xdgConfigHome := t.TempDir()
+	credDir := filepath.Join(xdgConfigHome, "docker-helper")
+	if err := os.MkdirAll(credDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte("dhc_installed-fixture-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "agent.sock")
+	requests := 0
+	var bearer atomic.Value
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		bearer.Store(r.Header.Get("Authorization"))
+		http.NotFound(w, r)
+	})
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
+
+	var out, errOut bytes.Buffer
+	exitCode := runCommandWithWriters([]string{"pull", "alpine:3.24"}, &out, &errOut)
+	if exitCode != 1 {
+		t.Errorf("expected exit 1, got %d", exitCode)
+	}
+	if !strings.Contains(errOut.String(), "DOCKER_HELPER_SESSION_TOKEN") {
+		t.Errorf("expected the missing session env failure, got: %s", errOut.String())
+	}
+	if requests != 0 {
+		t.Errorf("%d request(s) reached the daemon: the installed operator credential must not authenticate a data-plane command", requests)
+	}
+}

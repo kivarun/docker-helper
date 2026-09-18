@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -354,4 +355,43 @@ func TestSessionCreateEqualsInPathWire(t *testing.T) {
 	if !strings.Contains(captured, `"path":"/data/foo=bar","access":"read_only"`) {
 		t.Errorf("wire body does not carry the last-'=' split: %s", captured)
 	}
+}
+
+// TestSessionControlIgnoresSessionEnv proves the operator credential source
+// of the session control commands: with both an installed operator
+// credential and a DOCKER_HELPER_SESSION_TOKEN present, session list
+// authenticates with the operator credential — the Session env bearer must
+// not override or participate in the operator path.
+func TestSessionControlIgnoresSessionEnv(t *testing.T) {
+	xdgConfigHome := t.TempDir()
+	credDir := filepath.Join(xdgConfigHome, "docker-helper")
+	if err := os.MkdirAll(credDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte("dhc_installed-fixture-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "session.sock")
+	var bearer atomic.Value
+	requests := 0
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		bearer.Store(r.Header.Get("Authorization"))
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"sessions":[]}`))
+	})
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "dht_env-fixture-token")
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "list", "--endpoint", "unix://" + socketPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0, stderr: %s", code, stderr.String())
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want exactly one GET /sessions", requests)
+	}
+	requireBearerSource(t, "session list with installed credential and session env", bearer.Load().(string), "Bearer dhc_installed-fixture-token")
 }
