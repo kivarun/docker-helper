@@ -195,18 +195,26 @@ DEB_SHA="$(sha256sum "$DEB" | awk '{print $1}')"
 
 # run_runner RUNNER rcfile-template: run a runner once with every group set to
 # the same injected rc; print the runner's output; return the runner's exit.
+
+# runner_group_scripts prints the uat-regression-*.sh basename of every
+# REGRESSIONS entry declared by the runner itself. The runner's own
+# REGRESSIONS array is the one registry of regression semantics; this test
+# consumes it instead of keeping a second, drift-prone group list.
+runner_group_scripts() { # runner-file
+  awk '/^REGRESSIONS=\(/{flag=1;next} /^\)/{flag=0} flag' "$1" \
+    | grep -oE 'uat-regression-[a-z0-9-]+\.sh'
+}
+
 run_runner_all() { # runner rc
   local runner="$1" rc="$2"
   rm -rf "$WORK/rc"
   mkdir -p "$WORK/rc"
-  for g in auth-lifecycle cross-principal-isolation workspace-escape \
-           mount-pin-replacement concurrent-mount-pins secret-containment \
-           daemon-stale-runtime selinux-workspace-lifecycle \
-           selinux-operator-boundary selinux-fs-boundary selinux-mount-guard \
-           selinux-relabel-avc rc5-selectors user-mode-owner-reservation \
-           user-mode-effective-roots rc6-session-list-narrowing; do
-    printf '%s\n' "$rc" > "$WORK/rc/uat-regression-$g.sh"
-  done
+  local g count=0
+  while IFS= read -r g; do
+    printf '%s\n' "$rc" > "$WORK/rc/$g"
+    count=$((count+1))
+  done < <(runner_group_scripts "$runner")
+  [ "$count" -gt 0 ] || { bad "runner group extraction found no groups: $runner"; return 1; }
   local out
   out="$(UAT_ARTIFACT_PATH="$DEB" UAT_ARTIFACT_SHA256="$DEB_SHA" bash "$runner" 2>&1)"
   local ec=$?

@@ -4392,8 +4392,11 @@ Non-goals of the current implementation:
 - resource limits beyond the `/dev/shm` size (CPU, memory);
 - build caching configuration;
 - build secrets;
-- registry and credential management beyond per-session
-  `registry login` (registry authentication itself is supported);
+- external/Docker registry credential management beyond the per-Session
+  `registry login` capability (docker-helper's own Principal, Launcher,
+  and operator credential management is a first-class capability; the
+  non-goal is only the Docker registry credential store beyond that
+  per-Session login);
 - network management (creating or configuring Docker networks; workload
   containers and builds use the Docker/BuildKit default networking — the
   builder's own execution/network position is the accepted Release 2.2

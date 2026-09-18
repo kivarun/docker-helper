@@ -29,7 +29,7 @@
 #
 # This file owns the RPM-specific stages ONLY — the exact RPM transfer, and the
 # RPM SELinux stage set (black-box UAT, SELinux mount-pin / RPM postinstall
-# regression, the Release-2 SELinux targeted regression groups 1-6, the
+# regression, the Release-2 SELinux targeted regression groups 1-10, the
 # RPM/SELinux lifecycle, the RuntimeDirectory socket replacement regression,
 # the Release-2 SELinux workload-MAC acceptance matrix, and the 2.1.1 ->
 # candidate RPM migration gate). All VM mechanics live in the harness; all
@@ -68,7 +68,7 @@
 #       -> existing black-box UAT (UAT_PLATFORM=opensuse UAT_INSTALL=rpm
 #          UAT_MAC=selinux, prebuilt RPM)            [result recorded, collect-all]
 #       -> SELinux mount-pin / RPM postinstall regression  [result recorded]
-#       -> Release-2 SELinux targeted regression groups 1-6 (collect-all runner)
+#       -> Release-2 SELinux targeted regression groups 1-10 (collect-all runner)
 #       -> RPM/SELinux lifecycle                  [result recorded, collect-all]
 #       -> RuntimeDirectory socket replacement regression
 #          (real zypper upgrade + --force reinstall, long-lived bind-mount
@@ -277,17 +277,17 @@ fi
 record_stage "SELinux mount-pin regression" "$MP_RESULT"
 
 # ---------------------------------------------------------------------------
-# 8c. Release-2 SELinux targeted regression groups 1-6 (collect-all)
+# 8c. Release-2 SELinux targeted regression groups 1-10 (collect-all)
 # ---------------------------------------------------------------------------
-log "== 8c. SELinux targeted regression groups 1-6 (collect-all runner) =="
+log "== 8c. SELinux targeted regression groups 1-10 (collect-all runner) =="
 SELREG_RESULT=FAIL
-if run_guest_capture "SELinux regression groups 1-6 inside the guest" \
+if run_guest_capture "SELinux regression groups 1-10 inside the guest" \
   "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-regressions-runner-selinux.sh"; then
   SELREG_RESULT=PASS
 else
-  log "SELinux regression groups 1-6 reported a failure (recorded)"
+  log "SELinux regression groups 1-10 reported a failure (recorded)"
 fi
-record_stage "SELinux regressions (1-6)" "$SELREG_RESULT"
+record_stage "SELinux regressions (1-10)" "$SELREG_RESULT"
 
 
 # ---------------------------------------------------------------------------
