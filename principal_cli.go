@@ -41,6 +41,16 @@ var principalCreateCommand = &Command{
 		issueCredential := fs.Bool("issue-credential", false, "Issue an initial principal credential")
 		noCredential := fs.Bool("no-credential", false, "Do not issue an initial principal credential")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
@@ -104,6 +114,13 @@ var principalShowCommand = &Command{
 		jsonOut := fs.Bool("json", false, "Output the canonical JSON document")
 		return Invocation{
 			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
 				// The FIELD positional is the human scalar-extraction
 				// convenience; --json always selects the full document. The
 				// conflict is a CLI syntax error: deterministic local
@@ -184,6 +201,16 @@ var principalListCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -286,6 +313,16 @@ var principalSetCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
@@ -355,6 +392,16 @@ var principalDeleteCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
@@ -413,6 +460,16 @@ var principalAllowedRootListCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				username := fs.Args()[0]
 
@@ -457,6 +514,16 @@ var principalAllowedRootAddCommand = &Command{
 		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
@@ -512,6 +579,16 @@ var principalAllowedRootSetAccessCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
@@ -571,6 +648,16 @@ are not rewritten.`,
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]

@@ -57,17 +57,14 @@ func resolveAgentSocketPath() string {
 }
 
 // validateAgentEndpointOptions validates the CLI-only --system/--endpoint
-// combination for an agent command. It must run during Invocation.Validate,
-// before any runtime authentication lookup, so a usage error is reported with
-// exit code 2 even when DOCKER_HELPER_SESSION_TOKEN is unset.
+// combination for an agent command. The agent family carries no requirement
+// beyond the shared endpoint-selection owner: the bearer always comes from
+// DOCKER_HELPER_SESSION_TOKEN, so an http endpoint does not require
+// --token-file. It must run during Invocation.Validate, before any runtime
+// authentication lookup, so a usage error is reported with exit code 2 even
+// when DOCKER_HELPER_SESSION_TOKEN is unset.
 func validateAgentEndpointOptions(opts agentClientOptions) error {
-	if opts.System && opts.Endpoint != "" {
-		return fmt.Errorf("--system and --endpoint are mutually exclusive")
-	}
-	if opts.Endpoint != "" {
-		return validateEndpoint(opts.Endpoint)
-	}
-	return nil
+	return validateEndpointSelection(opts.System, opts.Endpoint)
 }
 
 // resolveAgentClient resolves the agent-facing client for the given endpoint

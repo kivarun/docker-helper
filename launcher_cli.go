@@ -246,6 +246,16 @@ var launcherCreateCommand = &Command{
 		noCredential := fs.Bool("no-credential", false, "Do not issue a launcher credential")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -323,6 +333,16 @@ var launcherListCommand = &Command{
 		launcher := fs.String("launcher", "", "Launcher name or ID filter (admin without --principal must use an ID)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -373,6 +393,16 @@ var launcherShowCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output the canonical JSON document")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -452,6 +482,13 @@ var launcherSetCommand = &Command{
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
 				if !name.set && *enabled == "" {
 					return errors.New("at least one of --name or --enabled is required")
 				}
@@ -515,6 +552,16 @@ var launcherDeleteCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -617,6 +664,16 @@ var launcherAllowedRootAddCommand = &Command{
 		fs.Var(access, "access", "Access mode: read_write (default) or read_only")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -666,6 +723,16 @@ var launcherAllowedRootListCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -706,6 +773,16 @@ var launcherAllowedRootSetAccessCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output the shared structured set-access result")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -753,6 +830,16 @@ var launcherAllowedRootRemoveCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -802,6 +889,16 @@ var launcherAllowedRootInheritCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -866,6 +963,16 @@ var launcherCredentialCreateCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -919,6 +1026,16 @@ var launcherCredentialShowCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -965,6 +1082,16 @@ var launcherCredentialRotateCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
@@ -1018,6 +1145,16 @@ var launcherCredentialDeleteCommand = &Command{
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {

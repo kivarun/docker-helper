@@ -28,6 +28,16 @@ var adminTokenRotateCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,

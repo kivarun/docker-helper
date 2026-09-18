@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -792,6 +793,102 @@ func TestOperatorCommandDefaultSystemEndpointWithoutRuntimeDir(t *testing.T) {
 		t.Fatalf("requests = %d, want exactly one GET /sessions", requests)
 	}
 	requireBearerSource(t, "session list default without XDG_RUNTIME_DIR", bearer.Load().(string), "Bearer dhc_installed-fixture-token")
+}
+
+// TestOperatorEndpointGrammarExitsTwo pins the operator endpoint-grammar
+// contract at the representative operator command: locally knowable invalid
+// forms are usage errors (exit 2) validated during Invocation.Validate, an
+// explicit Unix endpoint without --token-file stays syntactically valid, and
+// a runtime failure after valid syntax remains exit 1.
+func TestOperatorEndpointGrammarExitsTwo(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		wantRC  int
+		wantErr string
+	}{
+		{name: "system and endpoint mutually exclusive", args: []string{"--system", "--endpoint", "/tmp/nonexistent.sock"}, wantRC: 2, wantErr: "--system and --endpoint are mutually exclusive"},
+		{name: "malformed endpoint", args: []string{"--endpoint", "bogus"}, wantRC: 2, wantErr: "unsupported endpoint scheme"},
+		{name: "http endpoint without token file", args: []string{"--endpoint", "http://127.0.0.1:1"}, wantRC: 2, wantErr: "--endpoint requires --token-file for http endpoints"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(append([]string{"session", "list"}, tc.args...), &stdout, &stderr)
+			if code != tc.wantRC {
+				t.Fatalf("exit = %d, want %d, stderr: %s", code, tc.wantRC, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Errorf("stderr must name the grammar error %q, got: %s", tc.wantErr, stderr.String())
+			}
+		})
+	}
+
+	// An explicit Unix endpoint without --token-file is syntactically valid:
+	// the failure is the runtime token resolution, not a usage error.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "list", "--endpoint", "/tmp/nonexistent.sock"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("unix endpoint without --token-file: exit = %d, want 1 (runtime), stderr: %s", code, stderr.String())
+	}
+	for _, grammarErr := range []string{"mutually exclusive", "requires --token-file", "unsupported endpoint scheme"} {
+		if strings.Contains(stderr.String(), grammarErr) {
+			t.Errorf("valid syntax must not fail with the grammar error %q, got: %s", grammarErr, stderr.String())
+		}
+	}
+}
+
+// TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands proves no
+// command that registers the operator flag trio was left on the
+// late-validation path: every command carrying --system/--endpoint/
+// --token-file flags rejects the mutually exclusive combination with exit 2
+// from Invocation.Validate (with the minimum required positionals supplied
+// so the command-specific arity check cannot mask the grammar result).
+func TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands(t *testing.T) {
+	type operatorCommand struct {
+		path []string
+		cmd  *Command
+	}
+	var commands []operatorCommand
+	var walk func(path []string, c *Command)
+	walk = func(path []string, c *Command) {
+		if len(c.Subcommands) > 0 {
+			for _, sub := range c.Subcommands {
+				walk(append(append([]string{}, path...), sub.Name), sub)
+			}
+			return
+		}
+		if c.NewInvocation == nil {
+			return
+		}
+		fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+		c.NewInvocation(fs)
+		if fs.Lookup("system") != nil && fs.Lookup("endpoint") != nil && fs.Lookup("token-file") != nil {
+			commands = append(commands, operatorCommand{path: path, cmd: c})
+		}
+	}
+	for _, top := range rootCommand.Subcommands {
+		walk([]string{top.Name}, top)
+	}
+	if len(commands) == 0 {
+		t.Fatal("structural matrix found no operator commands; the probe is broken")
+	}
+
+	for _, oc := range commands {
+		args := append(append([]string{}, oc.path...), "--system", "--endpoint", "/tmp/nonexistent.sock")
+		for i := 0; i < oc.cmd.MinPosArgs; i++ {
+			args = append(args, "x")
+		}
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters(args, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("%v: exit = %d, want 2 for the mutually exclusive endpoint grammar, stderr: %s", oc.path, code, stderr.String())
+			continue
+		}
+		if !strings.Contains(stderr.String(), "--system and --endpoint are mutually exclusive") {
+			t.Errorf("%v: stderr must name the mutual-exclusion grammar error, got: %s", oc.path, stderr.String())
+		}
+	}
 }
 
 // --- Integration: agentClient unchanged ---

@@ -49,6 +49,46 @@ func (opts operatorClientOptions) clientTimeout() *time.Duration {
 
 // resolveOperatorClient resolves the operator client based on the given options.
 // It returns a configured apiClient ready to make authenticated requests.
+// validateEndpointSelection validates the endpoint-selection grammar shared
+// by every command family: --system and --endpoint are mutually exclusive,
+// and an explicit endpoint must carry the canonical syntax validateEndpoint
+// owns. It is pure and locally knowable, so CLI invocations run it during
+// Invocation.Validate (exit 2); family-specific requirements compose around
+// it rather than re-owning the mutual-exclusion or syntax rules.
+func validateEndpointSelection(system bool, endpoint string) error {
+	if system && endpoint != "" {
+		return fmt.Errorf("--system and --endpoint are mutually exclusive")
+	}
+	if endpoint != "" {
+		return validateEndpoint(endpoint)
+	}
+	return nil
+}
+
+// isUnixEndpoint reports whether an explicit endpoint selects a Unix socket
+// (canonical unix:// spelling or a plain absolute path). An explicit
+// endpoint that is not a Unix endpoint is an http:// endpoint.
+func isUnixEndpoint(endpoint string) bool {
+	return strings.HasPrefix(endpoint, "unix://") || strings.HasPrefix(endpoint, "/")
+}
+
+// validateOperatorEndpointOptions validates the operator-family endpoint
+// grammar around the shared endpoint-selection owner: an explicit HTTP
+// endpoint requires an explicit --token-file, while Unix endpoints may
+// auto-resolve the appropriate operator credential. It is pure and locally
+// knowable, so operator CLI invocations run it during Invocation.Validate
+// (exit 2); resolveOperatorClient retains the same validation for direct and
+// internal callers.
+func validateOperatorEndpointOptions(opts operatorClientOptions) error {
+	if err := validateEndpointSelection(opts.System, opts.Endpoint); err != nil {
+		return err
+	}
+	if opts.Endpoint != "" && !isUnixEndpoint(opts.Endpoint) && opts.TokenFile == "" {
+		return fmt.Errorf("--endpoint requires --token-file for http endpoints")
+	}
+	return nil
+}
+
 func resolveOperatorClient(opts operatorClientOptions) (*apiClient, error) {
 	if opts.System && opts.Endpoint != "" {
 		return nil, fmt.Errorf("--system and --endpoint are mutually exclusive")

@@ -195,6 +195,13 @@ control-plane authority.`,
 
 		return Invocation{
 			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
 				if principal.set && principal.value == "" {
 					return fmt.Errorf("--principal value must not be empty")
 				}
@@ -286,6 +293,13 @@ var sessionListCommand = &Command{
 
 		return Invocation{
 			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
 				if principal.set && principal.value == "" {
 					return fmt.Errorf("--principal value must not be empty")
 				}
@@ -346,6 +360,16 @@ var sessionDeleteCommand = &Command{
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -406,6 +430,16 @@ var sessionShowCommand = &Command{
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,

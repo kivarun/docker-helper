@@ -824,6 +824,13 @@ configuration and this command returns an error.`,
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				return validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				return runReload(stdout, stderr, operatorClientOptions{
 					System:    *system,

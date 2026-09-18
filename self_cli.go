@@ -65,6 +65,22 @@ credential does not already have and never mutates state.
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output raw JSON response")
 		return Invocation{
+			Validate: func() error {
+				// The documented credential-source precedence selects which
+				// endpoint-validation semantics apply before Run: the
+				// explicit --token-file and the operator fallback (no
+				// Session env) follow operator validation, while the
+				// Session-env bearer path follows agent validation (no
+				// operator token-file requirement).
+				if *tokenFile == "" && os.Getenv("DOCKER_HELPER_SESSION_TOKEN") != "" {
+					return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
+				}
+				return validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				// Credential resolution for self: the explicit --token-file
 				// stays the operator-style bearer path (the same owner as

@@ -297,6 +297,84 @@ func requireBearerSource(t *testing.T, what, got, want string) {
 	}
 }
 
+// TestSelfEndpointValidationFollowsCredentialSource proves self validates
+// the locally knowable endpoint grammar during Invocation.Validate (exit 2)
+// with the semantics of the credential source its documented precedence
+// selects: the Session-env bearer path follows agent validation (no
+// operator token-file requirement), while the explicit --token-file and the
+// operator fallback follow operator validation.
+func TestSelfEndpointValidationFollowsCredentialSource(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/config.json")
+
+	cases := []struct {
+		name    string
+		env     bool
+		args    []string
+		wantRC  int
+		wantErr string
+	}{
+		{
+			name:    "session env bearer path follows agent validation",
+			env:     true,
+			args:    []string{"--endpoint", "bogus"},
+			wantRC:  2,
+			wantErr: "unsupported endpoint scheme",
+		},
+		{
+			name: "session env bearer path allows http without token file",
+			env:  true,
+			args: []string{"--endpoint", "http://127.0.0.1:1"},
+			// Agent semantics: no operator token-file requirement; the
+			// failure is the runtime endpoint dial, not a usage error.
+			wantRC: 1,
+		},
+		{
+			name:    "operator fallback follows operator validation",
+			env:     false,
+			args:    []string{"--endpoint", "http://127.0.0.1:1"},
+			wantRC:  2,
+			wantErr: "--endpoint requires --token-file for http endpoints",
+		},
+		{
+			name:    "explicit token file follows operator validation",
+			env:     false,
+			args:    []string{"--token-file", "/tmp/nonexistent-self-test.token", "--endpoint", "http://127.0.0.1:1"},
+			wantRC:  1,
+			wantErr: "cannot read token file",
+		},
+		{
+			name:    "mutual exclusion applies on every credential source",
+			env:     false,
+			args:    []string{"--system", "--endpoint", "/tmp/nonexistent.sock"},
+			wantRC:  2,
+			wantErr: "--system and --endpoint are mutually exclusive",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The operator fallback is documented as "no Session env"; make
+			// that deterministic even in environments that export the
+			// variable (an empty value is not a bearer source).
+			t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
+			if tc.env {
+				t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "dht_env-fixture-token")
+			}
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(append([]string{"self"}, tc.args...), &stdout, &stderr)
+			if code != tc.wantRC {
+				t.Fatalf("exit = %d, want %d, stderr: %s", code, tc.wantRC, stderr.String())
+			}
+			if tc.wantErr != "" && !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Errorf("stderr must contain %q, got: %s", tc.wantErr, stderr.String())
+			}
+			if tc.name == "session env bearer path allows http without token file" &&
+				strings.Contains(stderr.String(), "requires --token-file") {
+				t.Errorf("agent semantics must not acquire the operator token-file requirement, got: %s", stderr.String())
+			}
+		})
+	}
+}
+
 // TestSelfCLITokenFileWinsOverSessionEnv proves the first precedence rule of
 // the dual-authority self surface: with both the explicit --token-file and a
 // DOCKER_HELPER_SESSION_TOKEN present, the explicit token file is the

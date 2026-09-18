@@ -42,6 +42,16 @@ var principalCredentialCreateCommand = &Command{
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				if len(args) == 0 || args[0] == "" {
@@ -108,6 +118,16 @@ var principalCredentialListCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				filter := ""
@@ -191,6 +211,16 @@ for reuse by a new credential.`,
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				id := args[0]
@@ -255,6 +285,16 @@ authentication.`,
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,

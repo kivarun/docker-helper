@@ -121,6 +121,16 @@ var completionRootsPrincipalCommand = &Command{
 		stored := fs.Bool("stored", false, "Print the target Principal's stored roots (the existing-entity mutation universe)")
 		authorityOnly := fs.Bool("authority-only", false, "Print authenticated operator authority for shell completion")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				timeout := completionQueryTimeout
 				if *authorityOnly {
@@ -207,6 +217,16 @@ var completionRootsSessionCommand = &Command{
 		launcher := &explicitStringFlag{}
 		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...) to target instead of the default Launcher")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -261,6 +281,16 @@ var completionRootsLauncherCommand = &Command{
 		launcher := &explicitStringFlag{}
 		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...); the default Launcher when omitted")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -339,6 +369,16 @@ var completionSelectorsPrincipalCommand = &Command{
 		command := &explicitStringFlag{}
 		fs.Var(command, "command", "Completed command path (context for the selector's applicability)")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -419,6 +459,16 @@ var completionSelectorsLauncherCommand = &Command{
 		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal context (admin authority; its Launcher names become selectable)")
 		return Invocation{
+			Validate: func() error {
+				if err := validateOperatorEndpointOptions(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				}); err != nil {
+					return err
+				}
+				return nil
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
