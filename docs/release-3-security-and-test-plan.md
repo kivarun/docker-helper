@@ -200,7 +200,7 @@ smallest applicable combination of these layers:
 | HTTP/CLI protocol | authentication, non-disclosure, status/code/envelope stability, selector rules, stdout/stderr routing, and thin-client behavior |
 | Race and fault injection | concurrent admission, lost wake-ups, disconnects, shutdown, partial backend effects, transaction failure, and cleanup ordering |
 | Real Docker Engine | ownership labels, runtime states, network isolation, logs framing, lifecycle effects, exec, port binding, and out-of-band tampering |
-| Real host policy | AppArmor/SELinux regression, mount pinning, cgroup hierarchy, rootless/system behavior, and aggregate enforcement |
+| Real host policy | AppArmor/SELinux regression, mount pinning, cgroup hierarchy, system-mode behavior, and aggregate enforcement |
 | Packaging and upgrade | service policy, config migration, dependency delivery, database upgrade, restart recovery, man pages, completion, and packaged skill |
 
 Tests assert public behavior and authoritative state, not private call order,
@@ -281,10 +281,11 @@ contract.
 Release evidence covers:
 
 - the repository-pinned Go toolchain and race detector;
-- user and system deployment modes; user mode remains fully supported and
-  tested in Release 3 despite its Release 4 deprecation;
-- rootful Docker and the supported rootless configuration; rootless remains a
-  Release 3 acceptance requirement despite its Release 4 deprecation;
+- the system-mode-only deployment baseline (one root-owned system service;
+  non-root system clients stay covered through the credential-based access
+  matrix);
+- rootful Docker; the rootless user-daemon deployment contract is not an
+  acceptance requirement after the Release 2.3 cutover;
 - the minimum supported Docker Engine/API combination and one representative
   newer supported version;
 - BuildKit-enabled and supported legacy build behavior for the D0 compatibility
@@ -295,9 +296,9 @@ Release evidence covers:
 
 The D0 Engine compatibility spike records the minimum Engine API and exact
 build/credential behavior before broad production migration. The D7 cgroup
-spike records which controller hierarchy is enforceable in rootful and rootless
-modes. These are implementation evidence gates, not permission to weaken the
-public security model silently.
+spike records which controller hierarchy is enforceable on the supported
+system-mode deployment. These are implementation evidence gates, not
+permission to weaken the public security model silently.
 
 ## Capacity and boundedness checks
 
@@ -360,11 +361,14 @@ Release 3 is accepted only when:
    data.
 7. Release documentation and shipped client surfaces describe the implemented
    contract without unresolved architectural placeholders.
-8. User-mode initialization and daemon startup, and every project-produced
-   tarball installer, emit the required Release 4 deprecation warning without
-   changing successful stdout or exit-status contracts.
-9. A non-root client using the system service receives no user-mode
-   deprecation warning, and DEB/RPM system-mode installation remains the
+8. Deployment surfaces follow the Release 2.3 system-mode-only decision:
+   native DEB/RPM installation is the canonical path, and any project-produced
+   tarball that remains is system-mode-only and satisfies the same daemon/MAC
+   contract; there are no deployment-mode deprecation warnings because there
+   are no deprecated deployment surfaces, and no successful stdout or
+   exit-status contract changes because of deployment mode.
+9. A non-root client using the system service receives no deployment-mode
+   warning, and DEB/RPM system-mode installation remains the
    recommended path in README, man pages, help, and packaging documentation.
 
 ## Completion criterion

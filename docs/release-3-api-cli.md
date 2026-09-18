@@ -29,33 +29,26 @@ the `docker-helper.exec.v1` subprotocol. That version belongs to its
 long-lived message framing and does not imply an HTTP `/v1` or `/v3`
 namespace.
 
-## Deployment deprecation surface
+## Deployment baseline
 
-Release 3 keeps the complete user-mode daemon and project-produced tarball
-contract but marks both for removal in Release 4. Deprecation is operational
-guidance, not a change to HTTP authorization, routing, response fields, or
-status codes.
+Release 3 runs on the system-mode-only deployment model established by
+Release 2.3: one root-owned system service protected by the mandatory
+AppArmor-or-enforcing-SELinux boundary. There is no user-mode daemon, no
+user-mode daemon startup, and no user-mode deprecation-warning surface:
+Release 2.3 removed those surfaces outright rather than leaving a deprecated
+compatibility branch, so Release 3 neither retains nor warns about them.
 
-The Release 3 public warning contract is:
+Non-root CLI and agent access remain first-class and are not a deprecation
+concern: they authenticate to the system service through Principal, Launcher,
+and Session credentials, and ordinary non-root commands never emit a
+deployment-mode warning.
 
-- non-root `docker-helper init` emits a stderr warning only when it selects
-  user-mode initialization; using `init` to configure a non-root client for an
-  available system service does not warn;
-- user-mode daemon startup emits one operational warning per daemon process;
-- each project-produced tarball installer emits a stderr warning before making
-  installation changes, whether it installs user or system mode;
-- ordinary non-root CLI and agent commands using the system service never emit
-  a user-mode deprecation warning.
-
-The user-mode warning states that the user-mode daemon is deprecated, will be
-removed in docker-helper 4.0, and should be migrated to the system service. The
-tarball warning states that the installation tarball is deprecated, will be
-removed in docker-helper 4.0, and should be replaced by the DEB or RPM package.
-Warnings never change an otherwise successful stdout contract or exit status.
-
-Release integration marks the affected README, man-page, help, and packaging
-sections as deprecated while continuing to document complete Release 3 usage.
-Non-root clients of the system service are explicitly not deprecated.
+Installation is the native DEB/RPM package path. If a project-produced tarball
+remains after the Release 2.3 decision, it is system-mode-only and must
+satisfy the same daemon/MAC contract; there is no user-mode installer and no
+hidden user-daemon path. Release 3 documentation does not mark any
+deployment-mode surface as deprecated, because the superseded Release 4
+cutover plan no longer exists.
 
 ## Process invocation vocabulary
 

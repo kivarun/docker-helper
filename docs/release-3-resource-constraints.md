@@ -267,11 +267,11 @@ Direct path syntax and driver-specific identifiers never enter the public API.
 
 ## Enforcement availability
 
-Release 3 must prove the hierarchy on both supported deployment modes before
+Release 3 must prove the hierarchy on the supported deployment mode before
 resource implementation is frozen:
 
-- system deployment;
-- rootless user deployment.
+- system deployment (the one deployment model after the Release 2.3
+  system-mode-only cutover).
 
 The implementation spike must verify controller delegation, nested aggregate
 enforcement, Docker placement, daemon restart, cleanup, and the Docker cgroup
@@ -434,5 +434,5 @@ Implementation is not complete without tests for:
   the stored concrete workload limits;
 - help, manual, architecture, and packaged `SKILL.md` consistency.
 
-Real-host integration tests are required in both system and rootless modes.
+Real-host integration tests are required in system mode.
 Unit tests and mocked Docker calls cannot prove aggregate cgroup enforcement.

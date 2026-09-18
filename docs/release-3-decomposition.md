@@ -319,7 +319,7 @@ Every Managed Container and one-shot `run` receives explicit CPU, memory, PIDs, 
 
 At initialization, the root workload memory pool defaults to 75% of Docker Engine-reported `MemTotal`, rounded down to 256 MiB. The CPU pool defaults from Engine-reported `NCPU`: logical CPUs minus the larger of 0.5 CPU or 10%, rounded down to 0.1 CPU. The Root PIDs ceiling defaults to 512 and is clamped by the enforceable system boundary. These defaults are materialized as explicit configuration and do not derive from the docker-helper process cgroup. Swap is disabled. Shared memory defaults to the smaller of 256 MiB and the workload memory limit, may be narrowed explicitly, and never exceeds memory. Disk quotas are outside Release 3.
 
-An omitted Principal, Launcher, or Session ceiling inherits its effective parent ceiling. A second Principal or Launcher that still inherits the full parent produces an operator warning rather than an automatic fractional split. The hierarchy is an aggregate runtime security boundary enforced by parent cgroups: multiple containers may each receive the full Session ceiling as their individual limit, while their combined actual usage remains bounded by the Session cgroup and its ancestors. docker-helper performs no resource reservation, remaining-capacity calculation, or scheduling admission. Memory ceilings are decreased only when the subtree has no active workloads; CPU and PIDs decreases apply live; exec-concurrency decreases do not kill existing execs. A cgroup-hierarchy spike must prove aggregate enforcement for both system and rootless deployments before implementation is frozen.
+An omitted Principal, Launcher, or Session ceiling inherits its effective parent ceiling. A second Principal or Launcher that still inherits the full parent produces an operator warning rather than an automatic fractional split. The hierarchy is an aggregate runtime security boundary enforced by parent cgroups: multiple containers may each receive the full Session ceiling as their individual limit, while their combined actual usage remains bounded by the Session cgroup and its ancestors. docker-helper performs no resource reservation, remaining-capacity calculation, or scheduling admission. Memory ceilings are decreased only when the subtree has no active workloads; CPU and PIDs decreases apply live; exec-concurrency decreases do not kill existing execs. A cgroup-hierarchy spike must prove aggregate enforcement on the supported system-mode deployment before implementation is frozen.
 
 Build resource control is outside this package.
 
@@ -382,12 +382,8 @@ Responsibilities:
 - local troubleshooting sections and CLI recovery hints for the capability
   that owns each public Condition;
 - compatibility with the normal blocking Release 2 CLI experience for run and build, while intentionally replacing their asynchronous HTTP Operation workflow;
-- user-mode initialization and daemon-startup deprecation warnings without
-  warning for non-root clients of the system service;
-- project-produced tarball installer deprecation warnings while retaining full
-  tarball build, install, upgrade, and uninstall acceptance for Release 3;
-- Release 3 LTS release notes and migration guidance toward the Release 4
-  system-mode-only deployment;
+- the system-mode-only deployment baseline: non-root clients of the system service are first-class and never emit a deployment-mode warning; there is no user-mode daemon gate to preserve;
+- Release 3 LTS release notes reflecting the Release 2.3 system-mode-only baseline;
 - packaging and service-upgrade verification.
 
 The CLI is deliberately thin. It may read explicit configuration and credentials, validate syntax, issue one request, wait or poll transiently, service a WebSocket, and render results. It must not persist execution state, implement local queues or reconciliation, automatically retry ambiguous mutations, or mirror server state machines. Protocol capabilities that require client-side workflow state may remain API-only.
@@ -435,11 +431,9 @@ Every work package must cover:
 - audit attribution without secret disclosure;
 - bounded input, output, time, and resource use;
 - failure cleanup;
-- compatibility with both user and system deployment modes, including the
-  supported rootless configuration; Release 3 deprecation does not permit a
-  skipped or weakened user-mode gate;
-- absence of user-mode deprecation warnings for non-root clients using the
-  system service;
+- the system-mode-only deployment baseline with first-class non-root system
+  clients (there is no user-mode/rootless daemon matrix to preserve, and no
+  deployment-mode deprecation warnings exist to verify);
 - real-Docker integration tests in addition to unit tests.
 
 Interactive streaming, port allocation, lifecycle mutation, and cleanup require dedicated race and disconnect tests; unit-only coverage is insufficient for these boundaries.

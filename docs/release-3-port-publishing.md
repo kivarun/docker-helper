@@ -493,7 +493,7 @@ Implementation is not complete without tests for:
 - warning behavior for full-inheriting sibling Principal and Launcher grants;
 - help, manual, architecture, and packaged `SKILL.md` consistency.
 
-Real-Docker integration tests are required in both system and rootless modes
+Real-Docker integration tests are required in system mode
 for fixed loopback binding, same-host TCP connectivity, rejection of non-host
 access in the supported network configuration, Docker start/restart behavior,
 host-socket contention, inspection, and cleanup. The supported-daemon matrix

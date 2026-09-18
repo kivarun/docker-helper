@@ -211,8 +211,6 @@ The Launcher ownership model Release 3 must consume:
   audit-only: `credential_id`, `credential_name`);
 - every Principal has an implicit `default` Launcher
   (`ensureDefaultLauncher`/`findDefaultLauncher`);
-- user mode transparently owns everything through the daemon-owner
-  Principal and its default Launcher;
 - the v2.0.0 → 2.1 migration attributed attributable principal-owned
   Sessions to the default Launcher and removed non-attributable
   system-mode admin Sessions.
@@ -223,20 +221,19 @@ second authorization path.
 
 ### Release 3 deployment compatibility
 
-Release 3 retains the complete user-mode implementation, including transparent
-daemon-owner Principal/default-Launcher ownership, per-user paths and socket,
-rootless support, and user-mode MAC behavior. It also retains the complete
-project-produced tarball lifecycle. These surfaces are deprecated for Release
-4, not removed or redesigned during Release 3.
+Release 3 starts from the system-mode-only deployment model established by
+Release 2.3: the user-mode daemon, transparent daemon-owner
+Principal/default-Launcher bootstrap, the per-user paths and socket, the
+rootless user-daemon deployment contract, and user-mode MAC behavior were
+removed outright in Release 2.3 rather than deprecated. Release 3 carries no
+user-mode compatibility obligation and must not re-add any of those surfaces.
 
-The deprecation implementation is deliberately narrow: user-mode init and
-daemon startup and tarball installers emit the warnings owned by
-`release-3-api-cli.md`; non-root clients using the system service do not. The
-Release 3 operational architect must not interpret the future deletion as
-permission to split ownership paths, skip user-mode/rootless/package evidence,
-or introduce an early compatibility shim. The first Release 4 work package
-will delete the obsolete production branches and tests as one reviewed
-system-mode-only cutover.
+The Launcher ownership model remains the same, minus the removed user-mode
+branch: every Session has exactly one non-null Launcher owner, and there is no
+transparent daemon-owner Principal path. Native DEB/RPM packages are the
+canonical installation; if a project-produced tarball remains after the
+Release 2.3 decision, it is system-mode-only and satisfies the same
+daemon/MAC contract.
 
 ### Release 3 extension
 
