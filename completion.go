@@ -233,19 +233,22 @@ var completionRootsSessionCommand = &Command{
 }
 
 // completionRootsLauncherCommand prints the stored allowed roots of the
-// target Launcher, one path per line. The target is the default Launcher of
-// the Principal the typed --principal names; without one the Principal is
-// inferred from the authenticated credential with the same scope-aware rule
-// the launcher command family uses. The launcher allowed-root existing-entity
-// mutations (remove, set-access) address exactly this universe, and the
-// launcher-omitted invocation targets the default Launcher, so completion
-// offers exactly the roots a real mutation with the typed selectors would
-// address. The daemon authorizes the query; this command performs no local
-// policy computation and a query failure degrades silently.
+// target Launcher, one path per line. The target is the optional --launcher
+// selector (name or dhl_ ID) of the Principal the typed --principal names;
+// without a --launcher selector the target is that Principal's default
+// Launcher. The selector resolves through the same shared selector owner the
+// launcher command family uses, so the printed roots are exactly the roots
+// the corresponding launcher allowed-root mutation would address. The
+// launcher allowed-root existing-entity mutations (remove, set-access)
+// address exactly this universe, and the launcher-omitted invocation targets
+// the default Launcher, so completion offers exactly the roots a real
+// mutation with the typed selectors would address. The daemon authorizes the
+// query; this command performs no local policy computation and a query
+// failure degrades silently.
 var completionRootsLauncherCommand = &Command{
 	Name:       "launcher",
 	Summary:    "Print a Launcher's stored allowed roots",
-	Usage:      "docker-helper completion roots launcher [--principal USER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion roots launcher [--principal USER] [--launcher LAUNCHER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 
@@ -255,6 +258,8 @@ var completionRootsLauncherCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal username (inferred from credential when omitted)")
+		launcher := &explicitStringFlag{}
+		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...); the default Launcher when omitted")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
@@ -267,14 +272,16 @@ var completionRootsLauncherCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				username, err := resolveTargetPrincipalForCLI(client, principal.value,
-					errors.New("--principal is required for admin authentication"),
-					errors.New("Launcher credentials cannot query Principal policy"), nil)
+				selector := defaultLauncherName
+				if launcher.set {
+					selector = launcher.value
+				}
+				username, err := launcherSelectorTargetSelector(client, principal.value, selector)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				l, err := client.showLauncher(username, defaultLauncherName)
+				l, err := client.showLauncher(username, selector)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -610,13 +617,24 @@ func generateBashCompletion(w io.Writer) {
 	// hand-maintained command-name list: new flag-only leaf commands are
 	// picked up automatically.
 	var flagOnlyLeaves []string
+	// Workload-command leaves (FlagsStopAtPositional) are derived the same
+	// way: once their primary operand is typed, every later token belongs
+	// to the workload command and no docker-helper flag or subcommand
+	// completion applies.
+	var stopAtPositionalLeaves []string
 	for _, path := range allPaths {
 		cmd := completionCommandPath(strings.Split(path, " "))
-		if cmd != nil && cmd.NewInvocation != nil && len(cmd.Subcommands) == 0 && cmd.MaxPosArgs == 0 {
-			flagOnlyLeaves = append(flagOnlyLeaves, path)
+		if cmd != nil && cmd.NewInvocation != nil && len(cmd.Subcommands) == 0 {
+			if cmd.MaxPosArgs == 0 {
+				flagOnlyLeaves = append(flagOnlyLeaves, path)
+			}
+			if cmd.FlagsStopAtPositional {
+				stopAtPositionalLeaves = append(stopAtPositionalLeaves, path)
+			}
 		}
 	}
 	sort.Strings(flagOnlyLeaves)
+	sort.Strings(stopAtPositionalLeaves)
 
 	// Collect flags for each command path (leaf commands with NewInvocation).
 	commandFlags := make(map[string][]string)
@@ -853,6 +871,20 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            -*) return ;;")
 	fmt.Fprintln(w, "        esac")
 	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "    # Workload-command grammar (flags-stop-at-positional leaves,")
+	fmt.Fprintln(w, "    # derived from the command tree): once the primary operand is")
+	fmt.Fprintln(w, "    # typed, every later token belongs to the workload command —")
+	fmt.Fprintln(w, "    # option-looking workload words are never docker-helper flags.")
+	fmt.Fprintf(w, "    case \"$cmd_path\" in\n")
+	fmt.Fprintf(w, "        %s)\n", strings.Join(quoteWords(stopAtPositionalLeaves), "|"))
+	fmt.Fprintln(w, "            local wlpos")
+	fmt.Fprintln(w, `            wlpos="$(_docker_helper_positional_count "$cmd_path")"`)
+	fmt.Fprintln(w, "            if [ \"$wlpos\" -ge 1 ]; then")
+	fmt.Fprintln(w, "                return")
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            ;;")
+	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "    # If current word starts with -, complete flags. A partially typed")
 	fmt.Fprintln(w, "    # --flag=VALUE word completes the flag's VALUE with the typed")
@@ -1163,47 +1195,94 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
 	fmt.Fprintln(w, `        "launcher allowed-root add"|"launcher allowed-root remove"|"launcher allowed-root set-access")`)
-	fmt.Fprintln(w, "            # PATH-first grammar: pos 0 is the PATH and the optional")
-	fmt.Fprintln(w, "            # trailing positional is the LAUNCHER selector; set-access")
-	fmt.Fprintln(w, "            # pos 1 is the canonical access vocabulary. add's PATH")
-	fmt.Fprintln(w, "            # completes from the effective Principal ceiling — the")
-	fmt.Fprintln(w, "            # same policy query the --workspace flag value uses —")
-	fmt.Fprintln(w, "            # with no generic fallback: the daemon stays the")
-	fmt.Fprintln(w, "            # authorization authority, so an ambiguous authority")
-	fmt.Fprintln(w, "            # context offers nothing. remove and set-access are")
-	fmt.Fprintln(w, "            # existing-entity mutations: their PATH completes exactly")
-	fmt.Fprintln(w, "            # the target Launcher's STORED roots (the default-Launcher")
-	fmt.Fprintln(w, "            # target of the launcher-omitted invocation).")
-	fmt.Fprintln(w, "            local lpos")
-	fmt.Fprintln(w, "            lpos=\"$(_docker_helper_positional_count \"$cmd_path\")\"")
+	fmt.Fprintln(w, "            # Target-first RC8 grammar: an optional leading LAUNCHER")
+	fmt.Fprintln(w, "            # selector (name or dhl_ ID) followed by the operation")
+	fmt.Fprintln(w, "            # operands. The first positional is ambiguous between the")
+	fmt.Fprintln(w, "            # selector and the PATH operand; the deterministic shape")
+	fmt.Fprintln(w, "            # rule disambiguates: launcher selectors (names and dhl_")
+	fmt.Fprintln(w, "            # IDs) never contain '/', stored roots are canonical")
+	fmt.Fprintln(w, "            # absolute paths, so a word starting with '/' is PATH data")
+	fmt.Fprintln(w, "            # and a slash-free word may be either — both domains are")
+	fmt.Fprintln(w, "            # offered, prefix-filtered. add's PATH domain is the")
+	fmt.Fprintln(w, "            # effective Principal ceiling (the same policy query the")
+	fmt.Fprintln(w, "            # launcher-create --allowed-root flag value uses, with no")
+	fmt.Fprintln(w, "            # generic fallback); remove/set-access PATH domains are")
+	fmt.Fprintln(w, "            # exactly the target Launcher's STORED roots (the typed")
+	fmt.Fprintln(w, "            # LAUNCHER selector and --principal are forwarded like the")
+	fmt.Fprintln(w, "            # real mutation's target construction). set-access pos 2")
+	fmt.Fprintln(w, "            # is the canonical access vocabulary.")
+	fmt.Fprintln(w, "            local lpos firstw")
+	fmt.Fprintln(w, `            lpos="$(_docker_helper_positional_count "$cmd_path")"`)
+	fmt.Fprintln(w, `            firstw="$(_docker_helper_positional_value "$cmd_path" 0)"`)
+	fmt.Fprintln(w, "            local -a sel_reply=()")
+	fmt.Fprintln(w, "            if [ \"$lpos\" -eq 0 ]; then")
+	fmt.Fprintln(w, `                case "$cur" in`)
+	fmt.Fprintln(w, "                    /*) ;;")
+	fmt.Fprintln(w, "                    *)")
+	fmt.Fprintln(w, "                        # Union contract: offer the selector domain")
+	fmt.Fprintln(w, "                        # alongside the PATH domain below.")
+	fmt.Fprintln(w, `                        _docker_helper_complete_selector_value launcher "$cur"`)
+	fmt.Fprintln(w, `                        sel_reply=("${COMPREPLY[@]}")`)
+	fmt.Fprintln(w, "                        ;;")
+	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "            fi")
 	fmt.Fprintln(w, "            if [ \"$lpos\" -eq 0 ]; then")
 	fmt.Fprintln(w, "                case \"$cmd_path\" in")
 	fmt.Fprintln(w, `                    "launcher allowed-root add")`)
-	fmt.Fprintln(w, "                        if ! _docker_helper_complete_policy_roots principal \"$cur\" workspace; then")
+	fmt.Fprintln(w, `                        if ! _docker_helper_complete_policy_roots principal "$cur" workspace; then`)
 	fmt.Fprintln(w, "                            COMPREPLY=()")
 	fmt.Fprintln(w, "                        fi")
 	fmt.Fprintln(w, "                        ;;")
 	fmt.Fprintln(w, "                    *)")
-	fmt.Fprintln(w, "                        _docker_helper_complete_stored_launcher_roots \"$cur\"")
+	fmt.Fprintln(w, `                        _docker_helper_complete_stored_launcher_roots "$cur"`)
 	fmt.Fprintln(w, "                        ;;")
 	fmt.Fprintln(w, "                esac")
 	fmt.Fprintln(w, "            elif [ \"$lpos\" -eq 1 ]; then")
-	fmt.Fprintln(w, "                case \"$cmd_path\" in")
-	fmt.Fprintln(w, `                    "launcher allowed-root set-access")`)
-	fmt.Fprintf(w, "                        COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
+	fmt.Fprintln(w, `                case "$firstw" in`)
+	fmt.Fprintln(w, "                    /*)")
+	fmt.Fprintln(w, "                        # pos 0 was the PATH operand.")
+	fmt.Fprintln(w, "                        case \"$cmd_path\" in")
+	fmt.Fprintln(w, `                            "launcher allowed-root set-access")`)
+	fmt.Fprintln(w, "                                # The two-operand form completes its")
+	fmt.Fprintln(w, "                                # ACCESS operand.")
+	fmt.Fprintf(w, "                                COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
+	fmt.Fprintln(w, "                                ;;")
+	fmt.Fprintln(w, "                            *)")
+	fmt.Fprintln(w, "                                # add/remove: the one-operand form is")
+	fmt.Fprintln(w, "                                # complete; nothing further applies.")
+	fmt.Fprintln(w, "                                ;;")
+	fmt.Fprintln(w, "                        esac")
 	fmt.Fprintln(w, "                        ;;")
 	fmt.Fprintln(w, "                    *)")
-	fmt.Fprintln(w, "                        # The optional trailing LAUNCHER selector.")
-	fmt.Fprintln(w, "                        _docker_helper_complete_selector_value launcher \"$cur\"")
+	fmt.Fprintln(w, "                        # pos 0 was the LAUNCHER selector: the PATH")
+	fmt.Fprintln(w, "                        # operand completes its domain.")
+	fmt.Fprintln(w, "                        case \"$cmd_path\" in")
+	fmt.Fprintln(w, `                            "launcher allowed-root add")`)
+	fmt.Fprintln(w, `                                if ! _docker_helper_complete_policy_roots principal "$cur" workspace; then`)
+	fmt.Fprintln(w, "                                    COMPREPLY=()")
+	fmt.Fprintln(w, "                                fi")
+	fmt.Fprintln(w, "                                ;;")
+	fmt.Fprintln(w, "                            *)")
+	fmt.Fprintln(w, `                                _docker_helper_complete_stored_launcher_roots "$cur"`)
+	fmt.Fprintln(w, "                                ;;")
+	fmt.Fprintln(w, "                        esac")
 	fmt.Fprintln(w, "                        ;;")
 	fmt.Fprintln(w, "                esac")
 	fmt.Fprintln(w, "            elif [ \"$lpos\" -eq 2 ]; then")
 	fmt.Fprintln(w, "                case \"$cmd_path\" in")
 	fmt.Fprintln(w, `                    "launcher allowed-root set-access")`)
-	fmt.Fprintln(w, "                        # The optional trailing LAUNCHER selector.")
-	fmt.Fprintln(w, "                        _docker_helper_complete_selector_value launcher \"$cur\"")
+	fmt.Fprintln(w, `                        case "$firstw" in`)
+	fmt.Fprintln(w, "                            /*) ;;")
+	fmt.Fprintln(w, "                            *)")
+	fmt.Fprintln(w, "                                # LAUNCHER PATH <TAB>: the ACCESS operand.")
+	fmt.Fprintf(w, "                                COMPREPLY=( $(compgen -W %q -- \"$cur\") )\n", strings.Join(allowedRootAccessVocabulary(), " "))
+	fmt.Fprintln(w, "                                ;;")
+	fmt.Fprintln(w, "                        esac")
 	fmt.Fprintln(w, "                        ;;")
 	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            if [ ${#sel_reply[@]} -gt 0 ]; then")
+	fmt.Fprintln(w, `                COMPREPLY=("${sel_reply[@]}" "${COMPREPLY[@]}")`)
 	fmt.Fprintln(w, "            fi")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")
@@ -1689,7 +1768,11 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Complete the target Launcher's STORED roots for the launcher")
 	fmt.Fprintln(w, "# existing-entity mutations (remove, set-access). The query targets")
-	fmt.Fprintln(w, "# the default Launcher of the typed --principal context; the")
+	fmt.Fprintln(w, "# the Launcher the real mutation addresses: the typed LAUNCHER")
+	fmt.Fprintln(w, "# positional (the target-first leading selector) becomes the")
+	fmt.Fprintln(w, "# --launcher context of the bounded query, the typed --principal")
+	fmt.Fprintln(w, "# flag stays the ownership selector; without a typed LAUNCHER the")
+	fmt.Fprintln(w, "# default Launcher of the Principal context is queried. The")
 	fmt.Fprintln(w, "# operator overrides are forwarded like every other query. An")
 	fmt.Fprintln(w, "# unavailable or empty answer is a silent degradation: the")
 	fmt.Fprintln(w, "# suggestions stay empty and the completion process succeeds; the")
@@ -1699,12 +1782,22 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    local -a opargs=() rootsargs=()")
 	fmt.Fprintln(w, "    mapfile -d '' -t opargs < <(_docker_helper_operator_args \"$cmd_path\")")
 	fmt.Fprintln(w, "    local p")
-	fmt.Fprintln(w, "    p=\"$(_docker_helper_typed_flag_value principal)\"")
+	fmt.Fprintln(w, `    p="$(_docker_helper_typed_flag_value principal)"`)
 	fmt.Fprintln(w, "    if [ -n \"$p\" ]; then")
-	fmt.Fprintln(w, "        rootsargs+=(--principal \"$p\")")
+	fmt.Fprintln(w, `        rootsargs+=(--principal "$p")`)
 	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    local launcher_sel")
+	fmt.Fprintln(w, `    launcher_sel="$(_docker_helper_positional_value "$cmd_path" 0)"`)
+	fmt.Fprintln(w, `    case "$launcher_sel" in`)
+	fmt.Fprintln(w, "        /*) ;;")
+	fmt.Fprintln(w, "        *)")
+	fmt.Fprintln(w, "            if [ -n \"$launcher_sel\" ]; then")
+	fmt.Fprintln(w, `                rootsargs+=(--launcher "$launcher_sel")`)
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            ;;")
+	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w, "    local roots")
-	fmt.Fprintln(w, "    if ! roots=\"$(${_docker_helper_WORDS[0]} completion roots launcher \"${opargs[@]}\" \"${rootsargs[@]}\" 2>/dev/null)\"; then")
+	fmt.Fprintln(w, `    if ! roots="$(${_docker_helper_WORDS[0]} completion roots launcher "${opargs[@]}" "${rootsargs[@]}" 2>/dev/null)"; then`)
 	fmt.Fprintln(w, "        return 0")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    [ -n \"$roots\" ] || return 0")

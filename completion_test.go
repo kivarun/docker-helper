@@ -3752,9 +3752,10 @@ func TestCompletionPrincipalAllowedRootMutationsStoredRoots(t *testing.T) {
 
 // TestCompletionLauncherAllowedRootAddPolicyRoots proves the add PATH
 // positional completes from the effective Principal ceiling — never the host
-// filesystem — driven through the real binary and a live stub daemon. An
-// unambiguous authority context yields the policy universe; the boundary
-// segments continue into each root.
+// filesystem — driven through the real binary and a live stub daemon. The
+// target-first grammar makes the first positional ambiguous between the
+// LAUNCHER selector and PATH: a slash-free word offers the selector domain
+// alongside the policy universe, a word starting with '/' is PATH data only.
 func TestCompletionLauncherAllowedRootAddPolicyRoots(t *testing.T) {
 	principal := "michael"
 	effective := []AllowedRootEntry{
@@ -3765,7 +3766,8 @@ func TestCompletionLauncherAllowedRootAddPolicyRoots(t *testing.T) {
 	endpoint, tokenPath := startCompletionStubServer(t, principal, effective, nil, nil)
 
 	// The empty PATH word renders the next boundary segment toward each
-	// authorized root, and nothing else: no /bin, /etc, /proc, /usr, /var.
+	// authorized root plus the selector domain (the shape-ambiguous union),
+	// and nothing else: no /bin, /etc, /proc, /usr, /var.
 	results := runCompletionLive(t, nil, []string{
 		"docker-helper", "launcher", "allowed-root", "add",
 		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "",
@@ -3775,11 +3777,13 @@ func TestCompletionLauncherAllowedRootAddPolicyRoots(t *testing.T) {
 			t.Errorf("host namespace %q must never be suggested, got %v", forbidden, results)
 		}
 	}
-	if !slices.Equal(sortedTrimmed(results), []string{"/home", "/mnt", "/opt"}) {
-		t.Errorf("add PATH completion = %v, want the root boundary segments [/home /mnt /opt]", results)
+	if !slices.Equal(sortedTrimmed(results), []string{"/home", "/mnt", "/opt", "default"}) {
+		t.Errorf("add first-positional completion = %v, want the selector + boundary-segment union [/home /mnt /opt default]", results)
 	}
 
-	// Inside a reached root the ceiling's concrete root continues.
+	// A word starting with '/' is PATH data only: the selector domain is
+	// not offered, and inside a reached root the ceiling's concrete root
+	// continues.
 	results = runCompletionLive(t, nil, []string{
 		"docker-helper", "launcher", "allowed-root", "add",
 		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "/home/",
@@ -3807,32 +3811,54 @@ func TestCompletionLauncherAllowedRootAddAmbiguousAuthorityOffersNothing(t *test
 
 // TestCompletionLauncherAllowedRootMutationsStoredRoots proves the
 // remove/set-access PATH positionals complete the target Launcher's stored
-// roots (the default-Launcher target of the launcher-omitted invocation)
-// through the daemon, and the new-grammar ACCESS/LAUNCHER positions complete
-// their canonical universes.
+// roots through the daemon under the target-first grammar: the first
+// positional is the shape-ambiguous selector/PATH union, the selector-led
+// form completes the target Launcher's stored roots as its PATH operand, and
+// the two-operand set-access form completes its ACCESS operand.
 func TestCompletionLauncherAllowedRootMutationsStoredRoots(t *testing.T) {
 	principal := "michael"
 	ro := AllowedRootEntry{Path: "/mnt/fake/inputs", Access: AllowedRootAccessReadOnly}
 	rw := AllowedRootEntry{Path: "/mnt/fake/work", Access: AllowedRootAccessReadWrite}
 	endpoint, tokenPath := startCompletionStubServer(t, principal, nil, nil, []AllowedRootEntry{ro, rw})
 
+	// First positional: the selector domain and the stored-roots domain
+	// (prefix-filtered union; the empty word offers both).
 	results := runCompletionLive(t, nil, []string{
 		"docker-helper", "launcher", "allowed-root", "remove",
 		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "",
 	})
-	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
-		t.Errorf("remove PATH completion = %v, want exactly the stored launcher roots [%s %s]", results, ro.Path, rw.Path)
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path, "default"}) {
+		t.Errorf("remove first-positional completion = %v, want the selector + stored-roots union", results)
 	}
 
 	results = runCompletionLive(t, nil, []string{
 		"docker-helper", "launcher", "allowed-root", "set-access",
 		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "",
 	})
-	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
-		t.Errorf("set-access PATH completion = %v, want exactly the stored launcher roots [%s %s]", results, ro.Path, rw.Path)
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path, "default"}) {
+		t.Errorf("set-access first-positional completion = %v, want the selector + stored-roots union", results)
 	}
 
-	// New grammar: pos 1 is the ACCESS vocabulary.
+	// A word starting with '/' is PATH data only: no selector domain.
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "remove",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "/m",
+	})
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
+		t.Errorf("remove PATH-only completion = %v, want exactly the stored launcher roots", results)
+	}
+
+	// Selector-led form: the PATH operand completes the target Launcher's
+	// stored roots.
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "remove",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "default", "",
+	})
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
+		t.Errorf("remove LAUNCHER PATH completion = %v, want exactly the target Launcher's stored roots", results)
+	}
+
+	// Two-operand set-access: pos 1 is the ACCESS vocabulary.
 	results = runCompletionLive(t, nil, []string{
 		"docker-helper", "launcher", "allowed-root", "set-access",
 		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, ro.Path, "",
@@ -3841,14 +3867,33 @@ func TestCompletionLauncherAllowedRootMutationsStoredRoots(t *testing.T) {
 		t.Errorf("set-access ACCESS completion = %v, want %v", results, want)
 	}
 
-	// The final optional LAUNCHER positional completes the daemon-backed
-	// Launcher selectors of the typed --principal context.
+	// Selector-led set-access: pos 1 is the PATH operand of the target
+	// Launcher; pos 2 is the ACCESS vocabulary.
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "set-access",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "default", "",
+	})
+	if !slices.Equal(sortedTrimmed(results), []string{ro.Path, rw.Path}) {
+		t.Errorf("set-access LAUNCHER PATH completion = %v, want the target Launcher's stored roots", results)
+	}
+
+	results = runCompletionLive(t, nil, []string{
+		"docker-helper", "launcher", "allowed-root", "set-access",
+		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, "default", ro.Path, "",
+	})
+	if want := allowedRootAccessVocabulary(); !slices.Equal(results, want) {
+		t.Errorf("set-access LAUNCHER PATH ACCESS completion = %v, want %v", results, want)
+	}
+
+	// A PATH-led add/remove is already complete: a third word is invalid
+	// grammar (it would reinterpret the PATH as a LAUNCHER selector), so
+	// nothing further is offered.
 	results = runCompletionLive(t, nil, []string{
 		"docker-helper", "launcher", "allowed-root", "remove",
 		"--principal", principal, "--endpoint", endpoint, "--token-file", tokenPath, ro.Path, "",
 	})
-	if !slices.Contains(results, "default") {
-		t.Errorf("LAUNCHER positional completion = %v, want the target Launcher names", results)
+	if len(results) != 0 {
+		t.Errorf("remove PATH over-typed completion = %v, want nothing", results)
 	}
 }
 
@@ -3867,6 +3912,67 @@ func TestCompletionFlagsOfferedAfterPositional(t *testing.T) {
 	if !slices.Contains(results, "--access") {
 		t.Errorf("launcher add must offer --access after the positional PATH, got %v", results)
 	}
+}
+
+// TestCompletionRemovedOperandFlagsNotSuggested is the RC8 completion
+// regression gate: the removed primary-operand spellings are derived from the
+// live command tree (no separate completion parser), so a removed flag can
+// never be suggested and a reintroduced flag is caught here.
+func TestCompletionRemovedOperandFlagsNotSuggested(t *testing.T) {
+	script := completionScript(t)
+	tests := []struct {
+		path         []string
+		removedFlag  string
+		survivorFlag string
+	}{
+		{[]string{"launcher", "create"}, "--name", "--allowed-root"},
+		{[]string{"session", "create"}, "--workspace", "--filesystem-root"},
+		{[]string{"session", "delete"}, "--id", "--system"},
+		{[]string{"registry", "login"}, "--registry", "--username"},
+		{[]string{"run"}, "--image", "--entrypoint"},
+		{[]string{"build"}, "--context", "--image"},
+	}
+	for _, tc := range tests {
+		t.Run(strings.Join(tc.path, " ")+" "+tc.removedFlag, func(t *testing.T) {
+			prefix := strings.TrimPrefix(tc.removedFlag, "--")[:1]
+			results := runCompletion(t, script, append(append([]string{"docker-helper"}, tc.path...), "--"+prefix))
+			if slices.Contains(results, tc.removedFlag) {
+				t.Errorf("removed spelling %s is still suggested: %v", tc.removedFlag, results)
+			}
+			results = runCompletion(t, script, append(append([]string{"docker-helper"}, tc.path...), tc.removedFlag[:2]))
+			if slices.Contains(results, tc.removedFlag) {
+				t.Errorf("removed spelling %s is still suggested by prefix: %v", tc.removedFlag, results)
+			}
+			// A retained modifier flag on the same command stays suggested.
+			full := runCompletion(t, script, append(append([]string{"docker-helper"}, tc.path...), tc.survivorFlag))
+			if !slices.Contains(full, tc.survivorFlag) {
+				t.Errorf("retained flag %s is not suggested: %v", tc.survivorFlag, full)
+			}
+		})
+	}
+}
+
+// TestCompletionWorkloadGrammarStopsAfterImage proves the run completion
+// stops treating workload command arguments as docker-helper options after
+// the IMAGE positional: option-looking workload words are completed by the
+// workload's own rules, never by the docker-helper flag table. The stop is
+// derived from the command tree's FlagsStopAtPositional metadata, so the
+// parser grammar and the completion grammar cannot drift apart.
+func TestCompletionWorkloadGrammarStopsAfterImage(t *testing.T) {
+	script := completionScript(t)
+
+	results := runCompletion(t, script, []string{"docker-helper", "run", "alpine:3.24", "sh", "-"})
+	if len(results) != 0 {
+		t.Errorf("post-IMAGE workload dash word completed docker-helper options: %v", results)
+	}
+	results = runCompletion(t, script, []string{"docker-helper", "run", "alpine:3.24", "--e"})
+	if len(results) != 0 {
+		t.Errorf("post-IMAGE workload flag-like word completed docker-helper options: %v", results)
+	}
+
+	// Before IMAGE the docker-helper flags are still applicable.
+	results = runCompletion(t, script, []string{"docker-helper", "run", "--e"})
+	requireCompletionContains(t, results, "--endpoint", "--entrypoint", "--env")
 }
 
 // TestCompletionDoubleDashStillStopsFlags keeps the sentinel contract: after
