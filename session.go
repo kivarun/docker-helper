@@ -154,6 +154,74 @@ type sessionCreateCredentialAuthority struct {
 	launcherID   string // Launcher credential authority
 }
 
+// workspaceResolutionRefusal is the typed workspace refusal of a failed
+// privileged probe (symlink resolution or post-resolution stat) of an
+// ADMITTED workspace spelling. The wrapped error keeps the full internal
+// diagnostic — the probe errno and the probed pathname, which for a denied
+// probe may name a resolved symlink target — for the operational log and
+// the ErrInvalidWorkspace family; publicMessage is the stable,
+// non-disclosing public meaning selected through the shared admitted-path
+// diagnosis. It discloses neither the errno nor any probed or resolved
+// pathname.
+type workspaceResolutionRefusal struct {
+	publicMessage string
+	err           error
+}
+
+func (e *workspaceResolutionRefusal) Error() string { return e.err.Error() }
+func (e *workspaceResolutionRefusal) Unwrap() error { return e.err }
+
+// workspacePathResolutionFailure builds the typed refusal for one failed
+// privileged probe of an admitted workspace spelling. internalPhrase is the
+// probe's operational diagnostic (the public fallback for a genuine
+// resolution/access failure of the admitted spelling); the shared
+// admitted-path diagnosis overrides it with the stable public meaning: the
+// missing-path cause when the path does not exist, and the existing bounded
+// workspace-authority refusal when the daemon may not resolve or consume
+// the pathname (fail-closed containment; identical to the
+// successful-resolution containment refusal, so the same caller action
+// answers with the same policy meaning on every backend).
+func workspacePathResolutionFailure(internalPhrase string, probeErr error) *workspaceResolutionRefusal {
+	public := internalPhrase
+	switch diagnoseAdmittedPath(probeErr) {
+	case admittedPathDoesNotExist:
+		public = "workspace path does not exist"
+	case admittedPathDenied:
+		public = "workspace must be inside an allowed root"
+	}
+	return &workspaceResolutionRefusal{
+		publicMessage: public,
+		err:           fmt.Errorf("%s: %w: %w", internalPhrase, probeErr, ErrInvalidWorkspace),
+	}
+}
+
+// sessionFilesystemResolutionRefusal marks an issuance-time filesystem-root
+// refusal whose cause is a failed privileged probe (symlink resolution or
+// post-resolution stat) of an ADMITTED requested root: the requested root
+// does not exist or cannot be resolved. It wraps the full internal
+// diagnostic (probe errno included) and the ErrInvalidSessionFilesystemPolicy
+// family; the HTTP layer maps it to the bounded path-resolution message
+// instead of the generic bounded policy message. A denied probe is never
+// marked: fail-closed containment stays the plain policy refusal.
+type sessionFilesystemResolutionRefusal struct {
+	err error
+}
+
+func (e *sessionFilesystemResolutionRefusal) Error() string { return e.err.Error() }
+func (e *sessionFilesystemResolutionRefusal) Unwrap() error { return e.err }
+
+// sessionFilesystemRootResolutionFailure builds the typed issuance-time
+// refusal for one failed privileged probe of an admitted requested
+// filesystem root. A denied probe stays a plain policy refusal (the bounded
+// public message); every other resolution/stat failure is marked as the
+// path-resolution family.
+func sessionFilesystemRootResolutionFailure(internal error, probeErr error) error {
+	if diagnoseAdmittedPath(probeErr) == admittedPathDenied {
+		return internal
+	}
+	return &sessionFilesystemResolutionRefusal{err: internal}
+}
+
 // createSessionWithPolicyLocked is the internal persistence/MAC stage beneath
 // createSessionAuthorized: the lifecycle serialization is already held, so
 // policy resolution and persistence cannot interleave with an authority
@@ -200,15 +268,20 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	// Filesystem mechanics after admission: resolution and type checks run
 	// only on an admitted spelling, and the canonical containment proof
 	// below remains the second, mandatory security proof — a symlink inside
-	// the lexical ceiling that resolves outside is still fail-closed.
+	// the lexical ceiling that resolves outside is still fail-closed. The
+	// full internal diagnostic (probe errno, probed pathname — which for a
+	// denied probe may name a resolved symlink target) stays in the domain
+	// error for the operational log; the typed refusal selects the stable,
+	// non-disclosing public message through the shared admitted-path
+	// diagnosis.
 	absWorkspace, err = evalSymlinksFn(absWorkspace)
 	if err != nil {
-		return nil, fmt.Errorf("cannot resolve workspace symlinks: %w: %w", err, ErrInvalidWorkspace)
+		return nil, workspacePathResolutionFailure("cannot resolve workspace symlinks", err)
 	}
 
 	info, err := osStatFn(absWorkspace)
 	if err != nil {
-		return nil, fmt.Errorf("cannot access workspace: %w: %w", err, ErrInvalidWorkspace)
+		return nil, workspacePathResolutionFailure("cannot access workspace", err)
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
@@ -559,14 +632,18 @@ func canonicalizeSessionFilesystemRoots(roots []sessionFilesystemRootEntry, ceil
 		// Filesystem mechanics after admission: resolution and type checks
 		// run only on an admitted spelling, and the canonical ceiling proof
 		// in narrowSessionFilesystemPolicy remains the second, mandatory
-		// security proof.
+		// security proof. The internal diagnostic keeps the probe errno for
+		// the operational log; the typed refusal distinguishes the
+		// path-resolution family for the HTTP layer.
 		resolved, err := evalSymlinksFn(cleaned)
 		if err != nil {
-			return nil, fmt.Errorf("filesystem root %q cannot be resolved: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
+			return nil, sessionFilesystemRootResolutionFailure(
+				fmt.Errorf("filesystem root %q cannot be resolved: %v: %w", root.Path, err, ErrInvalidSessionFilesystemPolicy), err)
 		}
 		info, err := osStatFn(resolved)
 		if err != nil {
-			return nil, fmt.Errorf("filesystem root %q cannot be accessed: %w", root.Path, ErrInvalidSessionFilesystemPolicy)
+			return nil, sessionFilesystemRootResolutionFailure(
+				fmt.Errorf("filesystem root %q cannot be accessed: %v: %w", root.Path, err, ErrInvalidSessionFilesystemPolicy), err)
 		}
 		if !info.IsDir() && !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("filesystem root %q is not a directory or regular file: %w", root.Path, ErrInvalidSessionFilesystemPolicy)

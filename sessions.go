@@ -310,6 +310,16 @@ func workspaceErrorMessage(err error) string {
 // existed.
 const sessionFilesystemPolicyMessage = "invalid session filesystem policy"
 
+// sessionFilesystemResolutionMessage is the bounded HTTP message of the
+// path-resolution family of an issuance-time Session filesystem refusal: the
+// requested root was admitted by the lexical ceiling proof but its
+// privileged resolution or stat failed, so its canonical identity cannot be
+// proven and the create is refused (an unresolvable root is a refusal, never
+// a guess). The message names no errno and no probed or resolved pathname —
+// the internal diagnostic stays in the operational log — while
+// distinguishing this family from the generic bounded policy refusal.
+const sessionFilesystemResolutionMessage = "requested filesystem root does not exist or cannot be resolved"
+
 // classifier for a create target relates a create error to its HTTP contract.
 type createTargetError struct {
 	status int
@@ -459,24 +469,44 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			// internal implementation detail. A request spelling that failed
 			// lexical admission never reaches the resolver at all, so no
 			// host-filesystem detail exists to disclose for an unauthorized
-			// path (the authorization-before-probing boundary).
+			// path (the authorization-before-probing boundary). A failed
+			// privileged probe of an admitted spelling answers with the
+			// stable typed refusal: the missing-path cause, the bounded
+			// workspace-authority refusal when the probe was denied
+			// (fail-closed containment), or the bare resolution/access
+			// failure — the probe's errno and any probed or resolved
+			// pathname stay in the operational log.
 			opLog(ctx).Warn("session creation rejected",
 				slog.String("operation", "session_create"),
 				slog.String("error", cerr.Error()),
 			)
-			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", workspaceErrorMessage(cerr))
+			message := workspaceErrorMessage(cerr)
+			var resolutionRefusal *workspaceResolutionRefusal
+			if errors.As(cerr, &resolutionRefusal) {
+				message = resolutionRefusal.publicMessage
+			}
+			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", message)
 		} else if errors.Is(cerr, ErrInvalidSessionFilesystemPolicy) {
 			// Issuance-time filesystem refusal: the request is malformed or
-			// is not a narrowing of the effective Launcher ceiling. The HTTP
-			// message is the bounded non-disclosing contract — the internal
-			// diagnostic (canonical requested path, which may name a resolved
-			// symlink target or upstream policy shape) stays in the
-			// operational log and never reaches the client.
+			// is not a narrowing of the effective Launcher ceiling. The
+			// default HTTP message is the bounded non-disclosing contract —
+			// the internal diagnostic (canonical requested path, which may
+			// name a resolved symlink target or upstream policy shape) stays
+			// in the operational log and never reaches the client. A failed
+			// privileged probe of an admitted requested root is the
+			// path-resolution family: the caller learns that its requested
+			// root does not exist or cannot be resolved, still without any
+			// errno or resolved pathname.
+			message := sessionFilesystemPolicyMessage
+			var resolutionRefusal *sessionFilesystemResolutionRefusal
+			if errors.As(cerr, &resolutionRefusal) {
+				message = sessionFilesystemResolutionMessage
+			}
 			opLog(ctx).Warn("session creation rejected",
 				slog.String("operation", "session_create"),
 				slog.String("error", cerr.Error()),
 			)
-			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", sessionFilesystemPolicyMessage)
+			writeError(ctx, w, http.StatusBadRequest, "invalid_filesystem_policy", message)
 		} else if errors.Is(cerr, ErrLifecycleBusy) {
 			// Non-waiting lifecycle admission: the create arrived while
 			// the lifecycle coordination was held by another transition and

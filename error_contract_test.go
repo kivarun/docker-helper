@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -1043,6 +1044,319 @@ func TestImageReferenceNotRejectedByHelper(t *testing.T) {
 
 			if w.Code != http.StatusOK {
 				t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// ---------- D2/D3/D4/D7 path-resolution diagnostics ----------
+
+// postSessionCreate posts a session-create body to the real production
+// handler and decodes the public refusal.
+func postSessionCreate(t *testing.T, app *App, body string) response {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(body)))
+	withAdminToken(req)
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response %s: %v", w.Body.String(), err)
+	}
+	return resp
+}
+
+// postBuild posts a build body to the real production handler and decodes
+// the public refusal.
+func postBuild(t *testing.T, app *App, token string, body string) response {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response %s: %v", w.Body.String(), err)
+	}
+	return resp
+}
+
+// TestErrorContractWorkspacePathDoesNotExist proves the missing-path
+// diagnosis of an admitted workspace spelling: the public cause identifies
+// the nonexistent path itself — not a symlink-resolution problem — while
+// the code stays invalid_workspace; a valid workspace still creates.
+func TestErrorContractWorkspacePathDoesNotExist(t *testing.T) {
+	app := newTestAppWithAdminTokenAndStaging(t)
+	root := app.Config.AllowedRoots[0].Path
+	ws := testWorkspaceDir(t, root)
+
+	resp := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(filepath.Join(ws, "does-not-exist"))+`"}`)
+	if resp.Code != "invalid_workspace" {
+		t.Errorf("expected code 'invalid_workspace', got %q", resp.Code)
+	}
+	if !strings.Contains(resp.Message, "does not exist") {
+		t.Errorf("expected the missing-path cause, got %q", resp.Message)
+	}
+	for _, incidental := range []string{"symlink", "no such file", "lstat"} {
+		if strings.Contains(resp.Message, incidental) {
+			t.Errorf("message %q must not present the failure as %q", resp.Message, incidental)
+		}
+	}
+
+	// Control: a valid workspace still creates through the same handler.
+	valid := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(ws)+`"}`)
+	if valid.Code == "invalid_workspace" || valid.Code == "internal_error" {
+		t.Errorf("valid workspace create refused: %s (%s)", valid.Code, valid.Message)
+	}
+}
+
+// TestErrorContractWorkspaceSymlinkEscapeStillRefused proves the workspace
+// symlink-escape refusal keeps its stable workspace-authority meaning: a
+// spelling that resolves outside the allowed root is refused with the
+// bounded containment message, not an incidental errno.
+func TestErrorContractWorkspaceSymlinkEscapeStillRefused(t *testing.T) {
+	app := newTestAppWithAdminTokenAndStaging(t)
+	root := app.Config.AllowedRoots[0].Path
+	ws := testWorkspaceDir(t, root)
+
+	escape := filepath.Join(ws, "escape")
+	outside := filepath.Join(filepath.Dir(root), "escape-target")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outside) })
+	if err := os.Symlink(outside, escape); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := postSessionCreate(t, app, `{"workspace":"`+filepath.ToSlash(escape)+`"}`)
+	if resp.Code != "invalid_workspace" {
+		t.Errorf("expected code 'invalid_workspace', got %q", resp.Code)
+	}
+	if resp.Message != "workspace must be inside an allowed root" {
+		t.Errorf("expected the stable containment refusal, got %q", resp.Message)
+	}
+}
+
+// TestErrorContractWorkspaceDeniedResolutionIsPolicyRefusal proves the
+// denied-resolution normalization (the confined-backend presentation of a
+// symlink escape): when the daemon may not resolve or consume an admitted
+// workspace spelling, the public message is the stable bounded
+// workspace-authority refusal — never the probe's errno or any probed or
+// resolved pathname — and a genuine resolution failure of the admitted
+// spelling keeps its own bare diagnosis without errno or pathname detail.
+func TestErrorContractWorkspaceDeniedResolutionIsPolicyRefusal(t *testing.T) {
+	app := newTestAppWithAdminTokenAndStaging(t)
+	root := app.Config.AllowedRoots[0].Path
+	ws := testWorkspaceDir(t, root)
+	spelling := filepath.ToSlash(filepath.Join(ws, "unresolvable"))
+
+	for _, tc := range []struct {
+		name        string
+		spellTarget func() string
+		failStat    bool
+		probeErr    error
+		wantMessage string
+		forbidden   []string
+	}{
+		{
+			name:        "denied resolution answers the bounded workspace-authority refusal",
+			spellTarget: func() string { return spelling },
+			probeErr:    os.ErrPermission,
+			wantMessage: "workspace must be inside an allowed root",
+			forbidden:   []string{"permission denied", "lstat ", spelling},
+		},
+		{
+			name: "denied post-resolution stat answers the same bounded refusal",
+			// The spelling resolves on the real filesystem, so the injected
+			// stat failure is the step the production path reaches.
+			spellTarget: func() string { return ws },
+			failStat:    true,
+			probeErr:    os.ErrPermission,
+			wantMessage: "workspace must be inside an allowed root",
+			forbidden:   []string{"permission denied", "stat ", ws},
+		},
+		{
+			name:        "a genuine resolution failure keeps its own bare diagnosis",
+			spellTarget: func() string { return spelling },
+			probeErr:    syscall.ELOOP,
+			wantMessage: "cannot resolve workspace symlinks",
+			forbidden:   []string{"too many levels", "lstat ", spelling},
+		},
+		{
+			name: "a genuine post-resolution access failure keeps its own bare diagnosis",
+			// The spelling resolves on the real filesystem, so the injected
+			// stat failure is the step the production path reaches.
+			spellTarget: func() string { return ws },
+			failStat:    true,
+			probeErr:    syscall.EIO,
+			wantMessage: "cannot access workspace",
+			forbidden:   []string{"input/output error", "stat ", ws},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// One probe step fails per subtest: the seam is swapped only for
+			// the failing step (evalSymlinksFn for the resolution failure,
+			// osStatFn for the post-resolution access failure), so the
+			// production path reaches exactly the claimed branch.
+			origEval, origStat := evalSymlinksFn, osStatFn
+			if tc.failStat {
+				osStatFn = func(string) (os.FileInfo, error) { return nil, tc.probeErr }
+			} else {
+				evalSymlinksFn = func(string) (string, error) { return "", tc.probeErr }
+			}
+			t.Cleanup(func() { evalSymlinksFn, osStatFn = origEval, origStat })
+
+			resp := postSessionCreate(t, app, `{"workspace":"`+tc.spellTarget()+`"}`)
+			if resp.Code != "invalid_workspace" {
+				t.Errorf("expected code 'invalid_workspace', got %q", resp.Code)
+			}
+			if resp.Message != tc.wantMessage {
+				t.Errorf("expected message %q, got %q", tc.wantMessage, resp.Message)
+			}
+			for _, forbiddenDetail := range tc.forbidden {
+				if strings.Contains(resp.Message, forbiddenDetail) {
+					t.Errorf("message %q discloses incidental detail %q", resp.Message, forbiddenDetail)
+				}
+			}
+		})
+	}
+}
+
+// TestErrorContractFilesystemRootMissing proves the path-resolution family
+// of the issuance-time filesystem refusal: a requested root admitted by the
+// lexical ceiling whose privileged resolution or stat fails answers
+// invalid_filesystem_policy with the bounded resolution message —
+// distinguishable from the generic bounded policy refusal of a genuine
+// ceiling/access-mode refusal — while a valid requested root still creates.
+func TestErrorContractFilesystemRootMissing(t *testing.T) {
+	app := newTestAppWithAdminTokenAndStaging(t)
+	root := app.Config.AllowedRoots[0].Path
+	ws := testWorkspaceDir(t, root)
+
+	missingRoot := filepath.ToSlash(filepath.Join(ws, "no-such-root"))
+
+	resp := postSessionCreate(t, app,
+		`{"workspace":"`+filepath.ToSlash(ws)+`","filesystem_roots":[{"path":"`+missingRoot+`","access":"read_write"}]}`)
+	if resp.Code != "invalid_filesystem_policy" {
+		t.Errorf("expected code 'invalid_filesystem_policy', got %q", resp.Code)
+	}
+	if resp.Message != "requested filesystem root does not exist or cannot be resolved" {
+		t.Errorf("expected the bounded resolution message, got %q", resp.Message)
+	}
+
+	// Controls: a genuine ceiling refusal and an access-mode refusal keep
+	// the generic bounded policy message.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "root outside the ceiling",
+			body: `{"workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"/etc","access":"read_write"}]}`,
+		},
+		{
+			name: "invalid access mode",
+			body: `{"workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"` + filepath.ToSlash(ws) + `","access":"sometimes"}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := postSessionCreate(t, app, tc.body)
+			if resp.Code != "invalid_filesystem_policy" {
+				t.Errorf("expected code 'invalid_filesystem_policy', got %q", resp.Code)
+			}
+			if resp.Message != "invalid session filesystem policy" {
+				t.Errorf("expected the generic bounded policy message, got %q", resp.Message)
+			}
+		})
+	}
+
+	// Control: a valid requested root still creates through the same handler.
+	resp = postSessionCreate(t, app,
+		`{"workspace":"`+filepath.ToSlash(ws)+`","filesystem_roots":[{"path":"`+filepath.ToSlash(ws)+`","access":"read_write"}]}`)
+	if resp.Code != "" && resp.Code != "invalid_filesystem_policy" {
+		t.Errorf("valid filesystem-root create refused: %s (%s)", resp.Code, resp.Message)
+	}
+}
+
+// TestErrorContractFilesystemRootDeniedResolutionStaysPolicyRefusal proves
+// the denied-resolution presentation of the issuance-time filesystem
+// refusal: when the daemon may not resolve or consume an admitted requested
+// root (the confined-backend presentation of a symlink escape), the public
+// message stays the generic bounded policy refusal — the same meaning a
+// successfully-resolved escape receives from the canonical ceiling proof —
+// with no errno and no resolved pathname.
+func TestErrorContractFilesystemRootDeniedResolutionStaysPolicyRefusal(t *testing.T) {
+	app := newTestAppWithAdminTokenAndStaging(t)
+	root := app.Config.AllowedRoots[0].Path
+	ws := testWorkspaceDir(t, root)
+	missingRoot := filepath.ToSlash(filepath.Join(ws, "denied-root"))
+	existingRoot := filepath.ToSlash(filepath.Join(ws, "denied-stat-root"))
+	if err := os.MkdirAll(existingRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := func(spelling string) string {
+		return `{"workspace":"` + filepath.ToSlash(ws) + `","filesystem_roots":[{"path":"` + spelling + `","access":"read_write"}]}`
+	}
+
+	for _, tc := range []struct {
+		name      string
+		spelling  string
+		failStat  bool
+		probeErr  error
+		forbidden []string
+	}{
+		{
+			name:      "denied resolution of a nonexistent requested root",
+			spelling:  missingRoot,
+			probeErr:  os.ErrPermission,
+			forbidden: []string{"permission denied", "lstat ", missingRoot},
+		},
+		{
+			name:      "denied post-resolution stat of a resolvable requested root",
+			spelling:  existingRoot,
+			failStat:  true,
+			probeErr:  os.ErrPermission,
+			forbidden: []string{"permission denied", "stat ", existingRoot},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The probe seams are package-global and shared by the workspace
+			// admission and the filesystem-root canonicalization, so each
+			// seam fails ONLY for the requested filesystem root and passes
+			// every other probe (the workspace spelling) through to the real
+			// implementation — the production path reaches exactly the
+			// claimed filesystem-root probe step.
+			origEval, origStat := evalSymlinksFn, osStatFn
+			target := tc.spelling
+			if tc.failStat {
+				osStatFn = func(p string) (os.FileInfo, error) {
+					if p == target {
+						return nil, tc.probeErr
+					}
+					return origStat(p)
+				}
+			} else {
+				evalSymlinksFn = func(p string) (string, error) {
+					if p == target {
+						return "", tc.probeErr
+					}
+					return origEval(p)
+				}
+			}
+			t.Cleanup(func() { evalSymlinksFn, osStatFn = origEval, origStat })
+
+			resp := postSessionCreate(t, app, body(tc.spelling))
+			if resp.Code != "invalid_filesystem_policy" {
+				t.Errorf("expected code 'invalid_filesystem_policy', got %q", resp.Code)
+			}
+			if resp.Message != "invalid session filesystem policy" {
+				t.Errorf("expected the generic bounded policy message, got %q", resp.Message)
+			}
+			for _, forbiddenDetail := range tc.forbidden {
+				if strings.Contains(resp.Message, forbiddenDetail) {
+					t.Errorf("message %q discloses incidental detail %q", resp.Message, forbiddenDetail)
+				}
 			}
 		})
 	}

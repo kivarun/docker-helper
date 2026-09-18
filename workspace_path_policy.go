@@ -1,12 +1,58 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
 )
+
+// admittedPathDiagnosis is the shared diagnosis of a failed host-path
+// resolution or post-resolution stat of an ADMITTED caller spelling: the
+// authorization-before-probing boundary has already admitted the spelling
+// lexically, so the privileged probe ran and its failure carries a
+// classifiable cause. Session-facing path boundaries (Session workspace
+// admission and issuance-time filesystem-root canonicalization) classify
+// these failures through this one owner so the caller-facing meaning is
+// stable and non-disclosing: the probe's incidental errno and any probed or
+// resolved pathname stay in the operational diagnostic, never in the public
+// message. It deliberately does not cover unadmitted spellings — those are
+// refused before any probe and carry no filesystem detail at all.
+type admittedPathDiagnosis int
+
+const (
+	// admittedPathDoesNotExist: the requested path does not exist (ENOENT).
+	// The spelling was admitted, so the caller already knows the pathname;
+	// the actionable public cause is the missing path itself.
+	admittedPathDoesNotExist admittedPathDiagnosis = iota
+	// admittedPathDenied: the daemon may not resolve or consume the
+	// pathname (EACCES). Fail-closed: containment/authority cannot be
+	// proven, and on the confined backends this is how a spelling that
+	// resolves across the authorized boundary presents.
+	admittedPathDenied
+	// admittedPathUnresolvable: any other resolution failure (ELOOP,
+	// EIO, ...): a genuine canonicalization/access failure of the admitted
+	// spelling, not an authority decision.
+	admittedPathUnresolvable
+)
+
+// diagnoseAdmittedPath classifies one failed privileged probe
+// (evalSymlinksFn/osStatFn) of an admitted caller spelling. The probe error
+// may name a resolved symlink target for a denied probe, so only the
+// diagnosis — never the error text — reaches a public boundary.
+func diagnoseAdmittedPath(probeErr error) admittedPathDiagnosis {
+	switch {
+	case errors.Is(probeErr, fs.ErrNotExist):
+		return admittedPathDoesNotExist
+	case errors.Is(probeErr, fs.ErrPermission):
+		return admittedPathDenied
+	default:
+		return admittedPathUnresolvable
+	}
+}
 
 // validateHostPathText is the shared host capability path text-grammar check.
 // A host capability path must not contain control characters that
