@@ -11414,3 +11414,94 @@ func TestMigrationAndAcceptanceListHarnessContracts(t *testing.T) {
 		}
 	}
 }
+
+// TestShippedSkillRC8Contract pins the canonical agent skill
+// (.claude/skills/docker-helper/SKILL.md, packaged as
+// skills/docker-helper/SKILL.md by build-bundle.sh) to the current Release
+// 2.2 contract: the RC8 positional CLI grammar, the explicit --json
+// machine-consumption rule with the stream/protocol exceptions, and the
+// parent-ceiling cascade consequences. The removed legacy spellings must
+// not appear as current-state examples, and the skill must keep steering
+// agents away from operator surfaces.
+func TestShippedSkillRC8Contract(t *testing.T) {
+	data, err := os.ReadFile(".claude/skills/docker-helper/SKILL.md")
+	if err != nil {
+		t.Fatalf("the canonical agent skill must exist at its canonical path: %v", err)
+	}
+	skill := string(data)
+
+	// The bundle is produced from this exact file: build-bundle.sh copies the
+	// canonical .claude skill to the shipped skills/ path, so the packaged
+	// file cannot drift from the canonical one.
+	bundle, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bundle),
+		`cp "$SCRIPT_DIR/.claude/skills/docker-helper/SKILL.md" \
+   "$BUNDLE_DIR/skills/docker-helper/SKILL.md"`) {
+		t.Error("build-bundle.sh must ship the canonical .claude skill verbatim at skills/docker-helper/SKILL.md")
+	}
+
+	// RC8 positional grammar as the current-state examples.
+	for _, must := range []string{
+		"docker-helper session create .",
+		"docker-helper build . --dockerfile Dockerfile --image IMAGE",
+		"docker-helper run --mount .:/workspace IMAGE -- command arg...",
+		"docker-helper run IMAGE -- command arg...",
+		"docker-helper registry login --username USER REGISTRY",
+	} {
+		if !strings.Contains(skill, must) {
+			t.Errorf("the skill must carry the RC8 positional example (%s)", must)
+		}
+	}
+
+	// Removed legacy spellings must not survive as current-state examples.
+	for _, removed := range []string{
+		"session create --workspace",
+		"launcher create --name",
+		"session delete --id",
+		"registry login --registry",
+		"run --image",
+		"build --context",
+	} {
+		if strings.Contains(skill, removed) {
+			t.Errorf("the skill must not present the removed spelling (%s)", removed)
+		}
+	}
+
+	// Machine-consumption presentation rule.
+	for _, must := range []string{
+		"Finite-result CLI commands default to human-readable output",
+		"request `--json` explicitly",
+		"never parse the human block",
+		"deliberate exceptions",
+	} {
+		if !strings.Contains(skill, must) {
+			t.Errorf("the skill must carry the machine-consumption presentation rule (%s)", must)
+		}
+	}
+
+	// Parent-ceiling cascade consequences (agent-relevant only).
+	for _, must := range []string{
+		"narrowing a parent",
+		"may delete stored Principal or restricted-Launcher",
+		"remains restricted with zero",
+		"authority for future Session creation only",
+		"trust your own `self` snapshot as",
+		"do not assume a",
+		"future Session will receive the same authority merely because the current",
+	} {
+		if !strings.Contains(skill, must) {
+			t.Errorf("the skill must carry the cascade consequence (%q)", must)
+		}
+	}
+
+	// The agent-relevant cascade wording must not instruct agents to
+	// manipulate policy state.
+	for _, operator := range []string{"docker-helper config", "docker-helper principal", "docker-helper launcher"} {
+		if strings.Contains(skill, operator) {
+			t.Errorf("the skill must not instruct agents to run the operator surface (%s)", operator)
+		}
+	}
+}

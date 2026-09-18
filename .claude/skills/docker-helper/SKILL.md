@@ -14,8 +14,8 @@ skip the delegated-identity machinery:
 
 ```bash
 docker-helper pull IMAGE
-docker-helper build --context . --dockerfile Dockerfile --image IMAGE
-docker-helper run --image IMAGE --mount .:/workspace -- command arg...
+docker-helper build . --dockerfile Dockerfile --image IMAGE
+docker-helper run --mount .:/workspace IMAGE -- command arg...
 ```
 
 Protected operations read the Session token from
@@ -131,7 +131,7 @@ delete sessions.
 CLI:
 
 ```bash
-docker-helper session create --workspace .
+docker-helper session create .
 ```
 
 The workspace is resolved against your own current directory; it must lie
@@ -224,6 +224,17 @@ lookup for a credential that authorizes it, not a Session-bearer surface.
 The snapshot does not change during the session's lifetime, and parent
 allowed-root policy changes do not affect an already-issued session.
 
+Authority for future Sessions can change under you: narrowing a parent
+allowed-root ceiling may delete stored Principal or restricted-Launcher
+descendant roots that are no longer covered, and a restricted Launcher
+whose final stored root is cascaded away remains restricted with zero
+roots. This changes authority for future Session creation only — the
+operator's concern, never something to manipulate from your side. The
+operational consequences for you are: trust your own `self` snapshot as
+the authority actually issued to the current Session, and do not assume a
+future Session will receive the same authority merely because the current
+Session has it.
+
 What this means for mounts:
 
 - A requested **writable** mount can be refused with
@@ -277,6 +288,17 @@ Helper credential (Launcher or Principal); with only a Session token, do
 not use them. `self` works with whichever bearer you hold, including a
 Session token.
 
+### Machine consumption: request --json explicitly
+
+Finite-result CLI commands default to human-readable output. When
+consuming a finite result programmatically, request `--json` explicitly —
+for example `docker-helper self --json`, `docker-helper session create
+--json ...`, `docker-helper session show --json SESSION_ID` — and parse
+the documented JSON fields; never parse the human block. Stream, protocol,
+and help commands (`pull`, `build`, `run`, `completion`, `help`) are
+deliberate exceptions: consume them according to their streaming, protocol,
+or text contract instead (operation output, exit codes, log offsets).
+
 ## Pull
 
 ```bash
@@ -286,8 +308,7 @@ docker-helper pull IMAGE
 ## Build
 
 ```bash
-docker-helper build \
-  --context . \
+docker-helper build . \
   --dockerfile Dockerfile \
   --image IMAGE \
   --build-arg KEY=value      # repeatable
@@ -303,13 +324,15 @@ in image history/provenance.
 ## Run
 
 ```bash
-docker-helper run \
-  --image IMAGE \
-  -- command arg...
+docker-helper run IMAGE -- command arg...
 ```
 
-Other useful options: `--entrypoint`, `--workdir`, `--shm-size`, `--env
-KEY=value`. Use `docker-helper help run` for exact syntax. Mount sources
+IMAGE is the primary operand: all docker-helper flags (including
+`--entrypoint`, `--workdir`, `--shm-size`, `--env KEY=value`, `--mount`)
+belong before IMAGE, and everything after IMAGE belongs to the workload
+command — the workload's own flags are never interpreted by
+docker-helper. A single optional bare `--` separator after IMAGE may be
+used for clarity. Use `docker-helper help run` for exact syntax. Mount sources
 follow the Path model; `run` waits for the operation to finish, streams
 its output, and propagates a non-zero container exit code.
 
@@ -319,9 +342,7 @@ the name the workload sees):
 
 ```bash
 ORCHESTRATOR_LLM_KEY=secret \
-docker-helper run --image IMAGE \
-  --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY \
-  -- command arg...
+docker-helper run --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY IMAGE -- command arg...
 ```
 
 - the value is read locally; it is not placed in the `docker-helper`
@@ -371,7 +392,7 @@ Do not attempt manual `docker kill` or container cleanup.
 Interactive:
 
 ```bash
-docker-helper registry login --registry REGISTRY --username USER
+docker-helper registry login --username USER REGISTRY
 ```
 
 Non-interactive (pipe password via stdin; never put registry passwords
@@ -380,9 +401,9 @@ directly into command arguments):
 ```bash
 printf '%s\n' "$REGISTRY_PASSWORD" | \
   docker-helper registry login \
-    --registry REGISTRY \
     --username USER \
-    --password-stdin
+    --password-stdin \
+    REGISTRY
 ```
 
 # HTTP API interface
