@@ -480,7 +480,7 @@ func TestBlackBoxVersionAliases(t *testing.T) {
 func TestBlackBoxCreateHelpNoRun(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/config.json")
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"session", "create", "--workspace", "/tmp", "--help"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"session", "create", "/tmp", "--help"}, &stdout, &stderr)
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
 	}
@@ -1009,26 +1009,21 @@ func TestHelpCanonicalPathsAndPerCommandFlag(t *testing.T) {
 }
 
 // TestBuildContextHelpDescribesAbsoluteWithinWorkspace guards the build
-// --context help contract: production accepts BOTH a workspace-relative
+// CONTEXT help contract: production accepts BOTH a workspace-relative
 // context and an absolute context path inside the session workspace
 // (validateBuildRequest canonicalizes and enforces containment), so the
-// help text must not claim relative-only support.
+// help text must not claim relative-only support. The context is the
+// positional primary operand; --dockerfile/--image stay build parameters.
 func TestBuildContextHelpDescribesAbsoluteWithinWorkspace(t *testing.T) {
-	fs := flag.NewFlagSet("build", flag.ContinueOnError)
-	buildCommand.NewInvocation(fs)
-	flagDef := fs.Lookup("context")
-	if flagDef == nil {
-		t.Fatal("the build command does not declare --context")
+	var stdout, stderr bytes.Buffer
+	if code := runCommandWithWriters([]string{"build", "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("build --help exit = %d, stderr=%s", code, stderr.String())
 	}
-	usage := flagDef.Usage
-	const relativeOnly = "Build context path relative to session workspace"
-	if usage == relativeOnly {
-		t.Errorf("build --context help still claims relative-only support: %q", usage)
+	help := stdout.String()
+	if !strings.Contains(help, "absolute") {
+		t.Errorf("build help must describe the accepted absolute-within-workspace context form:\n%s", help)
 	}
-	if !strings.Contains(usage, "absolute") {
-		t.Errorf("build --context help must describe the accepted absolute-within-workspace form: %q", usage)
-	}
-	if !strings.Contains(usage, "workspace") {
-		t.Errorf("build --context help must keep the session-workspace containment scope: %q", usage)
+	if !strings.Contains(help, "workspace") {
+		t.Errorf("build help must keep the session-workspace containment scope:\n%s", help)
 	}
 }

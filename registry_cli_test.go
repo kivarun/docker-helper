@@ -51,7 +51,7 @@ func TestRegistryLoginCLIMissingSessionToken(t *testing.T) {
 	var stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"registry", "login",
-		"--registry", "registry.example.com",
+		"registry.example.com",
 		"--username", "user",
 		"--password-stdin",
 	}, &bytes.Buffer{}, &stderr)
@@ -127,7 +127,7 @@ func TestRegistryLoginNoConfigFile(t *testing.T) {
 	var out, stderr bytes.Buffer
 	exitCode := runCommandWithWriters([]string{
 		"registry", "login",
-		"--registry", "registry.example.com",
+		"registry.example.com",
 		"--username", "user",
 		"--password-stdin",
 	}, &out, &stderr)

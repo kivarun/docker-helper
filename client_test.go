@@ -499,7 +499,7 @@ func TestSessionCreateJSONOutput(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
-		[]string{"session", "create", "--workspace", "/home/user/proj", "--json"},
+		[]string{"session", "create", "--json", "/home/user/proj"},
 		&stdout, &stderr,
 	)
 
@@ -550,7 +550,7 @@ func TestSessionCreateTextOutput(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
-		[]string{"session", "create", "--workspace", "/home/user/proj"},
+		[]string{"session", "create", "/home/user/proj"},
 		&stdout, &stderr,
 	)
 
@@ -587,7 +587,7 @@ func TestSessionCreateTokenNotInStderr(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
-		[]string{"session", "create", "--workspace", "/home/user/proj"},
+		[]string{"session", "create", "/home/user/proj"},
 		&stdout, &stderr,
 	)
 
@@ -677,7 +677,7 @@ func TestSessionDeleteJSONOutput(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
-		[]string{"session", "delete", "--id", "dhs_001", "--json"},
+		[]string{"session", "delete", "--json", "dhs_001"},
 		&stdout, &stderr,
 	)
 
@@ -710,7 +710,7 @@ func TestSessionDeleteTextOutput(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
-		[]string{"session", "delete", "--id", "dhs_001"},
+		[]string{"session", "delete", "dhs_001"},
 		&stdout, &stderr,
 	)
 
@@ -748,7 +748,7 @@ func TestSessionDeleteHTTPError(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
-		[]string{"session", "delete", "--id", "dhs_001"},
+		[]string{"session", "delete", "dhs_001"},
 		&stdout, &stderr,
 	)
 

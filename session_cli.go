@@ -155,15 +155,16 @@ var sessionCommand = &Command{
 }
 
 var sessionCreateCommand = &Command{
-	Name:    "create",
-	Summary: "Create a new session",
-	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json]",
+	Name:       "create",
+	Summary:    "Create a new session",
+	Usage:      "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json] WORKSPACE",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		workspace := fs.String("workspace", "", "Workspace directory")
 		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal username (admin authentication; targets the Principal's default Launcher)")
 		launcher := &explicitStringFlag{}
@@ -175,9 +176,6 @@ var sessionCreateCommand = &Command{
 
 		return Invocation{
 			Validate: func() error {
-				if *workspace == "" || strings.HasPrefix(*workspace, "-") {
-					return fmt.Errorf("--workspace is required")
-				}
 				if principal.set && principal.value == "" {
 					return fmt.Errorf("--principal value must not be empty")
 				}
@@ -197,7 +195,11 @@ var sessionCreateCommand = &Command{
 					return 1
 				}
 
-				absWorkspace, err := filepath.Abs(*workspace)
+				// The workspace is the primary resource operand and is
+				// positional; the canonical absolute resolution semantics are
+				// unchanged. --principal/--launcher stay flags (selectors)
+				// and --filesystem-root stays a repeatable modifier flag.
+				absWorkspace, err := filepath.Abs(fs.Arg(0))
 				if err != nil {
 					fmt.Fprintf(stderr, "error: cannot resolve workspace path: %v\n", err)
 					return 1
@@ -312,24 +314,19 @@ var sessionListCommand = &Command{
 }
 
 var sessionDeleteCommand = &Command{
-	Name:    "delete",
-	Summary: "Delete a session",
-	Usage:   "docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]",
+	Name:       "delete",
+	Summary:    "Delete a session",
+	Usage:      "docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		id := fs.String("id", "", "Session ID to delete")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
-			Validate: func() error {
-				if *id == "" || strings.HasPrefix(*id, "-") {
-					return fmt.Errorf("--id is required")
-				}
-				return nil
-			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -341,7 +338,12 @@ var sessionDeleteCommand = &Command{
 					return 1
 				}
 
-				if err := client.deleteSession(*id); err != nil {
+				// The Session ID is the primary resource identity and is
+				// positional, matching session show; flags carry options and
+				// transport only.
+				sessionID := fs.Arg(0)
+
+				if err := client.deleteSession(sessionID); err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
@@ -349,7 +351,7 @@ var sessionDeleteCommand = &Command{
 				if *jsonOut {
 					enc := json.NewEncoder(stdout)
 					enc.SetIndent("", "  ")
-					if err := enc.Encode(map[string]any{"ok": true, "id": *id, "deleted": true}); err != nil {
+					if err := enc.Encode(map[string]any{"ok": true, "id": sessionID, "deleted": true}); err != nil {
 						fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
 						return 1
 					}
@@ -357,7 +359,7 @@ var sessionDeleteCommand = &Command{
 				}
 
 				var buf strings.Builder
-				fmt.Fprintf(&buf, "ID: %s\n", *id)
+				fmt.Fprintf(&buf, "ID: %s\n", sessionID)
 				fmt.Fprintf(&buf, "DELETED: true\n")
 
 				if _, err := stdout.Write([]byte(buf.String())); err != nil {

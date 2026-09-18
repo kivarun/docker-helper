@@ -318,7 +318,7 @@ func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
 	// boundary completes in one TAB from the typed parent.
 	p.resetLine(t)
 	rec.snapshot() // drain prior requests
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher killme --workspace "+filepath.Dir(optDir), optDir)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher killme "+filepath.Dir(optDir), optDir)
 	if !strings.Contains(out, optDir) {
 		t.Fatalf("separated selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
 	}
@@ -330,7 +330,7 @@ func TestCompletionInteractiveFlagFormsUnderRealBash(t *testing.T) {
 	// carries the same semantics.
 	p.resetLine(t)
 	rec.snapshot()
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher=killme --workspace "+filepath.Dir(optDir), optDir)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+sockPath+" --token-file "+adminTokenPath+" --launcher=killme "+filepath.Dir(optDir), optDir)
 	if !strings.Contains(out, optDir) {
 		t.Fatalf("inline selector workspace <TAB>: completion output missing %s:\n%s", optDir, out)
 	}
@@ -372,7 +372,7 @@ func TestCompletionInteractiveExplicitHTTPEndpoint(t *testing.T) {
 	// by the daemon the URL names — never the generic filesystem fallback.
 	p.resetLine(t)
 	httpRec.snapshot()
-	out = p.typeAndTab(t, "docker-helper session create --endpoint "+httpEndpoint+" --token-file "+adminTokenPath+" --launcher=killme --workspace "+filepath.Dir(httpOpt), httpOpt)
+	out = p.typeAndTab(t, "docker-helper session create --endpoint "+httpEndpoint+" --token-file "+adminTokenPath+" --launcher=killme "+filepath.Dir(httpOpt), httpOpt)
 	if !strings.Contains(out, httpOpt) {
 		t.Fatalf("HTTP endpoint session workspace <TAB>: completion output missing %s:\n%s", httpOpt, out)
 	}

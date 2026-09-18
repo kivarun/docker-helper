@@ -298,16 +298,21 @@ var pullCommand = &Command{
 }
 
 var buildCommand = &Command{
-	Name:    "build",
-	Summary: "Build a Docker image",
-	Usage:   "docker-helper build --context PATH --dockerfile FILE --image NAME [flags]",
-	Help:    `SIGINT/SIGTERM cancels the running build operation.`,
+	Name:       "build",
+	Summary:    "Build a Docker image",
+	Usage:      "docker-helper build [--system] [--endpoint ENDPOINT] [--dockerfile FILE] --image NAME [--build-arg KEY=VALUE]... CONTEXT",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+	Help: `SIGINT/SIGTERM cancels the running build operation.
+
+CONTEXT is the build context path: a workspace-relative path or an
+absolute path inside the session workspace (the daemon canonicalizes the
+context and enforces workspace containment).`,
 
 	Presentation: exceptionPresentation("stream: build log data, not one finite result renderer"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
-		ctx := fs.String("context", "", "Build context path, relative to or absolute within the session workspace")
 		dockerfile := fs.String("dockerfile", "", "Dockerfile path relative to context")
 		image := fs.String("image", "", "Image name and tag")
 		var buildArgs stringSlice
@@ -315,9 +320,6 @@ var buildCommand = &Command{
 
 		return Invocation{
 			Validate: func() error {
-				if *ctx == "" {
-					return fmt.Errorf("--context is required")
-				}
 				if *dockerfile == "" {
 					return fmt.Errorf("--dockerfile is required")
 				}
@@ -346,8 +348,12 @@ var buildCommand = &Command{
 					return 1
 				}
 
+				// The build context is the primary operand and is positional;
+				// --dockerfile/--image/--build-arg remain build parameters.
+				context := fs.Arg(0)
+
 				resp, err := c.startBuild(buildRequest{
-					Context:    *ctx,
+					Context:    context,
 					Dockerfile: *dockerfile,
 					Image:      *image,
 					BuildArgs:  argsMap,
@@ -401,15 +407,21 @@ func (s *stringSlice) String() string {
 var runContainerCommand = &Command{
 	Name:       "run",
 	Summary:    "Run a Docker container",
-	Usage:      "docker-helper run --image NAME [flags] -- [command]",
-	MaxPosArgs: -1, // Unlimited positional args after --
-	Help:       `SIGINT/SIGTERM cancels the running container operation.`,
+	Usage:      "docker-helper run [flags] IMAGE [--] [COMMAND...]",
+	MinPosArgs: 1,
+	MaxPosArgs: -1, // IMAGE plus the workload command words
+	// FlagsStopAtPositional is the workload-command grammar: option parsing
+	// stops at the first positional (IMAGE), so every post-IMAGE token —
+	// including workload flags like `sh -c` or `python -m` — is passed to
+	// the workload command verbatim and never reinterpreted as a
+	// docker-helper flag.
+	FlagsStopAtPositional: true,
+	Help:                  `SIGINT/SIGTERM cancels the running container operation.`,
 
 	Presentation: exceptionPresentation("stream: workload stdout/stderr, not one finite result renderer"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
-		image := fs.String("image", "", "Image name and tag")
 		entrypoint := fs.String("entrypoint", "", "Container entrypoint")
 		workdir := fs.String("workdir", "", "Absolute working directory inside container")
 		shmSize := fs.String("shm-size", "", "Size of /dev/shm (e.g. 64m, 1g); max 2g")
@@ -423,14 +435,19 @@ var runContainerCommand = &Command{
 
 		return Invocation{
 			Validate: func() error {
-				if *image == "" {
-					return fmt.Errorf("--image is required")
-				}
 				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				// Parse command from remaining args after --
-				command := fs.Args()
+				// IMAGE is the primary workload operand; every following
+				// token belongs to the workload command. One optional bare
+				// "--" separator right after IMAGE is consumed as the
+				// separator, not workload content.
+				args := fs.Args()
+				image := args[0]
+				command := args[1:]
+				if len(command) > 0 && command[0] == "--" {
+					command = command[1:]
+				}
 
 				envMap := make(map[string]string)
 				for _, e := range envSlice.vals {
@@ -504,7 +521,7 @@ var runContainerCommand = &Command{
 				}
 
 				req := runRequest{
-					Image:        *image,
+					Image:        image,
 					Entrypoint:   *entrypoint,
 					Workdir:      *workdir,
 					Command:      command,

@@ -231,7 +231,7 @@ func TestLauncherCreateCredentialHint(t *testing.T) {
 			}
 		})
 		args := append([]string{"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath}, flags...)
-		args = append(args, "--json", "--name", "agent")
+		args = append(args, "--json", "agent")
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters(args, &stdout, &stderr)
 		return code, stdout, stderr

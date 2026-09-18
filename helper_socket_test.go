@@ -330,7 +330,7 @@ func TestHelperSocketCLIRequestField(t *testing.T) {
 	srv := newEnvFromRunTestServer()
 
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--helper-socket", "--", "true",
+		"run", "--helper-socket", "--", "true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, srv)
 	})
@@ -348,7 +348,7 @@ func TestHelperSocketCLIOmittedByDefault(t *testing.T) {
 	srv := newEnvFromRunTestServer()
 
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--", "true",
+		"run", "--", "true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, srv)
 	})
@@ -369,7 +369,7 @@ func TestHelperSocketCLIFlagWithEnvFrom(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_LLM_KEY", "uat-combined-marker")
 
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--helper-socket",
+		"run", "--helper-socket",
 		"--env-from", "LLM_KEY=ORCHESTRATOR_LLM_KEY", "--", "true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, srv)

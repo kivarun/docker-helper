@@ -21,9 +21,11 @@ var registryCommand = &Command{
 }
 
 var registryLoginCommand = &Command{
-	Name:    "login",
-	Summary: "Log in to a container registry",
-	Usage:   "docker-helper registry login [--system] [--endpoint ENDPOINT] --registry REGISTRY --username USER [--password-stdin] [--json]",
+	Name:       "login",
+	Summary:    "Log in to a container registry",
+	Usage:      "docker-helper registry login [--system] [--endpoint ENDPOINT] [--username USER] [--password-stdin] [--json] REGISTRY",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
 	Help: `Log in to a container registry for the current session.
 
 Credentials are session-scoped and ephemeral. They are stored in the
@@ -42,31 +44,27 @@ Examples:
   Interactive:
     DOCKER_HELPER_SESSION_TOKEN="$TOKEN" \
     docker-helper registry login \
-      --registry registry.example.com \
-      --username user
+      --username user \
+      registry.example.com
 
   Automation:
     printf '%s\n' "$REGISTRY_PASSWORD" |
     DOCKER_HELPER_SESSION_TOKEN="$TOKEN" \
     docker-helper registry login \
-      --registry registry.example.com \
       --username user \
-      --password-stdin`,
+      --password-stdin \
+      registry.example.com`,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
-		registry := fs.String("registry", "", "Registry address")
 		username := fs.String("username", "", "Registry username")
 		passwordStdin := fs.Bool("password-stdin", false, "Read password from stdin")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Validate: func() error {
-				if *registry == "" || strings.HasPrefix(*registry, "-") {
-					return fmt.Errorf("--registry is required")
-				}
 				if *username == "" || strings.HasPrefix(*username, "-") {
 					return fmt.Errorf("--username is required")
 				}
@@ -96,7 +94,12 @@ Examples:
 					return 1
 				}
 
-				result, err := client.registryLogin(*registry, *username, password)
+				// The registry address is the primary resource identity and
+				// is positional; --username/--password-stdin remain the
+				// credential-operation parameters.
+				registry := fs.Arg(0)
+
+				result, err := client.registryLogin(registry, *username, password)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -112,7 +115,7 @@ Examples:
 					return 0
 				}
 
-				fmt.Fprintf(stdout, "Login succeeded for %s\n", *registry)
+				fmt.Fprintf(stdout, "Login succeeded for %s\n", registry)
 				return 0
 			},
 		}

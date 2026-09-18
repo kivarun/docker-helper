@@ -228,36 +228,18 @@ var launcherCommand = &Command{
 	},
 }
 
-// launcherDefaultConflictHint is the CLI's pre-flight rejection for the
-// guaranteed conflict of creating the auto-provisioned 'default' Launcher:
-// every Principal gets a 'default' Launcher at creation, so a create without
-// --name can only collide. The check is a read-only show of the Launcher the
-// caller could fetch anyway; the create itself stays atomic on the daemon.
-const launcherDefaultConflictHint = "; use --name NAME to create a differently named launcher"
-
-// launcherDefaultExists reports whether the target Principal's 'default'
-// Launcher already exists. The check is advisory pre-flight: any query
-// failure, including a transient server error, reports false so the create
-// request remains the authoritative conflict boundary.
-func launcherDefaultExists(client *apiClient, username string) bool {
-	_, err := client.showLauncher(username, defaultLauncherName)
-	return err == nil
-}
-
 var launcherCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a launcher",
-	Usage:      "docker-helper launcher create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--name NAME] [--allowed-root PATH]... [--issue-credential | --no-credential] [--json]",
-	MinPosArgs: 0,
-	MaxPosArgs: 0,
+	Usage:      "docker-helper launcher create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--allowed-root PATH]... [--issue-credential | --no-credential] [--json] NAME",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		name := &explicitStringFlag{}
-		fs.Var(name, "name", "Launcher name (default: \"default\"; provisioned automatically at principal creation)")
 		allowedRoots := &stringListFlag{}
 		fs.Var(allowedRoots, "allowed-root", "Allowed root path (restricted scope)")
 		issueCredential := fs.Bool("issue-credential", false, "Issue a launcher credential")
@@ -275,21 +257,12 @@ var launcherCreateCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				targetName := defaultLauncherName
-				if name.set {
-					targetName = name.value
-				}
-				// Without --name the request targets the auto-provisioned
-				// 'default' Launcher, which every Principal already has:
-				// reject before the credential prompt instead of walking
-				// into the daemon's guaranteed conflict. With --name the
-				// create stays atomic and the daemon's conflict response
-				// names the colliding Launcher and Principal.
-				if !name.set && launcherDefaultExists(client, username) {
-					fmt.Fprintf(stderr, "error: launcher %q already exists for principal %q%s\n",
-						defaultLauncherName, username, launcherDefaultConflictHint)
-					return 1
-				}
+				// The Launcher name is the primary resource identity and is
+				// positional, like the other resource create commands. An
+				// attempt to create the auto-provisioned 'default' Launcher
+				// is an ordinary create: the daemon's conflict response names
+				// the colliding Launcher and Principal.
+				targetName := fs.Arg(0)
 				issue, err := resolveIssueCredential(*issueCredential, *noCredential,
 					"Create launcher credential now? [Y/n]", os.Stdin, stderr, term.IsTerminal(int(os.Stdin.Fd())))
 				if err != nil {
@@ -573,24 +546,47 @@ var launcherDeleteCommand = &Command{
 	},
 }
 
-// launcherAllowedRootTarget resolves the CLI target for the positional
-// launcher allowed-root add/remove forms: PATH [LAUNCHER]. One positional is
-// the PATH under the Principal's 'default' Launcher; two positionals are the
-// PATH and the LAUNCHER selector. The Principal resolves once through the
-// shared selector owner (launcherSelectorTargetSelector): the daemon remains
-// the authorization authority.
+// launcherAllowedRootTarget resolves the CLI target for the target-first
+// positional launcher allowed-root add/remove forms: [LAUNCHER] PATH. One
+// positional is the PATH under the Principal's 'default' Launcher; two
+// positionals are the LAUNCHER selector (name or dhl_ ID) and the PATH. The
+// Principal resolves once through the shared selector owner
+// (launcherSelectorTargetSelector): the daemon remains the authorization
+// authority.
 func launcherAllowedRootTarget(client *apiClient, explicitPrincipal string, fs *flag.FlagSet) (username, selector, path string, err error) {
 	args := fs.Args()
-	path = args[0]
 	selector = defaultLauncherName
+	operands := args
 	if len(args) == 2 {
-		selector = args[1]
+		selector = args[0]
+		operands = args[1:]
 	}
+	path = operands[0]
 	username, err = launcherSelectorTargetSelector(client, explicitPrincipal, selector)
 	if err != nil {
 		return "", "", "", err
 	}
 	return username, selector, path, nil
+}
+
+// launcherAllowedRootSetAccessTarget decomposes the target-first positional
+// operands of the launcher allowed-root set-access command: an optional
+// leading LAUNCHER selector (name or dhl_ ID) followed by PATH ACCESS. Two
+// positionals are the PATH and the access value under the Principal's
+// 'default' Launcher; three positionals are the LAUNCHER selector, the PATH,
+// and the access value. The daemon performs the conditional mutation, so the
+// CLI never reads and re-sends the root list.
+func launcherAllowedRootSetAccessTarget(fs *flag.FlagSet) (selector, path, access string) {
+	args := fs.Args()
+	selector = defaultLauncherName
+	operands := args
+	if len(args) == 3 {
+		selector = args[0]
+		operands = args[1:]
+	}
+	path = operands[0]
+	access = operands[1]
+	return selector, path, access
 }
 
 var launcherAllowedRootCommand = &Command{
@@ -608,7 +604,7 @@ var launcherAllowedRootCommand = &Command{
 var launcherAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root to a launcher",
-	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [--json] PATH [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--access ACCESS] [--json] [LAUNCHER] PATH",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 
@@ -696,15 +692,10 @@ var launcherAllowedRootListCommand = &Command{
 	},
 }
 
-// launcherAllowedRootSetAccessCommand changes the access mode of exactly one
-// stored root: PATH ACCESS [LAUNCHER]. The first positional is the path, the
-// second is the canonical access value; an optional trailing positional is
-// the LAUNCHER selector. The daemon performs the conditional mutation, so the
-// CLI never reads and re-sends the root list.
 var launcherAllowedRootSetAccessCommand = &Command{
 	Name:       "set-access",
 	Summary:    "Change the access mode of a launcher allowed root",
-	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] PATH read_only|read_write [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER] PATH read_only|read_write",
 	MinPosArgs: 2,
 	MaxPosArgs: 3,
 
@@ -721,13 +712,7 @@ var launcherAllowedRootSetAccessCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				args := fs.Args()
-				path := args[0]
-				accessArg := args[1]
-				selector := defaultLauncherName
-				if len(args) == 3 {
-					selector = args[2]
-				}
+				selector, path, accessArg := launcherAllowedRootSetAccessTarget(fs)
 				access, aerr := parseAllowedRootAccess(accessArg)
 				if aerr != nil {
 					fmt.Fprintf(stderr, "error: %v\n", aerr)
@@ -757,7 +742,7 @@ var launcherAllowedRootSetAccessCommand = &Command{
 var launcherAllowedRootRemoveCommand = &Command{
 	Name:       "remove",
 	Summary:    "Remove an allowed root from a launcher",
-	Usage:      "docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] PATH [LAUNCHER]",
+	Usage:      "docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER] PATH",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 

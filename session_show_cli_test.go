@@ -132,9 +132,10 @@ func TestSessionShowCLIMatrix(t *testing.T) {
 }
 
 // TestSessionShowHelpDocumentsPositionalIdentity protects the help
-// invariant: the show command help documents the positional SESSION_ID
-// identity (the canonical resource-show targeting) and the operator flags,
-// and the legacy `session delete --id` grammar stays untouched.
+// invariant: the show and delete commands both document the positional
+// SESSION_ID identity (the canonical resource-show and resource-delete
+// targeting) and the operator flags, and the superseded `session delete
+// --id` spelling survives nowhere in the current help.
 func TestSessionShowHelpDocumentsPositionalIdentity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session", "show", "--help"}, &stdout, &stderr)
@@ -151,11 +152,15 @@ func TestSessionShowHelpDocumentsPositionalIdentity(t *testing.T) {
 		t.Errorf("session show help must not carry the retired --id selector:\n%s", help)
 	}
 
-	// The legacy pre-2.2 delete grammar is compatibility and unchanged.
+	// The RC8 grammar normalizes delete onto the same positional identity:
+	// session delete SESSION_ID (no --id flag survives as an alias).
 	var delOut, delErr bytes.Buffer
 	delUsage := runCommandWithWriters([]string{"session", "delete", "--help"}, &delOut, &delErr)
-	if delUsage != 0 || !strings.Contains(delOut.String(), "--id SESSION_ID") {
-		t.Errorf("session delete must keep its legacy --id grammar (exit=%d):\n%s", delUsage, delOut.String())
+	if delUsage != 0 || !strings.Contains(delOut.String(), "SESSION_ID") {
+		t.Errorf("session delete help must document the positional SESSION_ID (exit=%d):\n%s", delUsage, delOut.String())
+	}
+	if strings.Contains(delOut.String(), "--id") {
+		t.Errorf("session delete help must not carry the retired --id flag:\n%s", delOut.String())
 	}
 }
 
@@ -165,6 +170,11 @@ func TestSessionShowHelpDocumentsPositionalIdentity(t *testing.T) {
 // A mechanical positional conversion (the `session show SESSION_ID`
 // normalization applied to `delete`) would silently change a compatibility
 // contract; this check fails such a replacement.
+//
+// RC8 supersedes this decision: the candidate consumers flip to the
+// canonical positional SESSION_ID grammar together with the UAT grammar
+// gate, and this check inverts there. Until that commit the corpus is
+// intentionally unchanged.
 func TestShippedScriptSessionDeleteGrammar(t *testing.T) {
 	var sessionDelete = regexp.MustCompile(`(?:\bdh\b|\bdhx\b|\bdocker-helper\b|\$DH\b|\$DHX\b)\s+session delete\b`)
 	entries, err := os.ReadDir("scripts")

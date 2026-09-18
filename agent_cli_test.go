@@ -117,13 +117,20 @@ func TestPullMissingImage(t *testing.T) {
 	}
 }
 
-func TestBuildMissingFlags(t *testing.T) {
-	_, err, exitCode := runAgentCLITestWithServer(t, []string{"build", "--image", "app:test"}, "", nil)
+func TestBuildMissingContext(t *testing.T) {
+	_, _, exitCode := runAgentCLITestWithServer(t, []string{"build", "--image", "app:test"}, "", nil)
 	if exitCode != 2 {
 		t.Errorf("expected exit 2, got %d", exitCode)
 	}
-	if !strings.Contains(err.String(), "--context is required") {
-		t.Errorf("expected context error, got: %s", err.String())
+}
+
+func TestBuildMissingImage(t *testing.T) {
+	_, err, exitCode := runAgentCLITestWithServer(t, []string{"build", "--dockerfile", "Dockerfile", "."}, "", nil)
+	if exitCode != 2 {
+		t.Errorf("expected exit 2, got %d", exitCode)
+	}
+	if !strings.Contains(err.String(), "--image is required") {
+		t.Errorf("expected image error, got: %s", err.String())
 	}
 }
 
@@ -131,7 +138,7 @@ func TestRunContainerExitNonzero(t *testing.T) {
 	opID := "op_test123"
 	exitCode := 42
 	_, _, actualExit := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--", "sh", "-c", "exit 42",
+		"run", "alpine:3.24", "sh", "-c", "exit 42",
 	}, "", func(s *agentCLITestServer) {
 		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -341,7 +348,7 @@ func TestWaitForOperationFinalLogsRace(t *testing.T) {
 // TestRunInvalidMountOption verifies that unknown mount options are rejected.
 func TestRunInvalidMountOption(t *testing.T) {
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--mount", ".:/workspace:rw", "--", "echo", "hi",
+		"run", "--mount", ".:/workspace:rw", "alpine:3.24", "echo", "hi",
 	}, "", nil)
 	if exitCode != 2 {
 		t.Errorf("expected exit 2, got %d", exitCode)
@@ -357,7 +364,7 @@ func TestRunInvalidMountOption(t *testing.T) {
 func TestRunMountAbsoluteSourceForwarded(t *testing.T) {
 	var gotSource, gotTarget string
 	_, _, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--mount", "/workspace/probe.txt:/target", "--", "echo", "hi",
+		"run", "--mount", "/workspace/probe.txt:/target", "alpine:3.24", "echo", "hi",
 	}, "", func(s *agentCLITestServer) {
 		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
 			var req runRequest
@@ -415,7 +422,7 @@ func TestRunMountAbsoluteSourceForwarded(t *testing.T) {
 func TestRunFailedDiagnostics(t *testing.T) {
 	opID := "op_test"
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--", "echo", "hi",
+		"run", "alpine:3.24", "echo", "hi",
 	}, "", func(s *agentCLITestServer) {
 		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -572,7 +579,7 @@ func TestBuildContract(t *testing.T) {
 	opID := "op_build"
 	received := false
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"build", "--context", ".", "--dockerfile", "Dockerfile", "--image", "myapp:latest",
+		"build", "--dockerfile", "Dockerfile", "--image", "myapp:latest", ".",
 		"--build-arg", "FOO=bar", "--build-arg", "BAZ=qux",
 	}, "", func(s *agentCLITestServer) {
 		s.handleBuild(func(w http.ResponseWriter, r *http.Request) {
@@ -637,11 +644,12 @@ func TestRunContract(t *testing.T) {
 	opID := "op_run"
 	received := false
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24",
+		"run",
 		"--env", "KEY=value",
 		"--mount", ".:/workspace:ro",
 		"--shm-size", "128m",
-		"--", "echo", "hello",
+		"alpine:3.24",
+		"echo", "hello",
 	}, "", func(s *agentCLITestServer) {
 		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
 			var req runRequest
@@ -1192,7 +1200,7 @@ func TestSignalNoOrphanGoroutine(t *testing.T) {
 func TestBuildContextAbsoluteForwarded(t *testing.T) {
 	var gotContext string
 	_, _, exitCode := runAgentCLITestWithServer(t, []string{
-		"build", "--context", "/absolute/path", "--dockerfile", "Dockerfile", "--image", "app:test",
+		"build", "--dockerfile", "Dockerfile", "--image", "app:test", "/absolute/path",
 	}, "", func(s *agentCLITestServer) {
 		s.handleBuild(func(w http.ResponseWriter, r *http.Request) {
 			var req buildRequest

@@ -312,7 +312,7 @@ func TestLauncherCreateCLINonInteractive(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--no-credential", "--principal", "alice",
+		"--no-credential", "--principal", "alice", "default",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
@@ -331,7 +331,7 @@ func TestLauncherCreateCLIAdminWithoutPrincipalErrors(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential",
+		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential", "default",
 	}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
@@ -353,7 +353,7 @@ func TestLauncherCreateCLILauncherCredentialErrors(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential",
+		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential", "default",
 	}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
@@ -363,13 +363,12 @@ func TestLauncherCreateCLILauncherCredentialErrors(t *testing.T) {
 	}
 }
 
-// TestLauncherCreateCLINamePresence proves the CLI --name presence contract
-// for launcher create: an omitted flag selects the default name on the wire,
-// an explicit value is transmitted exactly as supplied, and an explicitly
-// supplied empty value is never silently replaced by the default — it reaches
-// the daemon as "name":"" and the rejection is surfaced.
-func TestLauncherCreateCLINamePresence(t *testing.T) {
-	t.Run("explicit --name default", func(t *testing.T) {
+// TestLauncherCreateCLINameTransmitted proves the CLI transmits the positional
+// name exactly as supplied: an explicit empty positional reaches the daemon as
+// "name":"" and the rejection is surfaced — the empty name is never silently
+// replaced by the default.
+func TestLauncherCreateCLINameTransmitted(t *testing.T) {
+	t.Run("explicit default", func(t *testing.T) {
 		endpoint, tokenPath := startLauncherCLITestServer(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/auth" {
 				w.Header().Set("Content-Type", "application/json")
@@ -395,14 +394,14 @@ func TestLauncherCreateCLINamePresence(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters([]string{
 			"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-			"--no-credential", "--principal", "alice", "--name", "default",
+			"--no-credential", "--principal", "alice", "default",
 		}, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 		}
 	})
 
-	t.Run("explicit empty --name is transmitted and rejected", func(t *testing.T) {
+	t.Run("explicit empty positional is transmitted and rejected", func(t *testing.T) {
 		endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/auth" {
 				w.Header().Set("Content-Type", "application/json")
@@ -422,7 +421,7 @@ func TestLauncherCreateCLINamePresence(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters([]string{
 			"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-			"--no-credential", "--principal", "alice", "--name", "",
+			"--no-credential", "--principal", "alice", "",
 		}, &stdout, &stderr)
 		if code != 1 {
 			t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
@@ -862,20 +861,15 @@ func writeJSONResponse(w http.ResponseWriter, status int, v any) {
 // ---- principal inference end-to-end ----
 
 // TestLauncherCreateCLIInfersPrincipalFromCredential proves the full CLI path:
-// --principal omitted -> GET /auth (principal authority) -> pre-flight show of
-// the auto-provisioned default Launcher (404: absent, so creation may
-// proceed) -> canonical nested POST /principals/{username}/launchers with the
-// returned username and the simple-default body.
+// --principal omitted -> GET /auth (principal authority) -> canonical nested
+// POST /principals/{username}/launchers with the returned username and the
+// simple-default body. No pre-flight Launcher lookup precedes the create: the
+// daemon's create stays the conflict authority.
 func TestLauncherCreateCLIInfersPrincipalFromCredential(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
 			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
-		case r.URL.Path == "/principals/alice/launchers/default" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusNotFound, struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			}{Code: "launcher_not_found", Message: "launcher not found"})
 		case r.URL.Path == "/principals/alice/launchers" && r.Method == http.MethodPost:
 			writeJSONResponse(w, http.StatusCreated, createLauncherResponse{
 				OK:       true,
@@ -888,21 +882,21 @@ func TestLauncherCreateCLIInfersPrincipalFromCredential(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential",
+		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential", "default",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
 
-	if len(*requests) != 3 {
-		t.Fatalf("requests = %+v, want /auth, pre-flight default show, then create", *requests)
+	if len(*requests) != 2 {
+		t.Fatalf("requests = %+v, want /auth then create (no pre-flight lookup)", *requests)
 	}
-	if (*requests)[0].path != "/auth" || (*requests)[1].path != "/principals/alice/launchers/default" || (*requests)[2].path != "/principals/alice/launchers" {
-		t.Fatalf("request order = %+v, want /auth, show default, create", *requests)
+	if (*requests)[0].path != "/auth" || (*requests)[1].path != "/principals/alice/launchers" {
+		t.Fatalf("request order = %+v, want /auth, create", *requests)
 	}
 	var req createLauncherClientRequest
-	if err := json.Unmarshal([]byte((*requests)[2].body), &req); err != nil {
-		t.Fatalf("decode create body %q: %v", (*requests)[2].body, err)
+	if err := json.Unmarshal([]byte((*requests)[1].body), &req); err != nil {
+		t.Fatalf("decode create body %q: %v", (*requests)[1].body, err)
 	}
 	if req.Name != "default" || req.Scope != "inherit" || req.IssueCredential || len(req.AllowedRoots) != 0 {
 		t.Errorf("create body = %+v, want default/inherit/no-credential", req)
@@ -912,19 +906,21 @@ func TestLauncherCreateCLIInfersPrincipalFromCredential(t *testing.T) {
 	}
 }
 
-// TestLauncherCreateCLIDefaultPreFlightConflict proves the actionable
-// pre-flight rejection for the guaranteed default-Launcher conflict: without
-// --name, an existing default Launcher is rejected before the credential
-// prompt (the non-interactive prompt error would be a different message) and
-// before any mutating request — no create is issued. The message names the
-// Launcher, the Principal, and the --name escape hatch.
-func TestLauncherCreateCLIDefaultPreFlightConflict(t *testing.T) {
+// TestLauncherCreateCLIDefaultConflictSurfaced proves the canonical daemon
+// conflict path decides an attempt to create the auto-provisioned 'default'
+// Launcher: the create request is issued directly (no CLI pre-flight lookup),
+// the daemon's 409 conflict is surfaced with its message, and the conflict
+// names the colliding Launcher and Principal.
+func TestLauncherCreateCLIDefaultConflictSurfaced(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
 			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "michael"})
-		case r.URL.Path == "/principals/michael/launchers/default" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "michael", Name: "default", Scope: "inherit", Enabled: true})
+		case r.URL.Path == "/principals/michael/launchers" && r.Method == http.MethodPost:
+			writeJSONResponse(w, http.StatusConflict, struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}{Code: "launcher_exists", Message: `launcher "default" already exists for principal "michael"`})
 		default:
 			http.NotFound(w, r)
 		}
@@ -932,68 +928,16 @@ func TestLauncherCreateCLIDefaultPreFlightConflict(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential",
+		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential", "default",
 	}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
 	}
-	for _, want := range []string{
-		`launcher "default" already exists for principal "michael"`,
-		"--name NAME",
-	} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("stderr = %q, want containing %q", stderr.String(), want)
-		}
+	if !strings.Contains(stderr.String(), `launcher "default" already exists for principal "michael"`) {
+		t.Errorf("stderr = %q, want the daemon conflict message", stderr.String())
 	}
-	if strings.Contains(stderr.String(), "non-interactive") {
-		t.Errorf("credential prompt was reached before the pre-flight rejection: %q", stderr.String())
-	}
-	for _, req := range *requests {
-		if req.method == http.MethodPost {
-			t.Errorf("create was issued despite the pre-flight conflict: %+v", req)
-		}
-	}
-}
-
-// TestLauncherCreateCLITransientPreFlightFailureProceeds proves the pre-flight
-// is advisory only: when the read-only default check fails for another reason
-// (for example a transient daemon error), the create stays atomic on the
-// daemon and is still attempted — the daemon's response remains the authority.
-func TestLauncherCreateCLITransientPreFlightFailureProceeds(t *testing.T) {
-	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "michael"})
-		case r.URL.Path == "/principals/michael/launchers/default" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusInternalServerError, struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			}{Code: "internal_error", Message: "internal server error"})
-		case r.URL.Path == "/principals/michael/launchers" && r.Method == http.MethodPost:
-			writeJSONResponse(w, http.StatusCreated, createLauncherResponse{
-				OK:       true,
-				Launcher: launcherJSON{ID: "dhl_9", Principal: "michael", Name: "default", Scope: "inherit", Enabled: true},
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{
-		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--no-credential",
-	}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
-	}
-	found := false
-	for _, req := range *requests {
-		if req.method == http.MethodPost && req.path == "/principals/michael/launchers" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("create was not attempted after a transient pre-flight failure: %+v", *requests)
+	if len(*requests) != 2 || (*requests)[0].path != "/auth" || (*requests)[1].method != http.MethodPost {
+		t.Fatalf("requests = %+v, want exactly /auth then the create POST (no pre-flight show)", *requests)
 	}
 }
 
@@ -1105,7 +1049,7 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--allowed-root", "/a", "--allowed-root", "/b", "--issue-credential",
+		"--allowed-root", "/a", "--allowed-root", "/b", "--issue-credential", "agent",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
@@ -1115,8 +1059,8 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 	if err := json.Unmarshal([]byte((*requests)[len(*requests)-1].body), &req); err != nil {
 		t.Fatalf("decode create body %q: %v", (*requests)[len(*requests)-1].body, err)
 	}
-	if req.Scope != "restricted" || len(req.AllowedRoots) != 2 || req.AllowedRoots[0] != "/a" || req.AllowedRoots[1] != "/b" || !req.IssueCredential {
-		t.Errorf("create body = %+v, want restricted [/a /b] with credential", req)
+	if req.Name != "agent" || req.Scope != "restricted" || len(req.AllowedRoots) != 2 || req.AllowedRoots[0] != "/a" || req.AllowedRoots[1] != "/b" || !req.IssueCredential {
+		t.Errorf("create body = %+v, want agent restricted [/a /b] with credential", req)
 	}
 	if got := strings.Count(stdout.String(), "secret-create-once-42"); got != 1 {
 		t.Errorf("token printed %d times, want exactly once; stdout=%s", got, stdout.String())
@@ -1127,11 +1071,11 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 
 // TestLauncherAllowedRootCLISingleRequest proves the launcher allowed-root
 // commands issue exactly one request each — no GET and no read-modify-write:
-// the daemon owns the policy mutation and its concurrency semantics. The
-// RC5 positional grammar is PATH-first: the first positional is always the
-// PATH and the optional target Launcher is the last positional (omission
-// keeps the documented default-Launcher semantics); the old selector-first
-// interpretation is gone.
+// the daemon owns the policy mutation and its concurrency semantics. The RC8
+// positional grammar is target-first: the optional leading positional is the
+// LAUNCHER selector (name or dhl_ ID) and the operation operands follow
+// (omission keeps the documented default-Launcher semantics); the old
+// PATH-first interpretation is gone.
 func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1150,9 +1094,9 @@ func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 			wantBody:   `{"path":"/a"}`,
 		},
 		{
-			name:       "add two positionals are the path and the target launcher",
+			name:       "add two positionals are the target launcher and the path",
 			args:       []string{"launcher", "allowed-root", "add", "--principal", "alice"},
-			positional: []string{"/a", "build-agent"},
+			positional: []string{"build-agent", "/a"},
 			wantPath:   "/principals/alice/launchers/build-agent/allowed-roots",
 			wantMethod: http.MethodPost,
 			wantBody:   `{"path":"/a"}`,
@@ -1160,15 +1104,15 @@ func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 		{
 			name:       "manual repro: --access after positionals targets the named launcher",
 			args:       []string{"launcher", "allowed-root", "add", "--principal", "alice", "--access", "read_only"},
-			positional: []string{"/mnt/fake/bun", "bun"},
+			positional: []string{"bun", "/mnt/fake/bun"},
 			wantPath:   "/principals/alice/launchers/bun/allowed-roots",
 			wantMethod: http.MethodPost,
 			wantBody:   `{"path":"/mnt/fake/bun","access":"read_only"}`,
 		},
 		{
-			name:       "remove is path-first with the optional target launcher last",
+			name:       "remove is target-first with the optional launcher selector leading",
 			args:       []string{"launcher", "allowed-root", "remove", "--principal", "alice"},
-			positional: []string{"/a", "build-agent"},
+			positional: []string{"build-agent", "/a"},
 			wantPath:   "/principals/alice/launchers/build-agent/allowed-roots",
 			wantMethod: http.MethodDelete,
 			wantBody:   `{"path":"/a"}`,
@@ -1190,9 +1134,9 @@ func TestLauncherAllowedRootCLISingleRequest(t *testing.T) {
 			wantBody:   `{"path":"/a","access":"read_only"}`,
 		},
 		{
-			name:       "set-access three positionals target the named launcher last",
+			name:       "set-access three positionals target the named launcher first",
 			args:       []string{"launcher", "allowed-root", "set-access", "--principal", "alice"},
-			positional: []string{"/a", "read_only", "dhl_1"},
+			positional: []string{"dhl_1", "/a", "read_only"},
 			wantPath:   "/principals/alice/launchers/dhl_1/allowed-roots",
 			wantMethod: http.MethodPatch,
 			wantBody:   `{"path":"/a","access":"read_only"}`,

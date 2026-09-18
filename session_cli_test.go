@@ -239,9 +239,9 @@ func TestSessionCreateFsRootsWire(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"session", "create",
-		"--workspace", "/state/runs/run-1",
 		"--filesystem-root", "/home/michael/work/git/docker-helper=read_only",
 		"--filesystem-root", "/opt/michael/cache=read_write",
+		"/state/runs/run-1",
 		"--json",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -256,9 +256,8 @@ func TestSessionCreateFsRootsWire(t *testing.T) {
 	}
 }
 
-// TestSessionCreateOmittedFsRoots proves the old create
-// syntax is unchanged: a create without --filesystem-root sends no
-// filesystem_roots key at all.
+// TestSessionCreateOmittedFsRoots proves a create without
+// --filesystem-root sends no filesystem_roots key at all.
 func TestSessionCreateOmittedFsRoots(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
@@ -270,7 +269,7 @@ func TestSessionCreateOmittedFsRoots(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"session", "create",
-		"--workspace", "/state/runs/run-1",
+		"/state/runs/run-1",
 		"--json",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -304,8 +303,8 @@ func TestSessionCreateBadFsRootSyntax(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := runCommandWithWriters([]string{
 				"session", "create",
-				"--workspace", "/state/runs/run-1",
 				"--filesystem-root", value,
+				"/state/runs/run-1",
 			}, &stdout, &stderr)
 			if code == 0 {
 				t.Fatalf("bad root accepted: %s stderr=%s", value, stderr.String())
@@ -345,8 +344,8 @@ func TestSessionCreateEqualsInPathWire(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"session", "create",
-		"--workspace", "/state/runs/run-1",
 		"--filesystem-root", "/data/foo=bar=read_only",
+		"/state/runs/run-1",
 		"--json",
 	}, &stdout, &stderr)
 	if code != 0 {

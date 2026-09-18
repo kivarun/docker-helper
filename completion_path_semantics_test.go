@@ -57,10 +57,9 @@ func runCompletionEntrypoint(t *testing.T, script string, compWords []string) (r
 func TestCompletionPathFlagsEnableFilenameSemantics(t *testing.T) {
 	script := completionScript(t)
 	for _, words := range [][]string{
-		{"docker-helper", "session", "create", "--workspace", "/home/michael/"},
+		{"docker-helper", "session", "create", "--endpoint", "/nonexistent.sock", "/home/michael/"},
 		{"docker-helper", "launcher", "create", "--allowed-root", "/home/michael/"},
 		{"docker-helper", "config", "set", "trusted_ca_path", "/etc/ssl/"},
-		{"docker-helper", "session", "create", "--workspace=/home/michael/"},
 	} {
 		t.Run(strings.Join(words[1:], " "), func(t *testing.T) {
 			_, filenameMode := runCompletionEntrypoint(t, script, words)
@@ -137,7 +136,8 @@ func startPolicyRootsServer(t *testing.T, root string) (endpoint, tokenPath stri
 // example /home/michael/work//git/. The regression is driven through the
 // actually registered completion entrypoint with the filename-semantics
 // seam, so it proves the path-value stage was reached rather than failing
-// earlier with no candidates.
+// earlier with no candidates. The RC8 grammar completes the positional
+// WORKSPACE operand.
 func TestCompletionPolicyWorkspaceDoubledSeparatorNotPropagated(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "work")
@@ -149,7 +149,7 @@ func TestCompletionPolicyWorkspaceDoubledSeparatorNotPropagated(t *testing.T) {
 	script := completionPATHPreamble(t) + "\n" + completionScript(t)
 	reply, filenameMode := runCompletionEntrypoint(t, script, []string{
 		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--workspace", root + "//",
+		root + "//",
 	})
 	if !filenameMode {
 		t.Fatal("path-valued completion did not enable filename semantics")
@@ -185,7 +185,7 @@ func TestCompletionPolicyAnchorsNotPreSlashTerminated(t *testing.T) {
 	script := completionPATHPreamble(t) + "\n" + completionScript(t)
 	reply, _ := runCompletionEntrypoint(t, script, []string{
 		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--workspace", root,
+		root,
 	})
 	if len(reply) == 0 {
 		t.Fatal("no candidates produced; the anchor stage was not reached")

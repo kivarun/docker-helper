@@ -39,9 +39,10 @@ func TestEnvFromDeliversResolvedValue(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_LLM_KEY", "uat-env-from-marker-value")
 
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24",
+		"run",
 		"--env-from", "LLM_KEY=ORCHESTRATOR_LLM_KEY",
-		"--", "true",
+		"alpine:3.24",
+		"true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, srv)
 	})
@@ -65,9 +66,10 @@ func TestEnvFromMissingSourceRejectedBeforeOperation(t *testing.T) {
 	srv := newEnvFromRunTestServer()
 
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24",
+		"run",
 		"--env-from", "LLM_KEY=UAT_DEFINITELY_MISSING_ENV_VAR",
-		"--", "true",
+		"alpine:3.24",
+		"true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, srv)
 	})
@@ -88,9 +90,10 @@ func TestEnvFromExplicitEmptyValueDelivered(t *testing.T) {
 	t.Setenv("UAT_EMPTY_SOURCE_VAR", "")
 
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24",
+		"run",
 		"--env-from", "FLAG=UAT_EMPTY_SOURCE_VAR",
-		"--", "true",
+		"alpine:3.24",
+		"true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, srv)
 	})
@@ -115,9 +118,10 @@ func TestEnvFromNeighborEnvironmentDoesNotLeak(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_LLM_KEY", "uat-env-from-marker-value")
 
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24",
+		"run",
 		"--env-from", "LLM_KEY=ORCHESTRATOR_LLM_KEY",
-		"--", "true",
+		"alpine:3.24",
+		"true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, srv)
 	})
@@ -140,10 +144,11 @@ func TestEnvFromAndEnvWorkTogether(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_LLM_KEY", "uat-env-from-marker-value")
 
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24",
+		"run",
 		"--env", "PLAIN_KEY=plain-value",
 		"--env-from", "LLM_KEY=ORCHESTRATOR_LLM_KEY",
-		"--", "true",
+		"alpine:3.24",
+		"true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, srv)
 	})
@@ -179,8 +184,8 @@ func TestEnvFromInvalidDestRejectedLikeEnv(t *testing.T) {
 			srv := newEnvFromRunTestServer()
 			t.Setenv("ORCHESTRATOR_LLM_KEY", "uat-env-from-marker-value")
 
-			args := append([]string{"run", "--image", "alpine:3.24"}, tc.flag...)
-			args = append(args, "--", "true")
+			args := append([]string{"run"}, tc.flag...)
+			args = append(args, "alpine:3.24", "true")
 
 			_, stderr, exitCode := runAgentCLITestWithServer(t, args, "", func(s *agentCLITestServer) {
 				registerEnvFromRejectedRunHandlers(s, srv)
@@ -201,9 +206,10 @@ func TestEnvFromInvalidDestRejectedLikeEnv(t *testing.T) {
 
 func TestEnvFromMissingSeparatorRejectedLikeEnv(t *testing.T) {
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24",
+		"run",
 		"--env-from", "NOSEPARATOR",
-		"--", "true",
+		"alpine:3.24",
+		"true",
 	}, "", func(s *agentCLITestServer) {
 		registerEnvFromRunHandlers(s, nil)
 	})

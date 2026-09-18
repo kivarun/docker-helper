@@ -21,9 +21,7 @@ import (
 var pathValuedFlags = []string{
 	"endpoint",
 	"token-file",
-	"workspace",
 	"filesystem-root",
-	"context",
 	"dockerfile",
 	"allowed-root",
 }
@@ -590,7 +588,6 @@ type policyValueCompletion struct {
 
 var policyValueCompletions = []policyValueCompletion{
 	{commandPath: "launcher create", flag: "allowed-root", query: "principal"},
-	{commandPath: "session create", flag: "workspace", query: "session"},
 	{commandPath: "session create", flag: "filesystem-root", query: "session"},
 }
 
@@ -900,7 +897,10 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    # If previous word was a flag that takes a value, complete the value.")
 	fmt.Fprintln(w, "    # The typed value prefix (the current word for the separated form,")
 	fmt.Fprintln(w, "    # the part after --flag= for the inline form) is passed explicitly.")
-	fmt.Fprintln(w, "    if [ -n \"$prev\" ] && [[ \"$prev\" == -* ]]; then")
+	fmt.Fprintln(w, "    # A self-contained inline --flag=VALUE already carries its value:")
+	fmt.Fprintln(w, "    # the current word is a new logical word (for example the")
+	fmt.Fprintln(w, "    # positional operand typed after it), never its value.")
+	fmt.Fprintln(w, `    if [ -n "$prev" ] && [[ "$prev" == -* && "$prev" != *=* ]]; then`)
 	fmt.Fprintln(w, "        local clean_prev=\"${prev#-}\"")
 	fmt.Fprintln(w, "        clean_prev=\"${clean_prev#-}\"")
 	fmt.Fprintln(w, "        _docker_helper_complete_flag_value \"$flag_path\" \"$clean_prev\" \"$cur\"")
@@ -1204,6 +1204,40 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "                        _docker_helper_complete_selector_value launcher \"$cur\"")
 	fmt.Fprintln(w, "                        ;;")
 	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            return")
+	fmt.Fprintln(w, "            ;;")
+	fmt.Fprintln(w, `        "session create")`)
+	fmt.Fprintln(w, "            # WORKSPACE is the primary resource operand and is")
+	fmt.Fprintln(w, "            # positional: the same daemon-backed session policy")
+	fmt.Fprintln(w, "            # query the completed --workspace flag value used; the")
+	fmt.Fprintln(w, "            # typed selectors are forwarded exactly like a real")
+	fmt.Fprintln(w, "            # create. On a query failure completion degrades to the")
+	fmt.Fprintln(w, "            # generic directory completion. One WORKSPACE operand:")
+	fmt.Fprintln(w, "            # past it nothing else is suggested.")
+	fmt.Fprintln(w, "            local wpos")
+	fmt.Fprintln(w, `            wpos="$(_docker_helper_positional_count "session create")"`)
+	fmt.Fprintln(w, "            if [ \"$wpos\" -eq 0 ]; then")
+	fmt.Fprintln(w, "                compopt -o filenames 2>/dev/null || true")
+	fmt.Fprintln(w, `                if _docker_helper_complete_policy_roots session "$cur" workspace; then`)
+	fmt.Fprintln(w, "                    return")
+	fmt.Fprintln(w, "                fi")
+	fmt.Fprintln(w, `                COMPREPLY=( $(compgen -d -- "$cur") )`)
+	fmt.Fprintln(w, "                _docker_helper_normalize_path_candidates")
+	fmt.Fprintln(w, "            fi")
+	fmt.Fprintln(w, "            return")
+	fmt.Fprintln(w, "            ;;")
+	fmt.Fprintln(w, `        "build")`)
+	fmt.Fprintln(w, "            # CONTEXT is the primary operand: a generic directory")
+	fmt.Fprintln(w, "            # completion (the daemon canonicalizes and enforces the")
+	fmt.Fprintln(w, "            # workspace containment; the context may name any")
+	fmt.Fprintln(w, "            # directory under it). One CONTEXT operand.")
+	fmt.Fprintln(w, "            local bpos")
+	fmt.Fprintln(w, `            bpos="$(_docker_helper_positional_count "build")"`)
+	fmt.Fprintln(w, "            if [ \"$bpos\" -eq 0 ]; then")
+	fmt.Fprintln(w, "                compopt -o filenames 2>/dev/null || true")
+	fmt.Fprintln(w, `                COMPREPLY=( $(compgen -d -- "$cur") )`)
+	fmt.Fprintln(w, "                _docker_helper_normalize_path_candidates")
 	fmt.Fprintln(w, "            fi")
 	fmt.Fprintln(w, "            return")
 	fmt.Fprintln(w, "            ;;")

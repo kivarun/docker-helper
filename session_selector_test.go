@@ -211,7 +211,7 @@ func TestSessionCreateCLISelectorMatrix(t *testing.T) {
 				}
 			})
 
-			args := append([]string{"session", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--workspace", ws}, tc.args...)
+			args := append([]string{"session", "create", "--endpoint", endpoint, "--token-file", tokenPath, ws}, tc.args...)
 			var stdout, stderr bytes.Buffer
 			code := runCommandWithWriters(args, &stdout, &stderr)
 

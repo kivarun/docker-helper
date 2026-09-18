@@ -51,6 +51,15 @@ type Command struct {
 	Subcommands   []*Command
 	NewInvocation func(*flag.FlagSet) Invocation
 	Presentation  commandPresentation
+
+	// FlagsStopAtPositional selects Go's native flag.FlagSet grammar for
+	// the leaf: option parsing stops at the first positional token, and
+	// every following token is positional data even when it looks like an
+	// option. The workload-command grammar (run IMAGE [COMMAND...]) owns
+	// this mode: post-IMAGE tokens belong to the workload command and must
+	// never be reinterpreted as docker-helper flags. Every other command
+	// keeps the interspersed grammar (parseCommandFlags).
+	FlagsStopAtPositional bool
 }
 
 // resolveSubcommand finds a direct subcommand by name.
@@ -191,9 +200,17 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 	// Register command-specific flags
 	inv := c.NewInvocation(fs)
 
-	// Parse flags with an interspersed grammar: flags may appear before,
-	// between, or after positional arguments.
-	if err := parseCommandFlags(fs, args); err != nil {
+	// Parse flags. The default grammar is interspersed: flags may appear
+	// before, between, or after positional arguments. A leaf that owns the
+	// workload-command grammar parses with Go's native FlagSet instead:
+	// option parsing stops at the first positional, so everything after it
+	// is workload data verbatim.
+	if c.FlagsStopAtPositional {
+		if err := fs.Parse(args); err != nil {
+			// flag.FlagSet already printed the error via SetOutput(stderr)
+			return 2
+		}
+	} else if err := parseCommandFlags(fs, args); err != nil {
 		// flag.FlagSet already printed the error via SetOutput(stderr)
 		return 2
 	}

@@ -367,7 +367,7 @@ func TestSetAccessSharedPresentation(t *testing.T) {
 		})
 
 		var human, hErr bytes.Buffer
-		if code := runCommandWithWriters([]string{"launcher", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "/a", "read_only", "build-agent"}, &human, &hErr); code != 0 {
+		if code := runCommandWithWriters([]string{"launcher", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "build-agent", "/a", "read_only"}, &human, &hErr); code != 0 {
 			t.Fatalf("human exit = %d (stderr=%s)", code, hErr.String())
 		}
 		if human.String() != "changed /a to access read_only on launcher build-agent\n" {
@@ -375,7 +375,7 @@ func TestSetAccessSharedPresentation(t *testing.T) {
 		}
 
 		var js, jErr bytes.Buffer
-		if code := runCommandWithWriters([]string{"launcher", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "--json", "/a", "read_only", "build-agent"}, &js, &jErr); code != 0 {
+		if code := runCommandWithWriters([]string{"launcher", "allowed-root", "set-access", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "--json", "build-agent", "/a", "read_only"}, &js, &jErr); code != 0 {
 			t.Fatalf("json exit = %d (stderr=%s)", code, jErr.String())
 		}
 		var doc map[string]any
