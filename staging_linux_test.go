@@ -1323,28 +1323,37 @@ func TestStagingBudgetBytesExactlyAtLimitSucceeds(t *testing.T) {
 	}
 }
 
-// TestStagingBudgetBytesOneOverRefusedBeforeDestination proves one byte over
-// the byte ceiling is refused before the over-ceiling payload's destination
-// entry is created or written, and that the refusal leaves no operation
-// tree or source modification.
-func TestStagingBudgetBytesOneOverRefusedBeforeDestination(t *testing.T) {
+// TestStagingBudgetHostilePayloadRefusedBeforeDestination proves a payload
+// over the byte ceiling is refused before that payload's destination entry
+// is created or written, independently of readdir enumeration order: the
+// hostile payload alone exceeds the whole ceiling (payload > MaxBytes) while
+// the ordinary Dockerfile alone is below it (Dockerfile < MaxBytes), so
+// whichever file the walker reaches first, the hostile payload is refused
+// before any of its destination bytes exist — no production pre-scan or
+// deterministic sort required. The refusal leaves no operation tree and no
+// source modification.
+func TestStagingBudgetHostilePayloadRefusedBeforeDestination(t *testing.T) {
 	workspace, runtimeDir := setupStagingTest(t)
 	ctxDir := createBuildContext(t, workspace)
 	if err := os.Remove(filepath.Join(ctxDir, "app.go")); err != nil {
 		t.Fatal(err)
 	}
 
-	dfSt, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	const fileSize = 64
-	payload := make([]byte, fileSize)
+	const hostileSize = 128
+	payload := make([]byte, hostileSize)
 	for i := range payload {
 		payload[i] = byte(i)
 	}
 	if err := os.WriteFile(filepath.Join(ctxDir, "a.bin"), payload, 0o644); err != nil {
 		t.Fatal(err)
+	}
+
+	dockerfileSize, err := os.Stat(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dockerfileSize.Size() >= 64 || hostileSize <= 64 {
+		t.Fatalf("fixture must satisfy Dockerfile < MaxBytes(64) < payload: Dockerfile=%d payload=%d", dockerfileSize.Size(), hostileSize)
 	}
 
 	copied := false
@@ -1364,7 +1373,7 @@ func TestStagingBudgetBytesOneOverRefusedBeforeDestination(t *testing.T) {
 		},
 	}
 
-	ceilings := buildStagingCeilings{MaxBytes: dfSt.Size() + fileSize - 1, MaxEntries: 2, MaxDepth: 4}
+	ceilings := buildStagingCeilings{MaxBytes: 64, MaxEntries: 2, MaxDepth: 4}
 	_, err = stageWithCeilings(t, workspace, ctxDir, "Dockerfile", runtimeDir, "op1", ceilings, hooks)
 	requireCeilingError(t, err, "bytes")
 
@@ -1380,7 +1389,7 @@ func TestStagingBudgetBytesOneOverRefusedBeforeDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != fileSize {
+	if len(got) != hostileSize {
 		t.Errorf("source file changed: %d bytes", len(got))
 	}
 
