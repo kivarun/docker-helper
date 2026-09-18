@@ -284,8 +284,11 @@ Release evidence covers:
 - the system-mode-only deployment baseline (one root-owned system service;
   non-root system clients stay covered through the credential-based access
   matrix);
-- rootful Docker; the rootless user-daemon deployment contract is not an
-  acceptance requirement after the Release 2.3 cutover;
+- rootful Docker Engine/runtime for the system service; the removed rootless
+  user-daemon deployment contract is not a Release 3 acceptance requirement
+  after the Release 2.3 cutover. Builder isolation remains governed by the
+  Release 2.4 build-sandbox contract and may use a rootless builder or
+  another accepted isolation mechanism;
 - the minimum supported Docker Engine/API combination and one representative
   newer supported version;
 - BuildKit-enabled and supported legacy build behavior for the D0 compatibility

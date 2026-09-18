@@ -55,8 +55,8 @@ reg_require_service
 reg_require_cmd bash "completion acceptance drives a real Bash"
 reg_require_cmd realpath "completion roots canonicalization"
 
-TMPDIR="/tmp/uat-reg10"
-mkdir -p "$TMPDIR"
+TMPDIR_REG10="/tmp/uat-reg10"
+mkdir -p "$TMPDIR_REG10"
 
 # session_field SESSION_JSON: parse a --json session create/list document.
 session_field() { # field
@@ -395,7 +395,7 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   # Generate the real completion script from the installed CLI.
-  script="$TMPDIR/completion.bash"
+  script="$TMPDIR_REG10/completion.bash"
   if ! dh completion bash > "$script" 2>/dev/null || [ ! -s "$script" ]; then
     reg_fail "E: completion script generation failed"
     return
@@ -406,7 +406,7 @@ subcase_e() {
   # `complete -p` (asserting exactly one registration and a -F function),
   # invoke the registered function with COMP_WORDS/COMP_CWORD, and inspect
   # COMPREPLY. The test never assumes an internal helper name.
-  local e_err="$TMPDIR/e.err"
+  local e_err="$TMPDIR_REG10/e.err"
   out="$(bash -c '
     set -u
     source "$1" || exit 3
@@ -466,5 +466,5 @@ subcase_c
 subcase_d
 subcase_e
 
-rm -rf "$TMPDIR"
+rm -rf "$TMPDIR_REG10"
 reg_result
