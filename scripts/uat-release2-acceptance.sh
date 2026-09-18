@@ -1911,32 +1911,33 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   # H5: canonical parent-ceiling narrowing cascades stored descendants.
   # The Principal holds two roots at this point: $ALLOWED_ROOT (added by
   # set_up_principal) and the OS user's home directory (auto-installed as the
-  # default allowed root by principal create). Narrowing to exactly {H_SUB}
-  # removes both (plain lifecycle removals, not the cascade under test); the
-  # Launcher root ($H_SUB) is then the Principal's only root, the effective
-  # Principal ceiling is exactly {H_SUB}, and a positive precondition proves
-  # session creation through the Launcher succeeds. Removing that exact
-  # Principal root is the canonical parent mutation: the Launcher descendant
-  # root is cascaded out of stored state in the same transition, the Launcher
-  # stays restricted with zero roots (never demoted to inherit), and the
-  # follow-up create under the former root is refused by the ordinary
-  # narrowed-authority contract (400 invalid_workspace), never the stale-root
-  # 422 (that contract remains the corruption defense for state outside
-  # canonical mutation paths, proven by the unit suite). The original
-  # Principal root state is restored afterwards (later H checks reuse this
-  # Principal).
+  # default allowed root by principal create). The narrow ceiling $H_SUB is
+  # installed FIRST, under the surviving home root, and both wide parents are
+  # then removed: each removal cascades, but the Launcher root ($H_SUB, the
+  # beta Launcher's stored root) stays covered by the surviving narrow
+  # ceiling and is not touched. The Principal's only root is then exactly
+  # {H_SUB}; a positive precondition proves session creation through the
+  # Launcher succeeds. Removing that exact Principal root is the canonical
+  # parent mutation under test: the Launcher descendant root is cascaded out
+  # of stored state in the same transition, the Launcher stays restricted
+  # with zero roots (never demoted to inherit), and the follow-up create
+  # under the former root is refused by the ordinary narrowed-authority
+  # contract (400 invalid_workspace), never the stale-root 422 (that
+  # contract remains the corruption defense for state outside canonical
+  # mutation paths, proven by the unit suite). The original Principal root
+  # state is restored afterwards (later H checks reuse this Principal).
   H5_REMOVED=false
   H5_NARROWED=false
-  if dh principal allowed-root remove --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-      && dh principal allowed-root remove --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
-    H5_REMOVED=true
-    if dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
+  if dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
+    if dh principal allowed-root remove --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+        && dh principal allowed-root remove --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
+      H5_REMOVED=true
       H5_NARROWED=true
     else
-      acc_fail "could not install the narrow principal ceiling for the cascade check"
+      acc_fail "could not narrow the principal ceiling for the cascade check"
     fi
   else
-    acc_fail "could not narrow the principal ceiling for the cascade check"
+    acc_fail "could not install the narrow principal ceiling for the cascade check"
   fi
   if [ "$H5_NARROWED" = true ]; then
     mkdir -p "$H_SUB/ws5"; chown -R "$H_USER:$H_USER" "$H_SUB/ws5"
