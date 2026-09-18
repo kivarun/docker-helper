@@ -163,7 +163,7 @@ subcase_b() {
   [ -n "$beta_id" ] || { reg_fail "B: launcher create failed: $(printf '%s' "$beta_out" | head -2 | tr '\n' ' ')"; return; }
 
   # Read path: ONLY the global ID, no --principal.
-  if show_out="$(dh launcher show --system "$beta_id" 2>/dev/null)"; then
+  if show_out="$(dh launcher show --system --json "$beta_id" 2>/dev/null)"; then
     if printf '%s' "$show_out" | grep -q "\"principal\": \"$user\"" \
         && [ "$(printf '%s' "$show_out" | json_field name)" = "beta" ]; then
       reg_ok "B: launcher show by global dhl_ ID without --principal resolves the Launcher"
@@ -176,7 +176,7 @@ subcase_b() {
 
   # Mutation path: disable + re-enable by global ID only.
   if dh launcher set --system --enabled false "$beta_id" >/dev/null 2>&1; then
-    show2="$(dh launcher show --system "$beta_id" 2>/dev/null || true)"
+    show2="$(dh launcher show --system --json "$beta_id" 2>/dev/null || true)"
     if printf '%s' "$show2" | grep -q '"enabled": false'; then
       reg_ok "B: launcher set --enabled false by global dhl_ ID"
     else
@@ -186,7 +186,7 @@ subcase_b() {
     reg_fail "B: launcher set --enabled false by global dhl_ ID failed"
   fi
   if dh launcher set --system --enabled true "$beta_id" >/dev/null 2>&1; then
-    show2="$(dh launcher show --system "$beta_id" 2>/dev/null || true)"
+    show2="$(dh launcher show --system --json "$beta_id" 2>/dev/null || true)"
     if printf '%s' "$show2" | grep -q '"enabled": true'; then
       reg_ok "B: launcher set --enabled true by global dhl_ ID"
     else

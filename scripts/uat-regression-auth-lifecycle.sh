@@ -323,7 +323,7 @@ subcase_f() {
 
   # Authenticate as B and omit PRINCIPAL: this exercises the canonical CLI's
   # Principal-auth targeting as well as the daemon's atomic rotate endpoint.
-  rotate_out="$(dh principal credential rotate --system --token-file "$cred_b_file" --name default 2>/dev/null)" \
+  rotate_out="$(dh principal credential rotate --system --token-file "$cred_b_file" --name default --json 2>/dev/null)" \
     || { reg_fail "F: Principal-auth canonical rotate failed"; return; }
   rotate_id="$(printf '%s' "$rotate_out" | json_field id || true)"
   rotate_tok="$(printf '%s' "$rotate_out" | json_field token || true)"

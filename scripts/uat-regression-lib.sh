@@ -537,7 +537,7 @@ reg_setup_principal() {
   # stages), so prove presence positively via the canonical Admin-scoped
   # launcher show path: 'default' must exist, belong to the principal, and be
   # enabled with inherit scope.
-  launcher_json="$(dh launcher show --system --principal "$user" 2>/dev/null)" \
+  launcher_json="$(dh launcher show --system --principal "$user" --json 2>/dev/null)" \
     || { echo "error: principal '$user' has no default Launcher after principal create (eager provisioning broken)" >&2; return 1; }
   printf '%s\n' "$launcher_json" | grep -q "\"principal\": \"$user\"" \
     || { echo "error: default launcher does not belong to principal '$user': $launcher_json" >&2; return 1; }

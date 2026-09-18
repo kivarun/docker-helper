@@ -458,7 +458,7 @@ MAIN_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put.out --write-out '%{http_
 # P6 asserts the projection via the indented JSON of launcher show: the access
 # is on the line following the path, hence grep -A1.
 if [ "$MAIN_PUT_HTTP" = 200 ] \
-    && dh launcher show --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null \
+    && dh launcher show --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null \
       | grep -A1 -F "\"path\": \"$WS/pipeline-inputs\"" | grep -q '"access": "read_only"'; then
   acc_ok "P6 rich launcher scope replacement (PUT allowed_roots, access per entry)"
 else
@@ -468,7 +468,7 @@ fi
 # P7: the canonical allowed_roots projection is the only launcher roots
 # projection; the retired allowed_root_entries spelling is not an alias and
 # must be refused by the PUT route.
-MAIN_SHOW="$(dh launcher show --system --principal "$PRINCIPAL" "$MAIN_L_ID" 2>/dev/null || true)"
+MAIN_SHOW="$(dh launcher show --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
 if printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_roots"' \
     && ! printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_root_entries"'; then
   acc_ok "P7 launcher projection carries allowed_roots only"
@@ -497,7 +497,7 @@ LEGACY_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put2.out --write-out '%{ht
   -d "{\"scope\":\"restricted\",\"allowed_roots\":[\"$LEGACY\"]}" \
   "http://localhost/principals/$PRINCIPAL/launchers/$LEGACY_L_ID/allowed-roots" 2>/dev/null || true)"
 if [ "$LEGACY_PUT_HTTP" = 200 ] \
-    && dh launcher show --system --principal "$PRINCIPAL" "$LEGACY_L_ID" 2>/dev/null \
+    && dh launcher show --system --principal "$PRINCIPAL" --json "$LEGACY_L_ID" 2>/dev/null \
       | grep -A1 -F "\"path\": \"$LEGACY\"" | grep -q '"access": "read_write"'; then
   acc_ok "P9 legacy path-only scope replacement maps the path to read_write"
 else
@@ -996,7 +996,7 @@ G_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
   '{"name":"globalro","scope":"restricted","allowed_roots":["'"$TREE"'/global-ro"]}')"
 G_L_ID="$(printf '%s' "$G_L_JSON" | json_field id)"
 [ -n "$G_L_ID" ] || { echo "error: launcher 'globalro' create failed: $G_L_JSON" >&2; exit 1; }
-if dh launcher show --system --principal "$PRINCIPAL" "$G_L_ID" 2>/dev/null \
+if dh launcher show --system --principal "$PRINCIPAL" --json "$G_L_ID" 2>/dev/null \
     | grep -A1 -F "\"path\": \"$TREE/global-ro\"" | grep -q '"access": "read_write"'; then
   acc_ok "G Launcher carries read_write on the same subtree (rich projection)"
 else

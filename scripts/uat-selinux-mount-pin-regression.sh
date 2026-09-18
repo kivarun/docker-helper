@@ -142,7 +142,7 @@ docker-helper principal allowed-root add --system "$PRINCIPAL" /home/opc >/dev/n
 # atomically at principal creation (also when the principal already exists,
 # e.g. the common black-box UAT created it for this OS user), so prove
 # presence positively via the canonical Admin-scoped launcher show path.
-launcher_json="$(docker-helper launcher show --system --principal "$PRINCIPAL" 2>/dev/null)" \
+launcher_json="$(docker-helper launcher show --system --principal "$PRINCIPAL" --json 2>/dev/null)" \
   || { echo "error: principal '$PRINCIPAL' has no default Launcher after principal create (eager provisioning broken)" >&2; exit 1; }
 printf '%s\n' "$launcher_json" | grep -q "\"principal\": \"$PRINCIPAL\"" \
   || { echo "error: default launcher does not belong to principal '$PRINCIPAL': $launcher_json" >&2; exit 1; }

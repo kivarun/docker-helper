@@ -153,7 +153,7 @@ um_roots_empty() {
 # serializes zero roots as the empty array, never null.
 assert_owner_invariant() {
   local what="$1" p l
-  if p="$(dhx principal show "$OWNER" 2>/dev/null)"; then
+  if p="$(dhx principal show --json "$OWNER" 2>/dev/null)"; then
     if printf '%s' "$p" | grep -q '"enabled": true' \
         && printf '%s' "$p" | grep -q "\"uid\": $U_UID" \
         && printf '%s' "$p" | grep -q "\"gid\": $(id -g "$U_USER")" \
@@ -167,7 +167,7 @@ assert_owner_invariant() {
     reg_fail "$what: daemon-owner Principal show failed"
     return
   fi
-  if l="$(dhx launcher show --principal "$OWNER" default 2>/dev/null)"; then
+  if l="$(dhx launcher show --principal "$OWNER" --json default 2>/dev/null)"; then
     if printf '%s' "$l" | grep -q '"enabled": true' \
         && [ "$(printf '%s' "$l" | um_field name)" = "default" ] \
         && [ "$(printf '%s' "$l" | um_field scope)" = "inherit" ] \

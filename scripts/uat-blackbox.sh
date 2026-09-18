@@ -474,7 +474,7 @@ chmod 600 "$CRED_FILE"
 # contract positively via the canonical Admin-scoped launcher show path:
 # 'default' already exists, belongs to the just-created Principal, and is
 # usable by the scenario below (enabled, inherit scope).
-LAUNCHER_JSON="$(docker-helper launcher show --system --principal "$PRINCIPAL")" \
+LAUNCHER_JSON="$(docker-helper launcher show --system --principal "$PRINCIPAL" --json)" \
   || fail_uat "principal '$PRINCIPAL' has no default Launcher after principal create (eager provisioning broken)"
 printf '%s\n' "$LAUNCHER_JSON" | grep -q "\"principal\": \"$PRINCIPAL\"" \
   || fail_uat "default launcher does not belong to principal '$PRINCIPAL': $LAUNCHER_JSON"

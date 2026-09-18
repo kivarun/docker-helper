@@ -233,7 +233,7 @@ subcase_a() {
 
   local out rc
   # 1. own show: success with the full document.
-  if out="$(dh principal show --token-file "$cred_a" "$user_a" 2>&1)" && printf '%s' "$out" | grep -q '"username"'; then
+  if out="$(dh principal show --token-file "$cred_a" --json "$user_a" 2>&1)" && printf '%s' "$out" | grep -q '"username"'; then
     reg_ok "A: principal credential reads its own Principal"
   else
     reg_fail "A: own principal show failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
@@ -293,7 +293,7 @@ subcase_a() {
   fi
 
   # 5. admin read of any Principal is unchanged.
-  if out="$(dh principal show --system "$user_b" 2>&1)" && printf '%s' "$out" | grep -q '"username"'; then
+  if out="$(dh principal show --system --json "$user_b" 2>&1)" && printf '%s' "$out" | grep -q '"username"'; then
     reg_ok "A: admin principal read is unchanged"
   else
     reg_fail "A: admin principal show failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
