@@ -2,7 +2,7 @@
 #
 # uat-regressions-runner-selinux.sh — collect-all runner for the Release-2
 # targeted UAT regression groups on the Tumbleweed / RPM / SELinux profile
-# (groups 1-9). Runs INSIDE the SELinux guest, as root.
+# (groups 1-10). Runs INSIDE the SELinux guest, as root.
 #
 # It re-ensures the docker-helper system service (the common black-box UAT may
 # have stopped it during cleanup) and runs every SELinux regression group,
@@ -240,6 +240,7 @@ REGRESSIONS=(
   "7:SELinux C3 descriptor-safe restorecon:uat-regression-selinux-c3-restorecon-race.sh"
   "8:H8 bounded MAC-command liveness:uat-regression-h8-mac-liveness.sh"
   "9:H2 commit-boundary credential revocation race:uat-regression-h2-parked-revocation.sh"
+  "10:D1 build staging preserves build-context symlinks:uat-regression-d1-build-staging-symlinks.sh"
 )
 
 # Fresh AVC/USER_AVC evidence (best-effort; requires auditd started by the
