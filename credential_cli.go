@@ -363,9 +363,7 @@ principal credential commands. New scripts should use:
 			MinPosArgs:    principalCredentialCreateCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialCreateCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential create.",
-
-			Presentation: principalCredentialCreateCommand.Presentation,
-
+			Presentation:  principalCredentialCreateCommand.Presentation,
 			NewInvocation: principalCredentialCreateCommand.NewInvocation,
 		},
 		{
@@ -375,9 +373,7 @@ principal credential commands. New scripts should use:
 			MinPosArgs:    principalCredentialListCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialListCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential list.",
-
-			Presentation: principalCredentialListCommand.Presentation,
-
+			Presentation:  principalCredentialListCommand.Presentation,
 			NewInvocation: principalCredentialListCommand.NewInvocation,
 		},
 		{
@@ -387,9 +383,7 @@ principal credential commands. New scripts should use:
 			MinPosArgs:    principalCredentialRevokeCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialRevokeCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential revoke.",
-
-			Presentation: principalCredentialRevokeCommand.Presentation,
-
+			Presentation:  principalCredentialRevokeCommand.Presentation,
 			NewInvocation: principalCredentialRevokeCommand.NewInvocation,
 		},
 		credentialInstallCommand,
