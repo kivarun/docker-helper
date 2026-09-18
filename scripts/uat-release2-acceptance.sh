@@ -1456,9 +1456,12 @@ if [ -n "$M_BASELINE_DEB" ]; then
     acc_fail "M1 principal credential issuance failed"
   fi
 
-  # Restricted Launcher with a path-only root, plus its credential.
+  # Restricted Launcher with a path-only root, plus its credential. The
+  # seeding runs through the v2.1.1 baseline CLI, whose launcher create and
+  # launcher credential create are JSON-always and reject an explicit --json
+  # flag, so the document is parsed without requesting it.
   M_L_OUT="$(dh launcher create --system --principal "$M_USER" --name mlaunch \
-    --allowed-root "$M_POLICY/sub" --no-credential --json 2>/dev/null || true)"
+    --allowed-root "$M_POLICY/sub" --no-credential 2>/dev/null || true)"
   M_L_ID="$(printf '%s\n' "$M_L_OUT" | json_field id)"
   if [ -n "$M_L_ID" ] \
       && dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>/dev/null | grep -qx "$M_POLICY/sub"; then
@@ -1466,7 +1469,7 @@ if [ -n "$M_BASELINE_DEB" ]; then
   else
     acc_fail "M1 restricted Launcher root seeding failed"
   fi
-  M_LC_OUT="$(dh launcher credential create --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
+  M_LC_OUT="$(dh launcher credential create --system --principal "$M_USER" "$M_L_ID" 2>/dev/null || true)"
   M_LC_TOKEN="$(printf '%s\n' "$M_LC_OUT" | json_field token)"
   if [ -n "$M_LC_TOKEN" ]; then
     printf '%s\n' "$M_LC_TOKEN" > "$M_LCRED"; chmod 600 "$M_LCRED"
@@ -1793,7 +1796,7 @@ fi
 # Principals resolves independently (the migration scenario's principal still
 # exists), and a name that exists only under another Principal is the same
 # non-disclosing 404 as a missing selector.
-H_SEL_DEF_JSON="$(dh launcher show --system --principal "$H_USER" 2>/dev/null || true)"
+H_SEL_DEF_JSON="$(dh launcher show --system --principal "$H_USER" --json 2>/dev/null || true)"
 H_SEL_DEF_ID="$(printf '%s' "$H_SEL_DEF_JSON" | json_field id || true)"
 H_SEL_DEF_NAME_ID="$(dh launcher show --system --principal "$H_USER" --json default 2>/dev/null | json_field id || true)"
 H_SEL_ALPHA_NAME_ID="$(dh launcher show --system --principal "$H_USER" --json alpha 2>/dev/null | json_field id || true)"
@@ -1869,7 +1872,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ALPHA_TOK" http://localhost/auth 2>/dev/null || true)"
     H_NEW_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
     H_NEW_SESS="$(printf '%s' "$H_NEW_JSON" | json_field id || true)"
-    H_SHOW="$(dh launcher show --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
+    H_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
     if [ "$H_OLD_HTTP" = 401 ] \
         && [ -n "$H_NEW_SESS" ] \
         && printf '%s\n' "$H_SHOW" | grep -q "\"id\": \"$H_ALPHA_ID\"" \
@@ -1967,7 +1970,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
 
   # H6: disable propagation + persistence of individual disablement.
-  H_BETA_DIS_OUT="$(dh launcher set --system --principal "$H_USER" --enabled false "$H_BETA_ID" 2>/dev/null || true)"
+  H_BETA_DIS_OUT="$(dh launcher set --system --principal "$H_USER" --enabled false --json "$H_BETA_ID" 2>/dev/null || true)"
   if printf '%s\n' "$H_BETA_DIS_OUT" | grep -q '"enabled": false'; then
     acc_ok "launcher disabled"
   else
@@ -1983,8 +1986,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
   dh principal set --system "$H_USER" enabled false >/dev/null 2>&1 || true
   dh principal set --system "$H_USER" enabled true >/dev/null 2>&1 || true
-  H_BETA_SHOW="$(dh launcher show --system --principal "$H_USER" "$H_BETA_ID" 2>/dev/null || true)"
-  H_ALPHA_SHOW="$(dh launcher show --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
+  H_BETA_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_BETA_ID" 2>/dev/null || true)"
+  H_ALPHA_SHOW="$(dh launcher show --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
   if printf '%s\n' "$H_BETA_SHOW" | grep -q '"enabled": false' \
       && printf '%s\n' "$H_ALPHA_SHOW" | grep -q '"enabled": true'; then
     acc_ok "individually disabled launcher stays disabled through a principal enable cycle"
@@ -2019,7 +2022,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     H_DEL_ACT_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
       -X DELETE "http://localhost/principals/$H_USER/launchers/$H_ALPHA_ID" 2>/dev/null || true)"
-    H_ALPHA_SHOW2="$(dh launcher show --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
+    H_ALPHA_SHOW2="$(dh launcher show --system --principal "$H_USER" --json "$H_ALPHA_ID" 2>/dev/null || true)"
     H_ADMIN_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
     if [ "$H_DEL_ACT_HTTP" = 409 ] \
         && printf '%s\n' "$H_ALPHA_SHOW2" | grep -q '"enabled": true' \
@@ -2272,7 +2275,7 @@ fi
 
 # F: ordinary Principal lifecycle still works afterward (show, default
 #    Launcher, allowed-root, credential create/revoke).
-dh principal show --system "$M5_USER" >/tmp/r2ac-m5-show.json 2>&1 \
+dh principal show --system "$M5_USER" --json >/tmp/r2ac-m5-show.json 2>&1 \
   && grep -q '"username": "uatr2m5"' /tmp/r2ac-m5-show.json \
   && acc_ok "principal show works after all refusals" \
   || acc_fail "principal show failed after the M5 refusals: $(head -2 /tmp/r2ac-m5-show.json)"

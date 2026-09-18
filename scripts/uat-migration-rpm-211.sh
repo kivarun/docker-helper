@@ -245,7 +245,10 @@ else
   acc_fail_ctx "R2 principal credential issuance failed" "$M_DIAG/pcred.out"
 fi
 
-dh launcher create --system --principal "$M_USER" --name mlaunch --json \
+# The seeding runs through the v2.1.1 baseline CLI, whose launcher create and
+# launcher credential create are JSON-always and reject an explicit --json
+# flag, so the documents are parsed without requesting it.
+dh launcher create --system --principal "$M_USER" --name mlaunch \
   --allowed-root "$M_POLICY/sub" --no-credential >"$M_DIAG/lcreate.out" 2>&1 || true
 M_L_OUT="$(cat "$M_DIAG/lcreate.out")"
 M_L_ID="$(printf '%s\n' "$M_L_OUT" | json_field id)"
@@ -255,7 +258,7 @@ if [ -n "$M_L_ID" ] \
 else
   acc_fail_ctx "R2 restricted Launcher root seeding failed" "$M_DIAG/lcreate.out" "$M_DIAG/llist.err"
 fi
-dh launcher credential create --system --principal "$M_USER" --json "$M_L_ID" >"$M_DIAG/lcred.out" 2>&1 || true
+dh launcher credential create --system --principal "$M_USER" "$M_L_ID" >"$M_DIAG/lcred.out" 2>&1 || true
 M_LC_OUT="$(cat "$M_DIAG/lcred.out")"
 M_LC_TOKEN="$(printf '%s\n' "$M_LC_OUT" | json_field token)"
 if [ -n "$M_LC_TOKEN" ]; then

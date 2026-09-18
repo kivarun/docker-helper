@@ -413,7 +413,7 @@ subcase_d() {
   fi
 
   # 5. launcher show carries the canonical allowed_roots only.
-  out="$(dh launcher show --principal "$user" legacyprobe 2>&1)"
+  out="$(dh launcher show --principal "$user" --json legacyprobe 2>&1)"
   if printf '%s' "$out" | grep -q '"allowed_roots"' && ! printf '%s' "$out" | grep -q '"allowed_root_entries"'; then
     reg_ok "D: launcher show carries allowed_roots only"
   else

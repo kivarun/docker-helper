@@ -173,9 +173,9 @@ mkdir -p "$WORK/proj" || reg_fail "B: cannot create the restricted workspace $WO
 B_OUT="$(dhx launcher create --principal "$OWNER" --name work --allowed-root "$WORK" --no-credential --json 2>&1)"
 WORK_ID="$(printf '%s' "$B_OUT" | uer_field id || true)"
 if [ -n "$WORK_ID" ]; then
-  # `launcher show` always emits the JSON document (no --json flag); flags
-  # must precede positional arguments.
-  if B_SHOW="$(dhx launcher show --principal "$OWNER" work 2>&1)" \
+  # The show document is requested with the explicit --json of the canonical
+  # two-mode presentation; flags must precede positional arguments.
+  if B_SHOW="$(dhx launcher show --principal "$OWNER" --json work 2>&1)" \
       && [ "$(printf '%s' "$B_SHOW" | uer_field scope)" = "restricted" ] \
       && uer_roots_single "$B_SHOW" "$WORK"; then
     reg_ok "B: restricted Launcher created under the global root; show reports scope=restricted and the stored root"
@@ -208,7 +208,7 @@ if [ -n "$(printf '%s' "$C_OUT" | uer_field id || true)" ]; then
   # `launcher allowed-root add` prints a short confirmation; the committed
   # scope and root set are asserted through the launcher show document.
   if C_ADD="$(dhx launcher allowed-root add --principal "$OWNER" "$WORK" conv 2>&1)" \
-      && C_SHOW="$(dhx launcher show --principal "$OWNER" conv 2>&1)" \
+      && C_SHOW="$(dhx launcher show --principal "$OWNER" --json conv 2>&1)" \
       && [ "$(printf '%s' "$C_SHOW" | uer_field scope)" = "restricted" ] \
       && uer_roots_single "$C_SHOW" "$WORK"; then
     reg_ok "C: adding the first allowed root narrows the inherit Launcher to restricted with the committed root"
