@@ -64,18 +64,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# fixture creates the OS user, the Principal, and prints the home directory.
+# fixture creates (or reuses) the OS user, the Principal, and prints the home
+# directory. Subcases B/D/E each need the fixture; user creation is therefore
+# idempotent — a second useradd/principal-create against the same fixture user
+# would otherwise silently skip the later subcases (the failure inside the
+# command-substitution fixture call could never register).
 fixture() {
-  local home out
+  local home
   home="/home/$FIX_USER"
   rm -rf "$home"
-  useradd -m "$FIX_USER" >/dev/null 2>&1 || { reg_fail "fixture: useradd failed"; return 1; }
+  if ! id "$FIX_USER" >/dev/null 2>&1; then
+    useradd -m "$FIX_USER" >/dev/null 2>&1 || { printf 'fixture: useradd failed\n' >&2; return 1; }
+  fi
   home="$(getent passwd "$FIX_USER" | cut -d: -f6)"
   mkdir -p "$home/ws" && chown -R "$FIX_USER:$FIX_USER" "$home"
-  out="$(dh principal create --system --no-credential "$FIX_USER" 2>&1)" || {
-    reg_fail "fixture: principal create failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
-    return 1
-  }
+  dh principal create --system --no-credential "$FIX_USER" >/dev/null 2>&1 || true
+  dh principal set --system "$FIX_USER" enabled true >/dev/null 2>&1 || true
   printf '%s' "$home"
 }
 
@@ -155,7 +159,7 @@ subcase_b() {
   reg_info "subcase B: canonical positional forms"
   local home out rc sid lid
 
-  home="$(fixture)" || return
+  home="$(fixture)" || { reg_fail "B: fixture failed"; return; }
 
   # launcher create NAME (positional).
   out="$(dh launcher create --system --principal "$FIX_USER" target --no-credential --json 2>&1)" || {
@@ -267,7 +271,7 @@ subcase_d() {
   reg_info "subcase D: target-first allowed-root mutations"
   local home out rc tree sid_lid other_lid
 
-  home="$(fixture)" || return
+  home="$(fixture)" || { reg_fail "D: fixture failed"; return; }
   tree="$home/d"
   mkdir -p "$tree/one" "$tree/two" && chown -R "$FIX_USER:$FIX_USER" "$home"
 
@@ -372,7 +376,7 @@ subcase_e() {
   reg_info "subcase E: run passes post-IMAGE arguments to the workload"
   local out rc home cred_json cred_token sid_json sid
 
-  home="$(fixture)" || return
+  home="$(fixture)" || { reg_fail "E: fixture failed"; return; }
   cred_json="$(dh principal credential create --system --name gate28 "$FIX_USER" 2>&1)" || {
     reg_fail "E: principal credential create failed: $(printf '%s' "$cred_json" | head -2 | tr '\n' ' ' | redact)"
     return

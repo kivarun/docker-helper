@@ -82,7 +82,10 @@ home2="$(reg_setup_principal "$USER2")" || { reg_fail "fixture: principal $USER2
 [ -n "$home2" ] || { reg_fail "fixture: principal $USER2 home missing"; reg_result; }
 
 # Named launcher with its own credential: the launcher credential under test.
-LC_CREATE="$(dh launcher create --system --principal "$USER" "$LNAME" --issue-credential --json 2>&1)"
+# stdout and stderr are captured separately: the canonical --json document
+# goes to stdout, the credential-install hint goes to stderr, and the JSON
+# parses must only ever see the document.
+LC_CREATE="$(dh launcher create --system --principal "$USER" "$LNAME" --issue-credential --json 2>"$TMPDIR_REG29/create.err")"
 LC_RC=$?
 TOKA="$(printf '%s' "$LC_CREATE" | json_field token || true)"
 LID="$(printf '%s' "$LC_CREATE" | json_field id || true)"
@@ -90,7 +93,7 @@ if [ "$LC_RC" -eq 0 ] && [ -n "$TOKA" ] && [ -n "$LID" ]; then
   printf '%s\n' "$TOKA" > "$TMPDIR_REG29/credA"; chmod 600 "$TMPDIR_REG29/credA"
   reg_ok "fixture: launcher $LNAME created with credential A ($LID)"
 else
-  reg_fail "fixture: launcher create with credential failed (rc=$LC_RC: $(printf '%s\n' "$LC_CREATE" | redact | tail -2))"
+  reg_fail "fixture: launcher create with credential failed (rc=$LC_RC: $(redact < "$TMPDIR_REG29/create.err" 2>/dev/null | tail -2))"
   reg_result
 fi
 
