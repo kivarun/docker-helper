@@ -206,6 +206,157 @@ func TestDeliveryBoundedWriterPropagatesFlushError(t *testing.T) {
 	}
 }
 
+func TestStatusResponseWriterTransparentToResponseControllerFlush(t *testing.T) {
+	underlying := &flushFailingCredentialRotationWriter{}
+	w := &statusResponseWriter{ResponseWriter: underlying, status: http.StatusOK}
+
+	err := http.NewResponseController(w).Flush()
+	if err == nil || !strings.Contains(err.Error(), "forced credential rotation response flush failure") {
+		t.Fatalf("Flush() through statusResponseWriter = %v, want underlying flush failure", err)
+	}
+}
+
+// newProductionChainServer serves the app's route table through the exact
+// production middleware construction of the daemon wiring (main.go's
+// newHTTPServer path):
+//
+//	boundResponseDelivery(
+//	    withRequestID(
+//	        withLogging(routeTable),
+//	    ),
+//	)
+//
+// It reuses the production construction functions unchanged, so handlers
+// observe the same writer chain as in the real daemon: statusResponseWriter
+// over deliveryBoundedWriter over the real connection writer, with the
+// production response-delivery window.
+func newProductionChainServer(t *testing.T, app *App) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	registerRoutes(mux, app)
+	srv := httptest.NewServer(boundResponseDelivery(
+		withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))),
+		productionServerTimeouts().responseDelivery,
+	))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// rotateThroughProductionChain posts a credential rotate request through the
+// production middleware chain and returns the HTTP response; the caller owns
+// closing the body.
+func rotateThroughProductionChain(t *testing.T, srv *httptest.Server, path, bearer string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("rotate through production chain: %v", err)
+	}
+	return res
+}
+
+// authThroughProductionChain requests GET /auth through the production
+// middleware chain and returns the status code; the caller owns closing the
+// body.
+func authThroughProductionChain(t *testing.T, srv *httptest.Server, bearer string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/auth", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("auth through production chain: %v", err)
+	}
+	defer res.Body.Close()
+	return res.StatusCode
+}
+
+func TestLauncherCredentialRotateThroughProductionMiddlewareChain(t *testing.T) {
+	app, _, oldBearer, l := launcherAuditApp(t, "rotprodchain")
+	srv := newProductionChainServer(t, app)
+
+	res := rotateThroughProductionChain(t, srv,
+		"/principals/rotprodchain/launchers/"+l.ID+"/credential/rotate", oldBearer)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("rotate through production chain: expected 200, got %d", res.StatusCode)
+	}
+	var rotated launcherCredentialResponse
+	if err := json.NewDecoder(res.Body).Decode(&rotated); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Credential == nil || rotated.Token == "" {
+		t.Fatal("rotate response must carry the rotated credential and the replacement bearer")
+	}
+	if rotated.Credential.ID == "" {
+		t.Error("rotate response must preserve the credential ID")
+	}
+
+	if status := authThroughProductionChain(t, srv, oldBearer); status != http.StatusUnauthorized {
+		t.Errorf("old bearer after committed rotation: expected 401, got %d", status)
+	}
+	if status := authThroughProductionChain(t, srv, rotated.Token); status != http.StatusOK {
+		t.Fatalf("replacement bearer must authenticate through the production chain: got %d", status)
+	}
+
+	var credLauncherID string
+	if err := app.DB.QueryRow(`SELECT launcher_id FROM credentials WHERE id = ?`, rotated.Credential.ID).
+		Scan(&credLauncherID); err != nil {
+		t.Fatalf("rotated credential lookup: %v", err)
+	}
+	if credLauncherID != l.ID {
+		t.Errorf("rotated credential launcher_id = %q, want %q", credLauncherID, l.ID)
+	}
+}
+
+func TestPrincipalCredentialRotateThroughProductionMiddlewareChain(t *testing.T) {
+	app, oldBearer, _ := principalCredentialApp(t, "rotprodprincipal")
+	srv := newProductionChainServer(t, app)
+
+	res := rotateThroughProductionChain(t, srv,
+		"/principals/rotprodprincipal/credentials/caller/rotate", oldBearer)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("rotate through production chain: expected 200, got %d", res.StatusCode)
+	}
+	var rotated principalCredentialTokenResponse
+	if err := json.NewDecoder(res.Body).Decode(&rotated); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Token == "" || rotated.Credential.ID == "" {
+		t.Fatal("rotate response must carry the replacement bearer and the stable credential identity")
+	}
+	if rotated.Credential.Principal != "rotprodprincipal" {
+		t.Errorf("credential principal = %q, want rotprodprincipal", rotated.Credential.Principal)
+	}
+
+	if status := authThroughProductionChain(t, srv, oldBearer); status != http.StatusUnauthorized {
+		t.Errorf("old bearer after committed rotation: expected 401, got %d", status)
+	}
+	if status := authThroughProductionChain(t, srv, rotated.Token); status != http.StatusOK {
+		t.Fatalf("replacement bearer must authenticate through the production chain: got %d", status)
+	}
+
+	var credPrincipal string
+	if err := app.DB.QueryRow(
+		`SELECT p.username FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`,
+		rotated.Credential.ID,
+	).Scan(&credPrincipal); err != nil {
+		t.Fatalf("rotated credential lookup: %v", err)
+	}
+	if credPrincipal != "rotprodprincipal" {
+		t.Errorf("rotated credential principal = %q, want rotprodprincipal", credPrincipal)
+	}
+}
+
 func TestLauncherCredentialSelfRotationConcurrentSameBearerOneWinner(t *testing.T) {
 	app, _, oldBearer, l := launcherAuditApp(t, "launcherrace")
 	waitForBoth, releaseBoth := installCredentialRotationBarrier(t, 2)

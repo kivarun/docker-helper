@@ -77,6 +77,14 @@ func (w *statusResponseWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
+// Unwrap keeps the logging wrapper transparent to http.ResponseController and
+// other unwrapping machinery, so transport capabilities owned by inner
+// wrappers or the connection writer (for example the error-reporting response
+// flush) stay reachable from handlers.
+func (w *statusResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // getRoutePattern returns the registered route pattern for the request.
 // For parameterized routes, it returns the pattern with {param} placeholders.
 // For unmatched requests (404/405), it returns "<unmatched>" to avoid
