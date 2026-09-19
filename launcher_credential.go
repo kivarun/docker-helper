@@ -117,6 +117,32 @@ func findLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential,
 // returned once. No second credential row is created. Fails with
 // ErrLauncherCredentialNotFound if the Launcher has no credential.
 func rotateLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential, string, error) {
+	return rotateLauncherCredentialTargeted(db, launcherID, "")
+}
+
+// rotateLauncherCredentialExact is the exact-expected-credential-identity
+// targeting mode of the one canonical rotation owner: Launcher
+// self-rotation. The transaction proves and mutates the row matching
+// credential.id == expectedCredentialID AND credential.launcher_id ==
+// launcherID — the authenticated authority's own credential — before any
+// token generation or update is committed. If that exact credential no
+// longer exists, the request fails closed with
+// ErrLauncherCredentialNotFound without touching a replacement credential:
+// a stale authenticated authority must never rotate whatever credential
+// happens to be current, rebind by Launcher ID after its credential
+// disappears, or rebind by Principal/name.
+func rotateLauncherCredentialExact(db *sql.DB, launcherID, expectedCredentialID string) (*launcherCredential, string, error) {
+	return rotateLauncherCredentialTargeted(db, launcherID, expectedCredentialID)
+}
+
+// rotateLauncherCredentialTargeted is the single canonical Launcher-credential
+// rotation persistence owner. With an empty expectedCredentialID it targets
+// the Launcher's current singular credential (the existing Admin/Principal
+// behavior); with a non-empty one it targets exactly that credential row
+// under that Launcher, proven inside the same transaction that performs the
+// update. Both modes share the token generation, atomic same-row UPDATE,
+// commit, and response shape.
+func rotateLauncherCredentialTargeted(db *sql.DB, launcherID, expectedCredentialID string) (*launcherCredential, string, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot begin transaction: %w", err)
@@ -126,10 +152,16 @@ func rotateLauncherCredential(db *sql.DB, launcherID string) (*launcherCredentia
 	var credID string
 	var createdAt int64
 	var revokedAt sql.NullInt64
-	err = tx.QueryRow(
-		`SELECT id, created_at, revoked_at FROM credentials WHERE launcher_id = ?`,
-		launcherID,
-	).Scan(&credID, &createdAt, &revokedAt)
+	var query string
+	var queryArgs []any
+	if expectedCredentialID == "" {
+		query = `SELECT id, created_at, revoked_at FROM credentials WHERE launcher_id = ?`
+		queryArgs = []any{launcherID}
+	} else {
+		query = `SELECT id, created_at, revoked_at FROM credentials WHERE id = ? AND launcher_id = ?`
+		queryArgs = []any{expectedCredentialID, launcherID}
+	}
+	err = tx.QueryRow(query, queryArgs...).Scan(&credID, &createdAt, &revokedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, "", ErrLauncherCredentialNotFound

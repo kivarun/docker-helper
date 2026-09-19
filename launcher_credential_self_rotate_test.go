@@ -245,6 +245,139 @@ func principalIDForSelfRotate(t *testing.T, app *App, username string) int64 {
 	return id
 }
 
+// TestLauncherCredentialSelfRotateStaleAuthRaceFailsClosed is the
+// deterministic regression for the auth→mutation replacement race: credential
+// A authenticates, the request is parked after authentication (and after the
+// self-targeting proof) but before the rotation transaction targets its row,
+// credential A is deleted and replacement credential B is issued for the same
+// unchanged Launcher, and only then does A's request resume. The exact
+// expected-credential targeting must fail A's request closed on the existing
+// non-disclosing launcher_credential_not_found refusal — without rotating B,
+// without generating a new bearer, and without changing B's row — while B
+// self-rotates normally afterwards.
+func TestLauncherCredentialSelfRotateStaleAuthRaceFailsClosed(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, _, bearerA, l := launcherAuditApp(t, "selfrotrace")
+
+	// Credential A is the authenticated authority.
+	credA, err := findLauncherCredential(app.DB, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Park the request after authentication, before the rotation transaction.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	origGate := launcherCredentialSelfRotateGate
+	launcherCredentialSelfRotateGate = func() {
+		close(entered)
+		<-release
+	}
+	t.Cleanup(func() { launcherCredentialSelfRotateGate = origGate })
+
+	// Prove the failed request never generates a bearer: token generation
+	// happens only inside the rotation transaction, after the exact
+	// credential match. The recorder is installed after the fixtures so it
+	// counts only request-time generations.
+	origGen := generateCredentialTokenFn
+	generated := 0
+	generateCredentialTokenFn = func() (string, error) {
+		generated++
+		return origGen()
+	}
+	t.Cleanup(func() { generateCredentialTokenFn = origGen })
+	generated = 0
+
+	type rotateResult struct {
+		w *httptest.ResponseRecorder
+	}
+	results := make(chan rotateResult, 1)
+	go func() {
+		results <- rotateResult{w: rotateThroughMux(t, app, "selfrotrace", l.ID, bearerA)}
+	}()
+	<-entered
+
+	// Mutate the credential store underneath the parked request: delete A,
+	// issue replacement B for the same unchanged Launcher.
+	if _, err := deleteLauncherCredential(app.DB, l.ID); err != nil {
+		t.Fatal(err)
+	}
+	credB, bearerB, err := issueLauncherCredential(app.DB, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// B's issuance consumed a token generation; count only request-time
+	// generations from here.
+	generated = 0
+	close(release)
+
+	res := <-results
+	if res.w.Code != http.StatusNotFound {
+		t.Fatalf("stale A's self-rotation: expected 404, got %d %s", res.w.Code, res.w.Body.String())
+	}
+	errResp := decodeAPIError(t, res.w.Body.Bytes())
+	if errResp.Code != "launcher_credential_not_found" {
+		t.Errorf("refusal code = %q, want launcher_credential_not_found", errResp.Code)
+	}
+	if generated != 0 {
+		t.Errorf("the failed stale request generated %d bearer(s); a failed closed rotation must generate none", generated)
+	}
+
+	// Replacement B is untouched: its bearer still authenticates as exactly
+	// the same Launcher and its credential ID is unchanged.
+	w := launcherAuditRequest(t, app, http.MethodGet, "/auth", bearerB, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("replacement bearer B after A's failed request: expected 200, got %d", w.Code)
+	}
+	var auth authResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &auth); err != nil {
+		t.Fatal(err)
+	}
+	if auth.Authority != "launcher" || auth.LauncherID != l.ID {
+		t.Errorf("B's authority = %+v, want launcher %s", auth, l.ID)
+	}
+	var currentB string
+	if err := app.DB.QueryRow(`SELECT id FROM credentials WHERE launcher_id = ?`, l.ID).Scan(&currentB); err != nil {
+		t.Fatal(err)
+	}
+	if currentB != credB.ID {
+		t.Errorf("replacement credential changed: %q -> %q", credB.ID, currentB)
+	}
+	var count int
+	if err := app.DB.QueryRow(`SELECT COUNT(*) FROM credentials WHERE launcher_id = ?`, l.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("credential cardinality = %d, want 1", count)
+	}
+
+	// The failure audit records A's initiating provenance, never B as the
+	// target, and never either bearer.
+	for _, line := range findAuditLinesByEvent(auditBuf, "launcher.credential_rotate") {
+		m := parseAuditMap(t, line)
+		if m["result"] == "error" {
+			if m["launcher_id"] != l.ID || m["credential_id"] != credA.ID {
+				t.Errorf("stale-failure audit must carry A's initiating provenance (launcher %s, credential %s), got %v", l.ID, credA.ID, m)
+			}
+		}
+		assertNoSecrets(t, line, m, bearerA, bearerB)
+	}
+
+	// B may self-rotate normally.
+	launcherCredentialSelfRotateGate = nil
+	resp := rotateThroughMux(t, app, "selfrotrace", l.ID, bearerB)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("B's self-rotation: expected 200, got %d %s", resp.Code, resp.Body.String())
+	}
+	var rotated launcherCredentialResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &rotated); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Credential == nil || rotated.Credential.ID != credB.ID {
+		t.Errorf("B's rotation must preserve its credential ID %s, got %+v", credB.ID, rotated.Credential)
+	}
+}
+
 // TestLauncherCredentialSelfRotateOtherControlPlaneForbidden proves the
 // self-rotation exception does not open the shared Principal-control
 // authenticator: with a Launcher bearer, representative Launcher/Principal

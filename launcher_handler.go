@@ -34,8 +34,11 @@ func applyLauncherTargetProvenance(rec *auditRecord, l *LauncherWithPrincipal) {
 // the record does not already name its reachable target it also fills
 // principal_name (a Principal credential can only reach its own Principal)
 // and credential_id; target provenance from a resolved Launcher or target
-// credential always wins. Admin callers carry no credential provenance, and
-// Launcher credentials cannot perform control-plane operations.
+// credential always wins. Admin callers carry no credential provenance. A
+// Launcher authority reaches exactly one Principal-control endpoint — the
+// rotate endpoint's self-rotation exception, where the initiating credential
+// is the rotated credential — so its provenance is that one credential's ID
+// and owner projection; no other Launcher control-plane capability exists.
 func applyControlAuditProvenance(rec *auditRecord, auth *operatorAuthority) {
 	if auth == nil {
 		return
@@ -1388,6 +1391,13 @@ func (a *App) handleGetLauncherCredential(w http.ResponseWriter, r *http.Request
 	writeJSONRaw(ctx, w, http.StatusOK, launcherCredentialResponse{OK: true, Credential: &credJSON})
 }
 
+// launcherCredentialSelfRotateGate, when non-nil, is invoked by
+// tryLauncherCredentialSelfRotate after authentication and after the
+// self-targeting proof but before the rotation transaction targets the
+// authenticated credential's row — the deterministic seam for the
+// auth→mutation boundary. Production leaves it nil.
+var launcherCredentialSelfRotateGate func()
+
 // tryLauncherCredentialSelfRotate is the dedicated narrow
 // admission/targeting path of the Launcher-credential self-rotation
 // exception — the single credential-management capability of a Launcher
@@ -1431,12 +1441,24 @@ func (a *App) tryLauncherCredentialSelfRotate(w http.ResponseWriter, r *http.Req
 		return true
 	}
 
-	// The canonical atomic rotation owner: the same credential row is
-	// updated in one transaction — Launcher ID, credential ID, ownership,
-	// policy, and Sessions are untouched, only the bearer secret changes,
-	// and the old bearer is immediately invalid with no overlapping
-	// validity window.
-	cred, newToken, err := rotateLauncherCredential(a.DB, la.LauncherID)
+	// Deterministic test seam for the auth→mutation boundary: the gate runs
+	// after authentication (and after the self-targeting proof) and before
+	// the rotation transaction targets the authenticated credential's row.
+	// Production leaves it nil; the stale-authority race regression parks a
+	// request here and mutates the credential store underneath it.
+	if launcherCredentialSelfRotateGate != nil {
+		launcherCredentialSelfRotateGate()
+	}
+
+	// The canonical atomic rotation owner in the exact-expected-credential
+	// mode: the transaction proves credential.id == the authenticated
+	// CredentialID AND credential.launcher_id == the authenticated
+	// LauncherID before generating or committing anything. The
+	// authenticated Launcher credential may rotate exactly itself — if that
+	// exact credential no longer exists (deleted and replaced before the
+	// mutation), the request fails closed on the existing non-disclosing
+	// launcher_credential_not_found refusal without touching a replacement.
+	cred, newToken, err := rotateLauncherCredentialExact(a.DB, la.LauncherID, la.CredentialID)
 	if err != nil {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.credential_rotate",
