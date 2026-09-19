@@ -274,29 +274,19 @@ func (a *App) handleRotatePrincipalCredential(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// The target Principal is resolved under the request authority before any
-	// mutation through the stable control target owner: a Principal
-	// credential can only target its own Principal — by its exact
-	// authenticated Principal ID, never by re-resolving the username — and
-	// any other username, or a stale authority whose Principal was deleted
-	// (even if the same username was recreated), is a non-disclosing 404. The
-	// rotation itself is scoped by that exact ID, so it can never mutate a
-	// recreated same-username Principal's credential.
 	target, ok := a.resolveControlPrincipal(w, r, auth, username)
 	if !ok {
 		return
 	}
 
-	cred, token, err := rotatePrincipalCredential(a.DB, target.ID, name)
-	duration := time.Since(started).Round(time.Millisecond).String()
-
+	cred, expectedHash, token, newHash, err := preparePrincipalCredentialRotation(a.DB, target.ID, name)
 	if err != nil {
 		writeControlAudit(ctx, auditRecord{
 			Event:          "principal.credential_rotate",
 			PrincipalName:  target.Name,
 			CredentialName: name,
 			Result:         "error",
-			Duration:       duration,
+			Duration:       time.Since(started).Round(time.Millisecond).String(),
 		}, auth)
 		switch {
 		case isErrCredentialNotFound(err):
@@ -304,7 +294,7 @@ func (a *App) handleRotatePrincipalCredential(w http.ResponseWriter, r *http.Req
 		case errors.Is(err, ErrCredentialRevoked):
 			writeError(ctx, w, http.StatusConflict, "credential_revoked", "credential is revoked")
 		default:
-			opLog(ctx).Error("credential rotate failed",
+			opLog(ctx).Error("credential rotate prepare failed",
 				slog.String("operation", "credential_rotate"),
 				slog.String("error", err.Error()),
 			)
@@ -313,20 +303,141 @@ func (a *App) handleRotatePrincipalCredential(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	writeControlAudit(ctx, auditRecord{
-		Event:          "principal.credential_rotate",
-		PrincipalName:  cred.PrincipalName,
-		CredentialID:   cred.ID,
-		CredentialName: cred.Name,
-		Result:         "success",
-		Duration:       duration,
-	}, auth)
+	// When a Principal credential rotates itself, the commit authority is the
+	// bearer that authenticated this request, not merely the still-stable
+	// credential ID. A request that authenticated before a concurrent winner
+	// must therefore fail closed even if preparation observes the same row
+	// after its token hash has changed.
+	if auth.class == operatorAuthorityPrincipal && cred.ID == auth.principal.CredentialID {
+		bearer, ok := parseBearerToken(r)
+		if !ok {
+			writeControlAudit(ctx, auditRecord{
+				Event:          "principal.credential_rotate",
+				PrincipalName:  cred.PrincipalName,
+				CredentialID:   cred.ID,
+				CredentialName: cred.Name,
+				Result:         "error",
+				Duration:       time.Since(started).Round(time.Millisecond).String(),
+			}, auth)
+			opLog(ctx).Error("principal credential rotate lost authenticated bearer",
+				slog.String("operation", "credential_rotate"),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		authenticatedHash := hashCredentialToken(bearer)
+		if expectedHash != authenticatedHash {
+			writeControlAudit(ctx, auditRecord{
+				Event:          "principal.credential_rotate",
+				PrincipalName:  cred.PrincipalName,
+				CredentialID:   cred.ID,
+				CredentialName: cred.Name,
+				Result:         "conflict",
+				Duration:       time.Since(started).Round(time.Millisecond).String(),
+			}, auth)
+			writeError(ctx, w, http.StatusConflict, "credential_rotation_conflict", "credential changed during rotation")
+			return
+		}
+		expectedHash = authenticatedHash
+	}
 
-	writeJSONRaw(ctx, w, http.StatusOK, principalCredentialTokenResponse{
+	responseBytes, err := serializeJSONResponse(principalCredentialTokenResponse{
 		OK:         true,
 		Credential: principalCredentialToJSON(*cred),
 		Token:      token,
 	})
+	if err != nil {
+		writeControlAudit(ctx, auditRecord{
+			Event:          "principal.credential_rotate",
+			PrincipalName:  cred.PrincipalName,
+			CredentialID:   cred.ID,
+			CredentialName: cred.Name,
+			Result:         "error",
+			Duration:       time.Since(started).Round(time.Millisecond).String(),
+		}, auth)
+		opLog(ctx).Error("credential rotate response serialization failed",
+			slog.String("operation", "credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	err = commitPrincipalCredentialRotationAfterDelivery(
+		a.DB,
+		cred.ID,
+		target.ID,
+		expectedHash,
+		newHash,
+		func() error {
+			return writeSerializedJSONResponse(w, http.StatusOK, responseBytes)
+		},
+	)
+	duration := time.Since(started).Round(time.Millisecond).String()
+	if err == nil {
+		writeControlAudit(ctx, auditRecord{
+			Event:          "principal.credential_rotate",
+			PrincipalName:  cred.PrincipalName,
+			CredentialID:   cred.ID,
+			CredentialName: cred.Name,
+			Result:         "success",
+			Duration:       duration,
+		}, auth)
+		return
+	}
+
+	switch {
+	case errors.Is(err, ErrCredentialRotationConflict):
+		writeControlAudit(ctx, auditRecord{
+			Event:          "principal.credential_rotate",
+			PrincipalName:  cred.PrincipalName,
+			CredentialID:   cred.ID,
+			CredentialName: cred.Name,
+			Result:         "conflict",
+			Duration:       duration,
+		}, auth)
+		writeError(ctx, w, http.StatusConflict, "credential_rotation_conflict", "credential changed during rotation")
+	case errors.Is(err, ErrCredentialRotationDelivery):
+		writeControlAudit(ctx, auditRecord{
+			Event:          "principal.credential_rotate",
+			PrincipalName:  cred.PrincipalName,
+			CredentialID:   cred.ID,
+			CredentialName: cred.Name,
+			Result:         "delivery_failed",
+			Duration:       duration,
+		}, auth)
+		opLog(ctx).Error("credential rotate response delivery failed",
+			slog.String("operation", "credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+	case errors.Is(err, ErrCredentialRotationCommitUnknown):
+		writeControlAudit(ctx, auditRecord{
+			Event:          "principal.credential_rotate",
+			PrincipalName:  cred.PrincipalName,
+			CredentialID:   cred.ID,
+			CredentialName: cred.Name,
+			Result:         "commit_unknown",
+			Duration:       duration,
+		}, auth)
+		opLog(ctx).Error("credential rotate commit outcome unknown",
+			slog.String("operation", "credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+	default:
+		writeControlAudit(ctx, auditRecord{
+			Event:          "principal.credential_rotate",
+			PrincipalName:  cred.PrincipalName,
+			CredentialID:   cred.ID,
+			CredentialName: cred.Name,
+			Result:         "error",
+			Duration:       duration,
+		}, auth)
+		opLog(ctx).Error("credential rotate failed",
+			slog.String("operation", "credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+	}
 }
 
 func (a *App) handleRevokePrincipalCredential(w http.ResponseWriter, r *http.Request) {

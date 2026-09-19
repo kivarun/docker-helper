@@ -111,88 +111,134 @@ func findLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential,
 	))
 }
 
-// rotateLauncherCredential atomically replaces the bearer secret of the same
-// logical Launcher credential: the credential ID and Launcher ownership are
-// unchanged, the old token is immediately invalid, and the new secret is
-// returned once. No second credential row is created. Fails with
-// ErrLauncherCredentialNotFound if the Launcher has no credential.
-func rotateLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential, string, error) {
-	return rotateLauncherCredentialTargeted(db, launcherID, "")
-}
-
-// rotateLauncherCredentialExact is the exact-expected-credential-identity
-// targeting mode of the one canonical rotation owner: Launcher
-// self-rotation. The transaction proves and mutates the row matching
-// credential.id == expectedCredentialID AND credential.launcher_id ==
-// launcherID — the authenticated authority's own credential — before any
-// token generation or update is committed. If that exact credential no
-// longer exists, the request fails closed with
-// ErrLauncherCredentialNotFound without touching a replacement credential:
-// a stale authenticated authority must never rotate whatever credential
-// happens to be current, rebind by Launcher ID after its credential
-// disappears, or rebind by Principal/name.
-func rotateLauncherCredentialExact(db *sql.DB, launcherID, expectedCredentialID string) (*launcherCredential, string, error) {
-	return rotateLauncherCredentialTargeted(db, launcherID, expectedCredentialID)
-}
-
-// rotateLauncherCredentialTargeted is the single canonical Launcher-credential
-// rotation persistence owner. With an empty expectedCredentialID it targets
-// the Launcher's current singular credential (the existing Admin/Principal
-// behavior); with a non-empty one it targets exactly that credential row
-// under that Launcher, proven inside the same transaction that performs the
-// update. Both modes share the token generation, atomic same-row UPDATE,
-// commit, and response shape.
-func rotateLauncherCredentialTargeted(db *sql.DB, launcherID, expectedCredentialID string) (*launcherCredential, string, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, "", fmt.Errorf("cannot begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
+// prepareLauncherCredentialRotation resolves the singular Launcher credential,
+// optionally requiring the exact authenticated credential ID, captures its
+// current bearer hash as the CAS expectation, and generates the one-time
+// replacement bearer. It performs no mutation.
+func prepareLauncherCredentialRotation(
+	db *sql.DB,
+	launcherID string,
+	expectedCredentialID string,
+) (*launcherCredential, string, string, string, error) {
 	var credID string
 	var createdAt int64
 	var revokedAt sql.NullInt64
-	var query string
-	var queryArgs []any
+	var currentHash string
+	var err error
+
 	if expectedCredentialID == "" {
-		query = `SELECT id, created_at, revoked_at FROM credentials WHERE launcher_id = ?`
-		queryArgs = []any{launcherID}
+		err = db.QueryRow(
+			`SELECT id, created_at, revoked_at, token_hash
+			 FROM credentials
+			 WHERE launcher_id = ?`,
+			launcherID,
+		).Scan(&credID, &createdAt, &revokedAt, &currentHash)
 	} else {
-		query = `SELECT id, created_at, revoked_at FROM credentials WHERE id = ? AND launcher_id = ?`
-		queryArgs = []any{expectedCredentialID, launcherID}
+		err = db.QueryRow(
+			`SELECT id, created_at, revoked_at, token_hash
+			 FROM credentials
+			 WHERE id = ? AND launcher_id = ?`,
+			expectedCredentialID, launcherID,
+		).Scan(&credID, &createdAt, &revokedAt, &currentHash)
 	}
-	err = tx.QueryRow(query, queryArgs...).Scan(&credID, &createdAt, &revokedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, "", ErrLauncherCredentialNotFound
+			return nil, "", "", "", ErrLauncherCredentialNotFound
 		}
-		return nil, "", fmt.Errorf("cannot find launcher credential: %w", err)
+		return nil, "", "", "", fmt.Errorf("cannot find launcher credential: %w", err)
 	}
 
 	token, err := generateCredentialTokenFn()
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", "", err
 	}
 	newHash := hashCredentialToken(token)
-
-	// Update the SAME row: ID and owner unchanged, token hash atomically
-	// replaced. No overlapping validity window and no second credential row.
-	_, err = tx.Exec(
-		`UPDATE credentials SET token_hash = ? WHERE id = ? AND launcher_id = ?`,
-		newHash, credID, launcherID,
-	)
-	if err != nil {
-		return nil, "", fmt.Errorf("cannot rotate launcher credential: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, "", fmt.Errorf("cannot commit launcher credential rotation: %w", err)
-	}
 
 	cred := &launcherCredential{ID: credID, CreatedAt: time.Unix(createdAt, 0)}
 	if revokedAt.Valid {
 		t := time.Unix(revokedAt.Int64, 0)
 		cred.RevokedAt = &t
+	}
+	return cred, currentHash, token, newHash, nil
+}
+
+// replaceLauncherCredentialTokenHashInTx performs the exact Launcher
+// credential CAS inside the caller's transaction. The stable Launcher ID,
+// credential ID, active state, and prepared token hash must all still match.
+func replaceLauncherCredentialTokenHashInTx(
+	tx *sql.Tx,
+	launcherID string,
+	credentialID string,
+	expectedHash string,
+	newHash string,
+) error {
+	result, err := tx.Exec(
+		`UPDATE credentials SET token_hash = ?
+		 WHERE id = ? AND launcher_id = ?
+		   AND revoked_at IS NULL AND token_hash = ?`,
+		newHash, credentialID, launcherID, expectedHash,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot rotate launcher credential: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("cannot check launcher credential rotation result: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("launcher credential %q changed during rotation: %w", credentialID, ErrCredentialRotationConflict)
+	}
+	return nil
+}
+
+// commitLauncherCredentialRotationAfterDelivery applies the prepared Launcher
+// credential replacement through the shared DB-backed rotation
+// transaction/delivery owner.
+func commitLauncherCredentialRotationAfterDelivery(
+	db *sql.DB,
+	launcherID string,
+	credentialID string,
+	expectedHash string,
+	newHash string,
+	deliver func() error,
+) error {
+	return commitCredentialRotationAfterDelivery(
+		db,
+		func(tx *sql.Tx) error {
+			return replaceLauncherCredentialTokenHashInTx(tx, launcherID, credentialID, expectedHash, newHash)
+		},
+		deliver,
+	)
+}
+
+// rotateLauncherCredential atomically replaces the bearer secret of the same
+// logical Launcher credential for non-HTTP callers. The HTTP handlers use the
+// prepare + commit-after-delivery path directly so response delivery is part of
+// the rotation contract.
+func rotateLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential, string, error) {
+	return rotateLauncherCredentialTargeted(db, launcherID, "")
+}
+
+// rotateLauncherCredentialExact preserves exact credential-ID targeting for
+// non-HTTP callers while using the same canonical DB-backed rotation owner.
+func rotateLauncherCredentialExact(db *sql.DB, launcherID, expectedCredentialID string) (*launcherCredential, string, error) {
+	return rotateLauncherCredentialTargeted(db, launcherID, expectedCredentialID)
+}
+
+func rotateLauncherCredentialTargeted(db *sql.DB, launcherID, expectedCredentialID string) (*launcherCredential, string, error) {
+	cred, expectedHash, token, newHash, err := prepareLauncherCredentialRotation(db, launcherID, expectedCredentialID)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := commitLauncherCredentialRotationAfterDelivery(
+		db,
+		launcherID,
+		cred.ID,
+		expectedHash,
+		newHash,
+		func() error { return nil },
+	); err != nil {
+		return nil, "", err
 	}
 	return cred, token, nil
 }

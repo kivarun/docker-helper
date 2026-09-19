@@ -542,8 +542,8 @@ func TestPrincipalCredentialRotateFailsClosedOnStaleState(t *testing.T) {
 	if err == nil {
 		t.Fatal("guarded rotation must fail closed when the UPDATE matches no row")
 	}
-	if !errors.Is(err, ErrCredentialRevoked) {
-		t.Errorf("stale-state rotation error = %v, want ErrCredentialRevoked", err)
+	if !errors.Is(err, ErrCredentialRotationConflict) {
+		t.Errorf("stale-state rotation error = %v, want ErrCredentialRotationConflict", err)
 	}
 
 	realDB, err := openDatabase(dbPath)

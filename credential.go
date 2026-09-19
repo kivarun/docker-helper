@@ -265,55 +265,28 @@ func revokePrincipalCredential(db *sql.DB, id string) (bool, error) {
 	return true, nil
 }
 
-// rotatePrincipalCredential atomically replaces the bearer secret of the
-// CURRENT ACTIVE Principal credential with the given name owned by the exact
-// principalID: the credential ID, name, and Principal ownership are
-// unchanged, the old token is immediately invalid, and the new secret is
-// returned exactly once. No second credential row is created and there is no
-// overlapping validity window.
-//
-// The mutation is scoped by the stable Principal ID, never by username: the
-// exact owner is part of the lookup and mutation predicates, so a Principal
-// deleted and recreated under the same username can never rebind a rotation
-// onto the replacement Principal's credential — a vanished owner fails closed
-// (no active credential row exists at the exact principal_id, so neither
-// branch mutates any row).
-//
-// The primary lookup targets only the active row (revoked_at IS NULL), so
-// revoked historical rows that share the name through documented name reuse
-// never become the rotation target. When no active credential exists but
-// revoked history does, rotation fails with ErrCredentialRevoked; a name that
-// never existed fails with ErrCredentialNotFound. The mutation updates the
-// exact active row under the same ownership and active-state predicates and
-// fails closed on a zero affected-row count (stale concurrent state), so a
-// rotation can never resurrect a revoked row.
-func rotatePrincipalCredential(db *sql.DB, principalID int64, name string) (*PrincipalCredential, string, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, "", fmt.Errorf("cannot begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
+// preparePrincipalCredentialRotation resolves the current active Principal
+// credential by exact Principal ID + credential name, captures the current
+// bearer hash used as the CAS expectation, and generates the one-time
+// replacement bearer. It performs no mutation.
+func preparePrincipalCredentialRotation(db *sql.DB, principalID int64, name string) (*PrincipalCredential, string, string, string, error) {
 	var credID string
 	var principalName string
 	var createdAt int64
-	err = tx.QueryRow(
-		`SELECT c.id, c.created_at, p.username
+	var currentHash string
+	err := db.QueryRow(
+		`SELECT c.id, c.created_at, p.username, c.token_hash
 		 FROM credentials c
 		 JOIN principals p ON p.id = c.principal_id
 		 WHERE c.principal_id = ? AND c.name = ?
 		   AND c.principal_id IS NOT NULL AND c.launcher_id IS NULL
 		   AND c.revoked_at IS NULL`,
 		principalID, name,
-	).Scan(&credID, &createdAt, &principalName)
+	).Scan(&credID, &createdAt, &principalName, &currentHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// No active credential with this name owned by this exact
-			// Principal: distinguish documented revoked history (conflict)
-			// from a name that never existed (not found). Neither branch
-			// mutates any row.
 			var history int
-			err = tx.QueryRow(
+			err = db.QueryRow(
 				`SELECT COUNT(*) FROM credentials c
 				 JOIN principals p ON p.id = c.principal_id
 				 WHERE c.principal_id = ? AND c.name = ?
@@ -321,53 +294,100 @@ func rotatePrincipalCredential(db *sql.DB, principalID int64, name string) (*Pri
 				principalID, name,
 			).Scan(&history)
 			if err != nil {
-				return nil, "", fmt.Errorf("cannot check credential history: %w", err)
+				return nil, "", "", "", fmt.Errorf("cannot check credential history: %w", err)
 			}
 			if history > 0 {
-				return nil, "", fmt.Errorf("credential %q is revoked: %w", name, ErrCredentialRevoked)
+				return nil, "", "", "", fmt.Errorf("credential %q is revoked: %w", name, ErrCredentialRevoked)
 			}
-			return nil, "", fmt.Errorf("credential %q not found for principal %d: %w", name, principalID, ErrCredentialNotFound)
+			return nil, "", "", "", fmt.Errorf("credential %q not found for principal %d: %w", name, principalID, ErrCredentialNotFound)
 		}
-		return nil, "", fmt.Errorf("cannot find credential: %w", err)
+		return nil, "", "", "", fmt.Errorf("cannot find credential: %w", err)
 	}
 
 	token, err := generateCredentialTokenFn()
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", "", err
 	}
 	newHash := hashCredentialToken(token)
-
-	// Fail-closed mutation of the SAME row: ID, name, and owner unchanged,
-	// token hash atomically replaced. The predicate mirrors the active-row
-	// lookup above; a zero affected count means the row is no longer the
-	// active credential (concurrent revoke between lookup and mutation).
-	result, err := tx.Exec(
-		`UPDATE credentials SET token_hash = ?
-		 WHERE id = ? AND principal_id = ? AND launcher_id IS NULL
-		   AND revoked_at IS NULL`,
-		newHash, credID, principalID,
-	)
-	if err != nil {
-		return nil, "", fmt.Errorf("cannot rotate credential: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return nil, "", fmt.Errorf("cannot check rotate result: %w", err)
-	}
-	if affected == 0 {
-		return nil, "", fmt.Errorf("credential %q is no longer active: %w", name, ErrCredentialRevoked)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, "", fmt.Errorf("cannot commit credential rotation: %w", err)
-	}
 
 	return &PrincipalCredential{
 		ID:            credID,
 		PrincipalName: principalName,
 		Name:          name,
 		CreatedAt:     time.Unix(createdAt, 0),
-	}, token, nil
+	}, currentHash, token, newHash, nil
+}
+
+// replacePrincipalCredentialTokenHashInTx performs the exact Principal
+// credential CAS inside the caller's transaction. A zero-row update means the
+// target stopped matching the prepared credential ID/owner/hash/state and is
+// an expected concurrent rotation conflict.
+func replacePrincipalCredentialTokenHashInTx(
+	tx *sql.Tx,
+	credentialID string,
+	principalID int64,
+	expectedHash string,
+	newHash string,
+) error {
+	result, err := tx.Exec(
+		`UPDATE credentials SET token_hash = ?
+		 WHERE id = ? AND principal_id = ? AND launcher_id IS NULL
+		   AND revoked_at IS NULL AND token_hash = ?`,
+		newHash, credentialID, principalID, expectedHash,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot rotate credential: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("cannot check rotate result: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("credential %q changed during rotation: %w", credentialID, ErrCredentialRotationConflict)
+	}
+	return nil
+}
+
+// commitPrincipalCredentialRotationAfterDelivery applies the prepared
+// Principal credential replacement through the shared DB-backed rotation
+// transaction/delivery owner.
+func commitPrincipalCredentialRotationAfterDelivery(
+	db *sql.DB,
+	credentialID string,
+	principalID int64,
+	expectedHash string,
+	newHash string,
+	deliver func() error,
+) error {
+	return commitCredentialRotationAfterDelivery(
+		db,
+		func(tx *sql.Tx) error {
+			return replacePrincipalCredentialTokenHashInTx(tx, credentialID, principalID, expectedHash, newHash)
+		},
+		deliver,
+	)
+}
+
+// rotatePrincipalCredential preserves the domain-level helper used by tests
+// and non-HTTP callers while delegating the mutation to the same canonical
+// rotation owner. Its delivery step is a no-op because there is no HTTP
+// response boundary at this layer.
+func rotatePrincipalCredential(db *sql.DB, principalID int64, name string) (*PrincipalCredential, string, error) {
+	cred, expectedHash, token, newHash, err := preparePrincipalCredentialRotation(db, principalID, name)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := commitPrincipalCredentialRotationAfterDelivery(
+		db,
+		cred.ID,
+		principalID,
+		expectedHash,
+		newHash,
+		func() error { return nil },
+	); err != nil {
+		return nil, "", err
+	}
+	return cred, token, nil
 }
 
 // ErrPrincipalDisabled is returned when the credential's owning Principal is disabled.

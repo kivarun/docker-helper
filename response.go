@@ -60,6 +60,33 @@ func writeJSONRaw(ctx context.Context, w http.ResponseWriter, status int, value 
 	}
 }
 
+// serializeJSONResponse produces the complete response bytes before a
+// credential-rotation transaction begins. The trailing newline preserves the
+// existing json.Encoder wire shape.
+func serializeJSONResponse(value any) ([]byte, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// writeSerializedJSONResponse writes an already serialized JSON response and
+// reports body-delivery failure to the caller. A short write is a failure even
+// if the underlying ResponseWriter returned a nil error.
+func writeSerializedJSONResponse(w http.ResponseWriter, status int, data []byte) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	n, err := w.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
 func writeOperationCreated(ctx context.Context, w http.ResponseWriter, operationID string, status operationState) {
 	writeJSONRaw(ctx, w, http.StatusCreated, operationCreatedResponse{
 		OK:          true,

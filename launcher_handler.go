@@ -1430,18 +1430,7 @@ func (a *App) tryLauncherCredentialSelfRotate(w http.ResponseWriter, r *http.Req
 	}
 	la := authority.launcher
 	ctx := r.Context()
-	duration := time.Since(started).Round(time.Millisecond).String()
 
-	// Targeting is direct comparison with the authenticated owner
-	// projection, never a database/name lookup: the path Principal must be
-	// the projection's Principal, and the Launcher selector must be that
-	// projection's stable ID or its own name. The selector spelling never
-	// becomes mutation identity — the mutation stays bound to the
-	// authenticated stable LauncherID + CredentialID — so an own-name
-	// selector selects self without gaining name-resolution authority, and
-	// every other selector (foreign name, foreign ID, the same name under
-	// another Principal) answers the same constant non-disclosing
-	// launcher_not_found refusal with no foreign existence lookup.
 	selector := r.PathValue("launcher")
 	if r.PathValue("username") != la.PrincipalName ||
 		(selector != la.LauncherID && selector != la.LauncherName) {
@@ -1449,41 +1438,28 @@ func (a *App) tryLauncherCredentialSelfRotate(w http.ResponseWriter, r *http.Req
 			Event:      "launcher.credential_rotate",
 			LauncherID: la.LauncherID,
 			Result:     "launcher_not_found",
-			Duration:   duration,
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
 		}, authority, nil)
 		writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
 		return true
 	}
 
-	// Deterministic test seam for the auth→mutation boundary: the gate runs
-	// after authentication (and after the self-targeting proof) and before
-	// the rotation transaction targets the authenticated credential's row.
-	// Production leaves it nil; the stale-authority race regression parks a
-	// request here and mutates the credential store underneath it.
 	if launcherCredentialSelfRotateGate != nil {
 		launcherCredentialSelfRotateGate()
 	}
 
-	// The canonical atomic rotation owner in the exact-expected-credential
-	// mode: the transaction proves credential.id == the authenticated
-	// CredentialID AND credential.launcher_id == the authenticated
-	// LauncherID before generating or committing anything. The
-	// authenticated Launcher credential may rotate exactly itself — if that
-	// exact credential no longer exists (deleted and replaced before the
-	// mutation), the request fails closed on the existing non-disclosing
-	// launcher_credential_not_found refusal without touching a replacement.
-	cred, newToken, err := rotateLauncherCredentialExact(a.DB, la.LauncherID, la.CredentialID)
+	cred, currentHash, newToken, newHash, err := prepareLauncherCredentialRotation(a.DB, la.LauncherID, la.CredentialID)
 	if err != nil {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.credential_rotate",
 			LauncherID: la.LauncherID,
 			Result:     "error",
-			Duration:   duration,
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
 		}, authority, nil)
 		if isErrLauncherCredentialNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_credential_not_found", "launcher credential not found")
 		} else {
-			opLog(ctx).Error("launcher credential rotate failed",
+			opLog(ctx).Error("launcher credential rotate prepare failed",
 				slog.String("operation", "launcher_credential_rotate"),
 				slog.String("error", err.Error()),
 			)
@@ -1492,19 +1468,111 @@ func (a *App) tryLauncherCredentialSelfRotate(w http.ResponseWriter, r *http.Req
 		return true
 	}
 
-	credJSON := launcherCredentialToJSON(*cred)
-	writeLauncherControlAudit(ctx, auditRecord{
-		Event:        "launcher.credential_rotate",
-		CredentialID: cred.ID,
-		Result:       "success",
-		Duration:     duration,
-	}, authority, nil)
+	authenticatedHash := hashCredentialToken(token)
+	if currentHash != authenticatedHash {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			LauncherID:   la.LauncherID,
+			CredentialID: la.CredentialID,
+			Result:       "conflict",
+			Duration:     time.Since(started).Round(time.Millisecond).String(),
+		}, authority, nil)
+		writeError(ctx, w, http.StatusConflict, "credential_rotation_conflict", "credential changed during rotation")
+		return true
+	}
 
-	writeJSONRaw(ctx, w, http.StatusOK, launcherCredentialResponse{
+	credJSON := launcherCredentialToJSON(*cred)
+	responseBytes, err := serializeJSONResponse(launcherCredentialResponse{
 		OK:         true,
 		Credential: &credJSON,
 		Token:      newToken,
 	})
+	if err != nil {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			LauncherID:   la.LauncherID,
+			CredentialID: cred.ID,
+			Result:       "error",
+			Duration:     time.Since(started).Round(time.Millisecond).String(),
+		}, authority, nil)
+		opLog(ctx).Error("launcher credential rotate response serialization failed",
+			slog.String("operation", "launcher_credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return true
+	}
+
+	err = commitLauncherCredentialRotationAfterDelivery(
+		a.DB,
+		la.LauncherID,
+		cred.ID,
+		authenticatedHash,
+		newHash,
+		func() error {
+			return writeSerializedJSONResponse(w, http.StatusOK, responseBytes)
+		},
+	)
+	duration := time.Since(started).Round(time.Millisecond).String()
+	if err == nil {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			LauncherID:   la.LauncherID,
+			CredentialID: cred.ID,
+			Result:       "success",
+			Duration:     duration,
+		}, authority, nil)
+		return true
+	}
+
+	switch {
+	case errors.Is(err, ErrCredentialRotationConflict):
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			LauncherID:   la.LauncherID,
+			CredentialID: cred.ID,
+			Result:       "conflict",
+			Duration:     duration,
+		}, authority, nil)
+		writeError(ctx, w, http.StatusConflict, "credential_rotation_conflict", "credential changed during rotation")
+	case errors.Is(err, ErrCredentialRotationDelivery):
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			LauncherID:   la.LauncherID,
+			CredentialID: cred.ID,
+			Result:       "delivery_failed",
+			Duration:     duration,
+		}, authority, nil)
+		opLog(ctx).Error("launcher credential rotate response delivery failed",
+			slog.String("operation", "launcher_credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+	case errors.Is(err, ErrCredentialRotationCommitUnknown):
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			LauncherID:   la.LauncherID,
+			CredentialID: cred.ID,
+			Result:       "commit_unknown",
+			Duration:     duration,
+		}, authority, nil)
+		opLog(ctx).Error("launcher credential rotate commit outcome unknown",
+			slog.String("operation", "launcher_credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+	default:
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			LauncherID:   la.LauncherID,
+			CredentialID: cred.ID,
+			Result:       "error",
+			Duration:     duration,
+		}, authority, nil)
+		opLog(ctx).Error("launcher credential rotate failed",
+			slog.String("operation", "launcher_credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+	}
 	return true
 }
 
@@ -1512,16 +1580,6 @@ func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Requ
 	started := time.Now()
 	ctx := r.Context()
 
-	// The Launcher-credential self-rotation exception is admitted by this
-	// dedicated narrow path before the shared Principal-control
-	// authenticator: authenticatePrincipalControlRequest keeps its
-	// invariant that Launcher credentials have no Principal-owned
-	// control-plane authority, and the rotate endpoint is the single
-	// endpoint where an authenticated Launcher credential may act — on its
-	// own credential only. tryLauncherCredentialSelfRotate returns true
-	// only when it answered the request completely (success or its own
-	// refusal); any other bearer falls through to the unchanged
-	// Admin/Principal path below.
 	if a.tryLauncherCredentialSelfRotate(w, r, started) {
 		return
 	}
@@ -1536,19 +1594,18 @@ func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	cred, token, err := rotateLauncherCredential(a.DB, l.ID)
-	duration := time.Since(started).Round(time.Millisecond).String()
+	cred, expectedHash, token, newHash, err := prepareLauncherCredentialRotation(a.DB, l.ID, "")
 	if err != nil {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.credential_rotate",
 			LauncherID: l.ID,
 			Result:     "error",
-			Duration:   duration,
+			Duration:   time.Since(started).Round(time.Millisecond).String(),
 		}, auth, nil)
 		if isErrLauncherCredentialNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_credential_not_found", "launcher credential not found")
 		} else {
-			opLog(ctx).Error("launcher credential rotate failed",
+			opLog(ctx).Error("launcher credential rotate prepare failed",
 				slog.String("operation", "launcher_credential_rotate"),
 				slog.String("error", err.Error()),
 			)
@@ -1558,18 +1615,92 @@ func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Requ
 	}
 
 	credJSON := launcherCredentialToJSON(*cred)
-	writeLauncherControlAudit(ctx, auditRecord{
-		Event:        "launcher.credential_rotate",
-		CredentialID: cred.ID,
-		Result:       "success",
-		Duration:     duration,
-	}, auth, l)
-
-	writeJSONRaw(ctx, w, http.StatusOK, launcherCredentialResponse{
+	responseBytes, err := serializeJSONResponse(launcherCredentialResponse{
 		OK:         true,
 		Credential: &credJSON,
 		Token:      token,
 	})
+	if err != nil {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			LauncherID:   l.ID,
+			CredentialID: cred.ID,
+			Result:       "error",
+			Duration:     time.Since(started).Round(time.Millisecond).String(),
+		}, auth, l)
+		opLog(ctx).Error("launcher credential rotate response serialization failed",
+			slog.String("operation", "launcher_credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	err = commitLauncherCredentialRotationAfterDelivery(
+		a.DB,
+		l.ID,
+		cred.ID,
+		expectedHash,
+		newHash,
+		func() error {
+			return writeSerializedJSONResponse(w, http.StatusOK, responseBytes)
+		},
+	)
+	duration := time.Since(started).Round(time.Millisecond).String()
+	if err == nil {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			CredentialID: cred.ID,
+			Result:       "success",
+			Duration:     duration,
+		}, auth, l)
+		return
+	}
+
+	switch {
+	case errors.Is(err, ErrCredentialRotationConflict):
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			CredentialID: cred.ID,
+			Result:       "conflict",
+			Duration:     duration,
+		}, auth, l)
+		writeError(ctx, w, http.StatusConflict, "credential_rotation_conflict", "credential changed during rotation")
+	case errors.Is(err, ErrCredentialRotationDelivery):
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			CredentialID: cred.ID,
+			Result:       "delivery_failed",
+			Duration:     duration,
+		}, auth, l)
+		opLog(ctx).Error("launcher credential rotate response delivery failed",
+			slog.String("operation", "launcher_credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+	case errors.Is(err, ErrCredentialRotationCommitUnknown):
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			CredentialID: cred.ID,
+			Result:       "commit_unknown",
+			Duration:     duration,
+		}, auth, l)
+		opLog(ctx).Error("launcher credential rotate commit outcome unknown",
+			slog.String("operation", "launcher_credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+	default:
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:        "launcher.credential_rotate",
+			CredentialID: cred.ID,
+			Result:       "error",
+			Duration:     duration,
+		}, auth, l)
+		opLog(ctx).Error("launcher credential rotate failed",
+			slog.String("operation", "launcher_credential_rotate"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+	}
 }
 
 func (a *App) handleDeleteLauncherCredential(w http.ResponseWriter, r *http.Request) {
