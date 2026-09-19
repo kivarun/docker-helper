@@ -213,9 +213,18 @@ issued depends on the deployment mode:
 
 - **System mode**: a repeatable `--filesystem-root PATH=ACCESS` flag (CLI)
   or a `filesystem_roots` array of `{path, access}` objects (HTTP) may add
-  absolute host filesystem roots — directories or regular files — inside
+  absolute host filesystem roots — directories or regular files that must
+  already exist — inside
   the target Launcher's effective ceiling. ACCESS is `read_write` or
-  `read_only`, always within the parent authority. Issued roots may be
+  `read_only`. The request may only narrow the effective Launcher ceiling,
+  never widen it: a `read_write` root at a path where the effective
+  Launcher ceiling is `read_only` is refused. Within one request's own
+  entries a more-specific `read_write` exception below a broader
+  `read_only` Session region is legal when the ceiling authorizes
+  `read_write` at that child — a Session may be read-only over a broader
+  tree with a more-specific writable child (the pipeline-run shape). Never
+  read this as "a Session cannot have a writable child under its own
+  read-only parent". Issued roots may be
   used as absolute mount sources (see Path model).
 - **User mode**: no disjoint filesystem root can be issued — an explicit
   root is accepted only when its canonical path equals the canonical
@@ -253,6 +262,16 @@ Both interfaces share the same path semantics. Define once, apply everywhere.
     filesystem snapshot: it is accepted when it lies inside the snapshot
     (the workspace, or an issued filesystem root visible in your `self`
     snapshot); any other absolute path is refused.
+- **Mount containment is on the canonical source, not the spelling.** Both
+  source forms are admitted lexically before any probing and then
+  canonicalized; the canonical source must stay inside issued Session
+  authority, and the enforcement implementation's
+  intermediate-path/ancestor containment invariants apply on top (a
+  writable exposure additionally requires no `read_only` region below the
+  source inside the snapshot, and the enforced system-mode pathname may
+  not contain a symlinked intermediate component). A spelling that only
+  reaches a compliant final target by violating that containment is not a
+  bypass.
 - **User-mode mount rule** — the daemon-enforced invariant is that the
   canonical resolved source equals the canonical Session workspace.
   `.` is the recommended portable spelling and is valid in both modes;

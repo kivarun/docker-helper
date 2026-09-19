@@ -190,7 +190,7 @@ control-plane authority.`,
 		fs.Var(launcher, "launcher", "Launcher name or ID (dhl_...) to target instead of the default Launcher")
 		var filesystemRoots filesystemRootFlag
 		fs.Var(&filesystemRoots, "filesystem-root",
-			"Issuance-time Session filesystem root, repeatable PATH=ACCESS (PATH is an absolute host path inside the target Launcher's effective allowed roots; ACCESS is read_write or read_only; narrows RW to RO, never widens RO to RW; the daemon decides narrowing, the CLI validates syntax only)")
+			"Issuance-time Session filesystem root, repeatable PATH=ACCESS (PATH is an absolute host path inside the target Launcher's effective allowed roots; ACCESS is read_write or read_only; the request may only narrow the effective Launcher ceiling, never widen it — a read_write root where the effective Launcher ceiling is read_only is refused — while a Session request's own entries may carry a narrower-path read_write exception below a broader read_only Session region when the effective Launcher ceiling authorizes read_write at that child; the daemon decides narrowing, the CLI validates syntax only)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{

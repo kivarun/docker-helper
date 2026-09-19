@@ -727,7 +727,8 @@ when the request carries filesystem_roots:
     exists as a directory or regular file), prove the request is a
     narrowing-only composition against the effective Launcher ceiling
     (authorized canonical proof — the second, mandatory security proof;
-     explicit read_write under an effective read_only region refused),
+     explicit read_write where the effective Launcher ceiling is
+     read_only refused),
     build the requested scope (implicit workspace grant at the effective
     ceiling mode, replaced by an explicit workspace root), and compose
     ceiling ∩ request through the existing composition owner;
@@ -886,8 +887,8 @@ The HTTP body of `POST /sessions` accepts
   `read_only`; `null` is refused `400 invalid_filesystem_policy`, as are
   malformed entries (relative or traversal paths, unresolvable paths,
   paths of no mountable type, duplicate canonical entries, explicit
-  `read_write` under an effective `read_only` region, missing/unknown
-  access, unknown nested fields). An explicit root whose canonical path
+  `read_write` where the effective Launcher ceiling is `read_only`,
+  missing/unknown access, unknown nested fields). An explicit root whose canonical path
   equals the canonical workspace replaces the implicit workspace grant
   under the same privilege rule.
 
@@ -895,13 +896,19 @@ The HTTP body of `POST /sessions` accepts
 persisted Session filesystem snapshot is the canonical normalized
 composition of the implicit workspace grant with the admitted request:
 the explicit workspace entry replaces the implicit grant; the composition
-uses access-mode meet semantics against the effective ceiling; and the
+uses access-mode meet semantics against the effective ceiling (the
+ceiling itself — the parent authority — is never widened); and the
 stored snapshot is the canonically normalized representation, so
 redundant same-access authority already covered by another entry may
 collapse during normalization (for example a requested read_write subtree
 whose ancestor is already issued read_write), while a narrower nested
 `read_only` region remains represented because it changes the effective
-authority of the paths below it. Duplicate canonical request entries are
+authority of the paths below it. Within one request's own entries a
+more-specific `read_write` exception below a broader `read_only` Session
+region is legal when the effective Launcher ceiling authorizes
+`read_write` at that child — a Session may be read-only over a broader
+tree with a more-specific writable child, never wider than the ceiling
+(the motivating pipeline-run shape). Duplicate canonical request entries are
 refused rather than silently merged, and the snapshot is never a verbatim
 echo of the request. Callers must consume `GET /self` or
 `GET /sessions/{id}` (`session show`) — the exact persisted canonical
@@ -2763,6 +2770,21 @@ Validation details:
   the source is resolved through `EvalSymlinks` only after
   admission, and the issued snapshot exposure resolution stays the second,
   mandatory canonical proof;
+- the canonical source must remain inside issued Session authority: the
+  final resolved source is authorized through the snapshot lookup, and a
+  writable exposure additionally passes the snapshot owner's
+  writable-parent query (the source itself resolves `read_write` and no
+  effective `read_only` region exists strictly below it inside the
+  snapshot). The enforcement implementation's intermediate-path/ancestor
+  containment invariants apply on top: in system mode the canonical source
+  is inode-pinned through the real host tree with
+  `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS`, so no symlinked intermediate
+  component may participate in the enforced pathname, and the exposure/MAC
+  materialization consumes that pinned source rather than the caller
+  spelling. A spelling that reaches a compliant final canonical target
+  only by violating one of those containment invariants is not a valid
+  bypass: enforcement is on the canonical source and its real host path,
+  never on the caller's spelling;
 - environment values are never logged (only names in `env_keys`);
 - environment names are sorted for deterministic output;
 - `helper_socket` injects the server-owned read-only runtime projection

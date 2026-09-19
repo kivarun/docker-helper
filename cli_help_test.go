@@ -1054,6 +1054,35 @@ func TestBuildContextHelpDescribesAbsoluteWithinWorkspace(t *testing.T) {
 	}
 }
 
+// TestSessionCreateHelpDocumentsNarrowingException pins the public
+// filesystem-root narrowing distinction: the help states the parent
+// authority ceiling is never widened (a read_write root where the effective
+// Launcher ceiling is read_only is refused) while a Session request's own
+// entries may carry a narrower-path read_write exception below a broader
+// read_only Session region when the ceiling authorizes read_write at that
+// child — so the "narrows, never widens" wording cannot regress into
+// ambiguously prohibiting the legal Session-local pipeline-run shape.
+func TestSessionCreateHelpDocumentsNarrowingException(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCommandWithWriters([]string{"session", "create", "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("session create --help exit = %d, stderr=%s", code, stderr.String())
+	}
+	help := stdout.String()
+	for _, want := range []string{
+		"may only narrow the effective Launcher ceiling, never widen it",
+		"a read_write root where the effective Launcher ceiling is read_only is refused",
+		"narrower-path read_write exception below a broader read_only Session region",
+		"when the effective Launcher ceiling authorizes read_write at that child",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("session create --filesystem-root help must carry the narrowing distinction, missing %q", want)
+		}
+	}
+	if strings.Contains(help, "narrows RW to RO, never widens RO to RW") {
+		t.Errorf("session create help must not carry the ambiguous aggregate narrowing wording")
+	}
+}
+
 // TestBuildHelpDocumentsRequiredOperands pins the public build syntax: the
 // Usage line presents --dockerfile FILE and --image NAME as required (never
 // inside optional brackets), the help text states the three required

@@ -163,15 +163,23 @@ workspace (the daemon canonicalizes the workspace and enforces the
 strict-inside containment). With \-\-json, output in JSON format.
 The repeatable \fB\-\-filesystem-root PATH=ACCESS\fR flag issues additional
 filesystem roots for the Session: PATH is an absolute host path inside the
-resolved target Launcher's effective allowed roots (an existing directory
-or regular file; the root is created before the Session) and ACCESS is
+resolved target Launcher's effective allowed roots and must already exist
+as a directory or regular file before Session creation — Docker Helper
+does not create a missing requested root, and a missing admitted root is
+refused with the documented \fBinvalid_filesystem_policy\fR
+path-resolution contract — and ACCESS is
 exactly \fBread_write\fR or \fBread_only\fR. The workspace itself remains
 mandatory and receives the maximum access the effective policy permits at
 that path; a root whose canonical path equals the workspace explicitly
-narrows it instead. The request may only narrow the effective filesystem
-ceiling: a \fBread_write\fR root under an effective read_only region, or
-any path outside the ceiling, is refused with
-\fB400 invalid_filesystem_policy\fR before the Session exists. Omitting the
+narrows it instead. The request may only narrow the effective Launcher
+ceiling, never widen it: a \fBread_write\fR root at a path where the
+effective Launcher ceiling is read_only — or any path outside the
+ceiling — is refused with \fB400 invalid_filesystem_policy\fR before the
+Session exists. Within one request's own entries a more-specific
+\fBread_write\fR exception below a broader \fBread_only\fR Session region
+is legal when the effective Launcher ceiling authorizes \fBread_write\fR
+at that child: a Session may be read-only over a broader tree with a
+more-specific writable child. Omitting the
 flag preserves the inherited create behavior. The CLI validates
 PATH=ACCESS syntax only; whether the request is a valid narrowing is decided
 by the daemon. The issued snapshot is immutable; there is no post-create
@@ -678,7 +686,13 @@ caller mount): a longer list is refused with
 A mount source is a workspace-relative path (system mode: any file or
 subdirectory; user mode: only the workspace root \fB.\fR) or an absolute
 host path inside the issued Session filesystem snapshot; any other source
-is refused. A requested writable mount whose source resolves to a read-only region of
+is refused. Mount containment is enforced on the canonical source, not
+the caller spelling: the raw source is admitted lexically against the
+issued authority before any probing, then canonicalized, and the
+canonical source must stay inside the issued Session filesystem snapshot
+(the enforcement implementation's intermediate-path/ancestor containment
+invariants apply on top; a spelling that only reaches a compliant final
+target by violating that containment is not a bypass). A requested writable mount whose source resolves to a read-only region of
 the issued Session filesystem snapshot is refused before any container
 starts with the \fBread_only_root\fR error \- a policy refusal, distinct
 from the structural \fBinvalid_mount\fR. When a source is only needed for

@@ -1632,8 +1632,11 @@ Session keeps its issued snapshot for its whole lifetime.
 The authority creating a Session can also issue additional filesystem
 roots for it: `session create` accepts a repeatable
 `--filesystem-root PATH=ACCESS` flag where PATH is an absolute host path
-inside the target Launcher's effective allowed roots (a directory or a
-regular file) and ACCESS is `read_write` or `read_only`. The workspace
+inside the target Launcher's effective allowed roots and must already
+exist as a directory or a regular file before Session creation — Docker
+Helper does not create a missing requested root, and a missing admitted
+root is refused with the documented `invalid_filesystem_policy`
+path-resolution contract — and ACCESS is `read_write` or `read_only`. The workspace
 itself remains mandatory and receives the maximum access the target
 Launcher's effective policy permits; passing a filesystem root at the
 canonical workspace path explicitly narrows it instead:
@@ -1652,10 +1655,16 @@ docker-helper session create --system \
 A system-mode admin token must target exactly one Launcher explicitly
 (`--launcher NAME_OR_ID` or `--principal USER`); a Principal or Launcher
 credential targets its own scope and takes no `--principal` selector.
-The request may only narrow the target Launcher's effective ceiling; a
-`read_write` root under an effective `read_only` region, or a path
-outside the ceiling, is refused with `invalid_filesystem_policy` before
-the Session exists. Omitting the flag keeps the inherited behavior. A
+The request may only narrow the target Launcher's effective ceiling,
+never widen it: a `read_write` root at a path where the **effective
+Launcher ceiling** is `read_only` — or a path outside the ceiling — is
+refused with `invalid_filesystem_policy` before the Session exists.
+Within one request's own entries a more-specific `read_write` exception
+below a broader `read_only` Session region is legal when the effective
+Launcher ceiling authorizes `read_write` at that child: the pipeline-run
+shape above — a Session read-only over a broader tree with a
+more-specific writable child — never exceeds the ceiling. Omitting the
+flag keeps the inherited behavior. A
 Launcher credential can issue its own Session this way and can never
 widen Launcher/Principal/global authority; there is no post-create
 Session filesystem mutation. The issued snapshot is the daemon-normalized
