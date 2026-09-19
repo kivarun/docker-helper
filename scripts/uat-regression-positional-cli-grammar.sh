@@ -330,7 +330,7 @@ subcase_d() {
     reg_fail "D: set-access LAUNCHER PATH ACCESS failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
   out="$(dh launcher allowed-root list --system --principal "$FIX_USER" --json target 2>&1)"
-  if printf '%s' "$out" | grep -q '"path": "'"$tree"'/one", "access": "read_only"'; then
+  if printf '%s' "$out" | allowed_root_json_access "$tree/one" 2>/dev/null | grep -q 'read_only'; then
     reg_ok "D: the stored access is read_only on the named Launcher"
   else
     reg_fail "D: set-access did not land read_only: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
@@ -369,6 +369,15 @@ subcase_d() {
     reg_ok "D: the named Launcher keeps its second root after the targeted remove"
   else
     reg_fail "D: the targeted remove disturbed the wrong root: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+  fi
+
+  # Restore the default Launcher to inherit scope: D's one-operand add/remove
+  # left it restricted with an empty set, which would starve every later
+  # subcase (E issues its Session on the default Launcher).
+  if out="$(dh launcher allowed-root inherit --system --principal "$FIX_USER" 2>&1)" && [ "$out" ]; then
+    reg_ok "D: default Launcher restored to inherit scope"
+  else
+    reg_fail "D: default Launcher inherit restore failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
 }
 
