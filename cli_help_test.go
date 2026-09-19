@@ -1006,9 +1006,9 @@ func TestHelpPseudoSubcommandRemainsInvalid(t *testing.T) {
 	}
 }
 
-// TestHelpCanonicalPathsAndPerCommandFlag pins the Release 2.1 help contract:
-// the canonical help paths and per-command --help all resolve, and the rotate
-// help explains the atomic rotation contract.
+// TestHelpCanonicalPathsAndPerCommandFlag pins the credential-rotation help
+// contract: canonical help paths and per-command --help resolve, and rotate
+// documents the response-before-commit rollback/conflict/recovery semantics.
 func TestHelpCanonicalPathsAndPerCommandFlag(t *testing.T) {
 	for _, args := range [][]string{
 		{"help", "principal"},
@@ -1027,7 +1027,7 @@ func TestHelpCanonicalPathsAndPerCommandFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("rotate --help exit = %d", code)
 	}
-	for _, want := range []string{"atomic server-side operation", "exactly once"} {
+	for _, want := range []string{"response-write failure rolls back", "credential_rotation_conflict", "never retried automatically"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("rotate help missing %q:\n%s", want, stdout.String())
 		}
