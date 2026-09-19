@@ -400,10 +400,12 @@ subcase_e() {
     return
   }
   sid="$(printf '%s' "$sid_json" | json_field id)"
+  stoken="$(printf '%s' "$sid_json" | json_field token)"
   [ -n "$sid" ] || { reg_fail "E: session create returned no id"; return; }
+  [ -n "$stoken" ] || { reg_fail "E: session create returned no token"; return; }
 
   run_workload() {
-    DOCKER_HELPER_SESSION_TOKEN="$sid" dh "$@"
+    DOCKER_HELPER_SESSION_TOKEN="$stoken" dh "$@"
   }
 
   # 1. flag-like workload arguments after IMAGE reach the container
