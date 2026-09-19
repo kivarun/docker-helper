@@ -410,7 +410,7 @@ subcase_e() {
 
   # 1. flag-like workload arguments after IMAGE reach the container
   #    verbatim, without the bare -- separator.
-  out="$(run_workload run "$IMAGE" sh -c 'printf "ARGS:%s:%s:%s" "$1" "$2" "$3"' sh -- --json --image X 2>&1)"; rc=$?
+  out="$(run_workload run "$IMAGE" sh -c 'printf "ARGS:%s:%s:%s" "$1" "$2" "$3"' sh --json --image X 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ARGS:--json:--image:X'; then
     reg_ok "E: workload args survive unchanged without the -- separator"
   else
@@ -418,7 +418,7 @@ subcase_e() {
   fi
 
   # 2. the same with the bare -- separator.
-  out="$(run_workload run "$IMAGE" -- sh -c 'printf "ARGS:%s:%s:%s" "$1" "$2" "$3"' sh -- --json --image X 2>&1)"; rc=$?
+  out="$(run_workload run "$IMAGE" -- sh -c 'printf "ARGS:%s:%s:%s" "$1" "$2" "$3"' sh --json --image X 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ARGS:--json:--image:X'; then
     reg_ok "E: workload args survive unchanged with the -- separator"
   else
