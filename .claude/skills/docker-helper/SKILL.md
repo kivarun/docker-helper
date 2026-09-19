@@ -163,7 +163,8 @@ canonical installed credential file automatically; do not display any
 token value.
 
 A Launcher credential may rotate exactly its own credential — the
-launcher credential rotate command with no selector (HTTP:
+launcher credential rotate command with no selector (an explicit selector
+may be that Launcher's own name or stable `dhl_...` ID; HTTP:
 `POST /principals/{principal}/launchers/{launcher}/credential/rotate`
 with the installed credential as the Bearer): the
 credential ID, ownership, Launcher policy, and Sessions are preserved,

@@ -968,8 +968,13 @@ when the path identifies the authenticated stable owner itself. The
 authoritative identity comes from the authenticated credential projection
 (stable Launcher ID, credential ID, owner Principal), never from a fresh
 lookup: the path Principal must equal that projection's Principal, the
-Launcher selector must identify exactly the authenticated stable Launcher
-ID, and the mutation targets the credential carried by the authority. No
+Launcher selector must be that projection's stable Launcher ID or the
+authenticated Launcher's own name (direct comparison with the
+authenticated owner projection, never a database/name lookup), and the
+mutation targets the credential carried by the authority. The selector
+spelling never becomes mutation identity — the mutation stays bound to
+the authenticated stable Launcher ID + CredentialID — so an own-name
+selector selects self without gaining name-resolution authority. No
 foreign lookup is performed merely to answer a foreign selector, so a
 same-name Launcher under another Principal can never rebind the bearer —
 rebinding by `{username, launcher-name}` after authentication is

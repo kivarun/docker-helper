@@ -1948,6 +1948,7 @@ A Launcher credential may also rotate exactly its own credential:
 
 ```bash
 docker-helper launcher credential rotate    # under a Launcher credential: rotates self
+# an explicit selector may be that Launcher's own name or dhl_... ID
 ```
 
 This is the recommended post-provisioning hardening step for a bootstrap

@@ -546,17 +546,16 @@ policy, only the bearer secret changes, and the old bearer is immediately
 invalid. The command never rewrites a credential store: the caller is
 responsible for atomically installing the returned bearer through the
 supported credential-install mechanism and discarding the bootstrap
-bearer. Admin and Principal-credential targeting is unchanged. A Launcher
-credential may rotate exactly its own credential: omit the selector to
-rotate self, or supply that Launcher's own \fBdhl_\fR... ID as explicit
-self-selection (the exact-own request is constructed from the
+bearer. Admin and Principal-credential targeting is unchanged. With
+Launcher authentication, omission selects the authenticated Launcher. An
+explicit selector may be that Launcher's own name or stable
+\fBdhl_\fR... ID (the exact-own request is constructed from the
 authenticated \fBGET /auth\fR projection; the daemon remains the
-authorization authority). A foreign \fBdhl_\fR ID is answered by the
-daemon's non-disclosing \fBlauncher not found\fR refusal, a name selector
-gains no name-resolution authority, and \fB\-\-principal\fR cannot widen
-scope. This is the one credential-management capability of a Launcher
-credential — it grants no other Launcher/Principal control-plane
-authority.
+authorization authority). Any other selector is refused non-disclosing
+(\fBlauncher not found\fR) and grants no name-resolution authority;
+\fB\-\-principal\fR cannot widen scope. This is the one
+credential-management capability of a Launcher credential — it grants no
+other Launcher/Principal control-plane authority.
 .TP
 .B docker-helper launcher credential delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
 Delete a launcher's credential. No secret is printed.

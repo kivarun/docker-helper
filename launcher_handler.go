@@ -1430,7 +1430,19 @@ func (a *App) tryLauncherCredentialSelfRotate(w http.ResponseWriter, r *http.Req
 	ctx := r.Context()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
-	if r.PathValue("username") != la.PrincipalName || r.PathValue("launcher") != la.LauncherID {
+	// Targeting is direct comparison with the authenticated owner
+	// projection, never a database/name lookup: the path Principal must be
+	// the projection's Principal, and the Launcher selector must be that
+	// projection's stable ID or its own name. The selector spelling never
+	// becomes mutation identity — the mutation stays bound to the
+	// authenticated stable LauncherID + CredentialID — so an own-name
+	// selector selects self without gaining name-resolution authority, and
+	// every other selector (foreign name, foreign ID, the same name under
+	// another Principal) answers the same constant non-disclosing
+	// launcher_not_found refusal with no foreign existence lookup.
+	selector := r.PathValue("launcher")
+	if r.PathValue("username") != la.PrincipalName ||
+		(selector != la.LauncherID && selector != la.LauncherName) {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.credential_rotate",
 			LauncherID: la.LauncherID,

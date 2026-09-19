@@ -1112,24 +1112,22 @@ func launcherCredentialRotateTarget(client *apiClient, explicitPrincipal string,
 	}
 	// The Launcher-credential self-rotation exception: the exact-own request
 	// is constructed from the authenticated GET /auth projection, while the
-	// daemon remains the authorization authority.
+	// daemon remains the authorization authority. With Launcher
+	// authentication, omission selects the authenticated Launcher (its own
+	// stable ID is the exact-own spelling sent on the wire; publicly the
+	// meaning is simply "own Launcher"). An explicit selector — own name,
+	// own stable ID, or anything else — is forwarded unchanged: the daemon's
+	// dedicated self-admission accepts the projection-matching spellings and
+	// refuses every other one non-disclosing, so the CLI performs no foreign
+	// lookup and gains no name-resolution authority.
 	auth, err := client.auth()
 	if err != nil || auth.Authority != "launcher" {
 		return "", "", targetErr
 	}
 	if fs.NArg() == 0 {
-		// Omitted selector: rotate the authenticated Launcher itself.
 		return auth.Principal, auth.LauncherID, nil
 	}
-	selector = fs.Arg(0)
-	if !isLauncherIDSelector(selector) {
-		// A name-shaped selector gains no name-resolution authority under
-		// Launcher authentication.
-		return "", "", errors.New("Launcher authentication requires the Launcher's dhl_ ID (GET /auth reports it); omit the selector to rotate self")
-	}
-	// The own stable dhl_... ID is explicit self-selection; a foreign ID is
-	// forwarded unchanged for the daemon's non-disclosing refusal.
-	return auth.Principal, selector, nil
+	return auth.Principal, fs.Arg(0), nil
 }
 
 var launcherCredentialRotateCommand = &Command{
@@ -1147,14 +1145,12 @@ through the supported credential-install mechanism — this command never
 rewrites a credential store.
 
 Admin and Principal-credential targeting is unchanged (--principal USER
-and the optional positional LAUNCHER selector). A Launcher credential may
-rotate exactly its own credential: omit the selector to rotate self, or
-supply that Launcher's own dhl_... ID as explicit self-selection; a
-foreign dhl_ ID is answered by the daemon's non-disclosing
-launcher-not-found refusal, a name selector gains no name-resolution
-authority, and --principal cannot widen scope. This is the one
-credential-management capability of a Launcher credential — it grants no
-other Launcher/Principal control-plane authority.`,
+and the optional positional LAUNCHER selector). With Launcher
+authentication, omission selects the authenticated Launcher. An explicit
+selector may be that Launcher's own name or stable ID; any other selector
+is refused non-disclosing and grants no name-resolution authority. This
+is the one credential-management capability of a Launcher credential — it
+grants no other Launcher/Principal control-plane authority.`,
 
 	Presentation: humanJSONPresentation(),
 

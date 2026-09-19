@@ -1609,18 +1609,22 @@ func TestLauncherCredentialRotateCLIPreservesIdentity(t *testing.T) {
 // ---- launcher credential self-rotation ----
 
 // TestLauncherCredentialRotateCLISelfForm proves the CLI self-rotation form:
-// under a Launcher credential the rotate command constructs the exact-own
-// request from the authenticated /auth projection — no positional selector
-// rotates self, the own stable dhl_... ID is accepted as explicit
-// self-selection, the returned bearer is printed exactly once under the
-// existing presentation rules, a foreign dhl_ ID is forwarded unchanged for
-// the daemon's non-disclosing refusal, a name selector gains no
-// name-resolution capability locally, and --principal cannot widen scope.
+// under a Launcher credential the rotate command forwards every explicit
+// selector spelling unchanged and lets the daemon's dedicated self-admission
+// decide — no positional selector rotates self (the exact-own request is
+// constructed from the authenticated /auth projection), the own stable
+// dhl_... ID and the own name both rotate self, the returned bearer is
+// printed exactly once under the existing presentation rules, and a foreign
+// dhl_ ID or foreign name is forwarded for the daemon's non-disclosing
+// refusal; the CLI performs no foreign lookup and gains no name-resolution
+// authority, and --principal cannot widen scope.
 func TestLauncherCredentialRotateCLISelfForm(t *testing.T) {
 	ownID := "dhl_" + strings.Repeat("ab", 16)
 	foreignID := "dhl_" + strings.Repeat("cd", 16)
 	const principal = "alice"
+	const ownName = "agent"
 	rotatePath := "/principals/" + principal + "/launchers/" + ownID + "/credential/rotate"
+	ownNamePath := "/principals/" + principal + "/launchers/" + ownName + "/credential/rotate"
 
 	cases := []struct {
 		name       string
@@ -1645,6 +1649,13 @@ func TestLauncherCredentialRotateCLISelfForm(t *testing.T) {
 			wantStdout: true,
 		},
 		{
+			name:       "own name is forwarded and rotates self",
+			args:       []string{ownName},
+			wantPath:   ownNamePath,
+			wantReqs:   3,
+			wantStdout: true,
+		},
+		{
 			name:     "foreign dhl_ ID is forwarded for the non-disclosing refusal",
 			args:     []string{foreignID},
 			wantPath: "/principals/" + principal + "/launchers/" + foreignID + "/credential/rotate",
@@ -1652,10 +1663,11 @@ func TestLauncherCredentialRotateCLISelfForm(t *testing.T) {
 			wantErr:  "launcher not found",
 		},
 		{
-			name:     "name selector gains no name-resolution capability",
-			args:     []string{"agent"},
-			wantReqs: 2, // the shared targeting's /auth + the self-branch /auth; no rotate request, no lookup
-			wantErr:  "Launcher authentication requires the Launcher's dhl_ ID",
+			name:     "foreign name is forwarded for the non-disclosing refusal",
+			args:     []string{"othername"},
+			wantPath: "/principals/" + principal + "/launchers/othername/credential/rotate",
+			wantReqs: 3,
+			wantErr:  "launcher not found",
 		},
 		{
 			name:     "--principal is forwarded and cannot widen scope (daemon refuses)",
@@ -1672,7 +1684,7 @@ func TestLauncherCredentialRotateCLISelfForm(t *testing.T) {
 				case r.URL.Path == "/auth":
 					writeJSONResponse(w, http.StatusOK, authResponse{Authority: "launcher", Principal: principal, LauncherID: ownID})
 				case strings.HasSuffix(r.URL.Path, "/credential/rotate") && r.Method == http.MethodPost:
-					if r.URL.Path == rotatePath {
+					if r.URL.Path == rotatePath || r.URL.Path == ownNamePath {
 						writeJSONResponse(w, http.StatusOK, launcherCredentialResponse{
 							OK:         true,
 							Credential: &launcherCredentialJSON{ID: "dhcr_self"},

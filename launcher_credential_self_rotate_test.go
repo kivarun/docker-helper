@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -142,15 +143,85 @@ func sessionCreateBodyWithLauncherBearer(bearer, workspace string) string {
 	return `{"workspace":"` + workspace + `"}`
 }
 
+// TestLauncherCredentialSelfRotateOwnNameSelector proves the own-name
+// self-rotation spelling through the real rotate route: the authenticated
+// Launcher credential may address itself by its own name — a direct
+// comparison with the authenticated owner projection, no name lookup — and
+// the mutation is identical to the stable-ID spelling: the same credential
+// row keeps its ID, the old bearer dies, and the new bearer authenticates as
+// exactly the same Launcher.
+func TestLauncherCredentialSelfRotateOwnNameSelector(t *testing.T) {
+	app, _, bearerA, l := launcherAuditApp(t, "selfrotn")
+	credA, err := findLauncherCredential(app.DB, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp := rotateThroughMux(t, app, "selfrotn", l.Name, bearerA)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("own-name self-rotate: expected 200, got %d %s", resp.Code, resp.Body.String())
+	}
+	var rotated launcherCredentialResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &rotated); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Credential == nil || rotated.Credential.ID != credA.ID || rotated.Token == "" {
+		t.Fatalf("own-name rotation must preserve the authenticated credential ID %s and return the new bearer once: %s", credA.ID, resp.Body.String())
+	}
+
+	// Old bearer dead, new bearer = exactly the same Launcher.
+	if w := launcherAuditRequest(t, app, http.MethodGet, "/auth", bearerA, ""); w.Code != http.StatusUnauthorized {
+		t.Errorf("old bearer after own-name rotation: expected 401, got %d", w.Code)
+	}
+	w := launcherAuditRequest(t, app, http.MethodGet, "/auth", rotated.Token, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("new bearer /auth after own-name rotation: expected 200, got %d", w.Code)
+	}
+	var auth authResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &auth); err != nil {
+		t.Fatal(err)
+	}
+	if auth.Authority != "launcher" || auth.LauncherID != l.ID || auth.Principal != "selfrotn" {
+		t.Errorf("new bearer authority = %+v, want launcher %s of selfrotn", auth, l.ID)
+	}
+	var count int
+	if err := app.DB.QueryRow(`SELECT COUNT(*) FROM credentials WHERE launcher_id = ?`, l.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("credential-row cardinality = %d, want 1", count)
+	}
+}
+
 // TestLauncherCredentialSelfRotateForeignTargeting proves the self-rotation
-// admission is the authenticated stable owner only: a foreign Launcher ID, a
-// foreign Principal path, another Principal's same-name Launcher, and the
-// Launcher's own name (which must not gain name-resolution authority) are all
-// refused with the same non-disclosing launcher_not_found answer and no
-// foreign-state lookup, and the own credential stays valid.
+// admission is the authenticated owner projection only: a foreign Launcher
+// ID, a foreign Launcher name, a foreign Principal path, and another
+// Principal's same-name Launcher are all refused with the same constant
+// non-disclosing launcher_not_found answer and no foreign-state lookup, and
+// the own credential stays valid.
 func TestLauncherCredentialSelfRotateForeignTargeting(t *testing.T) {
 	app, _, bearerA, l := launcherAuditApp(t, "selfrotf")
-	_ = app
+
+	// A real second Principal owning a same-name Launcher, so the
+	// same-name case is a genuine cross-Principal path rather than a
+	// name-only mismatch.
+	globalRoots := app.Config.AllowedRoots
+	otherHome := filepath.Join(allowedRootPaths(globalRoots)[0], "home", "otherprincipal")
+	if err := os.MkdirAll(otherHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	orig := OSUserLookup
+	OSUserLookup = func(u string) (string, string, string, error) {
+		return "2002", "2002", otherHome, nil
+	}
+	otherP, err := createPrincipal(app.DB, "otherprincipal", globalRoots)
+	if err != nil {
+		t.Fatalf("createPrincipal(otherprincipal): %v", err)
+	}
+	OSUserLookup = orig
+	if _, _, _, err := createLauncher(app.DB, int64(otherP.ID), "work", LauncherScopeInherit, nil, nil, false); err != nil {
+		t.Fatalf("createLauncher(work@otherprincipal): %v", err)
+	}
 
 	cases := []struct {
 		name     string
@@ -158,9 +229,9 @@ func TestLauncherCredentialSelfRotateForeignTargeting(t *testing.T) {
 		selector string
 	}{
 		{name: "foreign launcher ID under own Principal", username: "selfrotf", selector: "dhl_" + "cdcd" + "0000000000000000000000000000"},
+		{name: "foreign launcher name under own Principal", username: "selfrotf", selector: "foreignname"},
 		{name: "foreign Principal path with own ID", username: "otherprincipal", selector: l.ID},
 		{name: "same-name Launcher under another Principal", username: "otherprincipal", selector: "work"},
-		{name: "own Launcher name selector gains no resolution", username: "selfrotf", selector: l.Name},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
