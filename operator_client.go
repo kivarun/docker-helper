@@ -47,8 +47,6 @@ func (opts operatorClientOptions) clientTimeout() *time.Duration {
 	return &timeout
 }
 
-// resolveOperatorClient resolves the operator client based on the given options.
-// It returns a configured apiClient ready to make authenticated requests.
 // validateEndpointSelection validates the endpoint-selection grammar shared
 // by every command family: --system and --endpoint are mutually exclusive,
 // and an explicit endpoint must carry the canonical syntax validateEndpoint
@@ -89,9 +87,15 @@ func validateOperatorEndpointOptions(opts operatorClientOptions) error {
 	return nil
 }
 
+// resolveOperatorClient resolves the operator client based on the given
+// options and returns a configured apiClient ready to make authenticated
+// requests. It is the single defensive entry boundary for operator endpoint
+// options: every path — CLI invocations after their Invocation.Validate and
+// direct/internal callers — is validated once by the canonical owner
+// validateOperatorEndpointOptions before the family resolvers execute.
 func resolveOperatorClient(opts operatorClientOptions) (*apiClient, error) {
-	if opts.System && opts.Endpoint != "" {
-		return nil, fmt.Errorf("--system and --endpoint are mutually exclusive")
+	if err := validateOperatorEndpointOptions(opts); err != nil {
+		return nil, err
 	}
 
 	if opts.Endpoint != "" {
@@ -105,11 +109,14 @@ func resolveOperatorClient(opts operatorClientOptions) (*apiClient, error) {
 	return resolveDefaultEndpoint(opts)
 }
 
+// resolveExplicitEndpoint is the execution/resolution stage for an already
+// validated explicit operator endpoint: it distinguishes Unix vs HTTP
+// transport, auto-resolves a token for Unix endpoints, reads the explicit
+// token for HTTP endpoints, and constructs the appropriate API client. The
+// endpoint grammar it previously re-owned (syntax and the HTTP token-file
+// requirement) is validated once by validateOperatorEndpointOptions at the
+// resolveOperatorClient boundary; this stage never re-validates.
 func resolveExplicitEndpoint(opts operatorClientOptions) (*apiClient, error) {
-	if err := validateEndpoint(opts.Endpoint); err != nil {
-		return nil, err
-	}
-
 	var socketPath string
 	var isUnix bool
 
@@ -140,10 +147,8 @@ func resolveExplicitEndpoint(opts operatorClientOptions) (*apiClient, error) {
 		}
 		tokenSource = func() (string, error) { return token, nil }
 	} else {
-		// HTTP always requires explicit token.
-		if opts.TokenFile == "" {
-			return nil, fmt.Errorf("--endpoint requires --token-file for http endpoints")
-		}
+		// The explicit token was validated as present at the
+		// resolveOperatorClient boundary.
 		token, err := readTokenFile(opts.TokenFile)
 		if err != nil {
 			return nil, err
