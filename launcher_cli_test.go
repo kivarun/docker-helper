@@ -1606,6 +1606,125 @@ func TestLauncherCredentialRotateCLIPreservesIdentity(t *testing.T) {
 	}
 }
 
+// ---- launcher credential self-rotation ----
+
+// TestLauncherCredentialRotateCLISelfForm proves the CLI self-rotation form:
+// under a Launcher credential the rotate command constructs the exact-own
+// request from the authenticated /auth projection — no positional selector
+// rotates self, the own stable dhl_... ID is accepted as explicit
+// self-selection, the returned bearer is printed exactly once under the
+// existing presentation rules, a foreign dhl_ ID is forwarded unchanged for
+// the daemon's non-disclosing refusal, a name selector gains no
+// name-resolution capability locally, and --principal cannot widen scope.
+func TestLauncherCredentialRotateCLISelfForm(t *testing.T) {
+	ownID := "dhl_" + strings.Repeat("ab", 16)
+	foreignID := "dhl_" + strings.Repeat("cd", 16)
+	const principal = "alice"
+	rotatePath := "/principals/" + principal + "/launchers/" + ownID + "/credential/rotate"
+
+	cases := []struct {
+		name       string
+		args       []string
+		wantPath   string
+		wantReqs   int
+		wantErr    string
+		wantStdout bool
+	}{
+		{
+			name:       "no selector rotates self",
+			args:       []string{},
+			wantPath:   rotatePath,
+			wantReqs:   3, // two /auth introspections + POST rotate
+			wantStdout: true,
+		},
+		{
+			name:       "explicit own dhl_ ID is explicit self-selection",
+			args:       []string{ownID},
+			wantPath:   rotatePath,
+			wantReqs:   3,
+			wantStdout: true,
+		},
+		{
+			name:     "foreign dhl_ ID is forwarded for the non-disclosing refusal",
+			args:     []string{foreignID},
+			wantPath: "/principals/" + principal + "/launchers/" + foreignID + "/credential/rotate",
+			wantReqs: 3, // two /auth introspections + forwarded POST rotate
+			wantErr:  "launcher not found",
+		},
+		{
+			name:     "name selector gains no name-resolution capability",
+			args:     []string{"agent"},
+			wantReqs: 2, // the shared targeting's /auth + the self-branch /auth; no rotate request, no lookup
+			wantErr:  "Launcher authentication requires the Launcher's dhl_ ID",
+		},
+		{
+			name:     "--principal is forwarded and cannot widen scope (daemon refuses)",
+			args:     []string{"--principal", "bob"},
+			wantPath: "/principals/bob/launchers/default/credential/rotate",
+			wantReqs: 1,
+			wantErr:  "launcher not found",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/auth":
+					writeJSONResponse(w, http.StatusOK, authResponse{Authority: "launcher", Principal: principal, LauncherID: ownID})
+				case strings.HasSuffix(r.URL.Path, "/credential/rotate") && r.Method == http.MethodPost:
+					if r.URL.Path == rotatePath {
+						writeJSONResponse(w, http.StatusOK, launcherCredentialResponse{
+							OK:         true,
+							Credential: &launcherCredentialJSON{ID: "dhcr_self"},
+							Token:      "secret-self-rotated-42",
+						})
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(`{"ok":false,"code":"launcher_not_found","message":"launcher not found"}`))
+				default:
+					http.NotFound(w, r)
+				}
+			})
+
+			args := append([]string{"launcher", "credential", "rotate", "--endpoint", endpoint, "--token-file", tokenPath}, tc.args...)
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(args, &stdout, &stderr)
+
+			if tc.wantErr == "" {
+				if code != 0 {
+					t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+				}
+			} else {
+				if code == 0 {
+					t.Fatalf("exit = 0, want failure, stderr=%s", stderr.String())
+				}
+				if !strings.Contains(stderr.String(), tc.wantErr) {
+					t.Errorf("stderr = %q, want %q", stderr.String(), tc.wantErr)
+				}
+			}
+			if len(*requests) != tc.wantReqs {
+				t.Fatalf("requests = %+v, want %d", *requests, tc.wantReqs)
+			}
+			if tc.wantPath != "" && (*requests)[len(*requests)-1].path != tc.wantPath {
+				t.Errorf("rotate request path = %q, want %q", (*requests)[len(*requests)-1].path, tc.wantPath)
+			}
+			if tc.wantStdout {
+				if got := strings.Count(stdout.String(), "secret-self-rotated-42"); got != 1 {
+					t.Errorf("new bearer printed %d times, want exactly once; stdout=%s stderr=%s", got, stdout.String(), stderr.String())
+				}
+				if !strings.Contains(stdout.String(), "dhcr_self") {
+					t.Errorf("stdout missing preserved credential id: %s", stdout.String())
+				}
+				if strings.Contains(stderr.String(), "secret-self-rotated-42") {
+					t.Error("new bearer leaked to stderr")
+				}
+			}
+		})
+	}
+}
+
 // ---- principal create with issue-credential ----
 
 // TestPrincipalCreateCLIIssueCredentialSendsTrueAndPrintsSecretOnce proves the

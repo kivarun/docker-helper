@@ -135,7 +135,7 @@ func resolveTargetPrincipalForCLI(client *apiClient, explicitPrincipal string, a
 func resolveLauncherPrincipalForCLI(client *apiClient, explicitPrincipal string) (string, error) {
 	return resolveTargetPrincipalForCLI(client, explicitPrincipal,
 		errors.New("--principal is required for admin authentication"),
-		errors.New("Launcher credentials do not manage Launchers"), nil)
+		errLauncherCredentialNoManagement, nil)
 }
 
 // resolvePrincipalTargetForCLI returns the Principal targeted by a Principal
@@ -170,6 +170,12 @@ func resolveLauncherPrincipalByID(client *apiClient, selector string) (string, e
 // Principal explicitly for a Launcher name; an ID-shaped selector (dhl_...)
 // resolves the owning Principal through the daemon's scope-first list query
 // and never searches Launcher names globally.
+// errLauncherCredentialNoManagement is the local targeting refusal of
+// commands whose target construction has no Launcher-credential capability:
+// a Launcher credential does not manage Launchers. The rotate command
+// catches exactly this sentinel for its narrow self-rotation exception.
+var errLauncherCredentialNoManagement = errors.New("Launcher credentials do not manage Launchers")
+
 func launcherSelectorTargetSelector(client *apiClient, explicitPrincipal, selector string) (string, error) {
 	adminResolver := func() (string, bool, error) {
 		if !isLauncherIDSelector(selector) {
@@ -183,7 +189,7 @@ func launcherSelectorTargetSelector(client *apiClient, explicitPrincipal, select
 	}
 	return resolveTargetPrincipalForCLI(client, explicitPrincipal,
 		errors.New("--principal is required for admin authentication"),
-		errors.New("Launcher credentials do not manage Launchers"), adminResolver)
+		errLauncherCredentialNoManagement, adminResolver)
 }
 
 // launcherSelectorTarget resolves the CLI target for an individual Launcher
@@ -1080,12 +1086,75 @@ var launcherCredentialShowCommand = &Command{
 	},
 }
 
+// launcherCredentialRotateTarget resolves the target of the rotate command.
+// Under a Launcher credential the sole credential-management capability is
+// atomic self-rotation: the exact-own request is constructed from the
+// authenticated GET /auth projection, while the daemon remains the
+// authorization authority. Omitted selector rotates self; the own stable
+// dhl_... ID is accepted as explicit self-selection; a foreign dhl_ ID is
+// forwarded unchanged for the daemon's non-disclosing refusal (the CLI
+// performs no foreign lookup); a name-shaped selector gains no
+// name-resolution authority; --principal must not widen scope. Admin and
+// Principal targeting semantics are unchanged.
+func launcherCredentialRotateTarget(client *apiClient, explicitPrincipal string, fs *flag.FlagSet) (string, string, error) {
+	username, selector, targetErr := launcherSelectorTarget(client, explicitPrincipal, fs)
+	if targetErr == nil {
+		// Admin/Principal targeting semantics are unchanged. An explicitly
+		// named Principal under a Launcher credential (the shared targeting
+		// accepts it without introspection) is forwarded unchanged: the
+		// daemon's self-admission compares the path against the
+		// authenticated owner projection and answers the same non-disclosing
+		// refusal, so --principal cannot select scope or widen it.
+		return username, selector, nil
+	}
+	if !errors.Is(targetErr, errLauncherCredentialNoManagement) {
+		return "", "", targetErr
+	}
+	// The Launcher-credential self-rotation exception: the exact-own request
+	// is constructed from the authenticated GET /auth projection, while the
+	// daemon remains the authorization authority.
+	auth, err := client.auth()
+	if err != nil || auth.Authority != "launcher" {
+		return "", "", targetErr
+	}
+	if fs.NArg() == 0 {
+		// Omitted selector: rotate the authenticated Launcher itself.
+		return auth.Principal, auth.LauncherID, nil
+	}
+	selector = fs.Arg(0)
+	if !isLauncherIDSelector(selector) {
+		// A name-shaped selector gains no name-resolution authority under
+		// Launcher authentication.
+		return "", "", errors.New("Launcher authentication requires the Launcher's dhl_ ID (GET /auth reports it); omit the selector to rotate self")
+	}
+	// The own stable dhl_... ID is explicit self-selection; a foreign ID is
+	// forwarded unchanged for the daemon's non-disclosing refusal.
+	return auth.Principal, selector, nil
+}
+
 var launcherCredentialRotateCommand = &Command{
 	Name:       "rotate",
 	Summary:    "Rotate a launcher credential",
 	Usage:      "docker-helper launcher credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--json] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+
+	Help: `Rotate a Launcher credential atomically: the same credential row keeps
+its ID, ownership, and Launcher policy, only the bearer secret changes,
+and the old bearer is immediately invalid. The new bearer is returned
+exactly once; the caller is responsible for atomically installing it
+through the supported credential-install mechanism — this command never
+rewrites a credential store.
+
+Admin and Principal-credential targeting is unchanged (--principal USER
+and the optional positional LAUNCHER selector). A Launcher credential may
+rotate exactly its own credential: omit the selector to rotate self, or
+supply that Launcher's own dhl_... ID as explicit self-selection; a
+foreign dhl_ ID is answered by the daemon's non-disclosing
+launcher-not-found refusal, a name selector gains no name-resolution
+authority, and --principal cannot widen scope. This is the one
+credential-management capability of a Launcher credential — it grants no
+other Launcher/Principal control-plane authority.`,
 
 	Presentation: humanJSONPresentation(),
 
@@ -1111,7 +1180,7 @@ var launcherCredentialRotateCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				username, selector, err := launcherSelectorTarget(client, *principal, fs)
+				username, selector, err := launcherCredentialRotateTarget(client, *principal, fs)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

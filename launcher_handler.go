@@ -37,17 +37,40 @@ func applyLauncherTargetProvenance(rec *auditRecord, l *LauncherWithPrincipal) {
 // credential always wins. Admin callers carry no credential provenance, and
 // Launcher credentials cannot perform control-plane operations.
 func applyControlAuditProvenance(rec *auditRecord, auth *operatorAuthority) {
-	if auth == nil || auth.class != operatorAuthorityPrincipal {
+	if auth == nil {
 		return
 	}
-	if rec.PrincipalName == "" {
-		rec.PrincipalName = auth.principal.PrincipalName
-	}
-	if rec.InitiatorCredentialID == "" {
-		rec.InitiatorCredentialID = auth.principal.CredentialID
-	}
-	if rec.CredentialID == "" {
-		rec.CredentialID = auth.principal.CredentialID
+	switch auth.class {
+	case operatorAuthorityPrincipal:
+		if rec.PrincipalName == "" {
+			rec.PrincipalName = auth.principal.PrincipalName
+		}
+		if rec.InitiatorCredentialID == "" {
+			rec.InitiatorCredentialID = auth.principal.CredentialID
+		}
+		if rec.CredentialID == "" {
+			rec.CredentialID = auth.principal.CredentialID
+		}
+	case operatorAuthorityLauncher:
+		// The Launcher-credential self-rotation exception is the only
+		// Principal-control endpoint reachable with a Launcher authority, so
+		// the initiating credential is the target credential: the rotated
+		// credential row and the initiating bearer are the same
+		// Launcher-owned credential. Principal provenance is the Launcher's
+		// owner projection.
+		la := auth.launcher
+		if rec.LauncherID == "" {
+			rec.LauncherID = la.LauncherID
+		}
+		if rec.PrincipalName == "" {
+			rec.PrincipalName = la.PrincipalName
+		}
+		if rec.InitiatorCredentialID == "" {
+			rec.InitiatorCredentialID = la.CredentialID
+		}
+		if rec.CredentialID == "" {
+			rec.CredentialID = la.CredentialID
+		}
 	}
 }
 
@@ -1365,13 +1388,112 @@ func (a *App) handleGetLauncherCredential(w http.ResponseWriter, r *http.Request
 	writeJSONRaw(ctx, w, http.StatusOK, launcherCredentialResponse{OK: true, Credential: &credJSON})
 }
 
+// tryLauncherCredentialSelfRotate is the dedicated narrow
+// admission/targeting path of the Launcher-credential self-rotation
+// exception — the single credential-management capability of a Launcher
+// credential, not general Launcher control-plane authority. It returns true
+// only when the bearer authenticates as a Launcher credential and the
+// request was answered completely (success or its own refusal); any other
+// bearer returns false so the shared Principal-control authenticator owns
+// the request's original contract.
+//
+// The mutation is admitted only when the path identifies the authenticated
+// stable owner itself: the authoritative identity comes from the
+// authenticated credential projection, never from a fresh lookup, and the
+// rotation targets the credential ID carried by that authority. Every
+// non-self targeting — a foreign Principal path, a foreign selector, or a
+// name-shaped selector (which must not gain name-resolution authority) —
+// answers the same non-disclosing launcher_not_found refusal without any
+// foreign-state lookup, so a same-name Launcher under another Principal can
+// never rebind the bearer: rebinding by {username, launcher-name} after
+// authentication is impossible by construction.
+func (a *App) tryLauncherCredentialSelfRotate(w http.ResponseWriter, r *http.Request, started time.Time) bool {
+	token, ok := parseBearerToken(r)
+	if !ok {
+		return false
+	}
+	authority, err := a.authenticateOperatorToken(token)
+	if err != nil || authority.class != operatorAuthorityLauncher {
+		return false
+	}
+	la := authority.launcher
+	ctx := r.Context()
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	if r.PathValue("username") != la.PrincipalName || r.PathValue("launcher") != la.LauncherID {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.credential_rotate",
+			LauncherID: la.LauncherID,
+			Result:     "launcher_not_found",
+			Duration:   duration,
+		}, authority, nil)
+		writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+		return true
+	}
+
+	// The canonical atomic rotation owner: the same credential row is
+	// updated in one transaction — Launcher ID, credential ID, ownership,
+	// policy, and Sessions are untouched, only the bearer secret changes,
+	// and the old bearer is immediately invalid with no overlapping
+	// validity window.
+	cred, newToken, err := rotateLauncherCredential(a.DB, la.LauncherID)
+	if err != nil {
+		writeLauncherControlAudit(ctx, auditRecord{
+			Event:      "launcher.credential_rotate",
+			LauncherID: la.LauncherID,
+			Result:     "error",
+			Duration:   duration,
+		}, authority, nil)
+		if isErrLauncherCredentialNotFound(err) {
+			writeError(ctx, w, http.StatusNotFound, "launcher_credential_not_found", "launcher credential not found")
+		} else {
+			opLog(ctx).Error("launcher credential rotate failed",
+				slog.String("operation", "launcher_credential_rotate"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return true
+	}
+
+	credJSON := launcherCredentialToJSON(*cred)
+	writeLauncherControlAudit(ctx, auditRecord{
+		Event:        "launcher.credential_rotate",
+		CredentialID: cred.ID,
+		Result:       "success",
+		Duration:     duration,
+	}, authority, nil)
+
+	writeJSONRaw(ctx, w, http.StatusOK, launcherCredentialResponse{
+		OK:         true,
+		Credential: &credJSON,
+		Token:      newToken,
+	})
+	return true
+}
+
 func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
+	ctx := r.Context()
+
+	// The Launcher-credential self-rotation exception is admitted by this
+	// dedicated narrow path before the shared Principal-control
+	// authenticator: authenticatePrincipalControlRequest keeps its
+	// invariant that Launcher credentials have no Principal-owned
+	// control-plane authority, and the rotate endpoint is the single
+	// endpoint where an authenticated Launcher credential may act — on its
+	// own credential only. tryLauncherCredentialSelfRotate returns true
+	// only when it answered the request completely (success or its own
+	// refusal); any other bearer falls through to the unchanged
+	// Admin/Principal path below.
+	if a.tryLauncherCredentialSelfRotate(w, r, started) {
+		return
+	}
+
 	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
-	ctx := r.Context()
 
 	l, ok := a.requireScopedLauncher(w, r, auth)
 	if !ok {

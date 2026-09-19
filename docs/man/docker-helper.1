@@ -540,7 +540,23 @@ output is the human credential block; \-\-json prints the canonical
 credential document.
 .TP
 .B docker-helper launcher credential rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
-Rotate a launcher credential and print the new bearer secret once.
+Rotate a launcher credential atomically and print the new bearer secret
+once: the same credential row keeps its ID, ownership, and Launcher
+policy, only the bearer secret changes, and the old bearer is immediately
+invalid. The command never rewrites a credential store: the caller is
+responsible for atomically installing the returned bearer through the
+supported credential-install mechanism and discarding the bootstrap
+bearer. Admin and Principal-credential targeting is unchanged. A Launcher
+credential may rotate exactly its own credential: omit the selector to
+rotate self, or supply that Launcher's own \fBdhl_\fR... ID as explicit
+self-selection (the exact-own request is constructed from the
+authenticated \fBGET /auth\fR projection; the daemon remains the
+authorization authority). A foreign \fBdhl_\fR ID is answered by the
+daemon's non-disclosing \fBlauncher not found\fR refusal, a name selector
+gains no name-resolution authority, and \fB\-\-principal\fR cannot widen
+scope. This is the one credential-management capability of a Launcher
+credential — it grants no other Launcher/Principal control-plane
+authority.
 .TP
 .B docker-helper launcher credential delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
 Delete a launcher's credential. No secret is printed.

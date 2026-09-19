@@ -162,6 +162,21 @@ reports the authority: the response is `{"authority":"launcher",...}` or
 canonical installed credential file automatically; do not display any
 token value.
 
+A Launcher credential may rotate exactly its own credential — the
+launcher credential rotate command with no selector (HTTP:
+`POST /principals/{principal}/launchers/{launcher}/credential/rotate`
+with the installed credential as the Bearer): the
+credential ID, ownership, Launcher policy, and Sessions are preserved,
+only the bearer secret changes, and the bootstrap bearer becomes invalid
+atomically. This is the recommended post-provisioning hardening step when
+the environment hands you a bootstrap credential — authenticate, rotate
+self, persist the returned replacement securely through the environment's
+supported install mechanism, and discard the bootstrap bearer. Rotation
+is optional: ordinary Session use works without it. The CLI never rewrites
+your credential store, and the new bearer is printed exactly once. A
+Launcher credential has no general Launcher/Principal control-plane
+authority — self-rotation is its only credential-management capability.
+
 If the environment provides only `DOCKER_HELPER_SESSION_TOKEN` and no
 credential, skip this section entirely: do not create, list, show, or
 delete sessions.

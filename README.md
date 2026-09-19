@@ -1944,6 +1944,24 @@ exception is an admin targeting an individual launcher by its globally
 unique `dhl_...` ID, where the owning principal is resolved by the daemon.
 Launcher names are never searched globally.
 
+A Launcher credential may also rotate exactly its own credential:
+
+```bash
+docker-helper launcher credential rotate    # under a Launcher credential: rotates self
+```
+
+This is the recommended post-provisioning hardening step for a bootstrap
+credential: receive the bootstrap Launcher credential → authenticate →
+rotate own credential → persist the returned replacement securely through
+the supported credential-install mechanism → discard the bootstrap bearer.
+The rotation is atomic (old bearer invalid the moment the new one is
+issued), preserves the credential ID, ownership, Launcher policy, and
+Sessions, and prints the new bearer exactly once; the command never
+rewrites a credential store, and rotation is optional — ordinary Session
+use works without it. A Launcher credential has no general
+Launcher/Principal control-plane authority; self-rotation is its only
+credential-management capability.
+
 `launcher create` infers the principal from the authenticated credential
 when `--principal` is omitted. The launcher NAME is the required
 positional operand; `launcher create default` is an ordinary explicit

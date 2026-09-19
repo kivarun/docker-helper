@@ -948,7 +948,10 @@ selector the credential's Principal's default Launcher is the target.
 
 #### Launcher authority
 
-A Launcher credential has no Launcher control-plane authority, so its
+A Launcher credential has no general Launcher/Principal control-plane
+authority; its sole credential-management capability is atomic rotation of
+its own authenticated Launcher credential (see the rotate endpoint below).
+On the session-control plane its authority is unchanged. Its create
 selector is never resolved through the launcher list: an ID-shaped
 `--launcher` is forwarded as `launcher_id` as-is and the daemon's create
 admission stays the authority (own -> self, foreign -> non-disclosing
@@ -956,6 +959,33 @@ admission stays the authority (own -> self, foreign -> non-disclosing
 with an actionable hint to use the Launcher's `dhl_` ID (reported for the
 credential by `GET /auth`). For this authority `--principal` is rejected
 locally.
+
+The rotate endpoint is the dedicated narrow admission/targeting path of
+the self-rotation exception: `authenticatePrincipalControlRequest`
+keeps its invariant that Launcher credentials have no Principal-owned
+control-plane authority, and the rotate endpoint admits the mutation only
+when the path identifies the authenticated stable owner itself. The
+authoritative identity comes from the authenticated credential projection
+(stable Launcher ID, credential ID, owner Principal), never from a fresh
+lookup: the path Principal must equal that projection's Principal, the
+Launcher selector must identify exactly the authenticated stable Launcher
+ID, and the mutation targets the credential carried by the authority. No
+foreign lookup is performed merely to answer a foreign selector, so a
+same-name Launcher under another Principal can never rebind the bearer —
+rebinding by `{username, launcher-name}` after authentication is
+impossible by construction, and a deleted-and-recreated Launcher leaves
+the old bearer unauthorized (the credential row cascades away with the
+deleted Launcher). Every non-self targeting answers the same non-disclosing
+`launcher_not_found` refusal. Admin and Principal-credential rotation
+behavior is unchanged; the shared rotation owner
+(`rotateLauncherCredential`) performs the same atomic single-row update —
+Launcher ID, credential ID, ownership, policy, and Sessions are
+preserved, only the bearer secret changes, the old bearer is immediately
+invalid with no overlapping validity window, and the new bearer is
+returned exactly once. The audit event family stays
+`launcher.credential_rotate` (target Launcher ID, credential ID, owner
+Principal provenance, initiating credential provenance; never either
+bearer).
 
 ### Principal and Launcher lifecycle
 
@@ -1816,7 +1846,8 @@ two-mode contract: the human table by default, the daemon's canonical
 ### Launcher
 
 HTTP surface (admin token or owning-Principal credential; a Launcher
-credential cannot manage launchers):
+credential cannot manage launchers — its sole exception is the rotate
+endpoint's self-admission above):
 
 | Endpoint | Purpose |
 |---|---|
@@ -1832,7 +1863,7 @@ credential cannot manage launchers):
 | `DELETE /principals/{username}/launchers/{launcher}` | delete launcher (checked delete) |
 | `PUT /principals/{username}/launchers/{launcher}/credential` | issue the launcher's single credential |
 | `GET /principals/{username}/launchers/{launcher}/credential` | show credential metadata |
-| `POST /principals/{username}/launchers/{launcher}/credential/rotate` | rotate the credential |
+| `POST /principals/{username}/launchers/{launcher}/credential/rotate` | rotate the credential (admin token or owning-Principal credential; a Launcher credential may rotate exactly its own authenticated Launcher credential through the dedicated self-admission above) |
 | `DELETE /principals/{username}/launchers/{launcher}/credential` | delete the credential |
 
 Individual Launcher control uses the Principal-scoped locator
