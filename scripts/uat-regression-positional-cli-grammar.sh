@@ -499,13 +499,13 @@ subcase_f() {
   # validation regressed, the command would fall through to the different
   # missing-Session-token/runtime failure (exit 1) — that distinction is the
   # evidence.
-  out="$(env -u DOCKER_HELPER_SESSION_TOKEN dh pull --endpoint "" "$IMAGE" 2>&1)"; rc=$?
+  out="$(env -u DOCKER_HELPER_SESSION_TOKEN /usr/bin/docker-helper pull --endpoint "" "$IMAGE" 2>&1)"; rc=$?
   if [ "$rc" -eq 2 ]; then
     reg_ok "F: agent command pull --endpoint \"\" exits 2 (grammar before token lookup)"
   else
     reg_fail "F: agent command pull --endpoint \"\" exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
   fi
-  out="$(env -u DOCKER_HELPER_SESSION_TOKEN dh pull --endpoint= "$IMAGE" 2>&1)"; rc=$?
+  out="$(env -u DOCKER_HELPER_SESSION_TOKEN /usr/bin/docker-helper pull --endpoint= "$IMAGE" 2>&1)"; rc=$?
   if [ "$rc" -eq 2 ]; then
     reg_ok "F: agent command pull --endpoint= exits 2 (grammar before token lookup)"
   else
