@@ -923,9 +923,14 @@ migration away from the legacy Docker CLI.
 `run --helper-socket` makes the daemon's own Unix socket reachable inside
 the container at `/run/docker-helper/docker-helper.sock` through a
 read-only bind of the helper runtime directory. The client chooses only
-the flag; the mount itself is server-owned. The socket provides transport
-only: protected operations still authenticate with a bearer credential,
-which can be passed with `--env-from`:
+the flag; the mount itself is server-owned. While that projection is active,
+the daemon also provides the workload with the server-owned transport locator
+`DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock` when the
+caller omitted it; an exactly matching caller value is accepted and a
+conflicting value is refused as `invalid_helper_socket`. The locator is a
+path, not a credential. The socket provides transport only: protected
+operations still authenticate with a bearer credential, which can be passed
+with `--env-from`:
 
 ```bash
 LAUNCHER_CREDENTIAL=... \

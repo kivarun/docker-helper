@@ -242,6 +242,7 @@ jobs:
             ARGS+=(--prerelease)
           fi
           gh release create "${{ needs.prepare.outputs.tag }}" \
+            --target "$GITHUB_SHA" \
             --title "${{ needs.prepare.outputs.tag }}" \
             --generate-notes \
             "${ARGS[@]}" \

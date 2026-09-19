@@ -449,12 +449,16 @@ docker-helper run --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY IMAGE -- command arg..
 **Helper socket (system mode only).** `--helper-socket` makes the Docker
 Helper socket reachable inside the container at
 `/run/docker-helper/docker-helper.sock` (read-only projection, chosen
-server-side; rejected in user mode). While the projection is active, a
-`--mount` target overlapping `/run/docker-helper` — the path itself, an
-ancestor such as `/run`, or a descendant such as the socket path — is
-rejected. The socket provides transport only; the workload still needs a
-bearer credential for protected operations, passed separately with
-`--env-from`.
+server-side; rejected in user mode). While the projection is active, the
+daemon also supplies the workload with the server-owned transport locator
+`DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock` when the
+caller omitted it; an exactly matching caller value is accepted and a
+conflicting value is refused as `invalid_helper_socket`. The locator is a
+path, not a credential. A `--mount` target overlapping
+`/run/docker-helper` — the path itself, an ancestor such as `/run`, or a
+descendant such as the socket path — is rejected. The socket provides
+transport only; the workload still needs a bearer credential for protected
+operations, passed separately with `--env-from`.
 
 **Mount examples** (rules in Path model):
 

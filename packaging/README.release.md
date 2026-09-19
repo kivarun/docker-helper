@@ -130,7 +130,7 @@ docker-helper version
 Create a session for a project:
 
 ```bash
-docker-helper session create --workspace /path/to/project
+docker-helper session create /path/to/project
 ```
 
 Export the session token printed by the command:
@@ -143,7 +143,7 @@ Verify Docker access through docker-helper:
 
 ```bash
 docker-helper pull alpine:3.24
-docker-helper run --image alpine:3.24 -- echo "docker-helper works"
+docker-helper run alpine:3.24 -- echo "docker-helper works"
 ```
 
 ## Host installation

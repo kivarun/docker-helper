@@ -747,9 +747,15 @@ When both \-\-env and
 Make the helper Unix socket reachable inside the container at
 \fI/run/docker-helper/docker-helper.sock\fR (system mode). This is a
 server-owned capability: the daemon injects a read-only bind of its own
-runtime directory, and the client selects only the boolean flag. The socket
-provides transport only; protected operations still require a bearer
-credential, passed separately (for example with
+runtime directory, and the client selects only the boolean flag. While the
+projection is active the daemon also supplies the workload with the
+server-owned transport locator
+\fBDOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock\fR
+when the caller omitted it; an exactly matching caller value is accepted
+and a conflicting value is refused as \fBinvalid_helper_socket\fR. The
+locator is a path, not a credential. The socket provides transport only;
+protected operations still require a bearer credential, passed separately
+(for example with
 .BR \-\-env\-from ).
 Not supported in user mode; the operation is rejected there.
 .TP

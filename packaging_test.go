@@ -466,6 +466,36 @@ func TestReleaseReadmeNoSecrets(t *testing.T) {
 	}
 }
 
+// TestReleaseReadmeCanonicalCLIGrammar pins the runnable CLI examples shipped
+// inside the release tarball. The bundle README must teach the same positional
+// grammar as the binary/help/man/SKILL and must not resurrect retired flags.
+func TestReleaseReadmeCanonicalCLIGrammar(t *testing.T) {
+	data, err := os.ReadFile("packaging/README.release.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	for _, want := range []string{
+		"docker-helper session create /path/to/project",
+		"docker-helper run alpine:3.24 -- echo",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("release README must contain canonical CLI example %q", want)
+		}
+	}
+	for _, retired := range []string{
+		"session create --workspace",
+		"session delete --id",
+		"run --image",
+		"--filesystem-entry",
+	} {
+		if strings.Contains(content, retired) {
+			t.Errorf("release README must not contain retired CLI spelling %q", retired)
+		}
+	}
+}
+
 func TestAskPrompts(t *testing.T) {
 	type testCase struct {
 		name       string
@@ -834,6 +864,30 @@ func TestSkillAgentContract(t *testing.T) {
 	}
 	if !strings.Contains(content, "not a Session-bearer surface") {
 		t.Error("SKILL.md must qualify session show as the operator lookup, not the Session-bearer surface")
+	}
+}
+
+// TestHelperSocketLocatorUserDocs pins the user-facing half of the
+// helper-socket contract: the projection provides a transport locator path,
+// not a bearer credential, and the canonical injected locator is documented
+// consistently outside the architecture reference.
+func TestHelperSocketLocatorUserDocs(t *testing.T) {
+	for _, file := range []string{
+		"README.md",
+		"docs/man/docker-helper.1",
+		".claude/skills/docker-helper/SKILL.md",
+	} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := strings.Join(strings.Fields(string(data)), " ")
+		if !strings.Contains(content, "DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock") {
+			t.Errorf("%s must document the helper-socket injected transport locator", file)
+		}
+		if !strings.Contains(content, "not a credential") {
+			t.Errorf("%s must state that the helper-socket locator is not a credential", file)
+		}
 	}
 }
 
@@ -8107,6 +8161,9 @@ func TestReleasePromoteNoBuild(t *testing.T) {
 	}
 	if !strings.Contains(promoteJob, "download-artifact") {
 		t.Error("promote job must download the candidate artifact, not build it")
+	}
+	if !strings.Contains(promoteJob, `--target "$GITHUB_SHA"`) {
+		t.Error("promote job must pin GitHub Release target metadata to the verified tag/run SHA")
 	}
 }
 
