@@ -45,13 +45,15 @@ if [[ "${2:-}" == "--payload" ]]; then
 	fi
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
+# Check tool availability before any path computation so a missing tool
+# always produces its own clear error instead of a cryptic PATH failure.
 if ! command -v nfpm >/dev/null 2>&1; then
 	echo "error: nfpm not found" >&2
 	echo "  Install (pinned, single owner): scripts/install-nfpm.sh" >&2
 	exit 1
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Verify the installed nfpm through the single pinned owner (version/hash live
 # only in scripts/install-nfpm.sh); an unpinned or wrong version fails closed.
