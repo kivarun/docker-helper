@@ -275,8 +275,11 @@ subcase_d() {
   tree="$home/d"
   mkdir -p "$tree/one" "$tree/two" && chown -R "$FIX_USER:$FIX_USER" "$home"
 
-  out="$(dh launcher create --system --principal "$FIX_USER" target --no-credential --json 2>&1)" || {
-    reg_fail "D: launcher create failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+  # D reuses the 'target' Launcher created by subcase B in this same run
+  # (creating it again would conflict); it only creates the second 'other'
+  # Launcher for the ID-selector proofs.
+  out="$(dh launcher show --system --principal "$FIX_USER" target --json 2>&1)" || {
+    reg_fail "D: launcher show target failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
   sid_lid="$(printf '%s' "$out" | json_field id)"
@@ -377,7 +380,7 @@ subcase_e() {
   local out rc home cred_json cred_token sid_json sid
 
   home="$(fixture)" || { reg_fail "E: fixture failed"; return; }
-  cred_json="$(dh principal credential create --system --name gate28 "$FIX_USER" 2>&1)" || {
+  cred_json="$(dh principal credential create --system --name gate28 "$FIX_USER" --json 2>&1)" || {
     reg_fail "E: principal credential create failed: $(printf '%s' "$cred_json" | head -2 | tr '\n' ' ' | redact)"
     return
   }
