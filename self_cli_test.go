@@ -349,6 +349,20 @@ func TestSelfEndpointValidationFollowsCredentialSource(t *testing.T) {
 			wantRC:  2,
 			wantErr: "--system and --endpoint are mutually exclusive",
 		},
+		{
+			name:    "explicitly empty endpoint follows agent validation",
+			env:     true,
+			args:    []string{"--endpoint", ""},
+			wantRC:  2,
+			wantErr: "--endpoint value must not be empty",
+		},
+		{
+			name:    "explicitly empty endpoint follows operator validation",
+			env:     false,
+			args:    []string{"--endpoint="},
+			wantRC:  2,
+			wantErr: "--endpoint value must not be empty",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

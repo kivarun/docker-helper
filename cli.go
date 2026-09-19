@@ -826,15 +826,16 @@ configuration and this command returns an error.`,
 		return Invocation{
 			Validate: func() error {
 				return validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				return runReload(stdout, stderr, operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				}, *jsonOut)
 			},

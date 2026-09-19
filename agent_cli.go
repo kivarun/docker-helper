@@ -25,13 +25,22 @@ const (
 type agentClientOptions struct {
 	System   bool   // --system: force the system daemon socket
 	Endpoint string // --endpoint: explicit endpoint URL
+	// EndpointSet records that --endpoint was explicitly supplied. It is
+	// part of the CLI grammar (an explicitly empty endpoint is a usage
+	// error); runtime resolvers and internal callers leave it false, so an
+	// empty endpoint stays indistinguishable from omission there.
+	EndpointSet bool
 }
 
 // registerAgentEndpointFlags adds --system and --endpoint to an agent command's
 // FlagSet and returns pointers to their values.
-func registerAgentEndpointFlags(fs *flag.FlagSet) (system *bool, endpoint *string) {
+func registerAgentEndpointFlags(fs *flag.FlagSet) (system *bool, endpoint *explicitStringFlag) {
 	system = fs.Bool("system", false, "Connect to system daemon")
-	endpoint = fs.String("endpoint", "", "Explicit endpoint (/path/to/socket, unix:///path, or http://127.0.0.1:port)")
+	// Presence-aware like the operator family: the shared endpoint
+	// validator must distinguish an omitted --endpoint (default
+	// resolution) from an explicitly supplied empty value (a usage error).
+	endpoint = &explicitStringFlag{}
+	fs.Var(endpoint, "endpoint", "Explicit endpoint (/path/to/socket, unix:///path, or http://127.0.0.1:port)")
 	return
 }
 
@@ -64,7 +73,7 @@ func resolveAgentSocketPath() string {
 // authentication lookup, so a usage error is reported with exit code 2 even
 // when DOCKER_HELPER_SESSION_TOKEN is unset.
 func validateAgentEndpointOptions(opts agentClientOptions) error {
-	return validateEndpointSelection(opts.System, opts.Endpoint)
+	return validateEndpointSelection(opts.System, opts.Endpoint, opts.EndpointSet)
 }
 
 // resolveAgentClient resolves the agent-facing client for the given endpoint
@@ -248,12 +257,12 @@ var pullCommand = &Command{
 		system, endpoint := registerAgentEndpointFlags(fs)
 		return Invocation{
 			Validate: func() error {
-				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
+				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				image := fs.Arg(0)
 
-				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: *endpoint})
+				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: endpoint.value})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -324,7 +333,7 @@ canonicalizes the context and enforces workspace containment).`,
 				if *image == "" {
 					return fmt.Errorf("--image is required")
 				}
-				if err := validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint}); err != nil {
+				if err := validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set}); err != nil {
 					return err
 				}
 				return nil
@@ -340,7 +349,7 @@ canonicalizes the context and enforces workspace containment).`,
 					argsMap[parts[0]] = parts[1]
 				}
 
-				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: *endpoint})
+				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: endpoint.value})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -433,7 +442,7 @@ var runContainerCommand = &Command{
 
 		return Invocation{
 			Validate: func() error {
-				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
+				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				// IMAGE is the primary workload operand; every following
@@ -512,7 +521,7 @@ var runContainerCommand = &Command{
 					runMounts = append(runMounts, rm)
 				}
 
-				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: *endpoint})
+				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: endpoint.value})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

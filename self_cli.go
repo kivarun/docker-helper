@@ -73,12 +73,13 @@ credential does not already have and never mutates state.
 				// Session-env bearer path follows agent validation (no
 				// operator token-file requirement).
 				if *tokenFile == "" && os.Getenv("DOCKER_HELPER_SESSION_TOKEN") != "" {
-					return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
+					return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set})
 				}
 				return validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				})
 			},
 			Run: func(stdout, stderr io.Writer) int {
@@ -93,7 +94,7 @@ credential does not already have and never mutates state.
 				// endpoint token files) answers.
 				var client *apiClient
 				if *tokenFile == "" && os.Getenv("DOCKER_HELPER_SESSION_TOKEN") != "" {
-					opts := agentClientOptions{System: *system, Endpoint: *endpoint}
+					opts := agentClientOptions{System: *system, Endpoint: endpoint.value}
 					if err := validateAgentEndpointOptions(opts); err != nil {
 						fmt.Fprintf(stderr, "error: %v\n", err)
 						return 1
@@ -107,7 +108,7 @@ credential does not already have and never mutates state.
 				} else {
 					operatorClient, cerr := resolveOperatorClient(operatorClientOptions{
 						System:    *system,
-						Endpoint:  *endpoint,
+						Endpoint:  endpoint.value,
 						TokenFile: *tokenFile,
 					})
 					if cerr != nil {

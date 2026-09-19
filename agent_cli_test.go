@@ -1546,6 +1546,49 @@ func TestAgentCLIInvalidEndpointExit2(t *testing.T) {
 	}
 }
 
+// TestAgentCLIExplicitEmptyEndpointExit2 proves the agent/data-plane family
+// carries the same explicit-empty endpoint grammar as the operator family:
+// an explicitly supplied empty --endpoint (both the separated and the
+// equals-form spelling) is a local usage error (exit 2) naming the flag,
+// while a genuinely omitted --endpoint keeps the default endpoint discovery
+// (the request flows to the default-resolved socket and fails at the
+// runtime/dial stage, not as a usage error).
+func TestAgentCLIExplicitEmptyEndpointExit2(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "dht_session-env-fixture")
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", filepath.Join(t.TempDir(), "default.sock"))
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "separated empty value", args: []string{"pull", "--endpoint", "", "alpine:3.24"}},
+		{name: "equals-form empty value", args: []string{"pull", "--endpoint=", "alpine:3.24"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errB bytes.Buffer
+			exitCode := runCommandWithWriters(tc.args, &out, &errB)
+			if exitCode != 2 {
+				t.Errorf("exit code = %d, want 2, stderr: %s", exitCode, errB.String())
+			}
+			if !strings.Contains(errB.String(), "--endpoint value must not be empty") {
+				t.Errorf("stderr = %q, want the explicit-empty endpoint grammar error", errB.String())
+			}
+		})
+	}
+
+	// A genuinely omitted --endpoint keeps default endpoint discovery: the
+	// grammar validators emit no endpoint error and the failure is the
+	// runtime dial of the default-resolved socket (exit 1).
+	var out, errB bytes.Buffer
+	exitCode := runCommandWithWriters([]string{"pull", "alpine:3.24"}, &out, &errB)
+	if exitCode != 1 {
+		t.Errorf("omitted endpoint: exit code = %d, want 1 (runtime), stderr: %s", exitCode, errB.String())
+	}
+	if strings.Contains(errB.String(), "must not be empty") || strings.Contains(errB.String(), "unsupported endpoint scheme") {
+		t.Errorf("omitted endpoint must not fail with an endpoint grammar error, got: %s", errB.String())
+	}
+}
+
 // TestAgentCLIMissingTokenRuntimeError verifies that a valid endpoint selection
 // with a missing session token is a runtime/auth error (exit 1), not a CLI
 // usage error.

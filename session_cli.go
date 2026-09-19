@@ -196,9 +196,10 @@ control-plane authority.`,
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -213,7 +214,7 @@ control-plane authority.`,
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -294,9 +295,10 @@ var sessionListCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -311,7 +313,7 @@ var sessionListCommand = &Command{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -362,9 +364,10 @@ var sessionDeleteCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -373,7 +376,7 @@ var sessionDeleteCommand = &Command{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -432,9 +435,10 @@ var sessionShowCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -443,7 +447,7 @@ var sessionShowCommand = &Command{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {

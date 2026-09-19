@@ -248,16 +248,17 @@ var launcherCreateCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -335,16 +336,17 @@ var launcherListCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -395,16 +397,17 @@ var launcherShowCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -483,9 +486,10 @@ var launcherSetCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -498,7 +502,7 @@ var launcherSetCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -554,16 +558,17 @@ var launcherDeleteCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -666,16 +671,17 @@ var launcherAllowedRootAddCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -725,16 +731,17 @@ var launcherAllowedRootListCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -775,16 +782,17 @@ var launcherAllowedRootSetAccessCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -832,16 +840,17 @@ var launcherAllowedRootRemoveCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -891,16 +900,17 @@ var launcherAllowedRootInheritCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -965,16 +975,17 @@ var launcherCredentialCreateCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -1028,16 +1039,17 @@ var launcherCredentialShowCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -1084,16 +1096,17 @@ var launcherCredentialRotateCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -1147,16 +1160,17 @@ var launcherCredentialDeleteCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				client, err := launcherOpClient(*system, endpoint.value, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

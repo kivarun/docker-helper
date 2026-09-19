@@ -810,6 +810,8 @@ func TestOperatorEndpointGrammarExitsTwo(t *testing.T) {
 		{name: "system and endpoint mutually exclusive", args: []string{"--system", "--endpoint", "/tmp/nonexistent.sock"}, wantRC: 2, wantErr: "--system and --endpoint are mutually exclusive"},
 		{name: "malformed endpoint", args: []string{"--endpoint", "bogus"}, wantRC: 2, wantErr: "unsupported endpoint scheme"},
 		{name: "http endpoint without token file", args: []string{"--endpoint", "http://127.0.0.1:1"}, wantRC: 2, wantErr: "--endpoint requires --token-file for http endpoints"},
+		{name: "explicitly empty endpoint", args: []string{"--endpoint", ""}, wantRC: 2, wantErr: "--endpoint value must not be empty"},
+		{name: "explicitly empty endpoint equals form", args: []string{"--endpoint="}, wantRC: 2, wantErr: "--endpoint value must not be empty"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -887,6 +889,23 @@ func TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands(t *testing.T) {
 		}
 		if !strings.Contains(stderr.String(), "--system and --endpoint are mutually exclusive") {
 			t.Errorf("%v: stderr must name the mutual-exclusion grammar error, got: %s", oc.path, stderr.String())
+		}
+
+		// The explicitly empty endpoint spelling is the same structural
+		// grammar error on every operator command: no command may treat
+		// an explicit empty value as omission.
+		emptyArgs := append(append(append([]string{}, oc.path...), "--endpoint", ""), make([]string, 0, oc.cmd.MinPosArgs)...)
+		for i := 0; i < oc.cmd.MinPosArgs; i++ {
+			emptyArgs = append(emptyArgs, "x")
+		}
+		var emptyOut, emptyErr bytes.Buffer
+		emptyCode := runCommandWithWriters(emptyArgs, &emptyOut, &emptyErr)
+		if emptyCode != 2 {
+			t.Errorf("%v: exit = %d, want 2 for the explicitly empty endpoint, stderr: %s", oc.path, emptyCode, emptyErr.String())
+			continue
+		}
+		if !strings.Contains(emptyErr.String(), "--endpoint value must not be empty") {
+			t.Errorf("%v: stderr must name the explicit-empty grammar error, got: %s", oc.path, emptyErr.String())
 		}
 	}
 }

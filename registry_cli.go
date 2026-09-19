@@ -68,7 +68,7 @@ Examples:
 				if *username == "" || strings.HasPrefix(*username, "-") {
 					return fmt.Errorf("--username is required")
 				}
-				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
+				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				var password string
@@ -88,7 +88,7 @@ Examples:
 					return 1
 				}
 
-				client, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: *endpoint})
+				client, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: endpoint.value})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

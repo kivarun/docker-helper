@@ -123,9 +123,10 @@ var completionRootsPrincipalCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -138,7 +139,7 @@ var completionRootsPrincipalCommand = &Command{
 				}
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   timeout,
 				})
@@ -219,9 +220,10 @@ var completionRootsSessionCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -230,7 +232,7 @@ var completionRootsSessionCommand = &Command{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   completionQueryTimeout,
 				})
@@ -283,9 +285,10 @@ var completionRootsLauncherCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -294,7 +297,7 @@ var completionRootsLauncherCommand = &Command{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   completionQueryTimeout,
 				})
@@ -371,9 +374,10 @@ var completionSelectorsPrincipalCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -382,7 +386,7 @@ var completionSelectorsPrincipalCommand = &Command{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   completionQueryTimeout,
 				})
@@ -461,9 +465,10 @@ var completionSelectorsLauncherCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -472,7 +477,7 @@ var completionSelectorsLauncherCommand = &Command{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   completionQueryTimeout,
 				})

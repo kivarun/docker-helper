@@ -44,9 +44,10 @@ var principalCredentialCreateCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -62,7 +63,7 @@ var principalCredentialCreateCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -120,9 +121,10 @@ var principalCredentialListCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -137,7 +139,7 @@ var principalCredentialListCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -213,9 +215,10 @@ for reuse by a new credential.`,
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -227,7 +230,7 @@ for reuse by a new credential.`,
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -287,9 +290,10 @@ authentication.`,
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -298,7 +302,7 @@ authentication.`,
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {

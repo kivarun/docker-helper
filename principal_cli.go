@@ -43,9 +43,10 @@ var principalCreateCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -64,7 +65,7 @@ var principalCreateCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -115,9 +116,10 @@ var principalShowCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -136,7 +138,7 @@ var principalShowCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -203,9 +205,10 @@ var principalListCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -214,7 +217,7 @@ var principalListCommand = &Command{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -315,9 +318,10 @@ var principalSetCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -347,7 +351,7 @@ var principalSetCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -394,9 +398,10 @@ var principalDeleteCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -408,7 +413,7 @@ var principalDeleteCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -462,9 +467,10 @@ var principalAllowedRootListCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -475,7 +481,7 @@ var principalAllowedRootListCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -516,9 +522,10 @@ var principalAllowedRootAddCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -531,7 +538,7 @@ var principalAllowedRootAddCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -581,9 +588,10 @@ var principalAllowedRootSetAccessCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -602,7 +610,7 @@ var principalAllowedRootSetAccessCommand = &Command{
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
@@ -650,9 +658,10 @@ are not rewritten.`,
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
+					System:      *system,
+					Endpoint:    endpoint.value,
+					EndpointSet: endpoint.set,
+					TokenFile:   *tokenFile,
 				}); err != nil {
 					return err
 				}
@@ -665,7 +674,7 @@ are not rewritten.`,
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
-					Endpoint:  *endpoint,
+					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
 				if err != nil {
