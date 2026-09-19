@@ -10197,6 +10197,8 @@ func TestUpgradeBaselineWorkflowRecovery(t *testing.T) {
 	for _, v := range []string{
 		"UAT_UPGRADE_BASELINE_DEB_URL",
 		"UAT_UPGRADE_BASELINE_RPM_URL",
+		"UAT_UPGRADE22_DEB_URL",
+		"UAT_UPGRADE22_RPM_URL",
 	} {
 		if !strings.Contains(content, "vars."+v) {
 			t.Errorf("artifact-gate.yml must propagate optional repository variable %s for recovery", v)
@@ -10205,11 +10207,13 @@ func TestUpgradeBaselineWorkflowRecovery(t *testing.T) {
 
 	// The pinned hashes/version are source-owned identity and must NOT be
 	// sourced from mutable workflow variables: the ONLY repository variables
-	// referenced may be the two URL source overrides.
+	// referenced may be the URL source overrides.
 	varsRe := regexp.MustCompile(`vars\.[A-Z0-9_]+`)
 	allowed := map[string]bool{
 		"vars.UAT_UPGRADE_BASELINE_DEB_URL": true,
 		"vars.UAT_UPGRADE_BASELINE_RPM_URL": true,
+		"vars.UAT_UPGRADE22_DEB_URL":        true,
+		"vars.UAT_UPGRADE22_RPM_URL":        true,
 	}
 	for _, ref := range varsRe.FindAllString(content, -1) {
 		if !allowed[ref] {

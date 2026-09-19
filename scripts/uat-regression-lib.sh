@@ -196,7 +196,7 @@ for entry in entries:
 }
 
 # session_list_count prints the authoritative number of active Sessions from
-# `dh session list --system --json`. Fail-closed: the list command must
+# `dh session list --json`. Fail-closed: the list command must
 # succeed and the document must be exactly the canonical session-list shape
 # (`{"ok":true,"sessions":[{"id","workspace"},...]}` with well-formed session
 # objects); a command failure, malformed JSON, an unexpected shape, or a
@@ -205,7 +205,7 @@ for entry in entries:
 # positively empty inventory from an unavailable one.
 session_list_count() {
   local out rc
-  out="$(dh session list --system --json 2>/dev/null)"
+  out="$(dh session list --json 2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '  session list inventory unavailable (session list failed)\n' >&2
@@ -528,8 +528,8 @@ reg_setup_principal() {
     useradd -m -d "$home_base/$user" -s /bin/bash "$user" || return 1
   fi
   home="$(getent passwd "$user" | cut -d: -f6)"
-  dh principal create --system --no-credential "$user" >/dev/null 2>&1 || true
-  dh principal set --system "$user" enabled true >/dev/null 2>&1 || true
+  dh principal create --no-credential "$user" >/dev/null 2>&1 || true
+  dh principal set "$user" enabled true >/dev/null 2>&1 || true
   # Final ownership model: a selector-less principal Session resolves to the
   # principal's inherit-scope 'default' Launcher, so that Launcher must exist
   # before any reg_session. Eager default provisioning provisions it
@@ -537,7 +537,7 @@ reg_setup_principal() {
   # stages), so prove presence positively via the canonical Admin-scoped
   # launcher show path: 'default' must exist, belong to the principal, and be
   # enabled with inherit scope.
-  launcher_json="$(dh launcher show --system --principal "$user" --json 2>/dev/null)" \
+  launcher_json="$(dh launcher show --principal "$user" --json 2>/dev/null)" \
     || { echo "error: principal '$user' has no default Launcher after principal create (eager provisioning broken)" >&2; return 1; }
   printf '%s\n' "$launcher_json" | grep -q "\"principal\": \"$user\"" \
     || { echo "error: default launcher does not belong to principal '$user': $launcher_json" >&2; return 1; }
@@ -555,7 +555,7 @@ reg_setup_principal() {
 reg_principal_credential() {
   local user="$1" credfile="$2" out
   rm -f "$credfile"
-  out="$(dh credential create --system --name reg "$user" 2>/dev/null)" || return 1
+  out="$(dh credential create --name reg "$user" 2>/dev/null)" || return 1
   REG_CRED_ID="$(printf '%s\n' "$out" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
   REG_CRED_TOKEN="$(printf '%s\n' "$out" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
   [ -n "$REG_CRED_ID" ] && [ -n "$REG_CRED_TOKEN" ] || return 1
@@ -568,7 +568,7 @@ reg_principal_credential() {
 # file and sets REG_SESSION_ID / REG_SESSION_TOKEN.
 reg_session() {
   local credfile="$1" ws="$2" json
-  json="$(dh session create --system --token-file "$credfile" "$ws" --json 2>/dev/null)" || return 1
+  json="$(dh session create --token-file "$credfile" "$ws" --json 2>/dev/null)" || return 1
   REG_SESSION_ID="$(printf '%s' "$json" | json_field id)"
   REG_SESSION_TOKEN="$(printf '%s' "$json" | json_field token)"
   [ -n "$REG_SESSION_ID" ] && [ -n "$REG_SESSION_TOKEN" ] || return 1

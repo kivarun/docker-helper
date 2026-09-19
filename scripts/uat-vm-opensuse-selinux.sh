@@ -155,6 +155,17 @@ else
   fail "could not download/verify the v2.1.1 baseline RPM (pinned fixture)"
 fi
 
+# The published v2.2.0 package is the immutable migration baseline for the
+# Release-2.3 system-mode-only 2.2.0 -> candidate RPM migration gate (same
+# single fixture owner, same pinned-digest contract).
+BASELINE22_RPM_PATH=""
+if upgrade22_fetch_rpm /tmp/uat-baseline22-docker-helper.rpm >/tmp/baseline22-rpm.path 2>/dev/null; then
+  BASELINE22_RPM_PATH="$(cat /tmp/baseline22-rpm.path)"
+  log "v2.2.0 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
+else
+  fail "could not download/verify the v2.2.0 baseline RPM (pinned fixture)"
+fi
+
 # ---------------------------------------------------------------------------
 # shared SELinux host construction (sources the canonical Tumbleweed VM harness
 # and the SELinux bootstrap/proof/transfer/docker-prep); no VM/MAC knowledge
@@ -197,6 +208,7 @@ vm_selinux_transfer_repo
 vm_selinux_transfer_artifact "docker-helper.rpm" "$UAT_RPM"
 vm_selinux_transfer_artifact "docker-helper-baseline.rpm" "$BASELINE_RPM_PATH"
 vm_selinux_transfer_artifact "docker-helper-baseline-2.1.1.rpm" "$BASELINE211_RPM_PATH"
+vm_selinux_transfer_artifact "docker-helper-baseline-2.2.0.rpm" "$BASELINE22_RPM_PATH"
 
 # ---------------------------------------------------------------------------
 # 6c. compile the live-workload proof harness on the host and bind it to the
@@ -371,6 +383,30 @@ record_stage "2.1.1 RPM migration" "$MIG211_RESULT"
 
 
 # ---------------------------------------------------------------------------
+# 8h. Release-2.3 system-mode-only migration gate 2.2.0 -> candidate on the
+#     RPM path (pinned published v2.2.0 baseline, real rpm -U upgrade with
+#     the service running; user-unit removal, removed mode-selection grammar,
+#     identity preservation, no historical user-state adoption)
+# ---------------------------------------------------------------------------
+log "== 8h. 2.2.0 -> candidate RPM migration gate =="
+MIG22_RESULT=FAIL
+if run_guest_capture "2.2.0 -> candidate RPM migration inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_BASELINE22_RPM=/opt/uat-import/docker-helper-baseline-2.2.0.rpm UAT_BASELINE22_SHA256=$UPGRADE22_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-migration-rpm-22.sh"; then
+  MIG22_RESULT=PASS
+  log "2.2.0 -> candidate RPM migration gate passed inside the guest"
+else
+  MIG22_EC=$?
+  if [ "$MIG22_EC" = 2 ]; then
+    MIG22_RESULT=BLOCKED
+    log "2.2.0 -> candidate RPM migration BLOCKED inside the guest (required scenario not exercised; fails the job)"
+  else
+    log "2.2.0 -> candidate RPM migration FAILED inside the guest (recorded)"
+  fi
+fi
+record_stage "2.2.0 RPM migration" "$MIG22_RESULT"
+
+
+# ---------------------------------------------------------------------------
 # 9. Summary
 # ---------------------------------------------------------------------------
 T1="$(date +%s)"
@@ -389,6 +425,7 @@ echo "RPM:              $UAT_RPM"
 echo "RPM sha256:       $UAT_RPM_SHA256 (producer, verified by UAT)"
 echo "v2.0.0 baseline RPM: $BASELINE_RPM_PATH (pinned fixture, verified)"
 echo "v2.1.1 baseline RPM: $BASELINE211_RPM_PATH (pinned fixture, verified)"
+echo "v2.2.0 baseline RPM: $BASELINE22_RPM_PATH (pinned fixture, verified)"
 echo "UAT version:      $VERSION"
 echo "Docker SELinux:   ${DOCKER_HEALTHY:-0}=naturally healthy two-stage setup (container-selinux before Docker)"
 echo "total:            ${TOTAL}s"
