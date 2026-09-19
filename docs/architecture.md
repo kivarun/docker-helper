@@ -997,15 +997,18 @@ cannot both succeed: after one commits, the other is the expected
 `409 credential_rotation_conflict` and receives no replacement bearer.
 
 After the tentative CAS update, the daemon writes the already serialized
-success response while the transaction remains uncommitted. A response
-write error rolls the transaction back, so the previous bearer remains
-authoritative. A successful write is followed by exactly one commit
-attempt; only a successful commit makes the replacement bearer
-authoritative and invalidates the previous bearer. A commit error after a
-successful response write is deliberately ambiguous: the daemon cannot
-retract the bearer already delivered and cannot prove to the client
-whether the durable commit took effect, so it performs no automatic retry
-and requires operator recovery/re-issue. The normal committed path still
+success response and then performs an error-reporting transport flush while
+the transaction remains uncommitted. A response write or transport-flush
+error rolls the transaction back, so the previous bearer remains
+authoritative. A successful transport flush is followed by exactly one
+commit attempt; only a successful commit makes the replacement bearer
+authoritative and invalidates the previous bearer. The flush is a
+server-side synchronous delivery boundary, not proof that the client
+application received or persisted the bearer. A commit error after a
+successful transport flush is deliberately ambiguous: the daemon cannot
+retract bytes that may already have reached the client and cannot prove to
+the client whether the durable commit took effect, so it performs no
+automatic retry and requires operator recovery/re-issue. The normal committed path still
 has exactly one active bearer and no overlapping validity window. The
 audit event family stays `launcher.credential_rotate` (target Launcher
 ID, credential ID, owner Principal provenance, initiating credential
@@ -1092,13 +1095,14 @@ MAC/runtime cleanup owners:
     second row is created. The replacement bearer and complete success
     response are prepared first; the transaction then CAS-updates the
     exact active target row using its Principal ID, credential ID, and
-    observed token hash, writes that serialized response, and commits only
-    after the write succeeds. A response write failure rolls back and
-    leaves the previous bearer valid. A competing rotation that changed the
-    target hash first is `409 credential_rotation_conflict` and returns no
-    replacement bearer. A commit error after a successful response write is
-    an ambiguous fail-closed outcome: there is no automatic retry and
-    operator recovery/re-issue is required.
+    observed token hash, writes that serialized response, performs the
+    error-reporting transport flush, and commits only after the full write
+    and flush succeed. A response write or transport-flush failure rolls
+    back and leaves the previous bearer valid. A competing rotation that
+    changed the target hash first is `409 credential_rotation_conflict` and
+    returns no replacement bearer. A commit error after a successful
+    transport flush is an ambiguous fail-closed outcome: there is no
+    automatic retry and operator recovery/re-issue is required.
     Rotation always targets the current active credential with that name:
     revoked historical rows that share the name through documented name
     reuse are never the target, a name that only has revoked history is
@@ -1133,7 +1137,7 @@ MAC/runtime cleanup owners:
   active bearer and the previous bearer is rejected. Concurrent stale
   rotation is `409 credential_rotation_conflict`; response-delivery
   failure rolls back to the previous bearer; commit failure after a
-  successful response write is ambiguous and requires operator re-issue.
+  successful transport flush is ambiguous and requires operator re-issue.
 - **Admin token** rotation (`admin-token rotate`; HTTP
   `POST /admin/token/rotate`) requires the current
   token; the new token is shown once, the old token is invalid
@@ -3761,7 +3765,7 @@ Current error codes (non-exhaustive):
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
-| `invalid_helper_socket` | `POST /run` | helper_socket requested in user mode (unsupported there) |
+| `invalid_helper_socket` | `POST /run` | `helper_socket` requested in user mode, or an active helper-socket request supplies a conflicting `DOCKER_HELPER_SOCKET_PATH` instead of the canonical server-owned locator |
 | `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause for a request spelling admitted by the lexical ceiling proof, and the bounded authorization-shape refusal (`workspace must be inside an allowed root`) for a spelling outside it — an unadmitted spelling is refused without any host filesystem probing (authorization-before-probing; see [Session workspace](#session-workspace)). For an admitted spelling whose privileged resolution or stat fails, the message is the stable non-disclosing diagnosis selected once through the shared admitted-path diagnosis: `workspace path does not exist` when the path does not exist, the same bounded authorization-shape refusal when the daemon may not resolve or consume the pathname (fail-closed containment — identical to the successful-resolution refusal, so an escaping symlink answers with the same policy meaning on every backend), or the bare resolution/access failure otherwise; the probe's errno and any probed or resolved pathname stay in the operational log |
 | `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |

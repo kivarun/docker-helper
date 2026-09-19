@@ -9,10 +9,16 @@ SC3 closed with the disposition PR merge (Release 2.2 head
 `3529f2ab65725a72d068638aced078a74250c596`); it carried accepted release-owner
 dispositions only. SC4 closed the adjacent hardening/audit tail (M3, M6, M9
 review and the Low-findings rebase pass, 2026-09-17, see the SC4 section).
-**This closes the disposition phase, not the Release 2.2 security gate:** the
-mandatory hostile exact-artifact security UAT below and the final security
-release review still gate stable promotion, and the conditional final C1/H9
-exact-candidate proof required by M3 is retained.
+**The Release 2.2 security gate passed on RC13 exact candidate
+`d7edbd8e29c9f9561af49eebd538aa887609f8f6`:** the canonical hostile/full
+exact-artifact UAT run `35463043888` completed 11/11 jobs successfully, and
+the tag-triggered Release workflow run `35463776583` completed successfully
+with checks, SELinux policy, the same full gate, and promotion. The final
+security/architecture review found no open C/H/M implementation blocker; only
+response-delivery wording and release-status drift remained. Because the
+resulting docs/help closure changes candidate bytes, the same canonical full
+artifact gate must pass once more on that final candidate SHA before stable
+`v2.2.0` promotion.
 
 The external audit that triggered this closure reviewed docker-helper 2.0.0 at
 commit `7e9762576327b625acde45934a15216d1ff0a56b`. Its finding identifiers are
@@ -1262,10 +1268,13 @@ SC3  explicit architecture dispositions for remaining questions CLOSED
 SC4  adjacent hardening/documentation cleanup                   CLOSED
         |
         v
-security cross-boundary UAT on exact candidate artifacts        NEXT
+security cross-boundary UAT on RC13 exact candidate             CLOSED
         |
         v
-full Phase 2.2.7 release gate + final architecture/docs review
+full Phase 2.2.7 gate + final architecture/docs review          CLOSED
+        |
+        v
+post-review docs/help closure + final exact-artifact rerun       NEXT
         |
         v
 stable v2.2.0

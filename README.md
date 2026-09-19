@@ -1968,13 +1968,13 @@ store.
 Principal and Launcher credential rotation share one DB-backed
 response-delivery contract: the replacement and complete success response
 are prepared first; the transaction CAS-checks the exact target identity
-and expected bearer hash; the response is written while the replacement
-is still uncommitted; a successful write is followed by one commit
-attempt. A write failure rolls back, leaving the previous bearer valid.
-A stale concurrent rotation receives `409 credential_rotation_conflict`
-and no replacement. A commit error after a successful response write is
-ambiguous; there is no automatic retry and operator recovery/re-issue is
-required. Admin-token rotation is separate and remains file-backed.
+and expected bearer hash; the response is written and error-reporting
+transport-flushed while the replacement is still uncommitted; a successful
+flush is followed by one commit attempt. A response write or transport-flush
+failure rolls back, leaving the previous bearer valid. A stale concurrent
+rotation receives `409 credential_rotation_conflict` and no replacement.
+A commit error after a successful transport flush is ambiguous; there is no
+automatic retry and operator recovery/re-issue is required. Admin-token rotation is separate and remains file-backed.
 Rotation is optional — ordinary Session use works without it. A Launcher
 credential has no general Launcher/Principal control-plane authority;
 self-rotation is its only credential-management capability.

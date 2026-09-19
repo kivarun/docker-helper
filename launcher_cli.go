@@ -1127,10 +1127,11 @@ ownership, Launcher policy, and Sessions; only the bearer secret changes.
 
 The daemon prepares the complete response before the transaction, CAS-checks
 the exact Launcher/credential identity and expected bearer hash, writes the
-response, then commits. A response-write failure rolls back and leaves the
-previous bearer valid. A concurrent rotation returns
+response, performs an error-reporting transport flush, then commits. A
+response-write or transport-flush failure rolls back and leaves the previous
+bearer valid. A concurrent rotation returns
 credential_rotation_conflict with no replacement bearer. A commit error after
-a successful response write is ambiguous and is never retried automatically;
+a successful transport flush is ambiguous and is never retried automatically;
 operator re-issue/recovery is required. On the normal committed path exactly
 one bearer is active. The caller is responsible for installing a returned
 bearer through the supported credential-install mechanism — this command never

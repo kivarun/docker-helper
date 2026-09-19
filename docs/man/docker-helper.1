@@ -427,12 +427,13 @@ default output is the human credential block with the one-time token
 (install hint on stdout), and \-\-json prints the canonical issuance
 document with the install hint on stderr.
 Before the database commit, the daemon fully serializes the response,
-CAS-checks the exact target credential and its current bearer hash, and
-writes that response. A response write failure rolls back the rotation,
-so the previous bearer remains valid. A concurrent rotation that changes
-the bearer first fails with
+CAS-checks the exact target credential and its current bearer hash, writes
+that response, and performs an error-reporting transport flush. A response
+write or transport-flush failure rolls back the rotation, so the previous
+bearer remains valid. A concurrent rotation that changes the bearer first
+fails with
 \fB409 credential_rotation_conflict\fR and returns no replacement token.
-After a successful response write the daemon attempts the commit exactly
+After a successful transport flush the daemon attempts the commit exactly
 once. If that commit reports an error, the result is deliberately
 ambiguous because the replacement bearer may already have reached the
 caller; the command does not retry automatically and operator
@@ -556,11 +557,12 @@ the replacement bearer once. The credential row keeps its ID, ownership,
 Launcher policy, and Sessions; only the bearer secret changes.
 The daemon fully serializes the success response before the transaction,
 CAS-checks the exact Launcher/credential identity and expected bearer
-hash, tentatively replaces the hash, writes the response, and commits only
-after the write succeeds. A write failure rolls back and leaves the
-previous bearer valid. A competing rotation loses with
+hash, tentatively replaces the hash, writes the response, performs an
+error-reporting transport flush, and commits only after the full write and
+flush succeed. A response write or transport-flush failure rolls back and
+leaves the previous bearer valid. A competing rotation loses with
 \fB409 credential_rotation_conflict\fR and receives no replacement
-bearer. A commit error after a successful response write is an ambiguous
+bearer. A commit error after a successful transport flush is an ambiguous
 outcome: there is no automatic retry and operator re-issue/recovery is
 required. On the normal committed path exactly one bearer is active and
 the previous bearer is invalid.

@@ -618,11 +618,18 @@ foreign policy state.
 
 ## Phase 2.2.7 — documentation, packaging, UAT, and release integration
 
-**Status: IN PROGRESS.** The documentation/release-closure increment
-(`feature/2.2.7a-docs-release-closure`) performs the current-state
-documentation pass below on `release/2.2` after the Phase 2.2.6 merge.
-The migration/upgrade UAT, functional UAT, backend-specific UAT, and
-exact-artifact gate remain open.
+**Status: RELEASE-READY; final-candidate gate rerun pending after the
+2026-09-19 docs/help closure.** RC13 exact candidate
+`d7edbd8e29c9f9561af49eebd538aa887609f8f6` passed the canonical full
+exact-artifact UAT in run `35463043888` (11/11 jobs successful), and the
+tag-triggered Release workflow run `35463776583` completed successfully
+(checks, SELinux policy, the same full artifact gate, and promotion). The final
+architecture/docs review found no production/security blocker; it found only
+the response-delivery wording and release-status drift closed by this
+docs/help commit. Because that commit changes candidate bytes, the canonical
+full exact-artifact gate must pass once more on the resulting final candidate
+SHA before the stable tag is promoted. No Release 2.2 implementation work
+remains open.
 
 ### Current-state docs
 

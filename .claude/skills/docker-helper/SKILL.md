@@ -171,11 +171,12 @@ with the installed credential as the Bearer). The credential ID,
 ownership, Launcher policy, and Sessions are preserved; only the bearer
 secret changes. The server prepares the one-time replacement and complete
 response first, then CAS-checks the exact authenticated credential and
-bearer hash inside the database transaction. It writes the response before
-committing the replacement. If response delivery fails, the transaction
+bearer hash inside the database transaction. It writes the response and
+performs an error-reporting transport flush before committing the
+replacement. If response write or transport flush fails, the transaction
 rolls back and the bootstrap bearer remains valid. A competing stale
 rotation receives `409 credential_rotation_conflict` and no replacement.
-After a successful response write, a commit error is deliberately
+After a successful transport flush, a commit error is deliberately
 ambiguous: do not retry rotation automatically and do not assume either
 bearer is authoritative; operator re-issue/recovery is required.
 

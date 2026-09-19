@@ -274,10 +274,11 @@ unchanged; the replacement bearer is returned once.
 
 The daemon prepares the complete response before the transaction, CAS-checks
 the exact active target credential and expected bearer hash, writes the
-response, then commits. A response-write failure rolls back and leaves the
-previous bearer valid. A concurrent rotation returns
+response, performs an error-reporting transport flush, then commits. A
+response-write or transport-flush failure rolls back and leaves the previous
+bearer valid. A concurrent rotation returns
 credential_rotation_conflict with no replacement bearer. A commit error after
-a successful response write is ambiguous and is never retried automatically;
+a successful transport flush is ambiguous and is never retried automatically;
 operator re-issue/recovery is required. On the normal committed path the
 replacement is the one active bearer.
 

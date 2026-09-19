@@ -524,11 +524,15 @@ implementation of Phases 2.2.1-2.2.6 is complete and architecturally accepted on
 `release/2.2` (see [`docs/release-2.2-implementation-plan.md`](release-2.2-implementation-plan.md)
 for the closure evidence). The feature contract is frozen. The mandatory
 external-security-audit closure SC0-SC4 is complete (see
-[`release-2.2-security-closure.md`](release-2.2-security-closure.md)); the
-remaining pre-stable work is the current-line cleanup/review pass and the
-final hostile exact-artifact UAT on the canonical artifact gate
-(`artifact-gate.yml`), plus the existing Phase 2.2.7 documentation/release
-integration. The stable tag is not declared by this status.
+[`release-2.2-security-closure.md`](release-2.2-security-closure.md)). RC13
+exact candidate `d7edbd8e29c9f9561af49eebd538aa887609f8f6` passed the full
+canonical exact-artifact UAT (run `35463043888`, 11/11 jobs successful) and
+the tag-triggered Release workflow (run `35463776583`) completed
+successfully. The final architecture/docs review found no production/security
+blocker and closed the remaining wording/status drift. The only pre-stable
+step left is to rerun the canonical full artifact gate on the resulting
+post-review docs/help closure SHA, then publish the stable tag. The stable tag
+is not declared by this status.
 
 Release 2.2 deliberately does not include Managed Containers, Engine migration,
 networking, resources, durable Operations, or any other Release 3 runtime work.

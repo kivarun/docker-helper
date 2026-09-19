@@ -1027,7 +1027,7 @@ func TestHelpCanonicalPathsAndPerCommandFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("rotate --help exit = %d", code)
 	}
-	for _, want := range []string{"response-write failure rolls back", "credential_rotation_conflict", "never retried automatically"} {
+	for _, want := range []string{"response-write or transport-flush failure rolls back", "credential_rotation_conflict", "never retried automatically"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("rotate help missing %q:\n%s", want, stdout.String())
 		}
