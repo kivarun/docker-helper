@@ -268,12 +268,18 @@ var principalCredentialRotateCommand = &Command{
 	Usage:      "docker-helper principal credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] [PRINCIPAL]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
-	Help: `Rotate a principal credential in one atomic server-side operation.
+	Help: `Rotate a Principal credential through the shared DB-backed
+response-delivery transaction. The credential ID, name, and ownership are
+unchanged; the replacement bearer is returned once.
 
-The old bearer token is invalidated immediately and the new one is
-returned exactly once on stdout. The credential ID, name, and ownership
-are unchanged; the name is reused according to principal credential
-semantics.
+The daemon prepares the complete response before the transaction, CAS-checks
+the exact active target credential and expected bearer hash, writes the
+response, then commits. A response-write failure rolls back and leaves the
+previous bearer valid. A concurrent rotation returns
+credential_rotation_conflict with no replacement bearer. A commit error after
+a successful response write is ambiguous and is never retried automatically;
+operator re-issue/recovery is required. On the normal committed path the
+replacement is the one active bearer.
 
 The credential name defaults to "default"; --name selects another named
 credential. The Principal defaults to the owner of the authenticated

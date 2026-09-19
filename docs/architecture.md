@@ -981,16 +981,36 @@ rebinding by `{username, launcher-name}` after authentication is
 impossible by construction, and a deleted-and-recreated Launcher leaves
 the old bearer unauthorized (the credential row cascades away with the
 deleted Launcher). Every non-self targeting answers the same non-disclosing
-`launcher_not_found` refusal. Admin and Principal-credential rotation
-behavior is unchanged; the shared rotation owner
-(`rotateLauncherCredential`) performs the same atomic single-row update —
-Launcher ID, credential ID, ownership, policy, and Sessions are
-preserved, only the bearer secret changes, the old bearer is immediately
-invalid with no overlapping validity window, and the new bearer is
-returned exactly once. The audit event family stays
-`launcher.credential_rotate` (target Launcher ID, credential ID, owner
-Principal provenance, initiating credential provenance; never either
-bearer).
+`launcher_not_found` refusal.
+
+Launcher and Principal credential rotation share one DB-backed
+response-delivery transaction owner. The replacement bearer is generated
+and the complete success response is serialized before the rotation
+transaction starts. Inside the transaction the target row is updated only
+by an exact CAS over its stable owner identity, credential ID, active state,
+and the token hash observed during preparation. Launcher self-rotation
+uses the authenticated bearer's hash as that expected hash; Principal
+rotation uses the target credential's observed hash, and a Principal
+rotating its own credential additionally binds the CAS to the
+authenticated bearer. Thus two requests authenticated with the same bearer
+cannot both succeed: after one commits, the other is the expected
+`409 credential_rotation_conflict` and receives no replacement bearer.
+
+After the tentative CAS update, the daemon writes the already serialized
+success response while the transaction remains uncommitted. A response
+write error rolls the transaction back, so the previous bearer remains
+authoritative. A successful write is followed by exactly one commit
+attempt; only a successful commit makes the replacement bearer
+authoritative and invalidates the previous bearer. A commit error after a
+successful response write is deliberately ambiguous: the daemon cannot
+retract the bearer already delivered and cannot prove to the client
+whether the durable commit took effect, so it performs no automatic retry
+and requires operator recovery/re-issue. The normal committed path still
+has exactly one active bearer and no overlapping validity window. The
+audit event family stays `launcher.credential_rotate` (target Launcher
+ID, credential ID, owner Principal provenance, initiating credential
+provenance; never either bearer). Admin-token rotation is separate:
+its file-backed atomic-replace protocol is unchanged.
 
 ### Principal and Launcher lifecycle
 
@@ -1066,24 +1086,29 @@ MAC/runtime cleanup owners:
     endpoint; a Launcher credential is `401`. `GET
     /principals/{username}/credentials` remains the single-Principal form
     of the same query.
-  - `POST /principals/{username}/credentials/{name}/rotate` rotates a
-    named credential in one atomic server-side operation: the token hash
-    is replaced in the same transaction (credential ID, name, ownership,
-    and created_at are unchanged, no second row is created), the old
-    bearer is rejected immediately, and the new bearer is returned exactly
-    once. Rotation always targets the current active credential with that
-    name: revoked historical rows that share the name through documented
-    name reuse are never the target, a name that only has revoked history
-    is `409 credential_revoked`, and a name that never existed is
-    `404 credential_not_found`; the guarded mutation fails closed against
-    stale concurrent state, so a rotation never resurrects a revoked row.
-    The mutation is scoped by the exact owning Principal ID resolved under
-    the request authority (an admin resolves the current same-name
-    Principal; a Principal credential uses its exact authenticated
-    Principal ID), never re-keyed by username, so a Principal deleted and
-    recreated under the same username can never rebind a rotation onto the
-    replacement Principal's credential — a vanished owner fails closed
-    without mutating any row.
+  - `POST /principals/{username}/credentials/{name}/rotate` uses the
+    shared DB-backed credential-rotation protocol described above. The
+    credential ID, name, ownership, and created_at are unchanged and no
+    second row is created. The replacement bearer and complete success
+    response are prepared first; the transaction then CAS-updates the
+    exact active target row using its Principal ID, credential ID, and
+    observed token hash, writes that serialized response, and commits only
+    after the write succeeds. A response write failure rolls back and
+    leaves the previous bearer valid. A competing rotation that changed the
+    target hash first is `409 credential_rotation_conflict` and returns no
+    replacement bearer. A commit error after a successful response write is
+    an ambiguous fail-closed outcome: there is no automatic retry and
+    operator recovery/re-issue is required.
+    Rotation always targets the current active credential with that name:
+    revoked historical rows that share the name through documented name
+    reuse are never the target, a name that only has revoked history is
+    `409 credential_revoked`, and a name that never existed is
+    `404 credential_not_found`. The mutation is scoped by the exact
+    owning Principal ID resolved under the request authority (an admin
+    resolves the current same-name Principal; a Principal credential uses
+    its exact authenticated Principal ID), never re-keyed by username, so
+    a Principal deleted and recreated under the same username can never
+    rebind a rotation onto the replacement Principal's credential.
   - The compatibility CLI `credential create|list|revoke` shares the same
     handlers as the canonical `principal credential` commands;
     `credential create --name` is optional and uses the literal name
@@ -1101,9 +1126,14 @@ MAC/runtime cleanup owners:
   `launcher credential create`), replaced by
   `POST .../credential/rotate`, and deleted by `DELETE .../credential`.
   Deleting the credential does not delete the launcher or its sessions; it
-  only removes that authentication key. Rotation keeps the launcher
-  identity and its sessions: the old bearer is rejected immediately, the
-  replacement is authorized, and no second credential row is created.
+  only removes that authentication key. Rotation uses the same shared
+  DB-backed response-delivery/CAS protocol as Principal credential
+  rotation. Launcher identity, policy, Sessions, and credential row ID are
+  preserved; on the normal committed path the replacement becomes the one
+  active bearer and the previous bearer is rejected. Concurrent stale
+  rotation is `409 credential_rotation_conflict`; response-delivery
+  failure rolls back to the previous bearer; commit failure after a
+  successful response write is ambiguous and requires operator re-issue.
 - **Admin token** rotation (`admin-token rotate`; HTTP
   `POST /admin/token/rotate`) requires the current
   token; the new token is shown once, the old token is invalid

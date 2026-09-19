@@ -420,17 +420,27 @@ Revoke a credential by its credential ID. With \-\-json the daemon's
 revocation document replaces the human "revoked" line.
 .TP
 .B docker-helper principal credential rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] [\-\-json] [USER]
-Rotate a principal credential in one atomic server-side operation. The
-old bearer token is invalidated immediately; the default output is the
-human credential block with the new one-time token (install hint on
-stdout), and \-\-json prints the canonical issuance document with the
-install hint on stderr.
-The old bearer token is invalidated immediately and the new token is
-printed exactly once on stdout; the credential ID, name, and ownership
-are unchanged. The credential name defaults to "default"; \-\-name
-selects another named credential. The principal defaults to the owner of
-the authenticated principal credential; with an admin token USER is
-required.
+Rotate a principal credential through the shared database-backed
+response-delivery transaction. The credential ID, name, and ownership are
+unchanged and the replacement token is printed once on stdout; the
+default output is the human credential block with the one-time token
+(install hint on stdout), and \-\-json prints the canonical issuance
+document with the install hint on stderr.
+Before the database commit, the daemon fully serializes the response,
+CAS-checks the exact target credential and its current bearer hash, and
+writes that response. A response write failure rolls back the rotation,
+so the previous bearer remains valid. A concurrent rotation that changes
+the bearer first fails with
+\fB409 credential_rotation_conflict\fR and returns no replacement token.
+After a successful response write the daemon attempts the commit exactly
+once. If that commit reports an error, the result is deliberately
+ambiguous because the replacement bearer may already have reached the
+caller; the command does not retry automatically and operator
+re-issue/recovery is required. On the normal committed path the
+replacement is the one active bearer and the previous bearer is invalid.
+The credential name defaults to "default"; \-\-name selects another
+named credential. The principal defaults to the owner of the authenticated
+principal credential; with an admin token USER is required.
 .SS Launcher Commands
 Like the other operator command families, every launcher command accepts
 the common operator flags
@@ -540,22 +550,32 @@ output is the human credential block; \-\-json prints the canonical
 credential document.
 .TP
 .B docker-helper launcher credential rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
-Rotate a launcher credential atomically and print the new bearer secret
-once: the same credential row keeps its ID, ownership, and Launcher
-policy, only the bearer secret changes, and the old bearer is immediately
-invalid. The command never rewrites a credential store: the caller is
-responsible for atomically installing the returned bearer through the
-supported credential-install mechanism and discarding the bootstrap
-bearer. Admin and Principal-credential targeting is unchanged. With
-Launcher authentication, omission selects the authenticated Launcher. An
-explicit selector may be that Launcher's own name or stable
-\fBdhl_\fR... ID (the exact-own request is constructed from the
-authenticated \fBGET /auth\fR projection; the daemon remains the
-authorization authority). Any other selector is refused non-disclosing
-(\fBlauncher not found\fR) and grants no name-resolution authority;
-\fB\-\-principal\fR cannot widen scope. This is the one
+Rotate a launcher credential through the same database-backed
+response-delivery transaction used for principal credentials and print
+the replacement bearer once. The credential row keeps its ID, ownership,
+Launcher policy, and Sessions; only the bearer secret changes.
+The daemon fully serializes the success response before the transaction,
+CAS-checks the exact Launcher/credential identity and expected bearer
+hash, tentatively replaces the hash, writes the response, and commits only
+after the write succeeds. A write failure rolls back and leaves the
+previous bearer valid. A competing rotation loses with
+\fB409 credential_rotation_conflict\fR and receives no replacement
+bearer. A commit error after a successful response write is an ambiguous
+outcome: there is no automatic retry and operator re-issue/recovery is
+required. On the normal committed path exactly one bearer is active and
+the previous bearer is invalid.
+The command never rewrites a credential store: the caller is responsible
+for installing a returned bearer through the supported credential-install
+mechanism. With Launcher authentication, omission selects the
+authenticated Launcher. An explicit selector may be that Launcher's own
+name or stable \fBdhl_\fR... ID (the exact-own request is constructed
+from the authenticated \fBGET /auth\fR projection; the daemon remains
+the authorization authority). Any other selector is refused
+non-disclosing (\fBlauncher not found\fR) and grants no name-resolution
+authority; \fB\-\-principal\fR cannot widen scope. This is the one
 credential-management capability of a Launcher credential — it grants no
-other Launcher/Principal control-plane authority.
+other Launcher/Principal control-plane authority. Admin-token rotation is
+a separate file-backed mechanism and is unchanged.
 .TP
 .B docker-helper launcher credential delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
 Delete a launcher's credential. No secret is printed.

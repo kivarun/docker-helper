@@ -167,17 +167,27 @@ A Launcher credential may rotate exactly its own credential — the
 launcher credential rotate command with no selector (an explicit selector
 may be that Launcher's own name or stable `dhl_...` ID; HTTP:
 `POST /principals/{principal}/launchers/{launcher}/credential/rotate`
-with the installed credential as the Bearer): the
-credential ID, ownership, Launcher policy, and Sessions are preserved,
-only the bearer secret changes, and the bootstrap bearer becomes invalid
-atomically. This is the recommended post-provisioning hardening step when
-the environment hands you a bootstrap credential — authenticate, rotate
-self, persist the returned replacement securely through the environment's
-supported install mechanism, and discard the bootstrap bearer. Rotation
-is optional: ordinary Session use works without it. The CLI never rewrites
-your credential store, and the new bearer is printed exactly once. A
-Launcher credential has no general Launcher/Principal control-plane
-authority — self-rotation is its only credential-management capability.
+with the installed credential as the Bearer). The credential ID,
+ownership, Launcher policy, and Sessions are preserved; only the bearer
+secret changes. The server prepares the one-time replacement and complete
+response first, then CAS-checks the exact authenticated credential and
+bearer hash inside the database transaction. It writes the response before
+committing the replacement. If response delivery fails, the transaction
+rolls back and the bootstrap bearer remains valid. A competing stale
+rotation receives `409 credential_rotation_conflict` and no replacement.
+After a successful response write, a commit error is deliberately
+ambiguous: do not retry rotation automatically and do not assume either
+bearer is authoritative; operator re-issue/recovery is required.
+
+This remains the recommended post-provisioning hardening step when the
+environment hands you a bootstrap credential. On an ordinary successful
+rotation, persist the returned replacement securely through the
+environment's supported install mechanism and then discard the bootstrap
+bearer. The CLI never rewrites your credential store, and the replacement
+bearer is printed exactly once. Rotation is optional: ordinary Session use
+works without it. A Launcher credential has no general Launcher/Principal
+control-plane authority — self-rotation is its only
+credential-management capability.
 
 If the environment provides only `DOCKER_HELPER_SESSION_TOKEN` and no
 credential, skip this section entirely: do not create, list, show, or

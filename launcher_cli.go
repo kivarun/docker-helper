@@ -1121,11 +1121,19 @@ var launcherCredentialRotateCommand = &Command{
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 
-	Help: `Rotate a Launcher credential atomically: the same credential row keeps
-its ID, ownership, and Launcher policy, only the bearer secret changes,
-and the old bearer is immediately invalid. The new bearer is returned
-exactly once; the caller is responsible for atomically installing it
-through the supported credential-install mechanism — this command never
+	Help: `Rotate a Launcher credential through the shared DB-backed
+response-delivery transaction. The same credential row keeps its ID,
+ownership, Launcher policy, and Sessions; only the bearer secret changes.
+
+The daemon prepares the complete response before the transaction, CAS-checks
+the exact Launcher/credential identity and expected bearer hash, writes the
+response, then commits. A response-write failure rolls back and leaves the
+previous bearer valid. A concurrent rotation returns
+credential_rotation_conflict with no replacement bearer. A commit error after
+a successful response write is ambiguous and is never retried automatically;
+operator re-issue/recovery is required. On the normal committed path exactly
+one bearer is active. The caller is responsible for installing a returned
+bearer through the supported credential-install mechanism — this command never
 rewrites a credential store.
 
 Admin and Principal-credential targeting is unchanged (--principal USER
@@ -1134,7 +1142,8 @@ authentication, omission selects the authenticated Launcher. An explicit
 selector may be that Launcher's own name or stable ID; any other selector
 is refused non-disclosing and grants no name-resolution authority. This
 is the one credential-management capability of a Launcher credential — it
-grants no other Launcher/Principal control-plane authority.`,
+grants no other Launcher/Principal control-plane authority. Admin-token
+rotation is a separate file-backed mechanism.`,
 
 	Presentation: humanJSONPresentation(),
 

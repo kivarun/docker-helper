@@ -1935,7 +1935,7 @@ sudo docker-helper launcher list --principal alice
 sudo docker-helper launcher show --principal alice                # the principal's `default` launcher
 sudo docker-helper launcher show --principal alice build-agent    # by name (or by dhl_... ID)
 sudo docker-helper launcher set --principal alice --enabled false build-agent   # disable: deletes its sessions
-sudo docker-helper launcher credential rotate --principal alice build-agent     # new token shown once; old rejected
+sudo docker-helper launcher credential rotate --principal alice build-agent     # replacement token shown once
 sudo docker-helper launcher delete --principal alice build-agent                # fails with 409 while runtime is active
 ```
 
@@ -1957,16 +1957,27 @@ docker-helper launcher credential rotate    # under a Launcher credential: rotat
 ```
 
 This is the recommended post-provisioning hardening step for a bootstrap
-credential: receive the bootstrap Launcher credential → authenticate →
-rotate own credential → persist the returned replacement securely through
-the supported credential-install mechanism → discard the bootstrap bearer.
-The rotation is atomic (old bearer invalid the moment the new one is
-issued), preserves the credential ID, ownership, Launcher policy, and
-Sessions, and prints the new bearer exactly once; the command never
-rewrites a credential store, and rotation is optional — ordinary Session
-use works without it. A Launcher credential has no general
-Launcher/Principal control-plane authority; self-rotation is its only
-credential-management capability.
+credential. On an ordinary successful rotation: receive the bootstrap
+Launcher credential → authenticate → rotate own credential → persist the
+returned replacement securely through the supported credential-install
+mechanism → discard the bootstrap bearer. Rotation preserves the
+credential ID, ownership, Launcher policy, and Sessions and prints the
+replacement bearer exactly once; the command never rewrites a credential
+store.
+
+Principal and Launcher credential rotation share one DB-backed
+response-delivery contract: the replacement and complete success response
+are prepared first; the transaction CAS-checks the exact target identity
+and expected bearer hash; the response is written while the replacement
+is still uncommitted; a successful write is followed by one commit
+attempt. A write failure rolls back, leaving the previous bearer valid.
+A stale concurrent rotation receives `409 credential_rotation_conflict`
+and no replacement. A commit error after a successful response write is
+ambiguous; there is no automatic retry and operator recovery/re-issue is
+required. Admin-token rotation is separate and remains file-backed.
+Rotation is optional — ordinary Session use works without it. A Launcher
+credential has no general Launcher/Principal control-plane authority;
+self-rotation is its only credential-management capability.
 
 `launcher create` infers the principal from the authenticated credential
 when `--principal` is omitted. The launcher NAME is the required

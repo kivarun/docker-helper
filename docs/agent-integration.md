@@ -34,9 +34,17 @@ by the CLI and HTTP clients:
 `GET /auth` reports which authority the installed credential carries
 (`{"authority": "launcher", "principal": ..., "launcher_id": ...}` or
 `{"authority": "principal", "principal": ...}`); a Session token does not
-authenticate this endpoint. Launcher credential rotation replaces the
-key immediately: the old bearer is rejected, the launcher's sessions are
-unaffected, and no second credential is created.
+authenticate this endpoint. Launcher and Principal credential rotation
+share the DB-backed response-delivery transaction: the replacement and
+complete response are prepared first, the exact target row is CAS-checked,
+the response is written while the replacement remains uncommitted, and
+the commit follows only after a successful write. A write failure rolls
+back to the previous bearer; a concurrent stale rotation is
+`409 credential_rotation_conflict`; a commit error after a successful
+write is ambiguous and must not be retried automatically. On the normal
+committed path the previous bearer is rejected, existing Sessions are
+unaffected, and no second Launcher credential row is created. Admin-token
+rotation remains the separate file-backed mechanism.
 
 The agent-facing self-introspection surface is `docker-helper self`
 (HTTP `GET /self`): the daemon classifies the bearer and answers with
