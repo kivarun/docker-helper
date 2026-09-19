@@ -2,7 +2,7 @@
 #
 # uat-regressions-runner-ubuntu.sh — collect-all runner for the Release-2
 # targeted UAT regression groups on the Ubuntu / DEB / AppArmor profile
-# (groups 3-28).
+# (groups 3-29).
 #
 # The runner installs a docker-helper .deb and starts the system service, then
 # runs every regression group, capturing rc and recording PASS / FAIL / BLOCKED
@@ -163,6 +163,7 @@ REGRESSIONS=(
   "26:H8 bounded MAC-command liveness:uat-regression-h8-mac-liveness.sh"
   "27:H2 commit-boundary credential revocation race:uat-regression-h2-parked-revocation.sh"
   "28:Positional CLI grammar gate:uat-regression-positional-cli-grammar.sh"
+  "29:Launcher credential self-rotation:uat-regression-launcher-self-rotate.sh"
 )
 
 declare -A RESULT

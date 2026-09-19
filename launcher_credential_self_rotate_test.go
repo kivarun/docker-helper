@@ -211,6 +211,7 @@ func TestLauncherCredentialSelfRotateForeignTargeting(t *testing.T) {
 		t.Fatal(err)
 	}
 	orig := OSUserLookup
+	t.Cleanup(func() { OSUserLookup = orig })
 	OSUserLookup = func(u string) (string, string, string, error) {
 		return "2002", "2002", otherHome, nil
 	}
@@ -218,7 +219,6 @@ func TestLauncherCredentialSelfRotateForeignTargeting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createPrincipal(otherprincipal): %v", err)
 	}
-	OSUserLookup = orig
 	if _, _, _, err := createLauncher(app.DB, int64(otherP.ID), "work", LauncherScopeInherit, nil, nil, false); err != nil {
 		t.Fatalf("createLauncher(work@otherprincipal): %v", err)
 	}

@@ -25,6 +25,11 @@
 #      command. Workload arguments that look like docker-helper flags
 #      (--json, --image) reach the container unchanged, with and without the
 #      bare -- separator.
+#   F. explicit-empty endpoint canary: --endpoint "" and --endpoint= exit 2
+#      as local usage errors for one operator and one agent/data-plane
+#      command before any network/auth activity, while the omitted endpoint
+#      still reaches the real system daemon. The exhaustive command-tree
+#      matrix stays unit-test owned.
 #
 # Each subcase is independent (collect-all). Docker is required (subcase E
 # and the end-to-end fixtures exercise real containers/images where the
@@ -416,6 +421,62 @@ subcase_b
 subcase_c
 subcase_d
 subcase_e
+
+# ---------------------------------------------------------------------------
+# F. explicit-empty endpoint canary (exact-artifact)
+# ---------------------------------------------------------------------------
+# RC11 closes the explicit-empty endpoint spellings as local usage errors
+# (exit 2) BEFORE any network/auth activity. The exhaustive command-tree
+# matrix is unit-test owned; this small live canary pins the exact candidate
+# bytes: one operator command and one agent/data-plane command with each
+# explicit-empty spelling must exit 2 locally, while the omitted endpoint
+# still resolves normally and reaches the real system daemon.
+subcase_f() {
+  reg_info "subcase F: explicit-empty endpoint exits 2 before network/auth activity"
+  local out rc
+
+  # Operator command (session list --system): both explicit-empty spellings
+  # are local usage errors. exit 2 must come from argument validation, not
+  # from a transport failure against the empty endpoint.
+  out="$(dh session list --system --endpoint "" 2>&1)"; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    reg_ok "F: operator command --endpoint \"\" exits 2 (local usage error)"
+  else
+    reg_fail "F: operator command --endpoint \"\" exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
+  fi
+  out="$(dh session list --system --endpoint= 2>&1)"; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    reg_ok "F: operator command --endpoint= exits 2 (local usage error)"
+  else
+    reg_fail "F: operator command --endpoint= exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
+  fi
+
+  # Agent/data-plane command (session list without --system under a Session
+  # bearer): the same explicit-empty refusals, before any socket activity.
+  out="$(DOCKER_HELPER_SESSION_TOKEN=dht_uatreg28 dh session list --endpoint "" 2>&1)"; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    reg_ok "F: agent command --endpoint \"\" exits 2 (local usage error)"
+  else
+    reg_fail "F: agent command --endpoint \"\" exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
+  fi
+  out="$(DOCKER_HELPER_SESSION_TOKEN=dht_uatreg28 dh session list --endpoint= 2>&1)"; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    reg_ok "F: agent command --endpoint= exits 2 (local usage error)"
+  else
+    reg_fail "F: agent command --endpoint= exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
+  fi
+
+  # Omitted endpoint keeps the normal default resolution: the same operator
+  # command reaches the real system daemon and returns its canonical output.
+  out="$(dh session list --system --json 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"ok": true'; then
+    reg_ok "F: omitted endpoint still resolves normally (real system daemon reached)"
+  else
+    reg_fail "F: omitted endpoint did not reach the system daemon (rc=$rc): $(printf '%s' "$out" | head -1 | tr '\n' ' ' | redact)"
+  fi
+}
+
+subcase_f
 
 cleanup
 trap - EXIT

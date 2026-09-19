@@ -880,7 +880,7 @@ and the man page.
 ```bash
 docker-helper pull IMAGE
 docker-helper build . --dockerfile Dockerfile --image NAME
-docker-helper run NAME -- command args...
+docker-helper run IMAGE -- command args...
 docker-helper registry login --username USER REG
 ```
 
@@ -900,7 +900,7 @@ the daemon does not log environment values:
 ORCHESTRATOR_LLM_KEY=secret \
 docker-helper run \
   --env-from LLM_KEY=ORCHESTRATOR_LLM_KEY \
-  --image NAME -- command args...
+  IMAGE -- command args...
 ```
 
 An unset SOURCE fails closed before any container operation is created; a
@@ -932,7 +932,7 @@ LAUNCHER_CREDENTIAL=... \
 docker-helper run \
   --helper-socket \
   --env-from ORCHESTRATOR_CREDENTIAL=LAUNCHER_CREDENTIAL \
-  --image NAME -- workload...
+  IMAGE -- workload...
 ```
 
 `--helper-socket` is not supported in user mode and is rejected there.
@@ -1644,12 +1644,12 @@ canonical workspace path explicitly narrows it instead:
 ```bash
 docker-helper session create --system \
   --launcher agent \
-  --workspace /srv/run-root/work \
   --filesystem-root /srv/run-root/work=read_only \
   --filesystem-root /srv/run-root/work/project=read_write \
   --filesystem-root /home/michael/work/git/docker-helper=read_only \
   --filesystem-root /opt/michael/cache=read_write \
-  --json
+  --json \
+  /srv/run-root/work
 ```
 
 A system-mode admin token must target exactly one Launcher explicitly

@@ -42,7 +42,9 @@
 #      ('.' read-only, project/pipeline-outputs read-write,
 #      pipeline-inputs read-only); the issued snapshot exposes exactly the
 #      effective semantics (a redundant read-only entry may be normalized
-#      away), the narrowing is enforced at runtime, and a second session on
+#      away), the Session bearer's self resource equals the canonical
+#      session show body and retains the RO-parent / RW-child pipeline
+#      shape, the narrowing is enforced at runtime, and a second session on
 #      the same run workspace without filesystem_roots keeps the inherited
 #      read-write behavior;
 #   14 an attempted issuance-time widening (read_write under the parent
@@ -838,6 +840,45 @@ if [ -n "${SN_ID:-}" ] \
   acc_ok "13 session show exposes the effective narrowed snapshot (root RO, project/outputs RW, redundant RO normalized away)"
 else
   acc_fail "13 issued narrowed snapshot wrong (SN: $(show_snapshot "${SN_ID:-}" 2>/dev/null | tr '\n' '; '))"
+fi
+
+# N-self: the delegated workload's own authority observes the same snapshot.
+# The Session bearer's self resource body must equal the canonical session
+# show body of the same Session, and the self snapshot must retain the
+# RO-parent / RW-child transition of the canonical pipeline shape
+# (run-root read_only, nested project read_write). This pins the intended
+# Release-2.2 shape as an expected PASS so future UATs cannot re-report the
+# Session-local RW exception below a Session-local RO parent as a widening
+# defect while the effective Launcher ceiling permits read_write at the
+# child.
+if [ -n "${SN_ID:-}" ]; then
+  SN_SELF="$(dh self --system --token-file "/tmp/uat-am-tok-$SN_ID" --json 2>&1)" \
+    && SN_SHOW_DOC="$(dh session show --system "$SN_ID" --json 2>&1)" \
+    || acc_fail "13 self or session show CLI failed for the narrowed Session: $(printf '%s\n' "${SN_SELF:-}" "${SN_SHOW_DOC:-}" | redact | head -4 | tr '\n' ' ')"
+  SN_SELF_RES="$(printf '%s\n' "${SN_SELF:-}" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["resource"], sort_keys=True))' 2>/dev/null)"
+  SN_SHOW_RES="$(printf '%s\n' "${SN_SHOW_DOC:-}" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))' 2>/dev/null)"
+  if [ -n "$SN_SELF_RES" ] && [ "$SN_SELF_RES" = "$SN_SHOW_RES" ]; then
+    acc_ok "13 self resource body equals the canonical session show body for the narrowed Session"
+  else
+    acc_fail "13 self resource differs from the session show body (SN: kept in /tmp/uat-am-n-self-*.log)"
+    printf '%s\n' "${SN_SELF_RES:-}" | redact > /tmp/uat-am-n-self-resource.log 2>/dev/null || true
+    printf '%s\n' "${SN_SHOW_RES:-}" | redact > /tmp/uat-am-n-self-show.log 2>/dev/null || true
+  fi
+  if printf '%s' "${SN_SELF:-}" | RUNDIR="$RUNDIR" python3 -c '
+import json, os, sys
+env = json.load(sys.stdin)
+rundir = os.environ["RUNDIR"]
+entries = env["resource"]["filesystem_snapshot"]["entries"]
+by_path = {e["path"]: e["access"] for e in entries}
+assert by_path.get(rundir) == "read_only", entries
+assert by_path.get(rundir + "/project") == "read_write", entries
+assert by_path.get(rundir + "/pipeline-outputs") == "read_write", entries
+print("N-SELF-SNAPSHOT-OK")
+' >/dev/null 2>&1; then
+    acc_ok "13 self snapshot retains the RO run-root parent and the RW child exception"
+  else
+    acc_fail "13 self snapshot lost the RO parent / RW child shape: $(printf '%s\n' "${SN_SELF:-}" | redact | tr '\n' ' ' | head -c 400)"
+  fi
 fi
 
 # N-runtime: the narrowed snapshot enforces exactly those semantics.
