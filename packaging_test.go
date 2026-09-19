@@ -4082,6 +4082,13 @@ func TestBuildPackagesScriptRequiresVersion(t *testing.T) {
 // TestBuildPackagesScriptNfpmMissing verifies the script fails with a
 // clear error when nfpm is not available.
 func TestBuildPackagesScriptNfpmMissing(t *testing.T) {
+	// Register the tested script as a direct Go test input. Child-process file
+	// reads are invisible to the go test cache, so a targeted -run of this test
+	// must open the script itself to invalidate a cached success when it changes.
+	if _, err := os.ReadFile("build-packages.sh"); err != nil {
+		t.Fatalf("build-packages.sh not found: %v", err)
+	}
+
 	cmd := exec.Command("bash", "build-packages.sh", "1.0.0")
 	cmd.Env = append(os.Environ(), "PATH=")
 	out, err := cmd.CombinedOutput()
