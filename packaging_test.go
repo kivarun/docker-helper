@@ -11569,3 +11569,94 @@ func TestShippedSkillCLIGrammarContract(t *testing.T) {
 		}
 	}
 }
+
+// TestUATSELinuxC3RaceOutcomeClassification pins the C3 hostile-race harness
+// contract to the accepted security-closure semantics: a raced workspace
+// relabel may complete (real Session id + bearer) or fail safely with the
+// stable mac_preparation_failed classification, while any other public
+// failure class — and a rc-0 answer without a real id/token — is a
+// regression. The content assertions keep the per-round wiring honest: the
+// classifier owns the raced create, both admitted outcomes prove victim
+// integrity, a safe refusal proves no Session was issued and no helper-owned
+// fcontext residue remains, and the mandatory positive proof is the normal
+// post-race lifecycle (no minimum number of successful raced creates is
+// required).
+func TestUATSELinuxC3RaceOutcomeClassification(t *testing.T) {
+	classifier := extractShellFunction(t,
+		"scripts/uat-regression-selinux-c3-restorecon-race.sh", "c3_read_create_outcome")
+
+	work := t.TempDir()
+	writeFile := func(name, content string) string {
+		path := filepath.Join(work, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	created := writeFile("created.json",
+		"{\n  \"ok\": true,\n  \"id\": \"dhs_91967563d7eea1d1bb26f2acd43a04ce\",\n  \"token\": \"dht_racecreated bearer\"\n}\n")
+	noToken := writeFile("notoken.json",
+		"{\n  \"ok\": true,\n  \"id\": \"dhs_91967563d7eea1d1bb26f2acd43a04ce\"\n}\n")
+	safeRefusal := writeFile("refused.txt",
+		"error: cannot create session: MAC preparation failed: restorecon failed for /opt/uat-c3-ws: exit status 255 (code mac_preparation_failed, status 500)\n")
+	decoys := map[string]string{
+		"unauthorized":  "error: session create failed: credential not authorized (code unauthorized, status 401)\n",
+		"lifecyclebusy": "error: another lifecycle transition is in progress (code lifecycle_busy, status 503)\n",
+		"policy":        "error: workspace must be inside an allowed root (code invalid_filesystem_policy, status 400)\n",
+		"transport":     "error: cannot reach the daemon: connection refused\n",
+	}
+	decoyPaths := make([]string, 0, len(decoys))
+	decoyNames := make([]string, 0, len(decoys))
+	for name, content := range decoys {
+		decoyPaths = append(decoyPaths, writeFile("decoy-"+name+".txt", content))
+		decoyNames = append(decoyNames, name)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("set -uo pipefail\n")
+	sb.WriteString(classifier)
+	sb.WriteString("\n")
+	fmt.Fprintf(&sb, "printf 'A:%%s\\n' \"$(c3_read_create_outcome %q 0)\"\n", created)
+	fmt.Fprintf(&sb, "printf 'B:%%s\\n' \"$(c3_read_create_outcome %q 0)\"\n", noToken)
+	fmt.Fprintf(&sb, "printf 'C:%%s\\n' \"$(c3_read_create_outcome %q 1)\"\n", safeRefusal)
+	for i, p := range decoyPaths {
+		fmt.Fprintf(&sb, "printf 'D%d:%%s\\n' \"$(c3_read_create_outcome %q 1)\"\n", i, p)
+	}
+	out, err := runBashIn(t, ".", sb.String())
+	if err != nil {
+		t.Fatalf("harness run failed: %v\n%s", err, out)
+	}
+	if got := extractHarnessValue(out, "A"); got != "created" {
+		t.Errorf("a completed relabel with a real id/token must classify created, got %q, output:\n%s", got, out)
+	}
+	if got := extractHarnessValue(out, "B"); got != "unclassified" {
+		t.Errorf("a rc-0 answer without a real bearer must NOT classify created, got %q, output:\n%s", got, out)
+	}
+	if got := extractHarnessValue(out, "C"); got != "safe_refusal" {
+		t.Errorf("the stable mac_preparation_failed refusal must classify safe_refusal, got %q, output:\n%s", got, out)
+	}
+	for i, name := range decoyNames {
+		if got := extractHarnessValue(out, fmt.Sprintf("D%d", i)); got != "unclassified" {
+			t.Errorf("decoy %s must classify unclassified (arbitrary failures are never accepted), got %q, output:\n%s", name, got, out)
+		}
+	}
+
+	script := readRepoFile(t, filepath.Join("scripts", "uat-regression-selinux-c3-restorecon-race.sh"))
+	requireAll(t, "scripts/uat-regression-selinux-c3-restorecon-race.sh", script, []string{
+		// The narrow classifier owns the raced create and its captured output.
+		"c3_read_create_outcome",
+		"CREATE_RC=0",
+		// Only the stable class admits a failed relabel round.
+		"mac_preparation_failed",
+		// A safe refusal proves no Session was issued and no helper-owned
+		// fcontext state survived the rollback.
+		"no Session was issued by the safe refusal",
+		"no helper-owned fcontext rule remains after the safe refusal",
+		// Victim integrity holds for every round in both admitted outcomes.
+		"victim type unchanged",
+		"victim inode identity unchanged",
+		// The mandatory positive proof stays the normal post-race lifecycle.
+		"normal session creation works after the race",
+	})
+}

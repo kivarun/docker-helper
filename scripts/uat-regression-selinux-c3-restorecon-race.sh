@@ -19,11 +19,19 @@
 #      runs recursive workspace restorecon (session create), a Principal-
 #      owned process aggressively swaps a workspace path component between
 #      the real directory and a symlink to a Principal-owned victim tree
-#      OUTSIDE the issued workspace. The victim starts with a known
-#      non-workspace SELinux type and must never receive
+#      OUTSIDE the issued workspace. The accepted security-closure contract
+#      admits TWO per-round outcomes: the workspace relabel may COMPLETE
+#      (successful raced create) or FAIL SAFELY (the daemon refuses
+#      fail-closed with the stable mac_preparation_failed class and commits
+#      no usable Session or bearer). A hostile Principal may continuously
+#      remove a mutable pathname, so the contract promises no raced-create
+#      availability; the mandatory positive proof is the normal
+#      post-race lifecycle. In BOTH admitted outcomes the victim starts
+#      with a known non-workspace SELinux type and must never receive
 #      docker_helper_workspace_t; no foreign inode outside the issued tree
 #      may be relabeled; the workspace lifecycle must stay healthy and leave
-#      no stale helper-owned fcontext state.
+#      no stale helper-owned fcontext state. Any other create failure
+#      classification is a regression.
 #
 # The OLD vulnerability is established by upstream/source evidence (libselinux
 # 3.11 release notes and the selinux_restorecon rewrite); this script proves
@@ -197,25 +205,78 @@ c3_racer() { # iterations ws victim
   ' c3racer "$1" "$2" "$3"
 }
 
+# c3_read_create_outcome OUTFILE RC classifies one raced session-create
+# outcome against the accepted security-closure contract. Prints exactly one
+# verdict:
+#   created       — rc 0 and the response carries a real Session id (dhs_)
+#                   and a real bearer token (dht_)
+#   safe_refusal  — the stable mac_preparation_failed class (the documented
+#                   fail-closed MAC-preparation refusal; commits no Session)
+#   unclassified  — anything else (rc 0 without a real id/token, or any other
+#                   failure class) — always a C3 regression
+#
+# This narrow classifier is owned here, not in the shared regression lib,
+# because only this scenario must retain the create's own error output, which
+# the shared reg_session helper deliberately discards.
+c3_read_create_outcome() { # outfile rc
+  local out="$1" rc="$2"
+  if [ "$rc" -eq 0 ]; then
+    if grep -q '"id": "dhs_' "$out" && grep -q '"token": "dht_' "$out"; then
+      printf 'created\n'
+    else
+      printf 'unclassified\n'
+    fi
+    return 0
+  fi
+  if grep -q "mac_preparation_failed" "$out"; then
+    printf 'safe_refusal\n'
+  else
+    printf 'unclassified\n'
+  fi
+  return 0
+}
+
 RACE_ROUNDS=3
 RACER_ITERS=4000
 RACE_FAILED=0
 for round in $(seq 1 "$RACE_ROUNDS"); do
   c3_racer "$RACER_ITERS" "$WS" "$VICTIM" &
   RACER_PID=$!
-  if reg_session "$C3_CRED" "$WS"; then
-    SID="$REG_SESSION_ID"
-    STOK="$REG_SESSION_TOKEN"
-    if [ -n "$SID" ] && [ -n "$STOK" ]; then
-      reg_ok "round $round: session created under race (recursive relabel ran against the hostile tree)"
-    else
-      reg_fail "round $round: session create returned no id/token"
+  # Capture the create's own output so the outcome can be classified against
+  # the accepted two-outcome contract instead of failing on any nonzero rc.
+  CREATE_OUT="/tmp/uat-c3-create.$round.$$"
+  CREATE_RC=0
+  dh session create --system --token-file "$C3_CRED" --json "$WS" >"$CREATE_OUT" 2>&1 || CREATE_RC=$?
+  OUTCOME="$(c3_read_create_outcome "$CREATE_OUT" "$CREATE_RC")"
+  SID=""
+  STOK=""
+  case "$OUTCOME" in
+    created)
+      SID="$(json_field id <"$CREATE_OUT")"
+      STOK="$(json_field token <"$CREATE_OUT")"
+      reg_ok "round $round: session created under race (relabel completed against the hostile tree)"
+      ;;
+    safe_refusal)
+      reg_ok "round $round: relabel failed safely (mac_preparation_failed; no usable Session or bearer issued)"
+      # Safe-refusal proof: no Session/token was issued for this credential
+      # and the service stays healthy — the list answers successfully and
+      # shows no issued session for this Principal.
+      LIST_OUT="$(dh session list --system --token-file "$C3_CRED" 2>&1)"
+      if [ $? -eq 0 ] && ! printf '%s\n' "$LIST_OUT" | grep -q 'dhs_'; then
+        reg_ok "round $round: no Session was issued by the safe refusal (credential-owned session list empty, service healthy)"
+      else
+        reg_fail "round $round: safe-refusal proof failed (session list errored or a session exists after mac_preparation_failed)"
+        RACE_FAILED=1
+      fi
+      # Safe rollback: the refusal must not leave helper-owned fcontext state.
+      reg_expect_no_se_rule_for "$WS" "round $round: no helper-owned fcontext rule remains after the safe refusal"
+      ;;
+    *)
+      reg_fail "round $round: session create failed with an unexpected public classification (only a completed relabel or the safe mac_preparation_failed refusal is admitted): $(head -3 "$CREATE_OUT" | redact | tr '\n' ' ')"
       RACE_FAILED=1
-    fi
-  else
-    reg_fail "round $round: session create failed during the race"
-    RACE_FAILED=1
-  fi
+      ;;
+  esac
+  rm -f "$CREATE_OUT"
   # The victim must never have received the workspace type.
   VICTIM_TYPE_NOW="$(selinux_context_type "$VICTIM/secret.txt" || true)"
   if [ "$VICTIM_TYPE_NOW" != "docker_helper_workspace_t" ] && [ "$VICTIM_TYPE_NOW" = "$VICTIM_TYPE_BEFORE" ]; then
@@ -241,7 +302,7 @@ for round in $(seq 1 "$RACE_ROUNDS"); do
   # Release the round's coverage before the next round (fresh relabel each
   # time). A failed release leaves the rule; the residue check below catches
   # it only after the final round, so release failures surface here too.
-  if [ -n "${SID:-}" ]; then
+  if [ -n "$SID" ]; then
     chown -R root:root "$WS" >/dev/null 2>&1 || true
     if dh session delete --system "$SID" >/dev/null 2>&1; then
       reg_ok "round $round: session deleted (coverage released)"
@@ -254,7 +315,7 @@ for round in $(seq 1 "$RACE_ROUNDS"); do
 done
 
 if [ "$RACE_FAILED" -eq 0 ]; then
-  reg_ok "bounded hostile race completed ($RACE_ROUNDS rounds x $RACER_ITERS swaps): no foreign inode outside the issued tree was relabeled"
+  reg_ok "bounded hostile race completed ($RACE_ROUNDS rounds x $RACER_ITERS swaps): every round completed or failed safely, no foreign inode outside the issued tree was relabeled"
 fi
 
 # --- no stale helper-owned fcontext ownership/residue -----------------------------
