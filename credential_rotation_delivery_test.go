@@ -30,6 +30,32 @@ func (w *failingCredentialRotationWriter) Write([]byte) (int, error) {
 	return 0, errors.New("forced credential rotation response write failure")
 }
 
+type flushFailingCredentialRotationWriter struct {
+	header http.Header
+	status int
+	wrote  int
+}
+
+func (w *flushFailingCredentialRotationWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *flushFailingCredentialRotationWriter) WriteHeader(status int) {
+	w.status = status
+}
+
+func (w *flushFailingCredentialRotationWriter) Write(p []byte) (int, error) {
+	w.wrote += len(p)
+	return len(p), nil
+}
+
+func (w *flushFailingCredentialRotationWriter) FlushError() error {
+	return errors.New("forced credential rotation response flush failure")
+}
+
 func serveCredentialRotationWithWriter(
 	t *testing.T,
 	app *App,
@@ -117,6 +143,66 @@ func TestPrincipalCredentialRotationWriteFailureRollsBack(t *testing.T) {
 	}
 	if auth.Principal == nil || auth.Principal.PrincipalName != "principalwritefail" {
 		t.Fatalf("old bearer authority after rollback = %+v, want principalwritefail", auth)
+	}
+}
+
+func TestLauncherCredentialRotationFlushFailureRollsBack(t *testing.T) {
+	app, _, oldBearer, l := launcherAuditApp(t, "rotflushfail")
+
+	w := &flushFailingCredentialRotationWriter{}
+	serveCredentialRotationWithWriter(
+		t,
+		app,
+		http.MethodPost,
+		"/principals/rotflushfail/launchers/"+l.ID+"/credential/rotate",
+		oldBearer,
+		w,
+	)
+
+	if w.status != http.StatusOK || w.wrote == 0 {
+		t.Fatalf("pre-flush response state = status %d, wrote %d; want status 200 with full body write", w.status, w.wrote)
+	}
+	auth, err := authenticateCredential(app.DB, oldBearer)
+	if err != nil {
+		t.Fatalf("old Launcher bearer must remain valid after response flush failure: %v", err)
+	}
+	if auth.Launcher == nil || auth.Launcher.LauncherID != l.ID {
+		t.Fatalf("old bearer authority after flush rollback = %+v, want Launcher %s", auth, l.ID)
+	}
+}
+
+func TestPrincipalCredentialRotationFlushFailureRollsBack(t *testing.T) {
+	app, oldBearer, _ := principalCredentialApp(t, "principalflushfail")
+
+	w := &flushFailingCredentialRotationWriter{}
+	serveCredentialRotationWithWriter(
+		t,
+		app,
+		http.MethodPost,
+		"/principals/principalflushfail/credentials/caller/rotate",
+		oldBearer,
+		w,
+	)
+
+	if w.status != http.StatusOK || w.wrote == 0 {
+		t.Fatalf("pre-flush response state = status %d, wrote %d; want status 200 with full body write", w.status, w.wrote)
+	}
+	auth, err := authenticateCredential(app.DB, oldBearer)
+	if err != nil {
+		t.Fatalf("old Principal bearer must remain valid after response flush failure: %v", err)
+	}
+	if auth.Principal == nil || auth.Principal.PrincipalName != "principalflushfail" {
+		t.Fatalf("old bearer authority after flush rollback = %+v, want principalflushfail", auth)
+	}
+}
+
+func TestDeliveryBoundedWriterPropagatesFlushError(t *testing.T) {
+	underlying := &flushFailingCredentialRotationWriter{}
+	w := &deliveryBoundedWriter{ResponseWriter: underlying}
+
+	if err := http.NewResponseController(w).Flush(); err == nil ||
+		!strings.Contains(err.Error(), "forced credential rotation response flush failure") {
+		t.Fatalf("Flush() error = %v, want underlying flush failure", err)
 	}
 }
 

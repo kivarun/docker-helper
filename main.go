@@ -657,14 +657,20 @@ func (w *deliveryBoundedWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
-// Flush forwards http.Flusher when the underlying writer supports it. A flush
-// is a response write, so it arms the response-delivery deadline like
-// WriteHeader, Write, and ReadFrom do.
-func (w *deliveryBoundedWriter) Flush() {
+// FlushError forwards an error-reporting flush to the underlying writer. A
+// flush is a response write, so it arms the response-delivery deadline like
+// WriteHeader, Write, and ReadFrom do. ResponseController must be able to
+// reach net/http's FlushError rather than stopping at this wrapper's
+// error-less http.Flusher implementation.
+func (w *deliveryBoundedWriter) FlushError() error {
 	w.arm()
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// Flush preserves http.Flusher compatibility for existing callers. Callers
+// that need delivery confirmation use FlushError through ResponseController.
+func (w *deliveryBoundedWriter) Flush() {
+	_ = w.FlushError()
 }
 
 // Hijack forwards http.Hijacker when the underlying writer supports it.

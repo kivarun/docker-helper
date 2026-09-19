@@ -84,6 +84,14 @@ func writeSerializedJSONResponse(w http.ResponseWriter, status int, data []byte)
 	if n != len(data) {
 		return io.ErrShortWrite
 	}
+
+	// ResponseWriter.Write may succeed after copying the body only into
+	// net/http's server-side buffer. Rotation may commit only after that
+	// buffer has been flushed to the transport and any synchronous socket
+	// write error has been reported.
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		return err
+	}
 	return nil
 }
 
