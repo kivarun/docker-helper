@@ -12,7 +12,10 @@
 #   B. canonical positional forms work end to end: launcher create NAME,
 #      session create WORKSPACE, session delete SESSION_ID (show/delete
 #      share the same targeting grammar), registry login REGISTRY,
-#      build CONTEXT, run IMAGE.
+#      build CONTEXT, run IMAGE — including the positive RELATIVE
+#      subdirectory build context (the public CLI invoked with the relative
+#      operand from the workspace CWD builds from workspace/ctx; the
+#      second external UAT's unreproduced relative-context anomaly).
 #   C. positional arity is enforced by CLI syntax exit semantics: too few
 #      and too many positionals exit 2 with the usage, before any daemon
 #      request.
@@ -25,11 +28,14 @@
 #      command. Workload arguments that look like docker-helper flags
 #      (--json, --image) reach the container unchanged, with and without the
 #      bare -- separator.
-#   F. explicit-empty endpoint canary: --endpoint "" and --endpoint= exit 2
-#      as local usage errors for one operator and one agent/data-plane
-#      command before any network/auth activity, while the omitted endpoint
-#      still reaches the real system daemon. The exhaustive command-tree
-#      matrix stays unit-test owned.
+#   F. explicit-empty endpoint canary: the operator family (an operator
+#      command without --system, so the empty value is isolated from the
+#      --system + --endpoint conflict) and the agent/data-plane family (a
+#      real agent command, pull, with the Session token deliberately unset)
+#      both exit 2 for --endpoint "" and --endpoint= before any network or
+#      token-lookup activity, while the omitted endpoint still reaches the
+#      real system daemon. The exhaustive command-tree matrix stays
+#      unit-test owned.
 #
 # Each subcase is independent (collect-all). Docker is required (subcase E
 # and the end-to-end fixtures exercise real containers/images where the
@@ -225,6 +231,21 @@ subcase_b() {
     docker rmi uat-reg28:2.2 >/dev/null 2>&1 || true
   else
     reg_fail "B: build CONTEXT failed (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+  fi
+
+  # Positive RELATIVE subdirectory context: the second external UAT reported
+  # one unreproduced session refusing relative build contexts; this is its
+  # exact-artifact live regression. The public CLI is invoked with the
+  # relative operand from the workspace CWD and must build from
+  # workspace/ctx (the CLI resolves the operand against the process CWD and
+  # the daemon keeps the canonical context inside the Session workspace).
+  out="$(cd "$home/ws" && DOCKER_HELPER_SESSION_TOKEN="$btoken" dh build --system ctx --dockerfile Dockerfile --image uat-reg28-rel:2.2 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && docker image inspect uat-reg28-rel:2.2 >/dev/null 2>&1; then
+    reg_ok "B: relative build ctx (workspace CWD) built workspace/ctx and the image exists"
+    docker rmi uat-reg28-rel:2.2 >/dev/null 2>&1 || true
+  else
+    reg_fail "B: relative build ctx failed (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
+    docker rmi uat-reg28-rel:2.2 >/dev/null 2>&1 || true
   fi
   dh session delete --system "$bid" >/dev/null 2>&1 || true
 }
@@ -453,39 +474,48 @@ subcase_f() {
   reg_info "subcase F: explicit-empty endpoint exits 2 before network/auth activity"
   local out rc
 
-  # Operator command (session list --system): both explicit-empty spellings
-  # are local usage errors. exit 2 must come from argument validation, not
-  # from a transport failure against the empty endpoint.
-  out="$(dh session list --system --endpoint "" 2>&1)"; rc=$?
+  # Operator family: an operator command with an explicit-empty endpoint
+  # WITHOUT --system. --system + --endpoint is independently invalid, so the
+  # bare operator spelling is what isolates the explicit-empty validation:
+  # both spellings are local usage errors, exit 2 from argument validation,
+  # not from a transport failure against the empty endpoint.
+  out="$(dh session list --endpoint "" 2>&1)"; rc=$?
   if [ "$rc" -eq 2 ]; then
     reg_ok "F: operator command --endpoint \"\" exits 2 (local usage error)"
   else
     reg_fail "F: operator command --endpoint \"\" exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
   fi
-  out="$(dh session list --system --endpoint= 2>&1)"; rc=$?
+  out="$(dh session list --endpoint= 2>&1)"; rc=$?
   if [ "$rc" -eq 2 ]; then
     reg_ok "F: operator command --endpoint= exits 2 (local usage error)"
   else
     reg_fail "F: operator command --endpoint= exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
   fi
 
-  # Agent/data-plane command (session list without --system under a Session
-  # bearer): the same explicit-empty refusals, before any socket activity.
-  out="$(DOCKER_HELPER_SESSION_TOKEN=dht_uatreg28 dh session list --endpoint "" 2>&1)"; rc=$?
+  # Agent/data-plane family: a real agent command, pull. The Session bearer
+  # is resolved from the environment at runtime; endpoint grammar validation
+  # must precede Session-token lookup and any network activity, so with the
+  # token deliberately unset the empty spellings must still exit 2. If the
+  # validation regressed, the command would fall through to the different
+  # missing-Session-token/runtime failure (exit 1) — that distinction is the
+  # evidence.
+  out="$(env -u DOCKER_HELPER_SESSION_TOKEN dh pull --endpoint "" "$IMAGE" 2>&1)"; rc=$?
   if [ "$rc" -eq 2 ]; then
-    reg_ok "F: agent command --endpoint \"\" exits 2 (local usage error)"
+    reg_ok "F: agent command pull --endpoint \"\" exits 2 (grammar before token lookup)"
   else
-    reg_fail "F: agent command --endpoint \"\" exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
+    reg_fail "F: agent command pull --endpoint \"\" exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
   fi
-  out="$(DOCKER_HELPER_SESSION_TOKEN=dht_uatreg28 dh session list --endpoint= 2>&1)"; rc=$?
+  out="$(env -u DOCKER_HELPER_SESSION_TOKEN dh pull --endpoint= "$IMAGE" 2>&1)"; rc=$?
   if [ "$rc" -eq 2 ]; then
-    reg_ok "F: agent command --endpoint= exits 2 (local usage error)"
+    reg_ok "F: agent command pull --endpoint= exits 2 (grammar before token lookup)"
   else
-    reg_fail "F: agent command --endpoint= exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
+    reg_fail "F: agent command pull --endpoint= exited $rc, want 2 (out: $(printf '%s' "$out" | head -1 | tr '\n' ' '))"
   fi
 
   # Omitted endpoint keeps the normal default resolution: the same operator
   # command reaches the real system daemon and returns its canonical output.
+  # (No --endpoint is involved here; the empty-spelling probes above are the
+  # only --system-free/operator isolation this canary needs.)
   out="$(dh session list --system --json 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"ok": true'; then
     reg_ok "F: omitted endpoint still resolves normally (real system daemon reached)"

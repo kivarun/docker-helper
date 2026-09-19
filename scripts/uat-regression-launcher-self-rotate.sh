@@ -17,10 +17,12 @@
 #      rotates exactly self: same credential row ID, same launcher/principal
 #      identity, new bearer returned exactly once on stdout (never stderr),
 #      old bearer immediately unauthorized.
-#   R2 own name — `rotate <own-launcher-name>` rotates exactly self with the
-#      same invariants.
-#   R3 own stable ID — `rotate <own-dhl-id>` rotates exactly self with the
-#      same invariants.
+#   R2 own name — `rotate <own-launcher-name>` sends the launcher's own name
+#      as the positional selector and rotates exactly self with the same
+#      invariants.
+#   R3 own stable ID — `rotate <own-dhl-id>` sends the launcher's own dhl_
+#      ID as the positional selector and rotates exactly self with the same
+#      invariants.
 #   P. preservation — across the whole sequence the credential ID stays
 #      constant, the Launcher policy (scope/enabled/roots) and the principal
 #      are unchanged, and the pre-existing Session stays owned and listed;
@@ -88,7 +90,16 @@ home2="$(reg_setup_principal "$USER2")" || { reg_fail "fixture: principal $USER2
 LC_CREATE="$(dh launcher create --system --principal "$USER" "$LNAME" --issue-credential --json 2>"$TMPDIR_REG29/create.err")"
 LC_RC=$?
 TOKA="$(printf '%s' "$LC_CREATE" | json_field token || true)"
-LID="$(printf '%s' "$LC_CREATE" | json_field id || true)"
+# Structural extraction of the Launcher ID and credential ID from the create
+# response's named objects, so the fixture never depends on response-field
+# ordering (a first-occurrence "id" grep would silently swap launcher and
+# credential identities if the field order ever changed).
+LID="$(printf '%s' "$LC_CREATE" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+launcher = doc.get("launcher") or {}
+print(launcher.get("id", ""))
+' 2>/dev/null)"
 if [ "$LC_RC" -eq 0 ] && [ -n "$TOKA" ] && [ -n "$LID" ]; then
   printf '%s\n' "$TOKA" > "$TMPDIR_REG29/credA"; chmod 600 "$TMPDIR_REG29/credA"
   reg_ok "fixture: launcher $LNAME created with credential A ($LID)"
@@ -128,13 +139,15 @@ fi
 # --- rotation helpers ------------------------------------------------------------
 
 # expected_identity BEARERFILE: the bearer still authenticates as exactly the
-# same launcher identity (stable ID, name, principal) — used after every
-# rotation and after every refusal.
+# same launcher identity — all three authenticated identity fields (stable
+# Launcher ID, Launcher name, owner Principal) — used after every rotation
+# and after every refusal.
 expected_identity() { # bearerfile
-  dh self --system --token-file "$1" --json 2>/dev/null \
-    | grep -q "\"id\": \"$LID\"" \
-    && dh self --system --token-file "$1" --json 2>/dev/null \
-    | grep -q "\"principal\": \"$USER\""
+  local self
+  self="$(dh self --system --token-file "$1" --json 2>/dev/null)" || return 1
+  printf '%s' "$self" | grep -q "\"id\": \"$LID\"" \
+    && printf '%s' "$self" | grep -q "\"name\": \"$LNAME\"" \
+    && printf '%s' "$self" | grep -q "\"principal\": \"$USER\""
 }
 
 # bearer_unauthorized BEARERFILE: a data-plane operation with this bearer is
@@ -146,13 +159,20 @@ bearer_unauthorized() { # bearerfile
   [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'unauthorized'
 }
 
-# assert_rotated LABEL OUTFILE: one rotation succeeded with the exact
-# preservation invariants: same credential row ID, launcher identity
-# unchanged, new token present exactly once on stdout (never stderr).
-# Emits the new token file path on stdout for the caller to chain.
-assert_rotated() { # label out_bearerfile out_errfile in_bearerfile
+# assert_rotated LABEL NEWFILE ERRFILE CURFILE [LAUNCHER...]: one rotation
+# succeeded with the exact preservation invariants: same credential row ID,
+# launcher identity unchanged, new token present exactly once on stdout
+# (never stderr). Any arguments after the fourth are forwarded verbatim as
+# the rotate command's positional [LAUNCHER] selector, so each caller really
+# exercises its labeled selector spelling (omission / own name / own dhl_
+# ID) — a dropped or mangled selector would make the R2/R3 requests hit a
+# different admission path or the N-phase foreign refusals would have
+# already proven positionals are not silently dropped. Emits the new token
+# file path on stdout for the caller to chain.
+assert_rotated() { # label newfile errfile curfile [LAUNCHER...]
   local label="$1" newfile="$2" errfile="$3" curfile="$4" out rc tok cred
-  out="$(dh launcher credential rotate --system --token-file "$curfile" --json 2>"$errfile")"
+  shift 4
+  out="$(dh launcher credential rotate --system --token-file "$curfile" --json "$@" 2>"$errfile")"
   rc=$?
   tok="$(printf '%s' "$out" | json_field token || true)"
   cred="$(printf '%s' "$out" | json_field id || true)"
@@ -219,7 +239,7 @@ else
 fi
 
 # --- R2: own-name selector rotates self -------------------------------------------
-if assert_rotated "R2 own-name selector" "$TMPDIR_REG29/credC" "$TMPDIR_REG29/r2.err" "$TMPDIR_REG29/credB"; then
+if assert_rotated "R2 own-name selector" "$TMPDIR_REG29/credC" "$TMPDIR_REG29/r2.err" "$TMPDIR_REG29/credB" "$LNAME"; then
   if bearer_unauthorized "$TMPDIR_REG29/credB"; then
     reg_ok "R2 old bearer B is immediately unauthorized"
   else
@@ -230,7 +250,7 @@ else
 fi
 
 # --- R3: own stable dhl_ ID selector rotates self ----------------------------------
-if assert_rotated "R3 own stable ID selector" "$TMPDIR_REG29/credD" "$TMPDIR_REG29/r3.err" "$TMPDIR_REG29/credC"; then
+if assert_rotated "R3 own stable ID selector" "$TMPDIR_REG29/credD" "$TMPDIR_REG29/r3.err" "$TMPDIR_REG29/credC" "$LID"; then
   if bearer_unauthorized "$TMPDIR_REG29/credC"; then
     reg_ok "R3 old bearer C is immediately unauthorized"
   else
