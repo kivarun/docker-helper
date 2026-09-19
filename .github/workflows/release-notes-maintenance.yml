@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   refresh:
-    if: ${{ github.event.head_commit.message == 'ops: refresh GitHub release notes' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -25,21 +24,7 @@ jobs:
           extract_changelog_section() {
             version="$1"
             out="$RUNNER_TEMP/release-$version.md"
-            python3 - "$version" >"$out" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-version = sys.argv[1]
-text = Path("CHANGELOG.md").read_text()
-m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n", text, re.M)
-if not m:
-    raise SystemExit(f"CHANGELOG section {version} not found")
-n = re.search(r"^## \[", text[m.end():], re.M)
-end = len(text) if n is None else m.end() + n.start()
-body = text[m.end():end].strip()
-print(body)
-PY
+            python3 -c 'import re,sys; from pathlib import Path; v=sys.argv[1]; t=Path("CHANGELOG.md").read_text(); m=re.search(rf"^## \\[{re.escape(v)}\\][^\\n]*\\n", t, re.M); m or (_ for _ in ()).throw(SystemExit(f"CHANGELOG section {v} not found")); n=re.search(r"^## \\[", t[m.end():], re.M); e=len(t) if n is None else m.end()+n.start(); print(t[m.end():e].strip())' "$version" >"$out"
             gh release edit "v$version" --notes-file "$out"
           }
 
@@ -48,16 +33,17 @@ PY
           extract_changelog_section 2.0.0
 
           cat >"$RUNNER_TEMP/release-1.0.2.md" <<'EOF'
-A focused installer lifecycle patch over 1.0.1.
+          A focused installer lifecycle patch over 1.0.1.
 
-### Highlights
+          ### Highlights
 
-- Reinstalling while `docker-helper.service` is active now checks the installed and incoming versions, prompts before stopping the service, and preserves the previous installation unchanged if the operator declines or the stop fails.
-- `--yes` auto-confirms the active-service reinstall path.
-- A previously active service is restarted after installation without an unnecessary enable prompt; the existing inactive-service enable/start flow is preserved.
-- Installer failures are now fail-closed: `daemon-reload` or service start failure exits non-zero and never prints a false successful-install message.
-- Added lifecycle regression coverage for confirmed reinstall, refusal, stop failure, daemon-reload failure, start failure, binary state at each step, and systemctl call ordering.
+          - Reinstalling while `docker-helper.service` is active now checks the installed and incoming versions, prompts before stopping the service, and preserves the previous installation unchanged if the operator declines or the stop fails.
+          - `--yes` auto-confirms the active-service reinstall path.
+          - A previously active service is restarted after installation without an unnecessary enable prompt; the existing inactive-service enable/start flow is preserved.
+          - Installer failures are now fail-closed: `daemon-reload` or service start failure exits non-zero and never prints a false successful-install message.
+          - Added lifecycle regression coverage for confirmed reinstall, refusal, stop failure, daemon-reload failure, start failure, binary state at each step, and systemctl call ordering.
 
-Full changes since 1.0.1: https://github.com/kivarun/docker-helper/compare/v1.0.1...v1.0.2
-EOF
+          Full changes since 1.0.1: https://github.com/kivarun/docker-helper/compare/v1.0.1...v1.0.2
+          EOF
+          sed -i 's/^          //' "$RUNNER_TEMP/release-1.0.2.md"
           gh release edit v1.0.2 --notes-file "$RUNNER_TEMP/release-1.0.2.md"
