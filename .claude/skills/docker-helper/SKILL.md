@@ -145,8 +145,9 @@ uses the agent/data-plane resolution above.
 
 Some environments provision the agent with a Docker Helper credential
 instead of a pre-created session token. The credential is a Bearer key
-(stored by the environment via `docker-helper credential install`; the
-agent never installs or rotates it):
+stored by the environment via `docker-helper credential install`; the agent
+does not install it itself. A Launcher credential may optionally perform the
+narrow self-rotation hardening step described below:
 
 - **Launcher credential** (narrowest): session creation and session
   management are automatically scoped to one launcher. No selector is

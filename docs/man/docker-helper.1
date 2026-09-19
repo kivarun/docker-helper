@@ -560,14 +560,18 @@ other Launcher/Principal control-plane authority.
 .B docker-helper launcher credential delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-json] [LAUNCHER]
 Delete a launcher's credential. No secret is printed.
 .PP
-LAUNCHER is a launcher name or ID (\fBdhl_\fR + 32 hex characters),
-resolved under the principal selected by \fB\-\-principal\fR or inferred
-from the authenticated principal credential; omitting it selects that
-principal's \fBdefault\fR launcher. With an admin token \fB\-\-principal\fR
-is required; the single exception is an admin targeting an individual
-launcher by its globally-unique \fBdhl_\fR ID, where the owning principal
-is resolved from the daemon's scope-first launcher list query instead of
-being named. The CLI never searches launchers globally by name.
+Except for the Launcher-authenticated credential self-rotation form
+described above, LAUNCHER is a launcher name or ID (\fBdhl_\fR + 32 hex
+characters), resolved under the principal selected by
+\fB\-\-principal\fR or inferred from the authenticated principal
+credential; omitting it selects that principal's \fBdefault\fR launcher.
+With an admin token \fB\-\-principal\fR is required; the single exception
+is an admin targeting an individual launcher by its globally-unique
+\fBdhl_\fR ID, where the owning principal is resolved from the daemon's
+scope-first launcher list query instead of being named. The CLI never
+searches launchers globally by name. Launcher-authenticated self-rotation
+instead accepts omission, the authenticated Launcher's own name, or its
+stable \fBdhl_\fR ID exactly as documented in the rotate entry above.
 .SS Credential Commands
 The canonical credential lifecycle commands live under
 .BR "principal credential" ;
