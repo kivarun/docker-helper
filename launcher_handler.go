@@ -1411,10 +1411,12 @@ var launcherCredentialSelfRotateGate func()
 // stable owner itself: the authoritative identity comes from the
 // authenticated credential projection, never from a fresh lookup, and the
 // rotation targets the credential ID carried by that authority. Every
-// non-self targeting — a foreign Principal path, a foreign selector, or a
-// name-shaped selector (which must not gain name-resolution authority) —
-// answers the same non-disclosing launcher_not_found refusal without any
-// foreign-state lookup, so a same-name Launcher under another Principal can
+// non-self targeting — a foreign Principal path or any selector that is
+// neither the authenticated Launcher's stable ID nor its own name — answers
+// the same non-disclosing launcher_not_found refusal without any foreign-state
+// lookup. Accepting the authenticated Launcher's own name is direct comparison
+// with the authenticated projection, not name-resolution authority, so a
+// same-name Launcher under another Principal can
 // never rebind the bearer: rebinding by {username, launcher-name} after
 // authentication is impossible by construction.
 func (a *App) tryLauncherCredentialSelfRotate(w http.ResponseWriter, r *http.Request, started time.Time) bool {

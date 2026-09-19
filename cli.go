@@ -16,6 +16,23 @@ type Invocation struct {
 	Run      func(stdout, stderr io.Writer) int
 }
 
+// explicitStringFlag is the shared presence-aware string-flag primitive for
+// CLI grammar that must distinguish omission from an explicitly supplied
+// value, including the empty string. Command-family validation owns whether
+// the explicit value is legal.
+type explicitStringFlag struct {
+	set   bool
+	value string
+}
+
+func (f *explicitStringFlag) String() string { return f.value }
+
+func (f *explicitStringFlag) Set(v string) error {
+	f.set = true
+	f.value = v
+	return nil
+}
+
 // commandPresentation is declarative metadata owned by each leaf command.
 // Finite-result commands declare the canonical human-default + explicit
 // --json contract. True exceptions declare their reason next to the command;

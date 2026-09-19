@@ -27,22 +27,6 @@ func (f *stringListFlag) Set(v string) error {
 	return nil
 }
 
-// explicitStringFlag is a presence-aware string flag. It distinguishes an
-// omitted flag from an explicitly supplied value, including the empty string.
-// Command-specific validation decides whether the explicit value is valid.
-type explicitStringFlag struct {
-	set   bool
-	value string
-}
-
-func (f *explicitStringFlag) String() string { return f.value }
-
-func (f *explicitStringFlag) Set(v string) error {
-	f.set = true
-	f.value = v
-	return nil
-}
-
 // resolveIssueCredential resolves whether a creation operation should issue a
 // credential. The mutually exclusive --issue-credential/--no-credential flags
 // suppress the prompt; with neither supplied it prompts when stdin is a

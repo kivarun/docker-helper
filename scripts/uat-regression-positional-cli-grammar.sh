@@ -237,8 +237,9 @@ subcase_b() {
   # one unreproduced session refusing relative build contexts; this is its
   # exact-artifact live regression. The public CLI is invoked with the
   # relative operand from the workspace CWD and must build from
-  # workspace/ctx (the CLI resolves the operand against the process CWD and
-  # the daemon keeps the canonical context inside the Session workspace).
+  # workspace/ctx. The CLI forwards the relative operand unchanged; the daemon
+  # resolves it relative to the Session workspace and keeps the canonical
+  # context inside that workspace.
   out="$(cd "$home/ws" && DOCKER_HELPER_SESSION_TOKEN="$btoken" dh build --system ctx --dockerfile Dockerfile --image uat-reg28-rel:2.2 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && docker image inspect uat-reg28-rel:2.2 >/dev/null 2>&1; then
     reg_ok "B: relative build ctx (workspace CWD) built workspace/ctx and the image exists"

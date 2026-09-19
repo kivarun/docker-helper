@@ -90,7 +90,7 @@ Operator / agent
       │
       ├─── admin token (full administrative control)
       ├─── Principal credential (Principal-scoped control plane)
-      ├─── Launcher credential (Launcher-scoped Session control)
+      ├─── Launcher credential (Launcher-scoped Session control + credential self-rotation)
       └─── session token (Docker data plane)
       │
     +--+--+
@@ -241,7 +241,7 @@ target-resolution contract:
 |---|---|---|---|---|
 | Admin token | the administrator | full control plane: all Principals, Launchers, Principal and Launcher credentials, all Sessions, configuration, reload, admin-token rotation | system mode: exactly one explicit selector required (`400 missing_launcher_selector`); user mode: the local daemon-owner `default` Launcher | `?principal=USER` and/or `?launcher=LAUNCHER`; a `dhl_` Launcher ID is valid without a Principal, a Launcher name requires the Principal scope |
 | Principal credential | one Principal | that Principal's resources: its Launchers and their credentials, its own Principal credential, `principal show` on itself, and the Sessions owned by its Principal's Launchers | its Principal's `default` Launcher, or an explicit own Launcher | `?launcher=` (name or ID) inside its own scope; `--principal` is illegal, even for its own Principal |
-| Launcher credential | one Launcher | that Launcher's Sessions and the credential self-introspection surfaces (`GET /auth` authority/classification introspection; `GET /self` own-resource introspection) | its own Launcher (forced) | none — there is no narrowing contract for this authority |
+| Launcher credential | one Launcher | that Launcher's Sessions, the credential self-introspection surfaces (`GET /auth` authority/classification introspection; `GET /self` own-resource introspection), and atomic rotation of exactly its own authenticated Launcher credential; no other Launcher/Principal control-plane capability | its own Launcher (forced) | none — there is no narrowing contract for this authority |
 | Session token | one Session | its issued filesystem snapshot's data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login`, and that Session's operation endpoints | not a control authority; not accepted by control endpoints or `GET /auth` | none |
 
 `GET /self` is the one credential self-introspection surface for all three
