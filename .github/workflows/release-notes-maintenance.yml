@@ -24,8 +24,7 @@ jobs:
           extract_changelog_section() {
             version="$1"
             out="$RUNNER_TEMP/release-$version.md"
-            python3 -c 'import re,sys; from pathlib import Path; v=sys.argv[1]; t=Path("CHANGELOG.md").read_text(); m=re.search(rf"^## \[{re.escape(v)}\][^\n]*\n", t, re.M); m or (_ for _ in ()).throw(SystemExit(f"CHANGELOG section {v} not found")); n=re.search(r"^## \[", t[m.end():], re.M); e=len(t) if n is None else m.end()+n.start(); print(t[m.end():e].strip())' "$version" >"$out"
-            sed -i '/^\\[2\\.1\\.0\\]:/,$d' "$out"
+            python3 -c 'import re,sys; from pathlib import Path; v=sys.argv[1]; t=Path("CHANGELOG.md").read_text(); m=re.search(rf"^## \[{re.escape(v)}\][^\n]*\n", t, re.M); m or (_ for _ in ()).throw(SystemExit(f"CHANGELOG section {v} not found")); n=re.search(r"^## \[", t[m.end():], re.M); e=len(t) if n is None else m.end()+n.start(); body=t[m.end():e].strip(); body=re.sub(r"\n\[2\.1\.0\]:.*$", "", body, flags=re.S); print(body)' "$version" >"$out"
             gh release edit "v$version" --notes-file "$out"
           }
 
