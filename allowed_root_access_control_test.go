@@ -344,15 +344,19 @@ func TestPrincipalHTTPSetAccess(t *testing.T) {
 		}
 	})
 
-	t.Run("reserved daemon-owner principal is refused", func(t *testing.T) {
-		owner := app.userModeDefault.username
-		w := launcherRequest(t, app, http.MethodPatch, "/principals/"+owner+"/allowed-roots", testAdminToken,
-			`{"path":"`+inner+`","access":"read_only"}`)
-		if w.Code != http.StatusConflict {
+	t.Run("out-of-ceiling add is refused", func(t *testing.T) {
+		owner := testOwnerUsername
+		outside := filepath.Join(os.TempDir(), "dh-outside-global-ceiling-target")
+		if err := os.MkdirAll(outside, 0755); err != nil {
+			t.Fatal(err)
+		}
+		w := launcherRequest(t, app, http.MethodPost, "/principals/"+owner+"/allowed-roots", testAdminToken,
+			`{"path":"`+outside+`","access":"read_only"}`)
+		if w.Code == http.StatusOK {
 			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 		}
-		if !strings.Contains(w.Body.String(), "user_mode_owner_reserved") {
-			t.Errorf("body = %s, want user_mode_owner_reserved", w.Body.String())
+		if !strings.Contains(w.Body.String(), "outside_global_root") {
+			t.Errorf("body = %s, want outside_global_root", w.Body.String())
 		}
 	})
 }
@@ -451,16 +455,20 @@ func TestLauncherHTTPSetAccess(t *testing.T) {
 		}
 	})
 
-	t.Run("reserved default launcher of the daemon owner is refused", func(t *testing.T) {
-		owner := app.userModeDefault.username
+	t.Run("inherit-scope launcher set-access targets a stored root only", func(t *testing.T) {
+		owner := testOwnerUsername
+		inside := filepath.Join(app.Config.AllowedRoots[0].Path, "owner-not-stored-target")
+		if err := os.MkdirAll(inside, 0755); err != nil {
+			t.Fatal(err)
+		}
 		w := launcherRequest(t, app, http.MethodPatch,
 			"/principals/"+owner+"/launchers/default/allowed-roots", testAdminToken,
-			`{"path":"`+root+`","access":"read_only"}`)
-		if w.Code != http.StatusConflict {
+			`{"path":"`+inside+`","access":"read_only"}`)
+		if w.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 		}
-		if !strings.Contains(w.Body.String(), "user_mode_owner_reserved") {
-			t.Errorf("body = %s, want user_mode_owner_reserved", w.Body.String())
+		if !strings.Contains(w.Body.String(), "allowed_root_not_found") {
+			t.Errorf("body = %s, want allowed_root_not_found", w.Body.String())
 		}
 	})
 
@@ -1618,32 +1626,40 @@ func TestLauncherSetAccessNotFoundAuditCarriesRequestedAccess(t *testing.T) {
 	assertNoSecrets(t, raw, m, testAdminToken, testAdminToken)
 }
 
-// TestReservedAddAuditCarriesRequestedAccess proves a refused mutation of the
-// reserved user-mode daemon-owner chain keeps the parsed requested access in
-// its audit record together with the stable reserved-owner refusal result.
-func TestReservedAddAuditCarriesRequestedAccess(t *testing.T) {
+// TestRefusedAddAuditCarriesRequestedAccess proves a refused allowed-root add
+// keeps the parsed requested access in its audit record together with the
+// stable refusal result.
+func TestRefusedAddAuditCarriesRequestedAccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
-	owner := app.userModeDefault.username
-	root := app.Config.AllowedRoots[0].Path
+	owner := testOwnerUsername
+	outside := filepath.Join(os.TempDir(), "dh-outside-global-ceiling-audit-target")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	w := launcherRequest(t, app, http.MethodPost, "/principals/"+owner+"/allowed-roots", testAdminToken,
-		`{"path":"`+root+`","access":"read_only"}`)
-	expectReservedResponse(t, w, "principal allowed-root add (audit)")
+		`{"path":"`+outside+`","access":"read_only"}`)
+	if w.Code == http.StatusOK {
+		t.Fatalf("status = %d, body=%s (refusal expected)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "outside_global_root") {
+		t.Fatalf("body = %s, want outside_global_root refusal", w.Body.String())
+	}
 
 	raw := findAuditLine(auditBuf, "principal.allowed_root_add")
 	if raw == "" {
 		t.Fatalf("missing add audit line\n%s", auditBuf.String())
 	}
 	m := parseAuditMap(t, raw)
-	if m["result"] != "user_mode_owner_reserved" {
-		t.Errorf("result = %v, want user_mode_owner_reserved", m["result"])
+	if m["result"] != "outside_global_root" {
+		t.Errorf("result = %v, want outside_global_root", m["result"])
 	}
 	if m["requested_access"] != "read_only" {
 		t.Errorf("requested_access = %v, want read_only (the parsed canonical mode)", m["requested_access"])
 	}
 	if _, ok := m["stored_access"]; ok {
-		t.Error("reserved refusal must not carry stored_access")
+		t.Error("refusal must not carry stored_access")
 	}
 	if m["principal_name"] != owner {
 		t.Errorf("principal_name = %v, want the target owner %q", m["principal_name"], owner)

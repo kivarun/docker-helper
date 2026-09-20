@@ -301,7 +301,6 @@ func TestWorkloadAppArmorValidateOwnedStateRejectsMalformed(t *testing.T) {
 // touches its first kernel-side resource.
 func TestCoordinatorPrepareCommitsRecordBeforeParserLoad(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	c := installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	prep := workloadPreparation{
 		OperationID:   "op_crash1",

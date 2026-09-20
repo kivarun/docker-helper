@@ -29,7 +29,7 @@ func setupSessionShowHierarchy(t *testing.T, app *App, bearer, workspace string)
 		t.Fatal(err)
 	}
 
-	w := launcherRequest(t, app, http.MethodPost, "/sessions", bearer, fmt.Sprintf(`{"workspace":%q}`, workspace))
+	w := launcherRequest(t, app, http.MethodPost, "/sessions", bearer, fmt.Sprintf(`{"principal":%q,"workspace":%q}`, testOwnerUsername, workspace))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create session: %d %s", w.Code, w.Body.String())
 	}
@@ -342,10 +342,9 @@ func TestSessionListStaysLightweightOfSnapshots(t *testing.T) {
 	// Any snapshot-entry query through this connection would trip the point.
 	snapshotQueryPoint := newParkedQueryPoint("FROM session_filesystem_snapshot_entries")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, snapshotQueryPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, snapshotQueryPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	w := launcherRequest(t, app, http.MethodGet, "/sessions", testAdminToken, "")

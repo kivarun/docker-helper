@@ -1423,9 +1423,13 @@ func TestPrincipalCascadeDelete(t *testing.T) {
 		t.Fatalf("DELETE FROM principals error: %v", err)
 	}
 
-	// Verify allowed roots were cascade-deleted
+	// Verify the deleted Principal's allowed roots were cascade-deleted.
 	var count int
-	err = app.DB.QueryRow("SELECT COUNT(*) FROM principal_allowed_roots").Scan(&count)
+	err = app.DB.QueryRow(
+		`SELECT COUNT(*) FROM principal_allowed_roots
+		 WHERE principal_id NOT IN (SELECT id FROM principals WHERE username = ?)`,
+		testOwnerUsername,
+	).Scan(&count)
 	if err != nil {
 		t.Fatalf("cannot query allowed roots: %v", err)
 	}

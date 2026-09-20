@@ -18,7 +18,9 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // assertRunWorkloadPrivilegeFloor proves the floor invariants on one
@@ -97,10 +99,15 @@ func securityOptValue(args []string, prefix string) string {
 func runWithCapturedDockerArgs(t *testing.T, app *App, token string, request map[string]any) ([]string, int) {
 	t.Helper()
 
+	waitAllOperationsTerminal(t, app)
+
+	var mu sync.Mutex
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if len(args) > 0 && args[0] == "--config" && args[2] == "run" {
+			mu.Lock()
 			capturedArgs = args
+			mu.Unlock()
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
@@ -112,7 +119,41 @@ func runWithCapturedDockerArgs(t *testing.T, app *App, token string, request map
 
 	app.handleRun(w, req)
 
+	mu.Lock()
+	defer mu.Unlock()
 	return capturedArgs, w.Code
+}
+
+// waitAllOperationsTerminal waits (bounded) until every operation the
+// supervisor currently holds has reached a terminal state, so a repeated
+// ExecCommandContext seam assignment cannot race a prior operation's
+// cleanup goroutine.
+func waitAllOperationsTerminal(t *testing.T, app *App) {
+	t.Helper()
+	if app.OperationSupervisor == nil {
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		app.OperationSupervisor.mu.RLock()
+		var pending []*operation
+		for _, op := range app.OperationSupervisor.ops {
+			op.mu.Lock()
+			terminal := op.CompletedAt != nil
+			op.mu.Unlock()
+			if !terminal {
+				pending = append(pending, op)
+			}
+		}
+		app.OperationSupervisor.mu.RUnlock()
+		if len(pending) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("operations did not reach a terminal state in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestRunWorkloadPrivilegeFloorUserMode proves the user-mode floor: the
@@ -141,7 +182,6 @@ func TestRunWorkloadPrivilegeFloorUserMode(t *testing.T) {
 // workload profile as before.
 func TestRunWorkloadPrivilegeFloorSystemModeAppArmor(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	result, err := createSystemSession(t, app)
@@ -166,7 +206,6 @@ func TestRunWorkloadPrivilegeFloorSystemModeAppArmor(t *testing.T) {
 // argv owner and the SELinux type selection stays present.
 func TestRunWorkloadPrivilegeFloorSystemModeSELinux(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMSELinux)
 
 	result, err := createSystemSession(t, app)

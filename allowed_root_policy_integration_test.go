@@ -575,14 +575,7 @@ func TestInitForbiddenUserRootFailsBeforeState(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(forbiddenRoot) }()
 
-	// Save and restore EffectiveUID
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = origUID }()
-
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
+	mockDetectLSM(t, LSMAppArmor, nil)
 
 	var stdout, stderr bytes.Buffer
 	err = runInit(forbiddenRoot, &stdout, &stderr)

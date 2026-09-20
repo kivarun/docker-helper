@@ -582,12 +582,8 @@ func runSessionCleanup(stdout, stderr io.Writer, jsonOut bool) int {
 		return 1
 	}
 
-	// Ensure runtime directory exists with mode-appropriate permissions.
-	dirMode := os.FileMode(0700)
-	if resolveDeploymentMode() == ModeSystem {
-		dirMode = 0755
-	}
-	if err := os.MkdirAll(runtimeDir, dirMode); err != nil {
+	// Ensure the runtime directory exists.
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 		fmt.Fprintf(stderr, "error: cannot create runtime directory: %v\n", err)
 		return 1
 	}

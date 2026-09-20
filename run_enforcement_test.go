@@ -328,7 +328,6 @@ func TestRunReadOnlyRootRefusalLeavesNoResidue(t *testing.T) {
 // exactly like in system mode.
 func TestRunUserModeWholeWorkspaceRWWithNestedRO(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
@@ -613,7 +612,6 @@ func TestRunReadOnlyRootRefusalReleasesLease(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 	mac := newSessionMACCoordinator(db, newTestSessionMACDriver(LSMBackend("test")))
 	app := &App{

@@ -99,12 +99,6 @@ func TestResolveDefaultEndpointFallsBackToSystem(t *testing.T) {
 
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
-	// Don't create user socket.
-
-	// Mock systemSocketExists to return true.
-	origSystemSocket := systemSocketExists
-	systemSocketExists = func() bool { return true }
-	defer func() { systemSocketExists = origSystemSocket }()
 
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 	tokenPath := filepath.Join(dir, "xdg_config", "docker-helper", "credential.token")
@@ -112,7 +106,8 @@ func TestResolveDefaultEndpointFallsBackToSystem(t *testing.T) {
 	os.MkdirAll(tokenDir, 0755)
 	writeTestTokenFile(t, tokenPath, "test-token")
 
-	// Should fall back to system socket since user socket doesn't exist.
+	// The default endpoint resolves to the system socket with the installed
+	// credential token.
 	client, err := resolveOperatorClient(operatorClientOptions{})
 	if err != nil {
 		t.Fatalf("resolveOperatorClient: %v", err)

@@ -161,11 +161,9 @@ func wantSnapshotJSON(app *App) string {
 // every ceiling transition strictly inside the workspace.
 func TestHTTPSessionFilesystemOmittedInheritsCeiling(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	// The full multi-root issuance contract (external absolute roots) is a
 	// system-mode capability; user mode restricts filesystem roots to the
 	// canonical workspace and is proven separately.
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -194,7 +192,6 @@ func TestHTTPSessionFilesystemOmittedInheritsCeiling(t *testing.T) {
 // workspace-only create — the inherited derived snapshot, byte-for-byte.
 func TestHTTPSessionFilesystemEmptyArrayInherits(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -224,7 +221,6 @@ func TestHTTPSessionFilesystemEmptyArrayInherits(t *testing.T) {
 // is the inherited workspace-only create, proven separately).
 func TestHTTPSessionFilesystemPresenceRefusals(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -256,7 +252,6 @@ func TestHTTPSessionFilesystemPresenceRefusals(t *testing.T) {
 // or a duplicate canonical identity is refused before the Session exists.
 func TestHTTPSessionFilesystemCanonicalizationRefusals(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 	tree := filepath.Join(app.Config.AllowedRoots[0].Path, "runs")
@@ -325,7 +320,6 @@ func TestHTTPSessionFilesystemCanonicalizationRefusals(t *testing.T) {
 // the effective Launcher ceiling are refused before the Session exists.
 func TestHTTPSessionFilesystemCeilingRefusals(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 	tree := filepath.Join(app.Config.AllowedRoots[0].Path, "runs")
@@ -365,7 +359,6 @@ func TestHTTPSessionFilesystemCeilingRefusals(t *testing.T) {
 // canonical requested path) stays in the operational log.
 func TestHTTPSessionFilesystemRefusalDoesNotDiscloseCanonicalPath(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -483,7 +476,6 @@ func TestSessionFilesystemOutsideCeilingRefusedByCeilingAdmission(t *testing.T) 
 // attempted widening is refused with no additional Session created.
 func TestHTTPLauncherCredentialRoots(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	auditBuf, _ := setupTestLogging(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 
@@ -561,7 +553,6 @@ func TestHTTPLauncherCredentialRoots(t *testing.T) {
 // widening refusal.
 func TestHTTPSessionFilesystemAuthoritySymmetry(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	principalToken, _, launcherID, workspace := setupSessionNarrowingFixture(t, app)
 

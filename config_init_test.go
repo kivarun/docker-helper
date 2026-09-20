@@ -21,6 +21,9 @@ func TestInitCoreCreatesConfig(t *testing.T) {
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	defer func() { getStateDirFunc = origState }()
 
 	// Use a real directory for the allowed root
 	rootDir := testAllowedRootDir(t)
@@ -60,6 +63,9 @@ func TestInitCoreExistingTokenFails(t *testing.T) {
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	defer func() { getStateDirFunc = origState }()
 
 	// Create existing token
 	tokenPath := filepath.Join(dir, "admin.token")
@@ -92,6 +98,9 @@ func TestInitSystemCoreInvocation(t *testing.T) {
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	defer func() { getStateDirFunc = origState }()
 
 	rootDir := testAllowedRootDir(t)
 
@@ -184,6 +193,9 @@ func TestInitSystemExistingConfigMatch(t *testing.T) {
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	defer func() { getStateDirFunc = origState }()
 
 	// Create real directory for the matching root
 	rootDir := testAllowedRootDir(t)
@@ -274,65 +286,6 @@ func TestInitSystemExistingTokenFails(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatal("expected error for existing token")
-	}
-}
-
-// --- User mode tests ---
-
-func TestInitUserModeNoMACBackendCheck(t *testing.T) {
-	dir := t.TempDir()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	rootDir := testAllowedRootDir(t)
-
-	// Save and restore EffectiveUID
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = origUID }()
-
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
-
-	var stdout, stderr bytes.Buffer
-	err := runInit(rootDir, &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("runInit failed: %v", err)
-	}
-
-	// Verify no MAC backend status message in stdout
-	if strings.Contains(stdout.String(), "workspace root added") ||
-		strings.Contains(stdout.String(), "workspace root already present") {
-		t.Errorf("user mode should not print MAC backend status, got: %s", stdout.String())
-	}
-}
-
-func TestInitUserModeNoRestrictions(t *testing.T) {
-	dir := t.TempDir()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	// Use a valid workspace root (not under /tmp).
-	rootDir := testAllowedRootDir(t)
-
-	// Save and restore EffectiveUID
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = origUID }()
-
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
-
-	var stdout, stderr bytes.Buffer
-	err := runInit(rootDir, &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("user mode should not apply MAC backend restrictions, got: %v", err)
 	}
 }
 
@@ -522,127 +475,6 @@ func TestValidateRawConfigRejectsRelativeAllowedRoot(t *testing.T) {
 	err := validateRawConfig(raw)
 	if err == nil {
 		t.Fatal("expected error for relative allowed_root")
-	}
-}
-
-// --- User systemd unit installation tests ---
-
-func TestInstallUserSystemdUnitCopiesFromSystemPath(t *testing.T) {
-	orig := installUserSystemdUnit
-	defer func() { installUserSystemdUnit = orig }()
-
-	homeDir := t.TempDir()
-	systemDir := t.TempDir()
-	unitContent := []byte("[Unit]\nDescription=Test\n")
-	if err := os.WriteFile(filepath.Join(systemDir, "docker-helper.service"), unitContent, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Override the system path.
-	// We can't override a const, so we mock the function instead.
-	installUserSystemdUnit = func(stdout, stderr io.Writer) {
-		userUnitDir := filepath.Join(homeDir, ".config", "systemd", "user")
-		userUnitPath := filepath.Join(userUnitDir, "docker-helper.service")
-
-		if _, err := os.Stat(userUnitPath); err == nil {
-			return
-		}
-
-		data, err := os.ReadFile(filepath.Join(systemDir, "docker-helper.service"))
-		if err != nil {
-			return
-		}
-
-		if err := os.MkdirAll(userUnitDir, 0700); err != nil {
-			return
-		}
-		if err := os.WriteFile(userUnitPath, data, 0644); err != nil {
-			return
-		}
-		fmt.Fprintln(stdout, "Systemd user unit installed at:")
-		fmt.Fprintln(stdout, userUnitPath)
-	}
-
-	var stdout, stderr bytes.Buffer
-	installUserSystemdUnit(&stdout, &stderr)
-
-	userUnitPath := filepath.Join(homeDir, ".config", "systemd", "user", "docker-helper.service")
-	data, err := os.ReadFile(userUnitPath)
-	if err != nil {
-		t.Fatalf("user unit not installed: %v", err)
-	}
-	if !bytes.Equal(data, unitContent) {
-		t.Errorf("unit content mismatch: got %q, want %q", data, unitContent)
-	}
-	if !strings.Contains(stdout.String(), "Systemd user unit installed") {
-		t.Errorf("expected installation message, got: %s", stdout.String())
-	}
-}
-
-func TestInstallUserSystemdUnitSkipsIfExists(t *testing.T) {
-	orig := installUserSystemdUnit
-	defer func() { installUserSystemdUnit = orig }()
-
-	homeDir := t.TempDir()
-	existingUnit := filepath.Join(homeDir, ".config", "systemd", "user", "docker-helper.service")
-	if err := os.MkdirAll(filepath.Dir(existingUnit), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(existingUnit, []byte("[Unit]\nDescription=Existing\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	installUserSystemdUnit = func(stdout, stderr io.Writer) {
-		userUnitDir := filepath.Join(homeDir, ".config", "systemd", "user")
-		userUnitPath := filepath.Join(userUnitDir, "docker-helper.service")
-
-		if _, err := os.Stat(userUnitPath); err == nil {
-			return
-		}
-		fmt.Fprintln(stdout, "would install")
-	}
-
-	var stdout, stderr bytes.Buffer
-	installUserSystemdUnit(&stdout, &stderr)
-
-	if stdout.Len() > 0 {
-		t.Errorf("expected no output when unit exists, got: %s", stdout.String())
-	}
-	// Verify existing unit was not modified.
-	data, err := os.ReadFile(existingUnit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(data, []byte("[Unit]\nDescription=Existing\n")) {
-		t.Error("existing unit was modified")
-	}
-}
-
-func TestInstallUserSystemdUnitSkipsWhenSystemUnitMissing(t *testing.T) {
-	orig := installUserSystemdUnit
-	defer func() { installUserSystemdUnit = orig }()
-
-	homeDir := t.TempDir()
-
-	// Simulate missing system unit by reading from non-existent path.
-	installUserSystemdUnit = func(stdout, stderr io.Writer) {
-		_, err := os.ReadFile("/nonexistent/docker-helper.service")
-		if err != nil {
-			return
-		}
-		fmt.Fprintln(stdout, "would install")
-	}
-
-	var stdout, stderr bytes.Buffer
-	installUserSystemdUnit(&stdout, &stderr)
-
-	if stdout.Len() > 0 {
-		t.Errorf("expected no output when system unit missing, got: %s", stdout.String())
-	}
-	// Verify no user unit was created.
-	userUnitPath := filepath.Join(homeDir, ".config", "systemd", "user", "docker-helper.service")
-	if _, err := os.Stat(userUnitPath); err == nil {
-		t.Error("user unit should not be created when system unit is missing")
 	}
 }
 
@@ -1079,34 +911,6 @@ func TestInitSystemAppArmorNoSELinuxRelabel(t *testing.T) {
 	}
 	if called {
 		t.Error("AppArmor system init must not invoke the SELinux deployment relabel")
-	}
-}
-
-// TestInitUserModeNoSELinuxRelabel verifies that user-mode init does not
-// invoke any SELinux relabel (no new SELinux dependency).
-func TestInitUserModeNoSELinuxRelabel(t *testing.T) {
-	dir := t.TempDir()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = origUID }()
-
-	called := false
-	origRC := deploymentRestorecon
-	deploymentRestorecon = func(args ...string) ([]byte, error) { called = true; return nil, nil }
-	defer func() { deploymentRestorecon = origRC }()
-
-	rootDir := testAllowedRootDir(t)
-	var stdout, stderr bytes.Buffer
-	if _, err := initCore(rootDir, &stdout, &stderr); err != nil {
-		t.Fatalf("initCore failed: %v", err)
-	}
-	if called {
-		t.Error("user-mode init must not invoke the SELinux deployment relabel")
 	}
 }
 

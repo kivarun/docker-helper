@@ -66,6 +66,16 @@ func setupCLITestEnv(t *testing.T) string {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
+	// System-only client contract: the default endpoint is the system socket,
+	// so the seam points at the fixture socket and the operator credential is
+	// installed at the canonical client store.
+	origSocketPath := systemSocketPath
+	systemSocketPath = socketPath
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
+	if err := os.WriteFile(filepath.Join(xdgConfigHome, "docker-helper", "credential.token"), []byte("test-token\n"), 0600); err != nil {
+		t.Fatalf("write credential: %v", err)
+	}
+
 	return socketPath
 }
 

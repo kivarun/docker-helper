@@ -70,7 +70,7 @@ func setupAppArmorMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *a
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatalf("cannot create daemon home: %v", err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
+	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 	return app, mac, driver, mgr
 }
 
@@ -91,7 +91,7 @@ func TestAppArmorDriverExternalTreeThroughSameOwner(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-aa", []string{extDir, extFile}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa", extDir)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-aa", extDir)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -145,12 +145,12 @@ func TestAppArmorDriverOverlapRelease(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-aa-parent", []string{parent}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-parent", parent)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-aa-parent", parent)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(parent): %v", err)
 	}
 	if _, err := mac.CreateSessionBinding("sess-aa-child", []string{child}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-child", child)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-aa-child", child)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(child): %v", err)
 	}
@@ -192,7 +192,7 @@ func TestAppArmorDriverFileBoundaryNeverCoversDescendant(t *testing.T) {
 	child := filepath.Join(treeFile, "child")
 
 	if _, err := mac.CreateSessionBinding("sess-aa-file-kind", []string{treeFile}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-file-kind", allowedRoot)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-aa-file-kind", allowedRoot)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestAppArmorDriverReplacedDirectoryNotCoveredByFileBoundary(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-aa-replaced", []string{treeFile}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-replaced", allowedRoot)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-aa-replaced", allowedRoot)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestAppArmorDriverReplacedFileNotCoveredByDirectoryBoundary(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-aa-dir-replaced", []string{treeDir}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-dir-replaced", allowedRoot)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-aa-dir-replaced", allowedRoot)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestAppArmorCreateSessionBindingRefusesStaleFileBoundary(t *testing.T) {
 	inserted := false
 	if _, err := mac.CreateSessionBinding("sess-aa-stale-live", []string{treeFile}, func([]sessionMACCoverage) error {
 		inserted = true
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-stale-live", allowedRoot)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-aa-stale-live", allowedRoot)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding(live): %v", err)
 	}
@@ -385,7 +385,7 @@ func TestAppArmorCreateSessionBindingRefusesStaleFileBoundary(t *testing.T) {
 	inserted = false
 	if _, err := mac.CreateSessionBinding("sess-aa-stale-new", []string{treeFile}, func([]sessionMACCoverage) error {
 		inserted = true
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-aa-stale-new", allowedRoot)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-aa-stale-new", allowedRoot)
 	}); err == nil {
 		t.Fatal("the create must fail closed when the persisted file boundary cannot cover the replaced directory tree")
 	} else if !errors.Is(err, ErrMACPreparation) {

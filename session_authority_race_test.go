@@ -59,7 +59,6 @@ func legacyRunEnforcementApp(t *testing.T, dir, dbPath string, db *sql.DB, allow
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 	app := &App{
 		Config:              cfg,

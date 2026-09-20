@@ -17,14 +17,25 @@ func TestInitExplicitAllowedRoot(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
+	// Init is system-only: the runInit root gate is bypassed with the UID
+	// seam, and the runtime/state directory seams point at the isolated
+	// fixture directories.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return filepath.Join(dir, "runtime"), nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
+
 	allowedRoot := filepath.Join(testAllowedRootDir(t), "workspaces")
 	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
+	mockDetectLSM(t, LSMAppArmor, nil)
 
 	var stdout, stderr bytes.Buffer
 	if err := runInit(allowedRoot, &stdout, &stderr); err != nil {

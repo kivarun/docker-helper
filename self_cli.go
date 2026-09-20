@@ -88,8 +88,8 @@ credential does not already have and never mutates state.
 				// `session show`). Without it, the agent environment's
 				// DOCKER_HELPER_SESSION_TOKEN is the session bearer's own
 				// credential — the agent-context self introspection path —
-				// resolved through the agent client owner (default user-mode
-				// socket, --system system socket, or the explicit endpoint).
+				// resolved through the agent client owner (default system
+				// socket or the explicit endpoint).
 				// With neither, the operator resolution (system/default
 				// endpoint token files) answers.
 				var client *apiClient

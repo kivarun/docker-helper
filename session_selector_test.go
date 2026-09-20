@@ -38,7 +38,7 @@ func TestCreateSessionSelectorMatrix(t *testing.T) {
 		want int
 		code string
 	}{
-		{name: "omitted", body: `{"workspace":"` + ws + `"}`, want: http.StatusCreated, code: ""},
+		{name: "omitted", body: `{"principal":"` + testOwnerUsername + `","workspace":"` + ws + `"}`, want: http.StatusCreated, code: ""},
 		{name: "empty launcher_id", body: `{"workspace":"` + ws + `","launcher_id":""}`, want: http.StatusBadRequest, code: "invalid_selector"},
 		{name: "empty principal", body: `{"workspace":"` + ws + `","principal":""}`, want: http.StatusBadRequest, code: "invalid_selector"},
 		{name: "null launcher_id", body: `{"workspace":"` + ws + `","launcher_id":null}`, want: http.StatusBadRequest, code: "invalid_selector"},

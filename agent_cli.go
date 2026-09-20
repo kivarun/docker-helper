@@ -46,21 +46,15 @@ func registerAgentEndpointFlags(fs *flag.FlagSet) (system *bool, endpoint *expli
 
 // resolveAgentSocketPath returns the Unix socket path for agent-facing CLI commands.
 // Resolution precedence:
-//  1. DOCKER_HELPER_SOCKET_PATH if set
-//  2. $XDG_RUNTIME_DIR/docker-helper/docker-helper.sock if that user-mode socket exists
-//  3. systemSocketPath (/run/docker-helper/docker-helper.sock, system/sandbox default)
+//  1. DOCKER_HELPER_SOCKET_PATH if explicitly set
+//  2. systemSocketPath (/run/docker-helper/docker-helper.sock, the default)
 //
-// The presence of XDG_RUNTIME_DIR alone does not select a nonexistent user socket;
-// agent commands fall back to the system socket when no user-mode daemon is present.
+// There is no per-user daemon to discover: the system service is the only
+// daemon deployment, so the default agent endpoint is always the system
+// socket.
 func resolveAgentSocketPath() string {
 	if socketPath := os.Getenv("DOCKER_HELPER_SOCKET_PATH"); socketPath != "" {
 		return socketPath
-	}
-	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
-		userSocket := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-		if userSocketExists(userSocket) {
-			return userSocket
-		}
 	}
 	return systemSocketPath
 }

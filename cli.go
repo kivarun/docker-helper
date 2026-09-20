@@ -552,14 +552,11 @@ For root, /home is used as the default.
 In non-interactive mode (stdin is not a terminal), --allowed-root
 is required.
 
-System mode (effective UID 0):
+System mode (effective UID 0, the only daemon deployment):
   The allowed root is the system-wide authorization ceiling.
   init does not prepare MAC state.
   MAC coverage for a concrete workspace is prepared by the session
-  lifecycle at session creation.
-
-User mode (non-root):
-  No MAC preparation is required.`,
+  lifecycle at session creation.`,
 
 	Presentation: exceptionPresentation("interactive setup workflow with one-time admin-token disclosure"),
 

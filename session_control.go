@@ -329,7 +329,6 @@ func (a *App) resolveCreateLauncher(auth *operatorAuthority, sel createSelector)
 	case auth == nil:
 		return "", ErrInvalidSelector
 	case auth.class == operatorAuthorityAdmin:
-		userMode := a.getConfig().Mode == ModeUser
 		switch {
 		case sel.launcherID != "":
 			return sel.launcherID, nil
@@ -346,8 +345,6 @@ func (a *App) resolveCreateLauncher(auth *operatorAuthority, sel createSelector)
 				return "", err
 			}
 			return findDefaultLauncher(a.DB, int64(pid))
-		case userMode && a.userModeDefault != nil:
-			return a.userModeDefault.launcherID, nil
 		default:
 			return "", ErrMissingLauncherSelector
 		}
@@ -422,12 +419,7 @@ func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, w
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSystem, err)
 	}
-	userMode := a.getConfig().Mode == ModeUser
-	var daemonID int64
-	if userMode && a.userModeDefault != nil {
-		daemonID = a.userModeDefault.principalID
-	}
-	effectiveEntries, err := effectiveLauncherAllowedRoots(globalEntries, snap, daemonID, userMode)
+	effectiveEntries, err := effectiveLauncherAllowedRoots(globalEntries, snap)
 	if err != nil {
 		return nil, err
 	}

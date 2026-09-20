@@ -51,7 +51,6 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeUser,
 	}
 
 	hash := sha256.Sum256([]byte(testAdminToken))
@@ -68,7 +67,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
+	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 
 	// Create a session.
 	workspace := testWorkspaceDir(t, allowedRoot)
@@ -181,7 +180,6 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeUser,
 	}
 
 	hash := sha256.Sum256([]byte(testAdminToken))
@@ -198,7 +196,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
+	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 
 	// Create a session.
 	workspace2 := testWorkspaceDir(t, allowedRoot)

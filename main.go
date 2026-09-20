@@ -97,8 +97,6 @@ func withDaemonInstanceLock(lockPath string, fn func() error) error {
 }
 
 // serveHTTPUntilShutdown handles both Unix and TCP listeners.
-// In user mode, tcpListener is nil and only unixListener is served.
-// In system mode, both listeners are served concurrently.
 // A signal or error on ANY listener triggers shutdown of all.
 // shutdownTimeout is resolved at the moment shutdown begins, so the budget
 // always reflects the ACTUAL App configuration (a reload may have changed
@@ -164,31 +162,16 @@ func serveHTTPUntilShutdown(
 	}
 
 	// Wait for signal or any listener error.
-	if tcpListener != nil {
-		select {
-		case <-signalCtx.Done():
-			startShutdown(nil)
-			drainDone = drainDoneCh
-			return
-		case serveErr := <-firstErr:
-			startShutdown(serveErr)
-			drainDone = drainDoneCh
-			err = serveErr
-			return
-		}
-	} else {
-		// User mode: only Unix listener.
-		select {
-		case <-signalCtx.Done():
-			startShutdown(nil)
-			drainDone = drainDoneCh
-			return
-		case serveErr := <-firstErr:
-			startShutdown(serveErr)
-			drainDone = drainDoneCh
-			err = serveErr
-			return
-		}
+	select {
+	case <-signalCtx.Done():
+		startShutdown(nil)
+		drainDone = drainDoneCh
+		return
+	case serveErr := <-firstErr:
+		startShutdown(serveErr)
+		drainDone = drainDoneCh
+		err = serveErr
+		return
 	}
 }
 
@@ -242,24 +225,32 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 }
 
 // runDaemon implements the docker-helper serve command. It owns the daemon
-// lifecycle: logging initialization, system-mode MAC confinement check, config
-// preparation, daemon instance locking, admin-token loading, database open/init,
-// expired Session cleanup, MAC reconciliation, stale runtime-dir cleanup, route
-// registration, listener preparation, shutdown signal handling, operation
-// admission shutdown, operation termination, and HTTP graceful drain.
+// lifecycle: logging initialization, MAC confinement check, config
+// preparation, daemon instance locking, admin-token loading, database
+// open/init, expired Session cleanup, MAC reconciliation, stale runtime-dir
+// cleanup, route registration, listener preparation, shutdown signal
+// handling, operation admission shutdown, operation termination, and HTTP
+// graceful drain.
 func runDaemon(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
 	// Audit JSONL -> stdout; operational JSONL -> stderr.
 	initLoggers(stderr, stdout, slog.LevelInfo, false)
 
-	// System mode requires MAC confinement. Check before loadAndPrepareRuntimeConfig()
+	// The system service is the only daemon deployment: serve is a
+	// root-owned lifecycle. Refuse before any side effect (runtime directory
+	// creation, config load).
+	if EffectiveUID() != 0 {
+		err := errors.New("docker-helper serve must be run as root (the system service is the only daemon deployment)")
+		serveStartupError(err, "")
+		return err
+	}
+
+	// MAC confinement is mandatory. Check before loadAndPrepareRuntimeConfig()
 	// to avoid side effects (runtime directory creation) when confinement
 	// is not satisfied.
-	if resolveDeploymentMode() == ModeSystem {
-		if err := requireMACConfinement(); err != nil {
-			serveStartupError(err, "")
-			return err
-		}
+	if err := requireMACConfinement(); err != nil {
+		serveStartupError(err, "")
+		return err
 	}
 
 	cfg, err := loadAndPrepareRuntimeConfig()
@@ -297,19 +288,10 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
-		// User-mode ownership provisioning: resolve the real daemon-owner OS
-		// identity and its Principal/'default' Launcher. System mode skips this.
-		userModeDefault, err := ensureUserModeOwnership(db, cfg.Mode)
-		if err != nil {
-			serveStartupError(err, "")
-			return err
-		}
-
 		// Session ownership cutover: rebuild any pre-cutover (principal-owned)
 		// sessions table to the final Launcher-owned schema. Idempotent: a no-op
-		// on the final schema. Must run after user-mode ownership provisioning
-		// and before any other Session consumers.
-		if _, err := migrateSessionOwnership(db, cfg.Mode, userModeDefault); err != nil {
+		// on the final schema. Must run before any other Session consumers.
+		if _, err := migrateSessionOwnership(db); err != nil {
 			serveStartupError(err, "")
 			return err
 		}
@@ -347,7 +329,7 @@ func runDaemon(stdout, stderr io.Writer) error {
 		// state is valid under the new ceiling before Session creation is
 		// possible. Failure is fail-closed startup.
 		startupRootReconciliation, err := reconcileStoredAllowedRootsToGlobalCeiling(
-			db, cfg.AllowedRoots, cfg.Mode == ModeUser, userModeDefaultOwnerID(userModeDefault),
+			db, cfg.AllowedRoots,
 		)
 		if err != nil {
 			serveStartupError(err, "")
@@ -374,10 +356,10 @@ func runDaemon(stdout, stderr io.Writer) error {
 		}
 
 		// Create MAC coordinator and reconcile live sessions.
-		// User mode (or no active MAC driver) leaves MACCoordinator nil, per the
-		// documented App invariant, so persisted live sessions remain usable
-		// without in-memory MAC bindings.
-		macCoordinator, err := newMACCoordinatorForMode(db, cfg.Mode, detectLSM)
+		// No active MAC driver leaves MACCoordinator nil, per the documented
+		// App invariant, so persisted live sessions remain usable without
+		// in-memory MAC bindings.
+		macCoordinator, err := newMACCoordinatorForMode(db, detectLSM)
 		if err != nil {
 			serveStartupError(err, "")
 			return err
@@ -423,7 +405,6 @@ func runDaemon(stdout, stderr io.Writer) error {
 			OperationSupervisor: newOperationSupervisor(),
 			MACCoordinator:      macCoordinator,
 			WorkloadMAC:         workloadMAC,
-			userModeDefault:     userModeDefault,
 		}
 
 		mux := http.NewServeMux()
@@ -431,10 +412,10 @@ func runDaemon(stdout, stderr io.Writer) error {
 
 		server := newHTTPServer(withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))))
 
-		// Prepare listeners based on deployment mode. The Unix listener is
-		// authoritative; an optional-TCP bind failure after a successful Unix
-		// bind is degraded startup (Unix-only), never a daemon failure.
-		unixListener, tcpListener, tcpDegraded, err := prepareListeners(cfg.Mode, cfg.SocketPath, cfg.HTTPAddress)
+		// Prepare listeners. The Unix listener is authoritative; an
+		// optional-TCP bind failure after a successful Unix bind is degraded
+		// startup (Unix-only), never a daemon failure.
+		unixListener, tcpListener, tcpDegraded, err := prepareListeners(cfg.SocketPath, cfg.HTTPAddress)
 		if err != nil {
 			serveStartupError(err, "")
 			return err
@@ -444,19 +425,15 @@ func runDaemon(stdout, stderr io.Writer) error {
 		logger := logging.snapshotLogger()
 
 		if logger != nil {
-			if cfg.Mode == ModeSystem && tcpDegraded != nil {
+			if tcpDegraded != nil {
 				logger.Info("daemon listening (TCP unavailable, serving Unix only)",
-					slog.String("socket", cfg.SocketPath),
-					slog.String("http", cfg.HTTPAddress),
-				)
-			} else if cfg.Mode == ModeSystem {
-				logger.Info("daemon listening",
 					slog.String("socket", cfg.SocketPath),
 					slog.String("http", cfg.HTTPAddress),
 				)
 			} else {
 				logger.Info("daemon listening",
 					slog.String("socket", cfg.SocketPath),
+					slog.String("http", cfg.HTTPAddress),
 				)
 			}
 		}

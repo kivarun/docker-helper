@@ -441,7 +441,7 @@ func TestMACSessionBindingRollsBackWhenSnapshotPersistFails(t *testing.T) {
 		t.Fatalf("create test trigger: %v", err)
 	}
 
-	_, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace, nil)
+	_, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{principal: testOwnerUsername}, workspace, nil)
 	if err == nil {
 		t.Fatal("createSessionAuthorized() must fail when the snapshot commit fails inside the MAC callback")
 	}

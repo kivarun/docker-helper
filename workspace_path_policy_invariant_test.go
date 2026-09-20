@@ -238,20 +238,27 @@ func TestConfigSetAllowedRootForbiddenSymlink(t *testing.T) {
 // the init command passes the canonical allowed_root into the written
 // config. The CLI resolves (canonicalizes) the allowed root before
 // runInit, so the value persisted by initCore is canonical.
-func TestInitUserModeStoresCanonicalAllowedRoot(t *testing.T) {
+func TestInitStoresCanonicalAllowedRoot(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
+	// Init is system-only: the runInit root gate is bypassed with the UID
+	// seam, and the runtime/state directory seams point at the isolated
+	// fixture directories.
 	origUID := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = origUID }()
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return filepath.Join(dir, "runtime"), nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
 
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
+	mockDetectLSM(t, LSMAppArmor, nil)
 
 	base := testAllowedRootDir(t)
 	target := filepath.Join(base, "target")

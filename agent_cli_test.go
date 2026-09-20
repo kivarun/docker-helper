@@ -1255,35 +1255,6 @@ func TestResolveAgentSocketPathExplicitWins(t *testing.T) {
 	}
 }
 
-func TestResolveAgentSocketPathXDGUserSocketExists(t *testing.T) {
-	runtimeDir := t.TempDir()
-	userSocket := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-	if err := os.MkdirAll(filepath.Dir(userSocket), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(userSocket, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	got := resolveAgentSocketPath()
-	if got != userSocket {
-		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, userSocket)
-	}
-}
-
-func TestResolveAgentSocketPathXDGNoUserSocketFallsBackToSystem(t *testing.T) {
-	// XDG_RUNTIME_DIR is set but the user-mode socket does not exist: the
-	// agent CLI must fall back to the system socket rather than fail.
-	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	got := resolveAgentSocketPath()
-	want := "/run/docker-helper/docker-helper.sock"
-	if got != want {
-		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, want)
-	}
-}
-
 func TestResolveAgentSocketPathFallback(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
 	t.Setenv("XDG_RUNTIME_DIR", "")

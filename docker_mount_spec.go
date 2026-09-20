@@ -8,10 +8,9 @@ import (
 )
 
 // dockerBindMount is the structured fact set of one Docker bind mount: the
-// canonical bind source (a helper-owned pinned or projection path in system
-// mode, the canonical resolved host path in user mode, or a daemon-owned
-// runtime path for server-owned injections), the container target, and the
-// requested consumption mode.
+// canonical bind source (a helper-owned pinned or projection path, or a
+// daemon-owned runtime path for server-owned injections), the container
+// target, and the requested consumption mode.
 type dockerBindMount struct {
 	Source   string
 	Target   string

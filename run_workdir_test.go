@@ -21,7 +21,11 @@ func TestRunWorkdirPassedToDocker(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		// Only the docker run command is captured; the correlated container
+		// inspection the cleanup proof runs must still succeed.
+		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -79,7 +83,11 @@ func TestRunNoWorkdir(t *testing.T) {
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
+		// Only the docker run command is captured; the correlated container
+		// inspection the cleanup proof runs must still succeed.
+		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
+			capturedArgs = args
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 

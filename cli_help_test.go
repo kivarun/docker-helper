@@ -847,18 +847,18 @@ func TestHelpRootVersionFlagDiscoverable(t *testing.T) {
 
 func TestHelpInitMACLifecycleContract(t *testing.T) {
 	// init help must describe the correct MAC lifecycle contract:
-	// system mode has authorization ceiling + session-creation MAC preparation;
-	// user mode requires no MAC preparation; init never prepares MAC state.
+	// the system service is the only daemon deployment, with authorization
+	// ceiling + session-creation MAC preparation; init never prepares MAC state.
 	var stdout, stderr bytes.Buffer
 	initCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
 	helpText := stdout.String()
 
-	// Must describe system mode and user mode.
+	// Must describe the single system deployment.
 	if !strings.Contains(helpText, "System mode") {
 		t.Error("init help must describe system mode")
 	}
-	if !strings.Contains(helpText, "User mode") {
-		t.Error("init help must describe user mode")
+	if !strings.Contains(helpText, "only daemon deployment") {
+		t.Error("init help must state that system mode is the only daemon deployment")
 	}
 
 	// Must describe the allowed root as the authorization ceiling.
@@ -866,14 +866,9 @@ func TestHelpInitMACLifecycleContract(t *testing.T) {
 		t.Error("init help must describe the allowed root as the authorization ceiling")
 	}
 
-	// Must state that system-mode MAC preparation happens at session creation.
+	// Must state that MAC preparation happens at session creation.
 	if !strings.Contains(helpText, "session") {
 		t.Error("init help must mention session lifecycle for MAC preparation")
-	}
-
-	// Must state that user mode requires no MAC preparation.
-	if !strings.Contains(helpText, "No MAC preparation") {
-		t.Error("init help must state that user mode requires no MAC preparation")
 	}
 
 	// Must NOT claim that init prepares MAC state.
@@ -918,11 +913,6 @@ func TestHelpConfigAllowedRootGlobalCeiling(t *testing.T) {
 	// Must describe system mode MAC at session creation.
 	if !strings.Contains(helpText, "session creation") {
 		t.Error("config allowed-root help must mention session creation for system-mode MAC")
-	}
-
-	// Must describe user mode.
-	if !strings.Contains(helpText, "user mode") {
-		t.Error("config allowed-root help must describe user mode")
 	}
 
 	// Must NOT mention workspace-root add.

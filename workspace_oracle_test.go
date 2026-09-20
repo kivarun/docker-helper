@@ -71,7 +71,7 @@ func TestWorkspaceAtAllowedRootItselfIsRefused(t *testing.T) {
 	setupTestLoggingDiscard(t)
 	root := app.Config.AllowedRoots[0].Path
 
-	resp := createSessionThroughMux(app, testAdminToken, root)
+	resp := createAdminSessionThroughMux(app, root)
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("workspace at the allowed root itself: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -84,7 +84,7 @@ func TestWorkspaceAtAllowedRootItselfIsRefused(t *testing.T) {
 	}
 
 	workspace := testWorkspaceDir(t, root)
-	resp = createSessionThroughMux(app, testAdminToken, workspace)
+	resp = createAdminSessionThroughMux(app, workspace)
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("proper descendant of the allowed root: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -105,7 +105,7 @@ func TestUnauthorizedWorkspaceRefusalsAreIndistinguishable(t *testing.T) {
 
 	var firstCode, firstMessage string
 	for _, tc := range workspaceOracleCases(t, root) {
-		resp := createSessionThroughMux(app, testAdminToken, tc.workspace)
+		resp := createAdminSessionThroughMux(app, tc.workspace)
 		if resp.Code != http.StatusBadRequest {
 			t.Fatalf("%s: expected 400, got %d (body=%s)", tc.name, resp.Code, resp.Body.String())
 		}
@@ -141,7 +141,7 @@ func TestAuthorizedWorkspaceFilesystemSemanticsPreserved(t *testing.T) {
 	}
 
 	// E: authorized existing workspace.
-	resp := createSessionThroughMux(app, testAdminToken, work)
+	resp := createAdminSessionThroughMux(app, work)
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("authorized existing: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -149,7 +149,7 @@ func TestAuthorizedWorkspaceFilesystemSemanticsPreserved(t *testing.T) {
 	// F: authorized missing workspace — an operator mistake inside their own
 	// ceiling keeps the actionable diagnostic.
 	missing := filepath.Join(home, "not-created-yet")
-	resp = createSessionThroughMux(app, testAdminToken, missing)
+	resp = createAdminSessionThroughMux(app, missing)
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("authorized missing: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -171,7 +171,7 @@ func TestAuthorizedWorkspaceFilesystemSemanticsPreserved(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(alias) })
 	aliasWorkspace := filepath.Join(alias, "work")
-	resp = createSessionThroughMux(app, testAdminToken, aliasWorkspace)
+	resp = createAdminSessionThroughMux(app, aliasWorkspace)
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("outside lexical alias: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -187,7 +187,7 @@ func TestAuthorizedWorkspaceFilesystemSemanticsPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Remove(insideAlias) })
-	resp = createSessionThroughMux(app, testAdminToken, insideAlias)
+	resp = createAdminSessionThroughMux(app, insideAlias)
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("inside-ceiling alias: expected 201, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -199,7 +199,7 @@ func TestAuthorizedWorkspaceFilesystemSemanticsPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Remove(escape) })
-	resp = createSessionThroughMux(app, testAdminToken, escape)
+	resp = createAdminSessionThroughMux(app, escape)
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("authorized escape: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -218,7 +218,7 @@ func sessionBearerWorkspace(t *testing.T, app *App, name string) (string, string
 	if err := os.MkdirAll(work, 0755); err != nil {
 		t.Fatal(err)
 	}
-	created, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, work, nil)
+	created, err := app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{principal: testOwnerUsername}, work, nil)
 	if err != nil {
 		t.Fatalf("createSessionAuthorized(%s): %v", name, err)
 	}
@@ -354,7 +354,7 @@ func TestUnauthorizedWorkspaceDiagnosticRetainedInOperationalLog(t *testing.T) {
 	// Unadmitted spellings: bounded refusals only — the resolver is never
 	// invoked, so no existence/error-class/pathname detail exists.
 	for _, tc := range workspaceOracleCases(t, root) {
-		resp := createSessionThroughMux(app, testAdminToken, tc.workspace)
+		resp := createAdminSessionThroughMux(app, tc.workspace)
 		if resp.Code != http.StatusBadRequest {
 			t.Fatalf("%s: expected 400, got %d (body=%s)", tc.name, resp.Code, resp.Body.String())
 		}
@@ -372,7 +372,7 @@ func TestUnauthorizedWorkspaceDiagnosticRetainedInOperationalLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := filepath.Join(home, "not-created-yet")
-	resp := createSessionThroughMux(app, testAdminToken, missing)
+	resp := createAdminSessionThroughMux(app, missing)
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("admitted missing workspace: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -423,7 +423,7 @@ func TestWorkspaceCreateOutsideCeilingProbesNothing(t *testing.T) {
 	reset, probes, _ := countSessionPathProbes(t)
 	for _, tc := range workspaceOracleCases(t, root) {
 		reset()
-		resp := createSessionThroughMux(app, testAdminToken, tc.workspace)
+		resp := createAdminSessionThroughMux(app, tc.workspace)
 		if resp.Code != http.StatusBadRequest {
 			t.Fatalf("%s: expected 400, got %d (body=%s)", tc.name, resp.Code, resp.Body.String())
 		}
@@ -531,7 +531,7 @@ func TestAdmittedSpellingStillProbesAndStaysContained(t *testing.T) {
 	// An admitted missing spelling still resolves: the probe count is
 	// non-zero (the resolver runs for admitted spellings).
 	reset, probes, _ := countSessionPathProbes(t)
-	resp := createSessionThroughMux(app, testAdminToken, filepath.Join(home, "missing"))
+	resp := createAdminSessionThroughMux(app, filepath.Join(home, "missing"))
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("admitted missing: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -547,7 +547,7 @@ func TestAdmittedSpellingStillProbesAndStaysContained(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Remove(escape) })
-	resp = createSessionThroughMux(app, testAdminToken, escape)
+	resp = createAdminSessionThroughMux(app, escape)
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("escape link: expected 400, got %d (body=%s)", resp.Code, resp.Body.String())
 	}
@@ -611,7 +611,6 @@ func filesystemRootsOracleCases(t *testing.T, root, tree string) []struct {
 // root spelling.
 func TestFilesystemRootsOutsideCeilingProbesNothing(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 	root := app.Config.AllowedRoots[0].Path
@@ -659,7 +658,6 @@ func TestFilesystemRootsOutsideCeilingProbesNothing(t *testing.T) {
 // before probing would silence the resolver for an admitted spelling.
 func TestRunMountFileRootDescendantFollowsSnapshotTreeSemantics(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	root := app.Config.AllowedRoots[0].Path
 	tree := filepath.Join(root, "runs")
@@ -719,7 +717,6 @@ func TestRunMountFileRootDescendantFollowsSnapshotTreeSemantics(t *testing.T) {
 // exposure owner — never from live kind inference.
 func TestRunMountIssuedFileRootKeepsSnapshotPathTreeAuthority(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	root := app.Config.AllowedRoots[0].Path
 	tree := filepath.Join(root, "runs")
@@ -800,7 +797,6 @@ func TestRunMountIssuedFileRootKeepsSnapshotPathTreeAuthority(t *testing.T) {
 // probe-free shortcut for admitted spellings.
 func TestFilesystemRootsAdmittedSpellingSemantics(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 	root := app.Config.AllowedRoots[0].Path
@@ -873,7 +869,7 @@ func TestSessionCreateControlCharacterTextGrammar(t *testing.T) {
 	mux := http.NewServeMux()
 	registerRoutes(mux, app)
 	post := func(workspace string) *httptest.ResponseRecorder {
-		body, err := json.Marshal(map[string]string{"workspace": workspace})
+		body, err := json.Marshal(map[string]string{"principal": testOwnerUsername, "workspace": workspace})
 		if err != nil {
 			t.Fatalf("cannot encode the workspace request: %v", err)
 		}
@@ -959,7 +955,6 @@ func TestSessionCreateControlCharacterTextGrammar(t *testing.T) {
 // and no Session state.
 func TestFilesystemRootsControlCharacterTextGrammar(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 	root := app.Config.AllowedRoots[0].Path

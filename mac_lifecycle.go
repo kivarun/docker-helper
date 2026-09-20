@@ -1414,13 +1414,9 @@ func (d *selinuxMACDriver) backend() LSMBackend {
 	return LSMSELinux
 }
 
-// newSessionMACDriver creates the appropriate driver for the given LSM.
-// Returns nil for non-system mode or when no driver is active.
-func newSessionMACDriver(mode DeploymentMode, detectLSM func() (LSMBackend, error)) (sessionMACDriver, error) {
-	if mode != ModeSystem {
-		return nil, nil
-	}
-
+// newSessionMACDriver creates the appropriate driver for the active LSM.
+// Returns nil when no driver is active.
+func newSessionMACDriver(detectLSM func() (LSMBackend, error)) (sessionMACDriver, error) {
 	backend, err := detectLSM()
 	if err != nil {
 		return nil, err
@@ -1450,13 +1446,13 @@ func newSessionMACDriver(mode DeploymentMode, detectLSM func() (LSMBackend, erro
 	}
 }
 
-// newMACCoordinatorForMode builds the session MAC coordinator for the given
-// deployment mode, returning nil when no MAC driver is active (e.g. user
-// mode). runDaemon uses this so App.MACCoordinator stays nil whenever there is
-// no active MAC driver; persisted live sessions then need no in-memory MAC
-// bindings to be usable.
-func newMACCoordinatorForMode(db *sql.DB, mode DeploymentMode, detectLSM func() (LSMBackend, error)) (*sessionMACCoordinator, error) {
-	driver, err := newSessionMACDriver(mode, detectLSM)
+// newMACCoordinatorForMode builds the session MAC coordinator for the active
+// MAC backend, returning nil when no MAC driver is active. runDaemon uses
+// this so App.MACCoordinator stays nil whenever there is no active MAC
+// driver; persisted live sessions then need no in-memory MAC bindings to be
+// usable.
+func newMACCoordinatorForMode(db *sql.DB, detectLSM func() (LSMBackend, error)) (*sessionMACCoordinator, error) {
+	driver, err := newSessionMACDriver(detectLSM)
 	if err != nil {
 		return nil, err
 	}

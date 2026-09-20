@@ -201,10 +201,9 @@ func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) 
 	// every other query in the race phase.
 	doorPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	// The race phase runs on a single P: the reload and the introspection
@@ -336,10 +335,9 @@ func TestRacePrincipalRootNarrowingSerializesCreatePolicyIntrospection(t *testin
 	mutationPoint := newParkedQueryPoint("SELECT id FROM principals WHERE username")
 	introspectionPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, introspectionPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, introspectionPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	// The race phase runs on a single P: the narrowing and the
@@ -446,7 +444,6 @@ func TestRacePrincipalDeleteSerializesEffectiveRootsIntrospection(t *testing.T) 
 		Config:                  app1.Config,
 		DB:                      openParkedQueryDB(t, app1.Config.DatabasePath, deletionPoint),
 		AdminTokenHash:          app1.AdminTokenHash,
-		userModeDefault:         app1.userModeDefault,
 		InspectHelperContainers: app1.InspectHelperContainers,
 	}
 	app.OperationSupervisor = newOperationSupervisor()
@@ -547,7 +544,6 @@ func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testi
 		Config:                  app1.Config,
 		DB:                      openParkedQueryDB(t, app1.Config.DatabasePath, introspectionPoint),
 		AdminTokenHash:          app1.AdminTokenHash,
-		userModeDefault:         app1.userModeDefault,
 		InspectHelperContainers: app1.InspectHelperContainers,
 	}
 	app.OperationSupervisor = newOperationSupervisor()
@@ -650,10 +646,9 @@ func TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing(t *testing.T
 	introspectionPoint := newParkedQueryPoint("SELECT id FROM launchers WHERE principal_id")
 	mutationPoint := newParkedQueryPoint("DELETE FROM principal_allowed_roots")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, introspectionPoint, mutationPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, introspectionPoint, mutationPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	// The race phase runs on a single P: the introspection and the
@@ -786,10 +781,9 @@ func TestRacePrincipalSetAccessSerializesCreatePolicyIntrospection(t *testing.T)
 	mutationPoint := newParkedQueryPoint("SELECT id FROM principals WHERE username")
 	introspectionPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, introspectionPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, mutationPoint, introspectionPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	// The race phase runs on a single P: the set-access and the

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -68,8 +69,11 @@ func profileNameFromSource(source string) string {
 }
 
 // testAppArmorWorkloadHarness records the parser/inventory behavior of the
-// AppArmor workload backend harness.
+// AppArmor workload backend harness. Records are concurrency-safe: a run
+// operation's cleanup goroutine may still be running while the next run
+// prepares.
 type testAppArmorWorkloadHarness struct {
+	mu          sync.Mutex
 	loaded      map[string]bool
 	loadErr     error
 	unloadErr   error
@@ -94,6 +98,8 @@ func newTestAppArmorWorkloadBackend(t *testing.T) (*workloadAppArmorBackend, *te
 		if len(args) == 0 {
 			return errors.New("parser invoked without arguments")
 		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
 		profilePath := args[len(args)-1]
 		source, readErr := os.ReadFile(profilePath)
 		var profileName string
@@ -125,6 +131,8 @@ func newTestAppArmorWorkloadBackend(t *testing.T) (*workloadAppArmorBackend, *te
 		return nil
 	}
 	b.loadedProfiles = func() ([]string, error) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
 		var names []string
 		for name, ok := range h.loaded {
 			if ok {
@@ -309,6 +317,12 @@ func installTestWorkloadMACForTest(t *testing.T, app *App, backend LSMBackend) *
 	default:
 		t.Fatalf("unsupported test workload backend: %s", backend)
 	}
+	return installWorkloadMACWithBackendForTest(app, backendImpl)
+}
+
+// installWorkloadMACWithBackendForTest installs the real test-seamed
+// coordinator around a caller-provided backend implementation.
+func installWorkloadMACWithBackendForTest(app *App, backendImpl workloadMACBackend) *workloadMACCoordinator {
 	c := &workloadMACCoordinator{
 		backend:     backendImpl,
 		stateRoot:   filepath.Join(app.Config.StateDir, workloadMACStateRootName),

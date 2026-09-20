@@ -482,10 +482,8 @@ func TestExplicitTokenFileHasPriority(t *testing.T) {
 }
 func TestDefaultEndpointSystemSocketUsesCredentialToken(t *testing.T) {
 	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return true }
 
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -510,76 +508,10 @@ func TestDefaultEndpointSystemSocketUsesCredentialToken(t *testing.T) {
 		t.Errorf("token = %q, want %q", gotToken, validToken)
 	}
 }
-func TestDefaultEndpointUserSocketUsesAdminToken(t *testing.T) {
-	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
-	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return false }
-
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	dhDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(dhDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	adminToken := "admin-token-usermode"
-	if err := os.WriteFile(filepath.Join(dhDir, "admin.token"), []byte(adminToken+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	client, err := resolveOperatorClient(operatorClientOptions{})
-	if err != nil {
-		t.Fatalf("resolveOperatorClient: %v", err)
-	}
-	gotToken, err := client.tokenSource()
-	if err != nil {
-		t.Fatalf("tokenSource: %v", err)
-	}
-	if gotToken != adminToken {
-		t.Errorf("token = %q, want %q", gotToken, adminToken)
-	}
-}
-func TestDefaultEndpointUserSocketIgnoresCredentialToken(t *testing.T) {
-	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
-	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return false }
-
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	dhDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(dhDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	// Both tokens exist — user socket must use admin.token, not credential.token.
-	if err := os.WriteFile(filepath.Join(dhDir, "credential.token"), []byte("dhc_"+strings.Repeat("c", 64)+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	adminToken := "admin-token-wins"
-	if err := os.WriteFile(filepath.Join(dhDir, "admin.token"), []byte(adminToken+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	client, err := resolveOperatorClient(operatorClientOptions{})
-	if err != nil {
-		t.Fatalf("resolveOperatorClient: %v", err)
-	}
-	gotToken, err := client.tokenSource()
-	if err != nil {
-		t.Fatalf("tokenSource: %v", err)
-	}
-	if gotToken != adminToken {
-		t.Errorf("token = %q, want admin.token %q (credential.token must not be used for user socket)", gotToken, adminToken)
-	}
-}
 func TestDefaultEndpointNoTokensFails(t *testing.T) {
 	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return false }
 
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -591,10 +523,8 @@ func TestDefaultEndpointNoTokensFails(t *testing.T) {
 }
 func TestDefaultEndpointNonRootFallsBackToSystem(t *testing.T) {
 	origUID := EffectiveUID
-	origSocket := systemSocketExists
-	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
-	systemSocketExists = func() bool { return true }
 
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
@@ -1050,84 +980,5 @@ func TestInitUserWithSystemDaemonDifferentTokenConflict(t *testing.T) {
 	}
 	if string(data) != existingToken+"\n" {
 		t.Errorf("credential was overwritten: %q", string(data))
-	}
-}
-
-func TestInitCLIFirstUseWithSystemDaemon(t *testing.T) {
-	// End-to-end CLI regression: docker-helper init as non-root with system daemon.
-	origSocket := systemSocketExists
-	defer func() { systemSocketExists = origSocket }()
-	systemSocketExists = func() bool { return true }
-
-	origUID := EffectiveUID
-	defer func() { EffectiveUID = origUID }()
-	EffectiveUID = func() int { return 1000 }
-
-	configDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configDir)
-
-	// --allowed-root is required by the CLI parser even though
-	// initUserWithSystemDaemon does not use it.
-	allowedRoot := testAllowedRootDir(t)
-
-	validToken := "dhc_" + strings.Repeat("c", 64)
-
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		fmt.Fprintln(w, validToken)
-		w.Close()
-	}()
-
-	oldStdin := os.Stdin
-	os.Stdin = r
-	defer func() { os.Stdin = oldStdin }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"init", "--allowed-root", allowedRoot}, &stdout, &stderr)
-
-	r.Close()
-
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
-	}
-
-	// Credential file must exist.
-	credPath := filepath.Join(configDir, "docker-helper", "credential.token")
-	data, err := os.ReadFile(credPath)
-	if err != nil {
-		t.Fatalf("credential file not created: %v", err)
-	}
-	if string(data) != validToken+"\n" {
-		t.Errorf("credential = %q, want %q", string(data), validToken+"\n")
-	}
-
-	// File mode must be 0600.
-	info, err := os.Stat(credPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("file mode = %o, want 0600", perm)
-	}
-
-	// Directory mode must be 0700.
-	dirInfo, err := os.Stat(filepath.Join(configDir, "docker-helper"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := dirInfo.Mode().Perm(); perm != 0700 {
-		t.Errorf("directory mode = %o, want 0700", perm)
-	}
-
-	// Output must indicate success.
-	out := stdout.String()
-	if strings.Contains(out, "Credential already installed") {
-		t.Error("first-use must NOT say 'Credential already installed'")
-	}
-	if !strings.Contains(out, "Credential installed successfully") {
-		t.Errorf("expected success message, got: %s", out)
 	}
 }

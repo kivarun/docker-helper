@@ -245,7 +245,6 @@ func TestSessionCreatePolicyContractMatrix(t *testing.T) {
 	// contract real Session create returns. The test app is user mode by
 	// default; the deployment mode is a config decision, so flip it for
 	// this query.
-	app.Config.Mode = ModeSystem
 	w = launcherRequest(t, app, http.MethodGet, "/sessions/create-policy", testAdminToken, "")
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "missing_launcher_selector") {
 		t.Fatalf("system admin: %d %s", w.Code, w.Body.String())
@@ -409,11 +408,11 @@ func TestSessionCreatePolicyUnavailableLauncher(t *testing.T) {
 // TestSessionCreatePolicyUserModeAdmin proves the user-mode admin authority
 // resolves the daemon-owner default Launcher with the collapsed global roots,
 // exactly like real Session creation.
-func TestSessionCreatePolicyUserModeAdmin(t *testing.T) {
+func TestSessionCreatePolicyAdmin(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	w := launcherRequest(t, app, http.MethodGet, "/sessions/create-policy", testAdminToken, "")
+	w := launcherRequest(t, app, http.MethodGet, "/sessions/create-policy?principal="+testOwnerUsername, testAdminToken, "")
 	if w.Code != http.StatusOK {
-		t.Fatalf("user-mode admin policy: %d %s", w.Code, w.Body.String())
+		t.Fatalf("admin policy: %d %s", w.Code, w.Body.String())
 	}
 	resp := decodeCreatePolicy(t, w.Body.String())
 	if resp.Principal != "dhtestowner" || resp.Launcher != "default" {

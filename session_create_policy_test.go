@@ -14,7 +14,7 @@ func TestCreateSessionGoesThroughResolveCreatePolicy(t *testing.T) {
 	app := newTestApp(t)
 	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 
-	if _, err := app.DB.Exec(`UPDATE launchers SET enabled = 0 WHERE id = ?`, app.userModeDefault.launcherID); err != nil {
+	if _, err := app.DB.Exec(`UPDATE launchers SET enabled = 0 WHERE id = ?`, testOwnerLauncherID(app)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,10 +35,10 @@ func TestCreateSessionResolvesDaemonOwnerDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
-	if result.Session.LauncherID != app.userModeDefault.launcherID {
-		t.Errorf("LauncherID = %q, want daemon-owner default %q", result.Session.LauncherID, app.userModeDefault.launcherID)
+	if result.Session.LauncherID != testOwnerLauncherID(app) {
+		t.Errorf("LauncherID = %q, want daemon-owner default %q", result.Session.LauncherID, testOwnerLauncherID(app))
 	}
-	if result.Session.PrincipalName != app.userModeDefault.username {
-		t.Errorf("PrincipalName = %q, want %q", result.Session.PrincipalName, app.userModeDefault.username)
+	if result.Session.PrincipalName != testOwnerUsername {
+		t.Errorf("PrincipalName = %q, want %q", result.Session.PrincipalName, testOwnerUsername)
 	}
 }

@@ -179,7 +179,7 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testS
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create daemon-owner home: %v", err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
+	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 
 	return app, mac, driver
 }
@@ -212,7 +212,7 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 
 	// Create session binding.
 	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-1", workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -337,7 +337,7 @@ func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
 	triggerWarning := func(sessionID string) {
 		t.Helper()
 		if _, err := mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
-			return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+			return insertTestSessionTx(app.DB, testOwnerLauncherID(app), sessionID, workspace)
 		}); err != nil {
 			t.Fatalf("CreateSessionBinding: %v", err)
 		}
@@ -451,7 +451,7 @@ func TestSessionMACRemovalUsesDurableKindAcrossRestart(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-durable", []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-durable", workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-durable", workspace)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestSessionMACCleanupResumesAfterPartialRemoval(t *testing.T) {
 	}
 
 	if _, err := mac.CreateSessionBinding("sess-resume", []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-resume", workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-resume", workspace)
 	}); err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
@@ -943,7 +943,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 
 	// Create session binding.
 	_, err = mac.CreateSessionBinding("sess-1", []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-1", workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -1291,7 +1291,7 @@ func TestSessionDeleteDefersBoundaryWhilePendingWorkloadUnproven(t *testing.T) {
 
 	const sessionID = "sess-pending-workload"
 	_, err = mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), sessionID, workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -1405,7 +1405,7 @@ func TestSessionDeleteKeepsBoundaryWhenPendingWorkloadUnresolvable(t *testing.T)
 
 	const sessionID = "sess-real-session"
 	_, err = mac.CreateSessionBinding(sessionID, []string{workspace}, func([]sessionMACCoverage) error {
-		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
+		return insertTestSessionTx(app.DB, testOwnerLauncherID(app), sessionID, workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -1584,7 +1584,6 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 
 	app := &App{
@@ -1720,7 +1719,6 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 
 	app := &App{
@@ -2113,7 +2111,6 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
-		Mode:                  ModeSystem,
 	}
 
 	app := &App{

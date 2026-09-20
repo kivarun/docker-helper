@@ -742,7 +742,7 @@ func TestHandleAuthSessionTokenRejected(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"dhs_authtest", hex.EncodeToString(hash[:]), app.Config.AllowedRoots[0].Path,
 		time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(),
-		app.userModeDefault.launcherID,
+		testOwnerLauncherID(app),
 	)
 	if err != nil {
 		t.Fatalf("insert session: %v", err)
@@ -758,7 +758,7 @@ func TestHandleAuthSessionTokenRejected(t *testing.T) {
 		t.Fatalf("status = %d, want 401 (body=%s)", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	if strings.Contains(body, "dhtestowner") || strings.Contains(body, app.userModeDefault.launcherID) {
+	if strings.Contains(body, "dhtestowner") || strings.Contains(body, testOwnerLauncherID(app)) {
 		t.Errorf("session token leaked identity information: %s", body)
 	}
 }

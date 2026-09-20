@@ -20,8 +20,7 @@ const (
 
 // systemSocketPath is the canonical Unix socket path of the system daemon.
 // Both operator and agent CLI endpoint selection resolve the same path; it is a
-// variable so tests can bind a real listener at a controlled path (the same
-// test-injection pattern as systemSocketExists).
+// variable so tests can bind a real listener at a controlled path.
 var systemSocketPath = filepath.Join(systemRuntimeDir, "docker-helper.sock")
 
 // operatorClientOptions specifies how to connect to the daemon.
@@ -110,11 +109,7 @@ func resolveOperatorClient(opts operatorClientOptions) (*apiClient, error) {
 		return resolveExplicitEndpoint(opts)
 	}
 
-	if opts.System {
-		return resolveSystemEndpoint(opts)
-	}
-
-	return resolveDefaultEndpoint(opts)
+	return resolveSystemEndpoint(opts)
 }
 
 // resolveExplicitEndpoint is the execution/resolution stage for an already
@@ -184,65 +179,6 @@ func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	tokenSource := func() (string, error) { return token, nil }
 
 	return newUnixAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
-}
-
-func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
-	// Documented operator default: the user-mode daemon socket when it
-	// exists, otherwise the system socket. A non-root operator without a
-	// resolvable user runtime directory (no XDG_RUNTIME_DIR) has no user
-	// socket to consider, so the default resolves to the system socket;
-	// only when that fallback is also unavailable does the runtime
-	// directory resolution error surface.
-	userSocketPath := ""
-	if runtimeDir, err := getRuntimeDir(); err == nil {
-		userSocketPath = filepath.Join(runtimeDir, "docker-helper.sock")
-	} else if !systemSocketExists() {
-		return nil, err
-	}
-
-	// Determine which socket to use.
-	// If user socket exists, use it. Otherwise fall back to system socket.
-	var socketPath string
-	switch {
-	case userSocketPath == "":
-		socketPath = systemSocketPath
-	case userSocketExists(userSocketPath):
-		socketPath = userSocketPath
-	case systemSocketExists():
-		socketPath = systemSocketPath
-	default:
-		socketPath = userSocketPath
-	}
-
-	tokenPath := opts.TokenFile
-	if tokenPath == "" {
-		if socketPath == systemSocketPath {
-			tokenPath = resolveSystemModeTokenPath()
-		} else {
-			tokenPath = filepath.Join(getConfigDir(), "admin.token")
-		}
-	}
-
-	token, err := readTokenFile(tokenPath)
-	if err != nil {
-		return nil, err
-	}
-	tokenSource := func() (string, error) { return token, nil }
-
-	return newUnixAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
-}
-
-// systemSocketExists reports whether the system daemon socket is present.
-// Can be replaced in tests.
-var systemSocketExists = func() bool {
-	_, err := os.Stat(systemSocketPath)
-	return err == nil
-}
-
-// userSocketExists reports whether a user-mode daemon socket exists at path.
-func userSocketExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // resolveSystemModeTokenPath returns the token file path for system daemon

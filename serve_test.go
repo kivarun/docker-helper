@@ -123,13 +123,18 @@ func TestPrepareListenersStaleSocket(t *testing.T) {
 		t.Fatal("stale socket should still exist on disk after Close")
 	}
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(socketPath, "")
 	if err != nil {
 		t.Fatalf("prepareListeners() error: %v", err)
 	}
 	defer unixListener.Close()
-	if tcpListener != nil {
-		t.Error("TCP listener should be nil in user mode")
+	defer func() {
+		if tcpListener != nil {
+			tcpListener.Close()
+		}
+	}()
+	if tcpListener == nil {
+		t.Error("TCP listener should be bound on the default HTTP address")
 	}
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -147,7 +152,7 @@ func TestPrepareListenersLiveSocket(t *testing.T) {
 	}
 	defer listener.Close()
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket has a live listener")
 	}
@@ -171,7 +176,7 @@ func TestPrepareListenersRegularFile(t *testing.T) {
 		t.Fatalf("cannot create file: %v", err)
 	}
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket path is a regular file")
 	}
@@ -195,7 +200,7 @@ func TestPrepareListenersDirectory(t *testing.T) {
 		t.Fatalf("cannot create directory: %v", err)
 	}
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket path is a directory")
 	}
@@ -211,13 +216,18 @@ func TestPrepareListenersNewSocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(socketPath, "")
 	if err != nil {
 		t.Fatalf("prepareListeners() error: %v", err)
 	}
 	defer unixListener.Close()
-	if tcpListener != nil {
-		t.Error("TCP listener should be nil in user mode")
+	defer func() {
+		if tcpListener != nil {
+			tcpListener.Close()
+		}
+	}()
+	if tcpListener == nil {
+		t.Error("TCP listener should be bound on the default HTTP address")
 	}
 
 	info, err := os.Stat(socketPath)
@@ -358,7 +368,7 @@ func TestPrepareListenersUnknownDialError(t *testing.T) {
 		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected failure")}
 	}
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(socketPath, "")
 	if err == nil {
 		t.Fatal("expected error from prepareListeners on unknown dial error")
 	}
@@ -397,13 +407,18 @@ func TestSocketDisappearsDuringCheck(t *testing.T) {
 		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected")}
 	}
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, socketPath, "")
+	unixListener, tcpListener, _, err := prepareListeners(socketPath, "")
 	if err != nil {
 		t.Fatalf("prepareListeners: %v", err)
 	}
 	defer unixListener.Close()
-	if tcpListener != nil {
-		t.Error("TCP listener should be nil in user mode")
+	defer func() {
+		if tcpListener != nil {
+			tcpListener.Close()
+		}
+	}()
+	if tcpListener == nil {
+		t.Error("TCP listener should be bound on the default HTTP address")
 	}
 }
 
@@ -1338,7 +1353,7 @@ func TestCreateUnixListenerRegularFile(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, err := ListenerFactory.createUnixListener(socketPath, ModeUser)
+	_, err := ListenerFactory.createUnixListener(socketPath)
 	if err == nil {
 		t.Fatal("expected error when socket path is a regular file")
 	}
@@ -1370,7 +1385,7 @@ func TestCreateUnixListenerLiveSocket(t *testing.T) {
 	}
 	defer listener.Close()
 
-	_, err = ListenerFactory.createUnixListener(socketPath, ModeUser)
+	_, err = ListenerFactory.createUnixListener(socketPath)
 	if err == nil {
 		t.Fatal("expected error when socket has a live listener")
 	}
@@ -1396,7 +1411,7 @@ func TestCreateUnixListenerStaleSocket(t *testing.T) {
 	}
 	syscall.Close(fd)
 
-	listener, err := ListenerFactory.createUnixListener(socketPath, ModeUser)
+	listener, err := ListenerFactory.createUnixListener(socketPath)
 	if err != nil {
 		t.Fatalf("createUnixListener: %v", err)
 	}
@@ -1407,33 +1422,12 @@ func TestCreateUnixListenerStaleSocket(t *testing.T) {
 	}
 }
 
-// User mode -> 0600 permissions.
-func TestCreateUnixListenerPermissionsUser(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
-
-	listener, err := ListenerFactory.createUnixListener(socketPath, ModeUser)
-	if err != nil {
-		t.Fatalf("createUnixListener: %v", err)
-	}
-	defer listener.Close()
-
-	info, err := os.Stat(socketPath)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	perm := info.Mode().Perm()
-	if perm != 0600 {
-		t.Errorf("permissions = %o, want 0600", perm)
-	}
-}
-
 // System mode -> 0666 permissions.
 func TestCreateUnixListenerPermissionsSystem(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
-	listener, err := ListenerFactory.createUnixListener(socketPath, ModeSystem)
+	listener, err := ListenerFactory.createUnixListener(socketPath)
 	if err != nil {
 		t.Fatalf("createUnixListener: %v", err)
 	}
@@ -1487,7 +1481,7 @@ type stubH7Factory struct {
 	tcpAddress   string
 }
 
-func (f *stubH7Factory) createUnixListener(socketPath string, mode DeploymentMode) (net.Listener, error) {
+func (f *stubH7Factory) createUnixListener(socketPath string) (net.Listener, error) {
 	f.unixCalls++
 	return f.unixListener, f.unixErr
 }
@@ -1533,7 +1527,7 @@ func TestH7TCPPortCaptureLeavesUnixListenerAuthoritative(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	unixListener, tcpListener, tcpDegraded, err := prepareListeners(ModeSystem, socketPath, DefaultHTTPAddress)
+	unixListener, tcpListener, tcpDegraded, err := prepareListeners(socketPath, DefaultHTTPAddress)
 	if err != nil {
 		t.Fatalf("TCP port capture must not deny the authoritative Unix service, got: %v", err)
 	}
@@ -1577,7 +1571,7 @@ func TestH7UnixFailureStillFatal(t *testing.T) {
 	t.Cleanup(func() { ListenerFactory = orig })
 	ListenerFactory = factory
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeSystem, "/run/docker-helper/docker-helper.sock", DefaultHTTPAddress)
+	unixListener, tcpListener, _, err := prepareListeners("/run/docker-helper/docker-helper.sock", DefaultHTTPAddress)
 	if err == nil {
 		t.Fatal("Unix listener creation failure must remain fatal")
 	}
@@ -1599,7 +1593,7 @@ func TestH7SystemModeBothListenersServed(t *testing.T) {
 	t.Cleanup(func() { ListenerFactory = orig })
 	ListenerFactory = factory
 
-	unixListener, tcpListener, _, err := prepareListeners(ModeSystem, "/tmp/stub-h7.sock", DefaultHTTPAddress)
+	unixListener, tcpListener, _, err := prepareListeners("/tmp/stub-h7.sock", DefaultHTTPAddress)
 	if err != nil {
 		t.Fatalf("healthy system-mode listener acquisition must succeed: %v", err)
 	}
@@ -1608,27 +1602,6 @@ func TestH7SystemModeBothListenersServed(t *testing.T) {
 	}
 	if out := opBuf.String(); strings.Contains(out, "unavailable") {
 		t.Errorf("no degradation warning may be emitted on the healthy path:\n%s", out)
-	}
-}
-
-// TestH7UserModeNeverAttemptsTCP proves user mode is unchanged: the TCP
-// creator is never consulted.
-func TestH7UserModeNeverAttemptsTCP(t *testing.T) {
-	setupTestLoggingDiscard(t)
-	factory := &stubH7Factory{unixListener: &stubH7Listener{}}
-	orig := ListenerFactory
-	t.Cleanup(func() { ListenerFactory = orig })
-	ListenerFactory = factory
-
-	unixListener, tcpListener, _, err := prepareListeners(ModeUser, "/tmp/stub-h7.sock", "")
-	if err != nil {
-		t.Fatalf("user-mode acquisition must succeed: %v", err)
-	}
-	if unixListener == nil || tcpListener != nil {
-		t.Error("user mode must return exactly the Unix listener")
-	}
-	if factory.tcpCalls != 0 {
-		t.Errorf("user mode must never attempt TCP, got %d calls", factory.tcpCalls)
 	}
 }
 

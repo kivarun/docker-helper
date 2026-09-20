@@ -408,65 +408,40 @@ func TestNormalizedLookupEquivalence(t *testing.T) {
 }
 
 // TestEffectivePrincipalAllowedRoots proves the Principal-level semantics:
-// user-mode daemon-owner collapse onto the global policy including modes,
-// normal composition otherwise, and empty fail-closed authority for
-// non-owner or system-mode Principals.
+// the plain stored-root composition is the ONLY ceiling source, and empty or
+// disjoint stored roots are fail-closed empty authority for every Principal.
 func TestEffectivePrincipalAllowedRoots(t *testing.T) {
 	global := []AllowedRootEntry{rwP("/g"), roP("/g/inputs")}
-	const owner = int64(7)
 
 	tests := []struct {
-		name        string
-		userMode    bool
-		principalID int64
-		daemonID    int64
-		stored      []AllowedRootEntry
-		want        []AllowedRootEntry
+		name   string
+		stored []AllowedRootEntry
+		want   []AllowedRootEntry
 	}{
 		{
-			name:        "daemon owner with zero roots collapses onto global modes",
-			userMode:    true,
-			principalID: owner,
-			daemonID:    owner,
-			stored:      nil,
-			want:        []AllowedRootEntry{rwP("/g"), roP("/g/inputs")},
+			name:   "zero roots has empty authority",
+			stored: nil,
+			want:   nil,
 		},
 		{
-			name:        "daemon owner with stored roots composes normally",
-			userMode:    true,
-			principalID: owner,
-			daemonID:    owner,
-			stored:      []AllowedRootEntry{roP("/g")},
-			want:        []AllowedRootEntry{roP("/g")},
+			name:   "stored roots compose normally",
+			stored: []AllowedRootEntry{roP("/g/inputs"), rwP("/g")},
+			want:   []AllowedRootEntry{rwP("/g"), roP("/g/inputs")},
 		},
 		{
-			name:        "non-owner with zero roots has empty authority",
-			userMode:    true,
-			principalID: 11,
-			daemonID:    owner,
-			stored:      nil,
-			want:        nil,
+			name:   "stored roots outside the global ceiling are fail-closed",
+			stored: []AllowedRootEntry{rwP("/elsewhere")},
+			want:   nil,
 		},
 		{
-			name:        "system mode with zero roots has empty authority",
-			userMode:    false,
-			principalID: owner,
-			daemonID:    owner,
-			stored:      nil,
-			want:        nil,
-		},
-		{
-			name:        "system mode composes stored roots",
-			userMode:    false,
-			principalID: 11,
-			daemonID:    owner,
-			stored:      []AllowedRootEntry{roP("/g/inputs"), rwP("/g")},
-			want:        []AllowedRootEntry{rwP("/g"), roP("/g/inputs")},
+			name:   "stored root keeps its narrower mode",
+			stored: []AllowedRootEntry{roP("/g")},
+			want:   []AllowedRootEntry{roP("/g")},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := effectivePrincipalAllowedRoots(global, tt.stored, tt.principalID, tt.daemonID, tt.userMode)
+			got := effectivePrincipalAllowedRoots(global, tt.stored, 11)
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("effective Principal policy = %v, want %v", got, tt.want)
 			}
@@ -500,55 +475,47 @@ func TestEffectiveLauncherAllowedRoots(t *testing.T) {
 	const owner = int64(7)
 
 	tests := []struct {
-		name     string
-		userMode bool
-		snap     *sessionOwnershipSnapshot
-		want     []AllowedRootEntry
-		wantErr  error
+		name    string
+		snap    *sessionOwnershipSnapshot
+		want    []AllowedRootEntry
+		wantErr error
 	}{
 		{
-			name:     "inherit equals the Principal ceiling",
-			userMode: false,
+			name: "inherit equals the Principal ceiling",
 			snap: newOwnershipSnapshotForTest(11, LauncherScopeInherit, nil,
 				[]AllowedRootEntry{rwP("/g"), roP("/g/inputs")}),
 			want: []AllowedRootEntry{rwP("/g"), roP("/g/inputs")},
 		},
 		{
-			name:     "inherit with daemon-owner collapse keeps global modes",
-			userMode: true,
-			snap:     newOwnershipSnapshotForTest(owner, LauncherScopeInherit, nil, nil),
-			want:     []AllowedRootEntry{rwP("/g"), roP("/g/inputs")},
+			name: "inherit with zero Principal roots is fail-closed empty",
+			snap: newOwnershipSnapshotForTest(11, LauncherScopeInherit, nil, nil),
+			want: nil,
 		},
 		{
-			name:     "restricted path narrowing",
-			userMode: false,
+			name: "restricted path narrowing",
 			snap: newOwnershipSnapshotForTest(11, LauncherScopeRestricted,
 				[]AllowedRootEntry{rwP("/g/sub")}, []AllowedRootEntry{rwP("/g")}),
 			want: []AllowedRootEntry{rwP("/g/sub")},
 		},
 		{
-			name:     "restricted mode narrowing",
-			userMode: false,
+			name: "restricted mode narrowing",
 			snap: newOwnershipSnapshotForTest(11, LauncherScopeRestricted,
 				[]AllowedRootEntry{roP("/g")}, []AllowedRootEntry{rwP("/g")}),
 			want: []AllowedRootEntry{roP("/g")},
 		},
 		{
-			name:     "restricted read_write cannot widen upstream read_only",
-			userMode: false,
+			name: "restricted read_write cannot widen upstream read_only",
 			snap: newOwnershipSnapshotForTest(11, LauncherScopeRestricted,
 				[]AllowedRootEntry{rwP("/g/inputs")}, []AllowedRootEntry{roP("/g/inputs")}),
 			want: []AllowedRootEntry{roP("/g/inputs")},
 		},
 		{
-			name:     "restricted with zero stored roots is fail-closed empty",
-			userMode: false,
-			snap:     newOwnershipSnapshotForTest(11, LauncherScopeRestricted, nil, []AllowedRootEntry{rwP("/g")}),
-			want:     nil,
+			name: "restricted with zero stored roots is fail-closed empty",
+			snap: newOwnershipSnapshotForTest(11, LauncherScopeRestricted, nil, []AllowedRootEntry{rwP("/g")}),
+			want: nil,
 		},
 		{
-			name:     "stale out-of-ceiling restricted root fails closed",
-			userMode: false,
+			name: "stale out-of-ceiling restricted root fails closed",
 			snap: newOwnershipSnapshotForTest(11, LauncherScopeRestricted,
 				[]AllowedRootEntry{rwP("/elsewhere")}, []AllowedRootEntry{rwP("/g")}),
 			wantErr: ErrLauncherUnavailable,
@@ -556,7 +523,7 @@ func TestEffectiveLauncherAllowedRoots(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := effectiveLauncherAllowedRoots(global, tt.snap, owner, tt.userMode)
+			got, err := effectiveLauncherAllowedRoots(global, tt.snap)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("error = %v, want %v", err, tt.wantErr)
@@ -880,13 +847,13 @@ func TestSnapshotEquivalenceWithEffectivePolicy(t *testing.T) {
 	}
 }
 
-// TestDaemonOwnerCollapseIsCanonicalized proves the user-mode daemon-owner
-// collapse returns the same canonical normalized representation as every
-// other resolver output: intentionally unordered global input collapses to
-// the normalized effective entries byte-for-byte, independent of insertion
-// order, and an inherit Launcher over the collapse receives the same
+// TestPrincipalCeilingIsCanonicalized proves the canonical Principal ceiling
+// resolver returns the same canonical normalized representation for every
+// resolver input: intentionally unordered global input composes to the
+// normalized effective entries byte-for-byte, independent of insertion
+// order, and an inherit Launcher over the Principal receives the same
 // normalized result.
-func TestDaemonOwnerCollapseIsCanonicalized(t *testing.T) {
+func TestPrincipalCeilingIsCanonicalized(t *testing.T) {
 	unorderedGlobal := []AllowedRootEntry{
 		rwP("/g/project"),
 		roP("/g/input"),
@@ -894,26 +861,26 @@ func TestDaemonOwnerCollapseIsCanonicalized(t *testing.T) {
 		rwP("/g/other"),
 	}
 	want := []AllowedRootEntry{rwP("/g"), roP("/g/input")}
-	const owner = int64(7)
+	stored := []AllowedRootEntry{rwP("/g")}
 
 	for i := 0; i < 4; i++ {
 		// Rotate the input to prove order independence.
 		rotated := append(append([]AllowedRootEntry{}, unorderedGlobal[i:]...), unorderedGlobal[:i]...)
-		got := effectivePrincipalAllowedRoots(rotated, nil, owner, owner, true)
+		got := effectivePrincipalAllowedRoots(rotated, stored, 11)
 		if !slices.Equal(got, want) {
-			t.Fatalf("collapse %d = %v, want %v", i, got, want)
+			t.Fatalf("composition %d = %v, want %v", i, got, want)
 		}
 	}
 
-	// An inherit Launcher over the collapse inherits the same normalized
+	// An inherit Launcher over the Principal inherits the same normalized
 	// effective policy.
-	snap := newOwnershipSnapshotForTest(owner, LauncherScopeInherit, nil, nil)
-	got, err := effectiveLauncherAllowedRoots(unorderedGlobal, snap, owner, true)
+	snap := newOwnershipSnapshotForTest(11, LauncherScopeInherit, nil, stored)
+	got, err := effectiveLauncherAllowedRoots(unorderedGlobal, snap)
 	if err != nil {
-		t.Fatalf("inherit over collapse error: %v", err)
+		t.Fatalf("inherit composition error: %v", err)
 	}
 	if !slices.Equal(got, want) {
-		t.Errorf("inherit over collapse = %v, want %v", got, want)
+		t.Errorf("inherit composition = %v, want %v", got, want)
 	}
 }
 
@@ -969,7 +936,7 @@ func TestUnknownLauncherScopeFailsClosed(t *testing.T) {
 	global := []AllowedRootEntry{rwP("/g")}
 	for _, scope := range []LauncherScopeMode{"", "garbage"} {
 		snap := newOwnershipSnapshotForTest(11, scope, nil, []AllowedRootEntry{rwP("/g")})
-		got, err := effectiveLauncherAllowedRoots(global, snap, 7, false)
+		got, err := effectiveLauncherAllowedRoots(global, snap)
 		if err == nil {
 			t.Fatalf("scope %q returned the Principal ceiling %v, want refusal", scope, got)
 		}
@@ -982,12 +949,13 @@ func TestUnknownLauncherScopeFailsClosed(t *testing.T) {
 	}
 }
 
-// TestDaemonOwnerCollapseRejectsCorruptGlobalPolicy proves the collapse
-// branch enforces the same structural boundary as composition: unknown
-// access, conflicting duplicates, and non-canonical global entries yield no
-// authority instead of passing corrupt policy through normalization.
-func TestDaemonOwnerCollapseRejectsCorruptGlobalPolicy(t *testing.T) {
-	const owner = int64(7)
+// TestPrincipalCeilingRejectsCorruptGlobalPolicy proves the canonical
+// Principal ceiling resolver enforces the same structural boundary for its
+// input as every other resolver output: unknown access, conflicting
+// duplicates, and non-canonical global entries yield no authority instead of
+// passing corrupt policy through normalization.
+func TestPrincipalCeilingRejectsCorruptGlobalPolicy(t *testing.T) {
+	stored := []AllowedRootEntry{rwP("/g")}
 	tests := []struct {
 		name   string
 		global []AllowedRootEntry
@@ -999,17 +967,17 @@ func TestDaemonOwnerCollapseRejectsCorruptGlobalPolicy(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := effectivePrincipalAllowedRoots(tt.global, nil, owner, owner, true)
+			got := effectivePrincipalAllowedRoots(tt.global, stored, 11)
 			if got != nil {
-				t.Errorf("collapse with corrupt global policy = %v, want no authority", got)
+				t.Errorf("composition with corrupt global policy = %v, want no authority", got)
 			}
 		})
 	}
 
-	// Valid unordered input keeps canonicalizing through the collapse.
+	// Valid unordered input keeps canonicalizing through the composition.
 	unordered := []AllowedRootEntry{rwP("/g/project"), roP("/g/input"), rwP("/g")}
-	if got := effectivePrincipalAllowedRoots(unordered, nil, owner, owner, true); !slices.Equal(got, []AllowedRootEntry{rwP("/g"), roP("/g/input")}) {
-		t.Errorf("valid collapse = %v, want the canonical normalized entries", got)
+	if got := effectivePrincipalAllowedRoots(unordered, stored, 11); !slices.Equal(got, []AllowedRootEntry{rwP("/g"), roP("/g/input")}) {
+		t.Errorf("valid composition = %v, want the canonical normalized entries", got)
 	}
 }
 

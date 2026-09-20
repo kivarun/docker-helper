@@ -423,12 +423,14 @@ func TestStartupReconciliationConvergesStoredRootsBeforeServing(t *testing.T) {
 	narrowed := narrowCfg(t, app, narrowRoot)
 
 	result, err := reconcileStoredAllowedRootsToGlobalCeiling(
-		app.DB, narrowed.AllowedRoots, true, app.userModeDefault.principalID)
+		app.DB, narrowed.AllowedRoots)
 	if err != nil {
 		t.Fatalf("startup reconciliation: %v", err)
 	}
-	if !pathSetEqual(principalPrunedPaths(result), []string{filepath.Join(root, "home", "bootrec"), pb}) {
-		t.Fatalf("reconciliation pruned principal roots = %v, want the out-of-ceiling pair", result.PrincipalRoots)
+	// The out-of-ceiling pair from bootrec plus the test owner's stored root
+	// (the pre-narrowing global ceiling, pruned by the same reconciliation).
+	if !pathSetEqual(principalPrunedPaths(result), []string{root, filepath.Join(root, "home", "bootrec"), pb}) {
+		t.Fatalf("reconciliation pruned principal roots = %v, want the out-of-ceiling set", result.PrincipalRoots)
 	}
 	if !pathSetEqual(launcherPrunedPaths(result), []string{cache}) {
 		t.Fatalf("reconciliation pruned launcher roots = %v, want [%s]", launcherPrunedPaths(result), cache)
@@ -486,10 +488,9 @@ func TestRaceReloadNarrowingCommitsWhollyCascadedHierarchy(t *testing.T) {
 	//   create  - the create's in-boundary ownership snapshot read.
 	createBoundaryPoint := newParkedQueryPoint("FROM launchers l JOIN principals p")
 	app := &App{
-		Config:          app1.Config,
-		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, createBoundaryPoint),
-		AdminTokenHash:  app1.AdminTokenHash,
-		userModeDefault: app1.userModeDefault,
+		Config:         app1.Config,
+		DB:             openParkedQueryDB(t, app1.Config.DatabasePath, createBoundaryPoint),
+		AdminTokenHash: app1.AdminTokenHash,
 	}
 
 	runSinglePinnedP(t, func() {

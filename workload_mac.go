@@ -235,13 +235,10 @@ type workloadMACCoordinator struct {
 }
 
 // newWorkloadMACCoordinatorForMode builds the workload MAC coordinator for
-// the given deployment mode. It returns nil for non-system mode and when no
-// supported MAC backend is active (mirroring the session MAC coordinator
-// invariant), so run requests fail closed per request in that case.
+// the active MAC backend. It returns nil when no supported MAC backend is
+// active (mirroring the session MAC coordinator invariant), so run requests
+// fail closed per request in that case.
 func newWorkloadMACCoordinatorForMode(cfg *Config, detectLSM func() (LSMBackend, error)) (*workloadMACCoordinator, error) {
-	if cfg.Mode != ModeSystem {
-		return nil, nil
-	}
 	backend, err := detectLSM()
 	if err != nil {
 		return nil, err

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"sync"
 	"testing"
 )
 
@@ -184,9 +185,12 @@ func TestRunShmSizeOmitted(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
+	var mu sync.Mutex
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		mu.Lock()
 		capturedArgs = args
+		mu.Unlock()
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -203,6 +207,8 @@ func TestRunShmSizeOmitted(t *testing.T) {
 		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	for i, arg := range capturedArgs {
 		if arg == "--shm-size" {
 			t.Errorf("expected no --shm-size in args, found at index %d: %v", i, capturedArgs)
@@ -220,9 +226,12 @@ func TestRunShmSizeEmpty(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
+	var mu sync.Mutex
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		mu.Lock()
 		capturedArgs = args
+		mu.Unlock()
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -242,6 +251,8 @@ func TestRunShmSizeEmpty(t *testing.T) {
 		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	for i, arg := range capturedArgs {
 		if arg == "--shm-size" {
 			t.Errorf("expected no --shm-size in args, found at index %d: %v", i, capturedArgs)
@@ -259,9 +270,12 @@ func TestRunShmSizeValid(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
+	var mu sync.Mutex
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		mu.Lock()
 		capturedArgs = args
+		mu.Unlock()
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -282,6 +296,8 @@ func TestRunShmSizeValid(t *testing.T) {
 	}
 
 	// Verify --shm-size is present with the correct byte value.
+	mu.Lock()
+	defer mu.Unlock()
 	wantBytes := "536870912" // 512 * 1024 * 1024
 	for i, arg := range capturedArgs {
 		if arg == "--shm-size" && i+1 < len(capturedArgs) {
@@ -303,9 +319,12 @@ func TestRunShmSizePlacementBeforeImage(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
+	var mu sync.Mutex
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		mu.Lock()
 		capturedArgs = args
+		mu.Unlock()
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -326,6 +345,8 @@ func TestRunShmSizePlacementBeforeImage(t *testing.T) {
 	}
 
 	// Find --shm-size and image positions.
+	mu.Lock()
+	defer mu.Unlock()
 	shmIdx := -1
 	imageIdx := -1
 	for i, arg := range capturedArgs {

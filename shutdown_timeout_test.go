@@ -41,9 +41,9 @@ func setupShutdownTimeoutConfig(t *testing.T, shutdownTimeout string) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 
 	// Prevent reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSocket })
+	origSocketPath := systemSocketPath
+	systemSocketPath = filepath.Join(dir, "runtime", "docker-helper", "nonexistent.sock")
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
 }
 
 // TestShutdownTimeoutLegacyUpgradeBoundedAtLoad proves Release 1 (v1.0.2)
