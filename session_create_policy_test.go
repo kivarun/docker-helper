@@ -7,9 +7,10 @@ import (
 
 // TestCreateSessionGoesThroughResolveCreatePolicy proves createSession is a
 // thin wrapper over the single authoritative resolveCreatePolicy path (admin
-// authority + omitted selectors). Disabling the daemon-owner default Launcher
-// must surface the policy owner's ErrLauncherUnavailable before any insert —
-// not a late insert-time error from a manual parallel policy construction.
+// authority + omitted selectors). Disabling the launcher-owner 'default'
+// Launcher must surface the policy owner's ErrLauncherUnavailable before any
+// insert — not a late insert-time error from a manual parallel policy
+// construction.
 func TestCreateSessionGoesThroughResolveCreatePolicy(t *testing.T) {
 	app := newTestApp(t)
 	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
@@ -24,10 +25,10 @@ func TestCreateSessionGoesThroughResolveCreatePolicy(t *testing.T) {
 	}
 }
 
-// TestCreateSessionResolvesDaemonOwnerDefault proves the thin wrapper resolves
-// the provisioned daemon-owner 'default' Launcher without explicit selectors
-// (the user-mode collapsed policy owner), producing the daemon-owner identity.
-func TestCreateSessionResolvesDaemonOwnerDefault(t *testing.T) {
+// TestCreateSessionResolvesLauncherOwnerDefault proves the thin wrapper resolves
+// the provisioned launcher-owner 'default' Launcher without explicit selectors,
+// producing the launcher-owner identity.
+func TestCreateSessionResolvesLauncherOwnerDefault(t *testing.T) {
 	app := newTestApp(t)
 	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)
 
@@ -36,7 +37,7 @@ func TestCreateSessionResolvesDaemonOwnerDefault(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 	if result.Session.LauncherID != testOwnerLauncherID(app) {
-		t.Errorf("LauncherID = %q, want daemon-owner default %q", result.Session.LauncherID, testOwnerLauncherID(app))
+		t.Errorf("LauncherID = %q, want launcher-owner default %q", result.Session.LauncherID, testOwnerLauncherID(app))
 	}
 	if result.Session.PrincipalName != testOwnerUsername {
 		t.Errorf("PrincipalName = %q, want %q", result.Session.PrincipalName, testOwnerUsername)

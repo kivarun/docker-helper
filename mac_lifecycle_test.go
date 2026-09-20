@@ -173,11 +173,11 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testS
 		MACCoordinator: mac,
 	}
 
-	// Provision a user-mode daemon-owner Principal + 'default' Launcher so that
+	// Provision the test-owner Principal + 'default' Launcher so that
 	// sessions created through the shared model reference a real launcher_id.
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
-		t.Fatalf("cannot create daemon-owner home: %v", err)
+		t.Fatalf("cannot create owner home: %v", err)
 	}
 	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 
@@ -292,12 +292,12 @@ func insertTestSessionTx(db *sql.DB, launcherID, sessionID, workspace string) er
 	return tx.Commit()
 }
 
-// testMACLauncherID provisions an enabled daemon-owner Principal and its
+// testMACLauncherID provisions an enabled test-owner Principal and its
 // 'default' Launcher for tests that build their own DB outside
 // setupTestMACCoordinator, returning a valid launcher_id for session inserts.
 func testMACLauncherID(t *testing.T, db *sql.DB) string {
 	t.Helper()
-	// Reuse an already-provisioned daemon-owner default Launcher if present so
+	// Reuse an already-provisioned test-owner default Launcher if present so
 	// that multiple session inserts in one test share a single launcher_id.
 	const username = "dhtestowner"
 	if p, err := findPrincipalByUsername(db, username); err == nil {

@@ -58,7 +58,7 @@ func TestLauncherListScopeFirstMatrix(t *testing.T) {
 	app, aliceToken, launcherToken := setupScopeListPrincipals(t)
 
 	// Admin without filter: every visible Launcher — both principals' rows
-	// plus the test app's provisioned daemon-owner Launcher.
+	// plus the test app's provisioned test-owner Launcher.
 	w := launcherRequest(t, app, http.MethodGet, "/launchers", testAdminToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin unfiltered list: expected 200, got %d (body=%s)", w.Code, w.Body.String())
@@ -75,7 +75,7 @@ func TestLauncherListScopeFirstMatrix(t *testing.T) {
 		case "bob":
 			bobRows++
 		case "dhtestowner":
-			// The test app's daemon-owner identity with its 'default' Launcher.
+			// The test app's test-owner identity with its 'default' Launcher.
 		default:
 			t.Errorf("admin list contains unexpected owner %q", l.Principal)
 		}

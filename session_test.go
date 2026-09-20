@@ -13,14 +13,14 @@ import (
 	"time"
 )
 
-// provisionDefaultLauncherForDB provisions an enabled daemon-owner Principal
+// provisionDefaultLauncherForDB provisions an enabled test-owner Principal
 // and its 'default' Launcher against an arbitrary (non-newTestApp) test
 // database, and returns the Launcher's ID. It mirrors newTestApp's owner
 // provisioning so bare-DB fixtures can reference a valid launcher_id.
 func provisionDefaultLauncherForDB(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	allowedRoot := testAllowedRootDir(t)
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}

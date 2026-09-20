@@ -328,9 +328,9 @@ func newTestApp(t *testing.T) *App {
 	// system-only ownership model has no daemon-owner special case: the owner
 	// Principal carries a stored allowed root covering the test allowed root,
 	// so its effective ceiling is the ordinary stored-root composition.
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
-		t.Fatalf("cannot create daemon-owner home: %v", err)
+		t.Fatalf("cannot create owner home: %v", err)
 	}
 	provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 

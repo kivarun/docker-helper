@@ -61,9 +61,9 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
-	// Provision a user-mode daemon-owner Principal + 'default' Launcher so
+	// Provision the test-owner Principal + 'default' Launcher so
 	// that session creation resolves a valid session owner.
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -190,9 +190,9 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 		OperationSupervisor: newOperationSupervisor(),
 	}
 
-	// Provision a user-mode daemon-owner Principal + 'default' Launcher so
+	// Provision the test-owner Principal + 'default' Launcher so
 	// that session creation resolves a valid session owner.
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}

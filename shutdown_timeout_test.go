@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// setupShutdownTimeoutConfig writes a minimal user-mode config with an optional
+// setupShutdownTimeoutConfig writes a minimal valid config with an optional
 // shutdown_timeout value ("" omits the key) and isolates the daemon load seams.
 func setupShutdownTimeoutConfig(t *testing.T, shutdownTimeout string) {
 	t.Helper()

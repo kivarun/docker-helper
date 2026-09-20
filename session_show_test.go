@@ -132,7 +132,7 @@ func TestSessionShowAuthorizationMatrix(t *testing.T) {
 	setupTestLoggingDiscard(t)
 	root := app.Config.AllowedRoots[0].Path
 
-	// A foreign Session owned by the reserved daemon-owner Launcher
+	// A foreign Session owned by the test-owner Launcher
 	// (admin-created, outside the scoped credentials below).
 	foreignWorkspace := testWorkspaceDir(t, root)
 	foreignSession, err := createDefaultAdminSessionForTest(app, foreignWorkspace)

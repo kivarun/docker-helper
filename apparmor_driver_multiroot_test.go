@@ -66,7 +66,7 @@ func setupAppArmorMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *a
 		OperationLogMaxBytes:  4 * 1024 * 1024,
 	}
 	app := &App{Config: cfg, DB: db, MACCoordinator: mac}
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatalf("cannot create daemon home: %v", err)
 	}

@@ -23,7 +23,7 @@ func TestHTTPAddressDefaultSystem(t *testing.T) {
 }
 
 func TestHTTPAddressCustomSystem(t *testing.T) {
-	// Validate custom http_address by loading config in user mode.
+	// Validate custom http_address by loading the config.
 	// Config decoding and validation are mode-independent;
 	// only TCP listener creation depends on mode.
 	orig := EffectiveUID
@@ -71,7 +71,7 @@ func TestHTTPAddressUserModeEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadAndPrepareRuntimeConfig: %v", err)
 	}
-	// In user mode, HTTPAddress is still set to the default value
+	// HTTPAddress is still set to the default value
 	// (it's just not used for TCP listener creation).
 	if cfg.HTTPAddress != DefaultHTTPAddress {
 		t.Errorf("HTTPAddress = %q, want %q", cfg.HTTPAddress, DefaultHTTPAddress)

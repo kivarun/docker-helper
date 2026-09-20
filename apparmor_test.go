@@ -2823,8 +2823,8 @@ func TestBuildxNoBroadWildcard(t *testing.T) {
 // read-only.
 //
 // Trusted CA preparation reads the configured trusted_ca_path from within
-// the confined daemon in both system and user mode, so both profiles must
-// cover the openSUSE location used for administrator-installed CA material.
+// the confined daemon, so the shipped profile must cover the openSUSE
+// location used for administrator-installed CA material.
 func TestAppArmorProfilesOpenSUSETrustAnchorsReadOnly(t *testing.T) {
 	profiles := map[string]string{
 		"system": "packaging/apparmor/docker-helper-system",

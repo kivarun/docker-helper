@@ -156,10 +156,10 @@ func waitAllOperationsTerminal(t *testing.T, app *App) {
 	}
 }
 
-// TestRunWorkloadPrivilegeFloorUserMode proves the user-mode floor: the
-// captured docker run argv carries the server-owned privilege floor and the
-// existing fixed user-mode label=disable policy stays present.
-func TestRunWorkloadPrivilegeFloorUserMode(t *testing.T) {
+// TestRunWorkloadPrivilegeFloor proves the captured docker run argv carries
+// the server-owned privilege floor and the fixed label=disable policy stays
+// present.
+func TestRunWorkloadPrivilegeFloor(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 

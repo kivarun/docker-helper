@@ -1211,7 +1211,7 @@ func TestServerErrorLogGoesToOperational(t *testing.T) {
 
 // --- serveHTTPUntilShutdown deadlock regression tests ---
 
-// User mode / single listener: unexpected Serve error -> function completes drain, no hang.
+// Single listener: unexpected Serve error -> function completes drain, no hang.
 func TestServeHTTPUntilShutdownUserModeServeError(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
@@ -1608,7 +1608,7 @@ func TestH7SystemModeBothListenersServed(t *testing.T) {
 // TestH7ServeAndCleanupWithNilTCP proves the degraded-startup runtime path is
 // correct: a system-shaped server with a live Unix listener and a nil TCP
 // listener serves the complete API over Unix (nil TCP is simply not served,
-// exactly like user mode), and cleanup with a nil TCP listener closes the
+// like the unconditional binding), and cleanup with a nil TCP listener closes the
 // Unix listener and removes its socket without error.
 func TestH7ServeAndCleanupWithNilTCP(t *testing.T) {
 	dir := t.TempDir()

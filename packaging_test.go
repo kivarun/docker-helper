@@ -327,8 +327,8 @@ func TestSkillAgentContract(t *testing.T) {
 		t.Error("SKILL.md must not resurrect the retired --filesystem-entry vocabulary")
 	}
 
-	// Socket discovery must cover both deployment modes: the authoritative
-	// override, the user-mode runtime socket, and the system socket.
+	// Socket discovery must cover the authoritative override, the XDG
+	// runtime locator, and the system socket.
 	for _, fact := range []string{
 		"DOCKER_HELPER_SOCKET_PATH",
 		"XDG_RUNTIME_DIR",
@@ -339,13 +339,13 @@ func TestSkillAgentContract(t *testing.T) {
 		}
 	}
 
-	// The user-mode mount invariant is the canonical workspace rule, never
+	// The workspace mount invariant is the canonical rule, never
 	// the literal "." spelling; the known-stale sentence must stay gone.
 	if !strings.Contains(content, "canonical resolved source equals the canonical Session workspace") {
-		t.Error("SKILL.md must state the canonical user-mode mount rule")
+		t.Error("SKILL.md must state the canonical workspace mount rule")
 	}
 	if strings.Contains(content, "only the workspace root source `.` is accepted") {
-		t.Error("SKILL.md must not claim the literal `.` spelling as the user-mode invariant")
+		t.Error("SKILL.md must not claim the literal `.` spelling as the workspace invariant")
 	}
 
 	// A Session bearer introspects its own issued snapshot through self;
@@ -391,7 +391,7 @@ func TestHelperSocketLocatorUserDocs(t *testing.T) {
 // TestCanonicalDocContract verifies the canonical current-design documents
 // keep the Release 2.2 contracts and do not resurrect known-stale claims:
 // the Session MAC lifecycle covers every concrete issued tree (never a
-// workspace-only scope, never preparation-after-persistence), the user-mode
+// workspace-only scope, never preparation-after-persistence), the workspace
 // filesystem authority stays workspace-only, and the shipped man page does
 // not reduce the SELinux MAC scope to concrete Session workspaces.
 func TestCanonicalDocContract(t *testing.T) {
@@ -431,24 +431,24 @@ func TestCanonicalDocContract(t *testing.T) {
 			},
 		},
 		{
-			name: "skill user-mode filesystem roots",
+			name: "skill workspace filesystem roots",
 			file: ".claude/skills/docker-helper/SKILL.md",
 			mustContain: []string{
-				// The canonical user-mode issuance rule: workspace-only.
+				// The canonical issuance rule: workspace-only.
 				"an explicit root is accepted only when its canonical path equals the canonical workspace",
 			},
 			mustNotContain: []string{},
 		},
 		{
-			name: "readme user-mode filesystem authority",
+			name: "readme workspace filesystem authority",
 			file: "README.md",
 			mustContain: []string{
-				// The canonical user-mode authority statement.
+				// The canonical workspace-only authority statement.
 				"the Session filesystem authority remains workspace-only",
 			},
 			mustNotContain: []string{
 				// The stale workspace+issued-roots impression in the
-				// user-mode limitation.
+				// authority description.
 				"workspace + issued filesystem roots) is still the only authority",
 			},
 		},
@@ -1010,7 +1010,7 @@ func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
 
 // TestInstallSystemScriptContent guards the facts normal CI cannot
 // exercise: the root fail-closed check, the real system destination paths,
-// and the separation from user-mode artifacts. Allowed-root handling,
+// and the real destination paths. Allowed-root handling,
 // managed-boundaries state migration, AppArmor-before-init ordering, and
 // profile load flags are proven by the behavioral tests below.
 func TestInstallSystemScriptContent(t *testing.T) {
@@ -1049,7 +1049,7 @@ func TestInstallSystemScriptContent(t *testing.T) {
 
 // TestUninstallSystemScriptContent guards the facts normal CI cannot
 // exercise: the root fail-closed check, the real system purge paths, and
-// the separation from user-mode artifacts. Stop-before-remove ordering,
+// and the real purge paths. Stop-before-remove ordering,
 // AppArmor unload, and purge preservation/removal are proven by the
 // behavioral tests below.
 func TestUninstallSystemScriptContent(t *testing.T) {
@@ -8102,7 +8102,7 @@ func TestReleaseReadmeNoR3Features(t *testing.T) {
 }
 
 // TestAppArmorCurlSnippet verifies the curl AppArmor compatibility snippet
-// exists and contains the required socket rules for both deployment modes.
+// exists and contains the required socket rule for the system socket.
 func TestAppArmorCurlSnippet(t *testing.T) {
 	path := "packaging/apparmor/local/curl"
 	data, err := os.ReadFile(path)
@@ -8111,13 +8111,9 @@ func TestAppArmorCurlSnippet(t *testing.T) {
 	}
 	content := string(data)
 
-	// Must contain user-mode socket rule.
-	if !strings.Contains(content, "/run/user/*/docker-helper/docker-helper.sock rw") {
-		t.Error("snippet must contain user-mode socket rule")
-	}
-	// Must contain system-mode socket rule.
+	// Must contain the system-mode socket rule.
 	if !strings.Contains(content, "/run/docker-helper/docker-helper.sock rw") {
-		t.Error("snippet must contain system-mode socket rule")
+		t.Error("snippet must contain the system socket rule")
 	}
 	// Must not contain executable or capability grants.
 	for _, s := range []string{"rix", "ix", "capability"} {

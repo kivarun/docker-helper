@@ -484,8 +484,8 @@ func TestValidateRawConfigRejectsRelativeAllowedRoot(t *testing.T) {
 // under enforcing SELinux applies the installed fcontext rules to the
 // helper-owned config/state directories (recursive restorecon) immediately
 // after creating them and before writing the admin token, so the first daemon
-// start succeeds. AppArmor system mode and user mode never invoke the SELinux
-// relabel, and a relabel failure is fatal (no misleading partial init).
+// start succeeds. AppArmor hosts never invoke the SELinux relabel, and a
+// relabel failure is fatal (no misleading partial init).
 
 // setupInitSystemMode points config + state dirs at temp dirs and forces
 // system mode (EffectiveUID 0) so initCore can run without root and without

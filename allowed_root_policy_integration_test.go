@@ -557,7 +557,7 @@ func TestAmbiguousSchemaFailsUnchanged(t *testing.T) {
 }
 
 // =============================================================================
-// Init: forbidden user-mode root
+// Init: forbidden root
 // =============================================================================
 
 func TestInitForbiddenUserRootFailsBeforeState(t *testing.T) {

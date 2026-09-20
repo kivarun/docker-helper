@@ -581,16 +581,15 @@ func TestSystemModeCAOutsideSourceAllowsUnrelatedMutation(t *testing.T) {
 	}
 }
 
-func TestUserModeCAArbitraryPath(t *testing.T) {
-	// User mode must accept arbitrary absolute CA paths.
+func TestNonRootCAArbitraryPath(t *testing.T) {
+	// Non-root clients must accept arbitrary absolute CA paths.
 	_, caPath := setupCAConfigPreflightTest(t)
 
-	// Ensure user mode.
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 1000 }
 	defer func() { EffectiveUID = origUID }()
 
-	// Set path and enable auto (should succeed with valid CA in user mode).
+	// Set path and enable auto (should succeed with a valid CA).
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
 	if code != 0 {

@@ -161,9 +161,8 @@ func wantSnapshotJSON(app *App) string {
 // every ceiling transition strictly inside the workspace.
 func TestHTTPSessionFilesystemOmittedInheritsCeiling(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	// The full multi-root issuance contract (external absolute roots) is a
-	// system-mode capability; user mode restricts filesystem roots to the
-	// canonical workspace and is proven separately.
+	// The full multi-root issuance contract (external absolute roots) is
+	// proven separately from the workspace-only narrowing here.
 	setupTestLoggingDiscard(t)
 	_, launcherToken, _, workspace := setupSessionNarrowingFixture(t, app)
 

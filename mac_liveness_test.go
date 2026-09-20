@@ -148,7 +148,7 @@ func setupH8AppArmorParkedCoordinator(t *testing.T) (*App, <-chan struct{}, chan
 		OperationLogMaxBytes:  4 * 1024 * 1024,
 	}
 	app := &App{Config: cfg, DB: db, MACCoordinator: newSessionMACCoordinator(db, driver)}
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create daemon home: %v", err)
 	}
@@ -208,7 +208,7 @@ func setupH8SELinuxParkedCoordinator(t *testing.T) (*App, <-chan struct{}, chan 
 		OperationLogMaxBytes:  4 * 1024 * 1024,
 	}
 	app := &App{Config: cfg, DB: db, MACCoordinator: newSessionMACCoordinator(db, driver)}
-	home := filepath.Join(allowedRoot, "daemon-home")
+	home := filepath.Join(allowedRoot, "owner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create daemon home: %v", err)
 	}
@@ -688,7 +688,7 @@ func TestH8ReloadHungTrustedCARestoreconKeepsPreviousConfig(t *testing.T) {
 	defer logging.reset()
 
 	// 1. Load the initial valid config and create the App in the environment
-	//    user mode (the DB and admin token live under the env-resolved dirs).
+	//    (the DB and admin token live under the env-resolved dirs).
 	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatalf("initial loadAndPrepareRuntimeConfig: %v", err)
