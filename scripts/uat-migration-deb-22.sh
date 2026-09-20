@@ -136,6 +136,12 @@ ok_mig "v2.2.0 baseline service active and healthy"
 # ---------------------------------------------------------------------------
 # M2. real pre-upgrade state through the 2.2 CLI.
 # ---------------------------------------------------------------------------
+# The 2.2 principal create resolves the OS account (os_user_not_found
+# otherwise); the account must exist before any principal create spelling.
+if ! id mig22u >/dev/null 2>&1; then
+  useradd -m -d /home/mig22u -s /bin/bash mig22u >/dev/null 2>&1 \
+    || fail_mig "cannot create the OS account mig22u"
+fi
 # The 2.2 baseline predates --no-credential: try the candidate form first,
 # then the baseline form (the baseline creates the principal with its own
 # issuance behavior; the explicit credential below is the authority seed).
@@ -174,13 +180,23 @@ ok_mig "pre-upgrade Session workload identity proven"
 
 # Real historical user-mode tree: a separate OS account bootstraps the exact
 # 2.2 non-root daemon world (XDG config + admin token + per-user unit copy).
+# The 2.2 non-root init delegates to credential install while the system
+# service is running; the standalone user-init branch that creates the
+# historical tree requires no system daemon and Docker access, so the
+# baseline service is stopped for the seeding and restarted afterwards.
 if ! id mig22legacy >/dev/null 2>&1; then
   useradd -m -d /home/mig22legacy -s /bin/bash mig22legacy >/dev/null 2>&1 \
     || fail_mig "cannot create the legacy-state account mig22legacy"
 fi
+usermod -aG docker mig22legacy >/dev/null 2>&1 || true
+systemctl stop "$SERVICE" >/dev/null 2>&1 \
+  || fail_mig "cannot stop the baseline service for legacy-state seeding"
 sudo -u mig22legacy env -u XDG_CONFIG_HOME HOME=/home/mig22legacy \
   docker-helper init --allowed-root /home/mig22legacy >/tmp/uat-mig22-legacy-init.log 2>&1 \
-  || fail_mig "the 2.2 baseline non-root init failed (legacy-state seeding broken): see /tmp/uat-mig22-legacy-init.log"
+  || fail_mig "the 2.2 baseline non-root init failed (legacy-state seeding broken): $(tail -3 /tmp/uat-mig22-legacy-init.log 2>/dev/null | redact | tr '\n' ' ')"
+systemctl start "$SERVICE" >/dev/null 2>&1 \
+  || fail_mig "cannot restart the baseline service after legacy-state seeding"
+wait_health || fail_mig "the baseline service did not come back healthy after legacy-state seeding"
 for legacy_path in \
   /home/mig22legacy/.config/docker-helper/config.json \
   /home/mig22legacy/.config/docker-helper/admin.token \

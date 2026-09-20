@@ -207,15 +207,26 @@ fi
 
 # Real historical user-mode tree: a separate OS account bootstraps the exact
 # 2.2 non-root daemon world (XDG config + admin token + per-user unit copy).
+# The 2.2 non-root init delegates to credential install while the system
+# service is running; the standalone user-init branch that creates the
+# historical tree requires no system daemon and Docker access, so the
+# baseline service is stopped for the seeding and restarted afterwards.
 if ! id mig22legacy >/dev/null 2>&1; then
   mkdir -p "$ALLOWED_ROOT/mig22legacy-home"
   useradd -m -d "$ALLOWED_ROOT/mig22legacy-home" -s /bin/bash mig22legacy >/dev/null 2>&1 \
     || acc_fail "cannot create the legacy-state account mig22legacy"
 fi
 LEGACY_HOME="$(getent passwd mig22legacy | cut -d: -f6)"
+usermod -aG docker mig22legacy >/dev/null 2>&1 || true
+systemctl stop docker-helper.service >/dev/null 2>&1 \
+  || acc_fail "cannot stop the baseline service for legacy-state seeding"
 sudo -u mig22legacy env -u XDG_CONFIG_HOME HOME="$LEGACY_HOME" \
   docker-helper init --allowed-root "$LEGACY_HOME" >/tmp/uat-mig22-legacy-init.log 2>&1 \
-  || acc_fail "the 2.2 baseline non-root init failed (legacy-state seeding broken): see /tmp/uat-mig22-legacy-init.log"
+  || acc_fail "the 2.2 baseline non-root init failed (legacy-state seeding broken): $(tail -3 /tmp/uat-mig22-legacy-init.log 2>/dev/null | redact | tr '\n' ' ')"
+systemctl start docker-helper.service >/dev/null 2>&1 \
+  || acc_fail "cannot restart the baseline service after legacy-state seeding"
+wait_service_active || acc_fail "the baseline service did not come back active after legacy-state seeding"
+wait_health || acc_fail "the baseline service did not come back healthy after legacy-state seeding"
 for legacy_path in \
   "$LEGACY_HOME/.config/docker-helper/config.json" \
   "$LEGACY_HOME/.config/docker-helper/admin.token" \
