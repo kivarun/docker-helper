@@ -1050,7 +1050,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		}
 	})
 
-	t.Run("config_add_user_mode", func(t *testing.T) {
+	t.Run("config_add_non_root_client", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
