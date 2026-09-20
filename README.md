@@ -289,8 +289,10 @@ service and remove the packaged assets. With `--purge` it also removes
 
 ### 1. Initialize
 
+Init is root-only: a non-root invocation is refused.
+
 ```bash
-docker-helper init
+sudo docker-helper init
 ```
 
 Creates configuration and state directories, writes `config.json` with
@@ -301,11 +303,11 @@ Creates configuration and state directories, writes `config.json` with
 token is printed once and stored beside the config file.
 
 If running interactively and `--allowed-root` is not provided, you will
-be prompted for the allowed root directory. The user's home directory is
-used as the default. For root, `/home` is used as the default.
+be prompted for the allowed root directory. The interactive default is
+`/home`.
 
 ```bash
-docker-helper init --allowed-root /path/to/workspaces
+sudo docker-helper init --allowed-root /path/to/workspaces
 ```
 
 In non-interactive environments (CI, scripts), `--allowed-root` is
@@ -561,8 +563,10 @@ regular internal force-cleanup phase.
 
 #### Manual foreground run
 
+Serve is root-only:
+
 ```bash
-docker-helper serve
+sudo docker-helper serve
 ```
 
 Use this mode for testing and troubleshooting. Audit records are written
@@ -1090,12 +1094,10 @@ curl --unix-socket /run/docker-helper/docker-helper.sock \
   http://localhost/registry/login
 ```
 
-Or use the CLI:
+Or use the CLI (REGISTRY is the one required positional operand):
 
 ```bash
-docker-helper registry login \
-  --registry registry.example.com \
-  --username myuser
+docker-helper registry login --username myuser registry.example.com
 ```
 
 When run interactively, the CLI prompts for the password via the terminal.

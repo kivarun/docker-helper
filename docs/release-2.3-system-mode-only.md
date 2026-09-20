@@ -8,12 +8,14 @@ repo hygiene, the full `go test` and `go test -race` suites, the
 non-Linux/static-build and SELinux policy checks, and exact-artifact
 verification of the packaged system-only payload (DEB, RPM, and tarball).
 
-The final hosted exact-artifact UAT (fresh DEB/RPM install, 2.2.0 → 2.3
-candidate upgrade, tarball install, AppArmor, enforcing SELinux, workload
-matrices, and the system-only regression battery) against the candidate
-artifact bytes is still pending. Until that gate passes and the release is
-closed out, no stable Release 2.3 is declared and no release tag exists;
-this owner receives the final evidence/status closure after that UAT.
+Declaring the stable release requires both machine gates on the exact final
+SHA: the full `.github/workflows/ci.yml` core CI run and the full
+exact-artifact hosted gate (`scope=full`, the release `uat_version`). This
+document does not record gate run IDs or hashes: they belong to the release
+closure record, not to a plan document, and writing them here before the
+final gate would make this document self-invalidating with every
+post-gate commit. No stable Release 2.3 is declared and no release tag
+exists; a post-release commit closes this status when the tag is published.
 
 This pulls forward an already accepted later simplification: user-mode daemon
 support is removed before the larger Release 3 managed-container runtime work.

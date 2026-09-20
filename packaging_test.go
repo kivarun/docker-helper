@@ -10668,3 +10668,29 @@ func TestUATSELinuxC3RaceOutcomeClassification(t *testing.T) {
 		"normal session creation works after the race",
 	})
 }
+
+// TestReadmeCanonicalCLIGrammar pins the repository README's executable CLI
+// examples against the real parser grammar: the registry-login example must
+// use the positional REGISTRY operand (the retired --registry spelling was
+// never a parser flag and must not return), and the init example must be
+// the root-only form (init is refused for non-root callers).
+func TestReadmeCanonicalCLIGrammar(t *testing.T) {
+	data, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if strings.Contains(content, "--registry") {
+		t.Error("README.md must not use the retired --registry flag; registry login takes the positional REGISTRY operand")
+	}
+	if !strings.Contains(content, "docker-helper registry login --username myuser registry.example.com") {
+		t.Error("README.md must teach the canonical positional registry-login grammar")
+	}
+	if !strings.Contains(content, "sudo docker-helper init") {
+		t.Error("README.md init examples must be the root-only form (sudo docker-helper init)")
+	}
+	if strings.Contains(content, "The user's home directory is used as the default") {
+		t.Error("README.md must not resurrect non-root init defaults; the interactive default is /home")
+	}
+}
