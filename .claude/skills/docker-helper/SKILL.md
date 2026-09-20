@@ -500,14 +500,13 @@ printf '%s\n' "$REGISTRY_PASSWORD" | \
 # HTTP API interface
 
 The HTTP API is a fully supported direct client interface — same
-capabilities as the CLI, different syntax only. Set the socket path
-without displaying any secret (Socket discovery order):
+capabilities as the CLI, different syntax only. Resolve the socket with
+the same two-stage discovery defined in Socket discovery above, without
+displaying any secret:
 
 ```bash
 if [ -n "$DOCKER_HELPER_SOCKET_PATH" ]; then
   SOCKET="$DOCKER_HELPER_SOCKET_PATH"
-elif [ -n "$XDG_RUNTIME_DIR" ] && [ -S "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" ]; then
-  SOCKET="$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock"
 else
   SOCKET=/run/docker-helper/docker-helper.sock
 fi
@@ -647,8 +646,8 @@ Do not describe Docker Helper as unavailable after an HTTP response.
   not evidence that the daemon is down.
 - **`invalid_mount`** specifically means the mount specification or mount
   policy was rejected. After this error, inspect the source, target, and
-  deployment-mode restrictions described in the Path model section, then
-  correct the request.
+  the mount/path/snapshot policy described in the Path model and Session
+  filesystem policy sections, then correct the request.
 - **`read_only_root`** specifically means the issued session filesystem
   policy refuses a writable exposure of the source. This is a policy
   refusal, not a structural error and not daemon unavailability: request

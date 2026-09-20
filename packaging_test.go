@@ -292,7 +292,7 @@ func TestBuildBundleSELinuxArtifact(t *testing.T) {
 }
 
 // TestSkillAgentContract verifies the shipped agent-facing SKILL.md keeps
-// the canonical Release 2.2 contract vocabulary and does not resurrect
+// the canonical current contract vocabulary and does not resurrect
 // known-stale claims. The file is a shipped release artifact
 // (skills/docker-helper/SKILL.md in the bundle), so its agent-facing
 // invariants are product contracts, not prose.
@@ -327,16 +327,19 @@ func TestSkillAgentContract(t *testing.T) {
 		t.Error("SKILL.md must not resurrect the retired --filesystem-entry vocabulary")
 	}
 
-	// Socket discovery must cover the authoritative override, the XDG
-	// runtime locator, and the system socket.
+	// Socket discovery must state the current two-stage agent/data-plane
+	// contract (the authoritative override and the system socket) and must
+	// not resurrect the retired per-user XDG runtime socket fallback.
 	for _, fact := range []string{
 		"DOCKER_HELPER_SOCKET_PATH",
-		"XDG_RUNTIME_DIR",
 		"/run/docker-helper/docker-helper.sock",
 	} {
 		if !strings.Contains(content, fact) {
 			t.Errorf("SKILL.md socket discovery must state %q", fact)
 		}
+	}
+	if strings.Contains(content, "XDG_RUNTIME_DIR") {
+		t.Error("SKILL.md must not teach the retired XDG user-runtime socket fallback")
 	}
 
 	// The canonicalization-owned containment rule must be stated; the
@@ -502,8 +505,31 @@ func TestCanonicalDocContract(t *testing.T) {
 				"authority/classification introspection",
 			},
 			mustNotContain: []string{
-				// The stale table wording that conflicted with GET /self.
+				// The stale table wording that conflicted with GET /auth.
 				"`GET /auth` self-inspection",
+			},
+		},
+		{
+			name: "agent integration current mount contract",
+			file: "docs/agent-integration.md",
+			mustContain: []string{
+				// The system-only mount contract: one daemon deployment,
+				// no user-mode workspace-only special case, the issued
+				// snapshot as the absolute-source authority, inode-pinned
+				// run mounts, and read-only semantics from the snapshot
+				// plus mandatory workload MAC.
+				"The system service is the only daemon deployment",
+				"no user-mode workspace-only special case",
+				"issued Session filesystem snapshot",
+				"All run mounts use inode pinning",
+				"mandatory workload MAC",
+			},
+			mustNotContain: []string{
+				// The retired user-mode special cases must not return to
+				// the current guide.
+				"Workspace-parent write invariant for user mode",
+				"Mount policy by deployment mode",
+				"deployment-mode restrictions",
 			},
 		},
 	}
