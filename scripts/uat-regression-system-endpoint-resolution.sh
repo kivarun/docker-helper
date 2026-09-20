@@ -73,7 +73,7 @@ reg_principal_credential "$EP_USER" "$CRED_FILE" \
 EP_TOKEN_FILE="/tmp/uat23ep-stdin.token"
 printf '%s\n' "$REG_CRED_TOKEN" > "$EP_TOKEN_FILE"
 chmod 600 "$EP_TOKEN_FILE"
-EP_INSTALL_OUT="$(sudo -u "$EP_USER" env HOME="$EP_HOME" docker-helper credential install \
+EP_INSTALL_OUT="$(sudo -u "$EP_USER" env -u XDG_CONFIG_HOME HOME="$EP_HOME" docker-helper credential install \
   < "$EP_TOKEN_FILE" 2>&1)"
 EP_INSTALL_RC=$?
 if [ "$EP_INSTALL_RC" -ne 0 ]; then
@@ -155,7 +155,7 @@ except Exception:
 # the fake user socket in place.
 ep_cli() { # cmd...
   sudo -u "$EP_USER" \
-    env HOME="$EP_HOME" XDG_RUNTIME_DIR="$EP_RUN" \
+    env -u XDG_CONFIG_HOME HOME="$EP_HOME" XDG_RUNTIME_DIR="$EP_RUN" \
     "$@"
 }
 

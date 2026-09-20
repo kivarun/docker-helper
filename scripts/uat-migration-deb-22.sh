@@ -136,7 +136,11 @@ ok_mig "v2.2.0 baseline service active and healthy"
 # ---------------------------------------------------------------------------
 # M2. real pre-upgrade state through the 2.2 CLI.
 # ---------------------------------------------------------------------------
+# The 2.2 baseline predates --no-credential: try the candidate form first,
+# then the baseline form (the baseline creates the principal with its own
+# issuance behavior; the explicit credential below is the authority seed).
 docker-helper principal create --no-credential mig22u >/dev/null 2>&1 \
+  || docker-helper principal create mig22u >/dev/null 2>&1 \
   || fail_mig "principal create failed on the baseline"
 MIG_CRED_OUT="$(docker-helper credential create --name mig22 mig22u 2>/dev/null)" \
   || fail_mig "credential create failed on the baseline"
@@ -174,8 +178,8 @@ if ! id mig22legacy >/dev/null 2>&1; then
   useradd -m -d /home/mig22legacy -s /bin/bash mig22legacy >/dev/null 2>&1 \
     || fail_mig "cannot create the legacy-state account mig22legacy"
 fi
-sudo -u mig22legacy env HOME=/home/mig22legacy \
-  docker-helper init --allowed-root /home >/tmp/uat-mig22-legacy-init.log 2>&1 \
+sudo -u mig22legacy env -u XDG_CONFIG_HOME HOME=/home/mig22legacy \
+  docker-helper init --allowed-root /home/mig22legacy >/tmp/uat-mig22-legacy-init.log 2>&1 \
   || fail_mig "the 2.2 baseline non-root init failed (legacy-state seeding broken): see /tmp/uat-mig22-legacy-init.log"
 for legacy_path in \
   /home/mig22legacy/.config/docker-helper/config.json \

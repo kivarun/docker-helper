@@ -213,8 +213,8 @@ if ! id mig22legacy >/dev/null 2>&1; then
     || acc_fail "cannot create the legacy-state account mig22legacy"
 fi
 LEGACY_HOME="$(getent passwd mig22legacy | cut -d: -f6)"
-sudo -u mig22legacy env HOME="$LEGACY_HOME" \
-  docker-helper init --allowed-root "$ALLOWED_ROOT" >/tmp/uat-mig22-legacy-init.log 2>&1 \
+sudo -u mig22legacy env -u XDG_CONFIG_HOME HOME="$LEGACY_HOME" \
+  docker-helper init --allowed-root "$LEGACY_HOME" >/tmp/uat-mig22-legacy-init.log 2>&1 \
   || acc_fail "the 2.2 baseline non-root init failed (legacy-state seeding broken): see /tmp/uat-mig22-legacy-init.log"
 for legacy_path in \
   "$LEGACY_HOME/.config/docker-helper/config.json" \
