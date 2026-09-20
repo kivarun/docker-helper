@@ -90,6 +90,25 @@ if [ ! -f "$EP_HOME/.config/docker-helper/credential.token" ]; then
 fi
 reg_ok "probe account holds the installed credential (client-side store)"
 
+# fake_connections — read the listener's durable connection counter. A
+# missing, empty, or non-numeric counter file is an ERROR (non-zero rc), not
+# a silent zero: the counter must be real observable state, and masking a
+# broken counter as "zero connections" would fake the whole proof.
+# Defined before the listener starts: the readiness loop reads it.
+fake_connections() {
+  python3 -c '
+import sys
+try:
+    with open(sys.argv[1]) as fh:
+        data = fh.read().strip()
+    n = int(data)
+    assert n >= 0
+except Exception:
+    sys.exit(1)
+print(n)
+' "$FAKE_COUNT_FILE" 2>/dev/null
+}
+
 # A real listening fake user socket, owned by the probe account. The
 # listener durably records every accepted connection into the counter file
 # (atomic replace on each accept), so the count is observable state on
@@ -153,24 +172,6 @@ done
 [ "$(fake_connections 2>/dev/null)" = "0" ] \
   || { kill "$FAKE_PID" 2>/dev/null || true; reg_blocked "the fake user socket counter file did not reach its initial zero state"; }
 reg_ok "fake per-user daemon socket is listening at $FAKE_SOCK (counter observable at 0)"
-
-# fake_connections — read the listener's durable connection counter. A
-# missing, empty, or non-numeric counter file is an ERROR (non-zero rc), not
-# a silent zero: the counter must be real observable state, and masking a
-# broken counter as "zero connections" would fake the whole proof.
-fake_connections() {
-  python3 -c '
-import sys
-try:
-    with open(sys.argv[1]) as fh:
-        data = fh.read().strip()
-    n = int(data)
-    assert n >= 0
-except Exception:
-    sys.exit(1)
-print(n)
-' "$FAKE_COUNT_FILE" 2>/dev/null
-}
 
 # ep_cli CMD... — run a docker-helper CLI command as the probe account with
 # the fake user socket in place.
