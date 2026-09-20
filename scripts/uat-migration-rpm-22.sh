@@ -180,7 +180,7 @@ dh principal set "$M_USER" enabled true >/dev/null 2>&1 || true
 dh credential create --name mig22 "$M_USER" >/tmp/uat-mig22-cred.out 2>&1 || true
 M_CRED_TOKEN="$(sed -n 's/^  Token: //p' /tmp/uat-mig22-cred.out | tr -d '[:space:]')"
 if [ -n "$M_CRED_TOKEN" ]; then
-  printf '%s\n' "$M_CRED_TOKEN" > /tmp/uat-mig22-cred.tok; chmod 600 /tmp/uat-mig22-cred.tok
+  umask 077; printf '%s\n' "$M_CRED_TOKEN" > /tmp/uat-mig22-cred.tok; umask 022
   acc_ok "pre-upgrade principal credential issued"
 else
   acc_fail "pre-upgrade principal credential issuance failed (see /tmp/uat-mig22-cred.out)"
@@ -190,7 +190,7 @@ M_S_JSON="$(dh session create --token-file /tmp/uat-mig22-cred.tok "$M_WS" --jso
 M_S_ID="$(printf '%s' "$M_S_JSON" | json_field id)"
 M_S_TOKEN="$(printf '%s' "$M_S_JSON" | json_field token)"
 if [ -n "$M_S_ID" ] && [ -n "$M_S_TOKEN" ]; then
-  printf '%s\n' "$M_S_TOKEN" > /tmp/uat-mig22-sess.tok; chmod 600 /tmp/uat-mig22-sess.tok
+  umask 077; printf '%s\n' "$M_S_TOKEN" > /tmp/uat-mig22-sess.tok; umask 022
   acc_ok "pre-upgrade live Session seeded ($M_S_ID)"
 else
   acc_fail "pre-upgrade session seeding failed"

@@ -240,7 +240,7 @@ dh credential create --name mig211 "$M_USER" >"$M_DIAG/pcred.out" 2>&1 || true
 M_P_CRED_OUT="$(cat "$M_DIAG/pcred.out")"
 M_P_TOKEN="$(printf '%s\n' "$M_P_CRED_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
 if [ -n "$M_P_TOKEN" ]; then
-  printf '%s\n' "$M_P_TOKEN" > /tmp/uat-mig211-pc.tok; chmod 600 /tmp/uat-mig211-pc.tok
+  umask 077; printf '%s\n' "$M_P_TOKEN" > /tmp/uat-mig211-pc.tok; umask 022
   acc_ok "R2 principal credential issued"
 else
   acc_fail_ctx "R2 principal credential issuance failed" "$M_DIAG/pcred.out"
@@ -263,7 +263,7 @@ dh launcher credential create --principal "$M_USER" "$M_L_ID" >"$M_DIAG/lcred.ou
 M_LC_OUT="$(cat "$M_DIAG/lcred.out")"
 M_LC_TOKEN="$(printf '%s\n' "$M_LC_OUT" | json_field token)"
 if [ -n "$M_LC_TOKEN" ]; then
-  printf '%s\n' "$M_LC_TOKEN" > /tmp/uat-mig211-lc.tok; chmod 600 /tmp/uat-mig211-lc.tok
+  umask 077; printf '%s\n' "$M_LC_TOKEN" > /tmp/uat-mig211-lc.tok; umask 022
   acc_ok "R2 launcher credential issued"
 else
   acc_fail_ctx "R2 launcher credential issuance failed" "$M_DIAG/lcred.out"

@@ -49,6 +49,9 @@
 # workloads), dpkg. Exits as above.
 
 set -uo pipefail
+# Bearer material must never exist on disk with a wide mode, even between
+# redirect and chmod: the gate's token files are created 0600 by umask.
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Baseline fixture: the single owner of the pinned v2.2.0 baseline identity.
@@ -61,11 +64,15 @@ CANDIDATE_DEB="${UAT_ARTIFACT_PATH:?UAT_ARTIFACT_PATH is required}"
 CANDIDATE_SHA="${UAT_ARTIFACT_SHA256:?UAT_ARTIFACT_SHA256 is required}"
 BASELINE_DEB="${UAT_BASELINE22_DEB:-}"
 
-# redact masks bearer-token values (admin/session/credential tokens) in any
-# diagnostic the migration gate prints.
+# redact masks bearer-token values (admin/session dht_, credential dhc_) in a
+# captured stream so they never reach the CI log. Session IDs (dhs_) and
+# credential IDs (dhcr_) are not bearer secrets and are left intact. The
+# expressions use ERE (sed -E): in Basic RE a '+' is a literal plus, so a
+# dropped -E silently disables the masking.
 redact() {
-  sed -e 's/dht_[A-Za-z0-9_-]+/<redacted-token>/g' \
-      -e 's/dhc_[A-Za-z0-9_-]+/<redacted-token>/g'
+  sed -E \
+    -e 's/dht_[A-Za-z0-9_-]+/<redacted-token>/g' \
+    -e 's/dhc_[A-Za-z0-9_-]+/<redacted-token>/g'
 }
 
 fail_mig() {
@@ -77,6 +84,17 @@ blocked_mig() {
   printf '\n[migration-deb-22] BLOCKED: %s\n' "$1" >&2
   exit 2
 }
+
+# The redact implementation is self-proven before any captured output is
+# emitted: both bearer-token classes must disappear and non-secret IDs must
+# survive. A broken redact means captured diagnostics could leak tokens, so
+# the gate is BLOCKED, not PASS.
+REDACT_PROBE="$(printf 'admin dht_AAABBBCCC111222333 session dhs_KEEPME credential dhc_DDDEEEFFF444555666' | redact)"
+case "$REDACT_PROBE" in
+  *dht_*|*dhc_*) blocked_mig "the redact implementation does not mask bearer-token sentinels: $REDACT_PROBE" ;;
+esac
+printf '%s\n' "$REDACT_PROBE" | grep -q 'dhs_KEEPME' \
+  || blocked_mig "the redact implementation removes non-secret session IDs"
 
 ok_mig() { printf '[migration-deb-22] ok: %s\n' "$*"; }
 
@@ -92,6 +110,27 @@ docker info >/dev/null 2>&1 || blocked_mig "Docker daemon is not reachable"
 
 SERVICE=docker-helper.service
 SOCK=/run/docker-helper/docker-helper.sock
+
+# migration_cleanup is the one exit-path cleanup owner: bearer files are
+# removed first, then created system-mode state, best-effort, on every exit
+# path (PASS, FAIL, BLOCKED) — a failed or blocked gate must not leave token
+# material or created test resources behind. The success path's M9 cleanup
+# is this same owner; the clean-slate reset at the top of the script handles
+# anything a previous run's trap could not reach.
+MIG_CLEANED=""
+migration_cleanup() {
+  [ -n "$MIG_CLEANED" ] && return 0
+  MIG_CLEANED=1
+  if [ -n "${MIG_SESSION_ID:-}" ] && [ -n "${MIG_CRED_FILE:-}" ]; then
+    docker-helper session delete --token-file "$MIG_CRED_FILE" "$MIG_SESSION_ID" >/dev/null 2>&1 || true
+  fi
+  docker-helper principal delete mig22u >/dev/null 2>&1 || true
+  [ -n "${MIG_CRED_FILE:-}" ] && rm -f "$MIG_CRED_FILE"
+  [ -n "${MIG_WS:-}" ] && rm -rf "$MIG_WS"
+  userdel -r mig22legacy >/dev/null 2>&1 || true
+  userdel -r mig22u >/dev/null 2>&1 || true
+}
+trap migration_cleanup EXIT
 
 wait_health() {
   for _ in $(seq 1 60); do
@@ -162,7 +201,6 @@ MIG_CRED_TOKEN="$(printf '%s\n' "$MIG_CRED_OUT" | sed -n 's/^  Token: //p' | tr 
 [ -n "$MIG_CRED_ID" ] && [ -n "$MIG_CRED_TOKEN" ] || fail_mig "could not parse the baseline credential"
 MIG_CRED_FILE="/tmp/uat-mig22-credential.token"
 printf '%s\n' "$MIG_CRED_TOKEN" > "$MIG_CRED_FILE"
-chmod 600 "$MIG_CRED_FILE"
 
 # The 2.2 principal create adds the OS account's home as the principal's
 # default allowed root, so the pre-upgrade workspace must live inside it.
@@ -321,12 +359,7 @@ ok_mig "the upgraded daemon remains confined ($ATTR_CURRENT)"
 # ---------------------------------------------------------------------------
 # M9. cleanup of the created system-mode state.
 # ---------------------------------------------------------------------------
-docker-helper session delete --token-file "$MIG_CRED_FILE" "$MIG_SESSION_ID" >/dev/null 2>&1 || true
-docker-helper principal delete mig22u >/dev/null 2>&1 || true
-rm -f "$MIG_CRED_FILE"
-rm -rf "$MIG_WS"
-userdel -r mig22legacy >/dev/null 2>&1 || true
-userdel -r mig22u >/dev/null 2>&1 || true
+migration_cleanup
 ok_mig "created system-mode state cleaned up"
 
 printf '\n[migration-deb-22] RESULT: PASS\n'

@@ -10694,3 +10694,57 @@ func TestReadmeCanonicalCLIGrammar(t *testing.T) {
 		t.Error("README.md must not resurrect non-root init defaults; the interactive default is /home")
 	}
 }
+
+// TestUATRedactFunctionsMaskBearerSentinels executes every UAT redact
+// implementation in the repository and proves both bearer-token classes
+// (session/admin dht_, Principal/Launcher credential dhc_) disappear from
+// redacted output while non-secret IDs (dhs_ session IDs) survive. A redact
+// that silently stopped masking would leak captured tokens into CI logs.
+// The sed expressions must use ERE (sed -E): in Basic RE a '+' is a literal
+// plus character, so a dropped -E disables the masking without any error.
+func TestUATRedactFunctionsMaskBearerSentinels(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash unavailable: %v", err)
+	}
+	scripts := []string{
+		"scripts/uat-regression-lib.sh",
+		"scripts/uat-migration-deb-22.sh",
+		"scripts/uat-migration-rpm-22.sh",
+		"scripts/uat-migration-rpm-211.sh",
+		"scripts/uat-blackbox.sh",
+	}
+	for _, script := range scripts {
+		t.Run(script, func(t *testing.T) {
+			data, err := os.ReadFile(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content := string(data)
+			fnRe := regexp.MustCompile(`(?ms)^(redact(?:_tokens)?)\(\) \{.*?\n\}`)
+			m := fnRe.FindString(content)
+			if m == "" {
+				t.Fatalf("%s has no redact implementation", script)
+			}
+			if !strings.Contains(m, "sed -E") {
+				t.Errorf("%s redact must use ERE (sed -E); a Basic-RE '+' is a literal plus and silently disables masking", script)
+			}
+			fnName := fnRe.FindStringSubmatch(content)[1]
+			probe := "admin dht_AAABBBCCC111222333 session dhs_KEEPME credential dhc_DDDEEEFFF444555666"
+			cmd := exec.Command("bash", "-c", m+"\nprintf '%s\\n' \"$1\" | "+fnName, "--", probe)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("redact execution failed: %v (%s)", err, out)
+			}
+			redacted := string(out)
+			if strings.Contains(redacted, "dht_") || strings.Contains(redacted, "dhc_") {
+				t.Errorf("%s redact leaves bearer sentinels in output: %s", script, redacted)
+			}
+			if !strings.Contains(redacted, "dhs_KEEPME") {
+				t.Errorf("%s redact removes non-secret session IDs: %s", script, redacted)
+			}
+			if !strings.Contains(redacted, "<redacted-token>") {
+				t.Errorf("%s redact output carries no replacement marker: %s", script, redacted)
+			}
+		})
+	}
+}
