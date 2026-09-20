@@ -109,8 +109,8 @@ wait_health() {
 }
 
 wait_service_active() {
-  local _i=0
-  for _i in $(seq 1 30); do
+  local _n="${1:-30}" _i
+  for _i in $(seq 1 "$_n"); do
     systemctl is-active --quiet docker-helper.service && return 0
     sleep 1
   done
@@ -218,6 +218,10 @@ if ! id mig22legacy >/dev/null 2>&1; then
 fi
 LEGACY_HOME="$(getent passwd mig22legacy | cut -d: -f6)"
 usermod -aG docker mig22legacy >/dev/null 2>&1 || true
+# The legacy account must be able to traverse its home chain for the 2.2
+# non-root init probe (the provisioned roots tree is root-owned).
+chmod a+x "$ALLOWED_ROOT" 2>/dev/null || true
+chmod a+x "$(dirname "$ALLOWED_ROOT")" 2>/dev/null || true
 systemctl stop docker-helper.service >/dev/null 2>&1 \
   || acc_fail "cannot stop the baseline service for legacy-state seeding"
 sudo -u mig22legacy env -u XDG_CONFIG_HOME HOME="$LEGACY_HOME" \
@@ -350,8 +354,14 @@ fi
 
 MIG_SESSIONS_BEFORE="$(dh session list --token-file /tmp/uat-mig22-cred.tok 2>/dev/null | grep -cF "$M_S_ID" || true)"
 systemctl restart docker-helper.service >/dev/null 2>&1 || true
-wait_service_active || acc_fail "the daemon did not come back after restart"
-wait_health || acc_fail "the daemon is not healthy after restart"
+# A cold QEMU-guest restart under the gate's load (AppArmor profile
+# replacement, SQLite WAL recovery, session MAC reconciliation) can exceed
+# the default 30s service window; wait on the state, with bounded patience
+# and failure evidence, not on an estimate.
+wait_service_active 120 \
+  || acc_fail "the daemon did not come back after restart (is-active: $(systemctl is-active docker-helper.service 2>&1); journal: $(journalctl -u docker-helper.service -n 8 --no-pager 2>/dev/null | tail -8 | redact | tr '\n' ' '))"
+wait_health \
+  || acc_fail "the daemon is not healthy after restart (is-active: $(systemctl is-active docker-helper.service 2>&1); journal: $(journalctl -u docker-helper.service -n 8 --no-pager 2>/dev/null | tail -8 | redact | tr '\n' ' '))"
 MIG_SESSIONS_AFTER="$(dh session list --token-file /tmp/uat-mig22-cred.tok 2>/dev/null | grep -cF "$M_S_ID" || true)"
 if [ "$MIG_SESSIONS_BEFORE" = "1" ] && [ "$MIG_SESSIONS_AFTER" = "1" ]; then
   acc_ok "restart idempotency: the preserved Session survives a daemon restart"

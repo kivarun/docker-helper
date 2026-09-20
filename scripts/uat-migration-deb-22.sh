@@ -159,8 +159,9 @@ chmod 600 "$MIG_CRED_FILE"
 
 MIG_WS="/home/mig22u-ws"
 mkdir -p "$MIG_WS"
-MIG_SESSION_JSON="$(docker-helper session create --token-file "$MIG_CRED_FILE" "$MIG_WS" --json 2>/dev/null)" \
-  || fail_mig "session create failed on the baseline"
+chown -R mig22u:mig22u "$MIG_WS" 2>/dev/null || true
+MIG_SESSION_JSON="$(docker-helper session create --token-file "$MIG_CRED_FILE" "$MIG_WS" --json 2>&1)" \
+  || fail_mig "session create failed on the baseline: $(printf '%s\n' "$MIG_SESSION_JSON" | redact | head -3)"
 MIG_SESSION_ID="$(printf '%s\n' "$MIG_SESSION_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
 MIG_SESSION_TOKEN="$(printf '%s\n' "$MIG_SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
 [ -n "$MIG_SESSION_ID" ] && [ -n "$MIG_SESSION_TOKEN" ] || fail_mig "could not parse the baseline session"
