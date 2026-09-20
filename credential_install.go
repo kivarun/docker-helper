@@ -50,6 +50,9 @@ func credentialPath() (string, error) {
 	return filepath.Join(dir, "credential.token"), nil
 }
 
+// credentialPathFunc is injectable for testing.
+var credentialPathFunc = credentialPath
+
 // validateCredentialToken checks the Principal-credential token format defined
 // by the canonical credential.go constants: dhc_ + 64 lowercase hex chars.
 func validateCredentialToken(token string) error {

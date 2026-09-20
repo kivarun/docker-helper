@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -162,6 +163,91 @@ func TestResolveSystemDefaultTokenPath(t *testing.T) {
 	}
 }
 
+// TestResolveOperatorTokenPathOwnerSelection pins the owner-credential
+// selection to the exact canonical paths: root resolves the system admin
+// token, non-root resolves the installed user credential. Both come from the
+// existing owner's seams, so the selection does not depend on runner
+// HOME/XDG/NSS specifics.
+func TestResolveOperatorTokenPathOwnerSelection(t *testing.T) {
+	origUID := EffectiveUID
+	origCred := credentialPathFunc
+	defer func() {
+		EffectiveUID = origUID
+		credentialPathFunc = origCred
+	}()
+
+	credPath := filepath.Join(t.TempDir(), "docker-helper", "credential.token")
+	credentialPathFunc = func() (string, error) { return credPath, nil }
+
+	tests := []struct {
+		name string
+		uid  int
+		want string
+	}{
+		{"root resolves the system admin token", 0, filepath.Join(systemConfigDir, "admin.token")},
+		{"non-root resolves the installed credential", 1000, credPath},
+	}
+	for _, tc := range tests {
+		EffectiveUID = func() int { return tc.uid }
+		path, err := resolveOperatorTokenPath()
+		if err != nil {
+			t.Fatalf("%s: resolveOperatorTokenPath: %v", tc.name, err)
+		}
+		if path != tc.want {
+			t.Errorf("%s: resolved %q, want %q", tc.name, path, tc.want)
+		}
+	}
+}
+
+// TestResolveOperatorTokenPathNonRootFailureFailsClosed is the regression for
+// the removed admin-token fallback: a non-root credential-path resolution
+// failure is returned to the caller by both resolution stages (default system
+// endpoint and explicit unix endpoint) and never selects an admin token path.
+// The would-be fallback location (user config dir / admin.token) is populated
+// with a valid readable token, so the pre-fix fallback behavior (resolving
+// that path and constructing the client from it) would fail this test.
+func TestResolveOperatorTokenPathNonRootFailureFailsClosed(t *testing.T) {
+	origUID := EffectiveUID
+	origCred := credentialPathFunc
+	origConfigPath := getConfigPathFunc
+	defer func() {
+		EffectiveUID = origUID
+		credentialPathFunc = origCred
+		getConfigPathFunc = origConfigPath
+	}()
+
+	EffectiveUID = func() int { return 1000 }
+	credErr := errors.New("cannot determine home directory: $HOME is not defined")
+	credentialPathFunc = func() (string, error) { return "", credErr }
+
+	// A readable admin token at the would-be fallback location makes the
+	// undesired fallback possible and observable.
+	configDir := t.TempDir()
+	getConfigPathFunc = func() string { return filepath.Join(configDir, "config.json") }
+	writeTestTokenFile(t, filepath.Join(configDir, "admin.token"), "admin-token-fallback-marker")
+
+	for _, tc := range []struct {
+		name string
+		opts operatorClientOptions
+	}{
+		{"default system endpoint", operatorClientOptions{}},
+		{"explicit unix endpoint", operatorClientOptions{Endpoint: "unix:///run/docker-helper/docker-helper.sock"}},
+	} {
+		client, err := resolveOperatorClient(tc.opts)
+		if client != nil {
+			t.Errorf("%s: client constructed on credential-path failure", tc.name)
+		}
+		if err == nil {
+			t.Fatalf("%s: expected credential-path failure, got nil (fallback would use %s)",
+				tc.name, filepath.Join(configDir, "admin.token"))
+		}
+		if !errors.Is(err, credErr) {
+			t.Errorf("%s: error = %v, want the credential-path resolution error (an admin token path was selected)",
+				tc.name, err)
+		}
+	}
+}
+
 // --- --endpoint tests ---
 
 func TestValidateEndpointValid(t *testing.T) {
@@ -307,7 +393,7 @@ func TestResolveEndpointPlainPathNoTokenFile(t *testing.T) {
 	defer server.Close()
 
 	// Auto-resolved token for unix endpoint (non-root uses credential.token).
-	// resolveSystemModeTokenPath for non-root returns credentialPath() which is
+	// resolveOperatorTokenPath for non-root returns credentialPath() which is
 	// $XDG_CONFIG_HOME/docker-helper/credential.token.
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 	tokenPath := filepath.Join(dir, "xdg_config", "docker-helper", "credential.token")
@@ -315,7 +401,7 @@ func TestResolveEndpointPlainPathNoTokenFile(t *testing.T) {
 	os.MkdirAll(tokenDir, 0755)
 	writeTestTokenFile(t, tokenPath, "test-token")
 
-	// No TokenFile — should auto-resolve via resolveSystemModeTokenPath.
+	// No TokenFile — should auto-resolve via resolveOperatorTokenPath.
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint: socketPath,
 	})
@@ -454,7 +540,7 @@ func TestUnixEndpointAutoToken(t *testing.T) {
 	os.MkdirAll(tokenDir, 0755)
 	writeTestTokenFile(t, tokenPath, "test-token")
 
-	// No TokenFile — should auto-resolve via resolveSystemModeTokenPath.
+	// No TokenFile — should auto-resolve via resolveOperatorTokenPath.
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint: "unix:///" + socketPath,
 	})

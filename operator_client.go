@@ -138,7 +138,11 @@ func resolveExplicitEndpoint(opts operatorClientOptions) (*apiClient, error) {
 		// Auto-resolve token for unix sockets.
 		tokenPath := opts.TokenFile
 		if tokenPath == "" {
-			tokenPath = resolveSystemModeTokenPath()
+			resolved, err := resolveOperatorTokenPath()
+			if err != nil {
+				return nil, err
+			}
+			tokenPath = resolved
 		}
 		token, err := readTokenFile(tokenPath)
 		if err != nil {
@@ -165,7 +169,11 @@ func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	socketPath := systemSocketPath
 	tokenPath := opts.TokenFile
 	if tokenPath == "" {
-		tokenPath = resolveSystemModeTokenPath()
+		resolved, err := resolveOperatorTokenPath()
+		if err != nil {
+			return nil, err
+		}
+		tokenPath = resolved
 	}
 
 	token, err := readTokenFile(tokenPath)
@@ -177,19 +185,15 @@ func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	return newUnixAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
 }
 
-// resolveSystemModeTokenPath returns the token file path for system daemon
-// authentication: non-root users use credential.token, root uses admin.token.
-func resolveSystemModeTokenPath() string {
+// resolveOperatorTokenPath returns the token file used to authenticate with
+// the system daemon: root resolves the system admin token, non-root resolves
+// the installed user credential. Credential-path resolution failure is
+// returned to the caller; resolution never falls back to any admin token.
+func resolveOperatorTokenPath() (string, error) {
 	if EffectiveUID() == 0 {
-		return filepath.Join(systemConfigDir, "admin.token")
+		return filepath.Join(systemConfigDir, "admin.token"), nil
 	}
-	// credentialPath can fail only if HOME is unreadable; fall back to
-	// admin.token in the user config directory rather than returning an error.
-	credPath, err := credentialPath()
-	if err == nil {
-		return credPath
-	}
-	return filepath.Join(getConfigDir(), "admin.token")
+	return credentialPathFunc()
 }
 
 // validateEndpoint validates an explicit endpoint URL. This is shared transport

@@ -2,7 +2,18 @@
 
 ## Status
 
-Accepted as the Release 2.3 architectural goal.
+Implementation complete. The cutover is implemented on the `release/2.3`
+branch (base `v2.2.0`) with the local/static gates green: build, vet, gofmt,
+repo hygiene, the full `go test` and `go test -race` suites, the
+non-Linux/static-build and SELinux policy checks, and exact-artifact
+verification of the packaged system-only payload (DEB, RPM, and tarball).
+
+The final hosted exact-artifact UAT (fresh DEB/RPM install, 2.2.0 → 2.3
+candidate upgrade, tarball install, AppArmor, enforcing SELinux, workload
+matrices, and the system-only regression battery) against the candidate
+artifact bytes is still pending. Until that gate passes and the release is
+closed out, no stable Release 2.3 is declared and no release tag exists;
+this owner receives the final evidence/status closure after that UAT.
 
 This pulls forward an already accepted later simplification: user-mode daemon
 support is removed before the larger Release 3 managed-container runtime work.

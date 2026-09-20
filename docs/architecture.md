@@ -333,6 +333,10 @@ Token resolution for the system service:
  3. Non-root — credential.token from `credentialPath()`
     (`${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`).
 
+Credential-path resolution failure fails closed: the error is returned to
+the caller, and no admin token path (system or otherwise) is selected as a
+fallback.
+
 Endpoint resolution: the system socket
 `/run/docker-helper/docker-helper.sock` is the default endpoint (an
 explicit `--endpoint` overrides it). Once selected, an unavailable/failing
