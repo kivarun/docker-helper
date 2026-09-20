@@ -598,7 +598,7 @@ System mode (effective UID 0, the only daemon deployment):
 // If flagValue is provided, it is validated and returned.
 // If not provided and isTerminal is true, the user is prompted interactively.
 // If not provided and isTerminal is false, an error is returned.
-// The prompt default is /home for root, or the user's home directory otherwise.
+// The prompt default is /home (init is root-only).
 func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writer, isTerminal bool) (string, error) {
 	if flagValue != "" {
 		return resolveAllowedRoot(flagValue)
@@ -618,17 +618,10 @@ func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writ
 	return resolveAllowedRoot(input)
 }
 
-// getInitDefaultRoot returns the default path for the init prompt.
-// Root gets /home; non-root gets the user's home directory.
+// getInitDefaultRoot returns the interactive default for the init prompt.
+// Init is root-only, so the canonical default is /home.
 func getInitDefaultRoot() string {
-	if EffectiveUID() == 0 {
-		return "/home"
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return home
+	return "/home"
 }
 
 // accessFlag is the presence-aware --access flag value shared by the

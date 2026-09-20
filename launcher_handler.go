@@ -903,10 +903,10 @@ func launcherAllowedRootResponseOf(launcherID string, entry AllowedRootEntry, ch
 // handleAddLauncherAllowedRoot adds one allowed root to a Launcher through the
 // daemon-owned narrow mutation: the target Launcher is resolved under the
 // request authority (requireScopedLauncher), then
-// addLauncherAllowedRootWithLifecycle owns the lifecycle serialization, the
-// current Principal ceiling, and the reservation guard. Adding the first root
+// addLauncherAllowedRootWithLifecycle owns the lifecycle serialization and the
+// current Principal ceiling. Adding the first root
 // to an inherit-scope Launcher is the inherit -> restricted narrowing (never an
-// authority broadening); the reserved daemon-owner default Launcher is refused.
+// authority broadening).
 // The success audit reports the committed post-mutation Launcher projection
 // returned by the lifecycle owner — for the first add that is the committed
 // restricted scope, never the pre-mutation inherit snapshot.
@@ -969,8 +969,8 @@ func (a *App) handleAddLauncherAllowedRoot(w http.ResponseWriter, r *http.Reques
 
 	// The narrow add shares the lifecycle serialization with Session creation
 	// and the other ownership mutations (see handleReplaceLauncherAllowedRoots):
-	// addLauncherAllowedRootWithLifecycle owns that boundary, the current
-	// policy snapshot inside it, and the reserved-launcher refusal.
+	// addLauncherAllowedRootWithLifecycle owns that boundary and the current
+	// policy snapshot inside it.
 	committed, changed, entry, err := a.addLauncherAllowedRootWithLifecycle(l.ID, req.Path, requestedAccess)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {

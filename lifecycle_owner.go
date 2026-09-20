@@ -40,8 +40,8 @@ func (a *App) removePrincipalAllowedRootWithLifecycle(username, rootPath string)
 // setPrincipalAllowedRootAccessWithLifecycle is the lock-owning App-level
 // Principal allowed-root set-access, the targeted access mutation on one
 // stored root. It holds the same lifecycleMu serialization boundary as the
-// other root-policy mutations and refuses the reserved daemon-owner Principal
-// before any change. The global ceiling is deliberately not re-resolved:
+// other root-policy mutations. The global ceiling is deliberately not
+// re-resolved:
 // set-access changes only the access of an already-stored, already
 // ceiling-validated root, and the effective policy is composed by the
 // canonical 2.2 effective-root owner at every consumption boundary.
@@ -52,14 +52,13 @@ func (a *App) setPrincipalAllowedRootAccessWithLifecycle(username, rootPath stri
 }
 
 // replaceLauncherScopeWithLifecycle is the lock-owning App-level Launcher scope
-// replacement. It holds lifecycleMu across the reservation check, the single
+// replacement. It holds lifecycleMu across the Launcher resolution, the single
 // authoritative pre-change projection resolution, the canonical
 // effective-Principal-root resolution (which reads the current global policy
 // snapshot — the same lifecycleMu -> a.mu ordering as config reload), and the
 // durable mutation, so the replacement is validated against the ceiling
-// committed by any reload that linearized before it, and it refuses any
-// narrowing or rooting of the reserved daemon-owner default Launcher before
-// any change. The resolved projection is shared with the persistence
+// committed by any reload that linearized before it. The resolved projection is
+// shared with the persistence
 // operation, which composes the successful result from it without any
 // post-commit DB read.
 func (a *App) replaceLauncherScopeWithLifecycle(launcherID string, scope LauncherScopeMode, allowedRootEntries []AllowedRootEntry) (*LauncherWithPrincipal, error) {
@@ -78,12 +77,11 @@ func (a *App) replaceLauncherScopeWithLifecycle(launcherID string, scope Launche
 
 // addLauncherAllowedRootWithLifecycle is the lock-owning App-level Launcher
 // allowed-root add, the narrow sibling of replaceLauncherScopeWithLifecycle. It
-// holds lifecycleMu across the Launcher resolution, the reservation check, the
-// canonical effective-Principal-root resolution (the same lifecycleMu -> a.mu
+// holds lifecycleMu across the Launcher resolution, the canonical
+// effective-Principal-root resolution (the same lifecycleMu -> a.mu
 // ordering as config reload), and the durable mutation, so the added root is
 // validated against the ceiling committed by any reload that linearized before
-// it, and it refuses rooting the reserved daemon-owner default Launcher before
-// any change (the reserved chain stays inherit with zero stored roots). On
+// it. On
 // success it returns the committed post-mutation Launcher projection, composed
 // without any post-commit DB read (the same committed-projection contract as
 // replaceLauncherScopeWithLifecycle).
@@ -105,9 +103,7 @@ func (a *App) addLauncherAllowedRootWithLifecycle(launcherID, rootPath string, a
 // allowed-root remove. See addLauncherAllowedRootWithLifecycle for the
 // serialization boundary. Removal never changes the scope mode and never
 // broadens authority (a restricted Launcher whose last root is removed stays
-// restricted with zero roots, fail-closed), and the reserved daemon-owner
-// default Launcher — which carries no stored roots — is refused like every
-// other mutation of the reserved chain.
+// restricted with zero roots, fail-closed).
 func (a *App) removeLauncherAllowedRootWithLifecycle(launcherID, rootPath string) (changed bool, canonicalPath string, err error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
@@ -120,8 +116,7 @@ func (a *App) removeLauncherAllowedRootWithLifecycle(launcherID, rootPath string
 // setLauncherAllowedRootAccessWithLifecycle is the lock-owning App-level
 // Launcher allowed-root set-access, the targeted access mutation on one stored
 // root. It holds the same lifecycleMu serialization boundary as the other
-// Launcher root-policy mutations, refuses the reserved daemon-owner default
-// Launcher before any change, and — like the Principal set-access —
+// Launcher root-policy mutations and — like the Principal set-access —
 // deliberately does not re-resolve the Principal ceiling: set-access changes
 // only the access of an already-stored, already ceiling-validated root, and
 // the effective policy is composed by the canonical 2.2 effective-root owner

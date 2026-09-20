@@ -338,6 +338,14 @@ func TestResolveAllowedRootForInitNoFlagNonTerminal(t *testing.T) {
 }
 
 func TestResolveAllowedRootForInitNoFlagTerminal(t *testing.T) {
+	// Init is root-only and its interactive default is /home, which resolves
+	// through the root admin wide-namespace override. Production refuses
+	// non-root init before this resolver is reached; the test simulates the
+	// root caller.
+	original := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = original }()
+
 	input := strings.NewReader("\n")
 	var buf bytes.Buffer
 	resolved, err := resolveAllowedRootForInit("", input, &buf, true)
@@ -345,7 +353,7 @@ func TestResolveAllowedRootForInitNoFlagTerminal(t *testing.T) {
 		t.Fatalf("resolveAllowedRootForInit = error: %v", err)
 	}
 
-	// The default should be the user's home directory (non-root) or /home (root).
+	// The interactive default is /home (init is root-only).
 	expected := getInitDefaultRoot()
 	if resolved != expected {
 		t.Errorf("resolveAllowedRootForInit = %q, want %q (init default)", resolved, expected)
@@ -370,25 +378,10 @@ func TestResolveAllowedRootForInitTerminalCustomInput(t *testing.T) {
 }
 
 func TestGetInitDefaultRoot(t *testing.T) {
-	original := EffectiveUID
-	defer func() { EffectiveUID = original }()
-
-	t.Run("root gets /home", func(t *testing.T) {
-		EffectiveUID = func() int { return 0 }
-		got := getInitDefaultRoot()
-		if got != "/home" {
-			t.Errorf("getInitDefaultRoot() = %q, want /home (root)", got)
-		}
-	})
-
-	t.Run("non-root gets home dir", func(t *testing.T) {
-		EffectiveUID = func() int { return 1000 }
-		got := getInitDefaultRoot()
-		home, _ := os.UserHomeDir()
-		if got != home {
-			t.Errorf("getInitDefaultRoot() = %q, want %q (home dir)", got, home)
-		}
-	})
+	// Init is root-only; the canonical interactive default is /home.
+	if got := getInitDefaultRoot(); got != "/home" {
+		t.Errorf("getInitDefaultRoot() = %q, want /home", got)
+	}
 }
 
 func syntheticResolveRoot(path string) (string, error) {

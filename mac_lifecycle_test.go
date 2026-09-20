@@ -3336,3 +3336,68 @@ func (b *selinuxTestDriver) proveOwnedKind(_ context.Context, boundary string) (
 func (s *selinuxSeam) proveOwnedFcontextShape(_ context.Context, boundary string) (macBoundaryKind, bool, error) {
 	return macBoundaryUnknown, false, nil
 }
+
+// TestMACCoordinatorsFailClosedWithoutBackend pins the single-deployment
+// construction contract: MAC confinement is a mandatory startup preflight,
+// so the session and workload MAC coordinators are constructed fail-closed
+// for the active backend — a no-backend detection or a detection error is a
+// construction error, never a nil coordinator runtime.
+func TestMACCoordinatorsFailClosedWithoutBackend(t *testing.T) {
+	app := newTestApp(t)
+
+	t.Run("no backend active", func(t *testing.T) {
+		origDetect := detectLSM
+		detectLSM = func() (LSMBackend, error) { return LSMNone, nil }
+		defer func() { detectLSM = origDetect }()
+
+		sessionMAC, err := newSessionMACCoordinatorForActiveBackend(app.DB, detectLSM)
+		if err == nil {
+			t.Fatal("session MAC coordinator construction must fail without an active backend")
+		}
+		if !strings.Contains(err.Error(), "no MAC backend active") {
+			t.Errorf("session coordinator error should name the missing backend, got: %v", err)
+		}
+		if sessionMAC != nil {
+			t.Error("session MAC coordinator must be nil on construction failure")
+		}
+
+		workloadMAC, err := newWorkloadMACCoordinatorForActiveBackend(app.Config, detectLSM)
+		if err == nil {
+			t.Fatal("workload MAC coordinator construction must fail without an active backend")
+		}
+		if !strings.Contains(err.Error(), "no MAC backend active") {
+			t.Errorf("workload coordinator error should name the missing backend, got: %v", err)
+		}
+		if workloadMAC != nil {
+			t.Error("workload MAC coordinator must be nil on construction failure")
+		}
+	})
+
+	t.Run("backend detection error", func(t *testing.T) {
+		origDetect := detectLSM
+		detectErr := errors.New("detection failed")
+		detectLSM = func() (LSMBackend, error) { return LSMNone, detectErr }
+		defer func() { detectLSM = origDetect }()
+
+		if _, err := newSessionMACCoordinatorForActiveBackend(app.DB, detectLSM); !errors.Is(err, detectErr) {
+			t.Errorf("session coordinator must propagate the detection error, got: %v", err)
+		}
+		if _, err := newWorkloadMACCoordinatorForActiveBackend(app.Config, detectLSM); !errors.Is(err, detectErr) {
+			t.Errorf("workload coordinator must propagate the detection error, got: %v", err)
+		}
+	})
+
+	t.Run("active backend constructs non-nil coordinators", func(t *testing.T) {
+		origDetect := detectLSM
+		detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+		defer func() { detectLSM = origDetect }()
+
+		sessionMAC, err := newSessionMACCoordinatorForActiveBackend(app.DB, detectLSM)
+		if err != nil {
+			t.Fatalf("session MAC coordinator construction: %v", err)
+		}
+		if sessionMAC == nil {
+			t.Fatal("session MAC coordinator must be non-nil for an active backend")
+		}
+	})
+}

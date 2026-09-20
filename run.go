@@ -635,8 +635,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// The workload MAC coordinator decides the container security options and
 	// materializes the accepted exposure plan through the active backend. A
-	// missing coordinator means no supported MAC backend is active — fail
-	// closed before any state exists.
+	// started daemon constructs it mandatorily at startup; this guard fails
+	// closed for directly constructed test App fixtures.
 	if a.WorkloadMAC == nil {
 		releasePreparation()
 		opLog(ctx).Error("no MAC backend active",

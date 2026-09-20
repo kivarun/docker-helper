@@ -342,24 +342,23 @@ func runDaemon(stdout, stderr io.Writer) error {
 		// Startup reconciliation of helper-owned workload state happens
 		// before the session MAC reconciliation, so issued-tree coverage a
 		// pending workload relies on is never removed while that workload
-		// state is still unproven.
-		workloadMAC, err := newWorkloadMACCoordinatorForMode(cfg, detectLSM)
+		// state is still unproven. MAC confinement is mandatory (checked
+		// before any side effect above), so the coordinator is constructed
+		// fail-closed: a missing backend is a startup error, not a nil
+		// runtime.
+		workloadMAC, err := newWorkloadMACCoordinatorForActiveBackend(cfg, detectLSM)
 		if err != nil {
 			serveStartupError(err, "")
 			return err
 		}
-		if workloadMAC != nil {
-			if err := workloadMAC.ReconcileStartup(context.Background()); err != nil {
-				serveStartupError(err, "workload MAC state cannot be reconciled")
-				return err
-			}
+		if err := workloadMAC.ReconcileStartup(context.Background()); err != nil {
+			serveStartupError(err, "workload MAC state cannot be reconciled")
+			return err
 		}
 
-		// Create MAC coordinator and reconcile live sessions.
-		// No active MAC driver leaves MACCoordinator nil, per the documented
-		// App invariant, so persisted live sessions remain usable without
-		// in-memory MAC bindings.
-		macCoordinator, err := newMACCoordinatorForMode(db, detectLSM)
+		// Create MAC coordinator and reconcile live sessions. The coordinator
+		// is constructed fail-closed for the mandatory MAC backend above.
+		macCoordinator, err := newSessionMACCoordinatorForActiveBackend(db, detectLSM)
 		if err != nil {
 			serveStartupError(err, "")
 			return err
@@ -368,16 +367,12 @@ func runDaemon(stdout, stderr io.Writer) error {
 		// Startup coverage gate source: the session MAC coordinator must not
 		// release issued-tree coverage while a workload ownership record is
 		// still pending for that Session.
-		if macCoordinator != nil && workloadMAC != nil {
-			macCoordinator.pendingWorkloadSessions = workloadMAC.PendingWorkloadSessions
-		}
+		macCoordinator.pendingWorkloadSessions = workloadMAC.PendingWorkloadSessions
 
 		// Reconcile: ensure all live sessions have valid MAC state.
-		if macCoordinator != nil {
-			if err := macCoordinator.ReconcileLiveSessions(); err != nil {
-				serveStartupError(err, "MAC state for live sessions cannot be reconciled")
-				return err
-			}
+		if err := macCoordinator.ReconcileLiveSessions(); err != nil {
+			serveStartupError(err, "MAC state for live sessions cannot be reconciled")
+			return err
 		}
 
 		// Expire Sessions last: the coverage gate above must still resolve

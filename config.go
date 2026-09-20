@@ -1043,55 +1043,6 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	)
 }
 
-// installCredentialForInit validates the token, checks credential state,
-// and installs the credential if absent. This is the shared bootstrap path
-// used by both production and tests.
-func installCredentialForInit(token string, stdout, stderr io.Writer) error {
-	if err := validateCredentialToken(token); err != nil {
-		return err
-	}
-
-	state, err := checkCredentialState(token)
-	if err != nil {
-		return err
-	}
-
-	switch state {
-	case credentialMatch:
-		fmt.Fprintln(stdout, "Credential already installed.")
-		return nil
-	case credentialConflict:
-		credPath, _ := credentialPath()
-		return fmt.Errorf(
-			"different credential already installed at %s; to replace it, run: docker-helper credential install --force",
-			credPath,
-		)
-	case credentialAbsent:
-		// No credential installed yet — proceed to install.
-	}
-
-	credPath, err := installCredential(credentialInstallConfig{
-		reader:     strings.NewReader(token),
-		writer:     safeWriteCredential,
-		uid:        EffectiveUID,
-		isTerminal: func() bool { return false },
-		readPassword: func() (string, error) {
-			return token, nil
-		},
-		force: false,
-	})
-	if err != nil {
-		if errors.Is(err, ErrCredentialAlreadyExists) {
-			fmt.Fprintln(stderr, "Use --force to replace the existing credential.")
-		}
-		return err
-	}
-
-	fmt.Fprintln(stdout, "Credential installed successfully.")
-	fmt.Fprintf(stdout, "Stored at: %s\n", credPath)
-	return nil
-}
-
 // resolveAllowedRoot normalizes and validates an allowed-root path.
 // It expands ~/ prefixes, resolves to an absolute canonical path,
 // and verifies that the path exists and is a directory.
