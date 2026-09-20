@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -139,57 +140,64 @@ func TestSecurityContractDocumented(t *testing.T) {
 }
 
 // TestManpageSynopsesMatchParser proves the man-page command synopses stay
-// aligned with the parser tree:
+// bidirectionally aligned with the parser tree:
 //
-//   - every `.B docker-helper <path>` synopsis line resolves to a registered
-//     command path (a stale command name such as a retired verb fails this);
-//   - every registered Launcher leaf command has a man synopsis;
-//   - every Launcher leaf synopsis lists the common operator flags its
-//     parser registers (--endpoint, --token-file), the known-drift
-//     area where Launcher synopses historically omitted them.
+//   - every registered leaf command (one with a NewInvocation) has a man
+//     synopsis (a documented command missing from the man page fails);
+//   - every `.B docker-helper <path>` synopsis line resolves to a
+//     registered command path (a stale command name such as a retired verb
+//     fails this);
+//   - for every synopsis with a resolvable leaf command, the synopsis flag
+//     set and the parser flag set match in both directions: every parser
+//     flag appears in the synopsis and every synopsis flag exists on the
+//     parser command (a flag documented in the man page that the parser
+//     does not define — such as the retired --system — fails this).
 //
 // It is a line-level smoke check, not a roff parser: only lines that start
-// with the `.B docker-helper` synopsis macro are considered.
+// with the `.B docker-helper` synopsis macro are considered, and synopsis
+// flags are the `--flag` tokens of the line (roff-escaped dashes and
+// synopsis brackets are normalized before matching). The implicit -h/--help
+// flags are excluded from both directions.
 func TestManpageSynopsesMatchParser(t *testing.T) {
 	data, err := os.ReadFile("docs/man/docker-helper.1")
 	if err != nil {
 		t.Fatalf("cannot read manpage source: %v", err)
 	}
 
-	allowed := map[string]bool{}
+	leaves := map[string]bool{}
 	for _, p := range walkCommandPaths(rootCommand, nil) {
-		allowed[strings.Join(p, " ")] = true
-	}
-
-	launcherLeaves := map[string]bool{}
-	for _, p := range walkCommandPaths(rootCommand, nil) {
-		if len(p) == 0 || p[0] != "launcher" {
-			continue
-		}
 		cmd, _ := rootCommand.resolveCommandPath(p)
 		if cmd != nil && cmd.NewInvocation != nil {
-			launcherLeaves[strings.Join(p, " ")] = true
+			leaves[strings.Join(p, " ")] = true
 		}
 	}
-	if len(launcherLeaves) < 10 {
-		t.Fatalf("only %d launcher leaf paths walked; tree walk is incomplete", len(launcherLeaves))
+	// The walker must be complete enough for the bidirectional check to be
+	// meaningful: guard against a partial tree producing vacuous passes.
+	if len(leaves) < 50 {
+		t.Fatalf("only %d leaf commands walked; tree walk is incomplete", len(leaves))
 	}
 
-	// Completion leaves are machine-facing surfaces documented from the
-	// parser contract: every one of them must have a synopsis, and every
-	// parser-declared flag must appear in it.
-	completionLeaves := map[string]bool{}
-	for _, p := range walkCommandPaths(rootCommand, nil) {
-		if len(p) == 0 || p[0] != "completion" {
-			continue
+	synopsisFlags := func(line string) []string {
+		// Normalize roff escapes first, then harvest `--flag` tokens: from
+		// bracket-group contents (the synopsis flag lists) and from the raw
+		// tokens (required flags such as build's --dockerfile are not
+		// bracketed). Trimming brackets keeps tokens like `[--access`
+		// comparable.
+		normalized := strings.ReplaceAll(line, `\`, "")
+		var flags []string
+		addTokens := func(s string) {
+			for _, tok := range strings.Fields(s) {
+				tok = strings.Trim(tok, "[],")
+				if strings.HasPrefix(tok, "--") && len(tok) > 2 {
+					flags = append(flags, tok)
+				}
+			}
 		}
-		cmd, _ := rootCommand.resolveCommandPath(p)
-		if cmd != nil && cmd.NewInvocation != nil {
-			completionLeaves[strings.Join(p, " ")] = true
+		for _, m := range regexp.MustCompile(`\[([^\]]*)\]`).FindAllStringSubmatch(normalized, -1) {
+			addTokens(m[1])
 		}
-	}
-	if len(completionLeaves) < 5 {
-		t.Fatalf("only %d completion leaf paths walked; tree walk is incomplete", len(completionLeaves))
+		addTokens(normalized)
+		return flags
 	}
 
 	synopses := map[string]bool{}
@@ -214,41 +222,70 @@ func TestManpageSynopsesMatchParser(t *testing.T) {
 		}
 		joined := strings.Join(path, " ")
 		synopses[joined] = true
-		if !allowed[joined] {
-			t.Errorf("docs/man/docker-helper.1:%d: synopsis names unknown command %q", i+1, joined)
-		}
-		if launcherLeaves[joined] {
-			for _, flag := range []string{`\-\-endpoint`, `\-\-token-file`} {
-				if !strings.Contains(trimmed, flag) {
-					t.Errorf("docs/man/docker-helper.1:%d: launcher synopsis %q is missing operator flag %s", i+1, joined, flag)
-				}
+		if !leaves[joined] {
+			if cmd, _ := rootCommand.resolveCommandPath(path); cmd == nil {
+				t.Errorf("docs/man/docker-helper.1:%d: synopsis names unknown command %q", i+1, joined)
 			}
+			continue
 		}
-		if completionLeaves[joined] {
-			cmd, _ := rootCommand.resolveCommandPath(path)
-			if cmd == nil || cmd.NewInvocation == nil {
+		cmd, _ := rootCommand.resolveCommandPath(path)
+		if cmd == nil || cmd.NewInvocation == nil {
+			continue
+		}
+		syncFS := flag.NewFlagSet("man-sync", flag.ContinueOnError)
+		cmd.NewInvocation(syncFS)
+		parserFlags := map[string]bool{}
+		syncFS.VisitAll(func(f *flag.Flag) {
+			if f.Name == "h" || f.Name == "help" {
+				return
+			}
+			parserFlags[f.Name] = true
+		})
+		lineFlags := synopsisFlags(trimmed)
+		seen := map[string]bool{}
+		for _, f := range lineFlags {
+			name := strings.TrimPrefix(f, "--")
+			if seen[name] {
 				continue
 			}
-			syncFS := flag.NewFlagSet("completion-man-sync", flag.ContinueOnError)
-			cmd.NewInvocation(syncFS)
-			syncFS.VisitAll(func(f *flag.Flag) {
-				roffFlag := `\-\-` + f.Name
-				if !strings.Contains(trimmed, roffFlag) {
-					t.Errorf("docs/man/docker-helper.1:%d: completion synopsis %q is missing the parser flag --%s", i+1, joined, f.Name)
-				}
-			})
+			seen[name] = true
+			if name == "h" || name == "help" {
+				continue
+			}
+			if !parserFlags[name] {
+				t.Errorf("docs/man/docker-helper.1:%d: synopsis for %q documents flag %s which the parser does not define", i+1, joined, f)
+			}
+		}
+		for name := range parserFlags {
+			if !seen[name] {
+				t.Errorf("docs/man/docker-helper.1:%d: parser command %q defines flag --%s missing from its synopsis", i+1, joined, name)
+			}
 		}
 	}
 
-	for path := range launcherLeaves {
+	for path := range leaves {
 		if !synopses[path] {
-			t.Errorf("registered launcher command %q has no man synopsis", path)
+			t.Errorf("registered command %q has no man synopsis", path)
 		}
 	}
-	for path := range completionLeaves {
-		if !synopses[path] {
-			t.Errorf("registered completion command %q has no man synopsis", path)
-		}
+}
+
+// TestManpageNoSystemFlag rejects the retired Release 2.2 dual-mode
+// endpoint-selection flag everywhere in the current man page. After the
+// system-only cutover there is exactly one daemon deployment and the
+// parser defines no --system flag (it fails as an undefined flag), so
+// documenting it would teach an invocable lie. Both the roff-escaped
+// synopsis form (\-\-system) and a plain prose form must fail this: roff
+// escapes split the dashes, so the backslashes are normalized away before
+// matching.
+func TestManpageNoSystemFlag(t *testing.T) {
+	data, err := os.ReadFile("docs/man/docker-helper.1")
+	if err != nil {
+		t.Fatalf("cannot read manpage source: %v", err)
+	}
+	normalized := strings.ReplaceAll(string(data), `\`, "")
+	if strings.Contains(normalized, "--system") {
+		t.Error("docs/man/docker-helper.1 must not document the retired --system dual-mode flag")
 	}
 }
 
