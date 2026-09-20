@@ -201,7 +201,7 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 // If the directory already exists, it verifies and fixes the mode to 0700.
 func ensureCredentialDir(dir string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("cannot create credential directory: %w", ErrCredentialDirectoryMissing)
+		return fmt.Errorf("cannot create credential directory: %v (%w)", err, ErrCredentialDirectoryMissing)
 	}
 	info, err := os.Stat(dir)
 	if err != nil {
