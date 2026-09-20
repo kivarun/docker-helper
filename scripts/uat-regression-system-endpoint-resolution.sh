@@ -35,7 +35,11 @@
 # The fake user socket is a real, bound, listening unix socket owned by the
 # probe account, and the group proves the 2.3 client never even connected to
 # it (zero accepted connections), so absence of probing is proven
-# positively, not inferred from success alone.
+# positively, not inferred from success alone. The connection counter is
+# observable state: the listener durably records every accepted connection
+# in a counter file, and a NEGATIVE SELF-TEST runs first — a deliberate
+# control connection must move the counter 0 -> 1 before the real probes,
+# otherwise the harness is broken and the group is BLOCKED, never PASS.
 #
 # Requires: root, the installed candidate system service (active), Docker
 # (subcase D runs a real trivial workload), sudo, python3, curl.
@@ -86,8 +90,10 @@ if [ ! -f "$EP_HOME/.config/docker-helper/credential.token" ]; then
 fi
 reg_ok "probe account holds the installed credential (client-side store)"
 
-# A real listening fake user socket, owned by the probe account. The listener
-# counts every accepted connection into a file the group reads afterwards.
+# A real listening fake user socket, owned by the probe account. The
+# listener durably records every accepted connection into the counter file
+# (atomic replace on each accept), so the count is observable state on
+# disk, not listener-internal memory.
 EP_RUN="$EP_HOME/xdg-run"
 FAKE_SOCK_DIR="$EP_RUN/docker-helper"
 FAKE_SOCK="$FAKE_SOCK_DIR/docker-helper.sock"
@@ -95,13 +101,19 @@ FAKE_COUNT_FILE="$EP_HOME/xdg-run/fake-socket-connections"
 rm -rf "$EP_RUN"
 mkdir -p "$FAKE_SOCK_DIR"
 chown -R "$EP_USER:$EP_USER" "$EP_RUN"
-FAKE_LISTENER_LOG="$EP_HOME/xdg-run/fake-socket-log"
 sudo -u "$EP_USER" env HOME="$EP_HOME" XDG_RUNTIME_DIR="$EP_RUN" \
   python3 -c '
-import socket, sys, threading
+import os, socket, sys, threading, signal
 path, count_path = sys.argv[1], sys.argv[2]
+
+def write_count(n):
+    tmp = count_path + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(str(n))
+        fh.flush()
+    os.replace(tmp, count_path)
+
 try:
-    import os
     try:
         os.unlink(path)
     except FileNotFoundError:
@@ -109,23 +121,24 @@ try:
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(path)
     srv.listen(16)
-    count = [0]
-    stop = threading.Event()
+    accepted = [0]
+    lock = threading.Lock()
     def accept_loop():
-        srv.settimeout(1.0)
-        while not stop.is_set():
+        srv.settimeout(0.5)
+        while True:
             try:
                 conn, _ = srv.accept()
                 conn.close()
-                count[0] += 1
             except socket.timeout:
                 continue
             except OSError:
-                break
+                return
+            with lock:
+                accepted[0] += 1
+                write_count(accepted[0])
     t = threading.Thread(target=accept_loop)
+    write_count(accepted[0])
     t.start()
-    open(count_path, "w").write("")
-    import signal
     signal.pause()
 except Exception as e:
     sys.stderr.write("fake listener failed: %s\n" % e)
@@ -133,21 +146,29 @@ except Exception as e:
 ' "$FAKE_SOCK" "$FAKE_COUNT_FILE" >/dev/null 2>&1 &
 FAKE_PID=$!
 for _ in $(seq 1 20); do
-  [ -S "$FAKE_SOCK" ] && break
+  [ -S "$FAKE_SOCK" ] && [ "$(fake_connections 2>/dev/null)" = "0" ] && break
   sleep 0.1
 done
 [ -S "$FAKE_SOCK" ] || { kill "$FAKE_PID" 2>/dev/null || true; reg_blocked "the fake user socket listener did not start"; }
-reg_ok "fake per-user daemon socket is listening at $FAKE_SOCK"
+[ "$(fake_connections 2>/dev/null)" = "0" ] \
+  || { kill "$FAKE_PID" 2>/dev/null || true; reg_blocked "the fake user socket counter file did not reach its initial zero state"; }
+reg_ok "fake per-user daemon socket is listening at $FAKE_SOCK (counter observable at 0)"
 
+# fake_connections — read the listener's durable connection counter. A
+# missing, empty, or non-numeric counter file is an ERROR (non-zero rc), not
+# a silent zero: the counter must be real observable state, and masking a
+# broken counter as "zero connections" would fake the whole proof.
 fake_connections() {
   python3 -c '
 import sys
 try:
     with open(sys.argv[1]) as fh:
         data = fh.read().strip()
-    print(int(data) if data else 0)
+    n = int(data)
+    assert n >= 0
 except Exception:
     sys.exit(1)
+print(n)
 ' "$FAKE_COUNT_FILE" 2>/dev/null
 }
 
@@ -167,6 +188,44 @@ cleanup_fake_listener() {
 trap cleanup_fake_listener EXIT
 
 # ---------------------------------------------------------------------------
+# A0. NEGATIVE SELF-TEST: the connection counter must actually observe
+#     connections. A deliberate control client connects to the fake socket
+#     and the counter must move 0 -> 1; only then is the counter reset to
+#     zero for the real probes. If the self-test cannot observe the
+#     artificial connection, the harness cannot prove absence of probing
+#     and the group is BLOCKED, never PASS.
+# ---------------------------------------------------------------------------
+ep_cli python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+s.close()
+' "$FAKE_SOCK" \
+  || reg_blocked "the control client could not connect to the fake user socket"
+
+SELF_CONN_OK=""
+for _ in $(seq 1 50); do
+  if [ "$(fake_connections 2>/dev/null)" = "1" ]; then
+    SELF_CONN_OK=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$SELF_CONN_OK" != "1" ]; then
+  reg_blocked "counter self-test failed: the deliberate control connection was not reflected in the observable counter; the zero-probe proof is not trustworthy (last count: '$(fake_connections 2>/dev/null)')"
+fi
+reg_ok "counter self-test: the deliberate connection moved the counter 0 -> 1"
+
+# Reset the observable counter to zero for the real probes. The listener's
+# in-memory count keeps incrementing, so any post-reset accepted connection
+# moves the counter file away from exactly 0 and fails the proof.
+printf '0' > "$FAKE_COUNT_FILE"
+if [ "$(fake_connections 2>/dev/null)" != "0" ]; then
+  reg_blocked "counter reset did not reach a readable zero state"
+fi
+reg_ok "counter reset to zero for the real probes"
+
+# ---------------------------------------------------------------------------
 # A. negative probe: the fake user socket is never selected.
 # ---------------------------------------------------------------------------
 DEF_OUT="$(ep_cli docker-helper session list 2>&1)"
@@ -178,11 +237,11 @@ else
 $(printf '%s\n' "$DEF_OUT" | redact | head -5)"
 fi
 
-CONN_COUNT="$(fake_connections)" || CONN_COUNT=""
+CONN_COUNT="$(fake_connections 2>/dev/null)" || CONN_COUNT=""
 if [ "$CONN_COUNT" = "0" ]; then
-  reg_ok "the fake user socket accepted zero connections (no client probing)"
+  reg_ok "the fake user socket accepted zero connections after the self-test (no client probing)"
 else
-  reg_fail "the fake user socket accepted $CONN_COUNT connection(s); the client must never probe it"
+  reg_fail "the fake user socket accepted connections (observed count '$CONN_COUNT'); the client must never probe it"
 fi
 
 # ---------------------------------------------------------------------------
