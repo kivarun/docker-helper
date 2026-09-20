@@ -217,11 +217,15 @@ if ! id mig22legacy >/dev/null 2>&1; then
     || acc_fail "cannot create the legacy-state account mig22legacy"
 fi
 LEGACY_HOME="$(getent passwd mig22legacy | cut -d: -f6)"
+# useradd -m leaves a pre-created home directory root-owned; the legacy
+# account must own its home for the 2.2 non-root init probe.
+chown -R mig22legacy:mig22legacy "$LEGACY_HOME" 2>/dev/null || true
 usermod -aG docker mig22legacy >/dev/null 2>&1 || true
 # The legacy account must be able to traverse its home chain for the 2.2
 # non-root init probe (the provisioned roots tree is root-owned).
 chmod a+x "$ALLOWED_ROOT" 2>/dev/null || true
 chmod a+x "$(dirname "$ALLOWED_ROOT")" 2>/dev/null || true
+systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
 systemctl stop docker-helper.service >/dev/null 2>&1 \
   || acc_fail "cannot stop the baseline service for legacy-state seeding"
 sudo -u mig22legacy env -u XDG_CONFIG_HOME HOME="$LEGACY_HOME" \
@@ -353,6 +357,7 @@ else
 fi
 
 MIG_SESSIONS_BEFORE="$(dh session list --token-file /tmp/uat-mig22-cred.tok 2>/dev/null | grep -cF "$M_S_ID" || true)"
+systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
 systemctl restart docker-helper.service >/dev/null 2>&1 || true
 # A cold QEMU-guest restart under the gate's load (AppArmor profile
 # replacement, SQLite WAL recovery, session MAC reconciliation) can exceed

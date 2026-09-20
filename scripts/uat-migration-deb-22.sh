@@ -61,6 +61,13 @@ CANDIDATE_DEB="${UAT_ARTIFACT_PATH:?UAT_ARTIFACT_PATH is required}"
 CANDIDATE_SHA="${UAT_ARTIFACT_SHA256:?UAT_ARTIFACT_SHA256 is required}"
 BASELINE_DEB="${UAT_BASELINE22_DEB:-}"
 
+# redact masks bearer-token values (admin/session/credential tokens) in any
+# diagnostic the migration gate prints.
+redact() {
+  sed -e 's/dht_[A-Za-z0-9_-]+/<redacted-token>/g' \
+      -e 's/dhc_[A-Za-z0-9_-]+/<redacted-token>/g'
+}
+
 fail_mig() {
   printf '\n[migration-deb-22] FAILED: %s\n' "$1" >&2
   exit 1
@@ -157,7 +164,9 @@ MIG_CRED_FILE="/tmp/uat-mig22-credential.token"
 printf '%s\n' "$MIG_CRED_TOKEN" > "$MIG_CRED_FILE"
 chmod 600 "$MIG_CRED_FILE"
 
-MIG_WS="/home/mig22u-ws"
+# The 2.2 principal create adds the OS account's home as the principal's
+# default allowed root, so the pre-upgrade workspace must live inside it.
+MIG_WS="/home/mig22u/uat-mig22-ws"
 mkdir -p "$MIG_WS"
 chown -R mig22u:mig22u "$MIG_WS" 2>/dev/null || true
 MIG_SESSION_JSON="$(docker-helper session create --token-file "$MIG_CRED_FILE" "$MIG_WS" --json 2>&1)" \
@@ -195,6 +204,7 @@ systemctl stop "$SERVICE" >/dev/null 2>&1 \
 sudo -u mig22legacy env -u XDG_CONFIG_HOME HOME=/home/mig22legacy \
   docker-helper init --allowed-root /home/mig22legacy >/tmp/uat-mig22-legacy-init.log 2>&1 \
   || fail_mig "the 2.2 baseline non-root init failed (legacy-state seeding broken): $(tail -3 /tmp/uat-mig22-legacy-init.log 2>/dev/null | redact | tr '\n' ' ')"
+systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
 systemctl start "$SERVICE" >/dev/null 2>&1 \
   || fail_mig "cannot restart the baseline service after legacy-state seeding"
 wait_health || fail_mig "the baseline service did not come back healthy after legacy-state seeding"
