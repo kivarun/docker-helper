@@ -414,9 +414,7 @@ func TestNonRootSystemUsesCredential(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(validToken+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := resolveOperatorClient(operatorClientOptions{
-		System: true,
-	})
+	client, err := resolveOperatorClient(operatorClientOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,9 +434,7 @@ func TestRootSystemUsesAdminToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	// Create admin token in a temp system config dir.
 	// We can't write to /etc, so we verify the error mentions admin.token.
-	_, err := resolveOperatorClient(operatorClientOptions{
-		System: true,
-	})
+	_, err := resolveOperatorClient(operatorClientOptions{})
 	if err == nil {
 		t.Fatal("expected error when admin token doesn't exist")
 	}
@@ -466,7 +462,6 @@ func TestExplicitTokenFileHasPriority(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := resolveOperatorClient(operatorClientOptions{
-		System:    true,
 		TokenFile: tokenFile,
 	})
 	if err != nil {

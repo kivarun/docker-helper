@@ -588,8 +588,8 @@ func TestSystemUnitFile(t *testing.T) {
 	if !strings.Contains(content, "ExecStart=/usr/bin/docker-helper serve") {
 		t.Error("ExecStart must point to /usr/bin/docker-helper serve")
 	}
-	if !strings.Contains(content, "ExecReload=/usr/bin/docker-helper reload --system") {
-		t.Error("ExecReload must be /usr/bin/docker-helper reload --system")
+	if !strings.Contains(content, "ExecReload=/usr/bin/docker-helper reload") {
+		t.Error("ExecReload must be /usr/bin/docker-helper reload")
 	}
 	if !strings.Contains(content, "AppArmorProfile=docker-helper-system") {
 		t.Error("unit must contain AppArmorProfile=docker-helper-system")
@@ -8230,16 +8230,16 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	// contract (400 invalid_workspace) — and finally restore the Principal
 	// root state.
 	for _, must := range []string{
-		`principal allowed-root remove --system "$H_USER" "$H_HOME"`,
-		`principal allowed-root add --system "$H_USER" "$H_SUB"`,
+		`principal allowed-root remove "$H_USER" "$H_HOME"`,
+		`principal allowed-root add "$H_USER" "$H_SUB"`,
 		`[ "$H_POS_HTTP" = 201 ]`,
 		`grep -q '"id":"dhs_' /tmp/r2ac-h-pos.json`,
-		`principal allowed-root remove --system "$H_USER" "$H_SUB"`,
+		`principal allowed-root remove "$H_USER" "$H_SUB"`,
 		`grep -q '"scope": "restricted"'`,
 		`grep -q '"allowed_roots": \[\]'`,
 		`[ "$H_CASCADE_HTTP" = 400 ]`,
 		`grep -q '"code":"invalid_workspace"' /tmp/r2ac-h-cascade.json`,
-		`principal allowed-root add --system "$H_USER" "$H_HOME"`,
+		`principal allowed-root add "$H_USER" "$H_HOME"`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("H5 cascade proof is missing a required step (%s)", must)
@@ -8249,7 +8249,7 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	// H5R: exact-candidate live global cascade.
 	for _, must := range []string{
 		`dh config allowed-root add "$H5_GLOBAL_ROOT"`,
-		`principal allowed-root add --system "$H_USER" "$H5_GLOBAL_ROOT"`,
+		`principal allowed-root add "$H_USER" "$H5_GLOBAL_ROOT"`,
 		`h5-runtime-cascade`,
 		`dh config allowed-root remove "$H5_GLOBAL_ROOT"`,
 		`live reload pruned the Principal root and restricted-Launcher descendant atomically`,
@@ -9636,8 +9636,8 @@ func TestUATHarnessRichListCLIGrammar(t *testing.T) {
 		args []string
 	}{
 		{"config list --json has no positional", []string{"config", "allowed-root", "list", "--json"}},
-		{"principal list --json precedes USER", []string{"principal", "allowed-root", "list", "--system", "--json", "uat-parser-principal"}},
-		{"launcher list --json precedes LAUNCHER", []string{"launcher", "allowed-root", "list", "--system", "--principal", "uat-parser-principal", "--json", "uat-parser-launcher"}},
+		{"principal list --json precedes USER", []string{"principal", "allowed-root", "list", "--json", "uat-parser-principal"}},
+		{"launcher list --json precedes LAUNCHER", []string{"launcher", "allowed-root", "list", "--principal", "uat-parser-principal", "--json", "uat-parser-launcher"}},
 	}
 	for _, tc := range canon {
 		var stdout, stderr strings.Builder
@@ -9651,7 +9651,7 @@ func TestUATHarnessRichListCLIGrammar(t *testing.T) {
 	// it must reach the runtime failure (missing token, exit 1), never the
 	// retired parse rejection (exit 2 with "flags must precede").
 	var stdout, stderr strings.Builder
-	exit := runCommandWithWriters([]string{"principal", "allowed-root", "list", "--system", "uat-parser-principal", "--json"}, &stdout, &stderr)
+	exit := runCommandWithWriters([]string{"principal", "allowed-root", "list", "uat-parser-principal", "--json"}, &stdout, &stderr)
 	if exit == 2 && strings.Contains(stderr.String(), parseRejection) {
 		t.Errorf("the retired parse rejection resurfaced for the flag-after-positional form (exit=%d, stderr=%q)", exit, stderr.String())
 	}
@@ -9676,9 +9676,9 @@ func TestAccessModesHarnessListContracts(t *testing.T) {
 	// for an access mode.
 	for _, must := range []string{
 		`dh config allowed-root list --json 2>/dev/null | allowed_root_json_access "$TREE/global-ro"`,
-		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE"`,
-		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs"`,
-		`dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/project"`,
+		`dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE"`,
+		`dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs"`,
+		`dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/project"`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("access assertion must parse the rich --json projection structurally (%s)", must)
@@ -9700,7 +9700,7 @@ func TestAccessModesHarnessListContracts(t *testing.T) {
 	// mutation step whose failure cannot be skipped by a failed verification —
 	// the read_only set-access line must not be chained behind a projection
 	// verification, and the verification must be a separate collect-all step.
-	restoreLine := `dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1`
+	restoreLine := `dh principal allowed-root set-access "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1`
 	if !strings.Contains(content, restoreLine) {
 		t.Fatal("P5 must keep the flip-back to read_only (the downstream read_only fixture state)")
 	}
@@ -10171,7 +10171,7 @@ func TestAccessModesHarnessGlobalROProof(t *testing.T) {
 	for _, must := range []string{
 		`G_WS="$TREE/global-ro/work"`,
 		`dh config allowed-root set-access "$TREE/global-ro" read_only`,
-		`dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$TREE/global-ro"`,
+		`dh principal allowed-root add --access read_write "$PRINCIPAL" "$TREE/global-ro"`,
 		`grep -A1 -F "\"path\": \"$TREE/global-ro\"" | grep -q '"access": "read_write"'`,
 		`issue_launcher_credential "$PRINCIPAL" "$G_L_ID" /tmp/uat-am-cred-globalro`,
 		`G_ID="$(create_session /tmp/uat-am-cred-globalro "$G_WS")"`,
@@ -10211,7 +10211,7 @@ func TestAccessModesHarnessGlobalROProof(t *testing.T) {
 		index int
 	}{
 		{"global RO narrowing", `dh config allowed-root set-access "$TREE/global-ro" read_only`, -1},
-		{"Principal read_write grant", `dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$TREE/global-ro"`, -1},
+		{"Principal read_write grant", `dh principal allowed-root add --access read_write "$PRINCIPAL" "$TREE/global-ro"`, -1},
 		{"Launcher credential", `issue_launcher_credential "$PRINCIPAL" "$G_L_ID" /tmp/uat-am-cred-globalro`, -1},
 		{"issued Session", `G_ID="$(create_session /tmp/uat-am-cred-globalro "$G_WS")"`, -1},
 		{"writable refusal", `expect_read_only_root "$G_TOKEN" . /mnt/g 'echo x > /mnt/g/forbidden.txt' "$G_RESIDUE_BASE"`, -1},
@@ -10256,10 +10256,10 @@ func TestAccessModesHarnessAuthoritySymmetry(t *testing.T) {
 	// launcher selector, Principal through a real principal credential
 	// bearer with no selector.
 	for _, must := range []string{
-		`dh session create --system --token-file /etc/docker-helper/admin.token`,
+		`dh session create --token-file /etc/docker-helper/admin.token`,
 		`--launcher "$MAIN_L_ID" "$WS" --json`,
 		`reg_principal_credential "$PRINCIPAL" /tmp/uat-am-cred-principal`,
-		`dh session create --system --token-file /tmp/uat-am-cred-principal`,
+		`dh session create --token-file /tmp/uat-am-cred-principal`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("the authority symmetry proof must carry distinct real authorities (%s)", must)
@@ -10433,8 +10433,8 @@ func TestMigrationAndAcceptanceListHarnessContracts(t *testing.T) {
 			path: "scripts/uat-migration-rpm-211.sh",
 			rich: []string{
 				`M_LIST_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"`,
-				`M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"`,
-				`M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
+				`M_PLIST_JSON="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null || true)"`,
+				`M_LLIST_JSON="$(dh launcher allowed-root list --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
 			},
 			stage: "R9",
 		},
@@ -10442,8 +10442,8 @@ func TestMigrationAndAcceptanceListHarnessContracts(t *testing.T) {
 			path: "scripts/uat-release2-acceptance.sh",
 			rich: []string{
 				`M_LIST_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"`,
-				`M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"`,
-				`M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
+				`M_PLIST_JSON="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null || true)"`,
+				`M_LLIST_JSON="$(dh launcher allowed-root list --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"`,
 			},
 			stage: "M8",
 		},

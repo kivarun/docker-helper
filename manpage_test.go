@@ -144,8 +144,8 @@ func TestSecurityContractDocumented(t *testing.T) {
 //   - every `.B docker-helper <path>` synopsis line resolves to a registered
 //     command path (a stale command name such as a retired verb fails this);
 //   - every registered Launcher leaf command has a man synopsis;
-//   - every Launcher leaf synopsis lists the three common operator flags its
-//     parser registers (--system, --endpoint, --token-file), the known-drift
+//   - every Launcher leaf synopsis lists the common operator flags its
+//     parser registers (--endpoint, --token-file), the known-drift
 //     area where Launcher synopses historically omitted them.
 //
 // It is a line-level smoke check, not a roff parser: only lines that start
@@ -218,7 +218,7 @@ func TestManpageSynopsesMatchParser(t *testing.T) {
 			t.Errorf("docs/man/docker-helper.1:%d: synopsis names unknown command %q", i+1, joined)
 		}
 		if launcherLeaves[joined] {
-			for _, flag := range []string{`\-\-system`, `\-\-endpoint`, `\-\-token-file`} {
+			for _, flag := range []string{`\-\-endpoint`, `\-\-token-file`} {
 				if !strings.Contains(trimmed, flag) {
 					t.Errorf("docs/man/docker-helper.1:%d: launcher synopsis %q is missing operator flag %s", i+1, joined, flag)
 				}

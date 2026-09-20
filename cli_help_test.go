@@ -624,17 +624,15 @@ func TestHelpUnknownNestedCommand(t *testing.T) {
 
 // --- reload operator flags tests ---
 
-func TestReloadSystemFlagAccepted(t *testing.T) {
-	// --system should be accepted by the flag parser.
-	// It will fail at connection time because there's no daemon,
-	// but the flag itself should not be "unknown".
+func TestReloadSystemFlagRejected(t *testing.T) {
+	// The system socket is the only endpoint: --system no longer exists.
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"reload", "--system"}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected non-zero exit (no daemon running)")
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d (stderr %s)", code, stderr.String())
 	}
-	if strings.Contains(stderr.String(), "unknown flag") {
-		t.Fatalf("--system should not be unknown: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("--system must be rejected as unknown: %s", stderr.String())
 	}
 }
 
@@ -653,18 +651,15 @@ func TestReloadEndpointTokenFileAccepted(t *testing.T) {
 	}
 }
 
-func TestReloadSystemEndpointMutuallyExclusive(t *testing.T) {
-	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "token")
-	writeTestTokenFile(t, tokenPath, "test-token")
-
+func TestReloadEndpointWithUnknownSystemFlagStillUsageError(t *testing.T) {
+	// An unknown flag is a usage error even together with other flags.
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"reload", "--system", "--endpoint", "http://127.0.0.1:52375", "--token-file", tokenPath}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected non-zero exit")
+	code := runCommandWithWriters([]string{"reload", "--system", "--endpoint", "http://127.0.0.1:52375"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d (stderr %s)", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "mutually exclusive") {
-		t.Fatalf("expected mutual exclusion error: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("expected unknown-flag usage error: %s", stderr.String())
 	}
 }
 

@@ -427,11 +427,11 @@ func TestCompletionNoLegacyAdminHierarchy(t *testing.T) {
 }
 
 func TestCompletionBoolFlagDoesNotSwallow(t *testing.T) {
-	// After a boolean flag like --system, the next word should still complete
+	// After a boolean flag like --stored, the next word should still complete
 	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "--system", "-"})
+	results := runCompletion(t, script, []string{"docker-helper", "principal", "allowed-root", "list", "--stored", "-"})
 	if len(results) == 0 {
-		t.Error("expected flag completions after boolean flag --system")
+		t.Error("expected flag completions after boolean flag --stored")
 		return
 	}
 	// Should still offer flags
@@ -443,7 +443,7 @@ func TestCompletionBoolFlagDoesNotSwallow(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected flags after --system: %v", results)
+		t.Errorf("expected flags after --stored: %v", results)
 	}
 }
 
@@ -1149,25 +1149,19 @@ func TestCompletionFlagsFollowParserGrammar(t *testing.T) {
 	// The shared parser accepts options after positional arguments, so
 	// completion must keep suggesting them there (until an explicit --).
 	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "alice", "--s"})
-	if !slices.Contains(results, "--system") {
-		t.Errorf("--system must be suggested after the positional argument, got: %v", results)
+	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "alice", "--i"})
+	if !slices.Contains(results, "--issue-credential") {
+		t.Errorf("an available flag must be suggested after the positional argument, got: %v", results)
 	}
 }
 
 func TestCompletionFlagsBeforePositional(t *testing.T) {
 	// Flags before positional arguments must still work.
 	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "--s"})
-	found := false
-	for _, r := range results {
-		if r == "--system" {
-			found = true
-			break
-		}
-	}
+	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "--i"})
+	found := slices.Contains(results, "--issue-credential")
 	if !found {
-		t.Errorf("--system must be suggested before positional argument, got: %v", results)
+		t.Errorf("an available flag must be suggested before positional argument, got: %v", results)
 	}
 }
 
@@ -1436,7 +1430,7 @@ func TestCompletionTreeLeafLongFlags(t *testing.T) {
 func TestCompletionSessionListNarrowingSelectors(t *testing.T) {
 	script := completionScript(t)
 	results := runCompletion(t, script, treeProbeWords([]string{"session", "list"}, "--"))
-	for _, want := range []string{"--principal", "--launcher", "--json", "--system"} {
+	for _, want := range []string{"--principal", "--launcher", "--json", "--token-file"} {
 		if !slices.Contains(results, want) {
 			t.Errorf("session list --<TAB>: missing %q, got %v", want, results)
 		}
@@ -2698,7 +2692,7 @@ func TestCompletionPolicyOperatorFlagForwarding(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString(script)
 	sb.WriteString("\n\n")
-	sb.WriteString("COMP_WORDS=(docker-helper launcher create --system --endpoint " + endpoint +
+	sb.WriteString("COMP_WORDS=(docker-helper launcher create --endpoint " + endpoint +
 		" --endpoint=" + endpoint + " --token-file '" + spacey + "' --token-file=/tmp/t2 --principal alice --principal bob)\n")
 	sb.WriteString("COMP_CWORD=${#COMP_WORDS[@]}\n")
 	sb.WriteString("_docker_helper_normalize_line\n")
@@ -2729,7 +2723,6 @@ func TestCompletionPolicyOperatorFlagForwarding(t *testing.T) {
 		t.Error("typed --principal line missing from harness output")
 	}
 	want := []string{
-		"--system",
 		"--endpoint", endpoint,
 		"--endpoint=" + endpoint,
 		"--token-file", spacey,
@@ -3140,7 +3133,7 @@ func TestCompletionPrincipalShowFieldVocabulary(t *testing.T) {
 
 	// The operator flag forms never shift the positional counting.
 	flagShiftCases := [][]string{
-		{"docker-helper", "principal", "show", "--system", "michael", ""},
+		{"docker-helper", "principal", "show", "--endpoint=unix:///tmp/nowhere", "michael", ""},
 		{"docker-helper", "principal", "show", "--endpoint=unix:///tmp/nowhere", "michael", ""},
 		{"docker-helper", "principal", "show", "--token-file", "/tmp/token", "michael", ""},
 	}
@@ -3927,7 +3920,7 @@ func TestCompletionRemovedOperandFlagsNotSuggested(t *testing.T) {
 	}{
 		{[]string{"launcher", "create"}, "--name", "--allowed-root"},
 		{[]string{"session", "create"}, "--workspace", "--filesystem-root"},
-		{[]string{"session", "delete"}, "--id", "--system"},
+		{[]string{"session", "delete"}, "--id", "--endpoint"},
 		{[]string{"registry", "login"}, "--registry", "--username"},
 		{[]string{"run"}, "--image", "--entrypoint"},
 		{[]string{"build"}, "--context", "--image"},

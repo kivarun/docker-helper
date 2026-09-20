@@ -25,7 +25,6 @@ var systemSocketPath = filepath.Join(systemRuntimeDir, "docker-helper.sock")
 
 // operatorClientOptions specifies how to connect to the daemon.
 type operatorClientOptions struct {
-	System    bool   // --system: force system daemon
 	Endpoint  string // --endpoint: explicit endpoint URL
 	TokenFile string // --token-file: explicit token file path
 	// EndpointSet records that --endpoint was explicitly supplied. It is
@@ -57,10 +56,7 @@ func (opts operatorClientOptions) clientTimeout() *time.Duration {
 // owns. It is pure and locally knowable, so CLI invocations run it during
 // Invocation.Validate (exit 2); family-specific requirements compose around
 // it rather than re-owning the mutual-exclusion or syntax rules.
-func validateEndpointSelection(system bool, endpoint string, endpointSet bool) error {
-	if system && endpoint != "" {
-		return fmt.Errorf("--system and --endpoint are mutually exclusive")
-	}
+func validateEndpointSelection(endpoint string, endpointSet bool) error {
 	if endpointSet && endpoint == "" {
 		return fmt.Errorf("--endpoint value must not be empty")
 	}
@@ -85,7 +81,7 @@ func isUnixEndpoint(endpoint string) bool {
 // (exit 2); resolveOperatorClient retains the same validation for direct and
 // internal callers.
 func validateOperatorEndpointOptions(opts operatorClientOptions) error {
-	if err := validateEndpointSelection(opts.System, opts.Endpoint, opts.EndpointSet); err != nil {
+	if err := validateEndpointSelection(opts.Endpoint, opts.EndpointSet); err != nil {
 		return err
 	}
 	if opts.Endpoint != "" && !isUnixEndpoint(opts.Endpoint) && opts.TokenFile == "" {
@@ -292,10 +288,9 @@ func newHTTPAPIClient(address string, tokenSource func() (string, error), timeou
 	}
 }
 
-// registerOperatorFlags adds --system, --endpoint, and --token-file flags to the
-// given FlagSet and returns pointers to the flag values.
-func registerOperatorFlags(fs *flag.FlagSet) (system *bool, endpoint *explicitStringFlag, tokenFile *string) {
-	system = fs.Bool("system", false, "Connect to system daemon")
+// registerOperatorFlags adds --endpoint and --token-file flags to the given
+// FlagSet and returns pointers to the flag values.
+func registerOperatorFlags(fs *flag.FlagSet) (endpoint *explicitStringFlag, tokenFile *string) {
 	// The endpoint flag is presence-aware: the CLI grammar must distinguish
 	// an omitted --endpoint (default resolution) from an explicitly
 	// supplied empty value (a usage error), so the shared endpoint

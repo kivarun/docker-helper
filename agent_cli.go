@@ -23,7 +23,6 @@ const (
 // Agent commands authenticate with the Session token (DOCKER_HELPER_SESSION_TOKEN),
 // never a Principal credential; these options only select the transport endpoint.
 type agentClientOptions struct {
-	System   bool   // --system: force the system daemon socket
 	Endpoint string // --endpoint: explicit endpoint URL
 	// EndpointSet records that --endpoint was explicitly supplied. It is
 	// part of the CLI grammar (an explicitly empty endpoint is a usage
@@ -32,10 +31,9 @@ type agentClientOptions struct {
 	EndpointSet bool
 }
 
-// registerAgentEndpointFlags adds --system and --endpoint to an agent command's
-// FlagSet and returns pointers to their values.
-func registerAgentEndpointFlags(fs *flag.FlagSet) (system *bool, endpoint *explicitStringFlag) {
-	system = fs.Bool("system", false, "Connect to system daemon")
+// registerAgentEndpointFlags adds --endpoint to an agent command's FlagSet
+// and returns a pointer to its value.
+func registerAgentEndpointFlags(fs *flag.FlagSet) (endpoint *explicitStringFlag) {
 	// Presence-aware like the operator family: the shared endpoint
 	// validator must distinguish an omitted --endpoint (default
 	// resolution) from an explicitly supplied empty value (a usage error).
@@ -67,7 +65,7 @@ func resolveAgentSocketPath() string {
 // authentication lookup, so a usage error is reported with exit code 2 even
 // when DOCKER_HELPER_SESSION_TOKEN is unset.
 func validateAgentEndpointOptions(opts agentClientOptions) error {
-	return validateEndpointSelection(opts.System, opts.Endpoint, opts.EndpointSet)
+	return validateEndpointSelection(opts.Endpoint, opts.EndpointSet)
 }
 
 // resolveAgentClient resolves the agent-facing client for the given endpoint
@@ -87,9 +85,6 @@ func resolveAgentClient(opts agentClientOptions) (*apiClient, error) {
 
 	if opts.Endpoint != "" {
 		return resolveAgentEndpoint(opts.Endpoint, tokenSource)
-	}
-	if opts.System {
-		return newUnixAPIClient(systemSocketPath, tokenSource, nil), nil
 	}
 	return newUnixAPIClient(resolveAgentSocketPath(), tokenSource, nil), nil
 }
@@ -241,22 +236,22 @@ func waitForOperationWithSignalCh(c *apiClient, opID string, stdout, stderr io.W
 var pullCommand = &Command{
 	Name:       "pull",
 	Summary:    "Pull a Docker image",
-	Usage:      "docker-helper pull [--system] [--endpoint ENDPOINT] IMAGE",
+	Usage:      "docker-helper pull [--endpoint ENDPOINT] IMAGE",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
 	Presentation: exceptionPresentation("stream: pull progress data, not one finite result renderer"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint := registerAgentEndpointFlags(fs)
+		endpoint := registerAgentEndpointFlags(fs)
 		return Invocation{
 			Validate: func() error {
-				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set})
+				return validateAgentEndpointOptions(agentClientOptions{Endpoint: endpoint.value, EndpointSet: endpoint.set})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				image := fs.Arg(0)
 
-				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: endpoint.value})
+				c, err := resolveAgentClient(agentClientOptions{Endpoint: endpoint.value})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -300,7 +295,7 @@ var pullCommand = &Command{
 var buildCommand = &Command{
 	Name:       "build",
 	Summary:    "Build a Docker image",
-	Usage:      "docker-helper build [--system] [--endpoint ENDPOINT] --dockerfile FILE --image NAME [--build-arg KEY=VALUE]... CONTEXT",
+	Usage:      "docker-helper build [--endpoint ENDPOINT] --dockerfile FILE --image NAME [--build-arg KEY=VALUE]... CONTEXT",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `SIGINT/SIGTERM cancels the running build operation.
@@ -313,7 +308,7 @@ canonicalizes the context and enforces workspace containment).`,
 	Presentation: exceptionPresentation("stream: build log data, not one finite result renderer"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint := registerAgentEndpointFlags(fs)
+		endpoint := registerAgentEndpointFlags(fs)
 		dockerfile := fs.String("dockerfile", "", "Dockerfile path relative to context (required)")
 		image := fs.String("image", "", "Image name and tag (required)")
 		var buildArgs stringSlice
@@ -327,7 +322,7 @@ canonicalizes the context and enforces workspace containment).`,
 				if *image == "" {
 					return fmt.Errorf("--image is required")
 				}
-				if err := validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set}); err != nil {
+				if err := validateAgentEndpointOptions(agentClientOptions{Endpoint: endpoint.value, EndpointSet: endpoint.set}); err != nil {
 					return err
 				}
 				return nil
@@ -343,7 +338,7 @@ canonicalizes the context and enforces workspace containment).`,
 					argsMap[parts[0]] = parts[1]
 				}
 
-				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: endpoint.value})
+				c, err := resolveAgentClient(agentClientOptions{Endpoint: endpoint.value})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -422,7 +417,7 @@ var runContainerCommand = &Command{
 	Presentation: exceptionPresentation("stream: workload stdout/stderr, not one finite result renderer"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint := registerAgentEndpointFlags(fs)
+		endpoint := registerAgentEndpointFlags(fs)
 		entrypoint := fs.String("entrypoint", "", "Container entrypoint")
 		workdir := fs.String("workdir", "", "Absolute working directory inside container")
 		shmSize := fs.String("shm-size", "", "Size of /dev/shm (e.g. 64m, 1g); max 2g")
@@ -436,7 +431,7 @@ var runContainerCommand = &Command{
 
 		return Invocation{
 			Validate: func() error {
-				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: endpoint.value, EndpointSet: endpoint.set})
+				return validateAgentEndpointOptions(agentClientOptions{Endpoint: endpoint.value, EndpointSet: endpoint.set})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				// IMAGE is the primary workload operand; every following
@@ -515,7 +510,7 @@ var runContainerCommand = &Command{
 					runMounts = append(runMounts, rm)
 				}
 
-				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: endpoint.value})
+				c, err := resolveAgentClient(agentClientOptions{Endpoint: endpoint.value})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

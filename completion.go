@@ -109,21 +109,21 @@ var completionRootsCommand = &Command{
 var completionRootsPrincipalCommand = &Command{
 	Name:       "principal",
 	Summary:    "Print a Principal's effective allowed roots",
-	Usage:      "docker-helper completion roots principal [--principal USER] [--stored] [--authority-only] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion roots principal [--principal USER] [--stored] [--authority-only] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 
 	Presentation: exceptionPresentation("machine-line protocol: Principal roots/authority for shell completion"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		stored := fs.Bool("stored", false, "Print the target Principal's stored roots (the existing-entity mutation universe)")
 		authorityOnly := fs.Bool("authority-only", false, "Print authenticated operator authority for shell completion")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
+
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -138,7 +138,7 @@ var completionRootsPrincipalCommand = &Command{
 					timeout = completionAuthorityQueryTimeout
 				}
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
+
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   timeout,
@@ -205,14 +205,14 @@ var completionRootsPrincipalCommand = &Command{
 var completionRootsSessionCommand = &Command{
 	Name:       "session",
 	Summary:    "Print the Session-create effective allowed roots",
-	Usage:      "docker-helper completion roots session [--principal USER] [--launcher LAUNCHER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion roots session [--principal USER] [--launcher LAUNCHER] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 
 	Presentation: exceptionPresentation("machine-line protocol: Session roots for shell completion"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal username (admin authentication; targets the Principal's default Launcher)")
 		launcher := &explicitStringFlag{}
@@ -220,7 +220,7 @@ var completionRootsSessionCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
+
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -231,7 +231,7 @@ var completionRootsSessionCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
+
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   completionQueryTimeout,
@@ -270,14 +270,14 @@ var completionRootsSessionCommand = &Command{
 var completionRootsLauncherCommand = &Command{
 	Name:       "launcher",
 	Summary:    "Print a Launcher's stored allowed roots",
-	Usage:      "docker-helper completion roots launcher [--principal USER] [--launcher LAUNCHER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion roots launcher [--principal USER] [--launcher LAUNCHER] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 
 	Presentation: exceptionPresentation("machine-line protocol: Launcher roots for shell completion"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal username (inferred from credential when omitted)")
 		launcher := &explicitStringFlag{}
@@ -285,7 +285,7 @@ var completionRootsLauncherCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
+
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -296,7 +296,7 @@ var completionRootsLauncherCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
+
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   completionQueryTimeout,
@@ -361,20 +361,20 @@ var completionSelectorsCommand = &Command{
 var completionSelectorsPrincipalCommand = &Command{
 	Name:       "principal",
 	Summary:    "Print the Principal names selectable with --principal",
-	Usage:      "docker-helper completion selectors principal [--command PATH] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion selectors principal [--command PATH] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 
 	Presentation: exceptionPresentation("machine-line protocol: Principal selectors for shell completion"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		command := &explicitStringFlag{}
 		fs.Var(command, "command", "Completed command path (context for the selector's applicability)")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
+
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -385,7 +385,7 @@ var completionSelectorsPrincipalCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
+
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   completionQueryTimeout,
@@ -452,20 +452,20 @@ var completionSelectorsPrincipalCommand = &Command{
 var completionSelectorsLauncherCommand = &Command{
 	Name:       "launcher",
 	Summary:    "Print the Launcher selectors selectable with --launcher",
-	Usage:      "docker-helper completion selectors launcher [--principal USER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion selectors launcher [--principal USER] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 
 	Presentation: exceptionPresentation("machine-line protocol: Launcher selectors for shell completion"),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal context (admin authority; its Launcher names become selectable)")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
+
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -476,7 +476,7 @@ var completionSelectorsLauncherCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
+
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 					Timeout:   completionQueryTimeout,

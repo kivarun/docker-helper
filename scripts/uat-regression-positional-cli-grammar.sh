@@ -29,8 +29,8 @@
 #      (--json, --image) reach the container unchanged, with and without the
 #      bare -- separator.
 #   F. explicit-empty endpoint canary: the operator family (an operator
-#      command without --system, so the empty value is isolated from the
-#      --system + --endpoint conflict) and the agent/data-plane family (a
+#      command; no conflicting flag can co-occur any more) and the agent/
+#      data-plane family (a
 #      real agent command, pull, with the Session token deliberately unset)
 #      both exit 2 for --endpoint "" and --endpoint= before any network or
 #      token-lookup activity, while the omitted endpoint still reaches the
@@ -64,7 +64,7 @@ FIX_USER="uatreg28a"
 IMAGE="alpine:3.24"
 
 cleanup() {
-  dh principal delete --system "$FIX_USER" >/dev/null 2>&1 || true
+  dh principal delete "$FIX_USER" >/dev/null 2>&1 || true
   userdel -r "$FIX_USER" >/dev/null 2>&1 || true
   rm -rf "$TMPDIR_REG28"
 }
@@ -84,8 +84,8 @@ fixture() {
   fi
   home="$(getent passwd "$FIX_USER" | cut -d: -f6)"
   mkdir -p "$home/ws" && chown -R "$FIX_USER:$FIX_USER" "$home"
-  dh principal create --system --no-credential "$FIX_USER" >/dev/null 2>&1 || true
-  dh principal set --system "$FIX_USER" enabled true >/dev/null 2>&1 || true
+  dh principal create --no-credential "$FIX_USER" >/dev/null 2>&1 || true
+  dh principal set "$FIX_USER" enabled true >/dev/null 2>&1 || true
   printf '%s' "$home"
 }
 
@@ -108,7 +108,7 @@ subcase_a() {
   local out rc
 
   # 1. launcher create --name NAME.
-  rc=0; out="$(dh launcher create --system --principal "$FIX_USER" --name ghost --no-credential 2>&1)" || rc=$?  # gate probe: removed spelling
+  rc=0; out="$(dh launcher create --principal "$FIX_USER" --name ghost --no-credential 2>&1)" || rc=$?  # gate probe: removed spelling
   expect_syntax_exit "A: launcher create --name is rejected (exit 2)" "$rc" "$out"
   if printf '%s' "$out" | grep -q -- '--name'; then
     reg_fail "A: the --name rejection must name the offending flag"
@@ -117,11 +117,11 @@ subcase_a() {
   fi
 
   # 2. session create --workspace PATH.
-  rc=0; out="$(dh session create --system --workspace /tmp 2>&1)" || rc=$?  # gate probe: removed spelling
+  rc=0; out="$(dh session create --workspace /tmp 2>&1)" || rc=$?  # gate probe: removed spelling
   expect_syntax_exit "A: session create --workspace is rejected (exit 2)" "$rc" "$out"
 
   # 3. session delete --id ID.
-  rc=0; out="$(dh session delete --system --id dhs_missing 2>&1)" || rc=$?  # gate probe: removed spelling
+  rc=0; out="$(dh session delete --id dhs_missing 2>&1)" || rc=$?  # gate probe: removed spelling
   expect_syntax_exit "A: session delete --id is rejected (exit 2)" "$rc" "$out"
 
   # 4. registry login --registry REGISTRY.
@@ -168,7 +168,7 @@ subcase_b() {
   home="$(fixture)" || { reg_fail "B: fixture failed"; return; }
 
   # launcher create NAME (positional).
-  out="$(dh launcher create --system --principal "$FIX_USER" target --no-credential --json 2>&1)" || {
+  out="$(dh launcher create --principal "$FIX_USER" target --no-credential --json 2>&1)" || {
     reg_fail "B: launcher create NAME failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
@@ -181,7 +181,7 @@ subcase_b() {
 
   # session create WORKSPACE (positional) + session delete SESSION_ID
   # (positional, same grammar as session show).
-  out="$(dh session create --system --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
+  out="$(dh session create --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
     reg_fail "B: session create WORKSPACE failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
@@ -192,12 +192,12 @@ subcase_b() {
     reg_fail "B: session create WORKSPACE returned no Session id"
     return
   fi
-  if out="$(dh session show --system "$sid" 2>&1)" && printf '%s' "$out" | grep -q "$sid"; then
+  if out="$(dh session show "$sid" 2>&1)" && printf '%s' "$out" | grep -q "$sid"; then
     reg_ok "B: session show SESSION_ID targets the issued Session"
   else
     reg_fail "B: session show SESSION_ID failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  if out="$(dh session delete --system "$sid" 2>&1)" && [ -n "$out" ]; then
+  if out="$(dh session delete "$sid" 2>&1)" && [ -n "$out" ]; then
     reg_ok "B: session delete SESSION_ID deletes the issued Session"
   else
     reg_fail "B: session delete SESSION_ID failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
@@ -205,7 +205,7 @@ subcase_b() {
 
   # registry login REGISTRY (positional): a refused connection is the
   # contract-level evidence the operand reached the operation.
-  out="$(dh registry login --system 127.0.0.1:1 --username "$FIX_USER" --password-stdin </dev/null 2>&1)"; rc=$?
+  out="$(dh registry login 127.0.0.1:1 --username "$FIX_USER" --password-stdin </dev/null 2>&1)"; rc=$?
   if [ "$rc" -ne 0 ]; then
     reg_ok "B: registry login REGISTRY drives the credential operation (refused endpoint is the expected failure)"
   else
@@ -219,13 +219,13 @@ subcase_b() {
   ctx="$home/ws/ctx"
   mkdir -p "$ctx"
   printf 'FROM scratch\n' > "$ctx/Dockerfile"
-  out="$(dh session create --system --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
+  out="$(dh session create --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
     reg_fail "B: build session create failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
   local bid="$(printf '%s' "$out" | json_field id)" btoken="$(printf '%s' "$out" | json_field token)"
   [ -n "$btoken" ] || { reg_fail "B: build session create returned no token"; return; }
-  out="$(DOCKER_HELPER_SESSION_TOKEN="$btoken" dh build --system "$ctx" --dockerfile Dockerfile --image uat-reg28:2.2 2>&1)"; rc=$?
+  out="$(DOCKER_HELPER_SESSION_TOKEN="$btoken" dh build "$ctx" --dockerfile Dockerfile --image uat-reg28:2.2 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ]; then
     reg_ok "B: build CONTEXT --dockerfile --image builds from the positional context"
     docker rmi uat-reg28:2.2 >/dev/null 2>&1 || true
@@ -240,7 +240,7 @@ subcase_b() {
   # workspace/ctx. The CLI forwards the relative operand unchanged; the daemon
   # resolves it relative to the Session workspace and keeps the canonical
   # context inside that workspace.
-  out="$(cd "$home/ws" && DOCKER_HELPER_SESSION_TOKEN="$btoken" dh build --system ctx --dockerfile Dockerfile --image uat-reg28-rel:2.2 2>&1)"; rc=$?
+  out="$(cd "$home/ws" && DOCKER_HELPER_SESSION_TOKEN="$btoken" dh build ctx --dockerfile Dockerfile --image uat-reg28-rel:2.2 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && docker image inspect uat-reg28-rel:2.2 >/dev/null 2>&1; then
     reg_ok "B: relative build ctx (workspace CWD) built workspace/ctx and the image exists"
     docker rmi uat-reg28-rel:2.2 >/dev/null 2>&1 || true
@@ -248,7 +248,7 @@ subcase_b() {
     reg_fail "B: relative build ctx failed (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     docker rmi uat-reg28-rel:2.2 >/dev/null 2>&1 || true
   fi
-  dh session delete --system "$bid" >/dev/null 2>&1 || true
+  dh session delete "$bid" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -300,31 +300,31 @@ subcase_d() {
   # D reuses the 'target' Launcher created by subcase B in this same run
   # (creating it again would conflict); it only creates the second 'other'
   # Launcher for the ID-selector proofs.
-  out="$(dh launcher show --system --principal "$FIX_USER" target --json 2>&1)" || {
+  out="$(dh launcher show --principal "$FIX_USER" target --json 2>&1)" || {
     reg_fail "D: launcher show target failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
   sid_lid="$(printf '%s' "$out" | json_field id)"
-  out="$(dh launcher create --system --principal "$FIX_USER" other --no-credential --json 2>&1)" || {
+  out="$(dh launcher create --principal "$FIX_USER" other --no-credential --json 2>&1)" || {
     reg_fail "D: launcher create failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
     return
   }
   other_lid="$(printf '%s' "$out" | json_field id)"
 
   # 1. two-operand add mutates the NAMED launcher, not the default.
-  if out="$(dh launcher allowed-root add --system --principal "$FIX_USER" target "$tree/one" 2>&1)" \
+  if out="$(dh launcher allowed-root add --principal "$FIX_USER" target "$tree/one" 2>&1)" \
       && printf '%s' "$out" | grep -q 'added'; then
     reg_ok "D: add LAUNCHER PATH stores on the named Launcher"
   else
     reg_fail "D: add LAUNCHER PATH failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  out="$(dh launcher allowed-root list --system --principal "$FIX_USER" target 2>&1)"
+  out="$(dh launcher allowed-root list --principal "$FIX_USER" target 2>&1)"
   if printf '%s' "$out" | grep -q "^$tree/one"; then
     reg_ok "D: list target carries the stored root"
   else
     reg_fail "D: list target misses the root: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  out="$(dh launcher allowed-root list --system --principal "$FIX_USER" 2>&1)"
+  out="$(dh launcher allowed-root list --principal "$FIX_USER" 2>&1)"
   if printf '%s' "$out" | grep -q "^$tree/one"; then
     reg_fail "D: the named add leaked onto the default Launcher"
   else
@@ -332,26 +332,26 @@ subcase_d() {
   fi
 
   # 2. the explicit selector also accepts the dhl_... ID.
-  if out="$(dh launcher allowed-root add --system --principal "$FIX_USER" "$sid_lid" "$tree/two" 2>&1)" \
+  if out="$(dh launcher allowed-root add --principal "$FIX_USER" "$sid_lid" "$tree/two" 2>&1)" \
       && printf '%s' "$out" | grep -q 'added'; then
     reg_ok "D: add dhl_ID PATH stores through the Launcher ID"
   else
     reg_fail "D: add dhl_ID PATH failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  out="$(dh launcher allowed-root list --system --principal "$FIX_USER" target 2>&1)"
+  out="$(dh launcher allowed-root list --principal "$FIX_USER" target 2>&1)"
   printf '%s\n' "$out" | grep -q "^$tree/two" \
     && reg_ok "D: the ID-selected add landed on the named Launcher" \
     || reg_fail "D: the ID-selected add missed the named Launcher"
 
   # 3. three-operand set-access targets the named Launcher; --access stays
   #    the modifier flag.
-  if out="$(dh launcher allowed-root set-access --system --principal "$FIX_USER" "$sid_lid" "$tree/one" read_only 2>&1)" \
+  if out="$(dh launcher allowed-root set-access --principal "$FIX_USER" "$sid_lid" "$tree/one" read_only 2>&1)" \
       && printf '%s' "$out" | grep -q 'read_only'; then
     reg_ok "D: set-access LAUNCHER PATH ACCESS retargets the named Launcher"
   else
     reg_fail "D: set-access LAUNCHER PATH ACCESS failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  out="$(dh launcher allowed-root list --system --principal "$FIX_USER" --json target 2>&1)"
+  out="$(dh launcher allowed-root list --principal "$FIX_USER" --json target 2>&1)"
   if printf '%s' "$out" | allowed_root_json_access "$tree/one" 2>/dev/null | grep -q 'read_only'; then
     reg_ok "D: the stored access is read_only on the named Launcher"
   else
@@ -359,19 +359,19 @@ subcase_d() {
   fi
 
   # 4. one-operand forms keep the default-Launcher semantics.
-  if out="$(dh launcher allowed-root add --system --principal "$FIX_USER" "$tree" 2>&1)" \
+  if out="$(dh launcher allowed-root add --principal "$FIX_USER" "$tree" 2>&1)" \
       && printf '%s' "$out" | grep -q 'added'; then
     reg_ok "D: add PATH stores on the default Launcher"
   else
     reg_fail "D: add PATH failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  out="$(dh launcher allowed-root list --system --principal "$FIX_USER" 2>&1)"
+  out="$(dh launcher allowed-root list --principal "$FIX_USER" 2>&1)"
   if printf '%s' "$out" | grep -q "^$tree$"; then
     reg_ok "D: list (default) carries the one-operand root"
   else
     reg_fail "D: list (default) misses the one-operand root: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  if out="$(dh launcher allowed-root remove --system --principal "$FIX_USER" "$tree" 2>&1)" \
+  if out="$(dh launcher allowed-root remove --principal "$FIX_USER" "$tree" 2>&1)" \
       && printf '%s' "$out" | grep -q 'removed'; then
     reg_ok "D: remove PATH removes from the default Launcher"
   else
@@ -380,13 +380,13 @@ subcase_d() {
 
   # 5. two-operand remove targets the named launcher and leaves the default
   #    alone.
-  if out="$(dh launcher allowed-root remove --system --principal "$FIX_USER" target "$tree/one" 2>&1)" \
+  if out="$(dh launcher allowed-root remove --principal "$FIX_USER" target "$tree/one" 2>&1)" \
       && printf '%s' "$out" | grep -q 'removed'; then
     reg_ok "D: remove LAUNCHER PATH removes the named root"
   else
     reg_fail "D: remove LAUNCHER PATH failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
   fi
-  out="$(dh launcher allowed-root list --system --principal "$FIX_USER" target 2>&1)"
+  out="$(dh launcher allowed-root list --principal "$FIX_USER" target 2>&1)"
   if printf '%s' "$out" | grep -q "^$tree/two"; then
     reg_ok "D: the named Launcher keeps its second root after the targeted remove"
   else
@@ -396,7 +396,7 @@ subcase_d() {
   # Restore the default Launcher to inherit scope: D's one-operand add/remove
   # left it restricted with an empty set, which would starve every later
   # subcase (E issues its Session on the default Launcher).
-  if out="$(dh launcher allowed-root inherit --system --principal "$FIX_USER" 2>&1)" && [ "$out" ]; then
+  if out="$(dh launcher allowed-root inherit --principal "$FIX_USER" 2>&1)" && [ "$out" ]; then
     reg_ok "D: default Launcher restored to inherit scope"
   else
     reg_fail "D: default Launcher inherit restore failed: $(printf '%s' "$out" | head -2 | tr '\n' ' ' | redact)"
@@ -411,13 +411,13 @@ subcase_e() {
   local out rc home cred_json cred_token sid_json sid
 
   home="$(fixture)" || { reg_fail "E: fixture failed"; return; }
-  cred_json="$(dh principal credential create --system --name gate28 "$FIX_USER" --json 2>&1)" || {
+  cred_json="$(dh principal credential create --name gate28 "$FIX_USER" --json 2>&1)" || {
     reg_fail "E: principal credential create failed: $(printf '%s' "$cred_json" | head -2 | tr '\n' ' ' | redact)"
     return
   }
   cred_token="$(printf '%s' "$cred_json" | json_field token)"
   [ -n "$cred_token" ] || { reg_fail "E: principal credential create returned no token"; return; }
-  sid_json="$(dh session create --system --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
+  sid_json="$(dh session create --token-file /etc/docker-helper/admin.token --principal "$FIX_USER" "$home/ws" --json 2>&1)" || {
     reg_fail "E: session create failed: $(printf '%s' "$sid_json" | head -2 | tr '\n' ' ' | redact)"
     return
   }
@@ -516,8 +516,8 @@ subcase_f() {
   # Omitted endpoint keeps the normal default resolution: the same operator
   # command reaches the real system daemon and returns its canonical output.
   # (No --endpoint is involved here; the empty-spelling probes above are the
-  # only --system-free/operator isolation this canary needs.)
-  out="$(dh session list --system --json 2>&1)"; rc=$?
+  # only operator-grammar isolation this canary needs.)
+  out="$(dh session list --json 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"ok": true'; then
     reg_ok "F: omitted endpoint still resolves normally (real system daemon reached)"
   else

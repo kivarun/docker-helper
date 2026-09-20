@@ -801,7 +801,7 @@ type versionResult struct {
 var reloadCommand = &Command{
 	Name:    "reload",
 	Summary: "Reload configuration from disk",
-	Usage:   "docker-helper reload [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
+	Usage:   "docker-helper reload [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	Help: `Ask the running daemon to re-read config.json and apply changes without restarting.
 
 The following configurable fields are applied at runtime:
@@ -835,12 +835,12 @@ configuration and this command returns an error.`,
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				return validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
+
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -848,7 +848,7 @@ configuration and this command returns an error.`,
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				return runReload(stdout, stderr, operatorClientOptions{
-					System:    *system,
+
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				}, *jsonOut)

@@ -1265,7 +1265,7 @@ func TestResolveAgentSocketPathFallback(t *testing.T) {
 	}
 }
 
-// TestResolveAgentClientSystemFlag verifies --system selects the system daemon
+// TestResolveAgentClientSystemFlag verifies the default resolution selects the system daemon
 // socket even when DOCKER_HELPER_SOCKET_PATH points elsewhere. It binds a real
 // Unix listener at the system socket path (via the test seam) and drives a pull
 // request through the resolved client's transport to prove the actual dial
@@ -1296,15 +1296,17 @@ func TestResolveAgentClientSystemFlag(t *testing.T) {
 	t.Cleanup(func() { systemSocketPath = origSystemSocket })
 
 	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
-	t.Setenv("DOCKER_HELPER_SOCKET_PATH", filepath.Join(tempDir, "elsewhere.sock"))
+	// The agent environment may export DOCKER_HELPER_SOCKET_PATH; the
+	// default-resolution contract is exercised with the locator unset.
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	c, err := resolveAgentClient(agentClientOptions{System: true})
+	c, err := resolveAgentClient(agentClientOptions{})
 	if err != nil {
-		t.Fatalf("resolveAgentClient(--system): %v", err)
+		t.Fatalf("resolveAgentClient: %v", err)
 	}
 	if _, err := c.pull(pullRequest{Image: "alpine:3.24"}); err != nil {
-		t.Fatalf("pull through --system client: %v", err)
+		t.Fatalf("pull through the default system client: %v", err)
 	}
 	if atomic.LoadInt32(&received) != 1 {
 		t.Errorf("expected request to reach system socket, got %d", atomic.LoadInt32(&received))
@@ -1407,16 +1409,14 @@ func TestResolveAgentClientEndpoint(t *testing.T) {
 	}
 }
 
-// TestValidateAgentEndpointOptionsMutuallyExclusive verifies --system and
-// --endpoint cannot be combined, and that this CLI usage error is raised before
-// any runtime authentication lookup.
-func TestValidateAgentEndpointOptionsMutuallyExclusive(t *testing.T) {
+// TestValidateAgentEndpointOptionsEndpointGrammar verifies the shared
+// endpoint-selection grammar is enforced at validation time, before any
+// runtime authentication lookup.
+func TestValidateAgentEndpointOptionsEndpointGrammar(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
-	err := validateAgentEndpointOptions(agentClientOptions{System: true, Endpoint: "/x.sock"})
-	if err == nil {
-		t.Fatal("expected mutual-exclusion error")
-	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
+	if err := validateAgentEndpointOptions(agentClientOptions{Endpoint: "", EndpointSet: true}); err == nil {
+		t.Fatal("expected explicit-empty-endpoint error")
+	} else if !strings.Contains(err.Error(), "empty") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -1437,7 +1437,7 @@ func TestValidateAgentEndpointOptionsInvalid(t *testing.T) {
 // required even when an endpoint is supplied (no Principal token semantics).
 func TestResolveAgentClientMissingSessionToken(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
-	_, err := resolveAgentClient(agentClientOptions{System: true})
+	_, err := resolveAgentClient(agentClientOptions{})
 	if err == nil {
 		t.Fatal("expected missing-session-token error")
 	}
@@ -1446,8 +1446,8 @@ func TestResolveAgentClientMissingSessionToken(t *testing.T) {
 	}
 }
 
-// TestAgentFlagsPresentInHelp verifies the new --system/--endpoint flags are
-// discoverable on every agent-facing command.
+// TestAgentFlagsPresentInHelp verifies the --endpoint flag is discoverable on
+// every agent-facing command.
 func TestAgentFlagsPresentInHelp(t *testing.T) {
 	cases := []struct {
 		cmd  string
@@ -1466,7 +1466,7 @@ func TestAgentFlagsPresentInHelp(t *testing.T) {
 		if exitCode != 0 {
 			t.Errorf("%v: expected exit 0, got %d", tc.cmd, exitCode)
 		}
-		for _, flag := range []string{"--system", "--endpoint"} {
+		for _, flag := range []string{"--endpoint"} {
 			if !strings.Contains(out.String(), flag) {
 				t.Errorf("%v --help: missing flag %q", tc.cmd, flag)
 			}
@@ -1474,10 +1474,10 @@ func TestAgentFlagsPresentInHelp(t *testing.T) {
 	}
 }
 
-// TestAgentCLIMutuallyExclusiveExit2 verifies pull --system --endpoint is a CLI
-// usage error (exit 2) with a mutual-exclusion diagnostic, and that this holds
-// whether or not the session token is present.
-func TestAgentCLIMutuallyExclusiveExit2(t *testing.T) {
+// TestAgentCLIUnknownSystemFlagExit2 verifies the retired --system flag is a CLI usage
+// error (exit 2), and that this holds whether or not the session token is
+// present.
+func TestAgentCLIUnknownSystemFlagExit2(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		token string
@@ -1488,12 +1488,12 @@ func TestAgentCLIMutuallyExclusiveExit2(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DOCKER_HELPER_SESSION_TOKEN", tc.token)
 			var out, errB bytes.Buffer
-			exitCode := runCommandWithWriters([]string{"pull", "--system", "--endpoint", "/x", "alpine:3.24"}, &out, &errB)
+			exitCode := runCommandWithWriters([]string{"pull", "--system", "alpine:3.24"}, &out, &errB)
 			if exitCode != 2 {
 				t.Errorf("exit code = %d, want 2", exitCode)
 			}
-			if !strings.Contains(errB.String(), "mutually exclusive") {
-				t.Errorf("stderr = %q, want mutual-exclusion diagnostic", errB.String())
+			if !strings.Contains(errB.String(), "flag provided but not defined") {
+				t.Errorf("stderr = %q, want unknown-flag diagnostic", errB.String())
 			}
 		})
 	}
@@ -1568,7 +1568,7 @@ func TestAgentCLIMissingTokenRuntimeError(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "system", args: []string{"pull", "--system", "alpine:3.24"}},
+		{name: "default", args: []string{"pull", "alpine:3.24"}},
 		{name: "endpoint", args: []string{"pull", "--endpoint", "/run/docker-helper/docker-helper.sock", "alpine:3.24"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

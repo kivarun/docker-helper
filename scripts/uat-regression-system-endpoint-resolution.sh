@@ -255,7 +255,7 @@ fi
 # ---------------------------------------------------------------------------
 # E. the mode-selection grammar is gone for non-root clients too.
 # ---------------------------------------------------------------------------
-SYS_OUT="$(ep_cli docker-helper session list --system 2>&1)"
+SYS_OUT="$(ep_cli docker-helper session list 2>&1)"
 SYS_RC=$?
 if [ "$SYS_RC" -eq 2 ] && printf '%s\n' "$SYS_OUT" | grep -q "flag provided but not defined: -system"; then
   reg_ok "non-root --system is rejected as an undefined flag"

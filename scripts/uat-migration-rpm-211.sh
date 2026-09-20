@@ -224,18 +224,18 @@ else
   acc_fail_ctx "R2 global allowed-root seeding failed" "$M_DIAG/gadd.out" "$M_DIAG/glist.out" "$M_DIAG/glist.err"
 fi
 
-dh principal create --system --no-credential "$M_USER" >"$M_DIAG/pcreate.out" 2>&1 || true
-dh principal set --system "$M_USER" enabled true >"$M_DIAG/pset.out" 2>&1 || true
-dh principal allowed-root add --system "$M_USER" "$ALLOWED_ROOT" >"$M_DIAG/padd1.out" 2>&1 || true
-dh principal allowed-root add --system "$M_USER" "$M_POLICY" >"$M_DIAG/padd2.out" 2>&1 || true
-if dh principal allowed-root list --system "$M_USER" 2>"$M_DIAG/plist.err" | grep -qx "$M_POLICY" \
-    && dh principal allowed-root list --system "$M_USER" 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
+dh principal create --no-credential "$M_USER" >"$M_DIAG/pcreate.out" 2>&1 || true
+dh principal set "$M_USER" enabled true >"$M_DIAG/pset.out" 2>&1 || true
+dh principal allowed-root add "$M_USER" "$ALLOWED_ROOT" >"$M_DIAG/padd1.out" 2>&1 || true
+dh principal allowed-root add "$M_USER" "$M_POLICY" >"$M_DIAG/padd2.out" 2>&1 || true
+if dh principal allowed-root list "$M_USER" 2>"$M_DIAG/plist.err" | grep -qx "$M_POLICY" \
+    && dh principal allowed-root list "$M_USER" 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
   acc_ok "R2 two path-only Principal roots seeded"
 else
   acc_fail_ctx "R2 Principal allowed-root seeding failed" "$M_DIAG/pcreate.out" "$M_DIAG/padd2.out" "$M_DIAG/plist.err"
 fi
 
-dh credential create --system --name mig211 "$M_USER" >"$M_DIAG/pcred.out" 2>&1 || true
+dh credential create --name mig211 "$M_USER" >"$M_DIAG/pcred.out" 2>&1 || true
 M_P_CRED_OUT="$(cat "$M_DIAG/pcred.out")"
 M_P_TOKEN="$(printf '%s\n' "$M_P_CRED_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
 if [ -n "$M_P_TOKEN" ]; then
@@ -248,17 +248,17 @@ fi
 # The seeding runs through the v2.1.1 baseline CLI, whose launcher create and
 # launcher credential create are JSON-always and reject an explicit --json
 # flag, so the documents are parsed without requesting it.
-dh launcher create --system --principal "$M_USER" --name mlaunch \
+dh launcher create --principal "$M_USER" --name mlaunch \
   --allowed-root "$M_POLICY/sub" --no-credential >"$M_DIAG/lcreate.out" 2>&1 || true
 M_L_OUT="$(cat "$M_DIAG/lcreate.out")"
 M_L_ID="$(printf '%s\n' "$M_L_OUT" | json_field id)"
 if [ -n "$M_L_ID" ] \
-    && dh launcher allowed-root list --system --principal "$M_USER" "$M_L_ID" 2>"$M_DIAG/llist.err" | grep -qx "$M_POLICY/sub"; then
+    && dh launcher allowed-root list --principal "$M_USER" "$M_L_ID" 2>"$M_DIAG/llist.err" | grep -qx "$M_POLICY/sub"; then
   acc_ok "R2 restricted path-only Launcher root seeded ($M_L_ID)"
 else
   acc_fail_ctx "R2 restricted Launcher root seeding failed" "$M_DIAG/lcreate.out" "$M_DIAG/llist.err"
 fi
-dh launcher credential create --system --principal "$M_USER" "$M_L_ID" >"$M_DIAG/lcred.out" 2>&1 || true
+dh launcher credential create --principal "$M_USER" "$M_L_ID" >"$M_DIAG/lcred.out" 2>&1 || true
 M_LC_OUT="$(cat "$M_DIAG/lcred.out")"
 M_LC_TOKEN="$(printf '%s\n' "$M_LC_OUT" | json_field token)"
 if [ -n "$M_LC_TOKEN" ]; then
@@ -268,10 +268,10 @@ else
   acc_fail_ctx "R2 launcher credential issuance failed" "$M_DIAG/lcred.out"
 fi
 
-M_S1_JSON="$(dh session create --system --token-file /tmp/uat-mig211-lc.tok --workspace "$M_POLICY/sub/ws" --json 2>"$M_DIAG/s1.err" || true)"
+M_S1_JSON="$(dh session create --token-file /tmp/uat-mig211-lc.tok --workspace "$M_POLICY/sub/ws" --json 2>"$M_DIAG/s1.err" || true)"
 M_S1_ID="$(printf '%s' "$M_S1_JSON" | json_field id)"
 M_S1_TOKEN="$(printf '%s' "$M_S1_JSON" | json_field token)"
-M_S2_JSON="$(dh session create --system --token-file /tmp/uat-mig211-pc.tok --workspace "$M_HOME/ws" --json 2>"$M_DIAG/s2.err" || true)"
+M_S2_JSON="$(dh session create --token-file /tmp/uat-mig211-pc.tok --workspace "$M_HOME/ws" --json 2>"$M_DIAG/s2.err" || true)"
 M_S2_ID="$(printf '%s' "$M_S2_JSON" | json_field id)"
 if [ -n "$M_S1_ID" ] && [ -n "$M_S2_ID" ]; then
   acc_ok "R2 live Sessions seeded (launcher=$M_S1_ID principal=$M_S2_ID)"
@@ -347,7 +347,7 @@ else
   acc_fail "R4 config.json legacy path-only form not preserved"
 fi
 
-M_PLIST_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
+M_PLIST_JSON="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null || true)"
 M_RW_P_GLOBAL="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$ALLOWED_ROOT")"
 M_RW_P_POLICY="$(printf '%s' "$M_PLIST_JSON" | allowed_root_json_access "$M_POLICY")"
 if [ "$M_RW_P_GLOBAL" = read_write ] && [ "$M_RW_P_POLICY" = read_write ]; then
@@ -355,7 +355,7 @@ if [ "$M_RW_P_GLOBAL" = read_write ] && [ "$M_RW_P_POLICY" = read_write ]; then
 else
   acc_fail "R5 Principal root migration wrong (rich projection: $M_PLIST_JSON)"
 fi
-M_LLIST_JSON="$(dh launcher allowed-root list --system --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
+M_LLIST_JSON="$(dh launcher allowed-root list --principal "$M_USER" --json "$M_L_ID" 2>/dev/null || true)"
 M_RW_L_SUB="$(printf '%s' "$M_LLIST_JSON" | allowed_root_json_access "$M_POLICY/sub")"
 if [ "$M_RW_L_SUB" = read_write ]; then
   acc_ok "R5 Launcher root migrated as read_write (rich projection)"
@@ -363,8 +363,8 @@ else
   acc_fail "R5 Launcher root migration wrong (rich projection: $M_LLIST_JSON)"
 fi
 
-M_S1_SHOW="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
-M_S2_SHOW="$(dh session show --system "$M_S2_ID" 2>/dev/null || true)"
+M_S1_SHOW="$(dh session show "$M_S1_ID" 2>/dev/null || true)"
+M_S2_SHOW="$(dh session show "$M_S2_ID" 2>/dev/null || true)"
 if printf '%s\n' "$M_S1_SHOW" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$" \
     && printf '%s\n' "$M_S2_SHOW" | grep -Eq "^$(printf '%s' "$M_HOME/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
   acc_ok "R6 pre-existing Sessions carry the compatibility workspace/read_write snapshot"
@@ -380,14 +380,14 @@ if [ "$M_AUTH_HTTP" = 200 ] && grep -q '"authority":"principal"' /tmp/uat-mig211
 else
   acc_fail "R7 principal credential identity check failed (http=$M_AUTH_HTTP)"
 fi
-M_LAUNCHERS="$(dh launcher list --system --principal "$M_USER" --json 2>/dev/null || true)"
+M_LAUNCHERS="$(dh launcher list --principal "$M_USER" --json 2>/dev/null || true)"
 if printf '%s\n' "$M_LAUNCHERS" | grep -q "\"id\": \"$M_L_ID\"" \
     && printf '%s\n' "$M_LAUNCHERS" | grep -q '"name": "mlaunch"'; then
   acc_ok "R7 launcher identity preserved (same ID and name)"
 else
   acc_fail "R7 launcher identity changed after migration"
 fi
-M_SESSIONS="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
+M_SESSIONS="$(dh session list --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
 if printf '%s\n' "$M_SESSIONS" | grep -q "$M_S1_ID" \
     && printf '%s\n' "$M_SESSIONS" | grep -q "$M_S2_ID"; then
   acc_ok "R7 both pre-existing Session IDs preserved"
@@ -413,19 +413,19 @@ fi
 # projection of the migrated policy (config and Principal roots). The
 # post-restart check compares this projection, never formatted output.
 M_R9_CONFIG_PROJ_BEFORE="$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_projection)"
-M_R9_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null | allowed_root_json_projection)"
+M_R9_PRINCIPAL_PROJ_BEFORE="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null | allowed_root_json_projection)"
 
 systemctl restart docker-helper.service >/dev/null 2>&1 || true
 wait_service_active || acc_fail "R9 daemon not active after restart"
 if wait_health; then
-  M_S1_SHOW2="$(dh session show --system "$M_S1_ID" 2>/dev/null || true)"
+  M_S1_SHOW2="$(dh session show "$M_S1_ID" 2>/dev/null || true)"
   if printf '%s\n' "$M_S1_SHOW2" | grep -Eq "^$(printf '%s' "$M_POLICY/sub/ws" | sed 's/[.[\*^$]/\\&/g')[[:space:]]+read_write$"; then
     acc_ok "R9 snapshot stable across restart (idempotent migration)"
   else
     acc_fail "R9 snapshot changed after restart"
   fi
   M_R9_CONFIG_JSON="$(dh config allowed-root list --json 2>/dev/null || true)"
-  M_R9_PRINCIPAL_JSON="$(dh principal allowed-root list --system --json "$M_USER" 2>/dev/null || true)"
+  M_R9_PRINCIPAL_JSON="$(dh principal allowed-root list --json "$M_USER" 2>/dev/null || true)"
   M_R9_CONFIG_RW="$(printf '%s' "$M_R9_CONFIG_JSON" | allowed_root_json_access "$M_POLICY")"
   M_R9_PRINCIPAL_RW="$(printf '%s' "$M_R9_PRINCIPAL_JSON" | allowed_root_json_access "$M_POLICY")"
   if [ "$(printf '%s' "$M_R9_CONFIG_JSON" | allowed_root_json_projection)" = "$M_R9_CONFIG_PROJ_BEFORE" ] \

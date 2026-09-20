@@ -175,9 +175,9 @@ M_WS="$M_HOME/uat-mig22-ws"
 mkdir -p "$M_WS"
 chown -R "$M_USER:$M_USER" "$M_WS" 2>/dev/null || true
 
-dh principal create --system --no-credential "$M_USER" >/dev/null 2>&1 || true
-dh principal set --system "$M_USER" enabled true >/dev/null 2>&1 || true
-dh credential create --system --name mig22 "$M_USER" >/tmp/uat-mig22-cred.out 2>&1 || true
+dh principal create --no-credential "$M_USER" >/dev/null 2>&1 || true
+dh principal set "$M_USER" enabled true >/dev/null 2>&1 || true
+dh credential create --name mig22 "$M_USER" >/tmp/uat-mig22-cred.out 2>&1 || true
 M_CRED_TOKEN="$(sed -n 's/^  Token: //p' /tmp/uat-mig22-cred.out | tr -d '[:space:]')"
 if [ -n "$M_CRED_TOKEN" ]; then
   printf '%s\n' "$M_CRED_TOKEN" > /tmp/uat-mig22-cred.tok; chmod 600 /tmp/uat-mig22-cred.tok
@@ -186,7 +186,7 @@ else
   acc_fail "pre-upgrade principal credential issuance failed (see /tmp/uat-mig22-cred.out)"
 fi
 
-M_S_JSON="$(dh session create --system --token-file /tmp/uat-mig22-cred.tok "$M_WS" --json 2>/dev/null || true)"
+M_S_JSON="$(dh session create --token-file /tmp/uat-mig22-cred.tok "$M_WS" --json 2>/dev/null || true)"
 M_S_ID="$(printf '%s' "$M_S_JSON" | json_field id)"
 M_S_TOKEN="$(printf '%s' "$M_S_JSON" | json_field token)"
 if [ -n "$M_S_ID" ] && [ -n "$M_S_TOKEN" ]; then
@@ -258,7 +258,7 @@ rpm -ql docker-helper 2>/dev/null | grep -qF '/usr/lib/systemd/user/docker-helpe
 # R5: the mode-selection grammar is gone post-upgrade
 # ==============================================================================
 scenario "R5: mode-selection grammar removed"
-SYS_OUT="$(dh session list --system 2>&1)"
+SYS_OUT="$(dh session list 2>&1)"
 SYS_RC=$?
 if [ "$SYS_RC" -eq 2 ] && printf '%s\n' "$SYS_OUT" | grep -q "flag provided but not defined: -system"; then
   acc_ok "--system is no longer an operator flag"

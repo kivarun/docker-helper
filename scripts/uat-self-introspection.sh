@@ -159,12 +159,12 @@ cleanup() {
   local sid
   if [ -n "$SELF_SESSION_IDS" ]; then
     for sid in $SELF_SESSION_IDS; do
-      dh session delete --system "$sid" >/dev/null 2>&1 || true
+      dh session delete "$sid" >/dev/null 2>&1 || true
     done
   fi
-  dh principal delete --system "$SELF_PRINC" >/dev/null 2>&1 || true
+  dh principal delete "$SELF_PRINC" >/dev/null 2>&1 || true
   dh config allowed-root remove "$FIXTURE_ROOT" >/dev/null 2>&1 || true
-  dh principal delete --system "$PRINCIPAL" >/dev/null 2>&1 || true
+  dh principal delete "$PRINCIPAL" >/dev/null 2>&1 || true
   rm -rf "$FIXTURE_ROOT"
   rm -f /tmp/uat-self-principal.token /tmp/uat-self-launcher.token \
     /tmp/uat-self-session.token /tmp/uat-self-s5-resource.log \
@@ -176,9 +176,9 @@ trap cleanup EXIT
 # The self matrix mutates principal/launcher policy, so it runs on a
 # dedicated fixture Principal that scenario cleanup deletes wholesale.
 
-dh principal delete --system "$PRINCIPAL" >/dev/null 2>&1 || true
-if dh principal create --system --no-credential "$PRINCIPAL" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1; then
+dh principal delete "$PRINCIPAL" >/dev/null 2>&1 || true
+if dh principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 \
+    && dh principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1; then
   ok "fixture principal $PRINCIPAL provisioned with allowed root $ALLOWED_ROOT"
 else
   blocked "fixture principal provisioning failed (cannot run the self matrix)"
@@ -194,7 +194,7 @@ scenario "S1: principal self identity and stored/effective roots"
 PUID="$(id -u "$PRINCIPAL")"; PGID="$(id -g "$PRINCIPAL")"
 P_HOME="$(getent passwd "$PRINCIPAL" | cut -d: -f6)"
 
-S1_CRED_OUT="$(dh credential create --system --name self-uat "$PRINCIPAL" 2>/dev/null || true)"
+S1_CRED_OUT="$(dh credential create --name self-uat "$PRINCIPAL" 2>/dev/null || true)"
 S1_CRED_TOKEN="$(printf '%s\n' "$S1_CRED_OUT" | cli_line_field Token)"
 if [ -n "$S1_CRED_TOKEN" ]; then
   printf '%s\n' "$S1_CRED_TOKEN" > /tmp/uat-self-principal.token
@@ -204,7 +204,7 @@ else
   blocked "principal credential creation failed (principal self unprovable)"
 fi
 
-if S1_SELF="$(dh self --system --token-file /tmp/uat-self-principal.token --json 2>&1)"; then
+if S1_SELF="$(dh self --token-file /tmp/uat-self-principal.token --json 2>&1)"; then
   if printf '%s\n' "$S1_SELF" | grep -q '"type": "principal"' \
       && printf '%s\n' "$S1_SELF" | grep -q "\"username\": \"$PRINCIPAL\"" \
       && printf '%s\n' "$S1_SELF" | grep -q "\"uid\": $PUID" \
@@ -238,8 +238,8 @@ scenario "S2: principal self reflects one policy generation"
 RO_DIR="$FIXTURE_ROOT/ro-region"
 mkdir -p "$RO_DIR"
 chown "$PRINCIPAL:$PRINCIPAL" "$RO_DIR"
-if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$RO_DIR" >/dev/null 2>&1; then
-  if S2_SELF="$(dh self --system --token-file /tmp/uat-self-principal.token --json 2>&1)"; then
+if dh principal allowed-root add --access read_only "$PRINCIPAL" "$RO_DIR" >/dev/null 2>&1; then
+  if S2_SELF="$(dh self --token-file /tmp/uat-self-principal.token --json 2>&1)"; then
     if printf '%s' "$S2_SELF" | EXPECTED_RO="$RO_DIR" python3 -c '
 import json, os, sys
 env = json.load(sys.stdin)
@@ -261,8 +261,8 @@ print("S2-JSON-OK")
 else
   fail "S2 principal allowed-root add (read-only) failed"
 fi
-if dh principal allowed-root remove --system "$PRINCIPAL" "$RO_DIR" >/dev/null 2>&1; then
-  if S2_SELF="$(dh self --system --token-file /tmp/uat-self-principal.token --json 2>&1)"; then
+if dh principal allowed-root remove "$PRINCIPAL" "$RO_DIR" >/dev/null 2>&1; then
+  if S2_SELF="$(dh self --token-file /tmp/uat-self-principal.token --json 2>&1)"; then
     if printf '%s\n' "$S2_SELF" | grep -q "$RO_DIR"; then
       fail "S2 removed root still present in the self projection: $(printf '%s\n' "$S2_SELF" | redact | tr '\n' ' ' | head -c 400)"
     else
@@ -279,13 +279,13 @@ fi
 # scenario S3: launcher self (inherit and restricted scopes)
 # =============================================================================
 scenario "S3: launcher self (inherit and restricted scopes)"
-S3_L_OUT="$(dh launcher create --system --principal "$PRINCIPAL" restricted-l --issue-credential --json 2>/dev/null || true)"
+S3_L_OUT="$(dh launcher create --principal "$PRINCIPAL" restricted-l --issue-credential --json 2>/dev/null || true)"
 S3_L_TOKEN="$(printf '%s\n' "$S3_L_OUT" | json_field token)"
 S3_L_ID="$(printf '%s\n' "$S3_L_OUT" | json_field id)"
 if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
   printf '%s\n' "$S3_L_TOKEN" > /tmp/uat-self-launcher.token
   chmod 600 /tmp/uat-self-launcher.token
-  if S3_SELF="$(dh self --system --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
+  if S3_SELF="$(dh self --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
     if printf '%s\n' "$S3_SELF" | grep -q '"type": "launcher"' \
         && printf '%s\n' "$S3_SELF" | grep -q "\"id\": \"$S3_L_ID\"" \
         && printf '%s\n' "$S3_SELF" | grep -q '"name": "restricted-l"' \
@@ -308,8 +308,8 @@ if [ -n "$S3_L_TOKEN" ] && [ -n "$S3_L_ID" ]; then
   # Restricted scope: the restricted root narrows the effective composition.
   S3_RES_DIR="$FIXTURE_ROOT/res-only"
   mkdir -p "$S3_RES_DIR"; chown "$PRINCIPAL:$PRINCIPAL" "$S3_RES_DIR"
-  if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only restricted-l "$S3_RES_DIR" >/dev/null 2>&1; then
-    if S3_SELF="$(dh self --system --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
+  if dh launcher allowed-root add --principal "$PRINCIPAL" --access read_only restricted-l "$S3_RES_DIR" >/dev/null 2>&1; then
+    if S3_SELF="$(dh self --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
       if printf '%s\n' "$S3_SELF" | grep -q '"scope": "restricted"' \
           && printf '%s' "$S3_SELF" | EXPECTED_RO="$S3_RES_DIR" python3 -c '
 import json, os, sys
@@ -350,8 +350,8 @@ fi
 # =============================================================================
 scenario "S4: launcher self reflects scope replacement"
 if [ -n "${S3_L_TOKEN:-}" ]; then
-  if dh launcher allowed-root inherit --system --principal "$PRINCIPAL" restricted-l >/dev/null 2>&1; then
-    if S4_SELF="$(dh self --system --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
+  if dh launcher allowed-root inherit --principal "$PRINCIPAL" restricted-l >/dev/null 2>&1; then
+    if S4_SELF="$(dh self --token-file /tmp/uat-self-launcher.token --json 2>&1)"; then
       if printf '%s\n' "$S4_SELF" | grep -q '"scope": "inherit"' \
           && printf '%s\n' "$S4_SELF" | tr '\n' ' ' | grep -Eq "\"allowed_roots\": \[[[:space:]]*\]"; then
         ok "S4 scope replacement back to inherit is reflected in the self projection"
@@ -373,15 +373,15 @@ fi
 # =============================================================================
 scenario "S5: session self equals the session show body"
 S5_WS="$FIXTURE_ROOT/ws"
-S5_CREATE="$(dh session create --system --token-file /tmp/uat-self-principal.token "$S5_WS" --json 2>/dev/null || true)"
+S5_CREATE="$(dh session create --token-file /tmp/uat-self-principal.token "$S5_WS" --json 2>/dev/null || true)"
 S5_ID="$(printf '%s\n' "$S5_CREATE" | json_field id)"
 S5_TOKEN="$(printf '%s\n' "$S5_CREATE" | json_field token)"
 if [ -n "$S5_ID" ] && [ -n "$S5_TOKEN" ]; then
   SELF_SESSION_IDS="$S5_ID"
   printf '%s\n' "$S5_TOKEN" > /tmp/uat-self-session.token
   chmod 600 /tmp/uat-self-session.token
-  if S5_SELF="$(dh self --system --token-file /tmp/uat-self-session.token --json 2>&1)" \
-      && S5_SHOW="$(dh session show --system "$S5_ID" --json 2>&1)"; then
+  if S5_SELF="$(dh self --token-file /tmp/uat-self-session.token --json 2>&1)" \
+      && S5_SHOW="$(dh session show "$S5_ID" --json 2>&1)"; then
     if printf '%s\n' "$S5_SELF" | grep -q '"type": "session"' \
         && printf '%s\n' "$S5_SELF" | grep -q "\"id\": \"$S5_ID\"" \
         && printf '%s\n' "$S5_SELF" | grep -q "\"workspace\": \"$S5_WS\""; then
@@ -452,18 +452,18 @@ fi
 scenario "S7: negative authentication matrix"
 
 # Revoked principal credential: issue a second credential and revoke it.
-S7_REV_OUT="$(dh credential create --system --name self-revoked "$PRINCIPAL" 2>/dev/null || true)"
+S7_REV_OUT="$(dh credential create --name self-revoked "$PRINCIPAL" 2>/dev/null || true)"
 S7_REV_TOKEN="$(printf '%s\n' "$S7_REV_OUT" | cli_line_field Token)"
 S7_REV_ID="$(printf '%s\n' "$S7_REV_OUT" | cli_line_field ID)"
 if [ -n "$S7_REV_TOKEN" ] && [ -n "$S7_REV_ID" ]; then
-  dh credential revoke --system "$S7_REV_ID" >/dev/null 2>&1 || true
+  dh credential revoke "$S7_REV_ID" >/dev/null 2>&1 || true
 fi
 
 # Disabled launcher (the S3 fixture launcher; the S4 pass re-enabled scope
 # only): disable it, probe, then re-enable so scenario Z cleanup stays clean.
 S7_LAUNCHER_DISABLING=0
 if [ -n "${S3_L_ID:-}" ]; then
-  if dh launcher set --system --principal "$PRINCIPAL" --enabled false restricted-l >/dev/null 2>&1; then
+  if dh launcher set --principal "$PRINCIPAL" --enabled false restricted-l >/dev/null 2>&1; then
     S7_LAUNCHER_DISABLING=1
   fi
 fi
@@ -515,12 +515,12 @@ S7_probe "malformed bearer token" "Bearer Basic c2VsZjppbnRyb3NwZWN0aW9u"
 # fails authentication closed). S7 is the last mutating scenario, so the
 # re-enable restores the state scenario Z expects.
 S7_PRIN_DISABLING=0
-if dh principal set --system "$PRINCIPAL" enabled false >/dev/null 2>&1; then
+if dh principal set "$PRINCIPAL" enabled false >/dev/null 2>&1; then
   S7_PRIN_DISABLING=1
 fi
 if [ "$S7_PRIN_DISABLING" = 1 ] && [ -n "${S1_CRED_TOKEN:-}" ]; then
   S7_probe "disabled principal" "$S1_CRED_TOKEN"
-  dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || fail "S7 principal re-enable failed"
+  dh principal set "$PRINCIPAL" enabled true >/dev/null 2>&1 || fail "S7 principal re-enable failed"
 else
   fail "S7 disabled-principal fixture could not be issued"
 fi
@@ -528,7 +528,7 @@ fi
 # Disabled launcher probe (S3 fixture launcher, disabled above).
 if [ "$S7_LAUNCHER_DISABLING" = 1 ] && [ -n "${S3_L_TOKEN:-}" ]; then
   S7_probe "disabled launcher" "$S3_L_TOKEN"
-  dh launcher set --system --principal "$PRINCIPAL" --enabled true restricted-l >/dev/null 2>&1 || fail "S7 launcher re-enable failed"
+  dh launcher set --principal "$PRINCIPAL" --enabled true restricted-l >/dev/null 2>&1 || fail "S7 launcher re-enable failed"
 else
   fail "S7 disabled-launcher probe skipped: fixture unavailable"
 fi
@@ -538,9 +538,9 @@ fi
 S7_TTL_BEFORE="$(dh config show session_ttl 2>/dev/null | head -1 | tr -d '[:space:]')"
 if [ -n "$S7_TTL_BEFORE" ] \
     && dh config set session_ttl 2s >/dev/null 2>&1 \
-    && dh reload --system >/dev/null 2>&1 \
+    && dh reload >/dev/null 2>&1 \
     && si_wait_health; then
-  S7_EXP_CREATE="$(dh session create --system --token-file /tmp/uat-self-principal.token "$S5_WS" --json 2>/dev/null || true)"
+  S7_EXP_CREATE="$(dh session create --token-file /tmp/uat-self-principal.token "$S5_WS" --json 2>/dev/null || true)"
   S7_EXP_ID="$(printf '%s\n' "$S7_EXP_CREATE" | json_field id)"
   S7_EXP_TOKEN="$(printf '%s\n' "$S7_EXP_CREATE" | json_field token)"
   if [ -n "$S7_EXP_ID" ] && [ -n "$S7_EXP_TOKEN" ]; then
@@ -551,7 +551,7 @@ if [ -n "$S7_TTL_BEFORE" ] \
     fail "S7 expired-session fixture could not be created"
   fi
   dh config set session_ttl "$S7_TTL_BEFORE" >/dev/null 2>&1 || fail "S7 session_ttl restore failed"
-  dh reload --system >/dev/null 2>&1 && si_wait_health || fail "S7 reload after session_ttl restore failed"
+  dh reload >/dev/null 2>&1 && si_wait_health || fail "S7 reload after session_ttl restore failed"
 else
   blocked "S7 session_ttl rotation unavailable (expired-session probe skipped)"
 fi
@@ -595,10 +595,10 @@ fi
 scenario "Z: no residue after the self-introspection scenarios"
 if [ -n "$SELF_SESSION_IDS" ]; then
   for sid in $SELF_SESSION_IDS; do
-    if ! dh session delete --system "$sid" >/dev/null 2>&1; then
+    if ! dh session delete "$sid" >/dev/null 2>&1; then
       # An expired session may already have been reaped by the daemon; the
       # delete only failed when the Session is still provably present.
-      if dh session show --system "$sid" >/dev/null 2>&1; then
+      if dh session show "$sid" >/dev/null 2>&1; then
         fail "Z session $sid delete failed"
       fi
     fi

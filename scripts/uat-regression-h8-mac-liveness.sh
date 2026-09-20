@@ -263,7 +263,7 @@ DISABLE_OUT="/tmp/uat-h8-disable.$$"
 create_start="$(date +%s)"
 HOLD_DEADLINE_BREACHED=0
 (
-  dh session create --system --token-file "$CREDFILE" "$WS_A" >"$CREATE_OUT" 2>&1
+  dh session create --token-file "$CREDFILE" "$WS_A" >"$CREATE_OUT" 2>&1
 ) &
 CREATE_PID=$!
 # The create parks inside the shimmed MAC command.
@@ -299,7 +299,7 @@ QUEUE_OUT_PREFIX="/tmp/uat-h8-q.$$"
 queue_pids=""
 for i in $(seq 1 "$QUEUE_COUNT"); do
   (
-    dh session create --system --token-file "$CREDFILE" "$WS_A" >"${QUEUE_OUT_PREFIX}-$i" 2>&1
+    dh session create --token-file "$CREDFILE" "$WS_A" >"${QUEUE_OUT_PREFIX}-$i" 2>&1
   ) &
   queue_pids="$queue_pids $!"
 done
@@ -342,7 +342,7 @@ fi
 # the parked MAC command.
 disable_start="$(date +%s)"
 (
-  dh principal set --system "$USER_A" enabled false >"$DISABLE_OUT" 2>&1
+  dh principal set "$USER_A" enabled false >"$DISABLE_OUT" 2>&1
 ) &
 DISABLE_PID=$!
 
@@ -425,14 +425,14 @@ fi
 
 # No Session was committed by the parked create nor by any refused
 # concurrent create (all of them request the same workspace).
-if dh session list --system --json 2>/dev/null | grep -qF "$WS_A"; then
+if dh session list --json 2>/dev/null | grep -qF "$WS_A"; then
   reg_fail "the parked or a refused concurrent Session create committed a Session"
 else
   reg_ok "the parked create and every refused concurrent create committed no Session"
 fi
 
 # The disable is durable (list JSON: {"ok":...,"principals":[...]}).
-if dh principal list --system --json 2>/dev/null | python3 -c "
+if dh principal list --json 2>/dev/null | python3 -c "
 import json, sys
 doc = json.load(sys.stdin)
 for p in doc.get('principals', []):
@@ -467,7 +467,7 @@ service_healthy "after restoring the backend command"
 # A subsequent normal MAC transition works after the hostile condition is
 # removed (the kept one-shot credential token file is reused; a disable/
 # enable cycle does not revoke credentials).
-dh principal set --system "$USER_A" enabled true >/dev/null 2>&1 || true
+dh principal set "$USER_A" enabled true >/dev/null 2>&1 || true
 if reg_session "$CREDFILE" "$WS_A"; then
   reg_ok "a subsequent normal MAC transition (session create) succeeds after the hostile condition is removed"
   RECOVERY_SESSION_ID="$REG_SESSION_ID"
@@ -485,7 +485,7 @@ WS_STOP="$home_a/ws-stop-$$"
 mkdir -p "$WS_STOP"
 arm_shim
 (
-  dh session create --system --token-file "$CREDFILE" "$WS_STOP" >/dev/null 2>&1
+  dh session create --token-file "$CREDFILE" "$WS_STOP" >/dev/null 2>&1
 ) &
 CREATE_PID2=$!
 for _ in $(seq 1 50); do
@@ -540,9 +540,9 @@ service_healthy "after the shutdown proof and restart"
 
 # --- cleanup ---------------------------------------------------------------------
 if [ -n "${RECOVERY_SESSION_ID:-}" ]; then
-  dh session delete --system "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
+  dh session delete "$RECOVERY_SESSION_ID" >/dev/null 2>&1 || true
 fi
-dh principal delete --system "$USER_A" >/dev/null 2>&1 || true
+dh principal delete "$USER_A" >/dev/null 2>&1 || true
 rm -rf "$BIGTREE" "$WS_A" "$WS_STOP" "$CREATE_OUT" "$DISABLE_OUT" "$CREDFILE" "$QUEUE_OUT_PREFIX"-* 2>/dev/null || true
 
 reg_result

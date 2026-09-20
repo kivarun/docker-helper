@@ -136,9 +136,9 @@ ok_mig "v2.2.0 baseline service active and healthy"
 # ---------------------------------------------------------------------------
 # M2. real pre-upgrade state through the 2.2 CLI.
 # ---------------------------------------------------------------------------
-docker-helper principal create --system --no-credential mig22u >/dev/null 2>&1 \
+docker-helper principal create --no-credential mig22u >/dev/null 2>&1 \
   || fail_mig "principal create failed on the baseline"
-MIG_CRED_OUT="$(docker-helper credential create --system --name mig22 mig22u 2>/dev/null)" \
+MIG_CRED_OUT="$(docker-helper credential create --name mig22 mig22u 2>/dev/null)" \
   || fail_mig "credential create failed on the baseline"
 MIG_CRED_ID="$(printf '%s\n' "$MIG_CRED_OUT" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
 MIG_CRED_TOKEN="$(printf '%s\n' "$MIG_CRED_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
@@ -149,7 +149,7 @@ chmod 600 "$MIG_CRED_FILE"
 
 MIG_WS="/home/mig22u-ws"
 mkdir -p "$MIG_WS"
-MIG_SESSION_JSON="$(docker-helper session create --system --token-file "$MIG_CRED_FILE" "$MIG_WS" --json 2>/dev/null)" \
+MIG_SESSION_JSON="$(docker-helper session create --token-file "$MIG_CRED_FILE" "$MIG_WS" --json 2>/dev/null)" \
   || fail_mig "session create failed on the baseline"
 MIG_SESSION_ID="$(printf '%s\n' "$MIG_SESSION_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
 MIG_SESSION_TOKEN="$(printf '%s\n' "$MIG_SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
@@ -212,7 +212,7 @@ ok_mig "the shipped user systemd unit was removed by the upgrade"
 # ---------------------------------------------------------------------------
 # M5. the mode-selection grammar is gone post-upgrade.
 # ---------------------------------------------------------------------------
-SYS_OUT="$(docker-helper session list --system 2>&1)"
+SYS_OUT="$(docker-helper session list 2>&1)"
 SYS_RC=$?
 [ "$SYS_RC" -eq 2 ] && printf '%s\n' "$SYS_OUT" | grep -q "flag provided but not defined: -system" \
   || fail_mig "--system must be an undefined flag after the upgrade (rc=$SYS_RC): $(printf '%s\n' "$SYS_OUT" | redact_tokens | head -3)"

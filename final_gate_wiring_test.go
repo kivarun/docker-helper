@@ -100,6 +100,6 @@ func TestFinalGateUATWiringIsComplete(t *testing.T) {
 	blackbox := readRepoFile(t, filepath.Join("scripts", "uat-blackbox.sh"))
 	requireAll(t, "scripts/uat-blackbox.sh", blackbox, []string{
 		"phase 7c: H6 admin-token rotation under confinement",
-		"docker-helper admin-token rotate --system",
+		"docker-helper admin-token rotate",
 	})
 }

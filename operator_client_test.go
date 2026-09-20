@@ -130,7 +130,6 @@ func TestResolveSystemEndpointNonRoot(t *testing.T) {
 	writeTestTokenFile(t, tokenPath, "test-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
-		System:    true,
 		TokenFile: tokenPath,
 	})
 	if err != nil {
@@ -153,45 +152,13 @@ func TestResolveSystemDefaultTokenPath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 
 	// Non-root: no token file provided, should use credential path.
-	_, err := resolveOperatorClient(operatorClientOptions{
-		System: true,
-	})
+	_, err := resolveOperatorClient(operatorClientOptions{})
 	if err == nil {
 		t.Fatal("expected error when credential file doesn't exist")
 	}
 	// The error should mention the credential path, not systemConfigDir.
 	if strings.Contains(err.Error(), systemConfigDir+"/admin.token") {
 		t.Error("non-root should not use system admin.token path")
-	}
-}
-
-func TestResolveSystemNoFallsBackToUser(t *testing.T) {
-	orig := EffectiveUID
-	defer func() { EffectiveUID = orig }()
-	EffectiveUID = func() int { return 1000 }
-
-	dir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
-
-	// Create a working user daemon socket — should NOT be used with --system.
-	userSocket := filepath.Join(dir, "docker-helper.sock")
-	userListener, err := net.Listen("unix", userSocket)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer userListener.Close()
-
-	// --system should try system socket, not user socket.
-	_, err = resolveOperatorClient(operatorClientOptions{
-		System: true,
-	})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	// The error should be about the system token file, not about connection.
-	if !strings.Contains(err.Error(), "token") {
-		t.Errorf("expected token error, got: %v", err)
 	}
 }
 
@@ -520,7 +487,7 @@ func TestAgentCommandsEndpointFlagsNoTokenFile(t *testing.T) {
 			t.Fatalf("%v: exit code %d", cmd, code)
 		}
 		out := stdout.String()
-		for _, flag := range []string{"--system", "--endpoint"} {
+		for _, flag := range []string{"--endpoint"} {
 			if !strings.Contains(out, flag) {
 				t.Errorf("%v --help should contain %q", cmd, flag)
 			}
@@ -540,7 +507,7 @@ func TestSessionCleanupNoOperatorFlags(t *testing.T) {
 		t.Fatalf("exit code %d", code)
 	}
 	out := stdout.String()
-	for _, flag := range []string{"--system", "--endpoint", "--token-file"} {
+	for _, flag := range []string{"--endpoint", "--token-file"} {
 		if strings.Contains(out, flag) {
 			t.Errorf("session cleanup --help should NOT contain %q", flag)
 		}
@@ -737,7 +704,7 @@ func TestResolveDefaultEndpointSystemFallbackWithoutRuntimeDir(t *testing.T) {
 
 // TestOperatorCommandDefaultSystemEndpointWithoutRuntimeDir proves the
 // documented default at the command level: a non-root operator command
-// without --system/--endpoint/XDG_RUNTIME_DIR resolves the system socket and
+// without --endpoint/XDG_RUNTIME_DIR resolves the system socket and
 // authenticates normally with the installed credential.
 func TestOperatorCommandDefaultSystemEndpointWithoutRuntimeDir(t *testing.T) {
 	origUID := EffectiveUID
@@ -802,7 +769,7 @@ func TestOperatorEndpointGrammarExitsTwo(t *testing.T) {
 		wantRC  int
 		wantErr string
 	}{
-		{name: "system and endpoint mutually exclusive", args: []string{"--system", "--endpoint", "/tmp/nonexistent.sock"}, wantRC: 2, wantErr: "--system and --endpoint are mutually exclusive"},
+		{name: "unknown --system flag", args: []string{"--system"}, wantRC: 2, wantErr: "flag provided but not defined"},
 		{name: "malformed endpoint", args: []string{"--endpoint", "bogus"}, wantRC: 2, wantErr: "unsupported endpoint scheme"},
 		{name: "http endpoint without token file", args: []string{"--endpoint", "http://127.0.0.1:1"}, wantRC: 2, wantErr: "--endpoint requires --token-file for http endpoints"},
 		{name: "explicitly empty endpoint", args: []string{"--endpoint", ""}, wantRC: 2, wantErr: "--endpoint value must not be empty"},
@@ -828,7 +795,7 @@ func TestOperatorEndpointGrammarExitsTwo(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("unix endpoint without --token-file: exit = %d, want 1 (runtime), stderr: %s", code, stderr.String())
 	}
-	for _, grammarErr := range []string{"mutually exclusive", "requires --token-file", "unsupported endpoint scheme"} {
+	for _, grammarErr := range []string{"unknown flag", "requires --token-file", "unsupported endpoint scheme"} {
 		if strings.Contains(stderr.String(), grammarErr) {
 			t.Errorf("valid syntax must not fail with the grammar error %q, got: %s", grammarErr, stderr.String())
 		}
@@ -837,8 +804,8 @@ func TestOperatorEndpointGrammarExitsTwo(t *testing.T) {
 
 // TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands proves no
 // command that registers the operator flag trio was left on the
-// late-validation path: every command carrying --system/--endpoint/
-// --token-file flags rejects the mutually exclusive combination with exit 2
+// late-validation path: every command carrying --endpoint/
+// --token-file flags rejects the malformed endpoint with exit 2
 // from Invocation.Validate (with the minimum required positionals supplied
 // so the command-specific arity check cannot mask the grammar result).
 func TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands(t *testing.T) {
@@ -860,7 +827,7 @@ func TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands(t *testing.T) {
 		}
 		fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 		c.NewInvocation(fs)
-		if fs.Lookup("system") != nil && fs.Lookup("endpoint") != nil && fs.Lookup("token-file") != nil {
+		if fs.Lookup("endpoint") != nil && fs.Lookup("token-file") != nil {
 			commands = append(commands, operatorCommand{path: path, cmd: c})
 		}
 	}
@@ -872,18 +839,18 @@ func TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands(t *testing.T) {
 	}
 
 	for _, oc := range commands {
-		args := append(append([]string{}, oc.path...), "--system", "--endpoint", "/tmp/nonexistent.sock")
+		args := append(append([]string{}, oc.path...), "--endpoint", "bogus")
 		for i := 0; i < oc.cmd.MinPosArgs; i++ {
 			args = append(args, "x")
 		}
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters(args, &stdout, &stderr)
 		if code != 2 {
-			t.Errorf("%v: exit = %d, want 2 for the mutually exclusive endpoint grammar, stderr: %s", oc.path, code, stderr.String())
+			t.Errorf("%v: exit = %d, want 2 for the endpoint grammar, stderr: %s", oc.path, code, stderr.String())
 			continue
 		}
-		if !strings.Contains(stderr.String(), "--system and --endpoint are mutually exclusive") {
-			t.Errorf("%v: stderr must name the mutual-exclusion grammar error, got: %s", oc.path, stderr.String())
+		if !strings.Contains(stderr.String(), "unsupported endpoint scheme") {
+			t.Errorf("%v: stderr must name the endpoint grammar error, got: %s", oc.path, stderr.String())
 		}
 
 		// The explicitly empty endpoint spelling is the same structural

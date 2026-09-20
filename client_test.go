@@ -394,20 +394,6 @@ func TestPrincipalListEmptyJSON(t *testing.T) {
 	}
 }
 
-func TestPrincipalListSystemFlagAccepted(t *testing.T) {
-	// --system should be accepted by the flag parser.
-	// It will fail at connection time because there's no daemon,
-	// but the flag itself should not be "unknown".
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"principal", "list", "--system"}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("expected non-zero exit (no daemon running)")
-	}
-	if strings.Contains(stderr.String(), "unknown flag") {
-		t.Fatalf("--system should not be unknown: %s", stderr.String())
-	}
-}
-
 func TestCreateSessionRequest(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")

@@ -30,21 +30,20 @@ var principalCredentialCommand = &Command{
 var principalCredentialCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new credential for a principal",
-	Usage:      "docker-helper principal credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] USER",
+	Usage:      "docker-helper principal credential create [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		name := fs.String("name", "default", "Credential name")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -62,7 +61,6 @@ var principalCredentialCreateCommand = &Command{
 				username := args[0]
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -109,19 +107,18 @@ var principalCredentialCreateCommand = &Command{
 var principalCredentialListCommand = &Command{
 	Name:       "list",
 	Summary:    "List principal credentials",
-	Usage:      "docker-helper principal credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] [PRINCIPAL]",
+	Usage:      "docker-helper principal credential list [--endpoint ENDPOINT] [--token-file PATH] [--json] [PRINCIPAL]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -138,7 +135,6 @@ var principalCredentialListCommand = &Command{
 				}
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -192,7 +188,7 @@ var principalCredentialListCommand = &Command{
 var principalCredentialRevokeCommand = &Command{
 	Name:       "revoke",
 	Summary:    "Revoke a principal credential",
-	Usage:      "docker-helper principal credential revoke [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] CREDENTIAL_ID",
+	Usage:      "docker-helper principal credential revoke [--endpoint ENDPOINT] [--token-file PATH] [--json] CREDENTIAL_ID",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Revoke a principal credential by its credential ID.
@@ -210,12 +206,11 @@ for reuse by a new credential.`,
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -229,7 +224,6 @@ for reuse by a new credential.`,
 				id := args[0]
 
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -265,7 +259,7 @@ for reuse by a new credential.`,
 var principalCredentialRotateCommand = &Command{
 	Name:       "rotate",
 	Summary:    "Rotate a principal credential",
-	Usage:      "docker-helper principal credential rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] [PRINCIPAL]",
+	Usage:      "docker-helper principal credential rotate [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] [PRINCIPAL]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	Help: `Rotate a Principal credential through the shared DB-backed
@@ -290,14 +284,13 @@ authentication.`,
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		name := fs.String("name", "default", "Credential name")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -308,7 +301,6 @@ authentication.`,
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -410,7 +402,7 @@ principal credential commands. New scripts should use:
 		{
 			Name:          "create",
 			Summary:       principalCredentialCreateCommand.Summary,
-			Usage:         "docker-helper credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] USER",
+			Usage:         "docker-helper credential create [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] [--json] USER",
 			MinPosArgs:    principalCredentialCreateCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialCreateCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential create.",
@@ -420,7 +412,7 @@ principal credential commands. New scripts should use:
 		{
 			Name:          "list",
 			Summary:       principalCredentialListCommand.Summary,
-			Usage:         "docker-helper credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] [PRINCIPAL]",
+			Usage:         "docker-helper credential list [--endpoint ENDPOINT] [--token-file PATH] [--json] [PRINCIPAL]",
 			MinPosArgs:    principalCredentialListCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialListCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential list.",
@@ -430,7 +422,7 @@ principal credential commands. New scripts should use:
 		{
 			Name:          "revoke",
 			Summary:       principalCredentialRevokeCommand.Summary,
-			Usage:         "docker-helper credential revoke [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json] CREDENTIAL_ID",
+			Usage:         "docker-helper credential revoke [--endpoint ENDPOINT] [--token-file PATH] [--json] CREDENTIAL_ID",
 			MinPosArgs:    principalCredentialRevokeCommand.MinPosArgs,
 			MaxPosArgs:    principalCredentialRevokeCommand.MaxPosArgs,
 			Help:          "Compatibility alias for docker-helper principal credential revoke.",

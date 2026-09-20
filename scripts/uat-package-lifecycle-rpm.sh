@@ -191,16 +191,16 @@ F_CRED="/tmp/rpm-life.cred"
 # The seeding runs against the v2.0.0 baseline binary, whose CLI predates the
 # --issue-credential/--no-credential flags; the candidate requires one of them
 # on non-interactive stdin. Try the candidate form first, then the baseline.
-if dh principal create --system --no-credential "$F_USER" >/dev/null 2>&1 \
-  || dh principal create --system "$F_USER" >/dev/null 2>&1; then
-  dh principal set --system "$F_USER" enabled true >/dev/null 2>&1 || true
-  dh principal allowed-root add --system "$F_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
-  CRED_OUT="$(dh credential create --system --name rpmlife "$F_USER" 2>/dev/null)"
+if dh principal create --no-credential "$F_USER" >/dev/null 2>&1 \
+  || dh principal create "$F_USER" >/dev/null 2>&1; then
+  dh principal set "$F_USER" enabled true >/dev/null 2>&1 || true
+  dh principal allowed-root add "$F_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
+  CRED_OUT="$(dh credential create --name rpmlife "$F_USER" 2>/dev/null)"
   F_CRED_ID="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
   F_CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
   printf '%s\n' "$F_CRED_TOKEN" > "$F_CRED"; chmod 600 "$F_CRED"
   F_WS="$ALLOWED_ROOT/rpm-life-ws"; mkdir -p "$F_WS"; chown -R "$PRINCIPAL:$PRINCIPAL" "$F_WS"
-  F_SESS_JSON="$(dh session create --system --token-file "$F_CRED" --workspace "$F_WS" --json 2>/dev/null)"
+  F_SESS_JSON="$(dh session create --token-file "$F_CRED" --workspace "$F_WS" --json 2>/dev/null)"
   F_SESSION_ID="$(printf '%s' "$F_SESS_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
   [ -n "$F_CRED_ID" ] && [ -n "$F_SESSION_ID" ] \
     && acc_ok "seeded principal/credential/session state on v2.0.0" \
@@ -242,17 +242,17 @@ else
   acc_blocked "service was not active before upgrade; upgrade health not exercised"
 fi
 [ -f /etc/docker-helper/config.json ] && acc_ok "system config survived the upgrade" || acc_fail "system config lost during upgrade"
-if dh principal show --system --token-file /etc/docker-helper/admin.token "$F_USER" >/dev/null 2>&1; then
+if dh principal show --token-file /etc/docker-helper/admin.token "$F_USER" >/dev/null 2>&1; then
   acc_ok "principal persisted across upgrade"
 else
   acc_fail "principal did not persist across upgrade"
 fi
-if dh credential list --system --token-file /etc/docker-helper/admin.token "$F_USER" 2>/dev/null | grep -q "$F_CRED_ID"; then
+if dh credential list --token-file /etc/docker-helper/admin.token "$F_USER" 2>/dev/null | grep -q "$F_CRED_ID"; then
   acc_ok "credential persisted across upgrade"
 else
   acc_fail "credential did not persist across upgrade"
 fi
-if dh session list --system --token-file /etc/docker-helper/admin.token 2>/dev/null | grep -q "$F_SESSION_ID"; then
+if dh session list --token-file /etc/docker-helper/admin.token 2>/dev/null | grep -q "$F_SESSION_ID"; then
   acc_ok "session persisted across upgrade"
 else
   acc_fail "session did not persist across upgrade"

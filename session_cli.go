@@ -157,7 +157,7 @@ var sessionCommand = &Command{
 var sessionCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new session",
-	Usage:      "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json] WORKSPACE",
+	Usage:      "docker-helper session create [--endpoint ENDPOINT] [--token-file PATH] [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json] WORKSPACE",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
@@ -183,7 +183,7 @@ control-plane authority.`,
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal username (admin authentication; targets the Principal's default Launcher)")
 		launcher := &explicitStringFlag{}
@@ -196,7 +196,6 @@ control-plane authority.`,
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -213,7 +212,6 @@ control-plane authority.`,
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -280,12 +278,12 @@ control-plane authority.`,
 var sessionListCommand = &Command{
 	Name:    "list",
 	Summary: "List active sessions",
-	Usage:   "docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]",
+	Usage:   "docker-helper session list [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]",
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := &explicitStringFlag{}
 		fs.Var(principal, "principal", "Principal username filter (admin authentication; narrowing only; the daemon authorizes visibility)")
 		launcher := &explicitStringFlag{}
@@ -295,7 +293,6 @@ var sessionListCommand = &Command{
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -312,7 +309,6 @@ var sessionListCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -351,20 +347,19 @@ var sessionListCommand = &Command{
 var sessionDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a session",
-	Usage:      "docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]",
+	Usage:      "docker-helper session delete [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -375,7 +370,6 @@ var sessionDeleteCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})
@@ -422,20 +416,19 @@ var sessionDeleteCommand = &Command{
 var sessionShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show one session with its issued filesystem snapshot",
-	Usage:      "docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]",
+	Usage:      "docker-helper session show [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Validate: func() error {
 				if err := validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -446,7 +439,6 @@ var sessionShowCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				})

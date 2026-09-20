@@ -158,7 +158,7 @@ fi
 # ---------------------------------------------------------------------------
 # E. the mode-selection grammar is gone.
 # ---------------------------------------------------------------------------
-SYS_OUT="$(docker-helper session list --system 2>&1)"
+SYS_OUT="$(docker-helper session list 2>&1)"
 SYS_RC=$?
 if [ "$SYS_RC" -eq 2 ] && printf '%s\n' "$SYS_OUT" | grep -q "flag provided but not defined: -system"; then
   reg_ok "--system is no longer an operator flag"

@@ -180,7 +180,7 @@ workload_residue_clean() {
 
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" "$ws" --json 2>&1 || true)"
+  out="$(dh session create --token-file "$cred" "$ws" --json 2>&1 || true)"
   id="$(printf '%s' "$out" | json_field id)"
   [ -n "$id" ] || { echo "session create failed for $ws: $(printf '%s' "$out" | redact | tail -2)" >&2; return 1; }
   printf '%s' "$out" | json_field token > "/tmp/uat-wls-tok-$id"; chmod 600 "/tmp/uat-wls-tok-$id"
@@ -424,17 +424,17 @@ if [ -z "$TREE_CTX_BEFORE" ]; then
   exit 2
 fi
 
-dh principal create --system --no-credential "$PRINCIPAL" 2>/tmp/uat-wls-setup.err || {
+dh principal create --no-credential "$PRINCIPAL" 2>/tmp/uat-wls-setup.err || {
   echo "error: principal create failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
-dh principal set --system "$PRINCIPAL" enabled true 2>>/tmp/uat-wls-setup.err || true
-dh principal allowed-root add --system "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setup.err || {
+dh principal set "$PRINCIPAL" enabled true 2>>/tmp/uat-wls-setup.err || true
+dh principal allowed-root add "$PRINCIPAL" "$TREE" 2>>/tmp/uat-wls-setup.err || {
   echo "error: principal TREE root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
-dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$TREE/work/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || {
+dh principal allowed-root add --access read_only "$PRINCIPAL" "$TREE/work/pipeline-inputs" 2>>/tmp/uat-wls-setup.err || {
   echo "error: principal pipeline-inputs root add failed: $(redact </tmp/uat-wls-setup.err | tail -3)" >&2; exit 1; }
-MAIN_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" main --no-credential --json 2>>/tmp/uat-wls-setup.err || true)"
+MAIN_L_JSON="$(dh launcher create --principal "$PRINCIPAL" main --no-credential --json 2>>/tmp/uat-wls-setup.err || true)"
 MAIN_L_ID="$(printf '%s' "$MAIN_L_JSON" | json_field id)"
 [ -n "$MAIN_L_ID" ] || { echo "error: launcher create failed: $MAIN_L_JSON ($(redact </tmp/uat-wls-setup.err | tail -10))" >&2; exit 1; }
-MAIN_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
+MAIN_LC_OUT="$(dh launcher credential create --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
 MAIN_LC_TOKEN="$(printf '%s' "$MAIN_LC_OUT" | json_field token)"
 [ -n "$MAIN_LC_TOKEN" ] || { echo "error: launcher credential create failed" >&2; exit 1; }
 printf '%s\n' "$MAIN_LC_TOKEN" > /tmp/uat-wls-cred-main; chmod 600 /tmp/uat-wls-cred-main
@@ -537,22 +537,22 @@ printf 'seed\n' > "$SE_CACHE/seed.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_OPT"
 chmod -R u+rwX,go+rX "$SE_OPT"
 if dh config allowed-root add --access read_write "$SE_OPT" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$SE_OPT" >/dev/null 2>&1; then
+    && dh principal allowed-root add --access read_write "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --access read_write "$PRINCIPAL" "$SE_OPT" >/dev/null 2>&1; then
   acc_ok "SE setup: second effective root $SE_OPT (global RW + Principal RW)"
 else
   acc_fail "SE setup: second effective root setup failed"
 fi
-SE_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" se-multiroot --no-credential --json 2>/dev/null || true)"
+SE_L_JSON="$(dh launcher create --principal "$PRINCIPAL" se-multiroot --no-credential --json 2>/dev/null || true)"
 SE_L_ID="$(printf '%s' "$SE_L_JSON" | json_field id)"
 if [ -n "$SE_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$SE_L_ID" "$SE_OPT" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --principal "$PRINCIPAL" "$SE_L_ID" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --principal "$PRINCIPAL" "$SE_L_ID" "$SE_OPT" >/dev/null 2>&1; then
   acc_ok "SE setup: multiroot launcher carries both effective roots"
 else
   acc_fail "SE setup: multiroot launcher setup failed: $SE_L_JSON"
 fi
-SE_LC_OUT="$(dh launcher credential create --system --principal "$PRINCIPAL" --json "$SE_L_ID" 2>/dev/null || true)"
+SE_LC_OUT="$(dh launcher credential create --principal "$PRINCIPAL" --json "$SE_L_ID" 2>/dev/null || true)"
 SE_LC_TOKEN="$(printf '%s' "$SE_LC_OUT" | json_field token)"
 if [ -n "$SE_LC_TOKEN" ]; then
   printf '%s\n' "$SE_LC_TOKEN" > /tmp/uat-wls-cred-multiroot; chmod 600 /tmp/uat-wls-cred-multiroot
@@ -564,7 +564,7 @@ rm -rf "$ALLOWED_ROOT/se-runs"
 mkdir -p "$SE_WS"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT/se-runs"
 chmod -R u+rwX,go+rX "$ALLOWED_ROOT/se-runs"
-SE_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_HELPER=read_only" \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
@@ -612,14 +612,14 @@ else
 fi
 
 # SE introspection: session show and self carry the issued external roots.
-SE_SHOW="$(dh session show --system --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" --json 2>/dev/null || true)"
+SE_SHOW="$(dh session show --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" --json 2>/dev/null || true)"
 if printf '%s' "$SE_SHOW" | grep -q '"'"$SE_CACHE"'"' \
     && printf '%s' "$SE_SHOW" | grep -q '"'"$SE_HELPER"'"'; then
   acc_ok "SE session show carries the issued external roots (RW cache + RO helper)"
 else
   acc_fail "SE session show does not expose the issued external roots: $(printf '%s' "$SE_SHOW" | redact | head -2)"
 fi
-SE_SELF="$(dh self --system --token-file "/tmp/uat-wls-tok-$SE_ID" --json 2>/dev/null || true)"
+SE_SELF="$(dh self --token-file "/tmp/uat-wls-tok-$SE_ID" --json 2>/dev/null || true)"
 if printf '%s' "$SE_SELF" | grep -q '"'"$SE_CACHE"'"' \
     && printf '%s' "$SE_SELF" | grep -q 'read_write'; then
   acc_ok "SE self carries the issued external RW root"
@@ -721,13 +721,13 @@ se_expect_context_type "$SE_CACHE" docker_helper_workspace_t \
 
 # SE share: a second Session issuing the same external tree must prevent
 # early release of the coverage when the first Session is deleted.
-SE2_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE2_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE2_ID="$(printf '%s' "$SE2_OUT" | json_field id)"
 if [ -n "$SE2_ID" ]; then
   printf '%s\n' "$(printf '%s' "$SE2_OUT" | json_field token)" > "/tmp/uat-wls-tok-$SE2_ID"; chmod 600 "/tmp/uat-wls-tok-$SE2_ID"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_CACHE(/.*)?" \
     "SE shared external tree survives the first Session deletion (second Session keeps it)" \
     "SE external fcontext coverage was released while a second Session still issues the tree"
@@ -739,7 +739,7 @@ if [ -n "$SE2_ID" ]; then
   else
     acc_fail "SE second Session lost write access to the shared tree (ec=$SE2_W)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE2_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE2_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE external fcontext coverage relinquished after the last Session deletion" \
     "SE external fcontext coverage must be relinquished after the last Session released it"
@@ -752,7 +752,7 @@ else
 fi
 
 # SE overlap: issued ancestor/descendant trees survive either deletion order.
-SE3_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE3_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_OPT=read_write" \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
@@ -767,7 +767,7 @@ if [ -n "$SE3_ID" ]; then
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE the collapsed descendant carries no independent rule" \
     "SE nested issued roots did not collapse"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE3_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE3_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_OPT(/.*)?" \
     "SE ancestor boundary removed after the only session deletion" \
     "SE ancestor boundary must be removed after the only session released it"
@@ -778,11 +778,11 @@ fi
 
 # SE reverse overlap: issue the child first, then the parent; deleting the
 # child must keep the parent usable, deleting the parent cleans up.
-SE4_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE4_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE4_ID="$(printf '%s' "$SE4_OUT" | json_field id)"
-SE5_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE5_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_OPT=read_write" 2>&1 || true)"
 SE5_ID="$(printf '%s' "$SE5_OUT" | json_field id)"
@@ -797,12 +797,12 @@ if [ -n "$SE4_ID" ] && [ -n "$SE5_ID" ]; then
     "SE reverse-order issuance prepares both disjoint boundaries" \
     "SE reverse-order issuance boundaries missing"
   # Delete the child session first: the parent boundary stays.
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE4_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE4_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_OPT(/.*)?" \
     "SE child deletion first keeps the parent boundary" \
     "SE child deletion removed the parent boundary needed by the parent session"
   # Delete the parent session: everything is released and restored.
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE5_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE5_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_OPT(/.*)?" \
     "SE final deletion relinquishes every external boundary" \
     "SE final deletion leaves fcontext residue"
@@ -821,7 +821,7 @@ fi
 SE_FILE="$SE_OPT/worker.env"
 printf 'se-file-src\n' > "$SE_FILE"
 chown "$PRINCIPAL:$PRINCIPAL" "$SE_FILE" 2>/dev/null || true
-SE6_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE6_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_FILE=read_write" 2>&1 || true)"
 SE6_ID="$(printf '%s' "$SE6_OUT" | json_field id)"
@@ -837,12 +837,12 @@ if [ -n "$SE6_ID" ]; then
   fi
   # Unrelated boundary mutation (a second session prepares and releases an
   # unrelated tree) must not disturb the issued file root's usability.
-  SE6B_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+  SE6B_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
     "$SE_WS" --json \
     --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
   SE6B_ID="$(printf '%s' "$SE6B_OUT" | json_field id)"
   if [ -n "$SE6B_ID" ]; then
-    dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE6B_ID" >/dev/null 2>&1
+    dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE6B_ID" >/dev/null 2>&1
   fi
   SE6_W2="$(DOCKER_HELPER_SESSION_TOKEN="$(cat "/tmp/uat-wls-tok-$SE6_ID")" \
     dh run --mount "$SE_FILE:/etc/worker.env" alpine:3.24 -- \
@@ -852,7 +852,7 @@ if [ -n "$SE6_ID" ]; then
   else
     acc_fail "SE regular-file root lost write access after an unrelated boundary mutation (ec=$SE6_W2)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE6_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE6_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_FILE" \
     "SE regular-file boundary relinquished after deletion" \
     "SE regular-file boundary must be relinquished after deletion"
@@ -871,7 +871,7 @@ chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_SIB" 2>/dev/null || true
 semanage fcontext -a -t docker_helper_workspace_t "$SE_SIB(/.*)?" >/dev/null 2>&1
 restorecon -R "$SE_SIB" >/dev/null 2>&1
 
-SE8_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE8_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_SIB/a=read_write" \
   --filesystem-root "$SE_SIB/b=read_write" 2>&1 || true)"
@@ -896,7 +896,7 @@ if [ -n "$SE8_ID" ]; then
   se_only_rule_for "$SE_SIB" "$SE_SIB(/.*)?" \
     "SE sibling coverage uses the operator rule without claiming helper state" \
     "SE sibling coverage created or claimed extra state"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE8_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE8_ID" >/dev/null 2>&1
   se_expect_rule_present "$SE_SIB(/.*)?" \
     "SE operator-owned sibling coverage rule survives the session deletion" \
     "SE helper deleted the operator-owned sibling rule"
@@ -927,7 +927,7 @@ SE_MIX="$SE_OPT/mix"
 rm -rf "$SE_MIX"
 mkdir -p "$SE_MIX"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$SE_MIX" 2>/dev/null || true
-SE9A_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE9A_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_MIX=read_write" 2>&1 || true)"
 SE9A_ID="$(printf '%s' "$SE9A_OUT" | json_field id)"
@@ -954,7 +954,7 @@ if [ -n "$SE9A_ID" ]; then
     "SE9A helper recursive rule still inventoried after the operator kind change"
   se_expect_rule_present "$SE_MIX" \
     "SE9A operator exact-file rule still inventoried after the operator kind change"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE9A_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE9A_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_MIX(/.*)?" \
     "SE9A helper-owned recursive-directory rule removed after the session deletion" \
     "SE9A helper-owned recursive-directory rule survived the session deletion"
@@ -969,7 +969,7 @@ SE_MIXF="$SE_OPT/mixfile"
 rm -rf "$SE_MIXF"
 printf 'mixfile-content\n' > "$SE_MIXF"
 chown "$PRINCIPAL:$PRINCIPAL" "$SE_MIXF" 2>/dev/null || true
-SE9B_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE9B_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_MIXF=read_write" 2>&1 || true)"
 SE9B_ID="$(printf '%s' "$SE9B_OUT" | json_field id)"
@@ -993,7 +993,7 @@ if [ -n "$SE9B_ID" ]; then
     "SE9B helper exact-file rule still inventoried after the operator kind change"
   se_expect_rule_present "$SE_MIXF(/.*)?" \
     "SE9B operator recursive rule still inventoried after the operator kind change"
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE9B_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE9B_ID" >/dev/null 2>&1
   se_expect_rule_absent "$SE_MIXF" \
     "SE9B helper-owned exact-file rule removed after the session deletion" \
     "SE9B helper-owned exact-file rule survived the session deletion"
@@ -1014,7 +1014,7 @@ rm -f "/tmp/uat-wls-tok-$SE8_ID" "/tmp/uat-wls-tok-$SE9A_ID" "/tmp/uat-wls-tok-$
 
 # SE restart: a live session's external coverage survives restart and the
 # reconciled binding keeps the write path working.
-SE7_OUT="$(dh session create --system --token-file /tmp/uat-wls-cred-multiroot \
+SE7_OUT="$(dh session create --token-file /tmp/uat-wls-cred-multiroot \
   "$SE_WS" --json \
   --filesystem-root "$SE_CACHE=read_write" 2>&1 || true)"
 SE7_ID="$(printf '%s' "$SE7_OUT" | json_field id)"
@@ -1037,7 +1037,7 @@ if [ -n "$SE7_ID" ]; then
   else
     acc_fail "SE restart lost the external coverage or write access: $(redact </tmp/uat-wls-se7.log | tail -2)"
   fi
-  dh session delete --system --token-file /tmp/uat-wls-cred-multiroot "$SE7_ID" >/dev/null 2>&1
+  dh session delete --token-file /tmp/uat-wls-cred-multiroot "$SE7_ID" >/dev/null 2>&1
   rm -f "$SE_CACHE/restart.txt"
   se_expect_rule_absent "$SE_CACHE(/.*)?" \
     "SE no external fcontext residue after the final cleanup" \
