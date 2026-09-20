@@ -577,3 +577,28 @@ func admitForTest(s *operationSupervisor, op *operation) admissionDecision {
 	}
 	return s.admitReserved(op, res)
 }
+
+// stubSystemRuntimeDirsForTest points the system runtime/state directory
+// seams at isolated fixture directories. loadAndPrepareRuntimeConfig
+// creates the runtime directory; without the stub it writes the root-owned
+// system paths (/run/docker-helper), which an unprivileged test process
+// cannot create.
+func stubSystemRuntimeDirsForTest(t *testing.T) (runtimeDir, stateDir string) {
+	t.Helper()
+	dir := t.TempDir()
+	runtimeDir = filepath.Join(dir, "runtime")
+	stateDir = filepath.Join(dir, "state")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return stateDir }
+	t.Cleanup(func() { getStateDirFunc = origState })
+	return runtimeDir, stateDir
+}

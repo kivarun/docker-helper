@@ -40,7 +40,8 @@ func TestHTTPAddressCustomSystem(t *testing.T) {
 	writeConfig(t, configPath, data)
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
@@ -51,7 +52,10 @@ func TestHTTPAddressCustomSystem(t *testing.T) {
 	}
 }
 
-func TestHTTPAddressUserModeEmpty(t *testing.T) {
+// TestHTTPAddressDefaultEmpty proves the effective http_address falls back
+// to the documented loopback default when the config omits the field (the
+// value is only consumed for TCP listener creation).
+func TestHTTPAddressDefaultEmpty(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 1000 }
@@ -65,7 +69,8 @@ func TestHTTPAddressUserModeEmpty(t *testing.T) {
 	writeConfig(t, configPath, data)
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {

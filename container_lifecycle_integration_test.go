@@ -14,8 +14,15 @@ import (
 )
 
 // dockerAvailable checks if the Docker daemon is reachable from this environment.
+// dockerAvailable requires Docker AND the root identity: the system-mode
+// run path exercises inode-pinned helper-owned mounts and workload MAC
+// materialization, which need root capability. On an unprivileged runner
+// these tests skip; the exact-artifact UAT owns the full root-host proof.
 func dockerAvailable(t *testing.T) {
 	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("the system-mode Docker run path requires root (pinned mounts and workload MAC materialization)")
+	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker CLI not found in PATH")
 	}

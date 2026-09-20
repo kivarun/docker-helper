@@ -24,14 +24,22 @@ func TestResolveDefaultEndpointNonRoot(t *testing.T) {
 	EffectiveUID = func() int { return 1000 }
 
 	dir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	runtimeDir := filepath.Join(dir, "docker-helper")
-	os.MkdirAll(runtimeDir, 0755)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 
-	tokenPath := filepath.Join(dir, "admin.token")
+	tokenPath := filepath.Join(dir, "credential.token")
 	writeTestTokenFile(t, tokenPath, "test-token")
 
-	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
+	// The non-root default endpoint is the system socket. Stub the canonical
+	// system socket path to a real listening fake and prove the default
+	// endpoint actually connects with the explicit token file.
+	socketPath := filepath.Join(dir, "system-socket", "docker-helper.sock")
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	origSocketPath := systemSocketPath
+	systemSocketPath = socketPath
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
+
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

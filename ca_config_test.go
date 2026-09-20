@@ -210,7 +210,7 @@ func TestCAConfigInvalidCA(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			configPath := filepath.Join(dir, "config.json")
-			runtimeDir := filepath.Join(dir, "runtime")
+			runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
 
 			caPath := tt.caSetup(t)
 

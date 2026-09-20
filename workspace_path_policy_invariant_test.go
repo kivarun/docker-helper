@@ -93,7 +93,8 @@ func TestLoadAndPrepareRuntimeConfigCanonicalizesManualSymlink(t *testing.T) {
 	}
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "xdg_runtime"))
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", dir)
 	if err := os.MkdirAll(filepath.Join(dir, "xdg_runtime"), 0700); err != nil {
 		t.Fatal(err)
