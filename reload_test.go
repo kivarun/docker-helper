@@ -272,17 +272,6 @@ func TestConfigUnsetHelpReloadMention(t *testing.T) {
 	}
 }
 
-func TestSystemdExecReload(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/user/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "ExecReload=%h/.local/bin/docker-helper reload") {
-		t.Fatalf("systemd unit missing ExecReload, got:\n%s", content)
-	}
-}
-
 func TestIsDaemonNotRunning(t *testing.T) {
 	tests := []struct {
 		err    error

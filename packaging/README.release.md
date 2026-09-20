@@ -4,44 +4,40 @@ This archive contains a static Linux amd64 build of docker-helper and the
 accompanying installation artifacts.
 
 Native packages are also available per release:
-- `.deb` — Ubuntu (user and system mode)
-- `.rpm` — openSUSE Tumbleweed (user and system mode)
+- `.deb` — Ubuntu
+- `.rpm` — openSUSE Tumbleweed
 
 The RPM carries both AppArmor and SELinux runtime toolchain dependencies
 because RPM dependency resolution cannot select packages based on the host's
 active LSM. The package supports either active AppArmor or enforcing SELinux
 at runtime. The release tarball supports the same MAC-backend-neutral system
-mode: it ships both MAC backend artifacts and its system installer selects the
-single active backend. Broader RPM distribution support is planned
-post-Release-2.
+deployment: it ships both MAC backend artifacts and its system installer
+selects the single active backend. Broader RPM distribution support is
+planned post-Release-2.
 
 ## Contents
 
 - `docker-helper` — static binary (Linux amd64, musl)
-- `install.sh` — user-mode installer script
-- `uninstall.sh` — user-mode uninstaller script
-- `install-system.sh` — system-mode installer script (requires root)
-- `uninstall-system.sh` — system-mode uninstaller script (requires root)
-- `systemd/user/docker-helper.service` — systemd user service unit
+- `install-system.sh` — system installer script (requires root)
+- `uninstall-system.sh` — system uninstaller script (requires root)
 - `systemd/system/docker-helper.service` — systemd system service unit
-- `apparmor/docker-helper` — user-mode AppArmor profile template (manual install)
-- `apparmor/docker-helper-system` — system-mode AppArmor profile, installed
+- `apparmor/docker-helper-system` — system AppArmor profile, installed
   as `/etc/apparmor.d/docker-helper-system`
 - `apparmor/local/curl` — AppArmor local-profile snippet for curl
-- `selinux/docker_helper.pp` — system-mode SELinux policy module (docker_helper)
+- `selinux/docker_helper.pp` — system SELinux policy module (docker_helper)
 - `skills/docker-helper/SKILL.md` — agent-facing skill file
 - `man/docker-helper.1.gz` — command reference man page (compressed)
 - `man/docker-helper-config.5.gz` — configuration file format man page (compressed)
 
 ## Deployment
 
-Two deployment modes are supported:
+docker-helper supports one daemon deployment: the root-owned system service.
 
-### System mode (multi-user, Release 2)
+### System mode
 
 System mode installs docker-helper as a root-owned system service with MAC
 confinement (AppArmor or enforcing SELinux, whichever single backend is active
-on the host). This is the recommended deployment for shared hosts.
+on the host).
 
 ```bash
 sudo ./install-system.sh
@@ -76,8 +72,8 @@ active backend from kernel state and configures it:
   recursive workspace relabeling the daemon performs is delegated to that
   upstream implementation. The RPM expresses the same floor as a hard
   `libselinux1 >= 3.11` dependency.
-- No active backend: the installer fails before changing anything — system mode
-  must not install unconfined.
+- No active backend: the installer fails before changing anything — the system
+  service must not run unconfined.
 - Both AppArmor and enforcing SELinux active: the installer fails before
   changing anything — the dual-active configuration is unsupported.
 
@@ -105,29 +101,15 @@ state:
 sudo ./uninstall-system.sh --yes --purge
 ```
 
-### User mode (single-user, Release 1)
+### Non-root clients
 
-User mode installs docker-helper for the current user only. No root required.
+Non-root users and agents are first-class clients of the system service. They
+authenticate through installed Principal, Launcher, or Session credentials;
+no per-user daemon exists. Install the credential with
+`docker-helper credential install`, or pass an explicit
+`--token-file`/`--endpoint` pair.
 
-```bash
-./install.sh
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Non-interactive:
-
-```bash
-./install.sh --yes
-```
-
-Verify that the user service is running:
-
-```bash
-systemctl --user status docker-helper
-docker-helper version
-```
-
-Create a session for a project:
+Once authenticated, create a Session for a project:
 
 ```bash
 docker-helper session create /path/to/project
@@ -146,44 +128,7 @@ docker-helper pull alpine:3.24
 docker-helper run alpine:3.24 -- echo "docker-helper works"
 ```
 
-## Host installation
-
-### User mode
-
-Run the installer from this directory:
-
-```bash
-./install.sh
-```
-
-For a fully non-interactive installation:
-
-```bash
-./install.sh --yes
-```
-
-The installer copies the binary to `~/.local/bin/docker-helper`, installs
-the systemd user unit, and optionally installs the agent skill.
-
-### System mode
-
-Run the system installer from this directory (requires root):
-
-```bash
-sudo ./install-system.sh
-```
-
-Non-interactive with explicit allowed root:
-
-```bash
-sudo ./install-system.sh --yes --allowed-root /srv/workspaces
-```
-
 ### Skill installation
-
-`install.sh` offers to install the docker-helper agent skill to
-`~/.claude/skills/docker-helper/SKILL.md`. In interactive mode, confirm
-with `y`. With `./install.sh --yes`, the skill is installed automatically.
 
 The system installer does NOT install the agent skill. The skill is a
 user/agent-side artifact, not part of the system daemon installation.
@@ -194,22 +139,6 @@ To install the skill manually:
 mkdir -p ~/.claude/skills/docker-helper
 cp skills/docker-helper/SKILL.md ~/.claude/skills/docker-helper/SKILL.md
 ```
-
-### AppArmor profile (user mode, optional)
-
-The `apparmor/docker-helper` file is a template for an optional user-mode
-AppArmor profile. It is **not** installed by `install.sh`. To install it manually:
-
-1. Replace every occurrence of `@@BINARY_PATH@@` with the absolute path to
-   the docker-helper binary (e.g., `/home/user/.local/bin/docker-helper`).
-2. For workspace access, replace the commented `@@WORKSPACE_RULE@@` line with
-   the appropriate AppArmor rules for your `allowed_root`, or leave it
-   commented out if workspace access is not needed.
-3. Copy the prepared profile to `/etc/apparmor.d/` and load it with
-   `apparmor_parser`.
-
-This is a system-level operation that requires sudo and should be performed
-by an administrator.
 
 ### AppArmor-confined curl
 
@@ -235,8 +164,8 @@ the admin token, a Principal or Launcher credential, or a Session token.
 ## Agent-side artifacts
 
 The `skills/docker-helper/SKILL.md` file is an agent-side artifact.
-The `docker-helper` binary is installed to `~/.local/bin` by `install.sh`
-or `/usr/bin/docker-helper` by `install-system.sh`.
+The `docker-helper` binary is installed to `/usr/bin/docker-helper` by
+`install-system.sh`.
 
 To use the skill in an agent environment, copy or mount it into the agent's
 filesystem. The exact paths depend on your agent runtime:
