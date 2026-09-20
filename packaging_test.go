@@ -339,10 +339,10 @@ func TestSkillAgentContract(t *testing.T) {
 		}
 	}
 
-	// The workspace mount invariant is the canonical rule, never
-	// the literal "." spelling; the known-stale sentence must stay gone.
-	if !strings.Contains(content, "canonical resolved source equals the canonical Session workspace") {
-		t.Error("SKILL.md must state the canonical workspace mount rule")
+	// The canonicalization-owned containment rule must be stated; the
+	// literal "." spelling must never be presented as the invariant.
+	if !strings.Contains(content, "the canonical resolved source must stay inside the canonical") {
+		t.Error("SKILL.md must state the canonical containment mount rule")
 	}
 	if strings.Contains(content, "only the workspace root source `.` is accepted") {
 		t.Error("SKILL.md must not claim the literal `.` spelling as the workspace invariant")
@@ -431,20 +431,11 @@ func TestCanonicalDocContract(t *testing.T) {
 			},
 		},
 		{
-			name: "skill workspace filesystem roots",
-			file: ".claude/skills/docker-helper/SKILL.md",
-			mustContain: []string{
-				// The canonical issuance rule: workspace-only.
-				"an explicit root is accepted only when its canonical path equals the canonical workspace",
-			},
-			mustNotContain: []string{},
-		},
-		{
 			name: "readme workspace filesystem authority",
 			file: "README.md",
 			mustContain: []string{
-				// The canonical workspace-only authority statement.
-				"the Session filesystem authority remains workspace-only",
+				// The canonical snapshot authority statement.
+				"the Session filesystem authority remains the persisted immutable snapshot",
 			},
 			mustNotContain: []string{
 				// The stale workspace+issued-roots impression in the

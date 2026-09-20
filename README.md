@@ -11,7 +11,9 @@ Docker and enforces policy:
 
 - host paths accepted as build contexts are restricted to the session
   workspace, and bind-mount sources are restricted to the session's issued
-  filesystem snapshot (the workspace plus any issued additional roots);
+  filesystem snapshot: the Session filesystem authority remains the
+  persisted immutable snapshot (the workspace plus any issued additional
+  roots);
 - build, pull, and run require a session token; session management
   requires an admin token, Principal credential, or Launcher credential;
 - all supported Docker operations are mediated by the daemon;
@@ -25,13 +27,12 @@ Full architecture and detailed API documentation: [docs/architecture.md](docs/ar
 
 ## Table of contents
 
-- [Deployment modes](#deployment-modes)
+- [Deployment](#deployment)
 - [Authentication model](#authentication-model)
 - [Prerequisites](#prerequisites)
 - [Docker access](#docker-access)
 - [Installation](#installation)
-  - [Quick start: user mode](#quick-start-user-mode)
-  - [Quick start: system mode](#quick-start-system-mode)
+  - [Quick start](#quick-start)
   - [Package installation](#package-installation)
 - [Getting started](#getting-started)
 - [Session management](#session-management)
@@ -42,46 +43,45 @@ Full architecture and detailed API documentation: [docs/architecture.md](docs/ar
 - [Security](#security)
 - [Logging](#logging)
 - [Agent instructions](#agent-instructions)
-- [Mandatory access control (system mode)](#mandatory-access-control-system-mode)
+- [Mandatory access control](#mandatory-access-control)
   - [AppArmor](#apparmor)
   - [SELinux](#selinux)
 - [Workspace root policy](#workspace-root-policy)
-- [System mode: provisioning a principal](#system-mode-provisioning-a-principal)
+- [Provisioning a principal](#provisioning-a-principal)
 - [Delegated ownership: launchers](#delegated-ownership-launchers)
 - [Documentation](#documentation)
 - [Release artifacts](#release-artifacts)
 - [License](#license)
 - [More information](#more-information)
 
-## Deployment modes
+## Deployment
 
-docker-helper supports two deployment modes determined by the effective
-UID of the process:
+There is one daemon deployment: the root-owned system service.
 
-| | User mode | System mode |
-|---|---|---|
-| **Effective UID** | non-root | root |
-| **Config** | `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json` | `/etc/docker-helper/config.json` |
-| **State** | `${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper` | `/var/lib/docker-helper` |
-| **Runtime** | `$XDG_RUNTIME_DIR/docker-helper` | `/run/docker-helper` |
-| **Transport** | Unix socket (0600) | Unix socket (0666) + loopback HTTP |
-| **Default HTTP** | — | `127.0.0.1:52375` |
+| | System service |
+|---|---|
+| **Effective UID** | root |
+| **Config** | `/etc/docker-helper/config.json` |
+| **State** | `/var/lib/docker-helper` |
+| **Runtime** | `/run/docker-helper` |
+| **Transport** | Unix socket (0666) + loopback HTTP |
+| **Default HTTP** | `127.0.0.1:52375` |
 
-In user mode, the daemon runs as the current user and listens on a
-private Unix socket.
-
-In system mode, the daemon runs as root, serves multiple principals, and
-exposes both a system Unix socket and a loopback HTTP listener. The
-loopback HTTP address is configurable (`http_address`); changing it
-requires a daemon restart. The Unix socket is authoritative: if another
-process (for example an unprivileged local user) occupies the configured
-loopback port at startup, the service starts degraded — Unix-only, with one
+The daemon runs as root, serves multiple principals, and exposes both a
+system Unix socket and a loopback HTTP listener. The loopback HTTP
+address is configurable (`http_address`); changing it requires a daemon
+restart. The Unix socket is authoritative: if another process (for
+example an unprivileged local user) occupies the configured loopback
+port at startup, the service starts degraded — Unix-only, with one
 warning in the journal — and picks the TCP listener up again at the next
 normal restart once the port is free.
 
-System daemon mode is implemented. Release 2 adds system mode, native
-DEB/RPM packages, a systemd system service, and mandatory confinement by
-exactly one supported MAC backend: AppArmor or enforcing SELinux.
+Non-root users and agents are first-class clients: they authenticate
+through installed credentials (see
+[Provisioning a principal](#provisioning-a-principal)) and no per-user
+daemon exists. A non-root `docker-helper init` or `serve` is refused.
+The deployment requires exactly one supported MAC backend: AppArmor or
+enforcing SELinux.
 
 ## Authentication model
 
@@ -130,35 +130,6 @@ To build from source, you additionally need:
 
 ## Docker access
 
-Docker access requirements depend on deployment mode.
-
-### User mode
-
-The user running docker-helper must be able to access the Docker daemon.
-docker-helper runs as the current user and does not use sudo (except
-optionally for the AppArmor profile). Ensure the current user has Docker
-access before installing.
-
-For a standard rootful Docker installation, add the user to the `docker`
-group:
-
-```bash
-sudo usermod -aG docker "$USER"
-```
-
-Log out and back in for the new group membership to apply. Verify access
-before starting docker-helper:
-
-```bash
-docker info
-```
-
-Membership in the `docker` group is effectively root-level access to the
-host. For rootless Docker, use the already configured Docker environment
-instead of adding the user to the `docker` group.
-
-### System mode
-
 The system daemon runs as root and accesses rootful Docker directly.
 Rootful Docker is effectively root-equivalent host capability.
 
@@ -167,42 +138,11 @@ Principals do NOT need direct docker.sock access or membership in the
 
 ## Installation
 
-Install the package or extract the release tarball. Both DEB and RPM
-packages support user mode and system mode. The release tarball supports
-both modes via `install.sh` (user) and `install-system.sh` (system).
+Install the package or extract the release tarball.
 
-### Quick start: user mode
+### Quick start
 
-Single-user deployment. Normal docker-helper user-mode operation runs
-non-root, but initial host preparation for a rootful Docker installation
-may require root — notably adding your user to the `docker` group (see
-[Docker access](#docker-access)). After that preparation, no root is
-required for package installation and everyday docker-helper use.
-Uses the current user's home directory as the default allowed root.
-
-```bash
-docker-helper init
-systemctl --user enable --now docker-helper
-mkdir -p ~/myproject
-docker-helper session create ~/myproject
-```
-
-Export the `TOKEN` printed by `session create` (starts with `dht_...`):
-
-```bash
-export DOCKER_HELPER_SESSION_TOKEN='dht_...'
-docker-helper pull alpine:3.24
-docker-helper run alpine:3.24 -- echo hello-from-docker-helper
-```
-
-User mode does not require principals or credentials. Ownership is
-transparently mapped to the reserved daemon-owner principal and its
-auto-provisioned `default` launcher, so the current user creates sessions
-directly.
-
-### Quick start: system mode
-
-Multi-user deployment. Requires root for initial setup.
+Requires root for initial setup.
 
 ```bash
 sudo docker-helper init
@@ -258,11 +198,10 @@ sudo apt install ./docker-helper_*.deb
 sudo zypper install ./docker-helper-*.rpm
 ```
 
-Both package formats install the binary, system and user systemd units,
+Both package formats install the binary, the systemd system unit,
 the AppArmor system profile, Bash completion, and man pages. The RPM also
 contains the compiled SELinux policy module. Packages do NOT run `init`,
-generate configuration, or start the service. Thus one native package supports
-both user and system deployment; the selected service determines the mode.
+generate configuration, or start the service.
 
 The RPM is validated against openSUSE Tumbleweed. It carries both AppArmor
 and SELinux runtime toolchain dependencies because RPM dependency resolution
@@ -300,22 +239,18 @@ Download the release tarball, extract it, and run the installer:
 ```bash
 tar xzf docker-helper-*.tar.gz
 cd docker-helper-*
-./install.sh
+sudo ./install-system.sh
 ```
 
-The installer copies the binary to `~/.local/bin/docker-helper`,
-installs the systemd user unit, and optionally installs the agent
-skill. For non-interactive installation:
-
-```bash
-./install.sh --yes
-```
-
-For system mode from a tarball:
+For non-interactive installation:
 
 ```bash
 sudo ./install-system.sh --yes --allowed-root /srv/workspaces
 ```
+
+The installer copies the binary to `/usr/bin/docker-helper`, installs
+the systemd system unit, initializes the configuration, and enables and
+starts the service.
 
 `install-system.sh` requires the runtime tooling of the active MAC backend:
 the AppArmor parser on an AppArmor host, and `semodule`, `restorecon`, and
@@ -331,46 +266,24 @@ backend; a tarball system install on an enforcing SELinux host requires
 `bindfs`, and `install-system.sh` fails before mutating the system when it is
 absent. The DEB/AppArmor packaging path does not require `bindfs`.
 
-Unlike native packages, extracting or running the normal tarball installer does
-not provision system mode. `install-system.sh` is the explicit manual
-system-install path.
-
 ### Manual installation
 
-Build from source and place the binary in `~/.local/bin` (the `go` command
-uses the Go version and `go1.26.7` toolchain pinned in `go.mod`):
+Build from source (the `go` command uses the Go version and `go1.26.7`
+toolchain pinned in `go.mod`):
 
 ```bash
 go build -o docker-helper .
-mkdir -p ~/.local/bin
-cp docker-helper ~/.local/bin/docker-helper
 ```
 
-Ensure `~/.local/bin` is on your PATH (most distributions add it via
-`~/.profile` or `/etc/profile`).
-
-Install the systemd user unit:
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp packaging/systemd/user/docker-helper.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-```
+Place the binary at `/usr/bin/docker-helper` and run `docker-helper init`
+as root to create the configuration, then start the daemon with
+`docker-helper serve` or the packaged systemd unit.
 
 ### Uninstall
 
-Soft uninstall (preserves config and state):
-
-```bash
-./uninstall.sh
-```
-
-Hard uninstall (also removes `~/.config/docker-helper` and
-`~/.local/state/docker-helper`):
-
-```bash
-./uninstall.sh --purge
-```
+Run `sudo ./uninstall-system.sh` (from a tarball bundle) to stop the
+service and remove the packaged assets. With `--purge` it also removes
+`/etc/docker-helper`, `/var/lib/docker-helper`, and `/run/docker-helper`.
 
 ## Getting started
 
@@ -398,20 +311,11 @@ docker-helper init --allowed-root /path/to/workspaces
 In non-interactive environments (CI, scripts), `--allowed-root` is
 required.
 
-By default, the config file is at:
+By default, the config file is at `/etc/docker-helper/config.json` and
+the admin token at `/etc/docker-helper/admin.token`.
 
-```
-${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json
-```
-
-and the token at:
-
-```
-${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/admin.token
-```
-
-To relocate the config and token, set `DOCKER_HELPER_CONFIG` before
-running `init`, `serve`, and `config` commands:
+To relocate the config and token for testing, set `DOCKER_HELPER_CONFIG`
+before running `init`, `serve`, and `config` commands:
 
 ```bash
 export DOCKER_HELPER_CONFIG=/some/path/config.json
@@ -426,8 +330,7 @@ admin_token_path=/some/path/admin.token
 ```
 
 The same environment variable must be supplied to the daemon and CLI.
-`DOCKER_HELPER_CONFIG` does not relocate runtime or state data; those
-continue to follow `XDG_RUNTIME_DIR` and `XDG_STATE_HOME`.
+`DOCKER_HELPER_CONFIG` does not relocate runtime or state data.
 
 ### 2. Review and modify configuration
 
@@ -490,14 +393,14 @@ Configuration fields:
 | `allowed_roots` | array of rich entries | Canonical root directories for agent workspaces (required). Canonical entries are `{"path": "/srv/run-root", "access": "read_write"}` objects with `access` exactly `read_write` or `read_only`; a legacy plain string entry is accepted for compatibility and means `read_write`. This is the global authorization ceiling only; it does not own MAC state. See [Allowed-root access modes](#allowed-root-access-modes) |
 | `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
 | `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
-| `audit_enabled` | boolean | Override audit behavior (default: `true` in system mode; in user mode, `true` only when `log_level` is `debug`) |
+| `audit_enabled` | boolean | Override audit behavior (default: `true` when absent; an explicit value wins) |
 | `shutdown_timeout` | duration | Graceful shutdown budget for HTTP drain + operation termination (default: `30s`; maximum `30s` so the internal budget always fits inside systemd `TimeoutStopSec=45s`; the last part of the budget is reserved for force cleanup, which must finish by the deadline — the extra 15s outside the internal maximum covers process exit and systemd's SIGKILL fallback, not the internal force-cleanup phase). Release 1 configs with a value above `30s` still load but are bounded to `30s` at startup with a warning; `config show` reports the effective value |
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log and synchronous pull output (bounded buffer, default: `4194304` = 4 MiB) |
-| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`). In user mode any readable absolute path works. In system mode the confined daemon must also be permitted to read the path under the active MAC policy; use the helper-owned `/etc/docker-helper` config tree or a system CA-bundle location the shipped policy permits (see "Trusted CA injection"). |
+| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`). The confined daemon must be permitted to read the path under the active MAC policy; use the helper-owned `/etc/docker-helper` config tree or a system CA-bundle location the shipped policy permits (see "Trusted CA injection"). |
 | `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. |
-| `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, system mode only, restart required (default: `127.0.0.1:52375`) |
+| `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, restart required (default: `127.0.0.1:52375`) |
 
 `allowed_roots` and `session_ttl` are required and cannot be unset.
 Other fields may be unset to restore their defaults, except that
@@ -553,20 +456,7 @@ trust your internal services. The CA file must be a single PEM-encoded
 X.509 CA certificate. Injection only affects containers started via
 `POST /run`.
 
-#### User mode
-
-In user mode the daemon runs as the invoking user and is not confined by the
-system-mode MAC boundary, so `trusted_ca_path` accepts any readable absolute
-path to a CA file.
-
-```bash
-docker-helper config set trusted_ca_path /absolute/path/to/company-root-ca.pem
-docker-helper config set trusted_ca_injection auto
-```
-
-#### System mode
-
-In system mode the confined daemon must also be permitted to read the CA
+The confined daemon must be permitted to read the CA
 source under the active AppArmor or SELinux policy. "Readable by the invoking
 (unconfined) CLI" is not the same contract as "supported by the confined system
 daemon". The shipped policy reads CA material from the helper-owned
@@ -616,7 +506,7 @@ docker-helper config unset trusted_ca_path
 Each command triggers a daemon reload automatically when the daemon is
 running.
 
-In system mode the source file must also be readable under the active AppArmor
+The source file must be readable under the active AppArmor
 or SELinux policy; arbitrary host locations are not a portable confined-system
 contract — use the helper-owned `/etc/docker-helper` config tree or a system
 CA-bundle location the shipped policy permits.
@@ -627,13 +517,13 @@ daemon will be allowed to read the path under the active MAC policy, so the
 config may be persisted successfully and a later daemon start can fail closed
 because of MAC access.
 
-When the system daemon is stopped and a successful change enables or modifies
+When the daemon is stopped and a successful change enables or modifies
 an active trusted CA configuration (`trusted_ca_injection=auto` with a source
 path), the CLI persists the validated config and prints a warning to stderr:
 the CA file was validated, but confined MAC readability cannot be verified
 until daemon startup, and startup fails closed if the source is not readable
 under the active MAC policy. This is a warning, not an error; the successful
-stdout contract (`updated`/`unchanged`) is unchanged. When the system daemon
+stdout contract (`updated`/`unchanged`) is unchanged. When the daemon
 is running, reload under confinement is authoritative: a reload that cannot
 read the source fails and rolls the change back, with no warning.
 
@@ -642,32 +532,28 @@ config.json. If present, configuration validation and daemon startup fail:
 
 | Field | Description |
 |-------|-------------|
-| `audit_enabled_source` | `"explicit"`, `"system_default"`, or `"log_level"` |
+| `audit_enabled_source` | `"explicit"` or `"system_default"` |
 | `config_path` | Path to `config.json` |
 | `config_dir` | Configuration directory |
-| `runtime_dir` | Runtime directory under `XDG_RUNTIME_DIR` |
+| `runtime_dir` | Runtime directory (`/run/docker-helper`) |
 | `socket_path` | Unix socket path |
 | `lock_path` | Lock file path |
 | `state_dir` | State directory |
 | `database_path` | SQLite database path |
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
-| `mode` | `"user"` or `"system"` |
 
 ### 3. Start the daemon
 
-Choose one of the startup modes below. In user mode the daemon listens on
-the Unix socket at `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`
-(permissions 0600). In system mode it listens on both
-`/run/docker-helper/docker-helper.sock` (0666) and the configured loopback
-HTTP address (default `127.0.0.1:52375`).
+The daemon listens on `/run/docker-helper/docker-helper.sock` (0666) and
+the configured loopback HTTP address (default `127.0.0.1:52375`).
 
 On SIGINT or SIGTERM, docker-helper stops accepting new connections and
 waits for in-flight HTTP requests to complete, up to the configured
 `shutdown_timeout` (default and maximum 30 seconds). The last part of the
 30-second budget is reserved by the supervisor for force cleanup, which must
 finish by the `shutdown_timeout` deadline — force cleanup does not start
-after the deadline. The shipped systemd units use `TimeoutStopSec=45s`; the
+after the deadline. The shipped systemd unit uses `TimeoutStopSec=45s`; the
 extra 15 seconds sit outside the internal daemon budget and cover process
 final exit, scheduler/kernel/systemd overhead, and systemd's SIGKILL
 fallback if the process still has not exited. They are not intended for the
@@ -682,31 +568,28 @@ docker-helper serve
 Use this mode for testing and troubleshooting. Audit records are written
 to stdout, operational logs to stderr. Stop the daemon with Ctrl+C.
 
-#### systemd user service
-
-The systemd user service runs as the current user. That user must have
-Docker access before the service is started.
+#### systemd system service
 
 Enable and start the service:
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now docker-helper
+sudo systemctl daemon-reload
+sudo systemctl enable --now docker-helper
 ```
 
 Check status and logs:
 
 ```bash
-systemctl --user status docker-helper
-journalctl --user -u docker-helper
+systemctl status docker-helper
+journalctl -u docker-helper
 ```
 
 Reload configuration without restarting:
 
 ```bash
-docker-helper reload
+sudo docker-helper reload
 # or
-systemctl --user reload docker-helper
+sudo systemctl reload docker-helper
 ```
 
 ## Session management
@@ -740,10 +623,10 @@ the authenticated authority may already see:
 
 ```bash
 # Admin: all sessions, optionally narrowed by principal and/or launcher
-docker-helper session list --system
-docker-helper session list --system --principal USER
-docker-helper session list --system --principal USER --launcher alpha
-docker-helper session list --system --launcher dhl_...   # global launcher ID
+docker-helper session list
+docker-helper session list --principal USER
+docker-helper session list --principal USER --launcher alpha
+docker-helper session list --launcher dhl_...   # global launcher ID
 
 # Principal credential: own sessions, optionally narrowed by launcher
 docker-helper session list --launcher alpha
@@ -793,9 +676,10 @@ removes expired sessions automatically at startup.
 command. The daemon **must be stopped** while it runs, and the command must
 run locally on the daemon host/environment whose state database is being
 maintained. It intentionally has no endpoint or authentication flags
-(`--system`, `--endpoint`, `--token-file`): it operates directly on the
-local SQLite database and session runtime directory, not through the API,
-and requires no token.
+(`--endpoint`, `--token-file`): it operates directly on
+the local SQLite database and session runtime directory, not through the API,
+and requires no token. It must run as the identity that owns the state
+database (root for `/var/lib/docker-helper`).
 
 ## Operator CLI
 
@@ -803,29 +687,21 @@ API-backed operator commands (principal, launcher, credential, session,
 reload, admin-token rotate, completion roots) support explicit endpoint selection:
 
 ```
---system              connect to system daemon (Unix socket)
 --endpoint ENDPOINT   explicit endpoint (unix:///path or http://127.0.0.1:port)
+--token-file FILE     explicit token file (auto-resolved for Unix endpoints)
 ```
 
-Without `--system`/`--endpoint` the documented operator default applies: the
-user-mode daemon socket when it exists, otherwise the system socket. This
-default resolves to the system socket even when `XDG_RUNTIME_DIR` is absent
-and no user socket can be resolved.
+The default endpoint is the system socket
+`/run/docker-helper/docker-helper.sock`. The token source follows the
+caller: root uses `/etc/docker-helper/admin.token`; a non-root caller
+uses the installed credential (a Principal or Launcher credential stored
+by `credential install`).
 
-Default behavior: select the user socket when it exists; otherwise select the
-system socket. The token source changes with the selected socket: user-mode
-`admin.token` for the user socket, and the installed credential (a Principal
-or Launcher credential, or the root `admin.token` when running as root) for
-the system socket. The same operator credential file
-(`${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`) may
-hold whichever non-admin operator bearer applies.
-
-`--endpoint` endpoint rules: an HTTP endpoint
+`--endpoint` rules: an HTTP endpoint
 (`http://127.0.0.1:PORT`) requires an explicit `--token-file`; a Unix
 endpoint (`/path` or `unix:///path`) may auto-resolve the appropriate
 operator credential unless `--token-file` is explicitly supplied.
-`--system` and `--endpoint` are
-mutually exclusive. Selection happens before the request; if the selected
+Selection happens before the request; if the selected
 endpoint is unavailable, the command fails rather than retrying another daemon.
 
 For the full command syntax, use `docker-helper help <command>`.
@@ -918,7 +794,7 @@ process boundary; no `--env-file`-style transport is introduced in
 Release 2.2, and the argv class closes with the accepted future
 migration away from the legacy Docker CLI.
 
-### Reaching the helper socket from a workload (system mode)
+### Reaching the helper socket from a workload
 
 `run --helper-socket` makes the daemon's own Unix socket reachable inside
 the container at `/run/docker-helper/docker-helper.sock` through a
@@ -940,33 +816,24 @@ docker-helper run \
   IMAGE -- workload...
 ```
 
-`--helper-socket` is not supported in user mode and is rejected there.
-
-Agent-facing commands (`pull`, `build`, `run`, `registry login`) carry the
-same explicit `--system`/`--endpoint` flags, but their ambient socket
+Agent-facing commands (`pull`, `build`, `run`, `registry login`) carry
+the same explicit `--endpoint` flag, but their ambient socket
 override `DOCKER_HELPER_SOCKET_PATH` is an agent/data-plane convenience
 only: operator and control-plane commands do not consult it and keep their
-own explicit `--system`/`--endpoint` selectors and operator credential
+own explicit `--endpoint` selector and operator credential
 authentication. Agent commands authenticate with the
 Session token from `DOCKER_HELPER_SESSION_TOKEN` (never a Principal
 credential):
 
 ```
---system              connect to system daemon (Unix socket)
 --endpoint ENDPOINT   explicit endpoint (/path, unix:///path, or http://127.0.0.1:port)
 ```
 
 Resolution precedence:
 
 1. `--endpoint` (explicit)
-2. `--system` (system socket)
-3. `DOCKER_HELPER_SOCKET_PATH`
-4. the existing user-mode socket `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`
-5. the system socket `/run/docker-helper/docker-helper.sock`
-
-The presence of `XDG_RUNTIME_DIR` alone does not select a user socket; agent
-commands fall back to the system socket when no user-mode daemon is present.
-`--system` and `--endpoint` are mutually exclusive.
+2. `DOCKER_HELPER_SOCKET_PATH`
+3. the system socket `/run/docker-helper/docker-helper.sock`
 
 SIGINT (Ctrl+C) or SIGTERM cancels the current operation:
 - SIGINT -> exit 130
@@ -1010,7 +877,7 @@ docker_helper_header_from_file() {
 
 ```bash
 docker_helper_session_header | \
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   -H @- \
   -H "Content-Type: application/json" \
   -d '{"image":"alpine:3.24"}' \
@@ -1024,7 +891,7 @@ with an `operation_id`. The build runs in the background.
 
 ```bash
 docker_helper_session_header | \
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   -H @- \
   -H "Content-Type: application/json" \
   -d '{"context":".","dockerfile":"Dockerfile","image":"myapp:v1"}' \
@@ -1036,7 +903,7 @@ build-time variables to Docker:
 
 ```bash
 docker_helper_session_header | \
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   -H @- \
   -H "Content-Type: application/json" \
   -d '{"context":".","dockerfile":"Dockerfile","image":"myapp:v1","build_args":{"FOO":"bar","VERSION":"1.2.3"}}' \
@@ -1095,7 +962,7 @@ Response (HTTP 201):
 
 ```bash
 docker_helper_session_header | \
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   -H @- \
   http://localhost/operations/op_abcdef1234567890abcdef1234567890
 ```
@@ -1104,7 +971,7 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 
 ```bash
 docker_helper_session_header | \
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   -H @- \
   'http://localhost/operations/op_abcdef1234567890abcdef1234567890/logs?offset=0'
 ```
@@ -1142,7 +1009,7 @@ with an `operation_id`. The container runs in the background.
 
 ```bash
 docker_helper_session_header | \
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   -H @- \
   -H "Content-Type: application/json" \
   -d '{"image":"alpine:3.24","command":["echo","hello"]}' \
@@ -1165,7 +1032,7 @@ Track progress using the same operation workflow as build:
 
   ```bash
   docker_helper_session_header | \
-  curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  curl --unix-socket /run/docker-helper/docker-helper.sock \
     -H @- \
     http://localhost/operations/op_abcdef1234567890abcdef1234567890
   ```
@@ -1174,7 +1041,7 @@ Track progress using the same operation workflow as build:
 
   ```bash
   docker_helper_session_header | \
-  curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  curl --unix-socket /run/docker-helper/docker-helper.sock \
     -H @- \
     'http://localhost/operations/op_abcdef1234567890abcdef1234567890/logs?offset=0'
   ```
@@ -1198,7 +1065,7 @@ Cancel a running build or run operation:
 
 ```bash
 docker_helper_session_header | \
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   -H @- \
   -X POST 'http://localhost/operations/op_abcdef1234567890abcdef1234567890/cancel'
 ```
@@ -1212,7 +1079,7 @@ Authenticate with a private registry before pulling images:
 
 ```bash
 docker_helper_session_header | \
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   -H @- \
   -H "Content-Type: application/json" \
   -d '{
@@ -1240,7 +1107,7 @@ that registry use the stored credentials automatically.
 ### Health check
 
 ```bash
-curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+curl --unix-socket /run/docker-helper/docker-helper.sock \
   http://localhost/health
 ```
 
@@ -1269,45 +1136,40 @@ Note: `docker-helper config show --json` (without a field) displays
 
 - **Host path policy** — bind-mount sources are workspace-relative paths
   or absolute host paths, both authorized only through the issued
-  immutable Session filesystem snapshot (the workspace plus, in system
-  mode, any issued filesystem roots). Builds use an isolated staging copy
-  with FD-relative traversal; system-mode run mounts use inode-pinned
+  immutable Session filesystem snapshot (the workspace plus any issued
+  filesystem roots). Builds use an isolated staging copy
+  with FD-relative traversal; run mounts use inode-pinned
   helper-owned mounts.
 - **Bearer authentication** — admin token uses SHA-256 hashing with
   constant-time comparison in memory; Principal credentials, Launcher
   credentials, and session tokens use SHA-256 hashes stored in SQLite and
   resolved through database lookup.
-- **Socket permissions** — user mode Unix socket has 0600 permissions;
-  system mode Unix socket has 0666 permissions. In system mode, the
-  socket is accessible to any local user, but security is enforced
-  through bearer authentication and authorization, not socket
-  permissions alone.
+- **Socket permissions** — the Unix socket has 0666 permissions; it is
+  accessible to any local user, but security is enforced through bearer
+  authentication and authorization, not socket permissions alone.
 - **Container policy** — containers run with `--rm` and
-  `--user <uid>:<gid>` (the owning Principal's UID:GID, or the daemon
-  UID:GID for user-mode daemon-owner Sessions). User mode and AppArmor system mode
-  use `--security-opt label=disable`; SELinux system mode uses the confined
-  `docker_helper_container_t` type. The UID:GID execution identity is not
-  the only runtime protection: every workload in every mode also gets the
-  fixed server-owned runtime privilege floor — `--cap-drop ALL` and
+  `--user <uid>:<gid>` (the owning Principal's UID:GID). AppArmor
+  deployments use `--security-opt label=disable`; SELinux deployments use
+  the confined `docker_helper_container_t` type. The UID:GID execution
+  identity is not the only runtime protection: every workload also gets
+  the fixed server-owned runtime privilege floor — `--cap-drop ALL` and
   `--security-opt no-new-privileges:true` are emitted before any backend
   option and no request field can disable or weaken them. Linux
   no-new-privileges and the dropped capability set keep an image-delivered
   or build-staging-delivered SUID/SGID executable at the workload's own
   execution identity, and build-context staging strips the SUID/SGID
   privilege bits from every staged file.
-- **Mandatory access control** — system mode requires exactly one active
+- **Mandatory access control** — the deployment requires exactly one active
   backend: AppArmor with `docker-helper-system`, or enforcing SELinux with the
   daemon in `docker_helper_t`. Neither, both, and permissive SELinux fail closed.
-  The release tarball also includes an optional user-mode AppArmor profile
-  template.
 
 **Known limitations:**
 
 - **Granted filesystem capability, not a DAC-preserving ceiling** — an
   allowed root and the issued Session filesystem snapshot are
   helper-mediated filesystem capability (path tree plus access modes),
-  not a path ceiling layered over the Principal's Unix DAC. In system
-  mode the root-owned daemon reads inside the granted capability
+  not a path ceiling layered over the Principal's Unix DAC. The
+  root-owned daemon reads inside the granted capability
   regardless of whether the Principal could read the same file under its
   own Unix DAC, and a file inside the capability may enter a staged
   build context even when the Principal could not read it. `read_only`
@@ -1317,22 +1179,9 @@ Note: `docker-helper config show --json` (without a field) displays
   credentials (Principal UID:GID, privilege floor), with POSIX ACLs
   evaluated against those actual credentials; host supplementary groups
   are not propagated, so permissions depending on those group
-  memberships may differ. User
-  mode has no separate gap: the non-root daemon is naturally bounded by
-  its own DAC identity.
+  memberships may differ.
 - docker-helper does not sandbox a coding tool that already has direct
   access to the host filesystem.
-- In user mode there is no inode pinning, so the Session filesystem
-  authority remains workspace-only: omitted or empty `filesystem_roots`
-  keep the inherited workspace grant, an explicit root is accepted only
-  when its canonical path equals the canonical workspace (it may narrow
-  the workspace access, including to `read_only`), and additional,
-  disjoint, or child roots are refused before the Session exists. Run
-  mount sources must resolve to the canonical workspace — no
-  subdirectory, file, or disjoint sources — and a writable mount spanning
-  a nested read-only region is refused exactly as in system mode. The
-  pathname-stability argument is the workspace-parent write invariant:
-  the sandboxed agent cannot replace the workspace directory entry.
 - Filesystem policy is pathname-based: policy resolution canonicalizes
   paths (including symlinks), but two authorized pathnames can still
   reference the same inode through a hard link. If one alias lies under a
@@ -1371,9 +1220,9 @@ helper enforces policy that the agent must not bypass. A portable skill is
 available at
 [.claude/skills/docker-helper/SKILL.md](.claude/skills/docker-helper/SKILL.md).
 
-## Mandatory access control (system mode)
+## Mandatory access control
 
-System mode requires exactly one supported enforcing backend. Backend
+The deployment requires exactly one supported enforcing backend. Backend
 detection is automatic; the operator cannot select a weaker mode with a flag.
 
 ### Common workflow
@@ -1392,15 +1241,15 @@ sudo docker-helper config allowed-root add /path/to/workspace
 It does NOT prepare MAC state. MAC preparation occurs at session creation
 time for the concrete workspace.
 
-Access modes are also enforced independently by the active MAC backend in
-system mode: for every run, the daemon additionally protects each
+Access modes are also enforced independently by the active MAC backend:
+for every run, the daemon additionally protects each
 read-only exposure with backend-owned state so a workload cannot write
 through a read-only exposure even if the bind itself were writable. The
 application policy remains the only owner of the access-mode decision.
 
 ### AppArmor
 
-System mode uses mandatory AppArmor confinement with the
+The deployment uses mandatory AppArmor confinement with the
 `/etc/apparmor.d/docker-helper-system` profile. The profile includes the
 dynamic helper-owned boundary state file
 `/var/lib/docker-helper/apparmor/managed-boundaries`; managed AppArmor
@@ -1429,10 +1278,6 @@ docker-helper apparmor check
 Session MAC lifecycle prepared; it is not a mutation surface and not an
 authorization API. The Session MAC lifecycle is the only production
 writer of managed AppArmor MAC boundaries.
-
-User mode does not use AppArmor confinement by default. The release tarball
-includes an optional user-mode AppArmor profile template that can be
-installed manually.
 
 ### SELinux
 
@@ -1542,13 +1387,10 @@ sudo sh -c 'cat /usr/share/docker-helper/apparmor/local/curl >> /etc/apparmor.d/
 sudo apparmor_parser -r /etc/apparmor.d/curl
 ```
 
-The snippet covers both user-mode and system-mode sockets:
+The snippet covers the system socket:
 
 ```
-# docker-helper user mode
-owner /run/user/*/docker-helper/docker-helper.sock rw,
-
-# docker-helper system mode
+# docker-helper system socket
 /run/docker-helper/docker-helper.sock rw,
 ```
 
@@ -1579,8 +1421,8 @@ The following namespaces are forbidden at the root but permit descendants:
     /media/backup     (allowed)
     /tmp/probe        (allowed; the exact /tmp namespace itself stays forbidden)
 
-When running as root (uid 0), `/home` and `/opt` are permitted as workspace
-roots. Non-root users cannot use these namespaces directly.
+`/home` and `/opt` are permitted as workspace roots (the daemon runs as
+root).
 
 Other non-system absolute paths such as `/data/workspaces` or `/workspace`
 are allowed if otherwise valid.
@@ -1647,7 +1489,7 @@ Launcher's effective policy permits; passing a filesystem root at the
 canonical workspace path explicitly narrows it instead:
 
 ```bash
-docker-helper session create --system \
+docker-helper session create \
   --launcher agent \
   --filesystem-root /srv/run-root/work=read_only \
   --filesystem-root /srv/run-root/work/project=read_write \
@@ -1657,7 +1499,7 @@ docker-helper session create --system \
   /srv/run-root/work
 ```
 
-A system-mode admin token must target exactly one Launcher explicitly
+An admin token must target exactly one Launcher explicitly
 (`--launcher NAME_OR_ID` or `--principal USER`); a Principal or Launcher
 credential targets its own scope and takes no `--principal` selector.
 The request may only narrow the target Launcher's effective ceiling,
@@ -1693,8 +1535,8 @@ run-root/
   pipeline-outputs/  read_write
 ```
 
-With `/srv/run-root` as the session workspace (system mode permits the
-subdirectory mounts):
+With `/srv/run-root` as the session workspace (subdirectory mounts are
+permitted):
 
 - mounting `project` or `pipeline-outputs` writable succeeds and the
   workload can write;
@@ -1706,9 +1548,9 @@ subdirectory mounts):
 - if a source is only needed for reading, request it read-only
   (`--mount source:target:ro`) so the exposure is valid in either mode.
 
-## System mode: provisioning a principal
+## Provisioning a principal
 
-System mode requires the operator to configure both docker-helper policy
+Provisioning requires the operator to configure both docker-helper policy
 and MAC confinement. The common workflow handles both:
 
 ```bash
@@ -1717,10 +1559,10 @@ and MAC confinement. The common workflow handles both:
 #    becomes the initial allowed root. --no-credential defers credential
 #    issuance to step 5 (a named credential), instead of the interactive
 #    default-yes prompt that would issue a `default` credential now.
-sudo docker-helper principal create --system --no-credential alice
+sudo docker-helper principal create --no-credential alice
 
 # 2. Review the principal's allowed roots.
-sudo docker-helper principal show --system alice
+sudo docker-helper principal show alice
 #    A principal credential reads exactly its own principal:
 #    docker-helper principal show --token-file alice.token alice
 
@@ -1735,11 +1577,11 @@ sudo docker-helper config allowed-root add /srv/workspaces
 #    which paths this principal may select at session creation time.
 sudo mkdir -p /srv/workspaces/alice
 sudo docker-helper principal allowed-root add \
-    --system alice /srv/workspaces/alice
+    alice /srv/workspaces/alice
 
 # 5. Create a Principal credential for the principal.
 sudo docker-helper principal credential create \
-    --system --name laptop alice
+    --name laptop alice
 ```
 
 The allowed-root narrowing model (global → principal → launcher → session):
@@ -1789,7 +1631,7 @@ they may remove it:
 
 ```bash
 sudo docker-helper principal allowed-root remove \
-    --system alice /home/alice
+    alice /home/alice
 ```
 
 Removing or narrowing a parent allowed-root ceiling cascades deletion of
@@ -1806,7 +1648,7 @@ To remove a principal and all associated sessions, credentials, and allowed
 roots:
 
 ```bash
-sudo docker-helper principal delete --system alice
+sudo docker-helper principal delete alice
 ```
 
 The delete is a checked, retryable teardown: while any launcher still has
@@ -1841,9 +1683,9 @@ The token is stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credenti
 with mode `0600`. The directory is created with mode `0700` if it does not exist.
 The write is atomic: a failure will not corrupt an existing credential.
 
-Once installed, operator commands automatically select the system socket and
-credential when no user socket exists. `--system`, `--endpoint`, and
-`--token-file` remain available for an explicit selection.
+Once installed, operator commands automatically use the system socket and
+the installed credential. `--endpoint` and `--token-file` remain
+available for an explicit selection.
 
 ## Delegated ownership: launchers
 
