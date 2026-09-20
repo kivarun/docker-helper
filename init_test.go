@@ -63,6 +63,12 @@ func TestInitNonInteractiveNoFlag(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
+	// The test proves root's non-interactive input contract; the canonical
+	// non-root refusal precedes argument validation and has its own test.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"init"}, &stdout, &stderr)
 	if code != 2 {
@@ -79,6 +85,13 @@ func TestInitInvalidAllowedRootNonExistent(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	// The test proves root's --allowed-root validation contract; the
+	// canonical non-root refusal precedes argument validation and has its
+	// own test.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"init", "--allowed-root", filepath.Join(dir, "no-such-dir")}, &stdout, &stderr)
@@ -101,6 +114,13 @@ func TestInitInvalidAllowedRootNotDirectory(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
+
+	// The test proves root's --allowed-root validation contract; the
+	// canonical non-root refusal precedes argument validation and has its
+	// own test.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"init", "--allowed-root", file}, &stdout, &stderr)

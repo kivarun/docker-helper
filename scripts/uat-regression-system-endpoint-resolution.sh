@@ -73,9 +73,12 @@ reg_principal_credential "$EP_USER" "$CRED_FILE" \
 EP_TOKEN_FILE="/tmp/uat23ep-stdin.token"
 printf '%s\n' "$REG_CRED_TOKEN" > "$EP_TOKEN_FILE"
 chmod 600 "$EP_TOKEN_FILE"
-sudo -u "$EP_USER" env HOME="$EP_HOME" docker-helper credential install \
-  < "$EP_TOKEN_FILE" >/dev/null 2>&1 \
-  || reg_blocked "credential install as the probe account failed"
+EP_INSTALL_OUT="$(sudo -u "$EP_USER" env HOME="$EP_HOME" docker-helper credential install \
+  < "$EP_TOKEN_FILE" 2>&1)"
+EP_INSTALL_RC=$?
+if [ "$EP_INSTALL_RC" -ne 0 ]; then
+  reg_blocked "credential install as the probe account failed (rc=$EP_INSTALL_RC): $(printf '%s\n' "$EP_INSTALL_OUT" | redact | head -5)"
+fi
 rm -f "$EP_TOKEN_FILE"
 
 if [ ! -f "$EP_HOME/.config/docker-helper/credential.token" ]; then
@@ -172,7 +175,7 @@ if [ "$DEF_RC" -eq 0 ]; then
   reg_ok "default non-root session list succeeds with a fake user socket present"
 else
   reg_fail "default (no flags) non-root session list must reach the system socket, not the fake user socket (rc=$DEF_RC, output below)
-$(printf '%s\n' "$DEF_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$DEF_OUT" | redact | head -5)"
 fi
 
 CONN_COUNT="$(fake_connections)" || CONN_COUNT=""
@@ -191,7 +194,7 @@ if [ "$ROOT_RC" -eq 0 ]; then
   reg_ok "root default session list reaches the system daemon with the admin token"
 else
   reg_fail "root default session list must succeed without any flag (rc=$ROOT_RC, output below)
-$(printf '%s\n' "$ROOT_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$ROOT_OUT" | redact | head -5)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -203,7 +206,7 @@ if [ "$UNIX_RC" -eq 0 ]; then
   reg_ok "explicit unix:// endpoint override works with an explicit token file"
 else
   reg_fail "explicit unix:// endpoint override must keep working (rc=$UNIX_RC, output below)
-$(printf '%s\n' "$UNIX_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$UNIX_OUT" | redact | head -5)"
 fi
 
 HTTP_ADMIN_FILE="/tmp/uat23ep-admin.token"
@@ -216,7 +219,7 @@ if [ "$HTTP_RC" -eq 0 ]; then
   reg_ok "explicit http://127.0.0.1 endpoint override works with an explicit token file"
 else
   reg_fail "explicit http endpoint override must keep working (rc=$HTTP_RC, output below)
-$(printf '%s\n' "$HTTP_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$HTTP_OUT" | redact | head -5)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -231,7 +234,7 @@ if [ "$EP_SESSION_RC" -eq 0 ] && [ -n "$EP_SESSION_ID" ] && [ -n "$EP_SESSION_TO
   reg_ok "default-endpoint session create for the probe principal (id $EP_SESSION_ID)"
 else
   reg_fail "default-endpoint session create must work with a fake user socket present (rc=$EP_SESSION_RC, output below)
-$(printf '%s\n' "$EP_SESSION_JSON" | redact_tokens | head -5)"
+$(printf '%s\n' "$EP_SESSION_JSON" | redact | head -5)"
 fi
 
 if [ -n "$EP_SESSION_TOKEN" ]; then
@@ -247,7 +250,7 @@ if [ -n "$EP_SESSION_TOKEN" ]; then
     reg_ok "default-endpoint chain ran the real workload with the Principal OS identity"
   else
     reg_fail "default-endpoint session run failed (rc=$RUN_RC, output below)
-$(printf '%s\n' "$RUN_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$RUN_OUT" | redact | head -5)"
   fi
   ep_cli docker-helper session delete "$EP_SESSION_ID" >/dev/null 2>&1 || true
 fi
@@ -255,13 +258,13 @@ fi
 # ---------------------------------------------------------------------------
 # E. the mode-selection grammar is gone for non-root clients too.
 # ---------------------------------------------------------------------------
-SYS_OUT="$(ep_cli docker-helper session list 2>&1)"
+SYS_OUT="$(ep_cli docker-helper session list --system 2>&1)"
 SYS_RC=$?
 if [ "$SYS_RC" -eq 2 ] && printf '%s\n' "$SYS_OUT" | grep -q "flag provided but not defined: -system"; then
   reg_ok "non-root --system is rejected as an undefined flag"
 else
   reg_fail "non-root --system must be an undefined flag (rc=$SYS_RC, output below)
-$(printf '%s\n' "$SYS_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$SYS_OUT" | redact | head -5)"
 fi
 
 reg_result

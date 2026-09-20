@@ -90,10 +90,10 @@ func isRuntimeDependent(name string) bool {
 }
 
 // isPureComputed returns true for fields that can be requested without
-// reading config.json (config_path, config_dir, admin_token_path, mode).
+// reading config.json (config_path, config_dir, admin_token_path).
 func isPureComputed(name string) bool {
 	switch name {
-	case "config_path", "config_dir", "admin_token_path", "mode":
+	case "config_path", "config_dir", "admin_token_path":
 		return true
 	default:
 		return false
@@ -141,7 +141,6 @@ Fields:
   operation_log_max_bytes
   trusted_ca_path
   trusted_ca_injection
-  mode
   http_address`,
 
 	Presentation: humanJSONPresentation(),

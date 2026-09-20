@@ -258,12 +258,12 @@ rpm -ql docker-helper 2>/dev/null | grep -qF '/usr/lib/systemd/user/docker-helpe
 # R5: the mode-selection grammar is gone post-upgrade
 # ==============================================================================
 scenario "R5: mode-selection grammar removed"
-SYS_OUT="$(dh session list 2>&1)"
+SYS_OUT="$(dh session list --system 2>&1)"
 SYS_RC=$?
 if [ "$SYS_RC" -eq 2 ] && printf '%s\n' "$SYS_OUT" | grep -q "flag provided but not defined: -system"; then
   acc_ok "--system is no longer an operator flag"
 else
-  acc_fail "--system must be an undefined flag after the upgrade (rc=$SYS_RC): $(printf '%s\n' "$SYS_OUT" | redact_tokens 2>/dev/null | head -3 || printf '%s\n' "$SYS_OUT" | redact | head -3)"
+  acc_fail "--system must be an undefined flag after the upgrade (rc=$SYS_RC): $(printf '%s\n' "$SYS_OUT" | redact | head -3)"
 fi
 MODE_OUT="$(dh config show mode 2>&1)"
 MODE_RC=$?

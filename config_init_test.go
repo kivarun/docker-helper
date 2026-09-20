@@ -342,6 +342,33 @@ func TestInitCLIInputErrorExitCode(t *testing.T) {
 	}
 }
 
+// TestNonRootInitRefusedBeforeArgumentValidation pins the non-root refusal
+// ordering contract: a non-root init invocation answers the canonical
+// root/system-service refusal before any argument or TTY validation, so no
+// argument error (an over-broad --allowed-root spelling or the
+// non-interactive --allowed-root requirement) can preempt it. Regression for
+// the pre-cutover ordering, where a non-root init with --allowed-root /home
+// answered the too-broad-usage error and never surfaced the refusal.
+func TestNonRootInitRefusedBeforeArgumentValidation(t *testing.T) {
+	origUID := EffectiveUID
+	defer func() { EffectiveUID = origUID }()
+	EffectiveUID = func() int { return 1000 }
+
+	for _, args := range [][]string{
+		{"init", "--allowed-root", "/home"},
+		{"init"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters(args, &stdout, &stderr)
+		if code != 1 {
+			t.Errorf("%v: exit code %d, want 1 (canonical refusal)", args, code)
+		}
+		if !strings.Contains(stderr.String(), "docker-helper init must be run as root") {
+			t.Errorf("%v: canonical refusal message missing, stderr: %q", args, stderr.String())
+		}
+	}
+}
+
 // --- Config path validation tests ---
 
 // TestInitSystemConfigPathIsDirectory verifies that initSystem fails when

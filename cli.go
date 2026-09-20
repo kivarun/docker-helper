@@ -565,6 +565,14 @@ System mode (effective UID 0, the only daemon deployment):
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
+				// The system service is the only daemon deployment: a
+				// non-root init invocation answers the canonical refusal
+				// before any argument or TTY validation.
+				if EffectiveUID() != 0 {
+					fmt.Fprintln(stderr, "docker-helper init must be run as root (the system service is the only daemon deployment)")
+					return 1
+				}
+
 				isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
 				resolved, err := resolveAllowedRootForInit(*allowedRoot, os.Stdin, stderr, isTerminal)
 				if err != nil {

@@ -118,7 +118,6 @@ var configFields = []configFieldSpec{
 	{name: "database_path"},
 	{name: "admin_token_path"},
 	{name: "admin_token"},
-	{name: "mode"},
 }
 
 func lookupConfigField(name string) (configFieldSpec, bool) {
@@ -1021,12 +1020,6 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("cannot determine current working directory: %w", err)
 		}
-	}
-
-	// docker-helper init bootstraps the root-owned system service; there is
-	// no non-root daemon deployment to initialize.
-	if EffectiveUID() != 0 {
-		return fmt.Errorf("docker-helper init must be run as root (the system service is the only daemon deployment)")
 	}
 
 	// Validate the MAC backend and initialize.

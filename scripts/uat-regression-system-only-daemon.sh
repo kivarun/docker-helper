@@ -73,7 +73,7 @@ if [ "$INIT_RC" -ne 0 ] && printf '%s\n' "$INIT_OUT" | grep -q "$REFUSAL"; then
   reg_ok "non-root init refused ($REFUSAL)"
 else
   reg_fail "non-root init must refuse with '$REFUSAL' (rc=$INIT_RC, output below)
-$(printf '%s\n' "$INIT_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$INIT_OUT" | redact | head -5)"
 fi
 
 for state_path in \
@@ -99,7 +99,7 @@ elif [ "$SERVE_RC" -ne 0 ] && printf '%s\n' "$SERVE_OUT" | grep -q "$REFUSAL"; t
   reg_ok "non-root serve refused ($REFUSAL, rc=$SERVE_RC)"
 else
   reg_fail "non-root serve must refuse with '$REFUSAL' (rc=$SERVE_RC, output below)
-$(printf '%s\n' "$SERVE_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$SERVE_OUT" | redact | head -5)"
 fi
 
 if [ ! -e "$USER_HOME/xdg-run/docker-helper/docker-helper.sock" ]; then
@@ -158,13 +158,13 @@ fi
 # ---------------------------------------------------------------------------
 # E. the mode-selection grammar is gone.
 # ---------------------------------------------------------------------------
-SYS_OUT="$(docker-helper session list 2>&1)"
+SYS_OUT="$(docker-helper session list --system 2>&1)"
 SYS_RC=$?
 if [ "$SYS_RC" -eq 2 ] && printf '%s\n' "$SYS_OUT" | grep -q "flag provided but not defined: -system"; then
   reg_ok "--system is no longer an operator flag"
 else
   reg_fail "--system must be an undefined flag (rc=$SYS_RC, output below)
-$(printf '%s\n' "$SYS_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$SYS_OUT" | redact | head -5)"
 fi
 
 for cmd_help in "reload --help" "session list --help"; do

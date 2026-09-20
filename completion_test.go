@@ -705,10 +705,16 @@ func TestConfigShowFieldsVocabulary(t *testing.T) {
 	}
 
 	// Must contain representative computed fields.
-	for _, f := range []string{"mode", "config_path"} {
+	for _, f := range []string{"config_path", "runtime_dir"} {
 		if !slices.Contains(fields, f) {
 			t.Errorf("config show must contain %s", f)
 		}
+	}
+
+	// The retired mode projection must not exist (there is no deployment
+	// mode to project after the system-only cutover).
+	if slices.Contains(fields, "mode") {
+		t.Error("config show must not contain the retired mode projection")
 	}
 
 	// Every returned field must be accepted by configShowField's contract.
@@ -738,7 +744,7 @@ func TestConfigSetFieldsVocabulary(t *testing.T) {
 	}
 
 	// Must not contain read-only fields.
-	for _, f := range []string{"mode", "config_path", "audit_enabled_source"} {
+	for _, f := range []string{"config_path", "audit_enabled_source"} {
 		if slices.Contains(fields, f) {
 			t.Errorf("config set must not contain read-only field %s", f)
 		}

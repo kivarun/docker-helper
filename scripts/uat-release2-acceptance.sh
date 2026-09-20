@@ -910,204 +910,79 @@ done
 wait_health "$SOCK" || acc_fail "daemon not healthy after restart for later scenarios"
 
 # ==============================================================================
-# scenario E: user-mode + system-mode coexistence
+# scenario E: non-root daemon bootstrap refused (system-only deployment)
+#
+# Release 2.3 removed the user-mode daemon: the only daemon deployment is the
+# root-owned system service. A real non-root OS account's init/serve must
+# refuse with the canonical root requirement and leave no per-user daemon
+# state or socket (RED on the 2.2 baseline, where a real user-mode daemon
+# bootstraps and serves on its own XDG socket).
 # ==============================================================================
-scenario "E: user-mode + system-mode coexistence"
+scenario "E: non-root daemon bootstrap refused (system-only deployment)"
 
 E_USER="uatcoex"
 
-E_SYSTEM_SESS=""
-
-# 1. package is installed; stop/disable the system daemon so the user-mode
-#    daemon is started FIRST (the required ordering).
-systemctl stop docker-helper.service >/dev/null 2>&1 || true
-systemctl disable docker-helper.service >/dev/null 2>&1 || true
-
-# 2. create a real non-root UAT user.
 if getent passwd "$E_USER" >/dev/null 2>&1; then
   userdel -r "$E_USER" >/dev/null 2>&1 || true
 fi
-useradd -m -s /bin/bash "$E_USER" 2>/dev/null || { acc_blocked "could not create coexistence user"; :; }
-E_UID="$(id -u "$E_USER")"
+useradd -m -s /bin/bash "$E_USER" 2>/dev/null || { acc_blocked "could not create the non-root probe user"; :; }
 E_HOME="$(getent passwd "$E_USER" | cut -d: -f6)"
-usermod -aG docker "$E_USER" 2>/dev/null || true
+E_UID="$(id -u "$E_USER")"
 mkdir -p "$E_HOME/ws"; chown -R "$E_USER:$E_USER" "$E_HOME/ws"
 
-# XDG runtime dir for the user-mode daemon (no logind session on the runner).
+# XDG runtime dir for the refusal probe (no logind session on the runner).
 E_XDG_RUNTIME="/run/user/$E_UID"
 mkdir -p "$E_XDG_RUNTIME"
 chown "$E_USER:$E_USER" "$E_XDG_RUNTIME"
 chmod 0700 "$E_XDG_RUNTIME"
 
-# A clean, user-scoped environment for every user-mode docker-helper process.
-# `env -i` prevents the CI runner's inherited XDG_CONFIG_HOME/XDG_STATE_HOME
-# (etc.) from leaking into the user-mode daemon: os.UserConfigDir() on Linux
-# prefers $XDG_CONFIG_HOME over $HOME, so a leaked runner value would make the
-# user-mode init write into the runner's config tree instead of the UAT user's.
+# A clean, user-scoped environment for every probe process; `env -i` keeps
+# the runner's inherited XDG variables out of the client's own resolution.
 E_ENV="env -i HOME=$E_HOME XDG_RUNTIME_DIR=$E_XDG_RUNTIME PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# 3. BEFORE starting the system daemon, initialize + start the user's user-mode
-#    daemon.
-{
-  echo "=== coexistence pre-init diagnostics ==="
-  echo "system socket exists: $(test -S /run/docker-helper/docker-helper.sock && echo yes || echo no)"
-  echo "user groups: $(id -nG "$E_USER")"
-  if sudo -u "$E_USER" $E_ENV sh -c 'test -S /run/docker.sock && echo "docker.sock visible" || echo "docker.sock NOT visible"'; then
-    :
-  fi
-} > /tmp/r2ac-coex-diag.log 2>&1 || true
-if sudo -u "$E_USER" $E_ENV docker-helper init --allowed-root "$E_HOME" >/tmp/r2ac-coex-init.log 2>&1; then
-  acc_ok "user-mode init succeeded for $E_USER"
+E_INIT_OUT="$(sudo -u "$E_USER" $E_ENV docker-helper init --allowed-root "$E_HOME/ws" 2>&1)"
+E_INIT_RC=$?
+if [ "$E_INIT_RC" -ne 0 ] && printf '%s\n' "$E_INIT_OUT" | grep -q "must be run as root"; then
+  acc_ok "non-root init refused (must be run as root; the system service is the only daemon deployment)"
 else
-  acc_fail "user-mode init failed for $E_USER (see /tmp/r2ac-coex-init.log)"
-  sed 's/^/    init-log: /' /tmp/r2ac-coex-init.log 2>/dev/null | redact | tail -15 >&2
-  sed 's/^/    diag: /' /tmp/r2ac-coex-diag.log 2>/dev/null | redact | tail -10 >&2
+  acc_fail "non-root init must refuse with the root requirement (rc=$E_INIT_RC): $(printf '%s\n' "$E_INIT_OUT" | redact | tail -3)"
 fi
 
-E_USER_SOCK="$E_XDG_RUNTIME/docker-helper/docker-helper.sock"
-sudo -u "$E_USER" $E_ENV docker-helper serve >/tmp/r2ac-user-serve.log 2>&1 &
-E_USER_SERVE_PID=$!
-E_USER_READY=0
-for _ in $(seq 1 100); do
-  if [ -S "$E_USER_SOCK" ] && curl --silent --fail --max-time 1 --unix-socket "$E_USER_SOCK" http://localhost/health >/dev/null 2>&1; then
-    E_USER_READY=1; break
+for state_path in \
+  "$E_HOME/.config/docker-helper/config.json" \
+  "$E_HOME/.config/docker-helper/admin.token" \
+  "$E_HOME/.local/state/docker-helper" \
+  "$E_HOME/.local/share/docker-helper"; do
+  if [ ! -e "$state_path" ]; then
+    acc_ok "non-root init left no daemon state at $state_path"
+  else
+    acc_fail "non-root init created per-user daemon state at $state_path"
   fi
-  sleep 0.2
 done
-[ "$E_USER_READY" = 1 ] && acc_ok "user-mode daemon healthy on its own socket" || acc_fail "user-mode daemon did not become ready"
 
-# 4. prove user-mode socket/config/state/database work (a user session + run).
-E_USER_SESS=""
-if [ "$E_USER_READY" = 1 ]; then
-  E_USER_SESS_JSON="$(sudo -u "$E_USER" $E_ENV docker-helper session create "$E_HOME/ws" --json 2>/tmp/r2ac-coex-usr-sess.err)" \
-    && E_USER_SESS="$(printf '%s' "$E_USER_SESS_JSON" | json_field id)" \
-    && E_USER_TOK="$(printf '%s' "$E_USER_SESS_JSON" | json_field token)"
-  if [ -n "$E_USER_SESS" ]; then
-    acc_ok "user-mode session created via the user socket ($E_USER_SESS)"
-    if [ -f "$E_HOME/.config/docker-helper/docker-helper.db" ] \
-        || [ -f "$E_HOME/.local/state/docker-helper/docker-helper.db" ]; then
-      acc_ok "user-mode database exists under the user's own state path"
-    else
-      acc_fail "user-mode database not found under user state path"
-    fi
-    if sudo -u "$E_USER" env -i DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        docker-helper run alpine:3.24 -- sh -ec 'echo USER-MODE-OK' | grep -q 'USER-MODE-OK'; then
-      acc_ok "user-mode docker-helper operation works"
-    else
-      acc_fail "user-mode docker-helper operation failed"
-    fi
-  else
-    acc_fail "user-mode session create failed: $(cat /tmp/r2ac-coex-usr-sess.err | redact)"
-  fi
-fi
-
-# 5. start system mode. The system daemon was already initialized by the
-#    suite setup (config + admin.token + database persist across scenarios);
-#    init is not idempotent and must not be re-run. The ordering that matters
-#    is that the user-mode daemon started BEFORE the system daemon.
-if [ -f /etc/docker-helper/config.json ] && [ -f /etc/docker-helper/admin.token ]; then
-  acc_ok "system mode already initialized (setup); starting system daemon"
+E_SERVE_OUT="$(sudo -u "$E_USER" timeout 20 $E_ENV docker-helper serve 2>&1)"
+E_SERVE_RC=$?
+if [ "$E_SERVE_RC" -eq 124 ]; then
+  acc_fail "non-root serve did not refuse: a daemon started and served until the bounded timeout"
+elif [ "$E_SERVE_RC" -ne 0 ] && printf '%s\n' "$E_SERVE_OUT" | grep -q "must be run as root"; then
+  acc_ok "non-root serve refused (must be run as root, rc=$E_SERVE_RC)"
 else
-  acc_fail "system mode not initialized when coexistence started"
-fi
-systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
-for _ in $(seq 1 30); do
-  systemctl is-active --quiet docker-helper.service && break
-  sleep 1
-done
-if wait_health "$SOCK"; then
-  acc_ok "system daemon healthy while user-mode daemon runs"
-else
-  acc_fail "system daemon not healthy while user-mode daemon runs"
+  acc_fail "non-root serve must refuse with the root requirement (rc=$E_SERVE_RC): $(printf '%s\n' "$E_SERVE_OUT" | redact | tail -3)"
 fi
 
-# 6. prove BOTH daemons remain healthy simultaneously.
-if curl --silent --fail --max-time 1 --unix-socket "$E_USER_SOCK" http://localhost/health >/dev/null 2>&1 \
-    && curl --silent --fail --max-time 1 --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1 \
-    && curl --silent --fail --max-time 1 "$HTTP_ENDPOINT/health" >/dev/null 2>&1; then
-  acc_ok "user socket + system socket + system HTTP all healthy simultaneously"
+if [ ! -S "$E_XDG_RUNTIME/docker-helper/docker-helper.sock" ]; then
+  acc_ok "non-root serve created no socket under the user's XDG runtime directory"
 else
-  acc_fail "not both daemons healthy simultaneously"
+  acc_fail "non-root serve left a socket at $E_XDG_RUNTIME/docker-helper/docker-helper.sock"
 fi
 
-# 7. prove paths/sockets/state are distinct.
-if [ "$E_USER_SOCK" = "$SOCK" ]; then
-  acc_fail "user and system sockets are not distinct"
-else
-  acc_ok "user socket ($E_USER_SOCK) distinct from system socket ($SOCK)"
-fi
-SYS_DB="/var/lib/docker-helper/docker-helper.db"
-if [ -f "$SYS_DB" ] && [ "$SYS_DB" != "$E_HOME/.local/state/docker-helper/docker-helper.db" ]; then
-  acc_ok "system database at $SYS_DB is distinct from user-mode state"
-else
-  acc_fail "system/user databases not distinct or system DB missing"
-fi
-
-# 8. default endpoint for that user selects the existing user socket.
-if [ "$E_USER_READY" = 1 ]; then
-  DEFAULT_SESS_JSON="$(sudo -u "$E_USER" $E_ENV docker-helper session create "$E_HOME/ws" --json 2>/dev/null)" \
-    && DEFAULT_SESS="$(printf '%s' "$DEFAULT_SESS_JSON" | json_field id)"
-  if [ -n "${DEFAULT_SESS:-}" ]; then
-    # The default-endpoint session must live in the USER daemon, not the
-    # system daemon. The system session list must succeed first — a failed
-    # list would vacuously "not contain" the session.
-    SYS_LIST="$(dh session list --token-file /etc/docker-helper/admin.token 2>&1)"; SYS_LIST_EC=$?
-    if [ "$SYS_LIST_EC" -ne 0 ]; then
-      acc_fail "system session list failed (rc=$SYS_LIST_EC); default-endpoint leak check cannot proceed"
-    elif printf '%s\n' "$SYS_LIST" | grep -q "$DEFAULT_SESS"; then
-      acc_fail "default endpoint session leaked into the system daemon"
-    else
-      acc_ok "user's default endpoint selected the existing user socket (not the system daemon)"
-    fi
-  else
-    acc_fail "user's default-endpoint session create failed"
-  fi
-else
-  acc_fail "cannot verify default endpoint selection without a user daemon"
-fi
-
-# 9. explicit --system selects the system daemon (operator creates a principal
-#    + credential for the user; the user installs it, then --system works).
-E_OPERATOR_CRED="$CRED_DIR/coex-sys.tok"
-if set_up_principal "$E_USER" "$E_OPERATOR_CRED" >/dev/null 2>&1; then
-  E_SYSTEM_SESS="$GLOBAL_SESSION_ID"
-  if [ -n "$E_SYSTEM_SESS" ]; then
-    # A system-mode session for the coexistence user must be visible to the
-    # SYSTEM daemon (proves --system/credential path selected the system daemon).
-    SYS_LIST2="$(dh session list --token-file /etc/docker-helper/admin.token 2>/dev/null)"
-    if printf '%s\n' "$SYS_LIST2" | grep -q "$E_SYSTEM_SESS"; then
-      acc_ok "explicit system-mode session is owned by the system daemon"
-    else
-      acc_fail "explicit system-mode session not found in the system daemon"
-    fi
-    # A system-mode session token must NOT be consumed by the user daemon.
-    if sudo -u "$E_USER" env -i DOCKER_HELPER_SESSION_TOKEN="$GLOBAL_SESSION_TOKEN" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        docker-helper run alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
-      acc_fail "system-mode session token was consumed by the user-mode daemon"
-    else
-      acc_ok "system-mode session token rejected by the user-mode daemon"
-    fi
-  fi
-else
-  acc_fail "could not provision a system credential for the coexistence user"
-fi
-
-# 10. a user-mode session token must NOT be consumed by the system daemon.
-if [ -n "${E_USER_TOK:-}" ]; then
-  if DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" \
-      dh run alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
-    acc_fail "user-mode session token was consumed by the system daemon"
-  else
-    acc_ok "user-mode session token rejected by the system daemon"
-  fi
-fi
-
-# Tear down the user-mode daemon for the lifecycle phase.
-kill "$E_USER_SERVE_PID" 2>/dev/null || true
-wait "$E_USER_SERVE_PID" 2>/dev/null || true
 userdel -r "$E_USER" >/dev/null 2>&1 || true
 rm -rf "$E_XDG_RUNTIME"
-systemctl stop docker-helper.service >/dev/null 2>&1 || true
+
+# The system service stays the only daemon: keep it healthy for the
+# following scenarios (it was never stopped in this scenario).
+wait_health "$SOCK" || acc_fail "system service not healthy after the non-root refusal scenario"
+
 
 # ==============================================================================
 # scenario G: v2.0.0 -> candidate upgrade ownership migration (depth proofs)

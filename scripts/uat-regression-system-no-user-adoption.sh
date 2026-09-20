@@ -162,7 +162,7 @@ if [ "$SHOW_RC" -ne 0 ] && printf '%s\n' "$SHOW_OUT" | grep -q "principal_not_fo
   reg_ok "the historical daemon-owner Principal was not adopted (principal_not_found)"
 else
   reg_fail "the historical daemon-owner Principal must not appear on the system daemon (rc=$SHOW_RC, output below)
-$(printf '%s\n' "$SHOW_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$SHOW_OUT" | redact | head -5)"
 fi
 
 SESSIONS_JSON="$(docker-helper session list --token-file "$ADMIN_FILE" --json 2>/dev/null)"
@@ -188,7 +188,7 @@ if [ "$LEGACY_AUTH_RC" -ne 0 ] && printf '%s\n' "$LEGACY_AUTH_OUT" | grep -q "un
   reg_ok "the historical per-user admin token is not an authority (unauthorized)"
 else
   reg_fail "presenting the historical admin token must be an unauthorized authentication result (rc=$LEGACY_AUTH_RC, output below)
-$(printf '%s\n' "$LEGACY_AUTH_OUT" | redact_tokens | head -5)"
+$(printf '%s\n' "$LEGACY_AUTH_OUT" | redact | head -5)"
 fi
 
 # ---------------------------------------------------------------------------

@@ -212,10 +212,10 @@ ok_mig "the shipped user systemd unit was removed by the upgrade"
 # ---------------------------------------------------------------------------
 # M5. the mode-selection grammar is gone post-upgrade.
 # ---------------------------------------------------------------------------
-SYS_OUT="$(docker-helper session list 2>&1)"
+SYS_OUT="$(docker-helper session list --system 2>&1)"
 SYS_RC=$?
 [ "$SYS_RC" -eq 2 ] && printf '%s\n' "$SYS_OUT" | grep -q "flag provided but not defined: -system" \
-  || fail_mig "--system must be an undefined flag after the upgrade (rc=$SYS_RC): $(printf '%s\n' "$SYS_OUT" | redact_tokens | head -3)"
+  || fail_mig "--system must be an undefined flag after the upgrade (rc=$SYS_RC): $(printf '%s\n' "$SYS_OUT" | redact | head -3)"
 ok_mig "--system is no longer an operator flag"
 MODE_OUT="$(docker-helper config show mode 2>&1)"
 MODE_RC=$?
@@ -228,13 +228,13 @@ ok_mig "the mode config projection no longer exists"
 PRINC_OUT="$(docker-helper principal show mig22u 2>&1)"
 PRINC_RC=$?
 [ "$PRINC_RC" -eq 0 ] \
-  || fail_mig "the pre-upgrade Principal did not survive the upgrade (rc=$PRINC_RC): $(printf '%s\n' "$PRINC_OUT" | redact_tokens | head -3)"
+  || fail_mig "the pre-upgrade Principal did not survive the upgrade (rc=$PRINC_RC): $(printf '%s\n' "$PRINC_OUT" | redact | head -3)"
 ok_mig "pre-upgrade Principal survived"
 
 LIST_OUT="$(docker-helper session list --token-file "$MIG_CRED_FILE" 2>&1)"
 LIST_RC=$?
 [ "$LIST_RC" -eq 0 ] \
-  || fail_mig "the pre-upgrade credential authority did not survive the upgrade (rc=$LIST_RC): $(printf '%s\n' "$LIST_OUT" | redact_tokens | head -3)"
+  || fail_mig "the pre-upgrade credential authority did not survive the upgrade (rc=$LIST_RC): $(printf '%s\n' "$LIST_OUT" | redact | head -3)"
 printf '%s\n' "$LIST_OUT" | grep -qF "$MIG_SESSION_ID" \
   || fail_mig "the pre-upgrade Session identity did not survive the upgrade"
 ok_mig "pre-upgrade credential authority and Session identity survived"
@@ -262,7 +262,7 @@ ok_mig "the historical user-mode state was never imported as system state"
 LEGACY_AUTH_OUT="$(docker-helper session list --token-file /home/mig22legacy/.config/docker-helper/admin.token 2>&1)"
 LEGACY_AUTH_RC=$?
 [ "$LEGACY_AUTH_RC" -ne 0 ] && printf '%s\n' "$LEGACY_AUTH_OUT" | grep -q "unauthorized" \
-  || fail_mig "the historical per-user admin token must not be an authority (rc=$LEGACY_AUTH_RC): $(printf '%s\n' "$LEGACY_AUTH_OUT" | redact_tokens | head -3)"
+  || fail_mig "the historical per-user admin token must not be an authority (rc=$LEGACY_AUTH_RC): $(printf '%s\n' "$LEGACY_AUTH_OUT" | redact | head -3)"
 ok_mig "the historical per-user admin token is not an authority"
 
 LEGACY_HASHES_AFTER="$(sha256sum \
