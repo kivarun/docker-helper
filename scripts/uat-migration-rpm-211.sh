@@ -228,11 +228,12 @@ dh principal create --no-credential "$M_USER" >"$M_DIAG/pcreate.out" 2>&1 || tru
 dh principal set "$M_USER" enabled true >"$M_DIAG/pset.out" 2>&1 || true
 dh principal allowed-root add "$M_USER" "$ALLOWED_ROOT" >"$M_DIAG/padd1.out" 2>&1 || true
 dh principal allowed-root add "$M_USER" "$M_POLICY" >"$M_DIAG/padd2.out" 2>&1 || true
-if dh principal allowed-root list "$M_USER" 2>"$M_DIAG/plist.err" | grep -qx "$M_POLICY" \
-    && dh principal allowed-root list "$M_USER" 2>/dev/null | grep -qx "$ALLOWED_ROOT"; then
+dh principal allowed-root list "$M_USER" >"$M_DIAG/plist.out" 2>"$M_DIAG/plist.err"
+if grep -qx "$M_POLICY" "$M_DIAG/plist.out" \
+    && grep -qx "$ALLOWED_ROOT" "$M_DIAG/plist.out"; then
   acc_ok "R2 two path-only Principal roots seeded"
 else
-  acc_fail_ctx "R2 Principal allowed-root seeding failed" "$M_DIAG/pcreate.out" "$M_DIAG/padd2.out" "$M_DIAG/plist.err"
+  acc_fail_ctx "R2 Principal allowed-root seeding failed" "$M_DIAG/pcreate.out" "$M_DIAG/padd1.out" "$M_DIAG/padd2.out" "$M_DIAG/plist.out" "$M_DIAG/plist.err"
 fi
 
 dh credential create --name mig211 "$M_USER" >"$M_DIAG/pcred.out" 2>&1 || true

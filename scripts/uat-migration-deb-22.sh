@@ -226,8 +226,12 @@ ok_mig "historical user-mode tree seeded on mig22legacy (2.2 non-root init)"
 # ---------------------------------------------------------------------------
 dpkg -i "$CANDIDATE_DEB" >/tmp/uat-mig22-upgrade.log 2>&1 \
   || fail_mig "dpkg -i upgrade to the candidate failed (see /tmp/uat-mig22-upgrade.log)"
-dpkg -s docker-helper 2>/dev/null | grep -q "^Version: $VERSION\$" \
-  || fail_mig "the upgraded package is not version $VERSION"
+dpkg -s docker-helper >/dev/null 2>&1 \
+  || fail_mig "the candidate package is not installed after the upgrade"
+# The binary version is the authoritative candidate identity (the DEB
+# package version carries the Debian tilde revision form 2.3.0~uat).
+[ "$(docker-helper version)" = "$VERSION" ] \
+  || fail_mig "the upgraded binary is not version $VERSION"
 wait_health || fail_mig "the upgraded service did not become healthy"
 ok_mig "upgraded to $VERSION with the service running; service healthy"
 
