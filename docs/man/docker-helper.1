@@ -14,43 +14,12 @@ restricting host path access to each session's issued filesystem snapshot
 (the workspace plus any issued additional roots) and enforcing policy on
 build, pull, and run operations.
 .PP
-Deployment mode is determined by effective UID:
-.IP \(bu 4
-\fIUser mode\fR (non-root): Private Unix socket, per-user configuration
-.IP \(bu 4
-\fISystem mode\fR (root): System Unix socket + loopback HTTP, system-wide configuration
+There is one daemon deployment: the root-owned system service with a
+system Unix socket plus a loopback HTTP listener and system-wide
+configuration. Non-root users and agents are first-class clients that
+authenticate through installed credentials.
 .SH QUICK START
-.SS User mode
-Single-user deployment. Normal docker-helper user-mode operation runs
-non-root, but initial host preparation for a rootful Docker installation
-may require root — notably adding the user to the
-\fBdocker\fR group (`sudo usermod -aG docker "$USER"`, logout and login
-required). After that preparation, no root is needed for package
-installation and everyday docker-helper use. System-mode Principals do
-not need \fBdocker\fR group membership; the root daemon mediates Docker
-access for them.
-.PP
-.RS 4
-.nf
-docker-helper init
-systemctl --user enable --now docker-helper
-mkdir \-p ~/myproject
-docker-helper session create ~/myproject
-.fi
-.RE
-.PP
-Export the \fBTOKEN\fR printed by \fBsession create\fR (starts with \fIdht_...\fR):
-.PP
-.RS 4
-.nf
-export DOCKER_HELPER_SESSION_TOKEN='dht_...'
-docker-helper pull alpine:3.24
-docker-helper run alpine:3.24 -- echo hello-from-docker-helper
-.fi
-.RE
-.PP
-User mode does not require principals or credentials.
-.SS System mode
+.SS System service deployment
 Multi-user deployment. Requires root for initial setup.
 .PP
 .RS 4
@@ -88,14 +57,8 @@ docker-helper run alpine:3.24 -- echo hello-from-docker-helper
 \fBcredential install\fR reads the token from stdin and stores it for
 subsequent use. After installation, \fBdocker-helper\fR commands use the
 credential and connect to the correct daemon automatically.
-.SH DEPLOYMENT MODES
-.SS User Mode
-Runs as the current user. Configuration at
-.IR ~/.config/docker-helper/config.json ,
-state at
-.IR ~/.local/state/docker-helper .
-No mandatory MAC integration.
-.SS System Mode
+.SH DEPLOYMENT
+.SS System service
 Runs as root. Configuration at
 .IR /etc/docker-helper/config.json ,
 state at
@@ -109,14 +72,13 @@ enforcing SELinux with the daemon in \fBdocker_helper_t\fR.
 Start the docker-helper daemon.
 .TP
 .B docker-helper init [\-\-allowed-root PATH]
-Initialize configuration and admin token. The interactive default is the
-current user's home, or /home for root. Root may explicitly select /home or
-/opt; non-root callers cannot select those broad roots directly.
-In system mode, the allowed root is the system-wide authorization ceiling;
-init does not prepare MAC state, which is handled by the session lifecycle
-at session creation. User mode requires no MAC preparation.
+Initialize configuration and admin token. The interactive default is
+/home for root. Root may explicitly select /home or /opt.
+The allowed root is the system-wide authorization ceiling; init does not
+prepare MAC state, which is handled by the session lifecycle at session
+creation.
 .TP
-.B docker-helper reload [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
+.B docker-helper reload [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
 Reload configuration. Narrowing the global allowed-root ceiling atomically
 prunes stored Principal roots the new ceiling no longer contains and then
 restricted-Launcher descendants outside the surviving per-Principal ceilings
@@ -140,13 +102,13 @@ Generate Bash completion.
 .B docker-helper completion roots principal [\-\-principal USER] [\-\-stored] [\-\-authority-only] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Machine-facing completion query: print the target Principal's effective allowed roots, one path per line. The target is \-\-principal when given, otherwise it is inferred from the authenticated credential. The daemon authorizes the query. With \fB\-\-stored\fR it instead prints the target Principal's stored roots — the universe of the Principal allowed-root existing-entity mutations (remove, set-access). With \fB\-\-authority-only\fR the command instead prints only the authenticated operator authority (admin, principal, or launcher) for shell completion introspection; it changes nothing about authorization.
 .TP
-.B docker-helper completion roots session [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+.B docker-helper completion roots session [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Machine-facing completion query: print the effective allowed roots of the Launcher a Session created right now with this authority would use, one path per line. The typed \fB\-\-principal\fR/\fB\-\-launcher\fR selectors are forwarded to the daemon, which resolves the same target a real session create with those selectors would use.
 .TP
-.B docker-helper completion roots launcher [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+.B docker-helper completion roots launcher [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Machine-facing completion query: print the stored allowed roots of the target Launcher (the default Launcher of the \fB\-\-principal\fR-named Principal, otherwise the Principal inferred from the credential, or the typed positional LAUNCHER), one path per line — the universe of the launcher allowed-root existing-entity mutations.
 .TP
-.B docker-helper completion selectors principal [\-\-command PATH] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+.B docker-helper completion selectors principal [\-\-command PATH] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Machine-facing completion query: print the Principal names the authenticated authority may target with a \-\-principal selector on the completed command path, one per line. Only an admin authority receives the daemon's Principal list; a Principal credential receives exactly its own username on the Launcher command families and on the \fBprincipal show\fR USER positional, and nothing where the selector is contractually illegal (both Session command paths); every other authority degrades silently.
 .TP
 .B docker-helper completion selectors launcher [\-\-principal USER] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
@@ -184,15 +146,11 @@ flag preserves the inherited create behavior. The CLI validates
 PATH=ACCESS syntax only; whether the request is a valid narrowing is decided
 by the daemon. The issued snapshot is immutable; there is no post-create
 Session filesystem mutation.
-In user mode every requested root must be the canonical workspace itself
-(user mode has no inode-pinned mounts); any other root is refused with the
-same error.
 The target Launcher is chosen by the daemon. Without a selector the
 authority-specific defaults apply: a Principal credential resolves its
 Principal's \fBdefault\fR Launcher; a Launcher credential is forced to its
-own Launcher (which does not need to be named \fBdefault\fR); a user-mode
-admin token resolves the local daemon-owner default Launcher; a system-mode
-admin token requires an explicit selector (\fB400
+own Launcher (which does not need to be named \fBdefault\fR); an admin
+token requires an explicit selector (\fB400
 missing_launcher_selector\fR). With an admin token,
 \fB\-\-principal USER\fR targets that Principal's default Launcher and
 \fB\-\-launcher LAUNCHER\fR a specific Launcher (a name requires
@@ -311,8 +269,8 @@ can remove it, while daemon startup and reload keep failing closed on it.
 .TP
 .B docker-helper config allowed-root add [\-\-json] [--access ACCESS] PATH
 Add a global allowed root. Changes the authorization ceiling only;
-never prepares MAC state. In system mode, MAC coverage for a concrete
-workspace is handled by the session lifecycle at session creation.
+never prepares MAC state. MAC coverage for a concrete workspace is
+handled by the session lifecycle at session creation.
 Omitted \fB\-\-access\fR is the canonical read_write grant. With
 \-\-json the shared structured add result (\fBpath\fR, \fBaccess\fR,
 \fBchanged\fR) replaces the human acknowledgement.
@@ -462,8 +420,7 @@ principal creation, so the explicit attempt conflicts if the principal
 already has a launcher named \fBdefault\fR with
 \fBlauncher "<name>" already exists for principal "<user>"\fR.
 That launcher is a normal, mutable launcher and can later be renamed or
-deleted; only the reserved user-mode daemon-owner default Launcher is
-permanently protected. Launcher names are path-safe identifiers:
+deleted. Launcher names are path-safe identifiers:
 1..63 characters of lowercase letters, digits, and internal hyphens, with
 alphanumeric first and last characters; the exact supplied value is
 accepted or rejected. With no \fB\-\-allowed-root\fR the scope is
@@ -652,7 +609,7 @@ Rotate the admin token. Requires the current admin token
 The new token is shown once on stdout; the old token is invalid
 immediately and no restart is required. \fB\-\-json\fR prints the API
 response.
-.SS AppArmor Commands (AppArmor System Mode)
+.SS AppArmor Commands (AppArmor Backend)
 .TP
 .B docker-helper apparmor root list [\-\-json]
 List managed AppArmor MAC boundaries in the boundary state file, one
@@ -665,7 +622,7 @@ is the only production writer of managed AppArmor MAC boundaries.
 .B docker-helper apparmor check [\-\-json]
 Validate the AppArmor profile. With \-\-json the structured check
 result (\fBvalid\fR) replaces the human status line.
-.SS SELinux Commands (SELinux System Mode)
+.SS SELinux Commands (SELinux Backend)
 .TP
 .B docker-helper selinux check [\-\-json]
 Validate the installed SELinux system-policy foundation: requires the
@@ -683,8 +640,8 @@ boundaries and of the SELinux fcontext coverage: it prepares the
 confinement resources for the concrete filesystem trees issued in the
 immutable Session filesystem snapshot at session creation and releases
 them through the same lifecycle (the workspace is one such
-tree; in system mode additional issued roots participate in the same
-lifecycle), and authorization roots are not a second persistent SELinux
+tree; additional issued roots participate in the same lifecycle), and
+authorization roots are not a second persistent SELinux
 root-management API. \fBselinux check\fR remains a read-only diagnostic.
 .SS Agent Commands
 .TP
@@ -724,8 +681,8 @@ A run request carries at most 16 caller mounts (duplicates and read-only
 mounts included; the server-owned helper-socket projection is not a
 caller mount): a longer list is refused with
 .BR too_many_mounts .
-A mount source is a workspace-relative path (system mode: any file or
-subdirectory; user mode: only the workspace root \fB.\fR) or an absolute
+A mount source is a workspace-relative path (any file or subdirectory)
+or an absolute
 host path inside the issued Session filesystem snapshot; any other source
 is refused. Mount containment is enforced on the canonical source, not
 the caller spelling: the raw source is admitted lexically against the
@@ -767,7 +724,7 @@ When both \-\-env and
 .TP
 .B \-\-helper\-socket
 Make the helper Unix socket reachable inside the container at
-\fI/run/docker-helper/docker-helper.sock\fR (system mode). This is a
+\fI/run/docker-helper/docker-helper.sock\fR. This is a
 server-owned capability: the daemon injects a read-only bind of its own
 runtime directory, and the client selects only the boolean flag. While the
 projection is active the daemon also supplies the workload with the
@@ -779,7 +736,6 @@ locator is a path, not a credential. The socket provides transport only;
 protected operations still require a bearer credential, passed separately
 (for example with
 .BR \-\-env\-from ).
-Not supported in user mode; the operation is rejected there.
 .TP
 .B docker-helper registry login [\-\-system] [\-\-endpoint ENDPOINT] \-\-username USER [\-\-password-stdin] [\-\-json] REGISTRY
 Log in to a container registry for the current session. REGISTRY is the
@@ -788,47 +744,32 @@ With \-\-password-stdin, read the password from stdin.
 With \-\-json, output in JSON format.
 .PP
 Agent-facing commands (pull, build, run, registry login) select the daemon
-endpoint with \fB\-\-system\fR or \fB\-\-endpoint ENDPOINT\fR and authenticate
+endpoint with \fB\-\-endpoint ENDPOINT\fR and authenticate
 with the Session token from \fBDOCKER_HELPER_SESSION_TOKEN\fR (never a
 Principal credential; agent commands do not take \fB\-\-token-file\fR).
 Resolution precedence:
 .IP \(bu 4
 \fB\-\-endpoint\fR (explicit)
 .IP \(bu 4
-\fB\-\-system\fR (system socket)
-.IP \(bu 4
 \fBDOCKER_HELPER_SOCKET_PATH\fR
 .IP \(bu 4
-the existing user-mode socket \fB$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock\fR
-.IP \(bu 4
 the system socket \fB/run/docker-helper/docker-helper.sock\fR
-.PP
-The presence of \fBXDG_RUNTIME_DIR\fR alone does not select a user socket;
-agent commands fall back to the system socket when no user-mode daemon is
-present. \fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
 .SH OPERATOR ENDPOINT SELECTION
 For launcher, reload, session, principal, credential, completion, and
 admin-token rotate commands, select the target daemon:
-.IP \(bu 4
-\fB\-\-system\fR: Connect to system daemon (default for system mode)
 .IP \(bu 4
 \fB\-\-endpoint URL\fR: Explicit endpoint: \fI/absolute/path\fR, \fIunix:///absolute/path\fR, or \fIhttp://127.0.0.1:PORT\fR (HTTP is loopback only; requires \fB\-\-token-file\fR; Unix sockets auto-resolve token)
 .IP \(bu 4
 \fB\-\-token-file FILE\fR: Read authentication token from file (optional for Unix sockets)
 .PP
-\fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
-\fB\-\-system\fR may use \fB\-\-token\-file\fR for authentication.
 Session control commands authenticate only through this operator
 credential source; \fBDOCKER_HELPER_SESSION_TOKEN\fR never overrides or
 participates in it.
-Without explicit endpoint selection, a deterministic default is used:
-an existing user socket is selected first; otherwise the system socket is
-selected. A non-root caller without \fBXDG_RUNTIME_DIR\fR has no resolvable
-user socket and selects the system socket. The token source follows that
-selection: user admin token for the
-user socket, or the installed credential (a Principal or Launcher
-credential) for the non-root system-daemon caller, or the root admin token
-for the system socket. A failed request is not retried against another
+Without explicit endpoint selection the system socket
+\fB/run/docker-helper/docker-helper.sock\fR is used. The token source
+follows the caller: the installed credential (a Principal or Launcher
+credential) for a non-root caller, or the root admin token
+for root. A failed request is not retried against another
 daemon.
 .SH EXIT STATUS
 .TP
@@ -849,25 +790,19 @@ SIGTERM for async build/run operations returns 143.
 .SH FILES
 .TP
 .B /etc/docker-helper/config.json
-System mode configuration
+System service configuration
 .TP
 .B /etc/docker-helper/admin.token
-System mode admin token
+System service admin token (root)
 .TP
 .B /var/lib/docker-helper/docker-helper.db
-System mode state database
+System service state database
 .TP
 .B /run/docker-helper/docker-helper.sock
-System mode Unix socket
+System service Unix socket
 .TP
-.B $XDG_CONFIG_HOME/docker-helper/config.json
-User mode configuration
-.TP
-.B $XDG_STATE_HOME/docker-helper
-User mode state directory
-.TP
-.B dirname(config_path)/admin.token
-Admin token (same directory as config)
+.B $XDG_CONFIG_HOME/docker-helper/credential.token
+Installed non-root operator credential
 .SH SECURITY
 .IP \(bu 4
 .B docker-helper
@@ -890,7 +825,7 @@ an image-delivered or build-staging-delivered SUID/SGID executable at
 the workload's own execution identity, and build-context staging strips
 the SUID/SGID privilege bits from every staged file.
 .IP \(bu 4
-System mode requires exactly one of AppArmor or enforcing SELinux. AppArmor
+The deployment requires exactly one of AppArmor or enforcing SELinux. AppArmor
 uses the \fBdocker-helper-system\fR profile. SELinux requires the daemon in
 \fBdocker_helper_t\fR and runs containers as
 \fBdocker_helper_container_t\fR with MCS confinement.
@@ -903,7 +838,7 @@ immutability or confidentiality between hard-link aliases.
 .IP \(bu 4
 An allowed root and a Session's issued filesystem snapshot are a
 helper-mediated filesystem capability, not a path ceiling over the
-Principal's Unix DAC: in system mode the root-owned daemon reads inside
+Principal's Unix DAC: the root-owned daemon reads inside
 the granted capability regardless of the Principal's own Unix DAC
 reach, and a file inside the capability may enter a staged build
 context even when the Principal could not read it. \fBread_only\fR
@@ -915,9 +850,9 @@ evaluated against those actual credentials; host supplementary groups
 are not propagated, so permissions depending on those group memberships
 may differ.
 .IP \(bu 4
-The daemon's own listeners are local only: a Unix socket, plus a loopback
-HTTP listener in system mode. No remote or non-loopback listener exists in
-Release 2. This is a statement about the daemon's own transport only: it
+The daemon's own listeners are local only: a Unix socket plus a loopback
+HTTP listener. No remote or non-loopback listener exists.
+This is a statement about the daemon's own transport only: it
 does not promise anything about Docker workload or build networking.
 Builds and containers use the Docker/BuildKit default network position;
 docker-helper provides no workload or build network isolation.

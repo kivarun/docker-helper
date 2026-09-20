@@ -439,7 +439,7 @@ var credentialInstallCommand = &Command{
 	Usage:      "docker-helper credential install [--json] [--force]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
-	Help: `Install a non-admin credential token for docker-helper --system.
+	Help: `Install a non-admin credential token for the docker-helper system service.
 The credential may belong to a Principal or a Launcher.
 The daemon resolves its owner and authorization scope when the token is used.
 

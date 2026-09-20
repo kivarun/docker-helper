@@ -57,7 +57,7 @@ func resolveAgentSocketPath() string {
 	return systemSocketPath
 }
 
-// validateAgentEndpointOptions validates the CLI-only --system/--endpoint
+// validateAgentEndpointOptions validates the CLI-only --endpoint
 // combination for an agent command. The agent family carries no requirement
 // beyond the shared endpoint-selection owner: the bearer always comes from
 // DOCKER_HELPER_SESSION_TOKEN, so an http endpoint does not require

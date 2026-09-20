@@ -51,11 +51,11 @@ func (opts operatorClientOptions) clientTimeout() *time.Duration {
 }
 
 // validateEndpointSelection validates the endpoint-selection grammar shared
-// by every command family: --system and --endpoint are mutually exclusive,
-// and an explicit endpoint must carry the canonical syntax validateEndpoint
-// owns. It is pure and locally knowable, so CLI invocations run it during
+// by every command family: an explicit endpoint must carry the canonical
+// syntax validateEndpoint owns and an explicit empty value is a usage
+// error. It is pure and locally knowable, so CLI invocations run it during
 // Invocation.Validate (exit 2); family-specific requirements compose around
-// it rather than re-owning the mutual-exclusion or syntax rules.
+// it rather than re-owning the syntax rules.
 func validateEndpointSelection(endpoint string, endpointSet bool) error {
 	if endpointSet && endpoint == "" {
 		return fmt.Errorf("--endpoint value must not be empty")
