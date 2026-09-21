@@ -68,6 +68,18 @@ jobs:
           unshare --user --map-root-user true && echo UNSHARE_OK || echo UNSHARE_FAIL
           rootlesskit --net=none true && echo RK_NONE_OK || echo RK_NONE_FAIL
           rootlesskit --net=slirp4netns --disable-host-loopback true && echo RK_SLIRP_OK || echo RK_SLIRP_FAIL
+      - name: AppArmor userns restriction diagnosis
+        run: |
+          set -x
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare --user --map-root-user true && echo UNSHARE_OK_RESTRICT_OFF || echo UNSHARE_FAIL_RESTRICT_OFF
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          echo "--- lsm ---"
+          cat /sys/kernel/security/lsm
+          echo "--- apparmor profiles mentioning unprivileged userns ---"
+          grep -rl "user_namespace" /etc/apparmor.d/ 2>/dev/null | head -5
+          ls /etc/apparmor.d/unprivileged-userns 2>/dev/null && cat /etc/apparmor.d/unprivileged-userns | head -20 || echo "no unprivileged-userns profile"
+
       - name: Run rootless BuildKit M0 probe
         run: |
           sudo -E env "PATH=$PATH" M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m0-evidence" \
