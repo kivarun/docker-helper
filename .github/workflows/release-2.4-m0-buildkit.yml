@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Validate probe script
         run: |
@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install probe dependencies
         run: |
@@ -98,7 +98,7 @@ jobs:
 
       - name: Upload M0 evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-2.4-m0-buildkit-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-2.4-m0-evidence
@@ -112,7 +112,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install probe dependencies
         run: |
@@ -174,7 +174,7 @@ jobs:
 
       - name: Upload M0 evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-2.4-m0-buildkit-2604-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-2.4-m0-evidence-2604
@@ -186,7 +186,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install QEMU and cloud-image tools
         run: |
@@ -201,7 +201,7 @@ jobs:
 
       - name: Upload Tumbleweed M0 evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-2.4-m0-buildkit-tw-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-2.4-m0-tw-evidence
