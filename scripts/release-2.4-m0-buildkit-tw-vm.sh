@@ -69,15 +69,16 @@ RMT
 GUEST_RC=$?
 cat "$RUNNER_TEMP/m0-tw-guest.log"
 set -e
-[ "$GUEST_RC" = 0 ] || fail "guest probe failed (exit $GUEST_RC)"
-printf '%s\n' "$(cat "$RUNNER_TEMP/m0-tw-guest.log")" | grep -q "M0-TW-PROOF-RESULT=PASS" || fail "guest probe did not report PASS"
 
-log 'collect guest evidence'
+log 'collect guest evidence (before the PASS gate: evidence survives failure)'
 mkdir -p "$EVIDENCE_DIR"
 if vm_ssh "test -d '$GUEST_EVIDENCE_DIR'" 2>/dev/null; then
   vm_ssh "tar -C '$GUEST_EVIDENCE_DIR' -czf - ." > "$EVIDENCE_DIR/guest-evidence.tar.gz" || true
   mkdir -p "$EVIDENCE_DIR/guest"
   tar -xzf "$EVIDENCE_DIR/guest-evidence.tar.gz" -C "$EVIDENCE_DIR/guest" 2>/dev/null || true
 fi
+
+[ "$GUEST_RC" = 0 ] || fail "guest probe failed (exit $GUEST_RC)"
+grep -q "M0-TW-PROOF-RESULT=PASS" "$RUNNER_TEMP/m0-tw-guest.log" || fail "guest probe did not report PASS"
 
 log 'openSUSE Tumbleweed composition-A proof PASSED'
