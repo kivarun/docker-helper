@@ -173,7 +173,6 @@ EOF
 # real unrelated Session would have
 mkdir -p "$WORK_DIR/docker-config-a" "$WORK_DIR/docker-config-b"
 buildctl --addr "$BUILDCTL_ADDR" \
-  --opts-file /dev/null \
   build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_A" \
