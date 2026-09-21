@@ -1,0 +1,36 @@
+name: M0 namespace diagnosis
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: userns mechanics as root and as builder
+        run: |
+          set -x
+          cat /proc/sys/user/max_user_namespaces
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          unshare --user --map-root-user true && echo ROOT_UNSHARE_OK || echo ROOT_UNSHARE_FAIL
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y uidmap >/dev/null
+          sudo useradd -m -s /usr/sbin/nologin dhm0builder || true
+          sudo sh -c 'echo "dhm0builder:231072:65536" >> /etc/subuid; echo "dhm0builder:231072:65536" >> /etc/subgid'
+          sudo -u dhm0builder sh -c 'unshare --user --map-root-user id && echo BUILDER_UNSHARE_OK' || echo BUILDER_UNSHARE_FAIL
+          echo "--- write uid_map manually as builder ---"
+          sudo -u dhm0builder sh -c '
+            set -x
+            unshare --user true
+            echo "plain unshare user ns: $?"
+            # create ns and map only self
+            unshare --user --map-user 0 true
+            echo "map-user ns: $?"
+          ' || true
+          echo "--- newuidmap direct ---"
+          sudo -u dhm0builder sh -c '
+            set -x
+            unshare --user sh -c "echo 0 > /proc/self/uid_map" 
+            echo rc=$?
+          ' || true
