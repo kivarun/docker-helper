@@ -189,8 +189,9 @@ CTX_B="$WORK_DIR/ctx-b"
 mkdir -p "$CTX_B"
 cat > "$CTX_B/Dockerfile" <<EOF
 FROM alpine:3.20
+RUN mkdir -p /m1
 RUN --mount=type=cache,id=$CACHE_ID,target=/cache \\
-    cat /cache/marker > /cache/observed.txt; echo rc=\$? > /cache/observed-rc.txt
+    sh -c 'cat /cache/marker > /m1/observed.txt 2>/dev/null || echo missing > /m1/observed.txt'
 EOF
 buildctl --addr "$BUILDCTL_ADDR" \
   build \
@@ -201,13 +202,12 @@ buildctl --addr "$BUILDCTL_ADDR" \
   > "$WORK_DIR/build-b.log" 2>&1 || { tail -30 "$WORK_DIR/build-b.log"; fail "session B build failed"; }
 
 # extract the observed marker from B's result image
-rm -rf "$WORK_DIR/img-b" && mkdir -p "$WORK_DIR/img-b"
-tar -xzf /dev/null 2>/dev/null || true
+B_LOAD_ERR=""
 if [ -f "$WORK_DIR/out-b.tar" ]; then
-  docker load -i "$WORK_DIR/out-b.tar" >/dev/null 2>&1 || true
+  B_LOAD_ERR="$(docker load -i "$WORK_DIR/out-b.tar" 2>&1 >/dev/null || true)"
 fi
-OBS="$(docker run --rm m1-b:latest sh -c 'cat /cache/observed-rc.txt 2>/dev/null; echo ---; cat /cache/observed.txt 2>/dev/null; echo ---; cat /cache/marker 2>/dev/null' 2>&1 || true)"
-evidence cache-cross-read.txt "session B observed from cache mount id=$CACHE_ID:
+OBS="$(docker run --rm m1-b:latest sh -c 'cat /m1/observed.txt 2>/dev/null; echo ---; cat /cache/marker 2>/dev/null' 2>&1 || true)"
+evidence cache-cross-read.txt "session B observed from cache mount id=$CACHE_ID (docker load errors: $B_LOAD_ERR):
 $OBS"
 if printf '%s\n' "$OBS" | grep -q "SESSION-A-SECRET-KEY"; then
   say "REPRODUCED: session B read session A's cache-mount content (PASS — leak shown)"
@@ -256,12 +256,14 @@ buildctl --addr "$BUILDCTL_ADDR" \
   > "$L2_LOG" 2>&1 || fail "layer build 2 failed"
 
 CACHED_LINE="$(grep -cE "\[.*\] CACHED" "$L2_LOG" || true)"
-docker load -i "$WORK_DIR/out-l1.tar" >/dev/null 2>&1 || true
-docker load -i "$WORK_DIR/out-l2.tar" >/dev/null 2>&1 || true
-V1="$(docker run --rm m1-l1:latest cat /m1/nondeterministic.txt 2>/dev/null || true)"
-V2="$(docker run --rm m1-l2:latest cat /m1/nondeterministic.txt 2>/dev/null || true)"
+LOAD_ERR=""
+LOAD_ERR+="$(docker load -i "$WORK_DIR/out-l1.tar" 2>&1 >/dev/null || true)"
+LOAD_ERR+="$(docker load -i "$WORK_DIR/out-l2.tar" 2>&1 >/dev/null || true)"
+V1="$(docker run --rm m1-l1:latest cat /m1/nondeterministic.txt 2>&1 || true)"
+V2="$(docker run --rm m1-l2:latest cat /m1/nondeterministic.txt 2>&1 || true)"
 evidence layer-cache.txt "layer build 1 value: $V1
 layer build 2 value: $V2
+docker load errors: $LOAD_ERR
 build 2 CACHED lines: $CACHED_LINE
 build 2 log tail:
 $(tail -5 "$L2_LOG")"
@@ -294,8 +296,9 @@ RUN --mount=type=cache,id=$CACHE_ID,target=/cache \\
 EOF
 cat > "$CTX_NS_B/Dockerfile" <<EOF
 FROM alpine:3.20
+RUN mkdir -p /m1
 RUN --mount=type=cache,id=$CACHE_ID,target=/cache \\
-    cat /cache/marker > /cache/observed.txt 2>&1 || true
+    sh -c 'cat /cache/marker > /m1/observed.txt 2>/dev/null || echo missing > /m1/observed.txt'
 EOF
 NS_TEST() {
   local ns="$1" tag="$2" out="$3"
@@ -312,7 +315,7 @@ NS_TEST() {
     --output "type=oci,name=$tag-b:latest,dest=$out.b.tar" \
     > "$WORK_DIR/ns-b-$ns.log" 2>&1 || { tail -20 "$WORK_DIR/ns-b-$ns.log"; fail "NS read build ($ns) failed"; }
   docker load -i "$out.b.tar" >/dev/null 2>&1 || true
-  docker run --rm "$tag-b:latest" cat /cache/observed.txt 2>/dev/null || true
+  docker run --rm "$tag-b:latest" cat /m1/observed.txt 2>/dev/null || true
 }
 SAME_NS_OBS="$(NS_TEST "m1-ns-shared" m1-nssame "$WORK_DIR/out-ns-same.tar")"
 evidence mitigation-same-ns.txt "same BUILDKIT_CACHE_MOUNT_NS on both builds, B observed:
