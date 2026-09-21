@@ -35,7 +35,7 @@ jobs:
       - name: Install probe dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y uidmap slirp4netns fuse-overlayfs fuse3 newuidmap newgidmap curl jq shellcheck
+          sudo apt-get install -y uidmap slirp4netns fuse-overlayfs fuse3 curl jq shellcheck
           sudo systemctl unmask --now docker.service docker.socket || true
           sudo systemctl start docker || true
           sudo useradd -m -s /usr/sbin/nologin dhm0builder || true
