@@ -141,10 +141,10 @@ set -Eeuo pipefail
 RUNTIME="$1"; STATE="$2"; CMD="$3"; OP="${4:-}"
 
 if [ "$CMD" != "purge" ]; then
-  case "$OP" in
-    op_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-    *) echo "ERR bad operation id"; exit 0 ;;
-  esac
+  # canonical operation id grammar: op_ + exactly 32 lowercase hex chars
+  if [[ ! "$OP" =~ ^op_[0-9a-f]{32}$ ]]; then
+    echo "ERR bad operation id"; exit 0
+  fi
 fi
 
 start_op() {
