@@ -56,7 +56,9 @@ jobs:
           BUILDKIT_VERSION=v0.33.0
           curl -fsSL -o /tmp/buildkit.tgz \
             "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-v0.33.0.linux-amd64.tar.gz"
-          sudo tar -xzf /tmp/buildkit.tgz -C /usr/local --strip-components=1
+          sudo tar -xzf /tmp/buildkit.tgz -C /usr/local
+          export PATH="/usr/local/bin:$PATH"
+          echo 'PATH=/usr/local/bin:'"$PATH" >> "$GITHUB_ENV"
           buildkitd --version
           buildctl --version
 
