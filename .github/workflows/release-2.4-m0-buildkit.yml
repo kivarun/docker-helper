@@ -1,0 +1,52 @@
+name: Release 2.4 M0 BuildKit sandbox proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-static-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate probe script
+        run: |
+          bash -n scripts/release-2.4-m0-buildkit-proof.sh
+          shellcheck scripts/release-2.4-m0-buildkit-proof.sh
+
+  buildkit-rootless-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install probe dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y uidmap slirp4netns fuse-overlayfs fuse3 newuidmap newgidmap curl jq shellcheck
+          sudo systemctl unmask --now docker.service docker.socket || true
+          sudo systemctl start docker || true
+          sudo useradd -m -s /usr/sbin/nologin dhm0builder || true
+          sudo sh -c 'grep -q dhm0builder /etc/subuid || echo "dhm0builder:200000:65536" >> /etc/subuid'
+          sudo sh -c 'grep -q dhm0builder /etc/subgid || echo "dhm0builder:200000:65536" >> /etc/subgid'
+          # GitHub runner has docker CLI but docker.service may need starting
+          sudo docker version || true
+
+      - name: Run rootless BuildKit M0 probe
+        run: |
+          sudo -E env "PATH=$PATH" M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m0-evidence" \
+            scripts/release-2.4-m0-buildkit-proof.sh
+
+      - name: Upload M0 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-2.4-m0-buildkit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-m0-evidence
+          if-no-files-found: error
