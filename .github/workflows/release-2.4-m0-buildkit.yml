@@ -80,6 +80,29 @@ jobs:
           grep -rl "user_namespace" /etc/apparmor.d/ 2>/dev/null | head -5
           ls /etc/apparmor.d/unprivileged-userns 2>/dev/null && cat /etc/apparmor.d/unprivileged-userns | head -20 || echo "no unprivileged-userns profile"
 
+      - name: Narrow AppArmor profile for the builder rootlesskit
+        run: |
+          sudo tee /etc/apparmor.d/dhm0-rootlesskit > /dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile dhm0-rootlesskit /usr/local/bin/rootlesskit flags=(attach_disconnected,mediate_deleted) {
+            userns,
+            capability,
+            network,
+            network alg,
+            network vsock,
+            file,
+            umount,
+            signal (receive) peer=unconfined,
+            signal (send,receive) peer=dhm0-rootlesskit,
+            ptrace (readby) peer=dhm0-rootlesskit,
+            deny ptrace (read) peer=dhm0-rootlesskit,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/dhm0-rootlesskit
+          aa-status | head -12
+
       - name: Run rootless BuildKit M0 probe
         run: |
           sudo -E env "PATH=$PATH" M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m0-evidence" \
