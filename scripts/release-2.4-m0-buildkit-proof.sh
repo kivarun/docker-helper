@@ -49,7 +49,7 @@ evidence_cmd() {
 
 su_builder() {
   setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_UID" --clear-groups \
-    env XDG_RUNTIME_DIR="$BUILDER_XDG" HOME="$BUILDER_HOME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    env XDG_RUNTIME_DIR="$BUILDER_XDG" HOME="$BUILDER_HOME" USER="$BUILDER_USER" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     "$@"
 }
 
