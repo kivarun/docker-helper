@@ -51,6 +51,14 @@ evidence() {
   say "evidence: $name ($(wc -l < "$EVIDENCE_DIR/$name") lines)"
 }
 
+evidence_cmd() {
+  local name="$1"; shift
+  local out
+  out="$("$@" 2>&1 || true)"
+  evidence "$name" "$out"
+  printf '%s\n' "$out"
+}
+
 su_builder() {
   setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_UID" --clear-groups \
     env XDG_RUNTIME_DIR="$BUILDER_XDG" HOME="$BUILDER_HOME" USER="$BUILDER_USER" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
