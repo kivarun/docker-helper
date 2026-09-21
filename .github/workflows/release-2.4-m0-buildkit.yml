@@ -43,13 +43,16 @@ jobs:
           sudo sh -c 'grep -q dhm0builder /etc/subgid || echo "dhm0builder:200000:65536" >> /etc/subgid'
           sudo docker version || true
 
-      - name: Install rootlesskit from official GitHub release
+      - name: Distro rootlesskit (noble shipped AppArmor profile)
         run: |
-          ROOTLESSKIT_VERSION=v3.2.0
-          curl -fsSL -o /tmp/rootlesskit.tgz \
-            "https://github.com/rootless-containers/rootlesskit/releases/download/${ROOTLESSKIT_VERSION}/rootlesskit-x86_64.tar.gz"
-          sudo tar -xzf /tmp/rootlesskit.tgz -C /usr/local/bin
+          set -x
+          apt-cache search rootlesskit || true
+          apt-cache policy rootlesskit || true
+          sudo apt-get install -y rootlesskit
+          which rootlesskit
           rootlesskit --version
+          ls -la /etc/apparmor.d/ | grep -i rootless || true
+          cat /etc/apparmor.d/rootlesskit 2>/dev/null || echo "no distro rootlesskit profile"
 
       - name: Install BuildKit from official GitHub release
         run: |
@@ -79,63 +82,6 @@ jobs:
           echo "--- apparmor profiles mentioning unprivileged userns ---"
           grep -rl "user_namespace" /etc/apparmor.d/ 2>/dev/null | head -5
           ls /etc/apparmor.d/unprivileged-userns 2>/dev/null && cat /etc/apparmor.d/unprivileged-userns | head -20 || echo "no unprivileged-userns profile"
-
-      - name: Narrow AppArmor profile for the builder rootlesskit
-        run: |
-          sudo tee /etc/apparmor.d/dhm0-rootlesskit > /dev/null <<'PROFILE'
-          abi <abi/4.0>,
-          include <tunables/global>
-
-          profile dhm0-rootlesskit /usr/local/bin/rootlesskit flags=(attach_disconnected,mediate_deleted) {
-            userns,
-            capability,
-            network,
-            network alg,
-            network vsock,
-            file,
-            umount,
-            signal (receive) peer=unconfined,
-            signal (send,receive) peer=dhm0-rootlesskit,
-            ptrace (readby) peer=dhm0-rootlesskit,
-            deny ptrace (read) peer=dhm0-rootlesskit,
-            /usr/bin/nsenter r,
-            /{usr/,}bin/{,b}ash r,
-            /usr/local/bin/buildkitd r,
-            /usr/sbin/ip r,
-            /usr/bin/ip r,
-          }
-          PROFILE
-          sudo tee /etc/apparmor.d/dhm0-nsenter > /dev/null <<'PROFILE2'
-          abi <abi/4.0>,
-          include <tunables/global>
-
-          profile dhm0-nsenter /usr/bin/nsenter flags=(attach_disconnected,mediate_deleted) {
-            userns,
-            capability,
-            network,
-            file,
-            signal (receive) peer=unconfined,
-            ptrace (readby) peer=unconfined,
-          }
-          PROFILE2
-          sudo apparmor_parser -r /etc/apparmor.d/dhm0-rootlesskit
-          sudo apparmor_parser -r /etc/apparmor.d/dhm0-nsenter
-          sudo aa-status | head -12
-          echo '--- manual nsenter join test as builder ---'
-          (sudo -u dhm0builder unshare --user --map-root-user sleep 30 &
-           sleep 1
-           CHILD=$(pgrep -u dhm0builder -f "sleep 30" | head -1)
-           [ -n "$CHILD" ] && sudo -u dhm0builder nsenter -t "$CHILD" -U --preserve-credentials id && echo NSENTER_JOIN_OK || echo NSENTER_JOIN_SKIP
-           pkill -u dhm0builder -f "sleep 30" || true)
-
-      - name: Diagnose nsenter/AppArmor state
-        run: |
-          sudo aa-status | head -20 || true
-          grep dhm0 /etc/subuid /etc/subgid
-          sudo -u dhm0builder unshare --user --map-root-user true && echo UNSHARE_AS_BUILDER_OK || echo UNSHARE_AS_BUILDER_FAIL
-          echo '--- try rootlesskit net=none as builder ---'
-          sudo -u dhm0builder rootlesskit --net=none true && echo RK_NONE_BUILDER_OK || echo RK_NONE_BUILDER_FAIL
-          echo '--- try rootlesskit slirp as runner (own profile not applicable to builder) ---'
 
       - name: Diagnose userns as builder user
         run: |
