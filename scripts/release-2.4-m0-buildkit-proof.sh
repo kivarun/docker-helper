@@ -197,19 +197,19 @@ evidence buildkitd.log "$(tail -50 "$WORK_DIR/buildkitd.log")"
 # daemon a few seconds of GRPC readiness after the socket appears
 buildctl_ok=0
 for _ in $(seq 1 15); do
-  if buildctl --addr "$BUILDCTL_ADDR" workers >/dev/null 2>&1; then
+  if buildctl --addr "$BUILDCTL_ADDR" debug workers >/dev/null 2>&1; then
     buildctl_ok=1
     break
   fi
   sleep 1
 done
 [ "$buildctl_ok" = 1 ] || {
-  buildctl --addr "$BUILDCTL_ADDR" workers 2>&1 | head -10 || true
+  buildctl --addr "$BUILDCTL_ADDR" debug workers 2>&1 | head -10 || true
   fail "root cannot drive the rootless buildkitd socket"
 }
 say "root -> buildkitd control socket connectivity OK"
 
-evidence_cmd workers.json bash -c "buildctl --addr $BUILDCTL_ADDR workers --inner 2>&1 || true"
+evidence_cmd workers.json bash -c "buildctl --addr $BUILDCTL_ADDR debug workers --inner 2>&1 || true"
 
 # ---------------------------------------------------------------------------
 # 4. namespace + host-root authority evidence (inside build RUN)
@@ -375,7 +375,7 @@ RUN --security=insecure true'
 say "=== 9. control-socket isolation ==="
 ls -la "$SOCKET" > "$EVIDENCE_DIR/socket-perms.txt"
 if setpriv --reuid 65534 --regid 65534 --clear-groups \
-  env BUILDKIT_HOST="$BUILDCTL_ADDR" buildctl --addr "$BUILDCTL_ADDR" workers >/dev/null 2>&1; then
+  env BUILDKIT_HOST="$BUILDCTL_ADDR" buildctl --addr "$BUILDCTL_ADDR" debug workers >/dev/null 2>&1; then
   fail "ordinary user CAN connect to the buildkit control socket (contract violation)"
 fi
 say "ordinary (nobody) connect DENIED (PASS)"
@@ -386,7 +386,7 @@ AGENT_USER="m0agent"
 id "$AGENT_USER" >/dev/null 2>&1 || useradd -m "$AGENT_USER" 2>/dev/null || true
 if id "$AGENT_USER" >/dev/null 2>&1; then
   if setpriv --reuid "$(id -u "$AGENT_USER")" --regid "$(id -g "$AGENT_USER")" --clear-groups \
-    env buildctl --addr "$BUILDCTL_ADDR" workers >/dev/null 2>&1; then
+    env buildctl --addr "$BUILDCTL_ADDR" debug workers >/dev/null 2>&1; then
     fail "agent user CAN connect to the buildkit control socket"
   fi
   say "agent user connect DENIED (PASS)"
