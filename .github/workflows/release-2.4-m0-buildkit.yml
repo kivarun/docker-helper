@@ -10,6 +10,7 @@ on:
       - scripts/release-2.4-m0-buildkit-proof.sh
       - scripts/release-2.4-m0-buildkit-tw.sh
       - scripts/release-2.4-m0-buildkit-tw-vm.sh
+      - scripts/release-2.4-m1-*.sh
 
 permissions:
   contents: read
@@ -206,3 +207,53 @@ jobs:
           name: release-2.4-m0-buildkit-tw-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-2.4-m0-tw-evidence
           if-no-files-found: warn
+
+  m1-global-daemon-proof:
+    # M1 part 1: shared persistent buildkitd cross-build cache isolation
+    # evidence on the hosted runners. Reuses the M0 environment setup.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install probe dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y uidmap slirp4netns fuse-overlayfs fuse3 curl jq shellcheck rootlesskit
+          sudo systemctl start docker || true
+          sudo useradd -m -s /usr/sbin/nologin dhm0builder || true
+          sudo sh -c 'grep -q dhm0builder /etc/subuid || echo "dhm0builder:200000:65536" >> /etc/subuid'
+          sudo sh -c 'grep -q dhm0builder /etc/subgid || echo "dhm0builder:200000:65536" >> /etc/subgid'
+          sudo docker version || true
+
+      - name: Install BuildKit from official GitHub release
+        run: |
+          BUILDKIT_VERSION=v0.33.0
+          BUILDKIT_SHA256=b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead
+          curl -fsSL -o /tmp/buildkit.tgz \
+            "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz"
+          ACTUAL_SHA256="$(sha256sum /tmp/buildkit.tgz | awk '{print $1}')"
+          if [ "$ACTUAL_SHA256" != "$BUILDKIT_SHA256" ]; then
+            echo "BuildKit tarball SHA256 mismatch: expected $BUILDKIT_SHA256, got $ACTUAL_SHA256" >&2
+            exit 1
+          fi
+          echo "BuildKit tarball SHA256 verified: $ACTUAL_SHA256"
+          sudo tar -xzf /tmp/buildkit.tgz -C /usr/local
+          export PATH="/usr/local/bin:$PATH"
+          echo 'PATH=/usr/local/bin:'"$PATH" >> "$GITHUB_ENV"
+          buildkitd --version
+          buildctl --version
+
+      - name: Run M1 global-daemon cache isolation probe
+        run: |
+          sudo -E env "PATH=$PATH" M1_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m1-global-evidence" \
+            scripts/release-2.4-m1-global-daemon-proof.sh
+
+      - name: Upload M1 global-daemon evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-m1-global-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-m1-global-evidence
+          if-no-files-found: error
