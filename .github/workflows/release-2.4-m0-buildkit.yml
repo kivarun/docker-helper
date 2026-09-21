@@ -103,6 +103,15 @@ jobs:
           sudo apparmor_parser -r /etc/apparmor.d/dhm0-rootlesskit
           aa-status | head -12
 
+      - name: Diagnose nsenter/AppArmor state
+        run: |
+          sudo aa-status | head -20 || true
+          grep dhm0 /etc/subuid /etc/subgid
+          sudo -u dhm0builder unshare --user --map-root-user true && echo UNSHARE_AS_BUILDER_OK || echo UNSHARE_AS_BUILDER_FAIL
+          echo '--- try rootlesskit net=none as builder ---'
+          sudo -u dhm0builder rootlesskit --net=none true && echo RK_NONE_BUILDER_OK || echo RK_NONE_BUILDER_FAIL
+          echo '--- try rootlesskit slirp as runner (own profile not applicable to builder) ---'
+
       - name: Run rootless BuildKit M0 probe
         run: |
           sudo -E env "PATH=$PATH" M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m0-evidence" \
