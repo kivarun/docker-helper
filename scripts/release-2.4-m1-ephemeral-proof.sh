@@ -298,17 +298,27 @@ chown "$BUILDER_UID:$BUILDER_GID" "$MGR_LOG" "$MGR_WORK/manager-listener.out"
 setsid setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
   env XDG_RUNTIME_DIR="/run/user/$BUILDER_UID" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  python3 "$MGR_WORK/manager-listener.py" \
+  python3 -u "$MGR_WORK/manager-listener.py" \
     "$MGR_SOCK" "$MGR_WORK/manager-ops.sh" "$MGR_RUNTIME" "$MGR_STATE" \
   > "$MGR_WORK/manager-listener.out" 2>&1 &
 MGR_PID=$!
 
 ready=0
 for _ in $(seq 1 20); do
+  if ! kill -0 "$MGR_PID" 2>/dev/null; then
+    say "manager process exited early"
+    break
+  fi
   if [ -S "$MGR_SOCK" ] && [ -f "$MGR_WORK/manager.ready" ]; then ready=1; break; fi
   sleep 0.5
 done
-[ "$ready" = 1 ] || { cat "$MGR_WORK/manager-listener.out" 2>/dev/null || true; fail "manager socket never appeared"; }
+if [ "$ready" != 1 ]; then
+  say "manager listener failed to start; diagnostics:"
+  cat "$MGR_WORK/manager-listener.out" 2>/dev/null || true
+  ls -la "$MGR_RUNTIME" "$MGR_WORK" 2>/dev/null || true
+  ps -ef | grep -E "manager-listener|setpriv" | grep -v grep || true
+  fail "manager socket never appeared"
+fi
 # grant root access via the root:builder group pair (the file is 0660 owned
 # builder:builder; chown to root:builder so root and builder-group members
 # both connect)
@@ -672,7 +682,7 @@ rm -f "$MGR_WORK/manager.ready" "$MGR_SOCK"
 setsid setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
   env XDG_RUNTIME_DIR="/run/user/$BUILDER_UID" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  python3 "$MGR_WORK/manager-listener.py" \
+  python3 -u "$MGR_WORK/manager-listener.py" \
     "$MGR_SOCK" "$MGR_WORK/manager-ops.sh" "$MGR_RUNTIME" "$MGR_STATE" \
   >> "$MGR_WORK/manager-listener.out" 2>&1 &
 MGR_PID=$!
@@ -681,7 +691,7 @@ for _ in $(seq 1 20); do
   if [ -S "$MGR_SOCK" ] && [ -f "$MGR_WORK/manager.ready" ]; then ready=1; break; fi
   sleep 0.5
 done
-[ "$ready" = 1 ] || fail "manager did not restart"
+[ "$ready" = 1 ] || { cat "$MGR_WORK/manager-listener.out" || true; fail "manager did not restart"; }
 chown "root:$BUILDER_GID" "$MGR_SOCK"
 say "manager restarted"
 
