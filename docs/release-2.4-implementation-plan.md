@@ -491,6 +491,15 @@ child processes):
 
 ## 9. Mandatory cancellation-race tests (P1 gate, before P3)
 
+Test ownership across phases (no test-only fake future BuildKit
+architecture is constructed in P1):
+
+- **P1** proves the GENERIC sequential-child cancellation/shutdown
+  invariants with synthetic stages (real child processes/seams);
+- **P2** owns the manager RPC ambiguity tests (§3);
+- **P3** promotes the generic P1 proof to the ACTUAL build stages and
+  asserts the manager STOP/image invariants there.
+
 Race-focused tests over the stage boundaries (table-driven; real
 production path with `ExecCommandContext` seam for process control):
 
@@ -741,12 +750,11 @@ not a product copy). The plan:
 - PREFERRED: explicit transition into the DISTRO rootlesskit profile
   (`/etc/apparmor.d/rootlesskit`, shipped by Ubuntu's rootlesskit
   package and proven in M0 to carry the userns permission under
-  `apparmor_restrict_unprivileged_userns=1`). The builder profile grants
-  `ix` (inherit-or-execute) only if the distro profile is already
-  attachable for the confined domain, otherwise `px`/transition rules
-  (`profile docker-helper-builder /usr/bin/rootlesskit { ... }` style
-  named transition in the builder profile) hand execution to the distro
-  profile. The builder profile itself must then contain NO parallel
+  `apparmor_restrict_unprivileged_userns=1`). Mechanism selection is
+  deferred to P5 live proof: plain `ix` does NOT transition — it
+  inherits the current (builder) profile — so the actual transition
+  must be proven with `px`/`Px`/named transition as appropriate.
+  The builder profile itself must then contain NO parallel
   rootlesskit userns policy: the distro profile remains the single
   owner of that permission;
 - fallback only on demonstrated denial evidence: if the distro profile
@@ -756,8 +764,9 @@ not a product copy). The plan:
   addition, reviewed as a dedicated policy change with the denial as its
   justification — not a preemptive duplicate userns policy;
 - `buildkitd`/`slirp4netns`/`newuidmap` execution from the builder
-  domain follows the same evidence-first shape (ix on the distro
-  binaries; newuidmap transitions to its distro profile if one exists);
+  domain follows the same evidence-first shape (execute permission on
+  the distro binaries with the transition mechanism chosen in P5;
+  newuidmap transitions to its distro profile if one exists);
 - UAT asserts the transition works under
   `apparmor_restrict_unprivileged_userns=1` (a real build under the real
   unit on 24.04 and 26.04, dmesg/audit clean of AppArmor DENIED entries
