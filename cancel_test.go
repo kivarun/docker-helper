@@ -65,7 +65,7 @@ func TestCancelRunningBuild(t *testing.T) {
 	// Wait for the process to start.
 	for i := 0; i < 50; i++ {
 		op.mu.Lock()
-		proc := op.cmd
+		proc := op.currentCmd
 		op.mu.Unlock()
 		if proc != nil && proc.Process != nil {
 			break
@@ -73,7 +73,7 @@ func TestCancelRunningBuild(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if op.cmd == nil || op.cmd.Process == nil {
+	if op.currentCmd == nil || op.currentCmd.Process == nil {
 		t.Fatal("process not started yet")
 	}
 
@@ -214,7 +214,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 	// Wait for the process to start.
 	for i := 0; i < 50; i++ {
 		op.mu.Lock()
-		proc := op.cmd
+		proc := op.currentCmd
 		op.mu.Unlock()
 		if proc != nil && proc.Process != nil {
 			break
@@ -222,7 +222,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if op.cmd == nil || op.cmd.Process == nil {
+	if op.currentCmd == nil || op.currentCmd.Process == nil {
 		t.Fatal("process not started yet")
 	}
 
@@ -499,7 +499,7 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	// Wait for the process to start.
 	for i := 0; i < 50; i++ {
 		op.mu.Lock()
-		proc := op.cmd
+		proc := op.currentCmd
 		op.mu.Unlock()
 		if proc != nil && proc.Process != nil {
 			break
@@ -561,7 +561,7 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 	// Wait for the process to start.
 	for i := 0; i < 50; i++ {
 		op.mu.Lock()
-		proc := op.cmd
+		proc := op.currentCmd
 		op.mu.Unlock()
 		if proc != nil && proc.Process != nil {
 			break
@@ -1035,7 +1035,7 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	// Wait for the process to start.
 	for i := 0; i < 50; i++ {
 		op.mu.Lock()
-		proc := op.cmd
+		proc := op.currentCmd
 		op.mu.Unlock()
 		if proc != nil && proc.Process != nil {
 			break
@@ -1154,7 +1154,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	// Create a run operation directly with cidfile set.
 	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
 	op.cidfile = cidfile
-	op.started = true // simulate already-started process
+
 	app.OperationSupervisor.mu.Lock()
 	app.OperationSupervisor.ops[op.ID] = op
 	app.OperationSupervisor.mu.Unlock()
@@ -1179,7 +1179,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cannot start test process: %v", err)
 	}
-	op.cmd = cmd
+	op.currentCmd = cmd
 
 	// Verify the process is running.
 	if cmd.Process == nil {
@@ -1295,7 +1295,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 
 	// Create a run operation with force cleanup already claimed by an owner.
 	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
-	op.started = true
+
 	op.forceOwned = true
 	op.forceDone = make(chan struct{})
 	op.forceDeadline = time.Now().Add(200 * time.Millisecond)
@@ -1310,7 +1310,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cannot start test process: %v", err)
 	}
-	op.cmd = cmd
+	op.currentCmd = cmd
 
 	// Wait for the process to install its SIGTERM trap.
 	waitProcessReady(t, readyFile)

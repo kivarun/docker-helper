@@ -273,7 +273,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	cmd := a.newDockerCommand(cmdCtx, "docker", args...)
 
-	result := startOperationProcess(cmd, op)
+	result := startOperationStage(cmd, op)
 
 	if result.Terminated {
 		cancel()
@@ -338,7 +338,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 // waitBuildCompletion waits for the build process to finish and transitions
 // the operation to succeeded or failed. It is the single owner of cmd.Wait().
 func (a *App) waitBuildCompletion(op *operation, started time.Time) {
-	err := op.cmd.Wait()
+	err := op.waitCurrentStage()
 
 	// Cleanup staging directory regardless of outcome.
 	cleanupErr := error(nil)

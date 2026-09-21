@@ -886,7 +886,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	cmd := a.newDockerCommand(cmdCtx, "docker", args...)
 
-	result := startOperationProcess(cmd, op)
+	result := startOperationStage(cmd, op)
 
 	if result.Terminated {
 		cancel()
@@ -939,7 +939,7 @@ func (a *App) newDockerCommand(ctx context.Context, name string, args ...string)
 // waitRunCompletion waits for the run process to finish and transitions
 // the operation to succeeded or failed. It is the single owner of cmd.Wait().
 func (a *App) waitRunCompletion(op *operation, started time.Time) {
-	err := op.cmd.Wait()
+	err := op.waitCurrentStage()
 
 	// The Docker CLI process finished. The correlated container is not
 	// assumed gone: the single run cleanup owner proves container absence

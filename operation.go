@@ -89,31 +89,42 @@ var ErrOperationNotFound = errors.New("operation not found")
 var ErrOperationAlreadyTerminal = errors.New("operation already terminal")
 
 type operation struct {
-	mu            sync.Mutex
-	ID            string         `json:"operation_id"`
-	SessionID     string         `json:"session_id"`
-	LauncherID    string         `json:"launcher_id,omitempty"`
-	Kind          string         `json:"kind"`
-	State         operationState `json:"status"`
-	CreatedAt     time.Time      `json:"created_at"`
-	StartedAt     *time.Time     `json:"started_at,omitempty"`
-	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
-	Duration      *string        `json:"duration,omitempty"`
-	ExitCode      *int           `json:"exit_code,omitempty"`
-	ResultCode    *string        `json:"result_code,omitempty"`
-	Image         string         `json:"image,omitempty"`
-	Context       string         `json:"context,omitempty"`
-	Dockerfile    string         `json:"dockerfile,omitempty"`
-	LogBuffer     *boundedBuffer `json:"-"`
-	cmd           *exec.Cmd
-	done          chan struct{}
-	doneOnce      sync.Once // ensures op.done is closed exactly once
-	terminated    bool      // set by terminateForShutdown/cancel when process not yet started
-	reason        terminationReason
-	started       bool          // set to true only after cmd.Start() succeeds
-	forceOwned    bool          // true when force cleanup has been claimed for this operation
-	forceDone     chan struct{} // closed when shared force-cleanup phase completes
-	forceDeadline time.Time     // absolute deadline shared by owner and all followers
+	mu          sync.Mutex
+	ID          string         `json:"operation_id"`
+	SessionID   string         `json:"session_id"`
+	LauncherID  string         `json:"launcher_id,omitempty"`
+	Kind        string         `json:"kind"`
+	State       operationState `json:"status"`
+	CreatedAt   time.Time      `json:"created_at"`
+	StartedAt   *time.Time     `json:"started_at,omitempty"`
+	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+	Duration    *string        `json:"duration,omitempty"`
+	ExitCode    *int           `json:"exit_code,omitempty"`
+	ResultCode  *string        `json:"result_code,omitempty"`
+	Image       string         `json:"image,omitempty"`
+	Context     string         `json:"context,omitempty"`
+	Dockerfile  string         `json:"dockerfile,omitempty"`
+	LogBuffer   *boundedBuffer `json:"-"`
+	// currentCmd is the Operation's current child-process slot: the one
+	// child process the Operation owns right now, or nil when no child is
+	// active (not yet started, already waited, or between sequential
+	// stages). A sequential stage installs the slot under op.mu via
+	// startOperationStage and the stage's single Wait owner clears it via
+	// waitCurrentStage. No exited *exec.Cmd is ever retained in the slot.
+	currentCmd *exec.Cmd
+	done       chan struct{}
+	doneOnce   sync.Once // ensures op.done is closed exactly once
+	// terminationRequested is the permanent termination latch. Set once by
+	// terminateForShutdown/cancel under op.mu; it never becomes false
+	// again. Meaning: this Operation has been claimed for termination and
+	// NO new child process stage may start — regardless of whether a child
+	// has not started yet, is currently running, has just exited, or the
+	// Operation is between stages.
+	terminationRequested bool
+	reason               terminationReason
+	forceOwned           bool          // true when force cleanup has been claimed for this operation
+	forceDone            chan struct{} // closed when shared force-cleanup phase completes
+	forceDeadline        time.Time     // absolute deadline shared by owner and all followers
 	// cidfile is the path to the Docker --cidfile for run operations.
 	// The helper determines this path before cmd.Start(); Docker CLI
 	// publishes the container ID into the file after the daemon creates
@@ -595,21 +606,27 @@ func (s *operationSupervisor) terminateOperations(ctx context.Context, targetOp 
 	}
 
 	// Phase 0+1: For each operation, atomically decide its fate under op.mu.
-	// If not started: mark terminated (blocks cmd.Start from proceeding).
-	// If started: send graceful SIGTERM.
-	// This single lock acquisition eliminates the race between checking
-	// started and setting terminated.
+	// Latch the permanent termination request (no later stage may ever
+	// start), and if a child process is active right now, signal it.
+	// Termination admission and child signaling happen in the same critical
+	// section, so there is no intermediate state: either the child receives
+	// the signal, or the Operation is latched before any later stage could
+	// have been admitted.
 	var terminated []*operation
 	for _, op := range ops {
 		op.mu.Lock()
 		if op.reason == terminationNone {
 			op.reason = reason
 		}
-		if !op.started {
-			op.terminated = true
+		op.terminationRequested = true
+		if op.currentCmd != nil && op.currentCmd.Process != nil {
+			op.currentCmd.Process.Signal(syscall.SIGTERM)
+		} else {
+			// No active child: the operation is either pre-start (its
+			// handler owns the terminal transition on the refused start)
+			// or between sequential stages (its stage driver completes
+			// it). Both observe the latch and never admit another child.
 			terminated = append(terminated, op)
-		} else if op.cmd != nil && op.cmd.Process != nil {
-			op.cmd.Process.Signal(syscall.SIGTERM)
 		}
 		op.mu.Unlock()
 	}
@@ -726,8 +743,8 @@ func (s *operationSupervisor) forceCleanupSequential(op *operation, killContaine
 		}
 	}
 	op.mu.Lock()
-	if op.cmd != nil && op.cmd.Process != nil {
-		op.cmd.Process.Kill()
+	if op.currentCmd != nil && op.currentCmd.Process != nil {
+		op.currentCmd.Process.Kill()
 	}
 	op.mu.Unlock()
 	forceCancel()
@@ -773,8 +790,8 @@ func forceCleanupOperation(op *operation, killContainer func(context.Context, st
 		}
 	}
 	op.mu.Lock()
-	if op.cmd != nil && op.cmd.Process != nil {
-		op.cmd.Process.Kill()
+	if op.currentCmd != nil && op.currentCmd.Process != nil {
+		op.currentCmd.Process.Kill()
 	}
 	op.mu.Unlock()
 	forceCancel()
@@ -996,41 +1013,54 @@ func (op *operation) Wait() {
 	<-op.done
 }
 
-// operationStartResult is returned by startOperationProcess.
+// operationStartResult is returned by startOperationStage.
 type operationStartResult struct {
-	Terminated bool  // true if operation was already terminated before start
+	Terminated bool  // true if the operation's termination latch was already set
 	Err        error // error from cmd.Start(), nil if successful
 }
 
-// startOperationProcess is a shared helper for starting operation processes
-// (build/run). It assigns stdout/stderr to op.LogBuffer, performs synchronized
-// start under op.mu, and returns the result.
+// startOperationStage is the shared owner of admitting and starting an
+// Operation's next child process (build/run; sequential stages install the
+// current-child slot one at a time). It assigns stdout/stderr to
+// op.LogBuffer, refuses admission once the termination latch is set, and
+// performs the synchronized start under op.mu so the start-vs-terminate
+// race linearizes in one critical section (either the child starts, or the
+// termination latch is set first and the child never starts).
 //
 // The caller must:
 // - handle pre-start termination (Terminated == true) with operation-specific cleanup
 // - handle start failure (Err != nil) with operation-specific result codes
-// - start the completion goroutine with operation-specific completion handler
-func startOperationProcess(cmd *exec.Cmd, op *operation) operationStartResult {
-	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
-	cmd.Stdout = op.LogBuffer
-	cmd.Stderr = op.LogBuffer
-
-	// Start the process under op.mu so terminateForShutdown can synchronize:
-	// either we start the process (started=true), or terminateForShutdown marks
-	// it as terminated. There is no intermediate state.
+// - be the single Wait owner for the started child via waitCurrentStage
+func startOperationStage(cmd *exec.Cmd, op *operation) operationStartResult {
 	op.mu.Lock()
-	if op.terminated {
+	if op.terminationRequested {
 		op.mu.Unlock()
 		return operationStartResult{Terminated: true}
 	}
-	startTime := time.Now()
-	op.StartedAt = &startTime
-	op.cmd = cmd
+	if op.currentCmd != nil {
+		// Sequential-stage discipline violation: a stage must Wait and
+		// clear the slot (waitCurrentStage) before the next admission.
+		op.mu.Unlock()
+		return operationStartResult{Err: errors.New("operation already owns an active child process")}
+	}
+	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
+	cmd.Stdout = op.LogBuffer
+	cmd.Stderr = op.LogBuffer
+	op.currentCmd = cmd
 
-	// cmd.Start() is called while holding op.mu so terminateForShutdown cannot
-	// race between checking started and setting terminated.
+	// cmd.Start() is called while holding op.mu so terminateOperations cannot
+	// race between latching termination and the child start: either the child
+	// starts and termination signals it, or the latch wins and no child
+	// starts.
 	err := cmd.Start()
-	op.started = err == nil
+	if err != nil {
+		op.currentCmd = nil
+	} else if op.StartedAt == nil {
+		// StartedAt is Operation metadata, set exactly once on the first
+		// successful child start; it is not reset per stage.
+		startTime := time.Now()
+		op.StartedAt = &startTime
+	}
 	op.mu.Unlock()
 
 	if err != nil {
@@ -1038,4 +1068,25 @@ func startOperationProcess(cmd *exec.Cmd, op *operation) operationStartResult {
 	}
 
 	return operationStartResult{}
+}
+
+// waitCurrentStage is the single Wait owner for the Operation's current
+// child process: it waits for the child installed by startOperationStage,
+// then clears the current-child slot under op.mu so a later stage can be
+// admitted. The permanent termination latch guarantees that a termination
+// arriving before, during, or after the Wait refuses any later stage.
+func (op *operation) waitCurrentStage() error {
+	op.mu.Lock()
+	cmd := op.currentCmd
+	op.mu.Unlock()
+	if cmd == nil {
+		return errors.New("operation has no active child process to wait for")
+	}
+	err := cmd.Wait()
+	op.mu.Lock()
+	if op.currentCmd == cmd {
+		op.currentCmd = nil
+	}
+	op.mu.Unlock()
+	return err
 }

@@ -84,7 +84,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	}
 	cmd1 := app.newDockerCommand(context.Background(), "sh", "-c",
 		"trap ':' TERM; touch "+readyFile1+"; while :; do :; done")
-	res1 := startOperationProcess(cmd1, op1)
+	res1 := startOperationStage(cmd1, op1)
 	if res1.Terminated || res1.Err != nil {
 		t.Fatalf("start op1: terminated=%v err=%v", res1.Terminated, res1.Err)
 	}
@@ -102,7 +102,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	}
 	cmd2 := app.newDockerCommand(context.Background(), "sh", "-c",
 		"trap ':' TERM; touch "+readyFile2+"; while :; do :; done")
-	res2 := startOperationProcess(cmd2, op2)
+	res2 := startOperationStage(cmd2, op2)
 	if res2.Terminated || res2.Err != nil {
 		t.Fatalf("start op2: terminated=%v err=%v", res2.Terminated, res2.Err)
 	}
@@ -203,26 +203,24 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	// Create two run operations with cidfiles.
 	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "", "", "")
 	op1.cidfile = cidfile1
-	op1.started = true
 	ready1 := filepath.Join(t.TempDir(), "op1.ready")
 	cmd1 := exec.Command("sh", "-c", "trap ':' TERM; touch "+ready1+"; while :; do :; done")
 	if err := cmd1.Start(); err != nil {
 		t.Fatalf("start cmd1: %v", err)
 	}
-	op1.cmd = cmd1
+	op1.currentCmd = cmd1
 	supervisor.mu.Lock()
 	supervisor.ops[op1.ID] = op1
 	supervisor.mu.Unlock()
 
 	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "", "", "")
 	op2.cidfile = cidfile2
-	op2.started = true
 	ready2 := filepath.Join(t.TempDir(), "op2.ready")
 	cmd2 := exec.Command("sh", "-c", "trap ':' TERM; touch "+ready2+"; while :; do :; done")
 	if err := cmd2.Start(); err != nil {
 		t.Fatalf("start cmd2: %v", err)
 	}
-	op2.cmd = cmd2
+	op2.currentCmd = cmd2
 	supervisor.mu.Lock()
 	supervisor.ops[op2.ID] = op2
 	supervisor.mu.Unlock()
