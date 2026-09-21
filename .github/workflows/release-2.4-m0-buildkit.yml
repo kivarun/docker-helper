@@ -41,8 +41,25 @@ jobs:
           sudo useradd -m -s /usr/sbin/nologin dhm0builder || true
           sudo sh -c 'grep -q dhm0builder /etc/subuid || echo "dhm0builder:200000:65536" >> /etc/subuid'
           sudo sh -c 'grep -q dhm0builder /etc/subgid || echo "dhm0builder:200000:65536" >> /etc/subgid'
-          # GitHub runner has docker CLI but docker.service may need starting
           sudo docker version || true
+
+      - name: Install rootlesskit from official GitHub release
+        run: |
+          ROOTLESSKIT_VERSION=v2.3.0
+          curl -fsSL -o /tmp/rootlesskit.tgz \
+            "https://github.com/rootless-containers/rootlesskit/releases/download/${ROOTLESSKIT_VERSION}/rootlesskit-x86_64-linux.tar.gz"
+          echo "ROOTLESSKIT_SHA256=$(sha256sum /tmp/rootlesskit.tgz | awk '{print $1}')" >> "$GITHUB_ENV"
+          sudo tar -xzf /tmp/rootlesskit.tgz -C /usr/local/bin
+          rootlesskit --version
+
+      - name: Install BuildKit from official GitHub release
+        run: |
+          BUILDKIT_VERSION=v0.19.2
+          curl -fsSL -o /tmp/buildkit.tgz \
+            "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-v0.19.2.linux-amd64.tar.gz"
+          sudo tar -xzf /tmp/buildkit.tgz -C /usr/local --strip-components=1
+          buildkitd --version
+          buildctl --version
 
       - name: Run rootless BuildKit M0 probe
         run: |
