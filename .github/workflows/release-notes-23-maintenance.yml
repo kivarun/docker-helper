@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   refresh:
-    if: ${{ github.event.head_commit.message == 'ops: refresh v2.3.0 release notes' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -21,10 +20,6 @@ jobs:
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/v2.3.0-notes.md"
-          awk '
-            /^## \[2\.3\.0\]/ { capture=1; next }
-            capture && /^## \[/ { exit }
-            capture { print }
-          ' CHANGELOG.md > "$notes"
+          awk '/^## \[2\.3\.0\]/ { capture=1; next } capture && /^## \[/ { exit } capture { print }' CHANGELOG.md > "$notes"
           test -s "$notes"
           gh release edit v2.3.0 --notes-file "$notes"
