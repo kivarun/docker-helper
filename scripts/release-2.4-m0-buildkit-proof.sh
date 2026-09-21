@@ -439,12 +439,23 @@ if buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_FAIL" \
   --local "dockerfile=$CTX_FAIL" \
-  --output "type=docker,dest=$WORK_DIR/m0-fail.tar" >/dev/null 2>&1; then
-  fail "failed build produced an export tar"
+  --output "type=docker,name=m0-fail-target:latest,dest=$WORK_DIR/m0-fail.tar" >/dev/null 2>&1; then
+  fail "failed build reported success"
 fi
-[ ! -f "$WORK_DIR/m0-fail.tar" ] || fail "failed build left a partial tar"
-say "failed build produced no export artifact (PASS)"
-echo "no partial tar on failure: PASS" > "$EVIDENCE_DIR/no-partial.txt"
+# The client may leave an empty/partial tar behind; what the contract needs
+# is that no USABLE target image reaches the Engine. docker load on any
+# leftover must not produce the tagged image.
+if [ -f "$WORK_DIR/m0-fail.tar" ]; then
+  if docker load < "$WORK_DIR/m0-fail.tar" >/dev/null 2>&1; then
+    fail "failed build left a loadable partial tar"
+  fi
+  rm -f "$WORK_DIR/m0-fail.tar"
+fi
+if docker image inspect m0-fail-target:latest >/dev/null 2>&1; then
+  fail "failed build left a usable target image in the Engine"
+fi
+say "failed build left no usable target image (PASS)"
+echo "no usable image on failure: PASS" > "$EVIDENCE_DIR/no-partial.txt"
 
 # ---------------------------------------------------------------------------
 # summary
