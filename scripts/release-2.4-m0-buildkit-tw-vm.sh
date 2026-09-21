@@ -38,16 +38,12 @@ log 'transfer the probe script into the guest'
 vm_scp "$SCRIPT_DIR/release-2.4-m0-buildkit-tw.sh" opc@127.0.0.1:/tmp/release-2.4-m0-buildkit-tw.sh
 
 log 'install guest prerequisites (distro packages + docker) and run the probe'
-PROBE_OUT="$(vm_ssh 'sudo bash -s' <<'RMT'
+set +e
+vm_ssh 'sudo bash -s' >"$RUNNER_TEMP/m0-tw-guest.log" 2>&1 <<'RMT'
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export DEBIAN_FRONTEND=noninteractive
 
 log(){ echo "[guest] $*"; }
-
-tune_zypper() {
-  zypper --non-interactive --gpg-auto-import-keys refresh 2>/dev/null || true
-}
 
 # docker is NOT present in the Minimal-VM cloud image; install it (this is
 # also what the UAT platform adapter does: `zypper install -y docker`).
@@ -70,10 +66,11 @@ chmod +x /tmp/release-2.4-m0-buildkit-tw.sh
 log "run the guest probe"
 bash /tmp/release-2.4-m0-buildkit-tw.sh
 RMT
-)"
-printf '%s\n' "$PROBE_OUT"
-
-printf '%s\n' "$PROBE_OUT" | grep -q "M0-TW-PROOF-RESULT=PASS" || fail "guest probe did not report PASS"
+GUEST_RC=$?
+cat "$RUNNER_TEMP/m0-tw-guest.log"
+set -e
+[ "$GUEST_RC" = 0 ] || fail "guest probe failed (exit $GUEST_RC)"
+printf '%s\n' "$(cat "$RUNNER_TEMP/m0-tw-guest.log")" | grep -q "M0-TW-PROOF-RESULT=PASS" || fail "guest probe did not report PASS"
 
 log 'collect guest evidence'
 mkdir -p "$EVIDENCE_DIR"
