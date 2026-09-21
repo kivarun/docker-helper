@@ -144,14 +144,19 @@ not chmod host CA material; it verifies builder readability and fails closed.
 
 | Target | Result | Evidence |
 |---|---|---|
-| Ubuntu 24.04 (hosted runner) | **PASS** | run [35631196290](https://github.com/kivarun/docker-helper/actions/runs/35631196290), artifact `release-2.4-m0-buildkit-35631196290-1`, digest `sha256:b8fd6729cc407de1953f869b1a9844509064a54cac426f319239c6b43313f769` |
-| Ubuntu 26.04 (hosted runner) | **PASS** | run [35631196290](https://github.com/kivarun/docker-helper/actions/runs/35631196290), artifact `release-2.4-m0-buildkit-2604-35631196290-1`, digest `sha256:120264c62f47de98a89d52e0848d95d187055302bda8744c7c1d9a236dd05141` |
-| openSUSE Tumbleweed (QEMU/KVM VM) | **PASS** | run [35631196290](https://github.com/kivarun/docker-helper/actions/runs/35631196290), artifact `release-2.4-m0-buildkit-tw-35631196290-1`, digest `sha256:942421bd5d82029eac35d9fb98b650e9b386cfd89efec232724abbc3e1188b6f` |
+| Ubuntu 24.04 (hosted runner) | **PASS** | run [35633765178](https://github.com/kivarun/docker-helper/actions/runs/35633765178), artifact `release-2.4-m0-buildkit-35633765178-1`, digest `sha256:4dfab9cb8bc840ed1ca09edfeb6bc91b619579404cda5e0abae5ed25afefb9ea` |
+| Ubuntu 26.04 (hosted runner) | **PASS** | run [35633765178](https://github.com/kivarun/docker-helper/actions/runs/35633765178), artifact `release-2.4-m0-buildkit-2604-35633765178-1`, digest `sha256:b06dc9a47be9146a3a49609d16e5a2bdab112756c23cc2b05be502fcdbecc5dc` |
+| openSUSE Tumbleweed (QEMU/KVM VM) | **PASS** | run [35633765178](https://github.com/kivarun/docker-helper/actions/runs/35633765178), artifact `release-2.4-m0-buildkit-tw-35633765178-1`, digest `sha256:0f89409a5b3a954ca75693bd10f0aba7d93ddf65f5dcb5e64986c7633bf7673e` |
 
-Tested commit: `15b560f27ae74764e85012cd0899f0a39b82827f` (the final probe
-SHA). Observed sandbox-root host-side UIDs: `1002` (24.04, 26.04; mapped into
-the builder's subordinate range 231072) and `1001` (Tumbleweed). BuildKit
-v0.33.0 on the Ubuntu targets; distro BuildKit 0.32.2 on Tumbleweed.
+Tested commit: `0db79950a24a72e49b876f362f517fc8d042a56e` (the final probe
+SHA, including the repo-policy action-SHA pinning). Observed sandbox-root
+host-side UIDs: `1002` (24.04, 26.04; mapped into the builder's subordinate
+range 231072) and `1001` (Tumbleweed). BuildKit v0.33.0 on the Ubuntu
+targets; distro BuildKit 0.32.2 on Tumbleweed.
+
+An equivalent earlier three-target PASS on the same probe mechanics ran at
+`15b560f27ae74764e85012cd0899f0a39b82827f` (run 35631196290); the later run
+adds only the action-SHA pinning required by the repository policy test.
 
 ### Earlier runs and the false-fail fix
 
