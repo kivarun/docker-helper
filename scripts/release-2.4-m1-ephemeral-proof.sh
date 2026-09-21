@@ -39,6 +39,7 @@
 
 set -Eeuo pipefail
 
+# shellcheck disable=SC2086
 PREFIX='[release-2.4-m1-ephemeral]'
 EVIDENCE_DIR="${M1_EVIDENCE_DIR:-/tmp/release-2.4-m1-ephemeral-evidence}"
 BUILDER_USER="${M0_BUILDER_USER:-dhm0builder}"
@@ -100,19 +101,20 @@ docker info >/dev/null 2>&1 || fail "rootful docker engine not reachable"
 # dangling CAs inside the child (rootlesskit#225). The manager spawns each
 # per-op buildkitd with SSL_CERT_FILE pointing at the real host CA bundle
 # (single env var, no mount games; the same narrow fix M0 proved).
-M1_BUILDER_CERT_ENV=""
+BUILDER_CERT_ENV_ARR=()
 if [ -f /etc/ssl/ca-bundle.pem ]; then
-  M1_BUILDER_CERT_ENV="SSL_CERT_FILE=$(realpath /etc/ssl/ca-bundle.pem 2>/dev/null || echo /etc/ssl/ca-bundle.pem)"
+  BUILDER_CERT_ENV_ARR=(SSL_CERT_FILE="$(realpath /etc/ssl/ca-bundle.pem 2>/dev/null || echo /etc/ssl/ca-bundle.pem)")
 elif [ -f /var/lib/ca-certificates/ca-bundle.pem ]; then
-  M1_BUILDER_CERT_ENV="SSL_CERT_FILE=/var/lib/ca-certificates/ca-bundle.pem"
+  BUILDER_CERT_ENV_ARR=(SSL_CERT_FILE=/var/lib/ca-certificates/ca-bundle.pem)
 fi
-if [ -n "$M1_BUILDER_CERT_ENV" ]; then
+M1_BUILDER_CERT_ENV="${BUILDER_CERT_ENV_ARR[0]:-}"
+if [ "${#BUILDER_CERT_ENV_ARR[@]}" -gt 0 ]; then
   # the builder must be able to read the bundle (no chmod of host material)
-  CA_TARGET="${M1_BUILDER_CERT_ENV#SSL_CERT_FILE=}"
+  CA_TARGET="${BUILDER_CERT_ENV_ARR[0]#SSL_CERT_FILE=}"
   if ! su -s /bin/sh "$BUILDER_USER" -c "test -r $CA_TARGET" 2>/dev/null; then
     fail "builder user cannot read host CA bundle ($CA_TARGET)"
   fi
-  say "builder CA env: $M1_BUILDER_CERT_ENV"
+  say "builder CA env: ${BUILDER_CERT_ENV_ARR[0]}"
 fi
 evidence builder-ca-env.txt "${M1_BUILDER_CERT_ENV:-<none needed>}"
 
@@ -202,9 +204,7 @@ debug = false
 [grpc]
   address = ["unix://$sock"]
 TOML
-  setsid env \
-    ${M1_BUILDER_CERT_ENV:-} \
-    rootlesskit \
+  setsid rootlesskit \
     --net=slirp4netns \
     --copy-up=/etc \
     --disable-host-loopback \
@@ -350,6 +350,7 @@ chown "$BUILDER_UID:$BUILDER_GID" "$MGR_LOG" "$MGR_WORK/manager-listener.out"
 setsid setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
   env XDG_RUNTIME_DIR="$BUILDER_XDG" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  "${BUILDER_CERT_ENV_ARR[@]}" \
   python3 -u "$MGR_WORK/manager-listener.py" \
     "$MGR_SOCK" "$MGR_WORK/manager-ops.sh" "$MGR_RUNTIME" "$MGR_STATE" \
   > "$MGR_WORK/manager-listener.out" 2>&1 &
@@ -747,6 +748,7 @@ rm -f "$MGR_RUNTIME/manager.ready" "$MGR_SOCK"
 setsid setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
   env XDG_RUNTIME_DIR="$BUILDER_XDG" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  "${BUILDER_CERT_ENV_ARR[@]}" \
   python3 -u "$MGR_WORK/manager-listener.py" \
     "$MGR_SOCK" "$MGR_WORK/manager-ops.sh" "$MGR_RUNTIME" "$MGR_STATE" \
   >> "$MGR_WORK/manager-listener.out" 2>&1 &
