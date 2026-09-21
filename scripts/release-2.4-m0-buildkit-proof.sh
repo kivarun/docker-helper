@@ -414,7 +414,7 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_HELLO" \
   --local "dockerfile=$CTX_HELLO" \
-  --output "type=docker,dest=$WORK_DIR/m0-hello.tar" >/dev/null 2>&1 \
+  --output "type=docker,name=m0-hello:latest,dest=$WORK_DIR/m0-hello.tar" >/dev/null 2>&1 \
   || fail "docker-type export failed"
 docker load < "$WORK_DIR/m0-hello.tar" >/dev/null || fail "docker load failed"
 MARKER="$(docker run --rm m0-hello:latest cat /m0/marker.txt)"
