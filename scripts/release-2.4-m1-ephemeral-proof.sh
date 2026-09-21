@@ -751,15 +751,22 @@ RESP_AFTER_PURGE="$(mgr_call "STOP $OP_B")"
 evidence restart-stale.txt "STOP for purged op -> $RESP_AFTER_PURGE"
 printf '%s\n' "$RESP_AFTER_PURGE" | grep -q "OK absent" || fail "purged op STOP did not answer 'absent': $RESP_AFTER_PURGE"
 
-# a fresh operation works normally after restart
+# a fresh operation works normally after restart: a self-contained build
+# (write + read its own write in one RUN, no dependence on any cache state)
+CTX_FRESH="$MGR_WORK/ctx-fresh"
+mkdir -p "$CTX_FRESH"
+cat > "$CTX_FRESH/Dockerfile" <<'EOF'
+FROM alpine:3.20
+RUN mkdir -p /m1 && echo fresh-op-write > /m1/observed.txt
+EOF
 OP_F="$(new_op_id)"
 START_RESP_F="$(mgr_call "START $OP_F")"
 SOCKET_F="$(printf '%s\n' "$START_RESP_F" | awk '{print $2}')"
 printf '%s\n' "$START_RESP_F" | grep -q "^OK " || fail "START after restart failed: $START_RESP_F"
-build_on "$SOCKET_F" "$CTX_W" m1-eph-f "$MGR_WORK/out-f.tar" "$MGR_WORK/build-F.log"
+build_on "$SOCKET_F" "$CTX_FRESH" m1-eph-f "$MGR_WORK/out-f.tar" "$MGR_WORK/build-F.log"
 docker load -i "$MGR_WORK/out-f.tar" >/dev/null 2>&1 || true
 F_OBS="$(docker run --rm m1-eph-f:latest cat /m1/observed.txt 2>/dev/null || true)"
-evidence restart-fresh.txt "post-restart op build observed (cache id from pre-restart A): $F_OBS"
+evidence restart-fresh.txt "post-restart op build observed its own write: $F_OBS"
 if printf '%s\n' "$F_OBS" | grep -q "EPHEMERAL-A-SECRET"; then
   fail "post-restart operation reached pre-restart op A cache state"
 fi
