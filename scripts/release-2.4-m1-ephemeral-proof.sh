@@ -485,7 +485,12 @@ say "op B did NOT observe A's cache content (PASS)"
 echo "cross-op cache-mount isolation: PASS" > "$EVIDENCE_DIR/ephemeral-cache-pass.txt"
 
 # ordinary layer-cache: identical Dockerfile+context across two separate
-# operations must NOT reuse the first operation's nondeterministic result
+# operations. The observable that distinguishes reuse from re-execution is
+# the CACHED verdict in the second build's progress output (the first
+# instance's cache cannot reach the second instance): on the second build
+# the RUN must NOT report CACHED. (The exported value alone cannot prove
+# this: busybox date truncates to seconds, so two real executions can
+# legitimately produce equal values.)
 CTX_L="$MGR_WORK/ctx-layer"
 mkdir -p "$CTX_L"
 cat > "$CTX_L/Dockerfile" <<'EOF'
@@ -498,12 +503,16 @@ docker load -i "$MGR_WORK/out-l1.tar" >/dev/null 2>&1 || true
 docker load -i "$MGR_WORK/out-l2.tar" >/dev/null 2>&1 || true
 LV1="$(docker run --rm m1-eph-l1:latest cat /m1/nondeterministic.txt 2>/dev/null || true)"
 LV2="$(docker run --rm m1-eph-l2:latest cat /m1/nondeterministic.txt 2>/dev/null || true)"
-evidence ephemeral-layer.txt "layer build in op A: $LV1
-layer build in op B: $LV2"
-if [ -n "$LV1" ] && [ -n "$LV2" ] && [ "$LV1" = "$LV2" ]; then
-  fail "op B reused op A's ordinary layer cache across ephemeral instances"
+L2_CACHED="$(grep -cE " CACHED" "$MGR_WORK/build-l2.log" || true)"
+evidence ephemeral-layer.txt "layer build in op A value: $LV1
+layer build in op B value: $LV2
+op B build CACHED lines: $L2_CACHED
+op B build log tail:
+$(grep -E 'CACHED|exec|RUN' "$MGR_WORK/build-l2.log" | tail -6 || true)"
+if [ "${L2_CACHED:-0}" -gt 0 ]; then
+  fail "op B reported CACHED steps from op A's layer cache across ephemeral instances"
 fi
-say "ordinary layer cache NOT reused across operations (PASS)"
+say "ordinary layer cache NOT reused across operations (no CACHED verdict in op B) (PASS)"
 echo "cross-op layer-cache isolation: PASS" > "$EVIDENCE_DIR/ephemeral-layer-pass.txt"
 
 # ---------------------------------------------------------------------------

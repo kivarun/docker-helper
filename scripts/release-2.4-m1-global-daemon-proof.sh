@@ -270,10 +270,14 @@ docker load errors: $LOAD_ERR
 build 2 CACHED lines: $CACHED_LINE
 build 2 log tail:
 $(tail -5 "$L2_LOG")"
-if [ -n "$V1" ] && [ "$V1" = "$V2" ]; then
-  say "REPRODUCED: build 2 reused build 1's nondeterministic layer result across client invocations (PASS — leak shown)"
-elif [ "${CACHED_LINE:-0}" -gt 0 ]; then
-  say "REPRODUCED: build 2 shows CACHED steps from build 1 (values $V1 / $V2) (PASS — leak shown)"
+# The CACHED verdict is the authoritative reuse observable: the exported
+# value can legitimately collide (busybox date truncates to seconds).
+# A value collision with zero CACHED lines does NOT prove reuse.
+if [ "${CACHED_LINE:-0}" -gt 0 ]; then
+  say "REPRODUCED: build 2 shows CACHED steps from build 1's layer cache (values $V1 / $V2) (PASS — leak shown)"
+elif [ -n "$V1" ] && [ "$V1" = "$V2" ] && [ -z "$LOAD_ERR" ]; then
+  say "note: build 2 produced build 1's exact value with no CACHED verdict — consistent with content dedup of identical work, not state reuse; recording"
+  evidence layer-cache.txt "layer-cache reuse NOT proven by CACHED verdict: build1=$V1 build2=$V2 cached=$CACHED_LINE"
 else
   say "note: layer-cache reuse not visible in this run (values $V1 / $V2, cached=$CACHED_LINE)"
   evidence layer-cache.txt "layer-cache reuse NOT reproduced: build1=$V1 build2=$V2 cached=$CACHED_LINE"
