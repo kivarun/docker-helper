@@ -262,7 +262,8 @@ NS_OUT="$({
 evidence ns-evidence.txt "$NS_OUT"
 printf '%s\n' "$NS_OUT"
 
-BUILD_HOST_UID="$(printf '%s\n' "$NS_OUT" | sed -n 's/^uid_map:.*[[:space:]]0[[:space:]]\+\([0-9]\+\)[[:space:]]\+[0-9]\+$/\1/p' | head -1)"
+RAW_UID_MAP="$(docker run --rm m0-probe:ns cat /m0/uid_map.txt 2>/dev/null | head -1 || true)"
+BUILD_HOST_UID="$(awk '{print $2}' <<<"$RAW_UID_MAP")"
 [ -n "$BUILD_HOST_UID" ] || fail "cannot determine build RUN host-side uid from uid_map"
 case "$BUILD_HOST_UID" in
   0) fail "build RUN maps to host uid 0 — no sandbox-root boundary" ;;
