@@ -95,6 +95,27 @@ command -v newuidmap >/dev/null 2>&1 || fail "newuidmap not installed"
 command -v docker >/dev/null 2>&1 || fail "docker not installed"
 docker info >/dev/null 2>&1 || fail "rootful docker engine not reachable"
 
+# openSUSE: /etc/ssl/* are RELATIVE symlinks into /var/lib/ca-certificates;
+# rootlesskit --copy-up=/etc copies the links but not the targets =>
+# dangling CAs inside the child (rootlesskit#225). The manager spawns each
+# per-op buildkitd with SSL_CERT_FILE pointing at the real host CA bundle
+# (single env var, no mount games; the same narrow fix M0 proved).
+M1_BUILDER_CERT_ENV=""
+if [ -f /etc/ssl/ca-bundle.pem ]; then
+  M1_BUILDER_CERT_ENV="SSL_CERT_FILE=$(realpath /etc/ssl/ca-bundle.pem 2>/dev/null || echo /etc/ssl/ca-bundle.pem)"
+elif [ -f /var/lib/ca-certificates/ca-bundle.pem ]; then
+  M1_BUILDER_CERT_ENV="SSL_CERT_FILE=/var/lib/ca-certificates/ca-bundle.pem"
+fi
+if [ -n "$M1_BUILDER_CERT_ENV" ]; then
+  # the builder must be able to read the bundle (no chmod of host material)
+  CA_TARGET="${M1_BUILDER_CERT_ENV#SSL_CERT_FILE=}"
+  if ! su -s /bin/sh "$BUILDER_USER" -c "test -r $CA_TARGET" 2>/dev/null; then
+    fail "builder user cannot read host CA bundle ($CA_TARGET)"
+  fi
+  say "builder CA env: $M1_BUILDER_CERT_ENV"
+fi
+evidence builder-ca-env.txt "${M1_BUILDER_CERT_ENV:-<none needed>}"
+
 # ---------------------------------------------------------------------------
 # 1. dedicated builder identity (M0 mechanics)
 # ---------------------------------------------------------------------------
@@ -181,7 +202,9 @@ debug = false
 [grpc]
   address = ["unix://$sock"]
 TOML
-  setsid rootlesskit \
+  setsid env \
+    ${M1_BUILDER_CERT_ENV:-} \
+    rootlesskit \
     --net=slirp4netns \
     --copy-up=/etc \
     --disable-host-loopback \
