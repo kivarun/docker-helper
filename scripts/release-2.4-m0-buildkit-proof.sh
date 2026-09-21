@@ -149,6 +149,7 @@ python3 "$WORK_DIR/marker-listener.py" "$HOST_MARKER_PORT" > "$WORK_DIR/marker-l
 MARKER_PID=$!
 sleep 1
 curl -s "http://127.0.0.1:$HOST_MARKER_PORT/" | grep -q M0-SECRET-OK || fail "host marker service not reachable from host"
+: > "$WORK_DIR/marker-listener.log"
 say "host marker service on 127.0.0.1:$HOST_MARKER_PORT; only host-side listeners receive host loopback"
 
 # ---------------------------------------------------------------------------
