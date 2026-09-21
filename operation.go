@@ -10,6 +10,7 @@ import (
 	"math"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -212,6 +213,25 @@ const (
 	operationIDHexLength = 32
 )
 
+// isOperationID is the canonical exact predicate for an issued Operation
+// ID: the production prefix plus exactly operationIDHexLength lowercase
+// hex characters. It is the ONE grammar validator; the builder-manager
+// backend (P2) reuses it because it is the same binary/package.
+func isOperationID(id string) bool {
+	if len(id) != len(operationIDPrefix)+operationIDHexLength {
+		return false
+	}
+	if !strings.HasPrefix(id, operationIDPrefix) {
+		return false
+	}
+	for _, r := range id[len(operationIDPrefix):] {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func generateOperationID() string {
 	b := make([]byte, operationIDHexLength/2)
 	if _, err := rand.Read(b); err != nil {
@@ -221,6 +241,9 @@ func generateOperationID() string {
 }
 
 // isOperationIDSafe checks that the operation ID cannot be used for path traversal.
+// This is the traversal-safety check for parsing untrusted persisted names;
+// it is NOT the canonical issued-ID grammar validator — use isOperationID
+// for that.
 func isOperationIDSafe(id string) bool {
 	if id == "" {
 		return false
