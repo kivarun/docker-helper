@@ -237,7 +237,7 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_PROBE" \
   --local "dockerfile=$CTX_PROBE" \
-  --output "type=docker,dest=$WORK_DIR/m0-ns.tar" > "$WORK_DIR/nsbuild.log" 2>&1 || {
+  --output "type=docker,name=m0-probe:ns,dest=$WORK_DIR/m0-ns.tar" > "$WORK_DIR/nsbuild.log" 2>&1 || {
   tail -30 "$WORK_DIR/nsbuild.log"
   fail "namespace probe build failed"
 }
@@ -288,7 +288,7 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_MARKER" \
   --local "dockerfile=$CTX_MARKER" \
-  --output "type=docker,dest=$WORK_DIR/m0-marker.tar" >/dev/null 2>&1 || fail "marker probe build failed"
+  --output "type=docker,name=m0-probe:marker,dest=$WORK_DIR/m0-marker.tar" >/dev/null 2>&1 || fail "marker probe build failed"
 docker load < "$WORK_DIR/m0-marker.tar" >/dev/null
 MARKER_OUT="$(docker run --rm m0-probe:marker sh -c 'cat /m0/leak.txt')"
 evidence root-marker.txt "$MARKER_OUT"
@@ -315,7 +315,7 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_LOOP" \
   --local "dockerfile=$CTX_LOOP" \
-  --output "type=docker,dest=$WORK_DIR/m0-loop.tar" >/dev/null 2>&1 || fail "loopback probe build failed"
+  --output "type=docker,name=m0-probe:loop,dest=$WORK_DIR/m0-loop.tar" >/dev/null 2>&1 || fail "loopback probe build failed"
 docker load < "$WORK_DIR/m0-loop.tar" >/dev/null
 LOOP_OUT="$(docker run --rm m0-probe:loop sh -c 'cat /m0/net.txt')"
 evidence loop-result.txt "$LOOP_OUT"
@@ -344,7 +344,7 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_OUT" \
   --local "dockerfile=$CTX_OUT" \
-  --output "type=docker,dest=$WORK_DIR/m0-out.tar" >/dev/null 2>&1 || fail "outbound probe build failed"
+  --output "type=docker,name=m0-probe:out,dest=$WORK_DIR/m0-out.tar" >/dev/null 2>&1 || fail "outbound probe build failed"
 docker load < "$WORK_DIR/m0-out.tar" >/dev/null
 OUT_RUN="$(docker run --rm m0-probe:out sh -c 'cat /m0/net2.txt')"
 evidence out-result.txt "$OUT_RUN"
