@@ -509,8 +509,12 @@ layer build in op B value: $LV2
 op B build CACHED lines: $L2_CACHED
 op B build log tail:
 $(grep -E 'CACHED|exec|RUN' "$MGR_WORK/build-l2.log" | tail -6 || true)"
-if [ "${L2_CACHED:-0}" -gt 0 ]; then
-  fail "op B reported CACHED steps from op A's layer cache across ephemeral instances"
+# only RUN-step CACHED lines count as layer-cache reuse; the base-image
+# resolution step (#N CACHED) is content dedup of the pulled manifest, not
+# op A's state
+RUN_CACHED="$(awk '/^#[0-9]+ \[.*\] RUN /{step=$1} /^#[0-9]+ CACHED$/{if ($1==step) print $1}' "$MGR_WORK/build-l2.log" | head -1)"
+if [ -n "$RUN_CACHED" ]; then
+  fail "op B's RUN step was CACHED from op A's layer cache across ephemeral instances ($RUN_CACHED)"
 fi
 say "ordinary layer cache NOT reused across operations (no CACHED verdict in op B) (PASS)"
 echo "cross-op layer-cache isolation: PASS" > "$EVIDENCE_DIR/ephemeral-layer-pass.txt"
