@@ -199,10 +199,14 @@ user) driven by independent buildctl client invocations
    `SESSION-A-SECRET-KEY` into a cache mount `id=dh-cross-session-m1`; a
    separate buildctl invocation B (own client Docker config) reads exactly
    that content through the same cache-mount id — **leak confirmed live**;
-2. ordinary layer-cache cross-client reuse: build B reports a `CACHED`
-   verdict for build A's nondeterministic `RUN` step — **reuse confirmed
-   live** (the exported value alone is not proof: busybox `date` truncates
-   to seconds, so the CACHED verdict is the authoritative observable);
+2. ordinary layer-cache cross-client reuse: **NOT proven in this run**. The
+   second build produced build 1's exact exported value, but with no
+   `CACHED` verdict for the `RUN` step; the probe was deliberately corrected
+   so that coinciding busybox `date` second-truncation values do not count
+   as proof. The recorded evidence is the absence of a reuse verdict, not a
+   demonstrated leak. This does not change the shared-daemon REJECT: the
+   live cache-mount leak above already breaks Session isolation, and no
+   upstream stable tenant-isolation contract exists;
 3. `BUILDKIT_CACHE_MOUNT_NS` build-arg probe: a reader build supplied a
    distinct namespace build-arg and still observed the writer's un-namespaced
    content — the namespace took effect only as an arg, not as a cache-key
@@ -310,9 +314,9 @@ in their required-weakening forms.
 | Ubuntu 26.04 (hosted runner) | **PASS** | run [35650934104](https://github.com/kivarun/docker-helper/actions/runs/35650934104), artifact `release-2.4-m1-ephemeral-2604-35650934104-1` |
 | openSUSE Tumbleweed (QEMU/KVM VM) | **PASS** | run [35650934104](https://github.com/kivarun/docker-helper/actions/runs/35650934104), artifact `release-2.4-m1-ephemeral-tw-35650934104-1` |
 
-Tested commit: `f337603072e583c3ec19b22e7b6d1e08ac0bfb07` (probe-side fixes
-after 266e514; the matrix run runs on this SHA). Shared-daemon evidence from
-the same run: artifacts `release-2.4-m1-global-35650934104-1`. AppArmor
+Tested commit: `f337603ecd74d8a35ed9de440aabf60717d621fc` (probe-side fixes
+after 266e514; the authoritative matrix run's head SHA). Shared-daemon
+evidence from the same run: artifacts `release-2.4-m1-global-35650934104-1`. AppArmor
 userns restriction remained enabled (sysctl `=1`) on both Ubuntu targets;
 the Tumbleweed guest (SELinux, kernel 7.2) needed the manager-spawn
 `SSL_CERT_FILE` CA handling for per-instance buildkitd (same rootlesskit#225
