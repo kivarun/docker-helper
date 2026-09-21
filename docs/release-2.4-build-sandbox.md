@@ -10,9 +10,14 @@ composition A — a dedicated unprivileged builder user running rootless
 BuildKit under rootlesskit with slirp4netns networking and a client/local
 buildctl context transport — proved the required builder boundary on Ubuntu
 24.04, Ubuntu 26.04, and openSUSE Tumbleweed. See the M0 closure record below
-for the probe contract, mechanics, and authoritative evidence. The 2.4
-mechanism selection freezes on this composition unless the architectural
-review of the implementation plan shows a concrete deficiency.
+for the probe contract, mechanics, and authoritative evidence.
+
+The M1 architectural proof (2026-09-21) then rejected one global persistent
+`buildkitd` (no upstream tenant-isolation contract; live cross-session cache
+leak on the proven composition) and selected the per-build-operation
+ephemeral BuildKit lifecycle (candidate C) behind a narrow unprivileged
+builder-manager service. See the M1 closure record below. Release 2.4 does
+not promise persistent build cache.
 
 Release 2.4 closes the mismatch between docker-helper's ordinary workload
 execution contract and Docker build execution. It is deliberately a build
@@ -171,6 +176,182 @@ removed. The earlier Tumbleweed evidence (for example run 35623061632,
 artifact digest `sha256:c242614dbbcd52cf24f497991fcb615334eacd59a37ab7c3bb399766f7202ad5`)
 showed the same composition passing inside the guest; the false fail was
 harness-side only.
+
+## M1 closure record — 2026-09-21
+
+The implementation-plan review rejected one global long-lived `buildkitd`
+unless a separate proof justified sharing build state across unrelated
+Sessions (a docker-helper Session is a security boundary; BuildKit does not
+advertise multi-tenant isolation). M1 is a probe-only architectural proof:
+it reproduces the shared-daemon problem live, evaluates partial mitigations,
+and proves the per-build-operation ephemeral alternative (candidate C) end
+to end on all three supported targets. No production code, shipped systemd
+unit, package policy, public API, Operation semantics, or service hardening
+changed.
+
+### Shared-daemon model: live reproduction
+
+One persistent rootless buildkitd (composition A mechanics, dedicated builder
+user) driven by independent buildctl client invocations
+(`scripts/release-2.4-m1-global-daemon-proof.sh`):
+
+1. cache-mount cross-client leak: build A writes
+   `SESSION-A-SECRET-KEY` into a cache mount `id=dh-cross-session-m1`; a
+   separate buildctl invocation B (own client Docker config) reads exactly
+   that content through the same cache-mount id — **leak confirmed live**;
+2. ordinary layer-cache cross-client reuse: build B reports a `CACHED`
+   verdict for build A's nondeterministic `RUN` step — **reuse confirmed
+   live** (the exported value alone is not proof: busybox `date` truncates
+   to seconds, so the CACHED verdict is the authoritative observable);
+3. `BUILDKIT_CACHE_MOUNT_NS` build-arg probe: a reader build supplied a
+   distinct namespace build-arg and still observed the writer's un-namespaced
+   content — the namespace took effect only as an arg, not as a cache-key
+   boundary in this buildctl invocation (mechanism inconclusive as a
+   boundary); independent of that quirk it is caller-reachable keying by
+   upstream construction, not tenant isolation;
+4. `--no-cache` (client flag): the other client's cache-mount secret remains
+   present in daemon state — no per-tenant prune;
+5. `image-resolve-mode=pull`: per-build bypass of the local image store;
+   no tenant-scoping.
+
+### Upstream contract conclusion
+
+No documented tenant-isolation contract exists for shared buildkitd state:
+
+- `RUN --mount=type=cache` documents shared-by-default semantics ("another
+  build may overwrite the files"); the cache-mount identity is the caller's
+  `id` (+ `sharing` mode), with no per-client component
+  (`frontend/dockerfile/docs/reference.md`, issue #1673);
+- `BUILDKIT_CACHE_MOUNT_NS` is a client-supplied namespacing build-arg
+  (`frontend/dockerui/config.go` `keyCacheNSArg`), not a security boundary;
+  per-client cache-mount isolation requests are closed pointing at it
+  (issue #2838), and tenant separation for the LAYER cache has no mechanism
+  at all (issue #1299, still open);
+- `buildkitd.toml` has no multi-tenant/isolation configuration;
+- security advisories consistently scope one daemon to one trust domain
+  (CVE-2024-23651, GHSA-388v-wmr2-g2v2, CVE-2026-15792: "isolate BuildKit
+  daemons per tenant or per pipeline");
+- registry credential state is daemon-pooled with cross-session reuse when
+  identical credentials appear (util/resolver/authorizer.go); buildctl reads
+  `$DOCKER_CONFIG/config.json` client-side and forwards per-session.
+
+Conclusion: **the shared persistent daemon is REJECTED** (alternative A). The
+Session is docker-helper's security boundary; sharing ordinary layer cache,
+cache mounts, and resolution state across unrelated Sessions is not
+acceptable without an upstream tenant-isolation contract that does not exist.
+
+### Candidate C: per-build-operation ephemeral BuildKit
+
+`scripts/release-2.4-m1-ephemeral-proof.sh` (hosted runners) and
+`scripts/release-2.4-m1-ephemeral-tw.sh` + `...-tw-vm.sh` (Tumbleweed VM)
+prove the composition:
+
+```text
+root docker-helper stand-in (probe shell)
+  | narrow line protocol over 0660 root:builder manager socket
+  v
+builder-manager prototype (runs AS the unprivileged builder user)
+  | START <op_id> / STOP <op_id> / PURGE (canonical op_ + 32-hex grammar only)
+  v
+setsid rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback
+  v
+ephemeral rootless buildkitd
+  op-private --root, op-private 0660 control socket
+  ^ buildctl runs client-side (root) with DOCKER_CONFIG=session config
+```
+
+Probed properties (all PASS on all three targets):
+
+1. protocol strictness: malformed operation ids and unknown commands are
+   refused; START returns only the operation-private socket path;
+2. socket isolation: the manager socket and every per-op socket deny
+   `nobody` and an agent-side user; root can drive both;
+3. ephemeral state: build A writes `EPHEMERAL-A-SECRET` through a cache
+   mount; the instance is destroyed; a fresh operation with the same cache
+   id observes `missing` (with the mandatory negative self-test: A's secret
+   provably exists in A's op-private state before teardown);
+4. ordinary layer cache: the second operation's RUN step is not `CACHED`
+   from the first operation's build (only the pulled base-manifest step
+   reports CACHED, which is content dedup, not cross-operation state);
+5. teardown: after STOP, op state dir, runtime dir, socket, and process
+   tree are all gone, and the surviving concurrent op is unaffected;
+6. concurrency: two operations run simultaneously with distinct sockets and
+   distinct state roots; both outbound networks work (HTTP 200); both
+   host-loopback negatives hold; killing one instance does not affect the
+   other; the manager refuses a third START immediately at its hard ceiling
+   of 2 (no queue, no waiting);
+7. crash/restart: manager restart purges all operation-private
+   runtime/state; a STOP for a purged op answers `absent` (no stale socket
+   accepted as live); a post-restart operation is fresh and self-contained;
+8. M0 invariants hold on the ephemeral composition: build RUN maps to a
+   nonzero host-side uid inside the builder's subordinate range (0→1002
+   Ubuntu, 0→1001 Tumbleweed), the userns differs from the host's, no
+   docker.sock is visible from build RUN, the host-root marker file is not
+   readable, host loopback is unreachable, outbound works, `--network=host`
+   and `--security=insecure` are refused, and a failed build leaves no
+   usable target image.
+
+### Main-daemon hardening
+
+`docker-helper.service` keeps `NoNewPrivileges=true` (the shipped unit is
+untouched; `packaging/systemd/system/docker-helper.service:45`). The
+builder-launch mechanics live entirely in the separate unprivileged builder
+identity, so the root daemon gains no user-namespace manipulation, no
+CAP_SYS_ADMIN, and no generic systemd/D-Bus authority. This satisfies the
+mandatory NNP constraint and rejects alternatives D (root daemon spawning
+rootlesskit directly) and E (transient-unit control from the root daemon)
+in their required-weakening forms.
+
+### Results
+
+| Target | Result | Evidence |
+|---|---|---|
+| Ubuntu 24.04 (hosted runner) | **PASS** | run [35650934104](https://github.com/kivarun/docker-helper/actions/runs/35650934104), artifact `release-2.4-m1-ephemeral-35650934104-1` |
+| Ubuntu 26.04 (hosted runner) | **PASS** | run [35650934104](https://github.com/kivarun/docker-helper/actions/runs/35650934104), artifact `release-2.4-m1-ephemeral-2604-35650934104-1` |
+| openSUSE Tumbleweed (QEMU/KVM VM) | **PASS** | run [35650934104](https://github.com/kivarun/docker-helper/actions/runs/35650934104), artifact `release-2.4-m1-ephemeral-tw-35650934104-1` |
+
+Tested commit: `f337603072e583c3ec19b22e7b6d1e08ac0bfb07` (probe-side fixes
+after 266e514; the matrix run runs on this SHA). Shared-daemon evidence from
+the same run: artifacts `release-2.4-m1-global-35650934104-1`. AppArmor
+userns restriction remained enabled (sysctl `=1`) on both Ubuntu targets;
+the Tumbleweed guest (SELinux, kernel 7.2) needed the manager-spawn
+`SSL_CERT_FILE` CA handling for per-instance buildkitd (same rootlesskit#225
+root cause M0 proved) and passed without sysctl relaxation.
+
+### Alternatives disposition
+
+- **A — one global persistent buildkitd: REJECT.** Live cross-session
+  cache-mount leak + cross-client layer-cache reuse on the proven
+  composition; no upstream tenant-isolation contract (see above).
+- **B — per-Session BuildKit instance: EVALUATE, DO NOT IMPLEMENT.**
+  Zero cross-Session state, but introduces a persistent per-Session cache
+  lifecycle, stale-Session cleanup, aggregate disk budgeting, and more
+  lifecycle coupling for no M1-proven benefit over per-operation instances
+  at the current 2-concurrent-build ceiling.
+- **C — per-Build-Operation ephemeral BuildKit instance: ACCEPT (M1
+  candidate).** Zero cross-operation builder state, no BuildKit GC
+  subsystem needed, the existing Operation already owns the lifetime, and
+  at most two instances exist under `maxConcurrentBuildsGlobal=2`.
+- **D — docker-helper directly spawning rootlesskit: REJECT** as the
+  production launch path; it would move userns/rootlesskit mechanics into
+  the root daemon and pressure `NoNewPrivileges=true`/confinement.
+- **E — systemd instance/transient-unit control directly from
+  docker-helper: REJECT** in the form that grants the root daemon generic
+  systemd/D-Bus authority. (An unprivileged manager service remains a
+  possible backend for the same candidate-C lifecycle.)
+
+### Recommended refined architecture
+
+Keep the M0 composition A runtime envelope (dedicated unprivileged builder
+user, rootlesskit slirp4netns, op-private control socket, buildctl
+client/local transport, `type=docker` export) but change the state/lifecycle
+model to candidate C: a `docker-helper-builder` manager service (dedicated
+builder identity, narrow `START/STOP` protocol, canonical operation-id
+grammar, startup purge) owns ephemeral per-build-operation BuildKit
+instances; registry credentials remain client-side in root docker-helper via
+the existing Session Docker config; Release 2.4 explicitly does not promise
+persistent build cache. The 2.4 implementation plan builds on this frozen
+selection.
 
 ## Builder authority
 
