@@ -342,10 +342,22 @@ NS_TEST_B() {
   local ns="$1" tag="$2" out="$3"
   NS_TEST "$ns" "$tag" "$out" "$CTX_NS_B"
 }
+cache_mount_dirs() {
+  local label="$1"
+  local dirs=""
+  if [ -d "$BUILDER_STATE/cache/exec.cachemounts" ]; then
+    dirs="$(ls -1 "$BUILDER_STATE/cache/exec.cachemounts" 2>/dev/null || true)"
+  fi
+  printf '%s: cache-mount keys under %s:\n%s\n' "$label" "$BUILDER_STATE" "$dirs"
+}
 NS_TEST_A "m1-ns-shared" m1-nssame "$WORK_DIR/out-ns-same.tar"
+NS_DIRS_AFTER_A="$(cache_mount_dirs after-A)"
 SAME_NS_OBS="$(NS_TEST_B "m1-ns-shared" m1-nssameb "$WORK_DIR/out-ns-same-b.tar")"
+NS_DIRS_AFTER_B="$(cache_mount_dirs after-B)"
 evidence mitigation-same-ns.txt "same BUILDKIT_CACHE_MOUNT_NS=m1-ns-shared on both builds, B observed:
 $SAME_NS_OBS
+$NS_DIRS_AFTER_A
+$NS_DIRS_AFTER_B
 A build log tail:
 $(tail -6 "$WORK_DIR/ns-m1-nssame.log")
 B build log tail:
@@ -357,8 +369,10 @@ else
 fi
 NS_TEST_A "m1-ns-shared" m1-nssame "$WORK_DIR/out-ns-same.tar"
 DIFF_NS_OBS="$(NS_TEST_B "m1-ns-other-$(date +%s)" m1-nsdiff "$WORK_DIR/out-ns-diff.tar")"
+NS_DIRS_AFTER_DIFF="$(cache_mount_dirs after-diff-ns-B)"
 evidence mitigation-diff-ns.txt "different BUILDKIT_CACHE_MOUNT_NS per build, B observed:
 $DIFF_NS_OBS
+$NS_DIRS_AFTER_DIFF
 B build log tail:
 $(tail -6 "$WORK_DIR/ns-m1-nsdiff.log")"
 if printf '%s\n' "$DIFF_NS_OBS" | grep -qE "NS-A-SECRET|SESSION-A-SECRET-KEY"; then
