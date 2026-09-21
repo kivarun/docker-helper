@@ -344,11 +344,12 @@ NS_TEST_B() {
 }
 cache_mount_dirs() {
   local label="$1"
-  local dirs=""
-  if [ -d "$BUILDER_STATE/cache/exec.cachemounts" ]; then
-    dirs="$(ls -1 "$BUILDER_STATE/cache/exec.cachemounts" 2>/dev/null || true)"
-  fi
-  printf '%s: cache-mount keys under %s:\n%s\n' "$label" "$BUILDER_STATE" "$dirs"
+  local dirs
+  dirs="$(grep -rl --binary-files=text -e "dh-cross-session-m1" \
+    -e "m1-ns-shared" -e "m1-ns-other" "$BUILDER_STATE" 2>/dev/null \
+    | sed "s|^$BUILDER_STATE/||" | sort | head -20 || true)"
+  printf '%s: state paths mentioning cache ids under %s:\n%s\n' \
+    "$label" "$BUILDER_STATE" "${dirs:-<none>}"
 }
 NS_TEST_A "m1-ns-shared" m1-nssame "$WORK_DIR/out-ns-same.tar"
 NS_DIRS_AFTER_A="$(cache_mount_dirs after-A)"
