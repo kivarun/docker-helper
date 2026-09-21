@@ -2,6 +2,12 @@ name: Release 2.4 M0 BuildKit sandbox proof
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - release/2.4
+    paths:
+      - .github/workflows/release-2.4-m0-buildkit.yml
+      - scripts/release-2.4-m0-buildkit-proof.sh
 
 permissions:
   contents: read
