@@ -19,18 +19,11 @@ jobs:
           sudo useradd -m -s /usr/sbin/nologin dhm0builder || true
           sudo sh -c 'echo "dhm0builder:231072:65536" >> /etc/subuid; echo "dhm0builder:231072:65536" >> /etc/subgid'
           sudo -u dhm0builder sh -c 'unshare --user --map-root-user id && echo BUILDER_UNSHARE_OK' || echo BUILDER_UNSHARE_FAIL
-          echo "--- write uid_map manually as builder ---"
-          sudo -u dhm0builder sh -c '
-            set -x
-            unshare --user true
-            echo "plain unshare user ns: $?"
-            # create ns and map only self
-            unshare --user --map-user 0 true
-            echo "map-user ns: $?"
-          ' || true
-          echo "--- newuidmap direct ---"
-          sudo -u dhm0builder sh -c '
-            set -x
-            unshare --user sh -c "echo 0 > /proc/self/uid_map" 
-            echo rc=$?
-          ' || true
+          echo "--- single-id mapping as builder ---"
+          sudo -u dhm0builder sh -c 'unshare --user --map-user 0 id && echo MAPUSER_OK' || echo MAPUSER_FAIL
+          echo "--- rootlesskit net=none as runner ---"
+          sudo apt-get install -y curl >/dev/null
+          ROOTLESSKIT_VERSION=v3.2.0
+          curl -fsSL -o /tmp/rootlesskit.tgz "https://github.com/rootless-containers/rootlesskit/releases/download/${ROOTLESSKIT_VERSION}/rootlesskit-x86_64.tar.gz"
+          sudo tar -xzf /tmp/rootlesskit.tgz -C /usr/local/bin
+          rootlesskit --net=none true && echo RK_RUNNER_NONE_OK || echo RK_RUNNER_NONE_FAIL
