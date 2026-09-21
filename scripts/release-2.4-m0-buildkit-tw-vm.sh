@@ -49,14 +49,14 @@ tune_zypper() {
   zypper --non-interactive --gpg-auto-import-keys refresh 2>/dev/null || true
 }
 
-# docker is present in the cloud image but may be disabled; the UAT platform
-# adapter starts it. The probe needs docker (Engine + CLI) for import/run.
-systemctl is-active --quiet docker || { log "starting docker"; systemctl start docker || zypper --non-interactive install -y docker; systemctl start docker || true; }
-
-log "install M0 probe prerequisites"
-PKGS="rootlesskit slirp4netns buildkit uidmap fuse-overlayfs libfuse3-3"
+# docker is NOT present in the Minimal-VM cloud image; install it (this is
+# also what the UAT platform adapter does: `zypper install -y docker`).
+log "install docker + M0 probe prerequisites"
 zypper --non-interactive --gpg-auto-import-keys refresh >/dev/null 2>&1 || true
-zypper --non-interactive install -y $PKGS
+zypper --non-interactive install -y docker rootlesskit slirp4netns buildkit fuse-overlayfs
+systemctl enable --now docker >/dev/null 2>&1 || systemctl start docker || true
+# shadow provides newuidmap/newgidmap; containerd/runc come with the docker
+# stack. Verify every required binary:
 for b in rootlesskit slirp4netns buildkitd buildctl newuidmap newgidmap docker; do
   command -v "$b" >/dev/null 2>&1 || { echo "missing after install: $b" >&2; exit 1; }
 done
