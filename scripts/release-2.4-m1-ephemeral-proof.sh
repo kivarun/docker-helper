@@ -235,7 +235,6 @@ OPS
 cat > "$MGR_WORK/manager-listener.py" <<'PY'
 import os, socket, sys, threading, subprocess
 sock_path, ops_script, runtime, state = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-ops_pid = sys.argv[5]
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.bind(sock_path)
