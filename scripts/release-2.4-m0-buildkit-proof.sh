@@ -237,12 +237,11 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_PROBE" \
   --local "dockerfile=$CTX_PROBE" \
-  --output "type=oci,tar=false,dest=$OUT_PROBE" > "$WORK_DIR/nsbuild.log" 2>&1 || {
+  --output "type=docker,dest=$WORK_DIR/m0-ns.tar" > "$WORK_DIR/nsbuild.log" 2>&1 || {
   tail -30 "$WORK_DIR/nsbuild.log"
   fail "namespace probe build failed"
 }
-PROBE_TAR="$(find "$OUT_PROBE" -type f | head -1)"
-docker import "$PROBE_TAR" m0-probe:ns >/dev/null || fail "docker import of probe image failed"
+docker load < "$WORK_DIR/m0-ns.tar" >/dev/null || fail "docker load of probe image failed"
 
 probe_run() {
   docker run --rm m0-probe:ns sh -c "$1" 2>&1 || true
@@ -289,8 +288,8 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_MARKER" \
   --local "dockerfile=$CTX_MARKER" \
-  --output "type=oci,tar=false,dest=$OUT_MARKER" >/dev/null 2>&1 || fail "marker probe build failed"
-docker import "$(find "$OUT_MARKER" -type f | head -1)" m0-probe:marker >/dev/null
+  --output "type=docker,dest=$WORK_DIR/m0-marker.tar" >/dev/null 2>&1 || fail "marker probe build failed"
+docker load < "$WORK_DIR/m0-marker.tar" >/dev/null
 MARKER_OUT="$(docker run --rm m0-probe:marker sh -c 'cat /m0/leak.txt')"
 evidence root-marker.txt "$MARKER_OUT"
 if printf '%s\n' "$MARKER_OUT" | grep -q "M0-ROOT-MARKER-SECRET"; then
@@ -316,8 +315,8 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_LOOP" \
   --local "dockerfile=$CTX_LOOP" \
-  --output "type=oci,tar=false,dest=$OUT_LOOP" >/dev/null 2>&1 || fail "loopback probe build failed"
-docker import "$(find "$OUT_LOOP" -type f | head -1)" m0-probe:loop >/dev/null
+  --output "type=docker,dest=$WORK_DIR/m0-loop.tar" >/dev/null 2>&1 || fail "loopback probe build failed"
+docker load < "$WORK_DIR/m0-loop.tar" >/dev/null
 LOOP_OUT="$(docker run --rm m0-probe:loop sh -c 'cat /m0/net.txt')"
 evidence loop-result.txt "$LOOP_OUT"
 if printf '%s\n' "$LOOP_OUT" | grep -q "M0-SECRET-OK"; then
@@ -345,8 +344,8 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_OUT" \
   --local "dockerfile=$CTX_OUT" \
-  --output "type=oci,tar=false,dest=$OUT_OUT" >/dev/null 2>&1 || fail "outbound probe build failed"
-docker import "$(find "$OUT_OUT" -type f | head -1)" m0-probe:out >/dev/null
+  --output "type=docker,dest=$WORK_DIR/m0-out.tar" >/dev/null 2>&1 || fail "outbound probe build failed"
+docker load < "$WORK_DIR/m0-out.tar" >/dev/null
 OUT_RUN="$(docker run --rm m0-probe:out sh -c 'cat /m0/net2.txt')"
 evidence out-result.txt "$OUT_RUN"
 printf '%s\n' "$OUT_RUN" | grep -q "curl_rc=0" || fail "outbound build traffic FAILED: $OUT_RUN"
@@ -365,7 +364,7 @@ deny_probe() {
     --frontend dockerfile.v0 \
     --local "context=$ctx" \
     --local "dockerfile=$ctx" \
-    --output "type=oci,tar=false,dest=$out" 2> "$err"; then
+    --output "type=docker,dest=$WORK_DIR/ent-$name.tar" 2> "$err"; then
     fail "$name entitlement ACCEPTED without server --allow (contract violation)"
   fi
   evidence "entitlement-$name.err" "$(cat "$err")"
