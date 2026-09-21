@@ -209,7 +209,7 @@ done
 }
 say "root -> buildkitd control socket connectivity OK"
 
-evidence_cmd workers.json bash -c "buildctl --addr $BUILDCTL_ADDR debug workers --inner 2>&1 || true"
+evidence_cmd workers.json bash -c "buildctl --addr $BUILDCTL_ADDR debug workers 2>&1 || true"
 
 # ---------------------------------------------------------------------------
 # 4. namespace + host-root authority evidence (inside build RUN)
