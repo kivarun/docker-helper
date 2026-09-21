@@ -158,6 +158,21 @@ start_op() {
     echo "ERR operation already exists"
     return
   fi
+  # hard concurrency ceiling (defense in depth; the product already refuses
+  # a third build at maxConcurrentBuildsGlobal=2): count live instances,
+  # refuse immediately, never queue
+  local live=0 d p
+  for d in "$RUNTIME"/ops/op_*; do
+    [ -d "$d" ] || continue
+    p="$(cat "$d/instance.pid" 2>/dev/null || true)"
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+      live=$((live + 1))
+    fi
+  done
+  if [ "$live" -ge 2 ]; then
+    echo "ERR builder at concurrency ceiling"
+    return
+  fi
   mkdir -p "$rt" "$st/rootlesskit-state"
   local sock="$rt/buildkitd.sock"
   local cfg="$rt/buildkitd.toml"
