@@ -5,6 +5,15 @@
 Accepted architectural direction for Release 2.4. Detailed implementation
 planning begins after Release 2.3 removes user-mode daemon support.
 
+The mandatory M0 build-sandbox feasibility probe is CLOSED (2026-09-21):
+composition A — a dedicated unprivileged builder user running rootless
+BuildKit under rootlesskit with slirp4netns networking and a client/local
+buildctl context transport — proved the required builder boundary on Ubuntu
+24.04, Ubuntu 26.04, and openSUSE Tumbleweed. See the M0 closure record below
+for the probe contract, mechanics, and authoritative evidence. The 2.4
+mechanism selection freezes on this composition unless the architectural
+review of the implementation plan shows a concrete deficiency.
+
 Release 2.4 closes the mismatch between docker-helper's ordinary workload
 execution contract and Docker build execution. It is deliberately a build
 execution-boundary release, not a generic Dockerfile policy engine.
@@ -75,6 +84,88 @@ the contract on supported Ubuntu and openSUSE installations. The design must
 fail closed if the required isolation cannot be established; silently falling
 back to the current rootful builder execution path is not acceptable once the
 2.4 contract is active.
+
+## M0 closure record — 2026-09-21
+
+### Composition A (probed)
+
+The feasibility probe exercised one composition end to end:
+
+```text
+dedicated unprivileged builder user
+  -> rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback
+  -> rootless buildkitd (oci worker, overlayfs snapshotter)
+  -> private Unix socket owned by the builder
+  -> buildctl --local-dir (client/local-source context transport)
+  -> --output type=docker -> docker load into the rootful Engine
+  -> docker run on the imported image
+```
+
+Probed properties (all mandatory per target):
+
+1. build `RUN` executes as sandbox-root: `uid_map` maps the in-build UID 0 to
+   a nonzero host-side UID inside the builder's subordinate range, and the
+   user/mount/PID namespaces differ from the host's;
+2. a root-owned `chmod 600` marker file outside the builder state is not
+   readable from build `RUN` (host-root DAC authority absent);
+3. the host loopback marker service is unreachable from build `RUN`, and the
+   host-side listener records no build traffic (`--disable-host-loopback`);
+4. outbound package-repository traffic works from build `RUN` (slirp4netns);
+5. `RUN --network=host` and `RUN --security=insecure` are refused without a
+   server entitlement;
+6. the control socket is builder-owned (0660 builder:builder); root (the
+   docker-helper stand-in) can drive it; an ordinary user and an agent-side
+   session user cannot;
+7. the `type=docker` export -> `docker load` -> `docker run` round trip works;
+8. a failed build leaves no usable target image in the Engine.
+
+### Probe mechanics
+
+`scripts/release-2.4-m0-buildkit-proof.sh` (hosted-runner proof, Ubuntu) and
+`scripts/release-2.4-m0-buildkit-tw.sh` (guest-side proof) implement the same
+composition; `scripts/release-2.4-m0-buildkit-tw-vm.sh` boots the official
+openSUSE Tumbleweed Cloud qcow2 through the canonical Tumbleweed VM harness
+(`scripts/uat-vm-tumbleweed.sh`) and runs the guest-side proof inside the VM.
+`.github/workflows/release-2.4-m0-buildkit.yml` owns the three proof targets
+and the static checks. The probe is probe-only: no docker-helper product code,
+policy, or RPM behavior is exercised or changed by M0.
+
+BuildKit binaries come from the official upstream release with a pinned and
+verified SHA-256 (v0.33.0, digest
+`b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead`, verified
+against the official release SBOM subject digest); the openSUSE target uses
+the distro `buildkit` RPM. The proof runs with Ubuntu's
+`apparmor_restrict_unprivileged_userns` restriction enabled (default) and
+relies on the distro-shipped rootlesskit AppArmor profile; no diagnostic
+sysctl disabling is part of the passing path. The Tumbleweed guest probe must
+not chmod host CA material; it verifies builder readability and fails closed.
+
+### Results
+
+| Target | Result | Evidence |
+|---|---|---|
+| Ubuntu 24.04 (hosted runner) | **PASS** | run [35631196290](https://github.com/kivarun/docker-helper/actions/runs/35631196290), artifact `release-2.4-m0-buildkit-35631196290-1`, digest `sha256:b8fd6729cc407de1953f869b1a9844509064a54cac426f319239c6b43313f769` |
+| Ubuntu 26.04 (hosted runner) | **PASS** | run [35631196290](https://github.com/kivarun/docker-helper/actions/runs/35631196290), artifact `release-2.4-m0-buildkit-2604-35631196290-1`, digest `sha256:120264c62f47de98a89d52e0848d95d187055302bda8744c7c1d9a236dd05141` |
+| openSUSE Tumbleweed (QEMU/KVM VM) | **PASS** | run [35631196290](https://github.com/kivarun/docker-helper/actions/runs/35631196290), artifact `release-2.4-m0-buildkit-tw-35631196290-1`, digest `sha256:942421bd5d82029eac35d9fb98b650e9b386cfd89efec232724abbc3e1188b6f` |
+
+Tested commit: `15b560f27ae74764e85012cd0899f0a39b82827f` (the final probe
+SHA). Observed sandbox-root host-side UIDs: `1002` (24.04, 26.04; mapped into
+the builder's subordinate range 231072) and `1001` (Tumbleweed). BuildKit
+v0.33.0 on the Ubuntu targets; distro BuildKit 0.32.2 on Tumbleweed.
+
+### Earlier runs and the false-fail fix
+
+All earlier 2.4 M0 runs before `15b560f` ran the same probe scripts against
+intermediate probe fixes; the Tumbleweed target reported FAILED even when the
+guest proof passed, because the guest probe wrote its PASS marker only into
+the evidence file, while the host-side gate grepped the captured guest stdout.
+The passing path now emits the marker on both surfaces. The Tumbleweed job
+also uploaded a never-populated host evidence directory
+(`if-no-files-found: error`), guaranteeing post-proof failure; that step is
+removed. The earlier Tumbleweed evidence (for example run 35623061632,
+artifact digest `sha256:c242614dbbcd52cf24f497991fcb615334eacd59a37ab7c3bb399766f7202ad5`)
+showed the same composition passing inside the guest; the false fail was
+harness-side only.
 
 ## Builder authority
 
@@ -155,7 +246,8 @@ a weaker rootful execution path.
 Release 2.4 is complete only when:
 
 - one build-sandbox owner is selected and documented after a real feasibility
-  proof on supported distributions;
+  proof on supported distributions (the M0 proof above closed the feasibility
+  half; implementation acceptance remains open);
 - agent-controlled build `RUN` code may execute as sandbox-root but cannot use
   host-root authority;
 - no Dockerfile parser/filter is introduced as the security boundary;
