@@ -119,7 +119,7 @@ EOF
 su -s /bin/sh "$BUILDER_USER" -c \
   "exec env XDG_RUNTIME_DIR=$BUILDER_XDG HOME=$BUILDER_HOME USER=$BUILDER_USER PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback --state-dir=$WORK_DIR/rootlesskit-state buildkitd --rootless --root=$BUILDER_STATE --addr=unix://$SOCKET --config=$BUILDKITD_CONFIG" \
   > "$WORK_DIR/buildkitd.log" 2>&1 &
-
+BUILDKITD_PID=$!
 
 socket_ready=0
 for _ in $(seq 1 90); do
