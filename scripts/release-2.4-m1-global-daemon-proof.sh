@@ -300,36 +300,69 @@ RUN mkdir -p /m1
 RUN --mount=type=cache,id=$CACHE_ID,target=/cache \\
     sh -c 'cat /cache/marker > /m1/observed.txt 2>/dev/null || echo missing > /m1/observed.txt'
 EOF
+# readback control: one build that writes AND reads under the same namespace
+# inside the SAME invocation. If this readback shows NS-READBACK-SECRET, the
+# namespace mechanism itself works; if not, the build-arg never took effect.
+CTX_NS_RB="$WORK_DIR/ctx-ns-rb"
+mkdir -p "$CTX_NS_RB"
+cat > "$CTX_NS_RB/Dockerfile" <<EOF
+FROM alpine:3.20
+RUN mkdir -p /m1
+RUN --mount=type=cache,id=$CACHE_ID,target=/cache \\
+    sh -c 'echo NS-READBACK-SECRET > /cache/marker'
+RUN --mount=type=cache,id=$CACHE_ID,target=/cache \\
+    sh -c 'cat /cache/marker > /m1/observed.txt 2>/dev/null || echo missing > /m1/observed.txt'
+EOF
 NS_TEST() {
-  local ns="$1" tag="$2" out="$3"
+  local ns="$1" tag="$2" out="$3" ctx="$4"
   buildctl --addr "$BUILDCTL_ADDR" \
     build --frontend dockerfile.v0 \
     --opt "build-arg:BUILDKIT_CACHE_MOUNT_NS=$ns" \
-    --local "context=$CTX_NS_A" --local "dockerfile=$CTX_NS_A" \
+    --local "context=$ctx" --local "dockerfile=$ctx" \
     --output "type=docker,name=$tag:latest,dest=$out" \
-    > "$WORK_DIR/ns-a-$ns.log" 2>&1 || { tail -20 "$WORK_DIR/ns-a-$ns.log"; fail "NS write build ($ns) failed"; }
-  buildctl --addr "$BUILDCTL_ADDR" \
-    build --frontend dockerfile.v0 \
-    --opt "build-arg:BUILDKIT_CACHE_MOUNT_NS=$ns" \
-    --local "context=$CTX_NS_B" --local "dockerfile=$CTX_NS_B" \
-    --output "type=docker,name=$tag-b:latest,dest=$out.b.tar" \
-    > "$WORK_DIR/ns-b-$ns.log" 2>&1 || { tail -20 "$WORK_DIR/ns-b-$ns.log"; fail "NS read build ($ns) failed"; }
-  docker load -i "$out.b.tar" >/dev/null 2>&1 || true
-  docker run --rm "$tag-b:latest" cat /m1/observed.txt 2>/dev/null || true
+    > "$WORK_DIR/ns-$tag.log" 2>&1 || { tail -20 "$WORK_DIR/ns-$tag.log"; fail "NS build ($tag) failed"; }
+  docker load -i "$out" >/dev/null 2>&1 || true
+  docker run --rm "$tag:latest" cat /m1/observed.txt 2>/dev/null || true
 }
-SAME_NS_OBS="$(NS_TEST "m1-ns-shared" m1-nssame "$WORK_DIR/out-ns-same.tar")"
-evidence mitigation-same-ns.txt "same BUILDKIT_CACHE_MOUNT_NS on both builds, B observed:
-$SAME_NS_OBS"
+NS_RB_OBS="$(NS_TEST "m1-ns-shared" m1-nsrb "$WORK_DIR/out-ns-rb.tar" "$CTX_NS_RB")"
+evidence mitigation-ns-readback.txt "same-invocation readback under BUILDKIT_CACHE_MOUNT_NS=m1-ns-shared:
+$NS_RB_OBS
+build log tail:
+$(tail -6 "$WORK_DIR/ns-m1-nsrb.log")"
+if printf '%s\n' "$NS_RB_OBS" | grep -q "NS-READBACK-SECRET"; then
+  say "mitigation 6a control: namespace keying works within one invocation"
+else
+  say "mitigation 6a control: readback under the namespace FAILED — the build-arg did not take effect in this frontend; recording and continuing"
+fi
+NS_TEST_A() {
+  local ns="$1" tag="$2" out="$3"
+  NS_TEST "$ns" "$tag" "$out" "$CTX_NS_A"
+}
+NS_TEST_B() {
+  local ns="$1" tag="$2" out="$3"
+  NS_TEST "$ns" "$tag" "$out" "$CTX_NS_B"
+}
+NS_TEST_A "m1-ns-shared" m1-nssame "$WORK_DIR/out-ns-same.tar"
+SAME_NS_OBS="$(NS_TEST_B "m1-ns-shared" m1-nssameb "$WORK_DIR/out-ns-same-b.tar")"
+evidence mitigation-same-ns.txt "same BUILDKIT_CACHE_MOUNT_NS=m1-ns-shared on both builds, B observed:
+$SAME_NS_OBS
+A build log tail:
+$(tail -6 "$WORK_DIR/ns-m1-nssame.log")
+B build log tail:
+$(tail -6 "$WORK_DIR/ns-m1-nssameb.log")"
 if printf '%s\n' "$SAME_NS_OBS" | grep -q "NS-A-SECRET"; then
   say "mitigation 6a: same namespace -> B sees A (namespace is a key, not a boundary)"
 else
   say "mitigation 6a: same namespace -> B did NOT observe A's marker directly (checking state)"
 fi
-DIFF_NS_OBS="$(NS_TEST "m1-ns-other-$(date +%s)" m1-nsdiff "$WORK_DIR/out-ns-diff.tar")"
+NS_TEST_A "m1-ns-shared" m1-nssame "$WORK_DIR/out-ns-same.tar"
+DIFF_NS_OBS="$(NS_TEST_B "m1-ns-other-$(date +%s)" m1-nsdiff "$WORK_DIR/out-ns-diff.tar")"
 evidence mitigation-diff-ns.txt "different BUILDKIT_CACHE_MOUNT_NS per build, B observed:
-$DIFF_NS_OBS"
-if printf '%s\n' "$DIFF_NS_OBS" | grep -q "NS-A-SECRET"; then
-  say "mitigation 6a: DIFFERENT namespace -> B still saw A (unexpected)"
+$DIFF_NS_OBS
+B build log tail:
+$(tail -6 "$WORK_DIR/ns-m1-nsdiff.log")"
+if printf '%s\n' "$DIFF_NS_OBS" | grep -qE "NS-A-SECRET|SESSION-A-SECRET-KEY"; then
+  say "mitigation 6a: DIFFERENT namespace -> B still saw A's content (unexpected)"
 else
   say "mitigation 6a: different namespace -> B did not see A's cache content (namespacing works, but it is caller-reachable keying, not a boundary)"
 fi
