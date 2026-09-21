@@ -113,7 +113,7 @@ say "subuid/subgid ok (>=65536)"
 
 # builder-owned runtime/state dirs
 mkdir -p "$BUILDER_STATE" "$BUILDER_XDG"
-chown -R "$BUILDER_USER:$BUILDER_USER" "$BUILDER_HOME" "$BUILDER_STATE"
+chown -R "$BUILDER_USER:$BUILDER_USER" "$BUILDER_HOME" "$BUILDER_STATE" "$BUILDER_XDG"
 chmod 700 "$BUILDER_XDG" "$BUILDER_STATE"
 
 # ---------------------------------------------------------------------------
