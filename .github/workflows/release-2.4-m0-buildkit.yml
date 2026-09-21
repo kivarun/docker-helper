@@ -98,6 +98,33 @@ jobs:
           sudo -E env "PATH=$PATH" M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m0-evidence" \
             scripts/release-2.4-m0-buildkit-proof.sh
 
+
+  tumbleweed-rootless-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed M0 probe
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m0-tw-evidence" \
+            scripts/release-2.4-m0-buildkit-tw-vm.sh
+
+      - name: Upload Tumbleweed M0 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-2.4-m0-buildkit-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-m0-tw-evidence
+          if-no-files-found: warn
+
       - name: Upload M0 evidence
         if: always()
         uses: actions/upload-artifact@v4
