@@ -220,6 +220,7 @@ OUT_PROBE="$WORK_DIR/out-probe"
 mkdir -p "$CTX_PROBE" "$OUT_PROBE"
 cat > "$CTX_PROBE/Dockerfile" <<'EOF'
 FROM alpine:3.20
+RUN mkdir -p /m0
 RUN id > /m0/id.txt
 RUN cat /proc/self/uid_map > /m0/uid_map.txt
 RUN cat /proc/self/gid_map > /m0/gid_map.txt
@@ -280,6 +281,7 @@ OUT_MARKER="$WORK_DIR/out-marker"
 mkdir -p "$CTX_MARKER" "$OUT_MARKER"
 cat > "$CTX_MARKER/Dockerfile" <<EOF
 FROM alpine:3.20
+RUN mkdir -p /m0
 RUN cat $WORK_DIR/m0-root-marker > /m0/leak.txt 2>&1; echo rc=\$? >> /m0/leak.txt
 RUN cat /proc/self/mountinfo > /m0/mountinfo.txt
 EOF
@@ -307,6 +309,7 @@ OUT_LOOP="$WORK_DIR/out-loop"
 mkdir -p "$CTX_LOOP" "$OUT_LOOP"
 cat > "$CTX_LOOP/Dockerfile" <<EOF
 FROM alpine:3.20
+RUN mkdir -p /m0
 RUN wget -q -T3 -O- http://127.0.0.1:$HOST_MARKER_PORT/ > /m0/net.txt 2>&1; echo rc=\$? >> /m0/net.txt
 EOF
 buildctl --addr "$BUILDCTL_ADDR" build \
@@ -335,6 +338,7 @@ OUT_OUT="$WORK_DIR/out-out"
 mkdir -p "$CTX_OUT" "$OUT_OUT"
 cat > "$CTX_OUT/Dockerfile" <<'EOF'
 FROM alpine:3.20
+RUN mkdir -p /m0
 RUN apk add --no-cache curl > /m0/apk.txt 2>&1; echo apk_rc=$? >> /m0/net2.txt; curl -s -o /dev/null https://dl-cdn.alpinelinux.org/alpine/; echo curl_rc=$? >> /m0/net2.txt
 EOF
 buildctl --addr "$BUILDCTL_ADDR" build \
@@ -404,6 +408,7 @@ CTX_HELLO="$WORK_DIR/ctx-hello"
 mkdir -p "$CTX_HELLO"
 cat > "$CTX_HELLO/Dockerfile" <<'EOF'
 FROM alpine:3.20
+RUN mkdir -p /m0
 RUN echo m0-roundtrip > /m0/marker.txt
 EOF
 buildctl --addr "$BUILDCTL_ADDR" build \
