@@ -161,8 +161,11 @@ debug = false
 [grpc]
   address = ["unix://$SOCKET"]
 EOF
-# the socket lives under WORK_DIR; the builder must be able to bind there
+# the socket and rootlesskit state live under WORK_DIR; the builder must be
+# able to traverse/bind there
 chmod 755 "$WORK_DIR"
+mkdir -p "$WORK_DIR/rootlesskit-state"
+chown -R "$BUILDER_USER:$BUILDER_USER" "$WORK_DIR/rootlesskit-state"
 
 as_builder nohup rootlesskit \
   --net=slirp4netns \
