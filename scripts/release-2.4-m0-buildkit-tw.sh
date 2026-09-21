@@ -110,6 +110,8 @@ say "host marker service up"
 
 # 3. rootless buildkitd
 chmod 755 "$WORK_DIR"
+mkdir -p "$WORK_DIR/rootlesskit-state"
+chown -R "$BUILDER_USER:$BUILDER_USER" "$WORK_DIR"
 BUILDKITD_CONFIG="$WORK_DIR/buildkitd.toml"
 cat > "$BUILDKITD_CONFIG" <<EOF
 debug = false
