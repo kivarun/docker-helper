@@ -173,6 +173,7 @@ as_builder nohup rootlesskit \
   --disable-host-loopback \
   --state-dir="$WORK_DIR/rootlesskit-state" \
   buildkitd \
+  --rootless \
   --root="$BUILDER_STATE" \
   --addr="unix://$SOCKET" \
   --config="$BUILDKITD_CONFIG" \
