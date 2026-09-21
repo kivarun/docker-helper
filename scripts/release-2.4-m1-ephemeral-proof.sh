@@ -113,7 +113,10 @@ say "builder identity ok (uid=$BUILDER_UID)"
 
 # manager runtime/state roots; owned by the builder user
 MGR_WORK="$(mktemp -d "${M1_MGR_WORK:-/tmp/release-2.4-m1-ephemeral.XXXXXXXX}")"
-mkdir -p "$MGR_RUNTIME" "$MGR_STATE"
+BUILDER_XDG="/run/user/$BUILDER_UID"
+mkdir -p "$MGR_RUNTIME" "$MGR_STATE" "$BUILDER_XDG"
+chown -R "$BUILDER_UID:$BUILDER_GID" "$BUILDER_XDG"
+chmod 700 "$BUILDER_XDG"
 chown "$BUILDER_UID:$BUILDER_GID" "$MGR_RUNTIME" "$MGR_STATE"
 chmod 750 "$MGR_RUNTIME" "$MGR_STATE"
 
@@ -179,6 +182,7 @@ TOML
   local ready=0
   for _ in $(seq 1 60); do
     if ! kill -0 "$pid" 2>/dev/null; then
+      tail -8 "$rt/buildkitd.log" >&2 || true
       rm -rf "$rt" "$st"
       echo "ERR buildkitd exited early"
       return
@@ -260,7 +264,9 @@ def dispatch(conn, data):
         helper = "start" if cmd == "START" else "stop"
         r = subprocess.run(["bash", ops_script, runtime, state, helper, op],
                            capture_output=True, text=True, timeout=180)
-        out = (r.stdout.strip() or ("ERR subprocess-failed: " + r.stderr.strip()[-200:]))
+        out = r.stdout.strip() or ("ERR subprocess-failed: " + r.stderr.strip()[-200:])
+        if r.returncode != 0 and r.stdout.strip():
+            out += " | stderr: " + r.stderr.strip()[-200:]
         conn.sendall((out + "\n").encode())
     except Exception as e:
         try: conn.sendall(("ERR " + str(e) + "\n").encode())
@@ -296,7 +302,7 @@ touch "$MGR_LOG" "$MGR_WORK/manager-listener.out"
 chown "$BUILDER_UID:$BUILDER_GID" "$MGR_LOG" "$MGR_WORK/manager-listener.out"
 
 setsid setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
-  env XDG_RUNTIME_DIR="/run/user/$BUILDER_UID" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
+  env XDG_RUNTIME_DIR="$BUILDER_XDG" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   python3 -u "$MGR_WORK/manager-listener.py" \
     "$MGR_SOCK" "$MGR_WORK/manager-ops.sh" "$MGR_RUNTIME" "$MGR_STATE" \
@@ -680,7 +686,7 @@ kill "$MGR_PID" 2>/dev/null || true
 wait "$MGR_PID" 2>/dev/null || true
 rm -f "$MGR_RUNTIME/manager.ready" "$MGR_SOCK"
 setsid setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
-  env XDG_RUNTIME_DIR="/run/user/$BUILDER_UID" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
+  env XDG_RUNTIME_DIR="$BUILDER_XDG" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   python3 -u "$MGR_WORK/manager-listener.py" \
     "$MGR_SOCK" "$MGR_WORK/manager-ops.sh" "$MGR_RUNTIME" "$MGR_STATE" \
