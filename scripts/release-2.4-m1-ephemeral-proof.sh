@@ -304,6 +304,14 @@ def serve():
                 except Exception: pass
         threading.Thread(target=handle, args=(c,), daemon=True).start()
 
+# startup purge: every manager start removes all previous operation-private
+# runtime/state (caches are disposable; no adoption/reconciliation exists)
+r = subprocess.run(["bash", ops_script, runtime, state, "purge"],
+                   capture_output=True, text=True, timeout=120)
+if "OK purged" not in r.stdout:
+    sys.stderr.write("startup purge failed: " + r.stdout + r.stderr)
+    sys.exit(1)
+
 # readiness marker for the probe
 open(os.path.join(os.path.dirname(sock_path), "manager.ready"), "w").write("ready\n")
 serve()
