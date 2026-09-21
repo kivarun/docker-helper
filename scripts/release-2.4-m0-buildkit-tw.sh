@@ -118,8 +118,20 @@ debug = false
 [grpc]
   address = ["unix://$SOCKET"]
 EOF
+# openSUSE: /etc/ssl/* are RELATIVE symlinks into /var/lib/ca-certificates;
+# rootlesskit --copy-up=/etc copies the links but not the targets =>
+# dangling CAs inside the child => x509 unknown authority (rootlesskit#225;
+# fixed upstream by rbind-mounting /etc/ssl from the parent, moby#42457).
+# The builder service wrapper must apply the same narrow fix. The probe
+# uses SSL_CERT_FILE for buildkitd (single env var, no mount games)
+# pointing at the real host CA bundle:
+CA_BUNDLE="$(realpath /etc/ssl/ca-bundle.pem 2>/dev/null || true)"
+[ -n "$CA_BUNDLE" ] || CA_BUNDLE="/var/lib/ca-certificates/ca-bundle.pem"
+[ -f "$CA_BUNDLE" ] || fail "no host CA bundle found ($CA_BUNDLE)"
+chmod 644 "$CA_BUNDLE" 2>/dev/null || true
+
 su -s /bin/sh "$BUILDER_USER" -c \
-  "exec env XDG_RUNTIME_DIR=$BUILDER_XDG HOME=$BUILDER_HOME USER=$BUILDER_USER PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin rootlesskit --net=slirp4netns --copy-up=/etc --copy-up=/var/lib/ca-certificates --disable-host-loopback --state-dir=$WORK_DIR/rootlesskit-state buildkitd --rootless --root=$BUILDER_STATE --addr=unix://$SOCKET --config=$BUILDKITD_CONFIG" \
+  "exec env XDG_RUNTIME_DIR=$BUILDER_XDG HOME=$BUILDER_HOME USER=$BUILDER_USER SSL_CERT_FILE=$CA_BUNDLE PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback --state-dir=$WORK_DIR/rootlesskit-state buildkitd --rootless --root=$BUILDER_STATE --addr=unix://$SOCKET --config=$BUILDKITD_CONFIG" \
   > "$WORK_DIR/buildkitd.log" 2>&1 &
 BUILDKITD_PID=$!
 
