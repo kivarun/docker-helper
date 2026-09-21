@@ -98,6 +98,11 @@ jobs:
             signal (send,receive) peer=dhm0-rootlesskit,
             ptrace (readby) peer=dhm0-rootlesskit,
             deny ptrace (read) peer=dhm0-rootlesskit,
+            /usr/bin/nsenter r,
+            /{usr/,}bin/{,b}ash r,
+            /usr/local/bin/buildkitd r,
+            /usr/sbin/ip r,
+            /usr/bin/ip r,
           }
           PROFILE
           sudo apparmor_parser -r /etc/apparmor.d/dhm0-rootlesskit
