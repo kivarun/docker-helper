@@ -318,19 +318,20 @@ RUN --mount=type=cache,id=$CACHE_ID,target=/cache \\
 EOF
 NS_TEST() {
   local ns="$1" tag="$2" out="$3" ctx="$4"
-  local before_lines
-  before_lines="$(wc -l < "$WORK_DIR/buildkitd.log")"
   buildctl --addr "$BUILDCTL_ADDR" \
     build --frontend dockerfile.v0 \
     --opt "build-arg:BUILDKIT_CACHE_MOUNT_NS=$ns" \
     --local "context=$ctx" --local "dockerfile=$ctx" \
+    --metadata-file "$WORK_DIR/ns-$tag.meta.json" \
     --output "type=docker,name=$tag:latest,dest=$out" \
     > "$WORK_DIR/ns-$tag.log" 2>&1 || { tail -20 "$WORK_DIR/ns-$tag.log"; fail "NS build ($tag) failed"; }
-  # capture the daemon-side solve-request opts for THIS build
+  # provenance records the invocation parameters the frontend actually
+  # received; show whether the namespace build-arg is among them
   {
-    echo "frontend opts seen by buildkitd for build $tag:"
-    tail -n +"$before_lines" "$WORK_DIR/buildkitd.log" \
-      | grep -oE "build-arg:BUILDKIT_CACHE_MOUNT_NS[^ ,\"}]*" | sort -u
+    echo "provenance build-args for build $tag:"
+    grep -oE "\"build-arg:BUILDKIT_CACHE_MOUNT_NS\":\"[^\"]*\"" \
+      "$WORK_DIR/ns-$tag.meta.json" 2>/dev/null | sort -u || true
+    echo "metadata keys: $(jq -r 'keys | join(",")' "$WORK_DIR/ns-$tag.meta.json" 2>/dev/null || true)"
     echo "(build log tail:)"
     tail -4 "$WORK_DIR/ns-$tag.log"
   } > "$WORK_DIR/ns-$tag.daemon.txt"
