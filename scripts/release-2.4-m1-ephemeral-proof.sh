@@ -798,10 +798,12 @@ SOCKS_OBS="$(docker run --rm m1-eph-ns:latest cat /m1/socks.txt 2>/dev/null || t
 evidence ephemeral-ns.txt "uid_map: $RAW_UID_MAP
 ns_user: $NS_USER
 socks: $SOCKS_OBS"
-case "$SOCKS_OBS" in
-  *"docker.sock"*) fail "ephemeral build RUN saw a docker socket" ;;
-  *) say "no docker.sock visible from build RUN (PASS)" ;;
-esac
+# ls prints "No such file or directory" for absent paths; a present socket
+# would appear as a direct ls entry line. Match only the direct-entry form.
+if printf '%s\n' "$SOCKS_OBS" | grep -v "No such file" | grep -q "docker.sock"; then
+  fail "ephemeral build RUN saw a docker socket"
+fi
+say "no docker.sock visible from build RUN (PASS)"
 say "sandbox-root host-side uid=$BUILD_HOST_UID (PASS)"
 
 # host-root marker negative through op F
