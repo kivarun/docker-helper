@@ -165,7 +165,7 @@ EOF
 # able to traverse/bind there
 chmod 755 "$WORK_DIR"
 mkdir -p "$WORK_DIR/rootlesskit-state"
-chown -R "$BUILDER_USER:$BUILDER_USER" "$WORK_DIR/rootlesskit-state"
+chown -R "$BUILDER_USER:$BUILDER_USER" "$WORK_DIR"
 
 as_builder nohup rootlesskit \
   --net=slirp4netns \
