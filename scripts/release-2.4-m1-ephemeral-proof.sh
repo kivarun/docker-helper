@@ -309,14 +309,14 @@ for _ in $(seq 1 20); do
     say "manager process exited early"
     break
   fi
-  if [ -S "$MGR_SOCK" ] && [ -f "$MGR_WORK/manager.ready" ]; then ready=1; break; fi
+  if [ -S "$MGR_SOCK" ] && [ -f "$MGR_RUNTIME/manager.ready" ]; then ready=1; break; fi
   sleep 0.5
 done
 if [ "$ready" != 1 ]; then
   say "manager listener failed to start; diagnostics:"
   cat "$MGR_WORK/manager-listener.out" 2>/dev/null || true
   ls -la "$MGR_RUNTIME" "$MGR_WORK" 2>/dev/null || true
-  ps -ef | grep -E "manager-listener|setpriv" | grep -v grep || true
+  pgrep -af "manager-listener" || true
   fail "manager socket never appeared"
 fi
 # grant root access via the root:builder group pair (the file is 0660 owned
@@ -678,7 +678,7 @@ say "=== 8. crash/restart contract ==="
 # restart the manager (simulate crash + systemd restart): kill it and relaunch
 kill "$MGR_PID" 2>/dev/null || true
 wait "$MGR_PID" 2>/dev/null || true
-rm -f "$MGR_WORK/manager.ready" "$MGR_SOCK"
+rm -f "$MGR_RUNTIME/manager.ready" "$MGR_SOCK"
 setsid setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
   env XDG_RUNTIME_DIR="/run/user/$BUILDER_UID" HOME="$BUILDER_HOME" USER="$BUILDER_USER" \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -688,7 +688,7 @@ setsid setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
 MGR_PID=$!
 ready=0
 for _ in $(seq 1 20); do
-  if [ -S "$MGR_SOCK" ] && [ -f "$MGR_WORK/manager.ready" ]; then ready=1; break; fi
+  if [ -S "$MGR_SOCK" ] && [ -f "$MGR_RUNTIME/manager.ready" ]; then ready=1; break; fi
   sleep 0.5
 done
 [ "$ready" = 1 ] || { cat "$MGR_WORK/manager-listener.out" || true; fail "manager did not restart"; }
