@@ -115,7 +115,10 @@ say "builder identity ready (uid=$BUILDER_UID)"
 say "=== 2. persistent shared rootless buildkitd ==="
 BUILDKITD_CONFIG="$WORK_DIR/buildkitd.toml"
 cat > "$BUILDKITD_CONFIG" <<EOF
-debug = false
+# debug=true so the daemon log records each solve request's frontend opts
+# (the M1 evidence needs to show whether build-arg:BUILDKIT_CACHE_MOUNT_NS
+# actually reached the dockerfile frontend)
+debug = true
 [grpc]
   address = ["unix://$SOCKET"]
 EOF
@@ -315,20 +318,29 @@ RUN --mount=type=cache,id=$CACHE_ID,target=/cache \\
 EOF
 NS_TEST() {
   local ns="$1" tag="$2" out="$3" ctx="$4"
+  local before_lines
+  before_lines="$(wc -l < "$WORK_DIR/buildkitd.log")"
   buildctl --addr "$BUILDCTL_ADDR" \
     build --frontend dockerfile.v0 \
     --opt "build-arg:BUILDKIT_CACHE_MOUNT_NS=$ns" \
     --local "context=$ctx" --local "dockerfile=$ctx" \
     --output "type=docker,name=$tag:latest,dest=$out" \
     > "$WORK_DIR/ns-$tag.log" 2>&1 || { tail -20 "$WORK_DIR/ns-$tag.log"; fail "NS build ($tag) failed"; }
+  # capture the daemon-side solve-request opts for THIS build
+  {
+    echo "frontend opts seen by buildkitd for build $tag:"
+    tail -n +"$before_lines" "$WORK_DIR/buildkitd.log" \
+      | grep -oE "build-arg:BUILDKIT_CACHE_MOUNT_NS[^ ,\"}]*" | sort -u
+    echo "(build log tail:)"
+    tail -4 "$WORK_DIR/ns-$tag.log"
+  } > "$WORK_DIR/ns-$tag.daemon.txt"
   docker load -i "$out" >/dev/null 2>&1 || true
   docker run --rm "$tag:latest" cat /m1/observed.txt 2>/dev/null || true
 }
 NS_RB_OBS="$(NS_TEST "m1-ns-shared" m1-nsrb "$WORK_DIR/out-ns-rb.tar" "$CTX_NS_RB")"
 evidence mitigation-ns-readback.txt "same-invocation readback under BUILDKIT_CACHE_MOUNT_NS=m1-ns-shared:
 $NS_RB_OBS
-build log tail:
-$(tail -6 "$WORK_DIR/ns-m1-nsrb.log")"
+$(cat "$WORK_DIR/ns-m1-nsrb.daemon.txt")"
 if printf '%s\n' "$NS_RB_OBS" | grep -q "NS-READBACK-SECRET"; then
   say "mitigation 6a control: namespace keying works within one invocation"
 else
@@ -359,10 +371,8 @@ evidence mitigation-same-ns.txt "same BUILDKIT_CACHE_MOUNT_NS=m1-ns-shared on bo
 $SAME_NS_OBS
 $NS_DIRS_AFTER_A
 $NS_DIRS_AFTER_B
-A build log tail:
-$(tail -6 "$WORK_DIR/ns-m1-nssame.log")
-B build log tail:
-$(tail -6 "$WORK_DIR/ns-m1-nssameb.log")"
+$(cat "$WORK_DIR/ns-m1-nssame.daemon.txt")
+$(cat "$WORK_DIR/ns-m1-nssameb.daemon.txt")"
 if printf '%s\n' "$SAME_NS_OBS" | grep -q "NS-A-SECRET"; then
   say "mitigation 6a: same namespace -> B sees A (namespace is a key, not a boundary)"
 else
@@ -374,8 +384,7 @@ NS_DIRS_AFTER_DIFF="$(cache_mount_dirs after-diff-ns-B)"
 evidence mitigation-diff-ns.txt "different BUILDKIT_CACHE_MOUNT_NS per build, B observed:
 $DIFF_NS_OBS
 $NS_DIRS_AFTER_DIFF
-B build log tail:
-$(tail -6 "$WORK_DIR/ns-m1-nsdiff.log")"
+$(cat "$WORK_DIR/ns-m1-nsdiff.daemon.txt")"
 if printf '%s\n' "$DIFF_NS_OBS" | grep -qE "NS-A-SECRET|SESSION-A-SECRET-KEY"; then
   say "mitigation 6a: DIFFERENT namespace -> B still saw A's content (unexpected)"
 else
