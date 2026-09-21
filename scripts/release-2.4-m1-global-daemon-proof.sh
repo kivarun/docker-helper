@@ -177,7 +177,7 @@ buildctl --addr "$BUILDCTL_ADDR" \
   --frontend dockerfile.v0 \
   --local "context=$CTX_A" \
   --local "dockerfile=$CTX_A" \
-  --output "type=oci,name=m1-a:latest,dest=$WORK_DIR/out-a.tar" \
+  --output "type=docker,name=m1-a:latest,dest=$WORK_DIR/out-a.tar" \
   > "$WORK_DIR/build-a.log" 2>&1 || { tail -30 "$WORK_DIR/build-a.log"; fail "session A build failed"; }
 say "session A build done (secret written into cache mount id=$CACHE_ID)"
 
@@ -198,7 +198,7 @@ buildctl --addr "$BUILDCTL_ADDR" \
   --frontend dockerfile.v0 \
   --local "context=$CTX_B" \
   --local "dockerfile=$CTX_B" \
-  --output "type=oci,name=m1-b:latest,dest=$WORK_DIR/out-b.tar" \
+  --output "type=docker,name=m1-b:latest,dest=$WORK_DIR/out-b.tar" \
   > "$WORK_DIR/build-b.log" 2>&1 || { tail -30 "$WORK_DIR/build-b.log"; fail "session B build failed"; }
 
 # extract the observed marker from B's result image
@@ -247,12 +247,12 @@ L2_LOG="$WORK_DIR/layer-build-2.log"
 buildctl --addr "$BUILDCTL_ADDR" \
   build --frontend dockerfile.v0 \
   --local "context=$CTX_L" --local "dockerfile=$CTX_L" \
-  --output "type=oci,name=m1-l1:latest,dest=$WORK_DIR/out-l1.tar" \
+  --output "type=docker,name=m1-l1:latest,dest=$WORK_DIR/out-l1.tar" \
   > "$L1_LOG" 2>&1 || fail "layer build 1 failed"
 buildctl --addr "$BUILDCTL_ADDR" \
   build --frontend dockerfile.v0 \
   --local "context=$CTX_L" --local "dockerfile=$CTX_L" \
-  --output "type=oci,name=m1-l2:latest,dest=$WORK_DIR/out-l2.tar" \
+  --output "type=docker,name=m1-l2:latest,dest=$WORK_DIR/out-l2.tar" \
   > "$L2_LOG" 2>&1 || fail "layer build 2 failed"
 
 CACHED_LINE="$(grep -cE "\[.*\] CACHED" "$L2_LOG" || true)"
@@ -306,13 +306,13 @@ NS_TEST() {
     build --frontend dockerfile.v0 \
     --opt "build-arg:BUILDKIT_CACHE_MOUNT_NS=$ns" \
     --local "context=$CTX_NS_A" --local "dockerfile=$CTX_NS_A" \
-    --output "type=oci,name=$tag:latest,dest=$out" \
+    --output "type=docker,name=$tag:latest,dest=$out" \
     > "$WORK_DIR/ns-a-$ns.log" 2>&1 || { tail -20 "$WORK_DIR/ns-a-$ns.log"; fail "NS write build ($ns) failed"; }
   buildctl --addr "$BUILDCTL_ADDR" \
     build --frontend dockerfile.v0 \
     --opt "build-arg:BUILDKIT_CACHE_MOUNT_NS=$ns" \
     --local "context=$CTX_NS_B" --local "dockerfile=$CTX_NS_B" \
-    --output "type=oci,name=$tag-b:latest,dest=$out.b.tar" \
+    --output "type=docker,name=$tag-b:latest,dest=$out.b.tar" \
     > "$WORK_DIR/ns-b-$ns.log" 2>&1 || { tail -20 "$WORK_DIR/ns-b-$ns.log"; fail "NS read build ($ns) failed"; }
   docker load -i "$out.b.tar" >/dev/null 2>&1 || true
   docker run --rm "$tag-b:latest" cat /m1/observed.txt 2>/dev/null || true
@@ -340,7 +340,7 @@ buildctl --addr "$BUILDCTL_ADDR" \
   build --frontend dockerfile.v0 \
   --no-cache \
   --local "context=$CTX_B" --local "dockerfile=$CTX_B" \
-  --output "type=oci,name=m1-b-nc:latest,dest=$WORK_DIR/out-b-nc.tar" \
+  --output "type=docker,name=m1-b-nc:latest,dest=$WORK_DIR/out-b-nc.tar" \
   > "$WORK_DIR/build-b-nocache.log" 2>&1 || { tail -20 "$WORK_DIR/build-b-nocache.log"; fail "no-cache build failed"; }
 NC_AFTER_A="$(grep -oE "SESSION-A-SECRET-KEY" "$WORK_DIR/build-b-nocache.log" | head -1 || true)"
 # After --no-cache on B, does A's cache mount still contain the secret?
@@ -358,7 +358,7 @@ buildctl --addr "$BUILDCTL_ADDR" \
   build --frontend dockerfile.v0 \
   --opt "image-resolve-mode=pull" \
   --local "context=$CTX_B" --local "dockerfile=$CTX_B" \
-  --output "type=oci,name=m1-b-pull:latest,dest=$WORK_DIR/out-b-pull.tar" \
+  --output "type=docker,name=m1-b-pull:latest,dest=$WORK_DIR/out-b-pull.tar" \
   > "$RESOLVE_LOG" 2>&1 || { tail -20 "$RESOLVE_LOG"; fail "resolve-mode pull build failed"; }
 evidence mitigation-resolve-pull.txt "$(tail -8 "$RESOLVE_LOG")"
 say "mitigation 6c: image-resolve-mode=pull accepted on buildctl; it bypasses local image cache, no tenant-scoping (evidence only)"
