@@ -236,7 +236,10 @@ buildctl --addr "$BUILDCTL_ADDR" build \
   --frontend dockerfile.v0 \
   --local "context=$CTX_PROBE" \
   --local "dockerfile=$CTX_PROBE" \
-  --output "type=oci,tar=false,dest=$OUT_PROBE" >/dev/null 2>&1 || fail "namespace probe build failed"
+  --output "type=oci,tar=false,dest=$OUT_PROBE" > "$WORK_DIR/nsbuild.log" 2>&1 || {
+  tail -30 "$WORK_DIR/nsbuild.log"
+  fail "namespace probe build failed"
+}
 PROBE_TAR="$(find "$OUT_PROBE" -type f | head -1)"
 docker import "$PROBE_TAR" m0-probe:ns >/dev/null || fail "docker import of probe image failed"
 
