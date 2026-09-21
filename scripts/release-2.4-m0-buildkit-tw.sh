@@ -128,7 +128,12 @@ EOF
 CA_BUNDLE="$(realpath /etc/ssl/ca-bundle.pem 2>/dev/null || true)"
 [ -n "$CA_BUNDLE" ] || CA_BUNDLE="/var/lib/ca-certificates/ca-bundle.pem"
 [ -f "$CA_BUNDLE" ] || fail "no host CA bundle found ($CA_BUNDLE)"
-chmod 644 "$CA_BUNDLE" 2>/dev/null || true
+# The host CA bundle's permission bits are the OS's; this probe must not
+# chmod host security material. If the builder cannot read it, the
+# buildkitd CA trust setup fails closed below.
+if ! su -s /bin/sh "$BUILDER_USER" -c "test -r $CA_BUNDLE" 2>/dev/null; then
+  fail "builder user cannot read host CA bundle ($CA_BUNDLE)"
+fi
 
 su -s /bin/sh "$BUILDER_USER" -c \
   "exec env XDG_RUNTIME_DIR=$BUILDER_XDG HOME=$BUILDER_HOME USER=$BUILDER_USER SSL_CERT_FILE=$CA_BUNDLE PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback --state-dir=$WORK_DIR/rootlesskit-state buildkitd --rootless --root=$BUILDER_STATE --addr=unix://$SOCKET --config=$BUILDKITD_CONFIG" \
@@ -337,3 +342,6 @@ say "failed-build negative (PASS)"
 
 say "=== ALL PROOFS COMPLETE — Tumbleweed composition A viable ==="
 echo "M0-TW-PROOF-RESULT=PASS" > "$EVIDENCE_DIR/RESULT.txt"
+# The host-side VM orchestrator gates on this marker in the captured guest
+# stdout (m0-tw-guest.log); the evidence-file copy alone is invisible there.
+echo "M0-TW-PROOF-RESULT=PASS"

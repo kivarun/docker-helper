@@ -8,6 +8,8 @@ on:
     paths:
       - .github/workflows/release-2.4-m0-buildkit.yml
       - scripts/release-2.4-m0-buildkit-proof.sh
+      - scripts/release-2.4-m0-buildkit-tw.sh
+      - scripts/release-2.4-m0-buildkit-tw-vm.sh
 
 permissions:
   contents: read
@@ -57,8 +59,18 @@ jobs:
       - name: Install BuildKit from official GitHub release
         run: |
           BUILDKIT_VERSION=v0.33.0
+          # Pinned digest: verified against the official release SBOM subject
+          # (buildkit-v0.33.0.linux-amd64.sbom.json -> digest.sha256) and by an
+          # independent download comparison. No plain .sha256 sidecar exists.
+          BUILDKIT_SHA256=b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead
           curl -fsSL -o /tmp/buildkit.tgz \
-            "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-v0.33.0.linux-amd64.tar.gz"
+            "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz"
+          ACTUAL_SHA256="$(sha256sum /tmp/buildkit.tgz | awk '{print $1}')"
+          if [ "$ACTUAL_SHA256" != "$BUILDKIT_SHA256" ]; then
+            echo "BuildKit tarball SHA256 mismatch: expected $BUILDKIT_SHA256, got $ACTUAL_SHA256" >&2
+            exit 1
+          fi
+          echo "BuildKit tarball SHA256 verified: $ACTUAL_SHA256"
           sudo tar -xzf /tmp/buildkit.tgz -C /usr/local
           export PATH="/usr/local/bin:$PATH"
           echo 'PATH=/usr/local/bin:'"$PATH" >> "$GITHUB_ENV"
@@ -71,25 +83,11 @@ jobs:
           unshare --user --map-root-user true && echo UNSHARE_OK || echo UNSHARE_FAIL
           rootlesskit --net=none true && echo RK_NONE_OK || echo RK_NONE_FAIL
           rootlesskit --net=slirp4netns --disable-host-loopback true && echo RK_SLIRP_OK || echo RK_SLIRP_FAIL
-      - name: AppArmor userns restriction diagnosis
-        run: |
-          set -x
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          unshare --user --map-root-user true && echo UNSHARE_OK_RESTRICT_OFF || echo UNSHARE_FAIL_RESTRICT_OFF
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
-          echo "--- lsm ---"
-          cat /sys/kernel/security/lsm
-          echo "--- apparmor profiles mentioning unprivileged userns ---"
-          grep -rl "user_namespace" /etc/apparmor.d/ 2>/dev/null | head -5
-          ls /etc/apparmor.d/unprivileged-userns 2>/dev/null && cat /etc/apparmor.d/unprivileged-userns | head -20 || echo "no unprivileged-userns profile"
 
-      - name: Diagnose userns as builder user
+      - name: Builder userns smoke test
         run: |
           set -x
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo -u dhm0builder unshare --user --map-root-user id && echo BUILDER_UNSHARE_OK_RESTRICT_OFF || echo BUILDER_UNSHARE_FAIL_RESTRICT_OFF
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
-          sudo -u dhm0builder unshare --user --map-root-user id && echo BUILDER_UNSHARE_OK_RESTRICT_ON || echo BUILDER_UNSHARE_FAIL_RESTRICT_ON
+          sudo -u dhm0builder unshare --user --map-root-user id && echo BUILDER_UNSHARE_OK || echo BUILDER_UNSHARE_FAIL
           rootlesskit --net=none true && echo RK_RUNNER_NONE_OK || echo RK_RUNNER_NONE_FAIL
           sudo -u dhm0builder rootlesskit --net=none true && echo RK_BUILDER_NONE_OK || echo RK_BUILDER_NONE_FAIL
 
@@ -97,6 +95,90 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m0-evidence" \
             scripts/release-2.4-m0-buildkit-proof.sh
+
+      - name: Upload M0 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-2.4-m0-buildkit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-m0-evidence
+          if-no-files-found: error
+
+  buildkit-rootless-proof-2604:
+    # Same composition-A proof on the Ubuntu 26.04 GA runner image
+    # (kernel 7.0/7.x, AppArmor userns restriction on by default, resolute
+    # distro rootlesskit). The probe script itself is distro-agnostic.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install probe dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y uidmap slirp4netns fuse-overlayfs fuse3 curl jq shellcheck rootlesskit
+          sudo systemctl start docker || true
+          sudo useradd -m -s /usr/sbin/nologin dhm0builder || true
+          sudo sh -c 'grep -q dhm0builder /etc/subuid || echo "dhm0builder:200000:65536" >> /etc/subuid'
+          sudo sh -c 'grep -q dhm0builder /etc/subgid || echo "dhm0builder:200000:65536" >> /etc/subgid'
+          sudo docker version || true
+
+      - name: Distro rootlesskit evidence
+        run: |
+          set -x
+          which rootlesskit
+          rootlesskit --version
+          ls -la /etc/apparmor.d/ | grep -i rootless || true
+          cat /etc/apparmor.d/rootlesskit 2>/dev/null || echo "no distro rootlesskit profile"
+
+      - name: Install BuildKit from official GitHub release
+        run: |
+          BUILDKIT_VERSION=v0.33.0
+          # Pinned digest: verified against the official release SBOM subject
+          # (buildkit-v0.33.0.linux-amd64.sbom.json -> digest.sha256) and by an
+          # independent download comparison. No plain .sha256 sidecar exists.
+          BUILDKIT_SHA256=b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead
+          curl -fsSL -o /tmp/buildkit.tgz \
+            "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz"
+          ACTUAL_SHA256="$(sha256sum /tmp/buildkit.tgz | awk '{print $1}')"
+          if [ "$ACTUAL_SHA256" != "$BUILDKIT_SHA256" ]; then
+            echo "BuildKit tarball SHA256 mismatch: expected $BUILDKIT_SHA256, got $ACTUAL_SHA256" >&2
+            exit 1
+          fi
+          echo "BuildKit tarball SHA256 verified: $ACTUAL_SHA256"
+          sudo tar -xzf /tmp/buildkit.tgz -C /usr/local
+          export PATH="/usr/local/bin:$PATH"
+          echo 'PATH=/usr/local/bin:'"$PATH" >> "$GITHUB_ENV"
+          buildkitd --version
+          buildctl --version
+
+      - name: Namespace capability smoke test
+        run: |
+          id
+          unshare --user --map-root-user true && echo UNSHARE_OK || echo UNSHARE_FAIL
+          rootlesskit --net=none true && echo RK_NONE_OK || echo RK_NONE_FAIL
+          rootlesskit --net=slirp4netns --disable-host-loopback true && echo RK_SLIRP_OK || echo RK_SLIRP_FAIL
+
+      - name: Builder userns smoke test
+        run: |
+          set -x
+          sudo -u dhm0builder unshare --user --map-root-user id && echo BUILDER_UNSHARE_OK || echo BUILDER_UNSHARE_FAIL
+          rootlesskit --net=none true && echo RK_RUNNER_NONE_OK || echo RK_RUNNER_NONE_FAIL
+          sudo -u dhm0builder rootlesskit --net=none true && echo RK_BUILDER_NONE_OK || echo RK_BUILDER_NONE_FAIL
+
+      - name: Run rootless BuildKit M0 probe
+        run: |
+          sudo -E env "PATH=$PATH" M0_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-m0-evidence-2604" \
+            scripts/release-2.4-m0-buildkit-proof.sh
+
+      - name: Upload M0 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-2.4-m0-buildkit-2604-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-m0-evidence-2604
+          if-no-files-found: error
 
 
   tumbleweed-rootless-proof:
@@ -124,11 +206,3 @@ jobs:
           name: release-2.4-m0-buildkit-tw-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-2.4-m0-tw-evidence
           if-no-files-found: warn
-
-      - name: Upload M0 evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-2.4-m0-buildkit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/release-2.4-m0-evidence
-          if-no-files-found: error
