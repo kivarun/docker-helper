@@ -770,7 +770,7 @@ evidence restart-fresh.txt "post-restart op build observed its own write: $F_OBS
 if printf '%s\n' "$F_OBS" | grep -q "EPHEMERAL-A-SECRET"; then
   fail "post-restart operation reached pre-restart op A cache state"
 fi
-printf '%s\n' "$F_OBS" | grep -q "written" || fail "post-restart build did not observe its own write: $F_OBS"
+printf '%s\n' "$F_OBS" | grep -q "fresh-op-write" || fail "post-restart build did not observe its own write: $F_OBS"
 say "post-restart operation fresh and self-contained (PASS)"
 
 # ---------------------------------------------------------------------------
