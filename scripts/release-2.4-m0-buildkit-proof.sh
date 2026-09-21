@@ -193,8 +193,20 @@ done
 say "rootless buildkitd is up; socket=$SOCKET"
 evidence buildkitd.log "$(tail -50 "$WORK_DIR/buildkitd.log")"
 
-# root (docker-helper stand-in) can drive the control socket
-buildctl --addr "$BUILDCTL_ADDR" workers >/dev/null 2>&1 || fail "root cannot drive the rootless buildkitd socket"
+# root (docker-helper stand-in) can drive the control socket; allow the
+# daemon a few seconds of GRPC readiness after the socket appears
+buildctl_ok=0
+for _ in $(seq 1 15); do
+  if buildctl --addr "$BUILDCTL_ADDR" workers >/dev/null 2>&1; then
+    buildctl_ok=1
+    break
+  fi
+  sleep 1
+done
+[ "$buildctl_ok" = 1 ] || {
+  buildctl --addr "$BUILDCTL_ADDR" workers 2>&1 | head -10 || true
+  fail "root cannot drive the rootless buildkitd socket"
+}
 say "root -> buildkitd control socket connectivity OK"
 
 evidence_cmd workers.json bash -c "buildctl --addr $BUILDCTL_ADDR workers --inner 2>&1 || true"
