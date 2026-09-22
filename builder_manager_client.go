@@ -81,6 +81,10 @@ var builderClientManagerUID = func() (int, int, error) {
 // builderClientPeerCredentials is the client-side peer-credential seam.
 var builderClientPeerCredentials = peerCredentialsUnix
 
+// builderClientSocketPath is the canonical fixed socket path (seam for
+// tests to mount a test endpoint; production always uses the constant).
+var builderClientSocketPath = builderManagerSocketPath
+
 // builderManagerClient is the root-side internal client.
 type builderManagerClient struct{}
 
@@ -118,7 +122,7 @@ func (c *builderManagerClient) roundTrip(ctx context.Context, command, opID stri
 	dialer := net.Dialer{Timeout: builderClientDialTimeout}
 	dialCtx, cancelDial := context.WithTimeout(ctx, builderClientDialTimeout)
 	defer cancelDial()
-	conn, err := dialer.DialContext(dialCtx, "unix", builderManagerSocketPath)
+	conn, err := dialer.DialContext(dialCtx, "unix", builderClientSocketPath)
 	if err != nil {
 		// Nothing was written: definitely did not reach the manager.
 		return "", &builderClientUnreachable{cause: err}

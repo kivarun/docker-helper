@@ -65,6 +65,26 @@ var (
 	builderPeerCredentials = peerCredentialsUnix
 )
 
+// builderNewRootlessKitCommand constructs the RootlessKit leader command
+// for one operation. Injectable for tests: tests mount a synthetic
+// session-leader process tree through the production spawn owner; the
+// production seam builds the manager-owned immutable argv.
+var builderNewRootlessKitCommand = func(opID string, rtDir, stDir string, env []string) *exec.Cmd {
+	args := []string{
+		"--net=slirp4netns",
+		"--copy-up=/etc",
+		"--disable-host-loopback",
+		"--state-dir=" + filepath.Join(stDir, "rootlesskit-state"),
+		builderManagerBuildkitd,
+		"--rootless",
+		"--root=" + filepath.Join(stDir, "root"),
+		"--addr=unix://" + opSocketPath(opID),
+	}
+	cmd := exec.Command(builderManagerRootlessKit, args...)
+	cmd.Env = env
+	return cmd
+}
+
 // builderVerifyIdentity is the fail-closed execution-identity guard for
 // `builder serve`: the process must run as the exact dedicated
 // docker-helper-builder identity (no hardcoded numeric UID/GID), and
@@ -178,13 +198,19 @@ func (m *builderManager) ceiling() int {
 }
 
 // opRuntimeDir/opStateDir derive the deterministic per-op paths both
-// sides compute independently (the protocol never carries paths).
+// sides compute independently (the protocol never carries paths). The
+// roots are seams for tests (production: fixed canonical constants).
+var (
+	builderRuntimeRoot = builderManagerRuntimeRoot
+	builderStateRoot   = builderManagerStateRoot
+)
+
 func opRuntimeDir(opID string) string {
-	return filepath.Join(builderManagerRuntimeRoot, "ops", opID)
+	return filepath.Join(builderRuntimeRoot, "ops", opID)
 }
 
 func opStateDir(opID string) string {
-	return filepath.Join(builderManagerStateRoot, "ops", opID)
+	return filepath.Join(builderStateRoot, "ops", opID)
 }
 
 func opSocketPath(opID string) string {
@@ -255,7 +281,7 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 	}
 
 	// CA bundle (backend mechanics; fail closed when required and absent).
-	caEnv, caOK := builderResolveSystemCA()
+	caEnv, caOK := builderResolveSystemCAFunc()
 	if !caOK {
 		m.managerDiagf("START %s: no readable supported system CA bundle", opID)
 		m.convergeFailedStart(inst)
@@ -270,20 +296,7 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 	}
 	env = append(env, caEnv...)
 
-	// Manager-owned immutable argv.
-	args := []string{
-		"--net=slirp4netns",
-		"--copy-up=/etc",
-		"--disable-host-loopback",
-		"--state-dir=" + filepath.Join(stDir, "rootlesskit-state"),
-		builderManagerBuildkitd,
-		"--rootless",
-		"--root=" + filepath.Join(stDir, "root"),
-		"--addr=unix://" + opSocketPath(opID),
-	}
-
-	cmd := exec.Command(builderManagerRootlessKit, args...)
-	cmd.Env = env
+	cmd := builderNewRootlessKitCommand(opID, rtDir, stDir, env)
 	cmd.Stdin = nil
 	cmd.Stdout = inst.diag
 	cmd.Stderr = inst.diag
@@ -574,6 +587,10 @@ var builderSystemCABundleCandidates = []string{
 	"/etc/ssl/certs/ca-certificates.crt",
 }
 
+// builderResolveSystemCAFunc is the injectable resolver seam (production:
+// builderResolveSystemCA).
+var builderResolveSystemCAFunc = builderResolveSystemCA
+
 // builderResolveSystemCA selects the first supported real/readable system
 // CA bundle and returns SSL_CERT_FILE env for the buildkitd child. It
 // never chmods host material and never adds user config. ok=false means
@@ -679,10 +696,10 @@ func (m *builderManager) startupPurge() error {
 	}
 
 	// Crash residue on disk.
-	if err := m.purgeDiskResidue(builderManagerRuntimeRoot); err != nil {
+	if err := m.purgeDiskResidue(builderRuntimeRoot); err != nil {
 		return err
 	}
-	if err := m.purgeDiskResidue(builderManagerStateRoot); err != nil {
+	if err := m.purgeDiskResidue(builderStateRoot); err != nil {
 		return err
 	}
 	return nil
@@ -752,39 +769,52 @@ func processAlive(pid int) bool {
 // proving it is the expected builder-owned socket entry (real socket,
 // builder-owned). Never removes an arbitrary path.
 func (m *builderManager) removeStaleManagerSocket() error {
+	return m.removeStaleManagerSocketAt(builderClientSocketPath)
+}
+
+// removeStaleManagerSocketAt is the path-parameterized stale-socket
+// remover (test seam; production always passes the canonical constant).
+func (m *builderManager) removeStaleManagerSocketAt(socketPath string) error {
 	var st unix.Stat_t
-	if err := unix.Lstat(builderManagerSocketPath, &st); err != nil {
+	if err := unix.Lstat(socketPath, &st); err != nil {
 		if errors.Is(err, unix.ENOENT) {
 			return nil
 		}
 		return err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFSOCK {
-		return fmt.Errorf("%s exists and is not a socket; refusing", builderManagerSocketPath)
+		return fmt.Errorf("%s exists and is not a socket; refusing", socketPath)
 	}
 	if st.Uid != uint32(m.uid) || st.Gid != uint32(m.gid) {
-		return fmt.Errorf("%s is not owned by the builder identity; refusing", builderManagerSocketPath)
+		return fmt.Errorf("%s is not owned by the builder identity; refusing", socketPath)
 	}
-	return os.Remove(builderManagerSocketPath)
+	return os.Remove(socketPath)
 }
 
 // prepareManagerSocket creates the manager-owned 0600 unix stream socket
 // after verifying both roots.
 func (m *builderManager) prepareManagerSocket() (*net.UnixListener, error) {
+	return m.prepareManagerSocketAt(builderClientSocketPath)
+}
+
+// prepareManagerSocketAt is the path-parameterized socket owner (the test
+// seam mounts a non-production path; production always passes the
+// canonical constant).
+func (m *builderManager) prepareManagerSocketAt(socketPath string) (*net.UnixListener, error) {
 	if err := m.verifyRealDirectory(builderManagerRuntimeRoot); err != nil {
 		return nil, fmt.Errorf("runtime root: %w", err)
 	}
 	if err := m.verifyRealDirectory(builderManagerStateRoot); err != nil {
 		return nil, fmt.Errorf("state root: %w", err)
 	}
-	if err := m.removeStaleManagerSocket(); err != nil {
+	if err := m.removeStaleManagerSocketAt(socketPath); err != nil {
 		return nil, err
 	}
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: builderManagerSocketPath, Net: "unix"})
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(builderManagerSocketPath, 0600); err != nil {
+	if err := os.Chmod(socketPath, 0600); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
@@ -820,7 +850,7 @@ func (m *builderManager) serve(stderr io.Writer) error {
 	}
 	defer func() {
 		_ = listener.Close()
-		_ = os.Remove(builderManagerSocketPath)
+		_ = os.Remove(builderClientSocketPath)
 	}()
 
 	for {
@@ -850,18 +880,48 @@ func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer) 
 		return
 	}
 
-	// Bounded read: never an unbounded ReadString.
+	// Bounded read: exactly one request line within the fixed ceiling.
+	// Read up to ceiling+1 bytes; EOF before the newline is a complete
+	// request only when a line was actually received. Never an unbounded
+	// ReadString.
 	buf := make([]byte, builderManagerRequestCeiling+1)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, err := io.ReadFull(conn, buf[:builderManagerRequestCeiling])
+	n, err := conn.Read(buf)
 	if err != nil && err != io.EOF {
-		return // oversized or broken request: no response, no execution
+		return // broken request: no response, no execution
+	}
+	if err == nil && n > builderManagerRequestCeiling {
+		// Oversized request: no response, no execution.
+		return
 	}
 	line := buf[:n]
 	if idx := bytes.IndexByte(line, '\n'); idx >= 0 {
 		line = line[:idx]
+	} else if err == nil {
+		// No newline yet: keep reading bounded until EOF or newline.
+		for {
+			more, readErr := conn.Read(buf[n:])
+			if more > 0 {
+				n += more
+				if bytes.IndexByte(buf[:n], '\n') >= 0 || n > builderManagerRequestCeiling {
+					break
+				}
+			}
+			if readErr != nil {
+				if readErr == io.EOF {
+					break
+				}
+				return
+			}
+		}
+		if idx := bytes.IndexByte(buf[:n], '\n'); idx >= 0 {
+			line = buf[:idx]
+		} else {
+			// No newline within the ceiling: oversized/malformed.
+			return
+		}
 	} else {
-		// No newline within the ceiling: oversized/malformed.
+		// EOF with no complete line: malformed.
 		return
 	}
 

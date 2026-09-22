@@ -58,6 +58,10 @@ func parseBuilderManagerRequest(line []byte) (builderManagerRequest, string) {
 	case 2:
 		cmd := string(fields[0])
 		opID := string(fields[1])
+		if cmd == builderManagerCmdPurge {
+			// PURGE takes no argument.
+			return builderManagerRequest{}, builderManagerRespBadRequest
+		}
 		if cmd != builderManagerCmdStart && cmd != builderManagerCmdStop {
 			return builderManagerRequest{}, builderManagerRespUnknownCmd
 		}
