@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 // while existing operations remain under shutdown lifecycle.
 func TestShutdownGateClosesOnSignal(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 
@@ -32,7 +34,10 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sleep", "60")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	// Start an operation before the signal.
@@ -95,6 +100,7 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 // (if admit completed before gate close) or rejected (if gate closed first).
 func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 
@@ -113,9 +119,12 @@ func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
 	var cmdWg sync.WaitGroup
 	cmdWg.Add(1)
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		cmdWg.Done()
-		<-cmdBlocked
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
+		if strings.HasSuffix(name, "buildctl") {
+			cmdWg.Done()
+			<-cmdBlocked
+			return exec.CommandContext(ctx, "/bin/sleep", "60")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{

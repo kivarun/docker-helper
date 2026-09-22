@@ -67,6 +67,14 @@ type App struct {
 	// container inspection used by checked Launcher/Principal deletion. It is a
 	// narrow test seam; production default shells out to the Docker CLI.
 	InspectHelperContainers func(ctx context.Context, launcherID string) ([]helperContainer, error)
+	// builderClientFn, when set, overrides the build driver's manager client
+	// construction (narrow test seam; production always returns the P2
+	// client).
+	builderClientFn func() *builderManagerClient
+	// validateBuildKitSocketFn, when set, overrides the root-side BuildKit
+	// socket validation (narrow test seam; production default is the real
+	// validation owner).
+	validateBuildKitSocketFn func(opID string) error
 }
 
 // pinMountSource calls PinMountSourceFn if set, otherwise the

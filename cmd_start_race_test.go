@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,11 +15,15 @@ import (
 // sets terminated=true, then the handler sees terminated and aborts.
 func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
 	app, supervisor, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 
 	// Block the handler at the point where it holds op.mu about to call Start().
 	cmdBlocked := make(chan struct{})
 	cmdProceed := make(chan struct{})
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if !strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/true")
+		}
 		close(cmdBlocked)
 		<-cmdProceed
 		return exec.CommandContext(ctx, "/bin/sleep", "60")
@@ -49,6 +54,13 @@ func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
 	if op == nil {
 		t.Fatal("operation should be in supervisor")
 	}
+	// The refused stage returns through the async driver; the terminal
+	// transition follows, so wait for it deterministically.
+	select {
+	case <-op.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("operation did not reach its terminal state")
+	}
 	if op.State != operationFailed {
 		t.Errorf("expected 'failed', got %q", op.State)
 	}
@@ -59,6 +71,7 @@ func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
 // properly terminated via graceful SIGTERM.
 func TestCmdStartRaceStartBeforeShutdown(t *testing.T) {
 	app, supervisor, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 	app.ExecCommandContext = makeSleepCmd()
 
 	op := startBuild(t, app, token)

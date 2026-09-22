@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 // terminates the process and returns result_code=cancelled.
 func TestCancelRunningBuild(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -33,8 +35,12 @@ func TestCancelRunningBuild(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Use sleep 300 which will respond to SIGTERM.
-		return exec.CommandContext(ctx, "sleep", "300")
+		// Only the buildctl stage blocks (sleep responds to SIGTERM);
+		// the remaining driver children succeed instantly.
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "sleep", "300")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -111,6 +117,7 @@ func TestCancelRunningBuild(t *testing.T) {
 // TestCancelUnknownOperation returns 404 for unknown operation ID.
 func TestCancelUnknownOperation(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -131,6 +138,7 @@ func TestCancelUnknownOperation(t *testing.T) {
 // TestCancelOtherSessionOperation returns 404 for operation belonging to another session.
 func TestCancelOtherSessionOperation(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	session1, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -178,6 +186,7 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 // TestCancelPreservesLogs proves that operation logs remain accessible after cancel.
 func TestCancelPreservesLogs(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -252,6 +261,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 // audit event with result=cancelled.
 func TestCancelAuditEvent(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -348,6 +358,7 @@ func TestCancelClassificationUsesSentinels(t *testing.T) {
 // returns the terminal state without error.
 func TestCancelIdempotent(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -407,6 +418,7 @@ func TestCancelIdempotent(t *testing.T) {
 // cleans up the cidfile.
 func TestCancelRunCidfileCleanup(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -463,6 +475,7 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 // does not produce result_code=cancelled for build operations.
 func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -532,6 +545,7 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 // does not produce result_code=cancelled for run operations.
 func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -596,6 +610,7 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 // cancel acquires op.mu and sets reason, then terminateForShutdown runs.
 func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -648,6 +663,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 // terminateForShutdown acquires op.mu and sets reason, then cancel runs.
 func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -702,6 +718,7 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -792,6 +809,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -879,6 +897,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 // result is preserved (sequential idempotency).
 func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -949,6 +968,7 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 // overwrite the result to "cancelled".
 func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -999,6 +1019,7 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -1137,6 +1158,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -1286,6 +1308,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 // defaultForceCleanupTimeout.
 func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -1347,6 +1370,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 // does not contain timestamp fields (created_at, started_at, completed_at, duration).
 func TestCancelResponseNoTimestampFields(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))

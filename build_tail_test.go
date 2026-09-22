@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,25 +16,16 @@ import (
 // This is a regression test for the pipe lifecycle race where cmd.Wait()
 // could close StdoutPipe/StderrPipe before io.Copy goroutines finished reading.
 func TestBuildTailOutputNotLost(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	supervisor := newOperationSupervisor()
-	app.OperationSupervisor = supervisor
+	app, supervisor, result, _, _ := setupBuildBackendTest(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	// Process that writes a distinctive final line right before exit.
+	// The buildctl stage writes a distinctive final line right before exit.
 	const tailMarker = "TAIL_OUTPUT_MARKER_12345"
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c",
-			"echo 'line1'; echo 'line2'; echo '"+tailMarker+"'")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c",
+				"echo 'line1'; echo 'line2'; echo '"+tailMarker+"'")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{

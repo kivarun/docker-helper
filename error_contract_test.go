@@ -736,6 +736,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAdminTokenAndStaging(t)
+	attachBackendFixture(t, app)
 	app.OperationSupervisor = newOperationSupervisor()
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
@@ -749,7 +750,12 @@ func TestDockerErrorLogBuild(t *testing.T) {
 
 	const dockerOutput = "build-output-secret-xyz"
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+dockerOutput+"\\n'; exit 1")
+		// The buildctl stage fails with captured live output; the
+		// trusted-side children (STOP, load, tag, rmi) succeed.
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+dockerOutput+"\\n'; exit 1")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody, _ := json.Marshal(map[string]any{

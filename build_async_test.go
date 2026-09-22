@@ -72,31 +72,25 @@ func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
 // TestBuildLiveOutput proves build output becomes visible through logs
 // while the command is still running.
 func TestBuildLiveOutput(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
+	app, _, result, _, _ := setupBuildBackendTest(t)
 
 	syncDir := t.TempDir()
 	readyFile := filepath.Join(syncDir, "ready")
 	releaseFile := filepath.Join(syncDir, "release")
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Write output, signal readiness, then block until release file appears.
-		// This creates an explicit handshake: the test controls when the
-		// process is allowed to complete, ensuring it stays running while
-		// we verify logs and operation state.
-		return exec.CommandContext(ctx, "/bin/sh", "-c",
-			"echo line1; echo line2; touch "+readyFile+
-				"; while [ ! -f "+releaseFile+" ]; do sleep 0.1; done")
+		// Only the buildctl stage emits the handshake output; later stages
+		// (docker load/tag/rmi) run instantly.
+		if strings.HasSuffix(name, "buildctl") {
+			// Write output, signal readiness, then block until release file appears.
+			// This creates an explicit handshake: the test controls when the
+			// process is allowed to complete, ensuring it stays running while
+			// we verify logs and operation state.
+			return exec.CommandContext(ctx, "/bin/sh", "-c",
+				"echo line1; echo line2; touch "+readyFile+
+					"; while [ ! -f "+releaseFile+" ]; do sleep 0.1; done")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -167,22 +161,7 @@ func TestBuildLiveOutput(t *testing.T) {
 
 // TestBuildSuccessTransition proves running -> succeeded transition.
 func TestBuildSuccessTransition(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	app, _, result, _, _ := setupBuildBackendTest(t)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -221,21 +200,13 @@ func TestBuildSuccessTransition(t *testing.T) {
 
 // TestBuildNonZeroExitTransition proves running -> failed with exit code.
 func TestBuildNonZeroExitTransition(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
+	app, _, result, _, _ := setupBuildBackendTest(t)
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 42")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 42")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -324,23 +295,16 @@ func TestAuditFinishEmittedOnce(t *testing.T) {
 // the process exits. This is a regression test for the old
 // io.MultiReader(stdout, stderr) approach which could block.
 func TestBuildStdoutStderrNoDeadlock(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
+	app, _, result, _, _ := setupBuildBackendTest(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	// Write substantial data to both stdout and stderr before exiting.
+	// The buildctl stage writes substantial data to both stdout and stderr
+	// before exiting.
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c",
-			"for i in 1 2 3 4 5; do echo \"stdout-$i\"; echo \"stderr-$i\" >&2; done")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c",
+				"for i in 1 2 3 4 5; do echo \"stdout-$i\"; echo \"stderr-$i\" >&2; done")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{

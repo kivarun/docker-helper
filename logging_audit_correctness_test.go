@@ -556,6 +556,13 @@ func TestAuditWriterFailureDoesNotBreakRequest(t *testing.T) {
 func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
+	app.OperationSupervisor = newOperationSupervisor()
+	setupStagingSeam(t, app)
+	// Build backend fixture so the driver reaches the buildctl child stage,
+	// whose start fails on the nonexistent binary (the build start failure
+	// this proof exercises).
+	newFakeBuilderManager(t)
+	app.validateBuildKitSocketFn = func(string) error { return nil }
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
 	if err != nil {
@@ -569,7 +576,10 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "nonexistent-docker-binary")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "nonexistent-docker-binary")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(fmt.Sprintf(
@@ -582,9 +592,19 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
 
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	op := app.OperationSupervisor.lookup(resp["operation_id"].(string))
+	op.Wait()
+
 	opOutput := opBuf.String()
-	if !strings.Contains(opOutput, "cannot start build process") {
+	if !strings.Contains(opOutput, "build stage failed") {
 		t.Fatalf("build start failure must produce operational ERROR, got:\n%s", opOutput)
+	}
+	if !strings.Contains(opOutput, "buildctl") {
+		t.Fatalf("operational ERROR must name the failed buildctl stage, got:\n%s", opOutput)
 	}
 	if strings.Contains(opOutput, "password") {
 		t.Fatal("operational ERROR must not contain build-arg values")

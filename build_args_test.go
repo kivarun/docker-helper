@@ -28,11 +28,7 @@ func TestBuildArgsProducesExpectedArgv(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
+	_, calls := attachBackendFixture(t, app)
 
 	body := map[string]any{
 		"context":    ".",
@@ -53,17 +49,19 @@ func TestBuildArgsProducesExpectedArgv(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+	waitBuild(t, app, w)
 
-	// Verify --build-arg entries are present.
+	// Verify --opt build-arg: entries are present in the buildctl argv.
+	args := buildctlCall(t, calls)
 	foundFoo := false
 	foundVersion := false
-	for i, arg := range capturedArgs {
-		if arg == "--build-arg" {
-			next := capturedArgs[i+1]
-			if next == "FOO=bar" {
+	for i, arg := range args {
+		if arg == "--opt" && i+1 < len(args) {
+			next := args[i+1]
+			if next == "build-arg:FOO=bar" {
 				foundFoo = true
 			}
-			if next == "VERSION=1.2.3" {
+			if next == "build-arg:VERSION=1.2.3" {
 				foundVersion = true
 			}
 		}
@@ -90,11 +88,7 @@ func TestBuildArgsDeterministicOrder(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
+	_, calls := attachBackendFixture(t, app)
 
 	body := map[string]any{
 		"context":    ".",
@@ -116,14 +110,15 @@ func TestBuildArgsDeterministicOrder(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+	waitBuild(t, app, w)
 
-	// Extract build-arg values in order.
+	// Extract build-arg keys in order from the buildctl argv.
 	var argOrder []string
-	for i, arg := range capturedArgs {
-		if arg == "--build-arg" {
-			parts := strings.SplitN(capturedArgs[i+1], "=", 2)
-			if len(parts) == 2 {
-				argOrder = append(argOrder, parts[0])
+	for i, arg := range buildctlCall(t, calls) {
+		if arg == "--opt" && i+1 < len(buildctlCall(t, calls)) {
+			parts := strings.SplitN(buildctlCall(t, calls)[i+1], "=", 2)
+			if len(parts) == 2 && strings.HasPrefix(parts[0], "build-arg:") {
+				argOrder = append(argOrder, strings.TrimPrefix(parts[0], "build-arg:"))
 			}
 		}
 	}
@@ -153,11 +148,7 @@ func TestBuildArgsEmptyValue(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
+	_, calls := attachBackendFixture(t, app)
 
 	body := map[string]any{
 		"context":    ".",
@@ -177,15 +168,16 @@ func TestBuildArgsEmptyValue(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+	waitBuild(t, app, w)
 
 	found := false
-	for i, arg := range capturedArgs {
-		if arg == "--build-arg" && capturedArgs[i+1] == "EMPTY=" {
+	for i, arg := range buildctlCall(t, calls) {
+		if arg == "--opt" && i+1 < len(buildctlCall(t, calls)) && buildctlCall(t, calls)[i+1] == "build-arg:EMPTY=" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected --build-arg EMPTY= in command args")
+		t.Error("expected --opt build-arg:EMPTY= in buildctl args")
 	}
 }
 

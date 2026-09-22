@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,12 +60,8 @@ func TestBuildImageReferenceParserGate(t *testing.T) {
 	for _, ref := range imageReferenceCorpus {
 		_, parseErr := reference.ParseNormalizedNamed(ref)
 		t.Run("spelling/"+ref, func(t *testing.T) {
-			app, _, _, token := setupBuildTest(t)
-			probed := false
-			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-				probed = true
-				return exec.CommandContext(ctx, "/bin/true")
-			}
+			app, _, result, _, calls := setupBuildBackendTest(t)
+			token := result.Token
 			req := newBuildRequest(map[string]any{
 				"context":    ".",
 				"dockerfile": "Dockerfile",
@@ -80,7 +77,7 @@ func TestBuildImageReferenceParserGate(t *testing.T) {
 					t.Fatalf("parser admits %q but handler refused: %d", ref, w.Code)
 				}
 				waitBuild(t, app, w)
-				if !probed {
+				if calls.count() == 0 {
 					t.Fatalf("admitted spelling %q never reached backend execution", ref)
 				}
 				return
@@ -98,7 +95,7 @@ func TestBuildImageReferenceParserGate(t *testing.T) {
 			if resp.Code != "invalid_image" {
 				t.Errorf("refused spelling %q: expected invalid_image, got %q", ref, resp.Code)
 			}
-			if probed {
+			if calls.count() > 0 {
 				t.Errorf("refused spelling %q reached backend execution", ref)
 			}
 			if len(app.OperationSupervisor.ops) != 0 {
@@ -182,24 +179,32 @@ func TestBuildImageReferenceMissingField(t *testing.T) {
 // validated only: the value handed onward (audit/commit stage argv) is the
 // exact caller spelling, never a parser-normalized rewrite.
 func TestBuildImageReferenceNotNormalized(t *testing.T) {
-	app, _, _, token := setupBuildTest(t)
+	app, _, result, _, _ := setupBuildBackendTest(t)
 	// A spelling with an explicit registry host and digest-normalizable
 	// parts stays byte-identical through validation: the parser's
 	// normalized form (docker.io/library/...) must never replace it.
 	const spelling = "registry.example.com:5000/owner/repo"
 	var commitArgs []string
+	var commitOnce sync.Once
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		commitArgs = append(commitArgs, args...)
+		// The commit stage is the docker tag child carrying the exact
+		// caller spelling as its final argument.
+		if len(args) >= 3 && args[0] == "tag" {
+			commitOnce.Do(func() { commitArgs = args })
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
 		"dockerfile": "Dockerfile",
 		"image":      spelling,
-	}, token)
+	}, result.Token)
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 	waitBuild(t, app, w)
+	if commitArgs == nil {
+		t.Fatal("commit stage never ran")
+	}
 
 	joined := strings.Join(commitArgs, "\x00")
 	if !strings.Contains(joined, spelling) {

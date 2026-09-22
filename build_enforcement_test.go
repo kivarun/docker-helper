@@ -98,10 +98,20 @@ func newBuildEnforcementApp(t *testing.T) (*App, func() []string) {
 	t.Helper()
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
+	// P3 backend: the buildctl stage is the execution child; the fake
+	// manager + socket-validation pass let the driver reach it. The capture
+	// returns the buildctl argv (the stage that consumes staged paths).
+	newFakeBuilderManager(t)
+	app.validateBuildKitSocketFn = func(string) error { return nil }
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
+		if strings.HasSuffix(name, "buildctl") {
+			capturedArgs = args
+		}
+		cmd := exec.CommandContext(ctx, "/bin/true")
+		cmd.Path = "/bin/true"
+		cmd.Args = append([]string{"/bin/true"}, args...)
+		return cmd
 	}
 	return app, func() []string { return capturedArgs }
 }
@@ -292,10 +302,10 @@ func TestBuildStagingNeverWritesSourceTree(t *testing.T) {
 	}
 	assertTreeUnchanged(t, before, after)
 
-	// Docker argv must reference the staged copy, never the source tree.
+	// buildctl argv must reference the staged copy, never the source tree.
 	args := capture()
 	if len(args) == 0 {
-		t.Fatal("docker was not invoked")
+		t.Fatal("buildctl was not invoked")
 	}
 	if stagedContextPath == "" {
 		t.Fatal("staging owner was never invoked")
@@ -309,17 +319,12 @@ func TestBuildStagingNeverWritesSourceTree(t *testing.T) {
 	if strings.HasPrefix(stagedContextPath, workspace) {
 		t.Fatalf("staging destination must never live inside the source tree: %s", stagedContextPath)
 	}
-	var found bool
-	for _, arg := range args {
-		if arg == stagedContextPath {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("docker argv does not use the staged context path %q: %v", stagedContextPath, args)
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "context="+stagedContextPath) {
+		t.Fatalf("buildctl argv does not use the staged context path %q: %v", stagedContextPath, args)
 	}
 	if slices.ContainsFunc(args, func(a string) bool { return a == workspace }) {
-		t.Fatalf("docker argv must never reference the original workspace path: %v", args)
+		t.Fatalf("buildctl argv must never reference the original workspace path: %v", args)
 	}
 }
 

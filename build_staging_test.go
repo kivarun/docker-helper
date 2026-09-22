@@ -23,19 +23,13 @@ import (
 // TestBuildDockerReceivesStagedPaths verifies Docker gets staged paths,
 // not workspace paths.
 func TestBuildDockerReceivesStagedPaths(t *testing.T) {
-	app, _, result, token := setupBuildTest(t)
-
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	app, _, result, _, calls := setupBuildBackendTest(t)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
 		"dockerfile": "Dockerfile",
 		"image":      "example:test",
-	}, token)
+	}, result.Token)
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
@@ -45,26 +39,46 @@ func TestBuildDockerReceivesStagedPaths(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// --file should point to a staged path, not the workspace.
-	var fileArg string
-	for i, arg := range capturedArgs {
-		if arg == "--file" && i+1 < len(capturedArgs) {
-			fileArg = capturedArgs[i+1]
-			break
-		}
-	}
+	// The buildctl stage is the build execution child (P3 backend).
+	buildctlArgs := calls.argv(buildctlCallIndex(t, calls))
+
+	// --local dockerfile should point to a staged path, not the workspace.
+	fileArg := localValue(t, buildctlArgs, "dockerfile")
 	if fileArg == "" {
-		t.Fatal("--file not found in args")
+		t.Fatal("--local dockerfile not found in buildctl args")
 	}
 	if fileArg == filepath.Join(result.Session.Workspace, "Dockerfile") {
-		t.Error("Docker should receive staged Dockerfile path, not workspace path")
+		t.Error("buildctl should receive the staged Dockerfile directory, not the workspace path")
 	}
 
-	// Last arg should be the staged context, not the workspace.
-	lastArg := capturedArgs[len(capturedArgs)-1]
-	if lastArg == app.Config.AllowedRoots[0].Path {
-		t.Error("Docker should receive staged context path, not workspace path")
+	// --local context should be the staged context, not the workspace.
+	ctxArg := localValue(t, buildctlArgs, "context")
+	if ctxArg == app.Config.AllowedRoots[0].Path {
+		t.Error("buildctl should receive the staged context path, not the workspace path")
 	}
+}
+
+// buildctlCallIndex returns the index of the first buildctl child call.
+func buildctlCallIndex(t *testing.T, calls *recordedCalls) int {
+	t.Helper()
+	idx := calls.buildctlIndex()
+	if idx < 0 {
+		t.Fatal("buildctl child was never invoked")
+	}
+	return idx
+}
+
+// localValue extracts VALUE from a "--local KEY=VALUE" pair.
+func localValue(t *testing.T, args []string, key string) string {
+	t.Helper()
+	for i, arg := range args {
+		if arg == "--local" && i+1 < len(args) {
+			if v, ok := strings.CutPrefix(args[i+1], key+"="); ok {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // TestBuildStagingErrorDoesNotRunDocker verifies that a staging error
@@ -221,6 +235,7 @@ func TestBuildStartErrorCleansStaging(t *testing.T) {
 // triggers staging cleanup.
 func TestBuildSuccessCleansStaging(t *testing.T) {
 	app, _, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -278,6 +293,7 @@ func TestBuildSuccessCleansStaging(t *testing.T) {
 // triggers staging cleanup.
 func TestBuildWaitErrorCleansStaging(t *testing.T) {
 	app, _, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -335,6 +351,7 @@ func TestBuildWaitErrorCleansStaging(t *testing.T) {
 // triggers staging cleanup.
 func TestBuildShutdownCleansStaging(t *testing.T) {
 	app, _, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -367,9 +384,14 @@ func TestBuildShutdownCleansStaging(t *testing.T) {
 	readyFile := filepath.Join(syncDir, "ready")
 	releaseFile := filepath.Join(syncDir, "release")
 
+	// The buildctl stage blocks on the release file; later stages run
+	// instantly. Cancellation during buildctl must still clean staging.
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c",
-			"touch "+readyFile+"; while [ ! -f "+releaseFile+" ]; do sleep 0.05; done")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c",
+				"touch "+readyFile+"; while [ ! -f "+releaseFile+" ]; do sleep 0.05; done")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -420,8 +442,8 @@ func TestBuildShutdownCleansStaging(t *testing.T) {
 // expected staging directory structure.
 func TestBuildStagedPathsContainContext(t *testing.T) {
 	app, _, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 
-	var capturedArgs []string
 	var capturedOpDir string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
 		stagingDir := t.TempDir()
@@ -449,10 +471,8 @@ func TestBuildStagedPathsContainContext(t *testing.T) {
 		}, nil
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	manager, calls := attachBackendFixture(t, app)
+	_ = manager
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -468,38 +488,40 @@ func TestBuildStagedPathsContainContext(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// --file should be exactly the staged Dockerfile path.
-	expectedDockerfile := filepath.Join(capturedOpDir, "context", "Dockerfile")
-	var fileArg string
-	for i, arg := range capturedArgs {
-		if arg == "--file" && i+1 < len(capturedArgs) {
-			fileArg = capturedArgs[i+1]
-			break
-		}
-	}
+	// buildctl --local dockerfile should be exactly the staged Dockerfile
+	// directory (staged context root for a root Dockerfile).
+	expectedDockerfileDir := filepath.Join(capturedOpDir, "context")
+	fileArg := localValue(t, buildctlCall(t, calls), "dockerfile")
 	if fileArg == "" {
-		t.Fatal("--file not found in args")
+		t.Fatal("--local dockerfile not found in buildctl args")
 	}
-	if fileArg != expectedDockerfile {
-		t.Errorf("--file = %q, want %q", fileArg, expectedDockerfile)
+	if fileArg != expectedDockerfileDir {
+		t.Errorf("--local dockerfile = %q, want %q", fileArg, expectedDockerfileDir)
 	}
 
-	// Last arg should be exactly the staged context path.
+	// --local context should be exactly the staged context path.
 	expectedContext := filepath.Join(capturedOpDir, "context")
-	lastArg := capturedArgs[len(capturedArgs)-1]
-	if lastArg != expectedContext {
-		t.Errorf("context = %q, want %q", lastArg, expectedContext)
+	ctxArg := localValue(t, buildctlCall(t, calls), "context")
+	if ctxArg != expectedContext {
+		t.Errorf("--local context = %q, want %q", ctxArg, expectedContext)
 	}
+}
+
+// buildctlCall returns the recorded buildctl argv (fatal when absent).
+func buildctlCall(t *testing.T, calls *recordedCalls) []string {
+	t.Helper()
+	idx := calls.buildctlIndex()
+	if idx < 0 {
+		t.Fatal("buildctl child was never invoked")
+	}
+	return calls.argv(idx)
 }
 
 // TestBuildLifecycleWithStaging verifies the full build lifecycle
 // (running -> succeeded) works correctly with staging.
 func TestBuildLifecycleWithStaging(t *testing.T) {
 	app, _, _, token := setupBuildTest(t)
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	attachBackendFixture(t, app)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -544,10 +566,7 @@ func TestBuildAuditWithStaging(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app, _, result, token := setupBuildTest(t)
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	attachBackendFixture(t, app)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -635,11 +654,7 @@ func TestBuildDockerfileDotSlash(t *testing.T) {
 	var capture capturedStaging
 	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	_, calls := attachBackendFixture(t, app)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -660,19 +675,13 @@ func TestBuildDockerfileDotSlash(t *testing.T) {
 		t.Errorf("dockerfileRel = %q, want %q", capture.dockerfileRel, "Dockerfile")
 	}
 
-	// --file should point to the staged Dockerfile with exact path.
-	var fileArg string
-	for i, arg := range capturedArgs {
-		if arg == "--file" && i+1 < len(capturedArgs) {
-			fileArg = capturedArgs[i+1]
-			break
-		}
-	}
+	// --opt filename should name the staged Dockerfile basename.
+	fileArg := optValue(t, buildctlCall(t, calls), "filename")
 	if fileArg == "" {
-		t.Fatal("--file not found in args")
+		t.Fatal("--opt filename not found in buildctl args")
 	}
 	if filepath.Base(fileArg) != "Dockerfile" {
-		t.Errorf("--file base = %q, want %q", filepath.Base(fileArg), "Dockerfile")
+		t.Errorf("--opt filename = %q, want %q", filepath.Base(fileArg), "Dockerfile")
 	}
 }
 
@@ -694,9 +703,7 @@ func TestBuildDockerfileDotDotPath(t *testing.T) {
 	var capture capturedStaging
 	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	attachBackendFixture(t, app)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -739,9 +746,7 @@ func TestBuildDockerfileSymlink(t *testing.T) {
 	var capture capturedStaging
 	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	attachBackendFixture(t, app)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -870,11 +875,8 @@ func TestBuildCleanupOnErrorPreservesSemantics(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
 	app, _, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -923,6 +925,7 @@ func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
 	app, _, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	syncDir := t.TempDir()
@@ -930,8 +933,11 @@ func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
 	releaseFile := filepath.Join(syncDir, "release")
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c",
-			"touch "+readyFile+"; while [ ! -f "+releaseFile+" ]; do sleep 0.05; done")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c",
+				"touch "+readyFile+"; while [ ! -f "+releaseFile+" ]; do sleep 0.05; done")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -994,6 +1000,7 @@ func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
 	app, _, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	syncDir := t.TempDir()
@@ -1001,8 +1008,11 @@ func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 	releaseFile := filepath.Join(syncDir, "release")
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c",
-			"touch "+readyFile+"; while [ ! -f "+releaseFile+" ]; do sleep 0.05; done")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c",
+				"touch "+readyFile+"; while [ ! -f "+releaseFile+" ]; do sleep 0.05; done")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{

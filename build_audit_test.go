@@ -91,22 +91,7 @@ func TestBuildStartContainsFields(t *testing.T) {
 func TestBuildFinishSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	app, _, result, _, _ := setupBuildBackendTest(t)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -142,21 +127,14 @@ func TestBuildFinishSuccess(t *testing.T) {
 func TestBuildFinishErrorWithExitCode(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
+	app, _, result, _, _ := setupBuildBackendTest(t)
 
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
+	// The buildctl stage fails with exit 1; later stages never run.
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -295,24 +273,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 }
 
 func TestBuildDockerArgsUnchanged(t *testing.T) {
-	app := newTestAppWithAdminTokenAndStaging(t)
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	app, _, result, _, calls := setupBuildBackendTest(t)
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -328,43 +289,55 @@ func TestBuildDockerArgsUnchanged(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-
-	// Verify arg structure (staged paths replace workspace paths).
-	if len(capturedArgs) < 10 {
-		t.Fatalf("expected at least 10 args, got %d: %v", len(capturedArgs), capturedArgs)
-	}
-
-	// Check fixed args.
-	expectedPrefix := []string{
-		"--config", dockerDir,
+	// The P3 backend runs buildctl as the execution child: verify the exact
+	// server-owned argv contract (§8) — fixed frontend/progress, staged
+	// --local paths, the op-internal tag exporter, and no requested image.
+	args := buildctlCall(t, calls)
+	expectedFixed := []string{
 		"build",
-		"--pull",
-		"--provenance=false",
-		"--sbom=false",
-		"--file",
+		"--progress=plain",
+		"--frontend=dockerfile.v0",
+		"--local", "context=" + calls.contextPathOf(calls.buildctlIndex()),
+		"--local", "dockerfile=" + calls.contextPathOf(calls.buildctlIndex()),
+		"--opt", "filename=Dockerfile",
 	}
-	for i, exp := range expectedPrefix {
-		if capturedArgs[i] != exp {
-			t.Errorf("arg[%d]: expected %q, got %q", i, exp, capturedArgs[i])
+	sliceEqual := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+	found := false
+	for i := 0; i+len(expectedFixed) <= len(args); i++ {
+		if sliceEqual(args[i:i+len(expectedFixed)], expectedFixed) {
+			found = true
+			break
 		}
 	}
-
-	// --file value should be a staged path (contains "context").
-	fileArg := capturedArgs[7]
-	if !strings.Contains(fileArg, "context") {
-		t.Errorf("--file should be a staged path containing 'context', got %q", fileArg)
+	if !found {
+		t.Errorf("fixed buildctl prefix not found in argv: %v", args)
 	}
 
-	// --tag should be present.
-	if capturedArgs[8] != "--tag" || capturedArgs[9] != "example:test" {
-		t.Errorf("expected --tag example:test, got %v", capturedArgs[8:11])
+	// --output carries the internal tag + staged export tar.
+	var outputArg string
+	for i, arg := range args {
+		if arg == "--output" && i+1 < len(args) {
+			outputArg = args[i+1]
+		}
 	}
-
-	// Last arg should be a staged context path (contains "context").
-	lastArg := capturedArgs[len(capturedArgs)-1]
-	if !strings.Contains(lastArg, "context") {
-		t.Errorf("last arg should be a staged context path containing 'context', got %q", lastArg)
+	if !strings.Contains(outputArg, "name=docker-helper-build/") {
+		t.Errorf("--output must carry the internal tag, got %q", outputArg)
+	}
+	if !strings.Contains(outputArg, ",dest=") {
+		t.Errorf("--output must carry the export tar dest, got %q", outputArg)
+	}
+	if strings.Contains(strings.Join(args, "\x00"), "example:test") {
+		t.Errorf("requested image must not appear in buildctl argv: %v", args)
 	}
 }
 

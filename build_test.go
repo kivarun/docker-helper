@@ -150,11 +150,7 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	_, calls := attachBackendFixture(t, app)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -175,10 +171,11 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// Check that context path is a staged path (contains "context" in path)
-	lastArg := capturedArgs[len(capturedArgs)-1]
-	if !strings.Contains(lastArg, "context") {
-		t.Errorf("expected staged context path in last arg, got %v", capturedArgs)
+	// Check that the buildctl --local context is a staged path (contains
+	// "context" in path).
+	ctxArg := localValue(t, buildctlCall(t, calls), "context")
+	if !strings.Contains(ctxArg, "context") {
+		t.Errorf("expected staged context path in --local context, got %v", calls.all())
 	}
 }
 
@@ -456,11 +453,7 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	_, calls := attachBackendFixture(t, app)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -481,11 +474,12 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// Check that --file contains the staged dockerfile path (contains "context")
+	// Check that --local dockerfile contains the staged dockerfile path
+	// (contains "context").
 	found := false
-	for i, arg := range capturedArgs {
-		if arg == "--file" && i+1 < len(capturedArgs) {
-			if strings.Contains(capturedArgs[i+1], "context") {
+	for i, arg := range buildctlCall(t, calls) {
+		if arg == "--local" && i+1 < len(buildctlCall(t, calls)) {
+			if strings.Contains(buildctlCall(t, calls)[i+1], "dockerfile=") {
 				found = true
 				break
 			}
@@ -493,7 +487,7 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 	}
 
 	if !found {
-		t.Errorf("expected --file with staged path (containing 'context') in args %v", capturedArgs)
+		t.Errorf("expected --local dockerfile with staged path in buildctl args %v", calls.all())
 	}
 }
 
@@ -542,11 +536,7 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
+	_, calls := attachBackendFixture(t, app)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -567,10 +557,10 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// Last arg should be the staged context path (contains "context")
-	lastArg := capturedArgs[len(capturedArgs)-1]
-	if !strings.Contains(lastArg, "context") {
-		t.Errorf("expected last arg to contain 'context' (staged path), got %v", capturedArgs)
+	// --local context should be the staged context path (contains "context")
+	ctxArg := localValue(t, buildctlCall(t, calls), "context")
+	if !strings.Contains(ctxArg, "context") {
+		t.Errorf("expected --local context to contain 'context' (staged path), got %v", calls.all())
 	}
 }
 

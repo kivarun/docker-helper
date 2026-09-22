@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -72,6 +71,23 @@ func (d *syntheticStageDriver) runStage(i int) *exec.Cmd {
 	d.started[i] = true
 	d.mu.Unlock()
 	waitForFileOrTimeout(d.t, d.markers[i], 5*time.Second)
+	return cmd
+}
+
+// tryAdmitStage admits stage i through the production owner and records
+// admission WITHOUT waiting for the child's marker file: the racing
+// cancel may terminate the child before its marker write, and the test
+// then proves the death from the reaped state. Returns the started cmd
+// on admission, nil on refusal (latch) or start error.
+func (d *syntheticStageDriver) tryAdmitStage(i int) *exec.Cmd {
+	cmd := syntheticStageCmd(d.markers[i], d.release[i])
+	res := startOperationStage(cmd, d.op)
+	if res.Terminated || res.Err != nil {
+		return nil
+	}
+	d.mu.Lock()
+	d.started[i] = true
+	d.mu.Unlock()
 	return cmd
 }
 
@@ -301,7 +317,7 @@ func TestOperationStageCancelSimultaneousAdmissionRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-begin
-			if cmd2 := d.runStage(1); cmd2 != nil {
+			if cmd2 := d.tryAdmitStage(1); cmd2 != nil {
 				admitted <- cmd2
 			} else {
 				refused <- struct{}{}
@@ -334,17 +350,18 @@ func TestOperationStageCancelSimultaneousAdmissionRace(t *testing.T) {
 			}
 			// The admitted child received SIGTERM from the cancel path;
 			// the child ignores SIGTERM, so the cancel force phase must
-			// kill it. Verify it dies, bounded by the cancel budget plus
-			// slack.
-			deadline := time.Now().Add(20 * time.Second)
-			for time.Now().Before(deadline) {
-				if err := syscall.Kill(stage2Cmd.Process.Pid, 0); err != nil {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
+			// kill it. Reap it through the production Wait owner (the
+			// reaped ProcessState proves termination; polling kill(pid,0)
+			// cannot: an unreaped zombie still answers).
+			waitDone := make(chan error, 1)
+			go func() { waitDone <- d.op.waitCurrentStage() }()
+			select {
+			case <-waitDone:
+			case <-time.After(20 * time.Second):
+				t.Fatalf("attempt %d: waitCurrentStage did not return after cancel", attempt)
 			}
-			if err := syscall.Kill(stage2Cmd.Process.Pid, 0); err == nil {
-				t.Fatalf("attempt %d: admitted stage 2 child outlived termination", attempt)
+			if stage2Cmd.ProcessState == nil {
+				t.Fatalf("attempt %d: admitted stage 2 child was not reaped after termination", attempt)
 			}
 		}
 		wg.Wait()

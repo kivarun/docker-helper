@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -266,130 +265,49 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		LauncherName:            session.LauncherName,
 	})
 
-	// Build the command using staged paths — Docker never sees workspace paths.
-	args := []string{
-		"--config", dockerDir,
-		"build",
-		"--pull",
-		"--provenance=false",
-		"--sbom=false",
-		"--file", staged.DockerfilePath,
-		"--tag", req.Image,
-	}
-
-	// Append build-arg entries in sorted key order.
-	for _, key := range buildArgKeys {
-		args = append(args, "--build-arg", key+"="+req.BuildArgs[key])
-	}
-	args = append(args, staged.ContextPath)
-
-	cmdCtx, cancel := context.WithCancel(context.Background())
-
-	cmd := a.newDockerCommand(cmdCtx, "docker", args...)
-
-	result := startOperationStage(cmd, op)
-
-	if result.Terminated {
-		cancel()
-		// Release lease AFTER cleaning up staged resources.
-		cleanupErr := staged.Cleanup()
-		if cleanupErr != nil {
-			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "build"),
-				slog.String("operation_id", op.ID),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-		if cleanupErr == nil && op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
-		msg := "build cancelled: daemon is shutting down"
-		if op.reason == terminationCancelled {
-			msg = "build cancelled"
-			op.fail(resultCancelled, msg, nil)
-		} else {
-			op.fail("docker_build_failed", msg, nil)
-		}
-		writeOperationCreated(ctx, w, op.ID, op.State)
-		return
-	}
-	if result.Err != nil {
-		cancel()
-		// Release lease AFTER cleaning up staged resources.
-		cleanupErr := staged.Cleanup()
-		if cleanupErr != nil {
-			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "build"),
-				slog.String("operation_id", op.ID),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-		if cleanupErr == nil && op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
-		opLog(ctx).Error("cannot start build process",
-			slog.String("operation", "build"),
-			slog.String("error", result.Err.Error()),
-		)
-		msg := fmt.Sprintf("cannot start build: %v", result.Err)
-		op.fail("docker_build_failed", msg, nil)
-		writeOperationCreated(ctx, w, op.ID, op.State)
-		return
-	}
-
-	// Store staged context for cleanup in waitBuildCompletion.
+	// P3 execution backend: the staged context is handed to the ephemeral
+	// BuildKit sandbox through the builder manager, buildctl runs client-side
+	// into a server-owned export tar, and the trusted Engine imports and
+	// commits the result through the existing Docker CLI owner. One driver
+	// goroutine owns the whole sequence and the terminal transition; the
+	// public API contract (POST /build -> 201 running) is unchanged.
 	op.stagedCtx = staged
-
-	// Start goroutine for process completion.
-	go func() {
-		defer cancel()
-		a.waitBuildCompletion(op, *op.StartedAt)
-	}()
+	driver := newBuildDriver(a, op, buildDriverRequest{
+		Image:        req.Image,
+		BuildArgKeys: buildArgKeys,
+		BuildArgs:    req.BuildArgs,
+		DockerDir:    dockerDir,
+	})
+	go driver.run()
 
 	writeOperationCreated(ctx, w, op.ID, operationRunning)
 }
 
-// waitBuildCompletion waits for the build process to finish and transitions
-// the operation to succeeded or failed. It is the single owner of cmd.Wait().
-func (a *App) waitBuildCompletion(op *operation, started time.Time) {
-	err := op.waitCurrentStage()
+// buildDriverRequest is the build driver's prepared input: everything
+// validated/prepared by the handler before admission. It carries no
+// lifecycle ownership — the operation owns termination, capacity, lease,
+// staging, and logs.
+type buildDriverRequest struct {
+	Image        string   // exact caller spelling, commit target
+	BuildArgKeys []string // validated, sorted
+	BuildArgs    map[string]string
+	DockerDir    string // session Docker config (credential owner)
+	StartedAt    time.Time
+}
 
-	// Cleanup staging directory regardless of outcome.
-	cleanupErr := error(nil)
-	if op.stagedCtx != nil {
-		cleanupErr = op.stagedCtx.Cleanup()
-		if cleanupErr != nil {
-			ctx := withSessionID(context.Background(), op.SessionID)
-			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
-				slog.String("operation", "build"),
-				slog.String("operation_id", op.ID),
-				slog.String("error", cleanupErr.Error()),
-			)
-		}
-	}
-
-	// Release session-use lease only if staging cleanup succeeded.
-	if cleanupErr == nil && op.macLeaseRelease != nil {
-		op.macLeaseRelease()
-	}
-
-	duration := time.Since(started).Round(time.Millisecond).String()
-
-	op.mu.Lock()
-	wasCancelled := op.reason == terminationCancelled
-	op.mu.Unlock()
-
-	if err != nil {
-		exitCode := extractExitCode(err)
-		if wasCancelled {
-			op.fail(resultCancelled, "build cancelled", exitCode, &duration)
-			return
-		}
-		op.fail("docker_build_failed", "docker build failed", exitCode, &duration)
-		return
-	}
-
-	op.succeed(&duration)
+// buildStageResult is the ONE internal result model of the build driver
+// (§26): every stage classification lands here, and ONE terminal
+// transition owner after cleanup consumes it. exitCode is populated from
+// the failed child stage only (manager-control stages have no child);
+// commitSucceeded records that the commit stage was admitted and its
+// docker tag exited 0.
+type buildStageResult struct {
+	ExitCode        *int
+	Err             error // child Wait error or stage failure detail
+	ResultCode      string
+	Message         string
+	Terminated      bool // refused admission: termination latch was set
+	CommitSucceeded bool
 }
 
 // operationForSession looks up an operation by ID and verifies it belongs
