@@ -113,8 +113,21 @@ type operation struct {
 	// startOperationStage and the stage's single Wait owner clears it via
 	// waitCurrentStage. No exited *exec.Cmd is ever retained in the slot.
 	currentCmd *exec.Cmd
-	done       chan struct{}
-	doneOnce   sync.Once // ensures op.done is closed exactly once
+	// currentCancel is the Operation's current NO-CHILD cancellation slot:
+	// the exact context.CancelFunc of one cancellable internal control
+	// stage (a manager RPC round-trip) installed under op.mu, or nil when
+	// no control stage is active. The P1 child-process slot and this
+	// control-stage slot are mutually exclusive: at most one current
+	// execution stage exists at any time
+	// (currentCmd != nil XOR currentCancel != nil).
+	//
+	// terminateOperations fires both slots in the SAME critical section
+	// where it sets terminationRequested: SIGTERM for the child, cancel()
+	// for the control stage. P2's manager client owns all RPC ambiguity
+	// convergence; this hook only interrupts the blocked call.
+	currentCancel context.CancelFunc
+	done          chan struct{}
+	doneOnce      sync.Once // ensures op.done is closed exactly once
 	// terminationRequested is the permanent termination latch. Set once by
 	// terminateForShutdown/cancel under op.mu; it never becomes false
 	// again. Meaning: this Operation has been claimed for termination and
@@ -122,10 +135,19 @@ type operation struct {
 	// has not started yet, is currently running, has just exited, or the
 	// Operation is between stages.
 	terminationRequested bool
-	reason               terminationReason
-	forceOwned           bool          // true when force cleanup has been claimed for this operation
-	forceDone            chan struct{} // closed when shared force-cleanup phase completes
-	forceDeadline        time.Time     // absolute deadline shared by owner and all followers
+	// commitClaimed marks that the build commit stage was ADMITTED (its
+	// child was started under op.mu with the termination latch still
+	// unset). Only the build flow reads it: after admission, a later
+	// termination may signal the commit child but must NOT classify the
+	// operation result as cancelled — the result follows the commit
+	// outcome. It is internal control state, never a claim that the image
+	// is committed (the irreversible success point stays docker tag
+	// exit 0).
+	commitClaimed bool
+	reason        terminationReason
+	forceOwned    bool          // true when force cleanup has been claimed for this operation
+	forceDone     chan struct{} // closed when shared force-cleanup phase completes
+	forceDeadline time.Time     // absolute deadline shared by owner and all followers
 	// cidfile is the path to the Docker --cidfile for run operations.
 	// The helper determines this path before cmd.Start(); Docker CLI
 	// publishes the container ID into the file after the daemon creates
@@ -644,11 +666,22 @@ func (s *operationSupervisor) terminateOperations(ctx context.Context, targetOp 
 		op.terminationRequested = true
 		if op.currentCmd != nil && op.currentCmd.Process != nil {
 			op.currentCmd.Process.Signal(syscall.SIGTERM)
-		} else {
-			// No active child: the operation is either pre-start (its
-			// handler owns the terminal transition on the refused start)
-			// or between sequential stages (its stage driver completes
-			// it). Both observe the latch and never admit another child.
+		}
+		// The no-child control-stage cancellation hook is the no-child
+		// analogue of the child SIGTERM above, fired in the SAME critical
+		// section as the latch: either a stage is admitted after the latch
+		// (never), or the active stage observes termination exactly once.
+		// At most one of the two slots is non-nil; firing cancel() when no
+		// control stage is active is the nil-safe no-op branch.
+		if op.currentCancel != nil {
+			op.currentCancel()
+		}
+		if op.currentCmd == nil && op.currentCancel == nil {
+			// No active execution stage: the operation is either pre-start
+			// (its handler owns the terminal transition on the refused
+			// start) or between sequential stages (its stage driver
+			// completes it). Both observe the latch and never admit
+			// another stage.
 			terminated = append(terminated, op)
 		}
 		op.mu.Unlock()
@@ -1066,6 +1099,13 @@ func startOperationStage(cmd *exec.Cmd, op *operation) operationStartResult {
 		op.mu.Unlock()
 		return operationStartResult{Err: errors.New("operation already owns an active child process")}
 	}
+	if op.currentCancel != nil {
+		// Sequential-stage discipline violation, no-child branch: an active
+		// control stage owns the one current execution slot
+		// (currentCmd != nil XOR currentCancel != nil).
+		op.mu.Unlock()
+		return operationStartResult{Err: errors.New("operation already owns an active control stage")}
+	}
 	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
 	cmd.Stdout = op.LogBuffer
 	cmd.Stderr = op.LogBuffer
@@ -1112,4 +1152,55 @@ func (op *operation) waitCurrentStage() error {
 	}
 	op.mu.Unlock()
 	return err
+}
+
+// operationControlStageResult is returned by runOperationControlStage.
+type operationControlStageResult struct {
+	Terminated bool // the termination latch was already set: the stage never ran
+	Err        error
+}
+
+// runOperationControlStage is the cancellable admission owner of ONE
+// Operation's no-child internal control stage (a builder-manager RPC
+// round-trip). The P2 manager client is not an exec.Cmd, so the P1
+// current-child slot cannot interrupt it; this hook extends the same
+// Operation owner with one no-child cancellation slot under the SAME
+// invariants: admission refuses once the termination latch is set, refuses
+// a discipline violation (any other current stage), installs the exact
+// cancel function under op.mu, runs fn on that cancellable context, and
+// clears its own slot afterwards.
+//
+// The termination-vs-start race linearizes in one critical section: either
+// fn runs with its cancel installed and termination fires that cancel, or
+// the latch wins and fn never runs. All RPC ambiguity convergence stays
+// with the P2 manager client (Start's fresh-context STOP); this helper
+// adds no protocol semantics.
+func runOperationControlStage(op *operation, fn func(ctx context.Context) error) operationControlStageResult {
+	op.mu.Lock()
+	if op.terminationRequested {
+		op.mu.Unlock()
+		return operationControlStageResult{Terminated: true}
+	}
+	if op.currentCmd != nil || op.currentCancel != nil {
+		// Sequential-stage discipline violation: a stage must be fully
+		// settled (child waited, control func returned) before the next
+		// admission. Never reachable from a correct stage driver.
+		op.mu.Unlock()
+		return operationControlStageResult{Err: errors.New("operation already owns an active execution stage")}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	op.currentCancel = cancel
+	op.mu.Unlock()
+
+	err := fn(ctx)
+
+	op.mu.Lock()
+	if op.currentCancel != nil {
+		// Clear OUR slot: the discipline check above guarantees no other
+		// stage installed its own cancel while we ran, so the non-nil slot
+		// is ours. (A func value is only comparable to nil.)
+		op.currentCancel = nil
+	}
+	op.mu.Unlock()
+	return operationControlStageResult{Err: err}
 }
