@@ -72,6 +72,12 @@ func TestOperationControlStageCancelDuringRun(t *testing.T) {
 				return nil
 			}
 		})
+		// A real stage driver owns the terminal transition after every
+		// stage; complete the op exactly like one so cancel's graceful
+		// wait converges on op.done instead of its full termination
+		// budget (the harness must not spend time the production driver
+		// never spends).
+		op.fail("docker_run_failed", "synthetic harness cleanup", nil)
 		if res.Terminated {
 			observed <- errors.New("unexpected termination refusal")
 			return
@@ -178,6 +184,11 @@ func TestOperationControlStageNoChildSlotOverlap(t *testing.T) {
 				return nil
 			}
 		})
+		// A real stage driver owns the terminal transition after every
+		// stage; complete the op exactly like one so cancel's graceful
+		// wait converges on op.done instead of its full termination
+		// budget.
+		op.fail("docker_run_failed", "synthetic harness cleanup", nil)
 	}()
 	<-entered
 
@@ -284,6 +295,12 @@ func TestOperationControlStageRaceAdmissionVsCancel(t *testing.T) {
 				<-ctx.Done()
 				return ctx.Err()
 			})
+			// The real stage driver owns the terminal transition after
+			// every stage; complete the op exactly like one, so cancel's
+			// graceful wait converges on op.done instead of the full
+			// termination budget (the harness must not spend the 5s
+			// budget the production driver never spends).
+			op.fail("docker_run_failed", "synthetic harness cleanup", nil)
 			if res.Terminated || res.Err != nil {
 				observed <- errors.New("refused")
 				return
@@ -313,14 +330,6 @@ func TestOperationControlStageRaceAdmissionVsCancel(t *testing.T) {
 			t.Fatalf("attempt %d: race neither admitted nor refused", attempt)
 		}
 		wg.Wait()
-
-		// Drive the op to a terminal state so the attempt releases capacity.
-		op.mu.Lock()
-		terminal := op.CompletedAt != nil
-		op.mu.Unlock()
-		if !terminal {
-			op.fail("docker_run_failed", "synthetic harness cleanup", nil)
-		}
 	}
 }
 

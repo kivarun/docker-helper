@@ -30,7 +30,16 @@ func newCapacityTestApp(t *testing.T) (*App, *CreatedSession) {
 		t.Fatalf("createSession: %v", err)
 	}
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// sleep responds to SIGTERM, matching the real termination paths.
+		// The workload child is the long-lived docker run process (the
+		// run argv is `docker --config <dir> run ...`): sleep responds to
+		// SIGTERM, matching the real termination paths. Every other docker
+		// child (ps/kill/rm: the container-absence proof and its removal)
+		// must complete instantly — the proof's bounded context outlives
+		// the cancel budget, so a sleeping proof child would spend the
+		// whole termination budget per operation.
+		if name == "docker" && !(len(args) > 2 && args[0] == "--config" && args[2] == "run") {
+			return exec.CommandContext(ctx, "/bin/true")
+		}
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 	t.Cleanup(func() {
@@ -611,6 +620,9 @@ func TestRunStartFailureReleasesCapacity(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if name == "docker" && (len(args) == 0 || args[0] != "run") {
+			return exec.CommandContext(ctx, "/bin/true")
+		}
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 	w2 := runCapacityRequest(t, app, result.Token)

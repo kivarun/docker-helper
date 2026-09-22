@@ -176,20 +176,38 @@ func TestOperationStageCancelDuringStage(t *testing.T) {
 		t.Fatal("stage 1 child not active")
 	}
 
-	// Cancel while the child runs. The child ignores SIGTERM (trap), so the
-	// cancel path's force cleanup must SIGKILL it; the stage is never
-	// released by the test.
+	// A real stage driver owns the Wait and the terminal transition while
+	// cancel runs; own both now so cancel's graceful wait converges on
+	// op.done instead of its full budget (the synthetic harness must not
+	// spend time the production driver never spends): on the Wait error
+	// after termination the driver classifies the cancelled failure.
+	waitDone := make(chan error, 1)
+	go func() {
+		waitErr := op.waitCurrentStage()
+		op.mu.Lock()
+		latched := op.terminationRequested
+		op.mu.Unlock()
+		if waitErr != nil && latched {
+			op.fail(resultCancelled, "cancelled", nil)
+		} else if waitErr != nil {
+			op.fail("docker_run_failed", "stage failed", nil)
+		} else {
+			op.succeed(nil)
+		}
+		waitDone <- waitErr
+	}()
+
+	// Cancel while the child runs. The child busy-loops, so the cancel
+	// path's graceful SIGTERM kills it (sh does not trap here); the
+	// completion goroutine reaps the child and completes the op with the
+	// stage-failure classification of a real driver.
 	if err := supervisor.cancel(op.ID, nil); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	// The child is terminated by the cancel path (graceful SIGTERM; force
-	// SIGKILL on escalation). Wait it through the production Wait owner,
-	// which reaps the child and clears the slot; the child's death is then
-	// proven from the reaped state (polling kill(pid,0) cannot prove
-	// termination: an unreaped zombie still answers kill(pid,0)).
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- op.waitCurrentStage() }()
+	// The child's death is proven from the reaped state (polling
+	// kill(pid,0) cannot prove termination: an unreaped zombie still
+	// answers kill(pid,0)).
 	select {
 	case <-waitDone:
 	case <-time.After(20 * time.Second):
@@ -203,6 +221,14 @@ func TestOperationStageCancelDuringStage(t *testing.T) {
 	op.mu.Unlock()
 	if !cleared {
 		t.Fatal("current slot not cleared after cancel during stage 1")
+	}
+	op.mu.Lock()
+	terminal := op.CompletedAt != nil
+	op.mu.Unlock()
+	if !terminal {
+		// Cancel won and the child was reaped with a Wait error: the
+		// real driver classifies this as the cancelled failure.
+		op.fail(resultCancelled, "cancelled", nil)
 	}
 
 	// Stage 2 must never start.

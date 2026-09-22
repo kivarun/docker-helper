@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net"
 	"net/http/httptest"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -105,15 +104,18 @@ type recordedCalls struct {
 	mu    sync.Mutex
 	names []string
 	argss [][]string
-	envs  [][]string
+	cmds  []*exec.Cmd
 }
 
-func (r *recordedCalls) record(name string, args []string, env []string) {
+// record stores one child invocation. The command is stored by reference:
+// the driver assigns cmd.Env after the seam returns, so env(i) must be
+// read only after the operation has completed.
+func (r *recordedCalls) record(name string, args []string, cmd *exec.Cmd) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.names = append(r.names, name)
 	r.argss = append(r.argss, args)
-	r.envs = append(r.envs, env)
+	r.cmds = append(r.cmds, cmd)
 }
 
 func (r *recordedCalls) count() int {
@@ -144,13 +146,16 @@ func (r *recordedCalls) buildctlIndex() int {
 	return -1
 }
 
+// env returns the final environment of the child command at index i.
+// The driver assigns cmd.Env after the seam returns, so this must be read
+// only after the operation has completed.
 func (r *recordedCalls) env(i int) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if i >= len(r.envs) {
+	if i >= len(r.cmds) {
 		return nil
 	}
-	return r.envs[i]
+	return r.cmds[i].Env
 }
 
 func (r *recordedCalls) all() string {
@@ -173,13 +178,10 @@ func setupBuildBackendTest(t *testing.T) (*App, *operationSupervisor, *CreatedSe
 	manager := newFakeBuilderManager(t)
 	calls := &recordedCalls{}
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		calls.record(name, args, os.Environ())
-		// The recording seam keeps the child runnable (the "true"
-		// binary's real Path), while Args[0] preserves the exact
-		// production identity for argv assertions.
 		cmd := exec.CommandContext(ctx, "true")
 		cmd.Path = "/bin/true"
 		cmd.Args = append([]string{"/bin/true"}, args...)
+		calls.record(name, args, cmd)
 		return cmd
 	}
 	app.validateBuildKitSocketFn = func(string) error { return nil }
@@ -224,10 +226,10 @@ func attachBackendFixture(t *testing.T, app *App) (*fakeBuilderManager, *recorde
 	manager := newFakeBuilderManager(t)
 	calls := &recordedCalls{}
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		calls.record(name, args, os.Environ())
 		cmd := exec.CommandContext(ctx, "true")
 		cmd.Path = "/bin/true"
 		cmd.Args = append([]string{"/bin/true"}, args...)
+		calls.record(name, args, cmd)
 		return cmd
 	}
 	app.validateBuildKitSocketFn = func(string) error { return nil }

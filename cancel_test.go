@@ -152,6 +152,13 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// The run workload is the long-lived child (sleep responds to
+		// SIGTERM); the container-absence proof's docker children must
+		// complete instantly or the cancel burns its full termination
+		// budget waiting on the proof's bounded context.
+		if name == "docker" && !(len(args) > 2 && args[0] == "--config" && args[2] == "run") {
+			return exec.CommandContext(ctx, "/bin/true")
+		}
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 
@@ -427,6 +434,13 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// The run workload is the long-lived child (sleep responds to
+		// SIGTERM); the container-absence proof's docker children must
+		// complete instantly or the cancel burns its full termination
+		// budget waiting on the proof's bounded context.
+		if name == "docker" && !(len(args) > 2 && args[0] == "--config" && args[2] == "run") {
+			return exec.CommandContext(ctx, "/bin/true")
+		}
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 
@@ -554,6 +568,13 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// The run workload is the long-lived child (sleep responds to
+		// SIGTERM); the container-absence proof's docker children must
+		// complete instantly or the termination burns its full budget
+		// waiting on the proof's bounded context.
+		if name == "docker" && !(len(args) > 2 && args[0] == "--config" && args[2] == "run") {
+			return exec.CommandContext(ctx, "/bin/true")
+		}
 		return exec.CommandContext(ctx, "sleep", "300")
 	}
 

@@ -557,7 +557,14 @@ func buildctlArgs(in buildctlArgsInput) []string {
 // owned by the builder UID, private mode. It uses the ONE shared path
 // owner from P2 (opSocketPath).
 func validateBuildKitSocket(opID string) error {
-	socketPath := opSocketPath(opID)
+	return validateBuildKitSocketPath(opSocketPath(opID), builderClientManagerUID)
+}
+
+// validateBuildKitSocketPath is the path-parameterized body of the root-side
+// BuildKit endpoint validation: one call site owns the deterministic
+// opSocketPath derivation; the expected-owner resolver is the P2 seam
+// (production: builderClientManagerUID; tests: a fixed test identity).
+func validateBuildKitSocketPath(socketPath string, expectedUID func() (int, int, error)) error {
 	info, err := os.Lstat(socketPath)
 	if err != nil {
 		return fmt.Errorf("buildkit socket missing: %w", err)
@@ -568,7 +575,7 @@ func validateBuildKitSocket(opID string) error {
 	if info.Mode()&os.ModeSocket == 0 {
 		return errors.New("buildkit socket is not a socket")
 	}
-	uid, _, err := builderClientManagerUID()
+	uid, _, err := expectedUID()
 	if err != nil {
 		return err
 	}

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,11 +44,23 @@ func TestShutdownGracefulSignalsBuild(t *testing.T) {
 // graceful SIGTERM is force-killed within the shutdown deadline.
 func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 	app, supervisor, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 
-	// Use a readiness marker so we know the trap is installed.
+	// The buildctl stage owns the child; later driver children succeed
+	// instantly. The child ignores SIGTERM (trap ':'), signals readiness
+	// by touching the marker itself, and busy-waits. The readiness marker
+	// is written by the child shell because the driver replaces the
+	// buildctl child environment after the seam returns (build_driver.go
+	// buildctlStage), so an env-borne READY_FILE never reaches it.
 	readyFile := filepath.Join(app.Config.AllowedRoots[0].Path, ".process_ready")
 	defer os.Remove(readyFile)
-	app.ExecCommandContext = makeIgnoringSignalCmd(t, readyFile)
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c",
+				"trap ':' TERM; touch "+readyFile+"; while :; do :; done")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
+	}
 
 	op := startBuild(t, app, token)
 

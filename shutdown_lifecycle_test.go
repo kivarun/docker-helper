@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,10 +17,20 @@ import (
 // Old code failed this because it used time.Now().Add(defaultForceCleanupTimeout).
 func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 	app, supervisor, _, token := setupBuildTest(t)
+	attachBackendFixture(t, app)
 
 	readyFile := filepath.Join(app.Config.AllowedRoots[0].Path, ".lifecycle_ready")
 	defer os.Remove(readyFile)
-	app.ExecCommandContext = makeIgnoringSignalCmd(t, readyFile)
+	// The buildctl child signals readiness by touching the marker itself
+	// (the driver replaces the buildctl child env after the seam returns,
+	// so an env-borne READY_FILE never reaches it) and ignores SIGTERM.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if strings.HasSuffix(name, "buildctl") {
+			return exec.CommandContext(ctx, "/bin/sh", "-c",
+				"trap ':' TERM; touch "+readyFile+"; while :; do :; done")
+		}
+		return exec.CommandContext(ctx, "/bin/true")
+	}
 
 	op := startBuild(t, app, token)
 	waitProcessReady(t, readyFile)
