@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"time"
+
+	"github.com/distribution/reference"
 )
 
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +44,18 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	case req.Image == "":
 		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "missing_field", "image is required", session.PrincipalName)
+		return
+	}
+
+	// The image reference is the exact grammar Docker CLI itself uses for
+	// `docker build --tag`: one canonical upstream parser call, validation
+	// only. The caller's spelling is never normalized or rewritten: the
+	// value is passed unchanged to the commit stage, whose Docker-owned
+	// semantics stay authoritative. Refusal uses the existing
+	// invalid-request shape before any capacity reservation, staging,
+	// operation admission, or backend work.
+	if _, err := reference.ParseNormalizedNamed(req.Image); err != nil {
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_image", "invalid image", session.PrincipalName)
 		return
 	}
 
