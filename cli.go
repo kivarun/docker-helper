@@ -536,6 +536,33 @@ var serveCommand = &Command{
 	},
 }
 
+var builderCommand = &Command{
+	Name:    "builder",
+	Summary: "Builder backend service (operator/service command)",
+	Subcommands: []*Command{
+		builderServeCommand,
+	},
+}
+
+var builderServeCommand = &Command{
+	Name:    "serve",
+	Summary: "Run the builder backend service",
+	Usage:   "docker-helper builder serve",
+
+	Presentation: exceptionPresentation("process: long-running builder backend service"),
+
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				if err := runBuilderServe(stdout, stderr); err != nil {
+					return 1
+				}
+				return 0
+			},
+		}
+	},
+}
+
 var initCommand = &Command{
 	Name:    "init",
 	Summary: "Initialize configuration and admin token",
@@ -897,6 +924,7 @@ help.`,
 func init() {
 	rootCommand.Subcommands = []*Command{
 		serveCommand,
+		builderCommand,
 		initCommand,
 		reloadCommand,
 		sessionCommand,

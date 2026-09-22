@@ -71,6 +71,11 @@ enforcing SELinux with the daemon in \fBdocker_helper_t\fR.
 .B docker-helper serve
 Start the docker-helper daemon.
 .TP
+.B docker-helper builder serve
+Run the builder backend service (long-running, dedicated unprivileged
+\fBdocker-helper-builder\fR identity only; refuses root and any other
+user). Operator/service command; no flags, no path overrides.
+.TP
 .B docker-helper init [\-\-allowed-root PATH]
 Initialize configuration and admin token. The interactive default is
 /home. Root may explicitly select /home or /opt.
