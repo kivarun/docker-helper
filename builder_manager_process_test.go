@@ -107,6 +107,25 @@ func waitInstance(t *testing.T, m *builderManager, opID string, want bool) bool 
 	return false
 }
 
+// waitLeaderPid waits bounded for the instance's leader pid to be
+// recorded. waitInstance only proves the map reservation, not that
+// launchInstance reached cmd.Start yet; asserting on a pid snapshot
+// without this barrier can exit through t.Fatalf while the START
+// goroutine is still inside launchInstance, racing the t.Cleanup seam
+// restore (observed as a -race DATA RACE on builderRuntimeRoot).
+func waitLeaderPid(t *testing.T, inst *builderInstance) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if pid := inst.leaderPidSnapshot(); pid > 1 {
+			return pid
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("leader pid never recorded")
+	return 0
+}
+
 // TestBuilderManagerStartReadinessSuccess: START through the real
 // launchInstance path with a real leader child and a real socket bind;
 // admission reservation, readiness contract, and ceiling entry all hold.
@@ -403,10 +422,7 @@ func TestBuilderManagerReadinessFailureKillsGroupAndRemovesDirs(t *testing.T) {
 		t.Fatal("reservation missing")
 	}
 	inst := m.instances[opID]
-	pid := inst.leaderPidSnapshot()
-	if pid <= 1 {
-		t.Fatalf("leader pid %d", pid)
-	}
+	pid := waitLeaderPid(t, inst)
 	// Pre-existence self-test: the leader exists as a group leader.
 	if processGroupGone(pid) {
 		t.Fatal("pre-existence self-test: leader group already gone")
@@ -510,10 +526,7 @@ while :; do :; done`)
 		t.Fatal("reservation missing")
 	}
 	leader := m.instances[opID]
-	pid := leader.leaderPidSnapshot()
-	if pid <= 1 {
-		t.Fatalf("leader pid %d", pid)
-	}
+	pid := waitLeaderPid(t, leader)
 
 	// Pre-existence self-test: leader + child + grandchild all exist.
 	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {

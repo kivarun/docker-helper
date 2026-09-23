@@ -367,7 +367,12 @@ func TestOperationStageCancelSimultaneousAdmissionRace(t *testing.T) {
 
 		if stage2Cmd != nil {
 			// Legal outcome 1: stage 2 won admission. The latch must be
-			// set (cancel also ran).
+			// set once cancel has also run. The latch read is ordered
+			// AFTER wg.Wait(): the admitted channel only proves
+			// tryAdmitStage returned, not that the racing cancel already
+			// acquired op.mu and latched termination (reading it earlier
+			// reported a legal interleaving as a forbidden outcome).
+			wg.Wait()
 			op.mu.Lock()
 			latched := op.terminationRequested
 			op.mu.Unlock()
@@ -389,8 +394,10 @@ func TestOperationStageCancelSimultaneousAdmissionRace(t *testing.T) {
 			if stage2Cmd.ProcessState == nil {
 				t.Fatalf("attempt %d: admitted stage 2 child was not reaped after termination", attempt)
 			}
+		} else {
+			// The refused branch never joined the cancel goroutine yet.
+			wg.Wait()
 		}
-		wg.Wait()
 
 		// Complete the operation so the attempt does not hold session
 		// capacity for the next attempt (the harness never drives the op

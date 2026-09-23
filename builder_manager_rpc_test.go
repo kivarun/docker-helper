@@ -273,6 +273,120 @@ func TestBuilderClientStartRefusesNoncanonicalID(t *testing.T) {
 	}
 }
 
+// TestBuilderClientAmbiguousStartErrStopIsNotProvenConvergence is the
+// compensating-STOP regression: after an ambiguous START, a WELL-FORMED
+// ERR reply from the compensating STOP must NOT count as proven
+// convergence. The manager answered but refused the compensation — the
+// operation instance may still be live — so Start must return an explicit
+// refused-compensation failure, not the proven-convergence verdict of the
+// OK/OK-absent path.
+func TestBuilderClientAmbiguousStartErrStopIsNotProvenConvergence(t *testing.T) {
+	listener, _ := rpcTestEndpoint(t)
+	fakeManagerUID(t, 4312, 4312)
+	fakeManagerPeer(t, 4312, 4312)
+	go func() {
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, builderManagerRequestCeiling)
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				line := strings.TrimRight(string(buf[:n]), "\n")
+				if strings.HasPrefix(line, "STOP ") {
+					// The manager refuses the compensating STOP with a
+					// well-formed protocol error.
+					_, _ = conn.Write([]byte(builderManagerRespInternal + "\n"))
+					return
+				}
+				select {} // START: hold, never reply (ambiguous after cancel)
+			}()
+		}
+	}()
+	c := &builderManagerClient{}
+	ctx, cancel := context.WithCancel(context.Background())
+	go time.AfterFunc(50*time.Millisecond, cancel)
+	err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+	cancel()
+	if err == nil {
+		t.Fatal("refused compensation must fail closed")
+	}
+	if !strings.Contains(err.Error(), "compensating STOP was refused") {
+		t.Fatalf("refused compensation must be the explicit failure, got %q", err)
+	}
+	// The refused-compensation failure wraps the manager's refusal kind.
+	var mgrErr *builderManagerError
+	if !errors.As(err, &mgrErr) || mgrErr.kind != builderManagerRespInternal {
+		t.Fatalf("refused compensation must carry the manager refusal kind, got %v", err)
+	}
+}
+
+// TestBuilderClientAmbiguousStartErrStopDistinctFromProvenConvergence
+// proves the two verdicts are distinguishable: with an OK-absent
+// compensating STOP the error is the proven-convergence verdict (no
+// refused-compensation wording); with an ERR STOP it is the refused-
+// compensation failure. The regression: both collapsed into the identical
+// typed error.
+func TestBuilderClientAmbiguousStartErrStopDistinctFromProvenConvergence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		stopResp    string
+		wantRefusal bool
+	}{
+		{name: "OK absent proves convergence", stopResp: builderManagerRespOKAbsent, wantRefusal: false},
+		{name: "OK proves convergence", stopResp: builderManagerRespOK, wantRefusal: false},
+		{name: "ERR internal refuses the compensation", stopResp: builderManagerRespInternal, wantRefusal: true},
+		{name: "ERR operation_exists refuses the compensation", stopResp: builderManagerRespOpExists, wantRefusal: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener, _ := rpcTestEndpoint(t)
+			fakeManagerUID(t, 4312, 4312)
+			fakeManagerPeer(t, 4312, 4312)
+			go func() {
+				for {
+					conn, err := listener.AcceptUnix()
+					if err != nil {
+						return
+					}
+					go func() {
+						defer conn.Close()
+						buf := make([]byte, builderManagerRequestCeiling)
+						_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+						n, err := conn.Read(buf)
+						if err != nil {
+							return
+						}
+						line := strings.TrimRight(string(buf[:n]), "\n")
+						if strings.HasPrefix(line, "STOP ") {
+							_, _ = conn.Write([]byte(tc.stopResp + "\n"))
+							return
+						}
+						select {} // START held: ambiguous after cancel
+					}()
+				}
+			}()
+			c := &builderManagerClient{}
+			ctx, cancel := context.WithCancel(context.Background())
+			go time.AfterFunc(50*time.Millisecond, cancel)
+			err := c.Start(ctx, "op_0123456789abcdef0123456789abcdef")
+			cancel()
+			if err == nil {
+				t.Fatal("ambiguous START must never report success")
+			}
+			gotRefusal := strings.Contains(err.Error(), "compensating STOP was refused")
+			if gotRefusal != tc.wantRefusal {
+				t.Fatalf("stopResp %q: refused-compensation verdict = %v, want %v (err: %v)", tc.stopResp, gotRefusal, tc.wantRefusal, err)
+			}
+		})
+	}
+}
+
 // TestBuilderClientStartDeadlineBounded: an endpoint that never replies
 // makes Start return boundedly (caller-context cancellation unblocks the
 // read); the read deadline constant covers the no-cancel case.

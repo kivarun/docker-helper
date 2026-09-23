@@ -27,17 +27,43 @@ type fakeBuilderManager struct {
 	stops     []string // recorded STOP op ids
 	startResp string   // response for START
 	stopResp  string   // response for STOP
+
+	// withholdStartReply makes handleConn record a START but never answer
+	// it: the connection is held open until withholdRelease is closed (the
+	// blocked START conn does not affect other connections). Used for the
+	// START-ambiguity proofs.
+	withholdStartReply bool
+	withholdRelease    chan struct{}
+	// dropStartReply makes handleConn record a START and then close the
+	// connection without any reply: the P2 client sees EOF after write —
+	// ambiguous — without needing a cancellation.
+	dropStartReply bool
+
+	// startedCh/stoppedCh are the deterministic record barriers: one
+	// buffered signal per recorded request (no sleeps).
+	startedCh chan string
+	stoppedCh chan string
 }
 
 func newFakeBuilderManager(t *testing.T) *fakeBuilderManager {
 	t.Helper()
-	m := &fakeBuilderManager{t: t, startResp: "OK", stopResp: "OK"}
+	m := &fakeBuilderManager{
+		t:               t,
+		startResp:       "OK",
+		stopResp:        "OK",
+		startedCh:       make(chan string, 16),
+		stoppedCh:       make(chan string, 16),
+		withholdRelease: make(chan struct{}),
+	}
 	path := filepath.Join(t.TempDir(), "manager.sock")
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatalf("cannot create fake manager endpoint: %v", err)
 	}
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() {
+		listener.Close()
+		close(m.withholdRelease)
+	})
 	go func() {
 		for {
 			conn, err := listener.AcceptUnix()
@@ -72,13 +98,38 @@ func (m *fakeBuilderManager) handleConn(conn *net.UnixConn) {
 	m.mu.Lock()
 	switch {
 	case strings.HasPrefix(line, builderManagerCmdStart+" "):
-		m.starts = append(m.starts, strings.TrimPrefix(line, builderManagerCmdStart+" "))
+		opID := strings.TrimPrefix(line, builderManagerCmdStart+" ")
+		m.starts = append(m.starts, opID)
+		withheld := m.withholdStartReply
+		dropped := m.dropStartReply
+		m.mu.Unlock()
+		m.startedCh <- opID
+		if dropped {
+			// Close without any reply: the client's read sees EOF after
+			// its write — ambiguous — with no cancellation involved.
+			return
+		}
+		if withheld {
+			// Deliberately withhold the reply: hold the accepted START
+			// connection open without answering. Other connections
+			// (STOP) keep being served concurrently. The conn closes
+			// when the test releases or cleanup closes the channel.
+			<-m.withholdRelease
+			return
+		}
+		m.mu.Lock()
 		_, _ = conn.Write([]byte(m.startResp + "\n"))
+		m.mu.Unlock()
 	case strings.HasPrefix(line, builderManagerCmdStop+" "):
-		m.stops = append(m.stops, strings.TrimPrefix(line, builderManagerCmdStop+" "))
-		_, _ = conn.Write([]byte(m.stopResp + "\n"))
+		opID := strings.TrimPrefix(line, builderManagerCmdStop+" ")
+		m.stops = append(m.stops, opID)
+		resp := m.stopResp
+		m.mu.Unlock()
+		m.stoppedCh <- opID
+		_, _ = conn.Write([]byte(resp + "\n"))
+	default:
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 }
 
 func (m *fakeBuilderManager) startCount() int {
@@ -97,6 +148,57 @@ func (m *fakeBuilderManager) setStartResp(resp string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.startResp = resp
+}
+
+func (m *fakeBuilderManager) setStopResp(resp string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopResp = resp
+}
+
+// setStartWithheld switches the manager into the START-ambiguity mode:
+// accepted, recorded, reply deliberately withheld. Returns the release
+// channel (test-controlled; cleanup closes it).
+func (m *fakeBuilderManager) setStartWithheld() chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.withholdStartReply = true
+	return m.withholdRelease
+}
+
+// setStartDropped switches the manager into the lost-START-reply mode:
+// accepted, recorded, connection closed without a reply (ambiguous EOF
+// for the client, no cancellation involved).
+func (m *fakeBuilderManager) setStartDropped() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dropStartReply = true
+}
+
+// waitStartBarrier waits for one recorded START (deterministic barrier,
+// no sleeps) and returns its op id.
+func (m *fakeBuilderManager) waitStartBarrier(t *testing.T) string {
+	t.Helper()
+	select {
+	case opID := <-m.startedCh:
+		return opID
+	case <-time.After(10 * time.Second):
+		t.Fatal("START never reached the fake manager")
+		return ""
+	}
+}
+
+// waitStopBarrier waits for one recorded STOP (deterministic barrier,
+// no sleeps) and returns its op id.
+func (m *fakeBuilderManager) waitStopBarrier(t *testing.T) string {
+	t.Helper()
+	select {
+	case opID := <-m.stoppedCh:
+		return opID
+	case <-time.After(10 * time.Second):
+		t.Fatal("STOP never reached the fake manager")
+		return ""
+	}
 }
 
 // recordedCalls captures every child process invocation of the App seam.

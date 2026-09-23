@@ -244,11 +244,20 @@ func (c *builderManagerClient) Start(ctx context.Context, operationID string) er
 		return err
 	}
 	// Ambiguous: the START bytes may have reached the manager. Converge
-	// with a fresh bounded STOP on a fresh context.
+	// with a fresh bounded STOP on a fresh context. Only a well-formed
+	// proven-convergence reply (OK / OK absent) closes the ambiguity: a
+	// well-formed ERR reply means the manager answered but could not
+	// prove convergence — the operation instance may still be live — and
+	// must surface as the explicit refused-compensation failure, never as
+	// the proven-convergence verdict.
 	stopCtx, cancel := context.WithTimeout(context.Background(), builderClientStopRead)
 	defer cancel()
-	if _, stopErr := c.roundTrip(stopCtx, builderManagerCmdStop, operationID, builderClientStopRead); stopErr != nil {
+	stopLine, stopErr := c.roundTrip(stopCtx, builderManagerCmdStop, operationID, builderClientStopRead)
+	if stopErr != nil {
 		return fmt.Errorf("builder manager START was ambiguous and convergence STOP failed: %w", stopErr)
+	}
+	if compErr := mapManagerResponse(stopLine); compErr != nil {
+		return fmt.Errorf("builder manager START was ambiguous and the compensating STOP was refused: %w", compErr)
 	}
 	return &builderManagerError{kind: builderManagerRespInternal}
 }

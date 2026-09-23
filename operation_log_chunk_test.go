@@ -56,7 +56,12 @@ func TestOperationLogsResponseBoundedForAdversarialBytes(t *testing.T) {
 
 	t.Cleanup(func() {
 		_ = os.WriteFile(releaseFile, nil, 0644)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		// The budget must exceed the 3s force-cleanup reserve so the
+		// graceful phase actually waits for op.done: with a 3s budget the
+		// force phase begins immediately and the cleanup returns while the
+		// driver goroutine is still inside builderStopCleanup, racing the
+		// fake-manager seam restore (observed as a -race DATA RACE).
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
 		app.OperationSupervisor.terminateForShutdown(ctx, nil)
 	})
