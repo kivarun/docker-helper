@@ -26,7 +26,9 @@ import (
 // behavior control: every STARTED child touches a ready file (proving the
 // real child process ran, not merely that a command was constructed); the
 // buildctl child optionally blocks on a release file and/or exits with a
-// fixed nonzero code.
+// fixed nonzero code, and the import stages (load, inspect, rmi) carry
+// their own scripted failure/termination behavior for the C1 failure-path
+// proofs (the tag child is only reached on the success path).
 type backendChildRunner struct {
 	app      *App
 	calls    *recordedCalls
@@ -35,6 +37,10 @@ type backendChildRunner struct {
 	mu               sync.Mutex
 	buildctlBlocks   bool
 	buildctlExitCode int
+	loadBlocks       bool
+	loadExitCode     int
+	inspectExitCode  int
+	rmiExitCode      int
 }
 
 func newBackendChildRunner(t *testing.T, app *App, calls *recordedCalls) *backendChildRunner {
@@ -43,31 +49,48 @@ func newBackendChildRunner(t *testing.T, app *App, calls *recordedCalls) *backen
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		idx := calls.count()
 		ready := r.readyPath(idx)
-		var cmd *exec.Cmd
-		if strings.HasSuffix(name, "buildctl") {
-			r.mu.Lock()
-			blocks, exitCode := r.buildctlBlocks, r.buildctlExitCode
-			r.mu.Unlock()
-			switch {
-			case blocks:
-				// Real child: ready marker, then block until terminated
-				// (the cancel/shutdown paths signal the child; the
-				// marker is self-written from the argv script, never
-				// from the environment).
-				cmd = exec.CommandContext(ctx, "/bin/sh", "-c",
-					"touch "+ready+"; while :; do sleep 0.05; done")
-			case exitCode != 0:
-				cmd = exec.CommandContext(ctx, "/bin/sh", "-c",
-					"touch "+ready+"; exit "+strconv.Itoa(exitCode))
-			}
-		}
-		if cmd == nil {
-			cmd = exec.CommandContext(ctx, "/bin/sh", "-c", "touch "+ready)
-		}
+		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", r.childScript(name, args, ready))
 		calls.record(name, args, cmd)
 		return cmd
 	}
 	return r
+}
+
+// childScript returns the shell script of one recorded child: every child
+// touches its ready marker (the real-start proof); buildctl and the import
+// stages add their scripted blocking/failure behavior on top.
+func (r *backendChildRunner) childScript(name string, args []string, ready string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	blocked := "touch " + ready + "; while :; do sleep 0.05; done"
+	failed := func(code int) string {
+		return "touch " + ready + "; exit " + strconv.Itoa(code)
+	}
+	switch {
+	case strings.HasSuffix(name, "buildctl"):
+		switch {
+		case r.buildctlBlocks:
+			return blocked
+		case r.buildctlExitCode != 0:
+			return failed(r.buildctlExitCode)
+		}
+	case hasArgvWord(args, "load"):
+		switch {
+		case r.loadBlocks:
+			return blocked
+		case r.loadExitCode != 0:
+			return failed(r.loadExitCode)
+		}
+	case isVerificationArgv(args):
+		if r.inspectExitCode != 0 {
+			return failed(r.inspectExitCode)
+		}
+	case hasArgvWord(args, "rmi"):
+		if r.rmiExitCode != 0 {
+			return failed(r.rmiExitCode)
+		}
+	}
+	return "touch " + ready
 }
 
 func (r *backendChildRunner) setBuildctlBlocks(blocks bool) {
@@ -80,6 +103,30 @@ func (r *backendChildRunner) setBuildctlExitCode(code int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.buildctlExitCode = code
+}
+
+func (r *backendChildRunner) setLoadBlocks(blocks bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loadBlocks = blocks
+}
+
+func (r *backendChildRunner) setLoadExitCode(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loadExitCode = code
+}
+
+func (r *backendChildRunner) setInspectExitCode(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inspectExitCode = code
+}
+
+func (r *backendChildRunner) setRmiExitCode(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rmiExitCode = code
 }
 
 func (r *backendChildRunner) readyPath(idx int) string {
