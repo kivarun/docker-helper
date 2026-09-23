@@ -1152,3 +1152,124 @@ func TestBuilderManagerSilentConnectionDoesNotBlockStop(t *testing.T) {
 		t.Fatalf("STOP reply = %q, want OK absent after the silent connection settled", reply)
 	}
 }
+
+// TestBuilderManagerIngressSettlesRejectedOlderConnections: rejected or
+// dead older connections (malformed request, unauthorized peer, EOF
+// before any request) settle through the catch-all handler exit without
+// blocking the absent STOP indefinitely and without leaking a pending
+// entry. Rejected connections are precisely the paths that must never
+// reach a START dispatch.
+//
+// Seam discipline: every seam is installed through install() BEFORE the
+// dispatch fixture exists (no handler goroutine can read a seam while it
+// is being installed) and restored at cleanup AFTER the fixture's
+// handler join (LIFO), so no handler reads a seam during install/restore.
+func TestBuilderManagerIngressSettlesRejectedOlderConnections(t *testing.T) {
+	cases := []struct {
+		name    string
+		install func(t *testing.T) <-chan struct{}
+		older   func(t *testing.T, listener *net.UnixListener, engaged <-chan struct{}) *net.UnixConn
+	}{
+		{
+			name: "malformed request",
+			older: func(t *testing.T, listener *net.UnixListener, _ <-chan struct{}) *net.UnixConn {
+				// Bad op id: the reply proves the handler ran and exited
+				// (the deferred settle fired with it).
+				conn := dispatchRequest(t, listener, "START nope\n")
+				if reply := readReply(t, conn); reply != builderManagerRespBadOpID {
+					t.Fatalf("malformed older conn reply = %q, want %q", reply, builderManagerRespBadOpID)
+				}
+				return conn
+			},
+		},
+		{
+			name: "unauthorized peer",
+			install: func(t *testing.T) <-chan struct{} {
+				// Refuse the FIRST peer-credential call (no reply, the
+				// handler exits at once) and signal when it happens;
+				// later connections are admitted as root. The test waits
+				// for the signal before dispatching the STOP, so the
+				// refused connection is deterministically the older one.
+				orig := builderPeerCredentials
+				engagedCh := make(chan struct{}, 1)
+				var mu sync.Mutex
+				calls := 0
+				builderPeerCredentials = func(c *net.UnixConn) (int, int, int, error) {
+					mu.Lock()
+					n := calls
+					calls++
+					mu.Unlock()
+					if n == 0 {
+						select {
+						case engagedCh <- struct{}{}:
+						default:
+						}
+						return 4312, 4312, 12, nil
+					}
+					return orig(c)
+				}
+				t.Cleanup(func() { builderPeerCredentials = orig })
+				return engagedCh
+			},
+			older: func(t *testing.T, listener *net.UnixListener, engaged <-chan struct{}) *net.UnixConn {
+				conn := dispatchRequest(t, listener, "STOP op_fedcba9876543210fedcba9876543210\n")
+				select {
+				case <-engaged:
+				case <-time.After(10 * time.Second):
+					t.Fatal("older connection never reached peer authentication")
+				}
+				return conn
+			},
+		},
+		{
+			name: "EOF before request",
+			older: func(t *testing.T, listener *net.UnixListener, _ <-chan struct{}) *net.UnixConn {
+				// Dial and close: the handler's bounded read returns EOF
+				// with no line and exits without a reply.
+				conn := dialDispatch(t, listener)
+				conn.Close()
+				return conn
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, _ := processTestManager(t)
+			seamCA(t)
+			fakeLeaderSeam(t, true)
+			managerPeerRootSeam(t)
+			var engaged <-chan struct{}
+			if tc.install != nil {
+				engaged = tc.install(t)
+			}
+			listener := realDispatchFixture(t, m)
+
+			opID := "op_0123456789abcdef0123456789abcdef"
+			olderConn := tc.older(t, listener, engaged)
+			defer olderConn.Close()
+
+			// The absent STOP settles the older connection through the
+			// barrier and still answers in bounded time.
+			stopConn := dispatchRequest(t, listener, "STOP "+opID)
+			defer stopConn.Close()
+			if reply := readReply(t, stopConn); reply != builderManagerRespOKAbsent {
+				t.Fatalf("STOP reply = %q, want OK absent after the rejected older connection settled", reply)
+			}
+
+			// No pending entry leaked: every accepted connection settled.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				m.ingress.mu.Lock()
+				leaked := len(m.ingress.pending)
+				m.ingress.mu.Unlock()
+				if leaked == 0 {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("%d pending ingress entries leaked after convergence", leaked)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		})
+	}
+}
