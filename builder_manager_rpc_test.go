@@ -31,17 +31,71 @@ func rpcTestEndpoint(t *testing.T) (*net.UnixListener, string) {
 	return listener, path
 }
 
-// startHoldRelease is the test-owned release signal for handlers that hold
-// an accepted START connection open without replying (the START-ambiguity
-// fixtures). The handler blocks on the returned channel and closes the
-// connection when it fires; the test's cleanup closes the channel exactly
-// once, so a failed or completed test never leaks the handler goroutine or
-// the held connection.
-func startHoldRelease(t *testing.T) chan struct{} {
+// startHoldFixture is the test-owned fixture for handlers that hold an
+// accepted START connection open without replying (the START-ambiguity
+// proofs). The release channel is created in the owning test goroutine
+// BEFORE the fake server starts and passed to every handler, so no handler
+// ever registers cleanup itself. Cleanup closes the channel exactly once,
+// stops the accept loop, and joins the accept goroutine and every
+// connection handler BEFORE it returns — the later cleanups (peer/UID
+// seams, socket-path restore) never observe a live handler, goroutine, or
+// accepted connection.
+type startHoldFixture struct {
+	release  chan struct{}
+	listener *net.UnixListener
+	acceptor chan struct{} // closed when the accept loop has exited
+	handlers sync.WaitGroup
+}
+
+func newStartHoldFixture(t *testing.T, listener *net.UnixListener) *startHoldFixture {
 	t.Helper()
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	return release
+	f := &startHoldFixture{
+		release:  make(chan struct{}),
+		listener: listener,
+		acceptor: make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		close(f.release)
+		// Stop accepting first so no handler can be added after the
+		// join below started (second Close is a no-op for the endpoint
+		// cleanup).
+		listener.Close()
+		<-f.acceptor
+		f.handlers.Wait()
+	})
+	return f
+}
+
+// serve runs the accept loop until the listener is closed. Each accepted
+// connection is served by one tracked handler goroutine: it reads one
+// bounded request line and calls handle; a non-empty return value is the
+// exact response line, an empty return value holds the connection open
+// without replying (the START ambiguity) until the release channel fires.
+func (f *startHoldFixture) serve(handle func(line string) string) {
+	go func() {
+		defer close(f.acceptor)
+		for {
+			conn, err := f.listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+			f.handlers.Add(1)
+			go func() {
+				defer f.handlers.Done()
+				defer conn.Close()
+				buf := make([]byte, builderManagerRequestCeiling)
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				line := strings.TrimRight(string(buf[:n]), "\n")
+				if reply := handle(line); reply != "" {
+					_, _ = conn.Write([]byte(reply + "\n"))
+				}
+			}()
+		}
+	}()
 }
 
 // fakeManagerPeer replaces the client peer-credential seam so tests can
@@ -117,34 +171,16 @@ func TestBuilderClientAmbiguousStartConvergesWithFreshContextStop(t *testing.T) 
 	fakeManagerPeer(t, 4312, 4312)
 
 	requests := make(chan string, 8)
-	startRelease := startHoldRelease(t)
-	go func() {
-		for {
-			conn, err := listener.AcceptUnix()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer conn.Close()
-				buf := make([]byte, builderManagerRequestCeiling)
-				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				n, err := conn.Read(buf)
-				if err != nil {
-					return
-				}
-				line := strings.TrimRight(string(buf[:n]), "\n")
-				requests <- line
-				if strings.HasPrefix(line, "STOP ") {
-					_, _ = conn.Write([]byte(builderManagerRespOKAbsent + "\n"))
-					return
-				}
-				// START: hold the connection open without replying ->
-				// client read timeout (ambiguous). The handler exits when
-				// the test releases it; cleanup covers failure paths.
-				<-startRelease
-			}()
+	f := newStartHoldFixture(t, listener)
+	f.serve(func(line string) string {
+		requests <- line
+		if strings.HasPrefix(line, "STOP ") {
+			return builderManagerRespOKAbsent
 		}
-	}()
+		// START: hold the connection open without replying -> client
+		// read timeout (ambiguous).
+		return ""
+	})
 
 	c := &builderManagerClient{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -299,31 +335,15 @@ func TestBuilderClientAmbiguousStartErrStopIsNotProvenConvergence(t *testing.T) 
 	listener, _ := rpcTestEndpoint(t)
 	fakeManagerUID(t, 4312, 4312)
 	fakeManagerPeer(t, 4312, 4312)
-	go func() {
-		for {
-			conn, err := listener.AcceptUnix()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer conn.Close()
-				buf := make([]byte, builderManagerRequestCeiling)
-				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				n, err := conn.Read(buf)
-				if err != nil {
-					return
-				}
-				line := strings.TrimRight(string(buf[:n]), "\n")
-				if strings.HasPrefix(line, "STOP ") {
-					// The manager refuses the compensating STOP with a
-					// well-formed protocol error.
-					_, _ = conn.Write([]byte(builderManagerRespInternal + "\n"))
-					return
-				}
-				<-startHoldRelease(t) // START held: ambiguous after cancel
-			}()
+	f := newStartHoldFixture(t, listener)
+	f.serve(func(line string) string {
+		if strings.HasPrefix(line, "STOP ") {
+			// The manager refuses the compensating STOP with a
+			// well-formed protocol error.
+			return builderManagerRespInternal
 		}
-	}()
+		return "" // START held: ambiguous after cancel
+	})
 	c := &builderManagerClient{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go time.AfterFunc(50*time.Millisecond, cancel)
@@ -363,29 +383,13 @@ func TestBuilderClientAmbiguousStartErrStopDistinctFromProvenConvergence(t *test
 			listener, _ := rpcTestEndpoint(t)
 			fakeManagerUID(t, 4312, 4312)
 			fakeManagerPeer(t, 4312, 4312)
-			go func() {
-				for {
-					conn, err := listener.AcceptUnix()
-					if err != nil {
-						return
-					}
-					go func() {
-						defer conn.Close()
-						buf := make([]byte, builderManagerRequestCeiling)
-						_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-						n, err := conn.Read(buf)
-						if err != nil {
-							return
-						}
-						line := strings.TrimRight(string(buf[:n]), "\n")
-						if strings.HasPrefix(line, "STOP ") {
-							_, _ = conn.Write([]byte(tc.stopResp + "\n"))
-							return
-						}
-						<-startHoldRelease(t) // START held: ambiguous after cancel
-					}()
+			f := newStartHoldFixture(t, listener)
+			f.serve(func(line string) string {
+				if strings.HasPrefix(line, "STOP ") {
+					return tc.stopResp
 				}
-			}()
+				return "" // START held: ambiguous after cancel
+			})
 			c := &builderManagerClient{}
 			ctx, cancel := context.WithCancel(context.Background())
 			go time.AfterFunc(50*time.Millisecond, cancel)
@@ -409,29 +413,13 @@ func TestBuilderClientStartDeadlineBounded(t *testing.T) {
 	listener, _ := rpcTestEndpoint(t)
 	fakeManagerUID(t, 4312, 4312)
 	fakeManagerPeer(t, 4312, 4312)
-	go func() {
-		for {
-			conn, err := listener.AcceptUnix()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer conn.Close()
-				buf := make([]byte, builderManagerRequestCeiling)
-				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				n, err := conn.Read(buf)
-				if err != nil {
-					return
-				}
-				line := strings.TrimRight(string(buf[:n]), "\n")
-				if strings.HasPrefix(line, "STOP ") {
-					_, _ = conn.Write([]byte(builderManagerRespOKAbsent + "\n"))
-					return
-				}
-				<-startHoldRelease(t) // START: hold, never reply
-			}()
+	f := newStartHoldFixture(t, listener)
+	f.serve(func(line string) string {
+		if strings.HasPrefix(line, "STOP ") {
+			return builderManagerRespOKAbsent
 		}
-	}()
+		return "" // START: hold, never reply
+	})
 	c := &builderManagerClient{}
 	ctx, cancel := context.WithCancel(context.Background())
 	go time.AfterFunc(100*time.Millisecond, cancel)

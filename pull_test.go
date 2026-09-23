@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -587,7 +588,7 @@ func TestPullRequestCancellation(t *testing.T) {
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		// Return an UNSTARTED command that writes PID on start.
 		cmd := exec.CommandContext(ctx, "sh", "-c",
-			`echo $$ > "$1"; exec sleep 300`,
+			`echo $$ > "$1"; while [ -d /proc/`+strconv.Itoa(os.Getpid())+` ]; do sleep 0.05; done`,
 			"sh", pidFile,
 		)
 		return cmd
@@ -683,7 +684,7 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		// Return an UNSTARTED command that writes PID on start.
 		cmd := exec.CommandContext(ctx, "sh", "-c",
-			`echo $$ > "$1"; exec sleep 300`,
+			`echo $$ > "$1"; while [ -d /proc/`+strconv.Itoa(os.Getpid())+` ]; do sleep 0.05; done`,
 			"sh", pidFile,
 		)
 		return cmd

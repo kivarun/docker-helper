@@ -40,7 +40,7 @@ func newCapacityTestApp(t *testing.T) (*App, *CreatedSession) {
 		if name == "docker" && !(len(args) > 2 && args[0] == "--config" && args[2] == "run") {
 			return exec.CommandContext(ctx, "/bin/true")
 		}
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -520,7 +520,7 @@ func TestBuildStagingRefusalReleasesCapacity(t *testing.T) {
 	// The slot is free again: a real build is admitted.
 	app.StageBuildContextFn = newStagingSeam(t, stagingSeamOptions{})
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 	w2 := httptest.NewRecorder()
 	app.handleBuild(w2, newBuildRequest(map[string]any{
@@ -574,7 +574,7 @@ func TestRunPinFailureReleasesCapacity(t *testing.T) {
 		return &pinnedMount{PinnedPath: filepath.Join(t.TempDir(), "pin"), cleanup: func() error { return nil }}, nil
 	}
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 	req2 := newRunRequest(map[string]any{
 		"image": "alpine:3.24",
@@ -623,7 +623,7 @@ func TestRunStartFailureReleasesCapacity(t *testing.T) {
 		if name == "docker" && (len(args) == 0 || args[0] != "run") {
 			return exec.CommandContext(ctx, "/bin/true")
 		}
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 	w2 := runCapacityRequest(t, app, result.Token)
 	if w2.Code != http.StatusCreated {

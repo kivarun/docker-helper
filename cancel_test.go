@@ -38,7 +38,7 @@ func TestCancelRunningBuild(t *testing.T) {
 		// Only the buildctl stage blocks (sleep responds to SIGTERM);
 		// the remaining driver children succeed instantly.
 		if strings.HasSuffix(name, "buildctl") {
-			return exec.CommandContext(ctx, "sleep", "300")
+			return boundedSleepCmd(ctx)
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
@@ -159,7 +159,7 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 		if name == "docker" && !(len(args) > 2 && args[0] == "--config" && args[2] == "run") {
 			return exec.CommandContext(ctx, "/bin/true")
 		}
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 
 	runReq := newRunRequest(map[string]any{
@@ -207,7 +207,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -282,7 +282,7 @@ func TestCancelAuditEvent(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -379,7 +379,7 @@ func TestCancelIdempotent(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -441,7 +441,7 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 		if name == "docker" && !(len(args) > 2 && args[0] == "--config" && args[2] == "run") {
 			return exec.CommandContext(ctx, "/bin/true")
 		}
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 
 	runReq := newRunRequest(map[string]any{
@@ -503,7 +503,7 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -575,7 +575,7 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 		if name == "docker" && !(len(args) > 2 && args[0] == "--config" && args[2] == "run") {
 			return exec.CommandContext(ctx, "/bin/true")
 		}
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 
 	runReq := newRunRequest(map[string]any{
@@ -1054,7 +1054,7 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
+		return boundedSleepCmd(ctx)
 	}
 
 	req := newBuildRequest(map[string]any{

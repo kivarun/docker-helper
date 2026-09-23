@@ -35,6 +35,29 @@ func processTestManager(t *testing.T) (*builderManager, string, string) {
 	t.Cleanup(func() { builderRuntimeRoot, builderStateRoot = origRT, origST })
 
 	m := newBuilderManager(os.Getuid(), os.Getgid())
+
+	// Test-owned instance teardown: every instance left running at test
+	// end goes through the ONE production stop owner (bounded SIGTERM ->
+	// SIGKILL group kill, single-owner reap, dir removal). The cleanup is
+	// registered here so it runs BEFORE the runtime/state roots and the
+	// spawn seam are restored (LIFO): stopInstance resolves op dirs and
+	// process handles while the test-scoped values are still in place.
+	// Stopping an already-stopped instance is the OK-absent no-op branch.
+	t.Cleanup(func() {
+		m.mu.Lock()
+		ids := make([]string, 0, len(m.instances))
+		for id := range m.instances {
+			ids = append(ids, id)
+		}
+		m.mu.Unlock()
+		for _, id := range ids {
+			m.stop(id)
+			if !waitInstance(t, m, id, false) {
+				t.Errorf("instance %s did not converge after test-owned stop", id)
+			}
+		}
+	})
+
 	return m, rtRoot, stRoot
 }
 
@@ -46,7 +69,7 @@ func fakeLeaderSeam(t *testing.T, ready bool) {
 	t.Helper()
 	orig := builderNewRootlessKitCommand
 	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
-		cmd := exec.Command("sh", "-c", "sleep 300")
+		cmd := exec.Command("sh", "-c", boundedSleepScript())
 		_ = opID
 		_ = rtDir
 		_ = stDir
@@ -464,7 +487,7 @@ func TestBuilderManagerStopBeforeSpawn(t *testing.T) {
 		_ = rtDir
 		_ = stDir
 		_ = env
-		return exec.Command("sh", "-c", "sleep 300")
+		return exec.Command("sh", "-c", boundedSleepScript())
 	}
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 

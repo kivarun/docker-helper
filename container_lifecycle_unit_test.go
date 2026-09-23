@@ -234,7 +234,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 			helperBin := filepath.Join(t.TempDir(), "helper")
 			if err := exec.Command("go", "build", "-o", helperBin, "testhelper_ignore_sigterm.go").Run(); err != nil {
 				t.Logf("failed to build helper: %v", err)
-				return exec.CommandContext(ctx, "/bin/sleep", "60")
+				return boundedSleepCmd(ctx)
 			}
 			cmd := exec.CommandContext(ctx, helperBin)
 			cmd.Env = append(os.Environ(), "READY_FILE="+readyFile)
@@ -327,7 +327,7 @@ func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
-			return exec.CommandContext(ctx, "/bin/sleep", "60")
+			return boundedSleepCmd(ctx)
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}

@@ -35,7 +35,7 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if strings.HasSuffix(name, "buildctl") {
-			return exec.CommandContext(ctx, "/bin/sleep", "60")
+			return boundedSleepCmd(ctx)
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
@@ -122,7 +122,7 @@ func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
 		if strings.HasSuffix(name, "buildctl") {
 			cmdWg.Done()
 			<-cmdBlocked
-			return exec.CommandContext(ctx, "/bin/sleep", "60")
+			return boundedSleepCmd(ctx)
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}

@@ -26,7 +26,7 @@ func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
 		}
 		close(cmdBlocked)
 		<-cmdProceed
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
+		return boundedSleepCmd(ctx)
 	}
 
 	w, _, getOp := startBuildConcurrent(t, app, token)

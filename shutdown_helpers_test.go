@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -112,10 +113,24 @@ func waitProcessReady(t *testing.T, readyFile string) {
 	}
 }
 
+// boundedSleepScript is the long-lived seam-child script: it stays alive
+// until the owning path terminates it (same SIGTERM/SIGKILL semantics as a
+// plain sleep) but polls the test binary's liveness, so even a child whose
+// owner never terminated it (a racing late spawn) dies boundedly when the
+// test binary exits instead of outliving the suite as an orphan.
+func boundedSleepScript() string {
+	return fmt.Sprintf("while [ -d /proc/%d ]; do sleep 0.05; done", os.Getpid())
+}
+
+// boundedSleepCmd is the ExecCommandContext form of boundedSleepScript.
+func boundedSleepCmd(ctx context.Context) *exec.Cmd {
+	return exec.CommandContext(ctx, "sh", "-c", boundedSleepScript())
+}
+
 // makeSleepCmd returns an ExecCommandContext that creates a sleep process.
 func makeSleepCmd() func(context.Context, string, ...string) *exec.Cmd {
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
+		return boundedSleepCmd(ctx)
 	}
 }
 
