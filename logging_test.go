@@ -836,6 +836,13 @@ func TestServeAuditRoutingToStdout(t *testing.T) {
 	EffectiveUID = func() int { return 0 }
 	t.Cleanup(func() { EffectiveUID = origUID })
 	mockDetectLSM(t, LSMAppArmor, nil)
+	// requireAppArmorConfinement reads the kernel LSM state through the
+	// independent appArmorLSMActive seam; the detectLSM mock above does not
+	// cover it. Without this seam the routing proof would depend on the
+	// test host kernel having AppArmor active.
+	origAAActive := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	t.Cleanup(func() { appArmorLSMActive = origAAActive })
 	origAAConf := appArmorProcessConfinement
 	appArmorProcessConfinement = func() (string, error) {
 		return "docker-helper-system (enforce)", nil

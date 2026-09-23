@@ -43,6 +43,11 @@ type fakeBuilderManager struct {
 	// buffered signal per recorded request (no sleeps).
 	startedCh chan string
 	stoppedCh chan string
+
+	// behavior, when set, runs before the default scripted reply and owns
+	// the reply for its command (it may withhold it: barriers for the
+	// P3-B2 STOP proofs).
+	behavior func(command, opID string, reply func(string))
 }
 
 func newFakeBuilderManager(t *testing.T) *fakeBuilderManager {
@@ -102,8 +107,18 @@ func (m *fakeBuilderManager) handleConn(conn *net.UnixConn) {
 		m.starts = append(m.starts, opID)
 		withheld := m.withholdStartReply
 		dropped := m.dropStartReply
+		behavior := m.behavior
 		m.mu.Unlock()
 		m.startedCh <- opID
+		if behavior != nil {
+			// A behavior script owns the reply for this command (it may
+			// withhold it: the P3-B2 gating proofs); B1's fixed modes
+			// apply only when no script is set.
+			m.dispatchBehavior(builderManagerCmdStart, opID, func(resp string) {
+				_, _ = conn.Write([]byte(resp + "\n"))
+			})
+			return
+		}
 		if dropped {
 			// Close without any reply: the client's read sees EOF after
 			// its write — ambiguous — with no cancellation involved.
@@ -124,11 +139,38 @@ func (m *fakeBuilderManager) handleConn(conn *net.UnixConn) {
 		opID := strings.TrimPrefix(line, builderManagerCmdStop+" ")
 		m.stops = append(m.stops, opID)
 		resp := m.stopResp
+		behavior := m.behavior
 		m.mu.Unlock()
 		m.stoppedCh <- opID
+		if behavior != nil {
+			m.dispatchBehavior(builderManagerCmdStop, opID, func(reply string) {
+				_, _ = conn.Write([]byte(reply + "\n"))
+			})
+			return
+		}
 		_, _ = conn.Write([]byte(resp + "\n"))
 	default:
 		m.mu.Unlock()
+	}
+}
+
+// dispatchBehavior routes one recorded request through the optional
+// behavior script (with the fixture lock released); with no script, the
+// default per-command response applies.
+func (m *fakeBuilderManager) dispatchBehavior(command, opID string, reply func(string)) {
+	m.mu.Lock()
+	behavior := m.behavior
+	startResp, stopResp := m.startResp, m.stopResp
+	m.mu.Unlock()
+	if behavior != nil {
+		behavior(command, opID, reply)
+		return
+	}
+	switch command {
+	case builderManagerCmdStart:
+		reply(startResp)
+	case builderManagerCmdStop:
+		reply(stopResp)
 	}
 }
 
@@ -150,6 +192,7 @@ func (m *fakeBuilderManager) setStartResp(resp string) {
 	m.startResp = resp
 }
 
+// setStopResp scripts the response of the default (non-behavior) STOP path.
 func (m *fakeBuilderManager) setStopResp(resp string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -199,6 +242,13 @@ func (m *fakeBuilderManager) waitStopBarrier(t *testing.T) string {
 		t.Fatal("STOP never reached the fake manager")
 		return ""
 	}
+}
+
+// stopIDs returns a copy of the recorded STOP operation IDs.
+func (m *fakeBuilderManager) stopIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.stops...)
 }
 
 // recordedCalls captures every child process invocation of the App seam.
