@@ -42,11 +42,13 @@ type backendChildRunner struct {
 	inspectBlocks    bool
 	inspectExitCode  int
 	rmiExitCode      int
+	rmiBlocks        bool
 	tagBlocks        bool
 
-	// inspectReleasePath is the blocked verification child's release file
-	// (set once by setInspectBlocks).
+	// inspectReleasePath / rmiReleasePath are the blocked verification /
+	// cleanup children's release files (set once by their setters).
 	inspectReleasePath string
+	rmiReleasePath     string
 }
 
 func newBackendChildRunner(t *testing.T, app *App, calls *recordedCalls) *backendChildRunner {
@@ -106,7 +108,14 @@ func (r *backendChildRunner) childScript(name string, args []string, ready strin
 			return "touch " + ready + "; while :; do sleep 0.05; done"
 		}
 	case hasArgvWord(args, "rmi"):
-		if r.rmiExitCode != 0 {
+		switch {
+		case r.rmiBlocks:
+			// Blocked post-commit cleanup: real child, ready marker, then
+			// hold until its release path exists (the test's deterministic
+			// release; the binary-liveness guard bounds a never-released
+			// child). The child then exits 0: the committed result stands.
+			return "touch " + ready + "; while [ ! -e " + r.rmiReleasePath + " ] && [ -d /proc/" + strconv.Itoa(os.Getpid()) + " ]; do sleep 0.05; done"
+		case r.rmiExitCode != 0:
 			return failed(r.rmiExitCode)
 		}
 	}
@@ -169,6 +178,26 @@ func (r *backendChildRunner) setRmiExitCode(code int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rmiExitCode = code
+}
+
+// setRmiBlocks scripts the post-commit internal-tag cleanup child to
+// start, touch its ready marker, and block until its release path exists
+// (or the test binary is gone, which bounds a never-released child).
+// Returns the release path for the test's deterministic mid-test release.
+func (r *backendChildRunner) setRmiBlocks(t *testing.T, blocks bool) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rmiBlocks = blocks
+	if blocks && r.rmiReleasePath == "" {
+		r.rmiReleasePath = filepath.Join(r.readyDir, "cleanup.release")
+	}
+	release := r.rmiReleasePath
+	if blocks {
+		// Release any still-blocked cleanup child on test cleanup; the
+		// binary-liveness guard in the script bounds a missed write.
+		t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0o644) })
+	}
+	return release
 }
 
 func (r *backendChildRunner) readyPath(idx int) string {
