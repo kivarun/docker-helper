@@ -57,7 +57,7 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if strings.HasSuffix(name, "buildctl") {
 			return exec.CommandContext(ctx, "/bin/sh", "-c",
-				"trap ':' TERM; touch "+readyFile+"; while :; do :; done")
+				"trap ':' TERM; touch "+readyFile+"; while :; do sleep 0.05; done")
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}

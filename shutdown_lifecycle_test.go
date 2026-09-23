@@ -27,7 +27,7 @@ func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if strings.HasSuffix(name, "buildctl") {
 			return exec.CommandContext(ctx, "/bin/sh", "-c",
-				"trap ':' TERM; touch "+readyFile+"; while :; do :; done")
+				"trap ':' TERM; touch "+readyFile+"; while :; do sleep 0.05; done")
 		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
@@ -82,7 +82,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	makeIgnoringCmd := func(readyFile string) func(context.Context, string, ...string) *exec.Cmd {
 		return func(ctx context.Context, name string, args ...string) *exec.Cmd {
 			cmd := exec.Command("sh", "-c",
-				"trap ':' TERM; touch "+readyFile+"; while :; do :; done")
+				"trap ':' TERM; touch "+readyFile+"; while :; do sleep 0.05; done")
 			return cmd
 		}
 	}
@@ -94,7 +94,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 		t.Fatal("admit op1 failed")
 	}
 	cmd1 := app.newDockerCommand(context.Background(), "sh", "-c",
-		"trap ':' TERM; touch "+readyFile1+"; while :; do :; done")
+		"trap ':' TERM; touch "+readyFile1+"; while :; do sleep 0.05; done")
 	res1 := startOperationStage(cmd1, op1)
 	if res1.Terminated || res1.Err != nil {
 		t.Fatalf("start op1: terminated=%v err=%v", res1.Terminated, res1.Err)
@@ -112,7 +112,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 		t.Fatal("admit op2 failed")
 	}
 	cmd2 := app.newDockerCommand(context.Background(), "sh", "-c",
-		"trap ':' TERM; touch "+readyFile2+"; while :; do :; done")
+		"trap ':' TERM; touch "+readyFile2+"; while :; do sleep 0.05; done")
 	res2 := startOperationStage(cmd2, op2)
 	if res2.Terminated || res2.Err != nil {
 		t.Fatalf("start op2: terminated=%v err=%v", res2.Terminated, res2.Err)
@@ -215,7 +215,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "", "", "")
 	op1.cidfile = cidfile1
 	ready1 := filepath.Join(t.TempDir(), "op1.ready")
-	cmd1 := exec.Command("sh", "-c", "trap ':' TERM; touch "+ready1+"; while :; do :; done")
+	cmd1 := exec.Command("sh", "-c", "trap ':' TERM; touch "+ready1+"; while :; do sleep 0.05; done")
 	if err := cmd1.Start(); err != nil {
 		t.Fatalf("start cmd1: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "", "", "")
 	op2.cidfile = cidfile2
 	ready2 := filepath.Join(t.TempDir(), "op2.ready")
-	cmd2 := exec.Command("sh", "-c", "trap ':' TERM; touch "+ready2+"; while :; do :; done")
+	cmd2 := exec.Command("sh", "-c", "trap ':' TERM; touch "+ready2+"; while :; do sleep 0.05; done")
 	if err := cmd2.Start(); err != nil {
 		t.Fatalf("start cmd2: %v", err)
 	}

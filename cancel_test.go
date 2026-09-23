@@ -1218,7 +1218,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	// phase expires and both termination paths reach force cleanup.
 	// Use a busy-loop approach that explicitly ignores SIGTERM.
 	readyFile := filepath.Join(t.TempDir(), "proc.ready")
-	cmd := exec.Command("sh", "-c", "trap ':' TERM; touch "+readyFile+"; while :; do :; done")
+	cmd := exec.Command("sh", "-c", "trap ':' TERM; touch "+readyFile+"; while :; do sleep 0.05; done")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cannot start test process: %v", err)
 	}
@@ -1350,7 +1350,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 	// Start a long-running process that survives SIGTERM so the follower
 	// reaches the force phase. The owner is simulated (already claimed).
 	readyFile := filepath.Join(t.TempDir(), "proc.ready")
-	cmd := exec.Command("sh", "-c", "trap ':' TERM; touch "+readyFile+"; while :; do :; done")
+	cmd := exec.Command("sh", "-c", "trap ':' TERM; touch "+readyFile+"; while :; do sleep 0.05; done")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cannot start test process: %v", err)
 	}

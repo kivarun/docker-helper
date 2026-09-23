@@ -19,13 +19,14 @@ import (
 // the real supervisor paths - the sole cancellation/shutdown owner.
 
 // syntheticStageCmd returns the stage child: write the marker, then block
-// until the release file appears (busy loop; default SIGTERM disposition —
+// until the release file appears (sleep-poll; default SIGTERM disposition —
 // a cancel's graceful signal ends it, and force cleanup escalates if
-// needed).
+// needed). The file markers stay the deterministic synchronization
+// mechanism; the child only stops burning a core while it waits.
 func syntheticStageCmd(markerPath, releasePath string) *exec.Cmd {
 	return exec.Command("sh", "-c",
 		"echo started > "+markerPath+
-			"; while [ ! -e "+releasePath+" ]; do :; done")
+			"; while [ ! -e "+releasePath+" ]; do sleep 0.05; done")
 }
 
 // syntheticStageDriver runs sequential stages of op through the production
@@ -334,7 +335,13 @@ func TestOperationStageCancelSimultaneousAdmissionRace(t *testing.T) {
 		}
 		d.endStage(0, cmd1)
 
-		// Race: stage-2 admission vs cancel, started together.
+		// Race: stage-2 admission vs cancel, started together. Like a real
+		// sequential-stage driver, the admission goroutine OWNS the Wait
+		// and the terminal transition of the stage it admits: cancel's
+		// graceful phase then converges on op.done (the child was
+		// SIGTERM'd and reaped, the classified failure completes the op)
+		// instead of burning its full budget on an operation nobody
+		// completes.
 		admitted := make(chan *exec.Cmd, 1)
 		refused := make(chan struct{}, 1)
 		begin := make(chan struct{})
@@ -343,11 +350,24 @@ func TestOperationStageCancelSimultaneousAdmissionRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-begin
-			if cmd2 := d.tryAdmitStage(1); cmd2 != nil {
-				admitted <- cmd2
-			} else {
+			cmd2 := d.tryAdmitStage(1)
+			if cmd2 == nil {
 				refused <- struct{}{}
+				return
 			}
+			waitErr := d.op.waitCurrentStage()
+			op.mu.Lock()
+			latched := op.terminationRequested
+			op.mu.Unlock()
+			switch {
+			case waitErr != nil && latched:
+				op.fail(resultCancelled, "cancelled", nil)
+			case waitErr != nil:
+				op.fail("docker_run_failed", "stage failed", nil)
+			default:
+				op.succeed(nil)
+			}
+			admitted <- cmd2
 		}()
 		go func() {
 			defer wg.Done()
@@ -379,18 +399,12 @@ func TestOperationStageCancelSimultaneousAdmissionRace(t *testing.T) {
 			if !latched {
 				t.Fatalf("attempt %d: stage 2 admitted but termination latch not set", attempt)
 			}
-			// The admitted child received SIGTERM from the cancel path;
-			// the child ignores SIGTERM, so the cancel force phase must
-			// kill it. Reap it through the production Wait owner (the
-			// reaped ProcessState proves termination; polling kill(pid,0)
-			// cannot: an unreaped zombie still answers).
-			waitDone := make(chan error, 1)
-			go func() { waitDone <- d.op.waitCurrentStage() }()
-			select {
-			case <-waitDone:
-			case <-time.After(20 * time.Second):
-				t.Fatalf("attempt %d: waitCurrentStage did not return after cancel", attempt)
-			}
+			// The admitted child received SIGTERM from the cancel path
+			// (default disposition; the force phase escalates if needed).
+			// The admission goroutine already reaped it through the
+			// production Wait owner: the reaped ProcessState proves
+			// termination (polling kill(pid,0) cannot: an unreaped zombie
+			// still answers).
 			if stage2Cmd.ProcessState == nil {
 				t.Fatalf("attempt %d: admitted stage 2 child was not reaped after termination", attempt)
 			}

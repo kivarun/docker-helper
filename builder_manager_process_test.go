@@ -512,8 +512,8 @@ func TestBuilderManagerRealProcessTreeTeardown(t *testing.T) {
 		// Session leader: sh (Setsid by the production owner) spawning a
 		// child sh which spawns a grandchild sh; all busy-wait.
 		cmd := exec.Command("sh", "-c",
-			`sh -c 'sh -c "while :; do :; done" & while :; do :; done' &
-while :; do :; done`)
+			`sh -c 'sh -c "while :; do sleep 0.05; done" & while :; do sleep 0.05; done' &
+while :; do sleep 0.05; done`)
 		_ = cmd
 		return cmd
 	}

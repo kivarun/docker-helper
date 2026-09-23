@@ -31,6 +31,19 @@ func rpcTestEndpoint(t *testing.T) (*net.UnixListener, string) {
 	return listener, path
 }
 
+// startHoldRelease is the test-owned release signal for handlers that hold
+// an accepted START connection open without replying (the START-ambiguity
+// fixtures). The handler blocks on the returned channel and closes the
+// connection when it fires; the test's cleanup closes the channel exactly
+// once, so a failed or completed test never leaks the handler goroutine or
+// the held connection.
+func startHoldRelease(t *testing.T) chan struct{} {
+	t.Helper()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	return release
+}
+
 // fakeManagerPeer replaces the client peer-credential seam so tests can
 // prove the verify-before-write contract without real cross-UID peers.
 func fakeManagerPeer(t *testing.T, uid, gid int) {
@@ -104,6 +117,7 @@ func TestBuilderClientAmbiguousStartConvergesWithFreshContextStop(t *testing.T) 
 	fakeManagerPeer(t, 4312, 4312)
 
 	requests := make(chan string, 8)
+	startRelease := startHoldRelease(t)
 	go func() {
 		for {
 			conn, err := listener.AcceptUnix()
@@ -125,8 +139,9 @@ func TestBuilderClientAmbiguousStartConvergesWithFreshContextStop(t *testing.T) 
 					return
 				}
 				// START: hold the connection open without replying ->
-				// client read timeout (ambiguous).
-				select {}
+				// client read timeout (ambiguous). The handler exits when
+				// the test releases it; cleanup covers failure paths.
+				<-startRelease
 			}()
 		}
 	}()
@@ -305,7 +320,7 @@ func TestBuilderClientAmbiguousStartErrStopIsNotProvenConvergence(t *testing.T) 
 					_, _ = conn.Write([]byte(builderManagerRespInternal + "\n"))
 					return
 				}
-				select {} // START: hold, never reply (ambiguous after cancel)
+				<-startHoldRelease(t) // START held: ambiguous after cancel
 			}()
 		}
 	}()
@@ -367,7 +382,7 @@ func TestBuilderClientAmbiguousStartErrStopDistinctFromProvenConvergence(t *test
 							_, _ = conn.Write([]byte(tc.stopResp + "\n"))
 							return
 						}
-						select {} // START held: ambiguous after cancel
+						<-startHoldRelease(t) // START held: ambiguous after cancel
 					}()
 				}
 			}()
@@ -413,7 +428,7 @@ func TestBuilderClientStartDeadlineBounded(t *testing.T) {
 					_, _ = conn.Write([]byte(builderManagerRespOKAbsent + "\n"))
 					return
 				}
-				select {} // START: hold, never reply
+				<-startHoldRelease(t) // START: hold, never reply
 			}()
 		}
 	}()
