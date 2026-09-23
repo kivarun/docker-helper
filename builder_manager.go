@@ -691,6 +691,35 @@ func (m *builderManager) stopInstance(inst *builderInstance) error {
 	}
 }
 
+// terminateGroupBounded escalates one process group to death: SIGTERM,
+// the bounded graceful window, SIGKILL, and a bounded finalize wait. It
+// returns nil only when the group is PROVEN gone (kill(-pgid, 0) ESRCH).
+// Callers own the reap (an instance's stop attempt gets it from the
+// single Wait owner) or have none to do (disk-only residue groups). The
+// signal callback's return is advisory (signal delivery failures are
+// diagnosable, not fatal); the group-gone probe is the truth source.
+func terminateGroupBounded(pgid int, signal func(syscall.Signal) bool) error {
+	if pgid <= 1 {
+		return nil
+	}
+	signal(syscall.SIGTERM)
+	deadline := time.Now().Add(builderStopGracefulTimeout)
+	for !processGroupGone(pgid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !processGroupGone(pgid) {
+		signal(syscall.SIGKILL)
+		finalize := time.Now().Add(builderStopFinalizeTimeout)
+		for !processGroupGone(pgid) && time.Now().Before(finalize) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if !processGroupGone(pgid) {
+		return fmt.Errorf("%w: process group %d did not fully die", errBuilderStopNotConverged, pgid)
+	}
+	return nil
+}
+
 // runStopAttempt is one bounded stop attempt, run by the claimant. The
 // reap is NEVER performed here: the instance's single child Wait owner
 // (awaitInstanceExit) owns the Wait and closes the reap signal, which
@@ -710,32 +739,17 @@ func (m *builderManager) runStopAttempt(inst *builderInstance, awaitLaunch bool)
 	pid := inst.pid
 	inst.mu.Unlock()
 
-	if leader != nil && leader.Process != nil {
-		// Settle the whole group (the setsid leader's pid IS its pgid);
-		// the claim already marked the phase so launchInstance's
-		// spawn/readiness checks observe it.
-		inst.signalProcessGroup(syscall.SIGTERM)
-	}
-	// Wait bounded for group death, escalating to SIGKILL.
-	deadline := time.Now().Add(builderStopGracefulTimeout)
-	for leader != nil && !processGroupGone(pid) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if leader != nil && !processGroupGone(pid) {
-		inst.signalProcessGroup(syscall.SIGKILL)
-	}
 	if leader != nil {
-		// Finalize: the group must be PROVEN gone (covers the zombie
-		// window between SIGKILL delivery and full disappearance) and the
-		// leader reaped by the single Wait owner, before any cleanup.
-		finalize := time.Now().Add(builderStopFinalizeTimeout)
-		for !processGroupGone(pid) && time.Now().Before(finalize) {
-			time.Sleep(10 * time.Millisecond)
+		if leader.Process != nil {
+			// Settle the whole group (the setsid leader's pid IS its
+			// pgid); the claim already marked the phase so
+			// launchInstance's spawn/readiness checks observe it.
+			if err := terminateGroupBounded(pid, inst.signalProcessGroup); err != nil {
+				m.managerDiagf("STOP %s: %v; retaining entry for retry", inst.operationID, err)
+				return err
+			}
 		}
-		if !processGroupGone(pid) {
-			m.managerDiagf("STOP %s: process group %d did not fully die; retaining entry for retry", inst.operationID, pid)
-			return fmt.Errorf("%w: process group %d did not fully die", errBuilderStopNotConverged, pid)
-		}
+		// The leader is dead: its reap is owned by the single Wait owner.
 		select {
 		case <-inst.reaped:
 		case <-time.After(builderStopFinalizeTimeout):
@@ -1012,9 +1026,34 @@ func (m *builderManager) startupPurge() error {
 	return nil
 }
 
-// purgeDiskResidue scans <root>/ops/<op_id> residue under both fixed roots.
-// Only canonical op ids are considered (never an arbitrary path obtained
-// from input).
+// killOwnedResidueGroup terminates a verified-owned live residue group
+// through the shared bounded escalation (SIGTERM -> SIGKILL, verified
+// group death). The exact ownership (uid, pgid==pid, argv0, the exact
+// --state-dir argument) was proven by builderStalePidIdentity BEFORE any
+// signal; fail closed when the group survives.
+func (m *builderManager) killOwnedResidueGroup(opID string, pid int) error {
+	signal := func(sig syscall.Signal) bool {
+		if err := syscall.Kill(-pid, sig); err != nil && err != syscall.ESRCH {
+			return false
+		}
+		return true
+	}
+	if err := terminateGroupBounded(pid, signal); err != nil {
+		m.managerDiagf("startup purge: %v; refusing startup", err)
+		return fmt.Errorf("startup purge: owned group %d for op %s did not die", pid, opID)
+	}
+	return nil
+}
+
+// purgeDiskResidue scans <root>/ops/<op_id> crash residue under both
+// fixed roots and converges it through the startup contract (F3):
+// canonical op-id names only; the persisted pid is resolved and PROVEN
+// before any signal — a verified-owned live group is terminated through
+// the shared escalation and its disappearance verified; a dead or absent
+// pid is plain residue; a live pid that cannot be proven owned (unknown,
+// mismatched, reused) fails closed WITHOUT any signal or removal; the
+// exact canonical path removal is verified, and cleanup errors fail
+// closed.
 func (m *builderManager) purgeDiskResidue(root string) error {
 	opsDir := filepath.Join(root, "ops")
 	entries, err := os.ReadDir(opsDir)
@@ -1033,20 +1072,29 @@ func (m *builderManager) purgeDiskResidue(root string) error {
 			continue
 		}
 		opDir := filepath.Join(opsDir, name)
-		// A live verified-owned process must NOT be killed by disk purge;
-		// fail closed with a bounded diagnostic.
 		if pid := readInstancePid(opDir); pid > 0 {
-			if !builderStalePidIdentity(pid, name, m.uid) {
-				if processAlive(pid) {
-					return fmt.Errorf("startup purge: unproven live process %d for op %s; refusing", pid, name)
+			switch {
+			case !processAlive(pid):
+				// Dead pid named by the pid file: plain residue.
+			case builderStalePidIdentity(pid, name, m.uid):
+				// Exactly owned live process group: settle it, then
+				// remove its state.
+				if err := m.killOwnedResidueGroup(name, pid); err != nil {
+					return err
 				}
-			}
-			// Dead or proven-owned-dead: residue removal below.
-			if processAlive(pid) && builderStalePidIdentity(pid, name, m.uid) {
-				return fmt.Errorf("startup purge: verified-owned live process %d for op %s; refusing startup", pid, name)
+			default:
+				// Live but unproven (foreign or reused pid): fail closed.
+				// No signal, no removal.
+				m.managerDiagf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, name)
+				return fmt.Errorf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, name)
 			}
 		}
-		_ = os.RemoveAll(opDir)
+		if err := os.RemoveAll(opDir); err != nil {
+			return fmt.Errorf("startup purge: cannot remove residue %s: %v", opDir, err)
+		}
+		if _, err := os.Lstat(opDir); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("startup purge: residue %s still present after removal: %v", opDir, err)
+		}
 	}
 	return nil
 }

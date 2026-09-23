@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -1779,4 +1780,266 @@ func TestBuilderManagerSelfExitSettlesDescendantsBeforeDirs(t *testing.T) {
 	if !waitInstance(t, m, opID, false) {
 		t.Fatal("unexpected-exit did not release the map entry")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// F3: startup PURGE residue semantics.
+// ---------------------------------------------------------------------------
+
+// makeResidueDir creates the earlier manager's crash-residue directories
+// for opID under the current test-scoped roots.
+func makeResidueDir(t *testing.T, opID string) {
+	t.Helper()
+	for _, d := range []string{opRuntimeDir(opID), opStateDir(opID)} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("cannot create residue dir %s: %v", d, err)
+		}
+	}
+}
+
+// writeResiduePid persists the earlier manager's instance.pid residue.
+func writeResiduePid(t *testing.T, opID string, pid int) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(opRuntimeDir(opID), "instance.pid"), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		t.Fatalf("cannot write residue instance.pid: %v", err)
+	}
+}
+
+// killForeignProcess is the GUARANTEED cleanup for live foreign process
+// fixtures: kill, reap, and assert the group gone (the tests may not
+// leave live processes behind).
+func killForeignProcess(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+}
+
+// ownedResidueFixture creates a REAL live process group that satisfies
+// builderStalePidIdentity for opID: a sh process (its own uid, session
+// leader via Setsid, long-lived sleep-free loops) whose argv0 is the
+// canonical rootlesskit path and whose argv carries the exact
+// --state-dir argument, with one long-lived child in the group. Cleanup
+// kills the whole group and reaps the leader. Pre-existence is asserted
+// before returning.
+func ownedResidueFixture(t *testing.T, opID string) (pid int, childPid int) {
+	t.Helper()
+	// The spoofed leader must be an ORPHAN whose parent is already gone
+	// (like the crashed earlier manager): init reaps it after a kill, so
+	// the group-death verification can complete; a test-process child
+	// would linger as an unreaped zombie inside its group. Construction:
+	// setsid forks a fresh session/group leader whose bash immediately
+	// re-execs itself with the spoofed argv0 (exec preserves pid and
+	// pgid) and reports its own pid through a file; the launcher exits.
+	// /bin/sh is not used: it may be an argv0-dispatching multi-call
+	// binary (busybox), which would exit instantly as an unknown applet.
+	dir := t.TempDir()
+	scriptFile := filepath.Join(dir, "leader.sh")
+	pidOut := filepath.Join(dir, "leader.pid")
+	script := `echo $$ > ` + pidOut + `
+while :; do :; done & while :; do :; done`
+	if err := os.WriteFile(scriptFile, []byte(script), 0o700); err != nil {
+		t.Fatalf("cannot write the leader script: %v", err)
+	}
+	launcher := exec.Command("/bin/bash", "-c",
+		`setsid /bin/bash -c 'exec -a `+builderManagerRootlessKit+` /bin/bash `+scriptFile+` --state-dir=`+filepath.Join(opStateDir(opID), "rootlesskit-state")+`' &`+
+			` while [ ! -s `+pidOut+` ]; do sleep 0.05; done`)
+	if err := launcher.Run(); err != nil {
+		t.Fatalf("cannot launch the orphaned leader fixture: %v", err)
+	}
+	raw, err := os.ReadFile(pidOut)
+	if err != nil {
+		t.Fatalf("cannot read the leader pid: %v", err)
+	}
+	pid, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad leader pid %q: %v", raw, err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if builderStalePidIdentity(pid, opID, os.Getuid()) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("owned-residue fixture never satisfied the identity proof")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	child := waitDescendants(t, pid, 1)
+	return pid, child[0]
+}
+
+// TestBuilderManagerStartupPurgeResidue proves the startup contract of a
+// NEW manager against residue left by an earlier manager: a verified-
+// owned live group is settled (bounded escalation, verified group death)
+// and its canonical paths removed; a dead pid is plain residue; a live
+// pid that cannot be proven owned (reused/foreign) fails closed without
+// any signal or removal; an unrelated live process is never touched;
+// removal failures fail closed; and no START adopts surviving old state.
+func TestBuilderManagerStartupPurgeResidue(t *testing.T) {
+	t.Run("owned live group killed and removed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		seamCA(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		pid, child := ownedResidueFixture(t, opID)
+		writeResiduePid(t, opID, pid)
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (the verified-owned live group is settled)", err)
+		}
+		if processAlive(pid) || processAlive(child) || !processGroupGone(pid) {
+			t.Fatalf("owned residue group survived startup purge: leader=%d child=%d", pid, child)
+		}
+		assertDirsAbsentAt(t, opID)
+
+		// No START adopts old state: a same-ID START after the purge is
+		// admitted fresh, and its instance.pid is the NEW leader's.
+		fakeLeaderSeam(t, true)
+		startResp := make(chan string, 1)
+		go func() { startResp <- m.start(opID, nil) }()
+		if !waitInstance(t, m, opID, true) {
+			t.Fatal("same-ID START after the purge not admitted")
+		}
+		bindFakeBuildkitdSocket(t, opID)
+		select {
+		case resp := <-startResp:
+			if resp != builderManagerRespOK {
+				t.Fatalf("same-ID START after the purge = %q, want OK", resp)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("same-ID START after the purge did not converge")
+		}
+		raw, err := os.ReadFile(filepath.Join(opRuntimeDir(opID), "instance.pid"))
+		if err != nil {
+			t.Fatalf("cannot read the new instance.pid: %v", err)
+		}
+		if strings.TrimSpace(string(raw)) == strconv.Itoa(pid) {
+			t.Fatal("START adopted the old instance.pid (stale state reused)")
+		}
+	})
+
+	t.Run("dead pid removed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		dead := exec.Command("true")
+		if err := dead.Run(); err != nil {
+			t.Fatalf("cannot create a dead-pid fixture: %v", err)
+		}
+		writeResiduePid(t, opID, dead.Process.Pid)
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (dead pid is plain residue)", err)
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("reused pid fails closed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		foreign := exec.Command("sh", "-c", boundedSleepScript())
+		if err := foreign.Start(); err != nil {
+			t.Fatalf("cannot start foreign fixture: %v", err)
+		}
+		killForeignProcess(t, foreign)
+		fpid := foreign.Process.Pid
+		writeResiduePid(t, opID, fpid)
+
+		err := m.startupPurge()
+		if err == nil {
+			t.Fatal("startupPurge succeeded over a live unproven pid (must fail closed)")
+		}
+		if !processAlive(fpid) {
+			t.Fatal("a foreign live process was signaled by startup purge")
+		}
+		if _, serr := os.Lstat(opRuntimeDir(opID)); serr != nil {
+			t.Fatal("residue removed despite fail-closed refusal")
+		}
+	})
+
+	t.Run("unrelated live process untouched", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		writeResiduePid(t, opID, 999999)
+		unrelated := exec.Command("sh", "-c", boundedSleepScript())
+		if err := unrelated.Start(); err != nil {
+			t.Fatalf("cannot start unrelated fixture: %v", err)
+		}
+		killForeignProcess(t, unrelated)
+		upid := unrelated.Process.Pid
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil", err)
+		}
+		if !processAlive(upid) {
+			t.Fatal("an unrelated live process was killed by startup purge")
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("remove failure fails closed", func(t *testing.T) {
+		m, rtRoot, stRoot := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		writeResiduePid(t, opID, 999999)
+		for _, d := range []string{filepath.Join(rtRoot, "ops"), filepath.Join(stRoot, "ops")} {
+			if err := os.Chmod(d, 0o500); err != nil {
+				t.Fatalf("cannot chmod %s: %v", d, err)
+			}
+			defer os.Chmod(d, 0o700)
+		}
+
+		if err := m.startupPurge(); err == nil {
+			t.Fatal("startupPurge succeeded with failed residue removal (must fail closed)")
+		}
+		if _, serr := os.Lstat(opRuntimeDir(opID)); serr != nil {
+			t.Fatal("residue vanished despite the removal failure")
+		}
+		// No START adopts surviving residue: the refuse-to-adopt check
+		// fails the START closed.
+		if resp := m.start(opID, nil); resp != builderManagerRespInternal {
+			t.Fatalf("START over surviving residue = %q, want internal (no adoption)", resp)
+		}
+	})
+
+	t.Run("in-memory instances converged", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		seamCA(t)
+		fakeLeaderSeam(t, true)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		startResp := make(chan string, 1)
+		go func() { startResp <- m.start(opID, nil) }()
+		if !waitInstance(t, m, opID, true) {
+			t.Fatal("reservation missing")
+		}
+		inst := m.instances[opID]
+		leaderPid := waitLeaderPid(t, inst)
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil", err)
+		}
+		select {
+		case resp := <-startResp:
+			if resp != builderManagerRespInternal {
+				t.Fatalf("purged START = %q, want internal", resp)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("purged START did not converge")
+		}
+		if processAlive(leaderPid) {
+			t.Fatal("in-memory instance's leader survived startup purge")
+		}
+		if !waitInstance(t, m, opID, false) {
+			t.Fatal("in-memory instance's map entry survived startup purge")
+		}
+		assertDirsAbsentAt(t, opID)
+	})
 }
