@@ -310,6 +310,16 @@ func (r *recordedCalls) env(i int) []string {
 	return r.cmds[i].Env
 }
 
+// cmd returns the recorded command at index i (nil when absent).
+func (r *recordedCalls) cmd(i int) *exec.Cmd {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i >= len(r.cmds) {
+		return nil
+	}
+	return r.cmds[i]
+}
+
 func (r *recordedCalls) all() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

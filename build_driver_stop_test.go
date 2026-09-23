@@ -39,8 +39,14 @@ type backendChildRunner struct {
 	buildctlExitCode int
 	loadBlocks       bool
 	loadExitCode     int
+	inspectBlocks    bool
 	inspectExitCode  int
 	rmiExitCode      int
+	tagBlocks        bool
+
+	// inspectReleasePath is the blocked verification child's release file
+	// (set once by setInspectBlocks).
+	inspectReleasePath string
 }
 
 func newBackendChildRunner(t *testing.T, app *App, calls *recordedCalls) *backendChildRunner {
@@ -82,8 +88,22 @@ func (r *backendChildRunner) childScript(name string, args []string, ready strin
 			return failed(r.loadExitCode)
 		}
 	case isVerificationArgv(args):
-		if r.inspectExitCode != 0 {
+		switch {
+		case r.inspectBlocks:
+			// Blocked verification: real child, ready marker, then hold
+			// until its release path exists (the test's deterministic
+			// mid-test release; the binary-liveness guard bounds a
+			// never-released child). The child then exits 0, so the
+			// driver reaches the commit stage and the latch refuses it.
+			return "touch " + ready + "; while [ ! -e " + r.inspectReleasePath + " ] && [ -d /proc/" + strconv.Itoa(os.Getpid()) + " ]; do sleep 0.05; done"
+		case r.inspectExitCode != 0:
 			return failed(r.inspectExitCode)
+		}
+	case hasArgvWord(args, "tag"):
+		if r.tagBlocks {
+			// Blocked commit child: real child killed by the termination
+			// path (no trap: the commit outcome must be a killed child).
+			return "touch " + ready + "; while :; do sleep 0.05; done"
 		}
 	case hasArgvWord(args, "rmi"):
 		if r.rmiExitCode != 0 {
@@ -121,6 +141,28 @@ func (r *backendChildRunner) setInspectExitCode(code int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inspectExitCode = code
+}
+
+func (r *backendChildRunner) setInspectBlocks(t *testing.T, blocks bool) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inspectBlocks = blocks
+	if blocks && r.inspectReleasePath == "" {
+		r.inspectReleasePath = filepath.Join(r.readyDir, "verify.release")
+	}
+	release := r.inspectReleasePath
+	if blocks {
+		// Release any still-blocked verification child on cleanup; the
+		// binary-liveness guard in the script bounds a missed write.
+		t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0o644) })
+	}
+	return release
+}
+
+func (r *backendChildRunner) setTagBlocks(blocks bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tagBlocks = blocks
 }
 
 func (r *backendChildRunner) setRmiExitCode(code int) {
