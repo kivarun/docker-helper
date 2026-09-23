@@ -180,6 +180,13 @@ func (m *fakeBuilderManager) startCount() int {
 	return len(m.starts)
 }
 
+// startIDs returns a copy of the recorded START operation IDs.
+func (m *fakeBuilderManager) startIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.starts...)
+}
+
 func (m *fakeBuilderManager) stopCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
