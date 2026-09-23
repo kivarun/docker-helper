@@ -691,7 +691,15 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
+
+	// Explicit test-owned handler completion tracking: handlerDone closes
+	// exactly when handlePull has fully returned, including its final
+	// pull.finish audit write through the package-global logging state that
+	// is shared with the rest of the suite. serveDone tracks the Serve
+	// goroutine the same way.
+	handlerDone := make(chan struct{})
 	mux.HandleFunc("POST /pull", func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
 		app.handlePull(w, r)
 	})
 
@@ -707,10 +715,30 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	}
 
 	// Start serving.
+	serveDone := make(chan struct{})
 	go func() {
+		defer close(serveDone)
 		_ = server.Serve(listener)
 	}()
-	defer server.Close()
+
+	// Quiesce on every exit path, including t.Fatal: force the server
+	// closed, then join the pull handler goroutine (after its child process
+	// kill cleanup has run) and the server goroutine with bounded waits. So
+	// the test cannot leak the HTTP handler, its child process, or the
+	// server goroutine past test return and fixture restoration.
+	t.Cleanup(func() {
+		_ = server.Close()
+		select {
+		case <-handlerDone:
+		case <-time.After(5 * time.Second):
+			t.Errorf("pull handler goroutine did not return after daemon shutdown quiesce")
+		}
+		select {
+		case <-serveDone:
+		case <-time.After(5 * time.Second):
+			t.Errorf("server goroutine did not return after daemon shutdown quiesce")
+		}
+	})
 
 	// Wait for server to be ready.
 	waitForDialReady(t, "tcp", listener.Addr().String())
@@ -823,6 +851,17 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	if !childGone {
 		t.Error("child process still exists after daemon shutdown")
 		// Don't SIGKILL here — that would mask the failure.
+	}
+
+	// Explicit bounded completion barrier (not a sleep, not an audit-buffer
+	// poll): the pull handler must have fully returned — its tail runs the
+	// final pull.finish audit write through the package-global logging
+	// state — before this test returns and cleanup restores the shared
+	// audit/logger fixtures and the next test installs its own.
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Errorf("pull handler did not finish after daemon shutdown")
 	}
 }
 
