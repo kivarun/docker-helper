@@ -2,12 +2,15 @@ package main
 
 // P3-C2a driver proofs for the cancellation / commit-admission boundary,
 // driven through the production build driver and the ONE §16 commit-stage
-// admission primitive: a termination latched before the boundary refuses
-// the admission (the commit child never starts) while a termination after
-// the boundary leaves the commit outcome in charge (a killed tag child is
-// docker_build_failed, never cancelled). The internal-tag cleanup runs on
-// every path. C2b owns successful post-commit result permanence; the
-// successful ordering is already proven by B2.
+// admission primitive: a termination latched during the admitted
+// internal-tag verification child stage signals that child and suppresses
+// the commit stage entirely (the tag command is never even constructed),
+// while a termination after the commit boundary leaves the commit outcome
+// in charge (a killed tag child is docker_build_failed, never cancelled).
+// The separate atomic commit-admission orderings are proven by
+// TestOperationCommitAdmissionTerminationOrderings. C2b owns successful
+// post-commit result permanence; the successful ordering is already proven
+// by B2.
 
 import (
 	"context"
@@ -37,96 +40,109 @@ func waitTerminationLatched(t *testing.T, op *operation) {
 	}
 }
 
-// TestBuildDriverPreCommitTerminationRefusesCommit proves the pre-commit
-// termination contract through the driver: with the internal-tag
-// verification blocked after a successful load, an explicit cancel or a
-// daemon shutdown latches the termination; releasing the verification
-// (which then SUCCEEDS) proves the refused commit admission — the tag
-// command is constructed but its process never starts — and the best-effort
-// internal-tag cleanup still removes exactly the operation-owned internal
-// tag on a fresh bounded context. Explicit cancel reports cancelled;
-// shutdown keeps the kind-specific docker_build_failed.
-func TestBuildDriverPreCommitTerminationRefusesCommit(t *testing.T) {
+// TestBuildDriverTerminateDuringVerificationCleansInternalTag proves the
+// pre-commit termination contract over the cancellable internal-tag
+// verification child stage: with the admitted inspect child blocked after
+// a successful load, an explicit cancel or a daemon shutdown latches the
+// termination in the same critical section that signals the admitted
+// child. The child is reaped by the driver's own Wait owner with the
+// release file never written (only the signal could have ended the blocked
+// child), the current execution-stage slot is cleared, the commit stage is
+// suppressed (the tag command is never even constructed), and the
+// best-effort internal-tag cleanup still removes exactly the
+// operation-owned internal tag on a fresh bounded context. Explicit cancel
+// reports cancelled; shutdown keeps the kind-specific docker_build_failed.
+func TestBuildDriverTerminateDuringVerificationCleansInternalTag(t *testing.T) {
 	cases := []struct {
 		name      string
-		terminate func(t *testing.T, supervisor *operationSupervisor, op *operation) (done func())
+		terminate func(t *testing.T, supervisor *operationSupervisor, op *operation)
 		wantRC    string
 	}{
 		{
-			name: "explicit cancel while verification pending",
-			terminate: func(t *testing.T, supervisor *operationSupervisor, op *operation) (done func()) {
-				var wg sync.WaitGroup
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					_ = supervisor.cancel(op.ID, nil)
-				}()
-				return wg.Wait
+			name: "explicit cancel during the admitted verification child",
+			terminate: func(t *testing.T, supervisor *operationSupervisor, op *operation) {
+				if err := supervisor.cancel(op.ID, nil); err != nil {
+					t.Fatalf("cancel: %v", err)
+				}
 			},
 			wantRC: resultCancelled,
 		},
 		{
-			name: "shutdown while verification pending",
-			terminate: func(t *testing.T, supervisor *operationSupervisor, op *operation) (done func()) {
+			name: "shutdown during the admitted verification child",
+			terminate: func(t *testing.T, supervisor *operationSupervisor, op *operation) {
 				supervisor.beginShutdown()
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				supervisor.terminateForShutdown(shutdownCtx, nil)
 				cancel()
-				return nil
 			},
 			wantRC: "docker_build_failed",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			_, opBuf := setupTestLogging(t)
 			app, supervisor, result, _, calls := setupBuildBackendTest(t)
 			runner := newBackendChildRunner(t, app, calls)
 			releasePath := runner.setInspectBlocks(t, true)
 
 			op := startBackendBuild(t, app, result.Token, nil)
 			// The blocked verification child is the newest started child:
-			// buildctl and load succeeded, verification is pending.
+			// buildctl and load succeeded, the inspect child was admitted
+			// and started.
 			runner.waitChildStartedCount(t, 3)
-			if !isVerificationArgv(calls.argv(calls.count() - 1)) {
-				t.Fatalf("newest child is not the verification child:\n%s", calls.all())
+			inspectIdx := runner.constructIndexOfImportStage("inspect")
+			if inspectIdx < 0 || !isVerificationArgv(calls.argv(calls.count()-1)) {
+				t.Fatalf("newest started child is not the admitted verification child:\n%s", calls.all())
 			}
 
-			done := tc.terminate(t, supervisor, op)
-			waitTerminationLatched(t, op)
-
-			// Release the blocked verification: the child exits 0, so the
-			// driver reaches the commit stage and the latch must refuse its
-			// admission. The release is a file write (never a read of the
-			// recorded command's process state, which the driver goroutine
-			// owns while Start runs).
-			if err := os.WriteFile(releasePath, []byte("release"), 0o644); err != nil {
-				t.Fatalf("cannot release verification child: %v", err)
-			}
-			if done != nil {
-				done() // the cancel's graceful wait converges on op.done
-			}
+			// The termination path signals the admitted child: the release
+			// file is never written, so only the signal can end the blocked
+			// child.
+			tc.terminate(t, supervisor, op)
 			op.Wait()
 
 			op.mu.Lock()
+			latched, slotCleared := op.terminationRequested, op.currentCmd == nil && op.currentCancel == nil
 			state, rc := op.State, derefString(op.ResultCode)
 			op.mu.Unlock()
-
-			// The verification succeeded and the latch refused the commit
-			// admission: the tag command was constructed (the atomic
-			// refusal artifact) but its process never started.
-			tagIdx := runner.constructIndexOfImportStage("tag")
-			if tagIdx < 0 {
-				t.Error("driver did not attempt the commit stage (expected a constructed tag command)")
-			} else if runner.childStarted(tagIdx) {
-				t.Error("docker tag process STARTED after the termination latch (admission must be refused)")
+			if !latched {
+				t.Error("termination latch not set")
+			}
+			if !slotCleared {
+				t.Error("current execution-stage slot not cleared after the terminated verification stage")
 			}
 
-			// Started handoff children: load, blocked verification, then
-			// only the best-effort internal-tag cleanup.
+			// The admitted verification child was signaled and reaped: its
+			// release file must not exist (the signal, not a release,
+			// ended it), the child must have started (admission), and the
+			// driver's Wait owner must have reaped it.
+			if _, err := os.Stat(releasePath); !os.IsNotExist(err) {
+				t.Errorf("verification release file exists (%v); the signal-only termination proof requires it absent", err)
+			}
+			if !runner.childStarted(inspectIdx) {
+				t.Error("verification child did not start (it must be admitted before termination)")
+			}
+			if cmd := calls.cmd(inspectIdx); cmd.ProcessState == nil {
+				t.Error("verification child was not reaped by the stage Wait owner")
+			}
+
+			// The terminated verification stage suppresses the commit stage
+			// entirely: the tag command is never even constructed.
+			if got := runner.constructIndexOfImportStage("tag"); got != -1 {
+				t.Errorf("tag child constructed after the terminated verification stage (index %d):\n%s", got, calls.all())
+			}
+
+			// Started handoff children: load, the terminated verification,
+			// then only the best-effort internal-tag cleanup.
 			if got := runner.startedImportStages(); !equalStrings(got, []string{"load", "inspect", "rmi"}) {
 				t.Errorf("started import stages = %v, want [load inspect rmi]\nall children:\n%s", got, calls.all())
 			}
+
+			// The cleanup ran on a FRESH bounded context despite the latch:
+			// the rmi child actually started and succeeded — a command bound
+			// to the terminated operation context would refuse to start.
 			assertInternalTagRmi(t, calls, op.ID)
+			assertNoCleanupFailureDiagnostic(t, opBuf)
 
 			if state != operationFailed {
 				t.Errorf("state = %v, want failed", state)

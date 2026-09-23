@@ -42,9 +42,9 @@ const buildInternalTagRepository = "docker-helper-build"
 // operation-scoped staging tree ($RUNTIME_DIR/builds/<op_id>/).
 const buildExportTarName = "export.tar"
 
-// buildCleanupContextTimeout bounds every fresh server-owned cleanup
-// context (manager STOP convergence, internal-tag rmi). Implementation
-// constant, not config.
+// buildCleanupContextTimeout bounds every fresh server-owned build-driver
+// context: manager STOP convergence, the internal-tag verification stage,
+// and internal-tag rmi cleanup. Implementation constant, not config.
 const buildCleanupContextTimeout = 30 * time.Second
 
 // buildInternalTag derives the one internal image tag of one build
@@ -148,11 +148,18 @@ func (d *buildDriver) runStages() buildStageResult {
 		return buildStageResult{ExitCode: loadRes.ExitCode, ResultCode: "docker_build_failed", Message: "docker load failed"}
 	}
 
-	// F. verify the imported internal tag resolves in the local Engine.
-	if err := d.verifyInternalTag(); err != nil {
-		d.logStage("image_import_verification_failed", err)
+	// F. verify the imported internal tag resolves in the local Engine
+	// (cancellable child stage: a latched termination refuses admission so
+	// no inspect process starts; a termination during the stage signals the
+	// admitted child).
+	verifyRes := d.verifyInternalTag()
+	if verifyRes.Terminated {
 		d.internalTagCleanupBestEffort()
-		return buildStageResult{ResultCode: "docker_build_failed", Message: "docker load failed"}
+		return buildStageResult{ExitCode: verifyRes.ExitCode, ResultCode: d.terminationResultCode(), Message: "build cancelled"}
+	}
+	if verifyRes.Err != nil {
+		d.internalTagCleanupBestEffort()
+		return buildStageResult{ExitCode: verifyRes.ExitCode, ResultCode: "docker_build_failed", Message: "docker load failed"}
 	}
 
 	// G. commit: docker tag <internal> <requested> through the one
@@ -389,15 +396,18 @@ func (d *buildDriver) loadStage() buildStageResult {
 }
 
 // verifyInternalTag proves the exact internal tag resolves in the local
-// Engine through the existing Docker CLI owner (no broad enumeration).
-func (d *buildDriver) verifyInternalTag() error {
+// Engine through the existing Docker CLI owner. It is a normal P1 child
+// stage: admitted through startOperationStage, waited through the single
+// Wait owner waitCurrentStage, and classified against the termination
+// latch by the shared runChildStage owner — a latched termination refuses
+// admission (no inspect process starts) and a termination during the
+// stage signals the admitted child. The 30s bound is the existing
+// server-owned bounded-context constant.
+func (d *buildDriver) verifyInternalTag() buildStageResult {
 	ctx, cancel := context.WithTimeout(context.Background(), buildCleanupContextTimeout)
 	defer cancel()
 	cmd := d.newChild(ctx, "docker", "image", "inspect", buildInternalTag(d.op.ID))
-	if err := cmd.Run(); err != nil {
-		return err
-	}
-	return nil
+	return d.runChildStage(cmd, "image_import_verification")
 }
 
 // commitStage runs the ONE linearized commit-stage primitive with the

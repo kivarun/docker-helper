@@ -55,10 +55,10 @@ func assertNoCleanupFailureDiagnostic(t *testing.T, opBuf *bytes.Buffer) {
 // TestBuildDriverImportFailureCleansInternalTag proves the image-handoff
 // failure contract: a nonzero docker load and a failed internal-tag
 // verification fail the build with docker_build_failed and no tag child
-// (the requested image stays untouched); a failed best-effort cleanup after
-// an earlier failure is logged without replacing the original failure or
-// its exit code; every cleanup removes exactly the operation-owned internal
-// tag.
+// (the requested image stays untouched); the failing child stage's exit
+// code is preserved; a failed best-effort cleanup after an earlier failure
+// is logged without replacing the original failure or its exit code; every
+// cleanup removes exactly the operation-owned internal tag.
 func TestBuildDriverImportFailureCleansInternalTag(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -68,7 +68,7 @@ func TestBuildDriverImportFailureCleansInternalTag(t *testing.T) {
 		wantStarted     []string
 		wantFailedStage string
 		wantCleanupDiag bool
-		wantExitCode    int // -1 = no child exit code expected
+		wantExitCode    int
 	}{
 		{
 			name:            "load nonzero fails and cleans the internal tag",
@@ -81,8 +81,8 @@ func TestBuildDriverImportFailureCleansInternalTag(t *testing.T) {
 			name:            "load ok but internal tag verification fails",
 			inspectExit:     3,
 			wantStarted:     []string{"load", "inspect", "rmi"},
-			wantFailedStage: "image_import_verification_failed",
-			wantExitCode:    -1,
+			wantFailedStage: "image_import_verification",
+			wantExitCode:    3,
 		},
 		{
 			name:            "cleanup failure after an earlier failure is logged without replacing it",
@@ -138,11 +138,7 @@ func TestBuildDriverImportFailureCleansInternalTag(t *testing.T) {
 			if rc != "docker_build_failed" {
 				t.Errorf("result_code = %q, want docker_build_failed (unchanged by the cleanup outcome)", rc)
 			}
-			if tc.wantExitCode < 0 {
-				if exitCode != nil {
-					t.Errorf("exit_code = %v, want nil (no child exit code exists)", exitCode)
-				}
-			} else if exitCode == nil || *exitCode != tc.wantExitCode {
+			if exitCode == nil || *exitCode != tc.wantExitCode {
 				t.Errorf("exit_code = %v, want %d (the failing child's exit code)", exitCode, tc.wantExitCode)
 			}
 

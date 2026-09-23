@@ -533,9 +533,11 @@ child processes):
   stage 2: buildctl (child process)
   stage 3: builder STOP (manager round-trip; no child)
   stage 4: docker load (child process)
-  stage 5: final cancellation/commit check (no child; under op.mu)
-  stage 6: docker tag + docker rmi internal tag (child processes)
-  stage 7: staging cleanup + lease release (existing owners)
+  stage 5: docker image inspect of the internal tag (child process;
+           cancellable through the same stage machinery)
+  stage 6: final cancellation/commit check (no child; under op.mu)
+  stage 7: docker tag + docker rmi internal tag (child processes)
+  stage 8: staging cleanup + lease release (existing owners)
   ```
 
 - invariants (all under the existing `op.mu`): at most one cancellable
@@ -568,6 +570,8 @@ production path with `ExecCommandContext` seam for process control):
   child, `cancelled`, requested image untouched;
 - cancel during `docker load` → load child killed, requested image
   untouched, internal tag cleaned;
+- cancel during the internal-tag verification → the admitted inspect child
+  is signaled, the tag stage is suppressed, internal tag cleaned;
 - shutdown during each equivalent window (same assertions; result code
   follows the CURRENT contract: `docker_build_failed` for
   shutdown-terminated builds, `docker_run_failed` for runs — see §13);
@@ -640,6 +644,7 @@ Flow:
 ```text
 buildctl --output type=docker,name=docker-helper-build/<op_id>,dest=$RUNTIME_DIR/builds/<op_id>/export.tar
 docker load < export.tar                     # tar path server-owned
+docker image inspect docker-helper-build/<op_id>  # internal-tag verification (cancellable child stage)
 [final cancellation/commit check — under op.mu]
 docker tag  docker-helper-build/<op_id> <requested-image>
 docker rmi  docker-helper-build/<op_id>      # internal tag removed
@@ -763,6 +768,7 @@ Stage-to-`exit_code`/`result_code` mapping:
 | buildctl cancelled | SIGTERM/kill | child exit code if available | `cancelled` |
 | buildctl terminated by shutdown | SIGTERM/kill | child exit code if available | `docker_build_failed` |
 | docker load | nonzero exit | docker exit code | `docker_build_failed` |
+| docker image inspect (internal-tag verification, cancellable child stage) | nonzero exit | docker exit code | `docker_build_failed` |
 | docker tag (commit, before success) | nonzero exit | docker exit code | `docker_build_failed` |
 | docker rmi internal tag (cleanup) | nonzero exit | — | **no effect**: result stays `succeeded` (cleanup logged/audited) |
 | any stage cancelled | cancel wins before commit | child exit code if available | `cancelled` |

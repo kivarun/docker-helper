@@ -93,10 +93,10 @@ func (r *backendChildRunner) childScript(name string, args []string, ready strin
 		switch {
 		case r.inspectBlocks:
 			// Blocked verification: real child, ready marker, then hold
-			// until its release path exists (the test's deterministic
-			// mid-test release; the binary-liveness guard bounds a
-			// never-released child). The child then exits 0, so the
-			// driver reaches the commit stage and the latch refuses it.
+			// until its release path exists. A termination during the
+			// blocked stage SIGTERMs the admitted child (the release file
+			// is never written; the release write is only the leak-safety
+			// backstop bounding a test that fails before terminating).
 			return "touch " + ready + "; while [ ! -e " + r.inspectReleasePath + " ] && [ -d /proc/" + strconv.Itoa(os.Getpid()) + " ]; do sleep 0.05; done"
 		case r.inspectExitCode != 0:
 			return failed(r.inspectExitCode)
