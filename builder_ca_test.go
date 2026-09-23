@@ -185,7 +185,7 @@ func TestBuilderManagerStartWithoutCABundleFailsClosed(t *testing.T) {
 	t.Cleanup(func() { builderNewRootlessKitCommand = origSpawn })
 
 	opID := "op_0123456789abcdef0123456789abcdef"
-	if resp := m.start(opID); resp != builderManagerRespInternal {
+	if resp := m.start(opID, nil); resp != builderManagerRespInternal {
 		t.Fatalf("START without a readable CA bundle = %q, want internal (fail closed)", resp)
 	}
 	if spawned {
@@ -229,7 +229,7 @@ func TestBuilderManagerChildReceivesSelectedCABundleEnv(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID) }()
+	go func() { respCh <- m.start(opID, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("START did not reserve the map entry")
 	}

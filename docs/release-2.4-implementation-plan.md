@@ -189,6 +189,24 @@ compensating STOP therefore cannot be overtaken by an earlier accepted
 START of the same id. The fence is transient in-flight state (removed
 when the START settles), not a tombstone.
 
+The dispatch fence alone covers STARTs already handed to the manager
+operation; an accepted-but-unparsed START connection is invisible to it.
+The manager therefore also keeps an accept-order ingress barrier: every
+accepted connection is registered pending synchronously before the next
+connection can be accepted (Linux dequeues unix-socket connections in
+connect order, so accept order equals submit order), and a pending
+connection settles exactly when its request's admission decision is
+visible under the manager lock — for START, its refusal or dispatch-
+fence registration, never its launch; for STOP/PURGE, dispatch; for
+unauthorized, malformed, dead, or timed-out connections, handler exit.
+Before answering `OK absent`, a STOP settles every connection accepted
+before its own and then re-checks the map and fences, so no
+accepted-but-unparsed START of the same id can reserve and launch after
+the STOP reported convergence. The barrier is transient (no pending
+entry survives its connection) and bounded (every older connection
+settles within its 2s read window at the latest); it holds only the
+absent answer, never instance convergence, and never a readiness cycle.
+
 The same rule applies to a lost STOP response: after a STOP
 deadline/ambiguity, re-issue STOP once on the fresh cleanup context; an
 `OK absent` reply then closes the ambiguity. PURGE failures at daemon

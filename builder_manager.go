@@ -69,6 +69,14 @@ var (
 	// section (production: nil). It parks the accepted START inside
 	// exactly the dispatch-fence window a concurrent STOP waits out.
 	builderStartFenceHold func(opID string)
+
+	// builderStopFenceWait is a test-only seam invoked by a STOP right
+	// before it waits on a START dispatch fence (production: nil). It is
+	// the explicit observation point for the fence-wait branch: tests hold
+	// their parked START until the waiting STOP provably reached the
+	// fence wait, so committed tests actually execute that branch instead
+	// of racing past it.
+	builderStopFenceWait func(opID string)
 )
 
 // builderNewRootlessKitCommand constructs the RootlessKit leader command
@@ -184,11 +192,16 @@ type builderInstance struct {
 // accepted-but-not-yet-settled START (at most one per op id, lifetime =
 // the dispatch-to-reservation window): a STOP for that id waits the fence
 // out instead of reporting convergence while the START may still reserve
-// and launch. No tombstones: a settled fence is removed.
+// and launch. No tombstones: a settled fence is removed. ingress is the
+// accept-order barrier: every accepted connection is registered pending
+// before the next connection can be accepted, and an absent STOP settles
+// every older pending connection before reporting `OK absent`, so no
+// accepted-but-unparsed START can reserve and launch afterwards.
 type builderManager struct {
 	mu          sync.Mutex
 	instances   map[string]*builderInstance
 	startFences map[string]chan struct{}
+	ingress     builderIngress
 	uid, gid    int
 	diag        *boundedBuffer // manager-level operational diagnostics
 }
@@ -197,9 +210,71 @@ func newBuilderManager(uid, gid int) *builderManager {
 	return &builderManager{
 		instances:   map[string]*builderInstance{},
 		startFences: map[string]chan struct{}{},
+		ingress:     builderIngress{pending: map[int]chan struct{}{}},
 		uid:         uid,
 		gid:         gid,
 		diag:        newBoundedBuffer(builderInstanceDiagMaxBytes),
+	}
+}
+
+// builderIngress is the manager's accept-order barrier. On Linux the
+// unix-socket accept queue is FIFO: accept(2) returns queued connections
+// in connect order, and the accept loop registers each connection here
+// synchronously before accepting the next one, so a connection's
+// sequence number orders it against every other connection by submit
+// time. A pending connection settles exactly once — at handler exit for
+// unauthorized, malformed, dead, or read-deadline connections, at
+// dispatch for STOP/PURGE, and for START only when its refusal or
+// startFences registration is visible under the manager lock — and no
+// entry survives its handler's lifetime (each older connection settles
+// within its bounded read window at the latest). An absent STOP waits
+// for every connection accepted before its own, then re-checks the map
+// and fences under the manager lock.
+type builderIngress struct {
+	mu      sync.Mutex
+	seq     int
+	pending map[int]chan struct{}
+}
+
+// accept registers an accepted connection as pending and returns its
+// sequence number. Called synchronously in the accept loop before the
+// next Accept.
+func (b *builderIngress) accept() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.seq++
+	b.pending[b.seq] = make(chan struct{})
+	return b.seq
+}
+
+// settle marks the connection's request admission as visible, removing
+// its pending entry. Idempotent: an already-settled or unregistered
+// sequence number (direct handleConnection callers, seq 0) is a no-op.
+func (b *builderIngress) settle(seq int) {
+	b.mu.Lock()
+	if ch, ok := b.pending[seq]; ok {
+		delete(b.pending, seq)
+		close(ch)
+	}
+	b.mu.Unlock()
+}
+
+// waitOlder blocks until every pending connection with a sequence number
+// lower than before has settled. All such connections were accepted
+// before the caller's connection, so the set is complete at collection:
+// sequence numbers are assigned in accept order and no lower number can
+// be registered afterwards.
+func (b *builderIngress) waitOlder(before int) {
+	b.mu.Lock()
+	older := make([]chan struct{}, 0, len(b.pending))
+	for s, ch := range b.pending {
+		if s < before {
+			older = append(older, ch)
+		}
+	}
+	b.mu.Unlock()
+	for _, ch := range older {
+		<-ch
 	}
 }
 
@@ -236,7 +311,13 @@ func opSocketPath(opID string) string {
 // a concurrent STOP for the same id can never report convergence (`OK
 // absent`) while an accepted START of that id may still create a live
 // instance.
-func (m *builderManager) start(opID string) string {
+//
+// settled, when non-nil, is the connection's ingress-barrier settle
+// callback (F1.2): it fires exactly when this START's admission decision
+// — a refusal, or the dispatch-fence registration — is visible under the
+// manager lock, never after the launch, so an absent STOP waiting out
+// older connections does not wait out a BuildKit readiness cycle.
+func (m *builderManager) start(opID string, settled func()) string {
 	// Fence registration: under the manager lock — refuse an existing
 	// instance or an in-flight START of the same id (the fixed
 	// one-instance-per-operation grammar), then register the dispatch
@@ -245,14 +326,23 @@ func (m *builderManager) start(opID string) string {
 	m.mu.Lock()
 	if _, exists := m.instances[opID]; exists {
 		m.mu.Unlock()
+		if settled != nil {
+			settled()
+		}
 		return builderManagerRespOpExists
 	}
 	if _, inflight := m.startFences[opID]; inflight {
 		m.mu.Unlock()
+		if settled != nil {
+			settled()
+		}
 		return builderManagerRespOpExists
 	}
 	fence := make(chan struct{})
 	m.startFences[opID] = fence
+	if settled != nil {
+		settled()
+	}
 	m.mu.Unlock()
 
 	if builderStartFenceHold != nil {
@@ -905,15 +995,25 @@ func (m *builderManager) serve(stderr io.Writer) error {
 			fmt.Fprintf(stderr, "builder serve: accept: %v\n", err)
 			continue
 		}
-		go m.handleConnection(conn, stderr)
+		seq := m.ingress.accept()
+		go m.handleConnection(conn, stderr, seq)
 	}
 }
 
 // handleConnection reads exactly one bounded request line, authenticates
 // the peer BEFORE dispatch, executes, and writes exactly one response
 // line from the fixed vocabulary.
-func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer) {
+//
+// seq is the connection's ingress-barrier sequence number (0 for direct
+// callers outside the accept loop: never registered, settle is a no-op).
+// The deferred settle is the catch-all for connections that never reach
+// a command dispatch (unauthorized peer, malformed or oversized request,
+// EOF, read deadline); STOP and PURGE settle at dispatch; a START settles
+// through its admission callback inside start, at the refusal or the
+// dispatch-fence registration — never after the launch.
+func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer, seq int) {
 	defer conn.Close()
+	defer m.ingress.settle(seq)
 
 	if err := authenticatePeer(conn); err != nil {
 		if !errors.Is(err, errBuilderManagerUnauthorized) {
@@ -976,10 +1076,12 @@ func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer) 
 	var response string
 	switch req.Command {
 	case builderManagerCmdStart:
-		response = m.start(req.OperationID)
+		response = m.start(req.OperationID, func() { m.ingress.settle(seq) })
 	case builderManagerCmdStop:
-		response = m.stop(req.OperationID)
+		m.ingress.settle(seq)
+		response = m.stop(req.OperationID, seq)
 	case builderManagerCmdPurge:
+		m.ingress.settle(seq)
 		response = m.purge()
 	default:
 		response = builderManagerRespUnknownCmd
@@ -994,7 +1096,21 @@ func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer) 
 // convergence while an accepted START of the same id is still unsettled —
 // it waits for the dispatch fence and then converges whatever that START
 // created (or reports absent when the START was refused).
-func (m *builderManager) stop(opID string) string {
+//
+// seq is the STOP connection's ingress-barrier sequence number. The
+// absent answer is additionally ordered against ACCEPTED-BUT-UNPARSED
+// STARTs (F1.2): before reporting `OK absent` the STOP settles every
+// connection accepted before its own — a START's settle is its refusal
+// or fence registration under the manager lock — and then re-checks the
+// map and fences, so no older accepted START can reserve and launch
+// after the STOP reported convergence. The wait is transient: older
+// connections settle within their bounded read window at the latest, a
+// START settles at admission (never after its launch), and the barrier
+// holds only the absent answer — instance convergence and other commands
+// proceed concurrently. seq 0 (direct callers outside the accept loop)
+// has nothing older and skips the barrier.
+func (m *builderManager) stop(opID string, seq int) string {
+	barrierSettled := false
 	for {
 		m.mu.Lock()
 		inst, ok := m.instances[opID]
@@ -1009,12 +1125,23 @@ func (m *builderManager) stop(opID string) string {
 			m.stopInstance(inst)
 			return builderManagerRespOK
 		}
-		if fence == nil {
+		if fence != nil {
+			if builderStopFenceWait != nil {
+				builderStopFenceWait(opID)
+			}
+			<-fence
+			// The START settled: re-check — it may have reserved the
+			// instance this STOP must converge.
+			continue
+		}
+		if barrierSettled {
 			return builderManagerRespOKAbsent
 		}
-		<-fence
-		// The START settled: re-check — it may have reserved the instance
-		// this STOP must converge.
+		// No entry, no fence: an older accepted connection may still be
+		// carrying the START this STOP must not overtake. Settle the
+		// barrier, then re-check under the manager lock.
+		m.ingress.waitOlder(seq)
+		barrierSettled = true
 	}
 }
 

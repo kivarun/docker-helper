@@ -53,7 +53,7 @@ func processTestManager(t *testing.T) (*builderManager, string, string) {
 		}
 		m.mu.Unlock()
 		for _, id := range ids {
-			m.stop(id)
+			m.stop(id, 0)
 			if !waitInstance(t, m, id, false) {
 				t.Errorf("instance %s did not converge after test-owned stop", id)
 			}
@@ -161,7 +161,7 @@ func TestBuilderManagerStartReadinessSuccess(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID) }()
+	go func() { respCh <- m.start(opID, nil) }()
 
 	// Wait for the child to spawn, then bind the fake buildkitd socket.
 	if !waitInstance(t, m, opID, true) {
@@ -194,7 +194,7 @@ func TestBuilderManagerConcurrentStartSameOpExactlyOneChild(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			respCh <- m.start(opID)
+			respCh <- m.start(opID, nil)
 		}()
 	}
 	if !waitInstance(t, m, opID, true) {
@@ -230,7 +230,7 @@ func TestBuilderManagerThirdStartAtCeiling(t *testing.T) {
 
 	for _, opID := range []string{"op_0123456789abcdef0123456789abcdef", "op_fedcba9876543210fedcba9876543210"} {
 		respCh := make(chan string, 1)
-		go func() { respCh <- m.start(opID) }()
+		go func() { respCh <- m.start(opID, nil) }()
 		if !waitInstance(t, m, opID, true) {
 			t.Fatalf("START %s did not reserve", opID)
 		}
@@ -239,7 +239,7 @@ func TestBuilderManagerThirdStartAtCeiling(t *testing.T) {
 			t.Fatalf("START %s = %q, want OK", opID, resp)
 		}
 	}
-	if resp := m.start("op_11111111111111111111111111111111"); resp != builderManagerRespAtCeiling {
+	if resp := m.start("op_11111111111111111111111111111111", nil); resp != builderManagerRespAtCeiling {
 		t.Fatalf("third START = %q, want builder_at_ceiling", resp)
 	}
 	m.mu.Lock()
@@ -260,12 +260,12 @@ func TestBuilderManagerStopDuringReadiness(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID) }()
+	go func() { respCh <- m.start(opID, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
 
-	if resp := m.stop(opID); resp != builderManagerRespOK {
+	if resp := m.stop(opID, 0); resp != builderManagerRespOK {
 		t.Fatalf("STOP = %q, want OK", resp)
 	}
 	if !waitInstance(t, m, opID, false) {
@@ -280,7 +280,7 @@ func TestBuilderManagerStopDuringReadiness(t *testing.T) {
 	// Ceiling released: a new START is admitted.
 	op2 := "op_fedcba9876543210fedcba9876543210"
 	resp2Ch := make(chan string, 1)
-	go func() { resp2Ch <- m.start(op2) }()
+	go func() { resp2Ch <- m.start(op2, nil) }()
 	if !waitInstance(t, m, op2, true) {
 		t.Fatal("post-STOP reservation missing")
 	}
@@ -299,7 +299,7 @@ func TestBuilderManagerTwoConcurrentStops(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID) }()
+	go func() { respCh <- m.start(opID, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -314,7 +314,7 @@ func TestBuilderManagerTwoConcurrentStops(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			stopCh <- m.stop(opID)
+			stopCh <- m.stop(opID, 0)
 		}()
 	}
 	wg.Wait()
@@ -338,7 +338,7 @@ func TestBuilderManagerPurgeRacingStop(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID) }()
+	go func() { respCh <- m.start(opID, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -350,7 +350,7 @@ func TestBuilderManagerPurgeRacingStop(t *testing.T) {
 	var wg sync.WaitGroup
 	resp2 := make(chan string, 2)
 	wg.Add(2)
-	go func() { defer wg.Done(); resp2 <- m.stop(opID) }()
+	go func() { defer wg.Done(); resp2 <- m.stop(opID, 0) }()
 	go func() { defer wg.Done(); resp2 <- m.purge() }()
 	wg.Wait()
 	close(resp2)
@@ -383,7 +383,7 @@ func TestBuilderManagerUnexpectedExitReleasesCeiling(t *testing.T) {
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 
 	opID := "op_0123456789abcdef0123456789abcdef"
-	if resp := m.start(opID); resp != builderManagerRespInternal {
+	if resp := m.start(opID, nil); resp != builderManagerRespInternal {
 		t.Fatalf("START after self-exit = %q, want internal", resp)
 	}
 	if !waitInstance(t, m, opID, false) {
@@ -392,7 +392,7 @@ func TestBuilderManagerUnexpectedExitReleasesCeiling(t *testing.T) {
 	if _, err := os.Lstat(opRuntimeDir(opID)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("runtime dir not removed after self-exit: %v", err)
 	}
-	if resp := m.stop(opID); resp != builderManagerRespOKAbsent {
+	if resp := m.stop(opID, 0); resp != builderManagerRespOKAbsent {
 		t.Fatalf("post-exit STOP = %q, want OK absent", resp)
 	}
 }
@@ -414,7 +414,7 @@ func TestBuilderManagerStartFailureReleasesCeiling(t *testing.T) {
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 
 	opID := "op_0123456789abcdef0123456789abcdef"
-	if resp := m.start(opID); resp != builderManagerRespInternal {
+	if resp := m.start(opID, nil); resp != builderManagerRespInternal {
 		t.Fatalf("START spawn failure = %q, want internal", resp)
 	}
 	if !waitInstance(t, m, opID, false) {
@@ -442,7 +442,7 @@ func TestBuilderManagerReadinessFailureKillsGroupAndRemovesDirs(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID) }()
+	go func() { respCh <- m.start(opID, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -452,7 +452,7 @@ func TestBuilderManagerReadinessFailureKillsGroupAndRemovesDirs(t *testing.T) {
 	if processGroupGone(pid) {
 		t.Fatal("pre-existence self-test: leader group already gone")
 	}
-	if resp := m.stop(opID); resp != builderManagerRespOK {
+	if resp := m.stop(opID, 0); resp != builderManagerRespOK {
 		t.Fatalf("STOP = %q", resp)
 	}
 	select {
@@ -495,13 +495,13 @@ func TestBuilderManagerStopBeforeSpawn(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID) }()
+	go func() { respCh <- m.start(opID, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
 
 	// STOP while the launch is blocked before spawn.
-	if resp := m.stop(opID); resp != builderManagerRespOK {
+	if resp := m.stop(opID, 0); resp != builderManagerRespOK {
 		t.Fatalf("STOP before spawn = %q, want OK", resp)
 	}
 	// Unblock the seam: the launch observes the stop claim at its next
@@ -546,7 +546,7 @@ while :; do sleep 0.05; done`)
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	respCh := make(chan string, 1)
-	go func() { respCh <- m.start(opID) }()
+	go func() { respCh <- m.start(opID, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
@@ -570,7 +570,7 @@ while :; do sleep 0.05; done`)
 		t.Fatal("pre-existence self-test: descendants did not appear")
 	}
 
-	if resp := m.stop(opID); resp != builderManagerRespOK {
+	if resp := m.stop(opID, 0); resp != builderManagerRespOK {
 		t.Fatalf("STOP = %q, want OK", resp)
 	}
 	select {
@@ -643,10 +643,14 @@ func realDispatchFixture(t *testing.T, m *builderManager) *net.UnixListener {
 			if err != nil {
 				return
 			}
+			// Same registration order as the production serve loop: the
+			// pending entry exists before the next connection can be
+			// accepted.
+			seq := m.ingress.accept()
 			handlers.Add(1)
 			go func() {
 				defer handlers.Done()
-				m.handleConnection(conn, io.Discard)
+				m.handleConnection(conn, io.Discard, seq)
 			}()
 		}
 	}()
@@ -701,16 +705,86 @@ func startFenceHoldFixture(t *testing.T, target string) (engaged <-chan struct{}
 	return engagedCh, func() { releaseOnce.Do(func() { close(releaseCh) }) }
 }
 
+// preParseAuthHoldFixture parks the FIRST connection that reaches peer
+// authentication — accepted and ingress-registered, but before its
+// request is read or parsed — until released. Tests must dispatch the
+// parked connection's request and wait for `engaged` before dispatching
+// any other connection, so the parked connection is deterministically the
+// one the test targets.
+func preParseAuthHoldFixture(t *testing.T) (engaged <-chan struct{}, release func()) {
+	t.Helper()
+	engagedCh := make(chan struct{}, 1)
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	orig := builderPeerCredentials
+	var first sync.Mutex
+	parked := false
+	builderPeerCredentials = func(c *net.UnixConn) (int, int, int, error) {
+		uid, gid, pid, err := orig(c)
+		first.Lock()
+		firstCall := !parked
+		parked = true
+		first.Unlock()
+		if firstCall {
+			select {
+			case engagedCh <- struct{}{}:
+			default:
+			}
+			select {
+			case <-releaseCh:
+			case <-time.After(10 * time.Second):
+				// Bounded park (same liveness-backstop idiom as the seam
+				// children's binary-liveness guard).
+			}
+		}
+		return uid, gid, pid, err
+	}
+	t.Cleanup(func() {
+		builderPeerCredentials = orig
+		releaseOnce.Do(func() { close(releaseCh) })
+	})
+	return engagedCh, func() { releaseOnce.Do(func() { close(releaseCh) }) }
+}
+
+// stopFenceWaitFixture observes the STOP fence-wait branch through the
+// builderStopFenceWait seam: engaged signals that a STOP provably reached
+// the fence wait for target (the F1.1 review's missing synchronization
+// barrier for the committed fence tests).
+func stopFenceWaitFixture(t *testing.T, target string) <-chan struct{} {
+	t.Helper()
+	engagedCh := make(chan struct{}, 1)
+	orig := builderStopFenceWait
+	builderStopFenceWait = func(opID string) {
+		if opID != target {
+			return
+		}
+		select {
+		case engagedCh <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { builderStopFenceWait = orig })
+	return engagedCh
+}
+
 // dispatchRequest opens one real connection to the dispatch listener and
 // sends one request line.
 func dispatchRequest(t *testing.T, listener *net.UnixListener, request string) *net.UnixConn {
 	t.Helper()
+	conn := dialDispatch(t, listener)
+	if _, err := conn.Write([]byte(request + "\n")); err != nil {
+		t.Fatalf("cannot write request %q: %v", request, err)
+	}
+	return conn
+}
+
+// dialDispatch opens one real connection to the dispatch listener without
+// writing anything (the ingress-barrier silent-connection case).
+func dialDispatch(t *testing.T, listener *net.UnixListener) *net.UnixConn {
+	t.Helper()
 	conn, err := net.DialUnix("unix", nil, listener.Addr().(*net.UnixAddr))
 	if err != nil {
 		t.Fatalf("cannot dial dispatch listener: %v", err)
-	}
-	if _, err := conn.Write([]byte(request + "\n")); err != nil {
-		t.Fatalf("cannot write request %q: %v", request, err)
 	}
 	return conn
 }
@@ -718,13 +792,32 @@ func dispatchRequest(t *testing.T, listener *net.UnixListener, request string) *
 // readReply reads one bounded reply line from a dispatched connection.
 func readReply(t *testing.T, conn *net.UnixConn) string {
 	t.Helper()
+	line, ok := readReplyWithin(t, conn, 10*time.Second)
+	if !ok {
+		t.Fatal("no reply line within 10s")
+	}
+	return line
+}
+
+// readReplyWithin reads one reply line with an explicit bounded deadline.
+// ok is false when no reply arrived within the window (the deterministic
+// observation that a barrier is still holding: an unsettled older
+// connection must delay the absent STOP's reply, and the pre-fix code
+// answered within microseconds).
+func readReplyWithin(t *testing.T, conn *net.UnixConn, within time.Duration) (string, bool) {
+	t.Helper()
 	buf := make([]byte, builderManagerRequestCeiling+1)
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(within)); err != nil {
+		t.Fatalf("cannot set read deadline: %v", err)
+	}
 	n, err := conn.Read(buf)
+	if n == 0 && err != nil {
+		return "", false
+	}
 	if err != nil && err != io.EOF {
 		t.Fatalf("reply read: %v", err)
 	}
-	return trimNewlineSuffix(string(buf[:n]))
+	return trimNewlineSuffix(string(buf[:n])), true
 }
 
 // waitInstanceResidueGone polls bounded for the op's runtime/state dirs
@@ -757,6 +850,12 @@ func waitInstanceResidueGone(t *testing.T, opID string) {
 // replies OK. After the STOP's convergence reply there is no instance
 // map entry and no runtime/state residue; the raced START's own reply is
 // the internal refusal of its cancelled launch.
+//
+// The STOP's fence-wait branch is exercised deterministically: the test
+// holds the START until the builderStopFenceWait observation point
+// proves the STOP reached the fence wait (F1.1 review: without that
+// barrier the release raced the STOP's dispatch and the branch never
+// executed).
 func TestBuilderManagerStopDoesNotOvertakeDispatchedStart(t *testing.T) {
 	m, _, _ := processTestManager(t)
 	seamCA(t)
@@ -766,6 +865,7 @@ func TestBuilderManagerStopDoesNotOvertakeDispatchedStart(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	engaged, release := startFenceHoldFixture(t, opID)
+	fenceWait := stopFenceWaitFixture(t, opID)
 
 	startConn := dispatchRequest(t, listener, "START "+opID)
 	defer startConn.Close()
@@ -790,6 +890,14 @@ func TestBuilderManagerStopDoesNotOvertakeDispatchedStart(t *testing.T) {
 
 	stopConn := dispatchRequest(t, listener, "STOP "+opID)
 	defer stopConn.Close()
+
+	// Hold the release until the waiting STOP provably reached the
+	// fence-wait branch.
+	select {
+	case <-fenceWait:
+	case <-time.After(10 * time.Second):
+		t.Fatal("STOP never reached the dispatch-fence wait")
+	}
 
 	// Release the START: it reserves and launches; the waiting STOP
 	// converges the instance instead of reporting `OK absent`.
@@ -824,6 +932,10 @@ func TestBuilderManagerStopDoesNotOvertakeDispatchedStart(t *testing.T) {
 // compensating STOP converges that instance before replying OK. The
 // client's proven-convergence verdict then stands with no live instance,
 // no residue, and no process left.
+//
+// As in the manager-level fence test, the release waits for the
+// builderStopFenceWait observation point so the compensating STOP
+// provably executes the fence-wait branch.
 func TestBuilderClientCompensatingStopConvergesDispatchedStart(t *testing.T) {
 	m, _, _ := processTestManager(t)
 	seamCA(t)
@@ -833,6 +945,7 @@ func TestBuilderClientCompensatingStopConvergesDispatchedStart(t *testing.T) {
 
 	opID := "op_0123456789abcdef0123456789abcdef"
 	engaged, release := startFenceHoldFixture(t, opID)
+	fenceWait := stopFenceWaitFixture(t, opID)
 
 	// The production client dials the REAL manager endpoint; the test
 	// mount's peer credentials match the resolved builder identity.
@@ -860,6 +973,14 @@ func TestBuilderClientCompensatingStopConvergesDispatchedStart(t *testing.T) {
 	// compensating STOP is issued on a fresh context.
 	cancel()
 
+	// Hold the release until the compensating STOP provably reached the
+	// fence-wait branch.
+	select {
+	case <-fenceWait:
+	case <-time.After(10 * time.Second):
+		t.Fatal("compensating STOP never reached the dispatch-fence wait")
+	}
+
 	// Release the START: it reserves and launches; the already-waiting
 	// compensating STOP converges the instance and the client's
 	// proven-convergence verdict stands.
@@ -882,4 +1003,152 @@ func TestBuilderClientCompensatingStopConvergesDispatchedStart(t *testing.T) {
 		t.Fatal("instance map entry survived the compensating STOP")
 	}
 	waitInstanceResidueGone(t, opID)
+}
+
+// ---------------------------------------------------------------------------
+// F1.2: accept-order ingress barrier.
+// ---------------------------------------------------------------------------
+
+// TestBuilderManagerIngressAcceptOrderMatchesDialOrder establishes the
+// barrier's ordering assumption on the production transport: on Linux the
+// unix-socket accept queue is FIFO, so accept(2) dequeues connections in
+// the order their peers dialed — the order in which the P2 client
+// submits its requests. Each dial writes a marker only AFTER all dials
+// completed, so the marker arrives on the server side of the same
+// connection regardless of accept timing, and the accepted connection at
+// position i must carry the marker of dial i.
+func TestBuilderManagerIngressAcceptOrderMatchesDialOrder(t *testing.T) {
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "order.sock"), Net: "unix"})
+	if err != nil {
+		t.Fatalf("cannot create order listener: %v", err)
+	}
+	defer listener.Close()
+
+	const n = 3
+	dials := make([]*net.UnixConn, n)
+	for i := range dials {
+		conn, err := net.DialUnix("unix", nil, listener.Addr().(*net.UnixAddr))
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		dials[i] = conn
+		defer dials[i].Close()
+	}
+	for i, conn := range dials {
+		if _, err := conn.Write([]byte{byte('a' + i)}); err != nil {
+			t.Fatalf("marker %d: %v", i, err)
+		}
+	}
+
+	accepted := make([]*net.UnixConn, n)
+	for i := range accepted {
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			t.Fatalf("accept %d: %v", i, err)
+		}
+		accepted[i] = conn
+		defer conn.Close()
+	}
+
+	buf := make([]byte, 1)
+	for i, conn := range accepted {
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("deadline %d: %v", i, err)
+		}
+		if _, err := conn.Read(buf); err != nil {
+			t.Fatalf("marker read %d: %v", i, err)
+		}
+		if buf[0] != byte('a'+i) {
+			t.Fatalf("accept position %d carries marker %q, want %q: accept order does not match dial order", i, buf[0], byte('a'+i))
+		}
+	}
+}
+
+// TestBuilderManagerStopBarrierSettlesUnparsedStart is the F1.2 proof of
+// the residual window through the REAL dispatch path: a START connection
+// is accepted, ingress-registered, and parked BEFORE its request is read
+// or parsed (inside peer authentication); a compensating STOP dispatched
+// after it must NOT report `OK absent` while that START is unsettled —
+// the STOP waits at the ingress barrier (no reply within a bounded
+// window, the deterministic observation against the pre-fix immediate
+// `OK absent`); the released START then parses, registers its dispatch
+// fence (its settle fires exactly there, under the manager lock), and
+// the barrier-released STOP sees the fence, waits it out, and converges
+// the launched instance. After the STOP's OK there is no map entry, no
+// residue, and the released START's own reply is the internal refusal of
+// its claimed launch.
+func TestBuilderManagerStopBarrierSettlesUnparsedStart(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+	fakeLeaderSeam(t, true)
+	managerPeerRootSeam(t)
+	authEngaged, authRelease := preParseAuthHoldFixture(t)
+	listener := realDispatchFixture(t, m)
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	startConn := dispatchRequest(t, listener, "START "+opID)
+	defer startConn.Close()
+	select {
+	case <-authEngaged:
+	case <-time.After(10 * time.Second):
+		t.Fatal("START connection never parked before parsing")
+	}
+
+	stopConn := dispatchRequest(t, listener, "STOP "+opID)
+	defer stopConn.Close()
+
+	// The barrier is engaged: the STOP must not answer while the older
+	// accepted START connection is unsettled (pre-fix behavior: immediate
+	// `OK absent` while the parked START could still launch).
+	if line, ok := readReplyWithin(t, stopConn, 500*time.Millisecond); ok {
+		t.Fatalf("STOP replied %q while an older accepted START was unsettled (barrier missing)", line)
+	}
+
+	// Release the START: it parses, registers the dispatch fence, settles
+	// its ingress entry, reserves, and launches; the barrier-released
+	// STOP sees the fence, waits it out, and converges the instance.
+	authRelease()
+
+	if reply := readReply(t, stopConn); reply != builderManagerRespOK {
+		t.Fatalf("STOP reply = %q, want OK (the compensating STOP must converge the released START)", reply)
+	}
+	if reply := readReply(t, startConn); reply != builderManagerRespInternal {
+		t.Fatalf("released START reply = %q, want internal (its launch was claimed by the STOP)", reply)
+	}
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("instance map entry survived the converged STOP")
+	}
+	waitInstanceResidueGone(t, opID)
+}
+
+// TestBuilderManagerSilentConnectionDoesNotBlockStop: a connection
+// accepted BEFORE a STOP's connection but silent (no request bytes)
+// settles at its bounded read deadline; the STOP's ingress barrier waits
+// it out and still answers `OK absent` in bounded time. Proves the
+// barrier is transient (silent/dead connections leak no pending entry)
+// and bounded (the absent STOP is never blocked indefinitely).
+func TestBuilderManagerSilentConnectionDoesNotBlockStop(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+	fakeLeaderSeam(t, true)
+	managerPeerRootSeam(t)
+	listener := realDispatchFixture(t, m)
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	silentConn := dialDispatch(t, listener)
+	defer silentConn.Close()
+
+	stopConn := dispatchRequest(t, listener, "STOP "+opID)
+	defer stopConn.Close()
+
+	// The barrier waits out the older silent connection (bounded by its
+	// 2s read deadline): no reply within the first 500ms.
+	if line, ok := readReplyWithin(t, stopConn, 500*time.Millisecond); ok {
+		t.Fatalf("STOP replied %q while the older silent connection was unsettled (barrier missing)", line)
+	}
+	// ...and the reply arrives bounded, after the silent connection's
+	// deadline settled it.
+	if reply := readReply(t, stopConn); reply != builderManagerRespOKAbsent {
+		t.Fatalf("STOP reply = %q, want OK absent after the silent connection settled", reply)
+	}
 }

@@ -200,7 +200,7 @@ func TestBuilderManagerConnectionNonRootPeerRefused(t *testing.T) {
 	go func() {
 		defer close(done)
 		m := newBuilderManager(os.Getuid(), os.Getgid())
-		m.handleConnection(server, &strings.Builder{})
+		m.handleConnection(server, &strings.Builder{}, 0)
 	}()
 	select {
 	case <-done:
@@ -252,7 +252,7 @@ func TestBuilderManagerConnectionHappyPath(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 	go func() {
-		m.handleConnection(server, &strings.Builder{})
+		m.handleConnection(server, &strings.Builder{}, 0)
 	}()
 	if _, err := client.Write([]byte("START " + opID + "\n")); err != nil {
 		t.Fatalf("cannot write request: %v", err)
@@ -325,7 +325,7 @@ func TestBuilderManagerOversizedRequestNoResponse(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.handleConnection(server, &strings.Builder{})
+		m.handleConnection(server, &strings.Builder{}, 0)
 	}()
 	// builderManagerRequestCeiling bytes without a newline + one more.
 	payload := strings.Repeat("A", builderManagerRequestCeiling)
@@ -365,7 +365,7 @@ func TestBuilderManagerResponseVocabularyOnly(t *testing.T) {
 			client, server := unixSocketPair(t)
 			defer client.Close()
 			defer server.Close()
-			go func() { m.handleConnection(server, &strings.Builder{}) }()
+			go func() { m.handleConnection(server, &strings.Builder{}, 0) }()
 			if _, err := client.Write([]byte(tc.request)); err != nil {
 				t.Fatalf("cannot write: %v", err)
 			}
