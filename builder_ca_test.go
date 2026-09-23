@@ -41,10 +41,11 @@ func fixtureCABundle(t *testing.T, path string, mode os.FileMode) {
 }
 
 // TestBuilderResolveSystemCAFixtureOrder proves the frozen candidate
-// order over temporary fixtures: the first existing readable bundle wins,
-// missing/wrong-kind/dangling/unreadable candidates are skipped, no
-// readable bundle fails closed with no environment, and the resolver
-// never modifies fixture permissions.
+// order over temporary fixtures: the first existing readable bundle wins
+// and no readable bundle fails closed (always run), missing/wrong-kind/
+// dangling/unreadable candidates are skipped (the unreadability sub-case
+// alone is UID-dependent and skips on root), and the resolver never
+// modifies fixture permissions.
 func TestBuilderResolveSystemCAFixtureOrder(t *testing.T) {
 	dir := t.TempDir()
 	bundleA := filepath.Join(dir, "a.pem")
@@ -52,13 +53,16 @@ func TestBuilderResolveSystemCAFixtureOrder(t *testing.T) {
 	fixtureCABundle(t, bundleA, 0o644)
 	fixtureCABundle(t, bundleB, 0o644)
 
-	// An unreadable candidate (mode 0000). Root reads it, so the
-	// unreadability sub-case skips when this identity can open it.
+	// An unreadable candidate (mode 0000). Root reads it, so only the
+	// unreadability sub-case is UID-dependent: it runs when the current
+	// identity cannot open the fixture and skips otherwise. The
+	// first-readable and fail-closed sub-cases never depend on it.
 	unreadable := filepath.Join(dir, "unreadable.pem")
 	fixtureCABundle(t, unreadable, 0o000)
+	unreadableUsable := false
 	if f, err := os.Open(unreadable); err == nil {
 		f.Close()
-		t.Skip("unreadable-fixture sub-case needs non-root (the fixture is readable)")
+		unreadableUsable = true
 	}
 
 	// Wrong-kind and dangling-symlink candidates.
@@ -82,12 +86,6 @@ func TestBuilderResolveSystemCAFixtureOrder(t *testing.T) {
 			name:       "first existing readable wins",
 			candidates: []string{bundleA, bundleB},
 			wantPath:   bundleA,
-			wantOK:     true,
-		},
-		{
-			name:       "missing wrong-kind dangling and unreadable candidates skipped",
-			candidates: []string{absent, wrongKind, dangling, unreadable, bundleB},
-			wantPath:   bundleB,
 			wantOK:     true,
 		},
 		{
@@ -115,6 +113,22 @@ func TestBuilderResolveSystemCAFixtureOrder(t *testing.T) {
 			}
 		})
 	}
+
+	// The UID-dependent unreadability sub-case: only here the fixture's
+	// unreadability (non-root) is load-bearing.
+	t.Run("unreadable candidate skipped", func(t *testing.T) {
+		if unreadableUsable {
+			t.Skip("unreadable-fixture sub-case needs non-root (the fixture is readable)")
+		}
+		replaceCACandidates(t, []string{absent, wrongKind, dangling, unreadable, bundleB})
+		env, ok := builderResolveSystemCA()
+		if !ok {
+			t.Fatalf("resolver refused with a readable later candidate: ok=%v", ok)
+		}
+		if len(env) != 1 || env[0] != "SSL_CERT_FILE="+bundleB {
+			t.Errorf("resolver env = %v, want exactly [SSL_CERT_FILE=%s]", env, bundleB)
+		}
+	})
 
 	// The resolver only reads: fixture permissions are unchanged.
 	if info, err := os.Stat(bundleA); err != nil || info.Mode().Perm() != 0o644 {

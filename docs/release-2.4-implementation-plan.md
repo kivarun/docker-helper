@@ -956,12 +956,26 @@ before asserting its absence after teardown).
    already defined by the buffer — no change.
 8. Concurrent `docker load` operations (ceiling 2) serialize on the
    Engine; acceptable, existing capacity semantics cover it.
-9. Private-registry custom CA for BUILD (registry CA pinned in the
-   Session docker config via existing registry-login semantics) —
-   buildctl reads it client-side from `DOCKER_CONFIG` (the docker CLI
-   config layout carries per-registry CA); one explicit P3 test proves
-   buildctl honors it; if a gap shows up, it becomes a separate design
-   question, not a blocker for the sandbox boundary.
+9. Private-registry custom CA for BUILD: registry-login credentials are
+   pinned in the Session docker config (existing registry-login
+   semantics), but that config supplies CREDENTIALS ONLY. Upstream
+   BuildKit (v0.13.0+; source-verified `session/auth/authprovider`) has
+   buildctl fetch registry tokens directly, with token-endpoint TLS
+   trusted from the Go default system pool, overridable only by the
+   buildctl flag `--registry-auth-tlscontext host=...,ca=...`; per-
+   registry custom CA for buildkitd requires a buildkitd.toml
+   `[registry."host"] ca=[...]` section. DOCKER_CONFIG therefore does
+   NOT supply custom registry CA trust, and the earlier plan claim that
+   buildctl reads per-registry CA from DOCKER_CONFIG is withdrawn. What
+   IS implemented and unit-tested (P3-D2a): the manager resolves the
+   first existing readable system CA bundle and passes it as
+   SSL_CERT_FILE to the per-instance buildkitd (fail closed without
+   one). Custom registry CA trust for BUILD needs an explicit design
+   decision (buildkitd.toml generation vs buildctl flag vs trust-store
+   provisioning), carries its own policy/scope questions, and is not
+   part of the sandbox boundary. Real TLS/auth behavior against real
+   registries is proven in P7 UAT (probes: system-CA pull; token-endpoint
+   trust outside system paths; fail-closed against self-signed chains).
 10. Capability floor (§5): `CapabilityBoundingSet=CAP_SETUID CAP_SETGID`
     is planned but not yet live-proven; if the live unit proof shows
     newuidmap needs more, the demonstrated minimum is recorded and
