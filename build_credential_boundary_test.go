@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -119,6 +120,11 @@ func TestBuildDriverSessionDockerConfigIsolation(t *testing.T) {
 	wBFailed := registryLogin(sessionB.Token, markerB)
 	if wBFailed.Code == http.StatusOK {
 		t.Fatal("session B login: expected the first attempt not to succeed")
+	}
+	// Immediately after the failed first login, BEFORE the retry: the
+	// failed attempt stored nothing.
+	if _, err := os.Stat(filepath.Join(dirB, "config.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the failed session B login stored a credential before the retry: %v", err)
 	}
 	wBRetried := registryLogin(sessionB.Token, markerB)
 	if wBRetried.Code != http.StatusOK {
