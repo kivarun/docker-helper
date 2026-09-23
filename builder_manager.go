@@ -63,6 +63,12 @@ var (
 	// builderPeerCredentials returns the SO_PEERCRED credentials of a
 	// unix connection (uid, gid, pid). Injectable for tests.
 	builderPeerCredentials = peerCredentialsUnix
+
+	// builderStartFenceHold is a test-only seam invoked after a START
+	// registered its dispatch fence and before the reservation critical
+	// section (production: nil). It parks the accepted START inside
+	// exactly the dispatch-fence window a concurrent STOP waits out.
+	builderStartFenceHold func(opID string)
 )
 
 // builderNewRootlessKitCommand constructs the RootlessKit leader command
@@ -174,20 +180,26 @@ type builderInstance struct {
 // builderManager owns the per-operation ephemeral BuildKit instance
 // lifecycle. The instance map counts an instance against the ceiling from
 // reservation until terminal cleanup removes it (starting/running/
-// stopping all count).
+// stopping all count). startFences holds the dispatch fence of every
+// accepted-but-not-yet-settled START (at most one per op id, lifetime =
+// the dispatch-to-reservation window): a STOP for that id waits the fence
+// out instead of reporting convergence while the START may still reserve
+// and launch. No tombstones: a settled fence is removed.
 type builderManager struct {
-	mu        sync.Mutex
-	instances map[string]*builderInstance
-	uid, gid  int
-	diag      *boundedBuffer // manager-level operational diagnostics
+	mu          sync.Mutex
+	instances   map[string]*builderInstance
+	startFences map[string]chan struct{}
+	uid, gid    int
+	diag        *boundedBuffer // manager-level operational diagnostics
 }
 
 func newBuilderManager(uid, gid int) *builderManager {
 	return &builderManager{
-		instances: map[string]*builderInstance{},
-		uid:       uid,
-		gid:       gid,
-		diag:      newBoundedBuffer(builderInstanceDiagMaxBytes),
+		instances:   map[string]*builderInstance{},
+		startFences: map[string]chan struct{}{},
+		uid:         uid,
+		gid:         gid,
+		diag:        newBoundedBuffer(builderInstanceDiagMaxBytes),
 	}
 }
 
@@ -217,20 +229,44 @@ func opSocketPath(opID string) string {
 	return filepath.Join(opRuntimeDir(opID), "buildkitd.sock")
 }
 
-// instanceResponse maps the internal lifecycle to the fixed protocol
-// vocabulary. Never paths, never PIDs.
+// start is the START protocol operation. The dispatch fence is the
+// START/STOP ordering guarantee (§3 of the plan): an accepted START
+// registers its fence BEFORE the reservation, and the fence settles
+// exactly when the reservation is installed or the START is refused — so
+// a concurrent STOP for the same id can never report convergence (`OK
+// absent`) while an accepted START of that id may still create a live
+// instance.
 func (m *builderManager) start(opID string) string {
-	// START linearization (§10 of the plan): under the manager lock —
-	// validate grammar, refuse existing entry, check ceiling, reserve the
-	// map entry. Only then release the lock and do filesystem/process
-	// work.
+	// Fence registration: under the manager lock — refuse an existing
+	// instance or an in-flight START of the same id (the fixed
+	// one-instance-per-operation grammar), then register the dispatch
+	// fence. The ceiling stays with the reservation below: a fenced START
+	// consumes no capacity until it reserves.
 	m.mu.Lock()
-	if inst, exists := m.instances[opID]; exists {
-		_ = inst
+	if _, exists := m.instances[opID]; exists {
 		m.mu.Unlock()
 		return builderManagerRespOpExists
 	}
+	if _, inflight := m.startFences[opID]; inflight {
+		m.mu.Unlock()
+		return builderManagerRespOpExists
+	}
+	fence := make(chan struct{})
+	m.startFences[opID] = fence
+	m.mu.Unlock()
+
+	if builderStartFenceHold != nil {
+		builderStartFenceHold(opID)
+	}
+
+	// Reservation: validate the ceiling and reserve the map entry in the
+	// same critical section, then settle the fence — a waiting STOP
+	// re-checks the map after this and converges the reserved instance
+	// through the ONE stop owner.
+	m.mu.Lock()
+	delete(m.startFences, opID)
 	if len(m.instances) >= m.ceiling() {
+		close(fence)
 		m.mu.Unlock()
 		return builderManagerRespAtCeiling
 	}
@@ -241,6 +277,7 @@ func (m *builderManager) start(opID string) string {
 		done:        make(chan struct{}),
 	}
 	m.instances[opID] = inst
+	close(fence)
 	m.mu.Unlock()
 
 	// Launch outside the manager lock: a START readiness wait must not
@@ -377,9 +414,14 @@ func (m *builderManager) removeReservation(inst *builderInstance) {
 
 // convergeFailedStart is the START failure convergence: terminate any
 // spawned process group, reap it, remove op runtime/state, remove the map
-// reservation. No half-admitted instance.
+// reservation. No half-admitted instance. The dir removal runs AFTER the
+// stop owner settled because a stop claim that raced the launch may have
+// removed the (then still absent) dirs before launchInstance created
+// them; the failed launch must not leave its own re-creation behind
+// (RemoveAll is idempotent).
 func (m *builderManager) convergeFailedStart(inst *builderInstance) {
 	m.stopInstance(inst)
+	m.removeInstanceDirs(inst.operationID)
 }
 
 // claimStop claims the single stop right for an instance. Returns true
@@ -947,18 +989,33 @@ func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer) 
 
 // stop is the STOP protocol operation. Idempotent: unknown/absent ->
 // OK absent; an existing instance converges through stopInstance (the
-// single cleanup owner) and then returns OK.
+// single cleanup owner) and then returns OK. The `OK absent` answer
+// carries the START/STOP ordering guarantee: a STOP never reports
+// convergence while an accepted START of the same id is still unsettled —
+// it waits for the dispatch fence and then converges whatever that START
+// created (or reports absent when the START was refused).
 func (m *builderManager) stop(opID string) string {
-	m.mu.Lock()
-	inst, ok := m.instances[opID]
-	m.mu.Unlock()
-	if !ok {
-		return builderManagerRespOKAbsent
+	for {
+		m.mu.Lock()
+		inst, ok := m.instances[opID]
+		var fence chan struct{}
+		if !ok {
+			fence = m.startFences[opID]
+		}
+		m.mu.Unlock()
+		if ok {
+			// stopInstance is safe for racing callers: exactly one claimant
+			// performs the kill/reap/cleanup; the others wait for done.
+			m.stopInstance(inst)
+			return builderManagerRespOK
+		}
+		if fence == nil {
+			return builderManagerRespOKAbsent
+		}
+		<-fence
+		// The START settled: re-check — it may have reserved the instance
+		// this STOP must converge.
 	}
-	// stopInstance is safe for racing callers: exactly one claimant
-	// performs the kill/reap/cleanup; the others wait for done.
-	m.stopInstance(inst)
-	return builderManagerRespOK
 }
 
 // purge is the runtime PURGE protocol operation: snapshot/claim all

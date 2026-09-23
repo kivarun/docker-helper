@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -613,4 +615,271 @@ func findGroupDescendants(pgid int) []int {
 		}
 	}
 	return found
+}
+
+// ---------------------------------------------------------------------------
+// F1: START/STOP dispatch-fence proofs through the REAL dispatch path.
+// ---------------------------------------------------------------------------
+
+// realDispatchFixture mounts a test unix listener whose accepted
+// connections are served by the REAL production dispatch owner
+// (handleConnection: peer authentication, bounded read, parse, command
+// dispatch), exactly like serve's accept loop. Cleanup closes the
+// listener, joins the accept loop, and joins every handler goroutine with
+// a bounded wait (a visible error on timeout, never a silent leak), so no
+// handler outlives the test-owned roots or seams.
+func realDispatchFixture(t *testing.T, m *builderManager) *net.UnixListener {
+	t.Helper()
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "dispatch.sock"), Net: "unix"})
+	if err != nil {
+		t.Fatalf("cannot create dispatch listener: %v", err)
+	}
+	var handlers sync.WaitGroup
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+			handlers.Add(1)
+			go func() {
+				defer handlers.Done()
+				m.handleConnection(conn, io.Discard)
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		listener.Close()
+		<-acceptDone
+		handlers.Wait()
+	})
+	return listener
+}
+
+// managerPeerRootSeam makes the real dispatch's authenticatePeer accept
+// the test connections as the root daemon peer (production peers are
+// root; the test connections' SO_PEERCRED is the test process identity).
+func managerPeerRootSeam(t *testing.T) {
+	t.Helper()
+	orig := builderPeerCredentials
+	builderPeerCredentials = func(*net.UnixConn) (int, int, int, error) { return 0, 0, 0, nil }
+	t.Cleanup(func() { builderPeerCredentials = orig })
+}
+
+// startFenceHoldFixture parks every dispatched START of target (inside
+// its dispatch-fence window, between fence registration and reservation)
+// until released; engaged signals the park. The release is once-guarded
+// and bounded (a test that fails before releasing must not park the START
+// forever) and the seam restores on cleanup.
+func startFenceHoldFixture(t *testing.T, target string) (engaged <-chan struct{}, release func()) {
+	t.Helper()
+	engagedCh := make(chan struct{}, 1)
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	orig := builderStartFenceHold
+	builderStartFenceHold = func(opID string) {
+		if opID != target {
+			return
+		}
+		select {
+		case engagedCh <- struct{}{}:
+		default:
+		}
+		select {
+		case <-releaseCh:
+		case <-time.After(10 * time.Second):
+			// Bounded park (same liveness-backstop idiom as the seam
+			// children's binary-liveness guard).
+		}
+	}
+	t.Cleanup(func() {
+		builderStartFenceHold = orig
+		releaseOnce.Do(func() { close(releaseCh) })
+	})
+	return engagedCh, func() { releaseOnce.Do(func() { close(releaseCh) }) }
+}
+
+// dispatchRequest opens one real connection to the dispatch listener and
+// sends one request line.
+func dispatchRequest(t *testing.T, listener *net.UnixListener, request string) *net.UnixConn {
+	t.Helper()
+	conn, err := net.DialUnix("unix", nil, listener.Addr().(*net.UnixAddr))
+	if err != nil {
+		t.Fatalf("cannot dial dispatch listener: %v", err)
+	}
+	if _, err := conn.Write([]byte(request + "\n")); err != nil {
+		t.Fatalf("cannot write request %q: %v", request, err)
+	}
+	return conn
+}
+
+// readReply reads one bounded reply line from a dispatched connection.
+func readReply(t *testing.T, conn *net.UnixConn) string {
+	t.Helper()
+	buf := make([]byte, builderManagerRequestCeiling+1)
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("reply read: %v", err)
+	}
+	return trimNewlineSuffix(string(buf[:n]))
+}
+
+// waitInstanceResidueGone polls bounded for the op's runtime/state dirs
+// to be gone: the raced launch's failed-start convergence removes the
+// dirs it re-created after the stop owner's pass, so the converged state
+// (not the OK reply instant) is the assertion point.
+func waitInstanceResidueGone(t *testing.T, opID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, rtErr := os.Lstat(opRuntimeDir(opID))
+		_, stErr := os.Lstat(opStateDir(opID))
+		if errors.Is(rtErr, os.ErrNotExist) && errors.Is(stErr, os.ErrNotExist) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("instance residue survived convergence: runtime=%v state=%v", rtErr, stErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestBuilderManagerStopDoesNotOvertakeDispatchedStart proves the
+// START/STOP fence through the REAL dispatch path (handleConnection over
+// real connections): a START for the op id is accepted and parked inside
+// its dispatch-fence window (registered fence, no reservation yet); a
+// STOP dispatched in that window must NOT report convergence (`OK
+// absent`) — after the START is released and reserves+launches, the
+// waiting STOP converges the instance through the ONE stop owner and
+// replies OK. After the STOP's convergence reply there is no instance
+// map entry and no runtime/state residue; the raced START's own reply is
+// the internal refusal of its cancelled launch.
+func TestBuilderManagerStopDoesNotOvertakeDispatchedStart(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+	fakeLeaderSeam(t, true)
+	managerPeerRootSeam(t)
+	listener := realDispatchFixture(t, m)
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	engaged, release := startFenceHoldFixture(t, opID)
+
+	startConn := dispatchRequest(t, listener, "START "+opID)
+	defer startConn.Close()
+	select {
+	case <-engaged:
+	case <-time.After(10 * time.Second):
+		t.Fatal("dispatched START never parked inside the fence window")
+	}
+
+	// Setup self-test: the accepted START is fenced but has NOT reserved
+	// (exactly the state the original code lost the race in).
+	m.mu.Lock()
+	_, reserved := m.instances[opID]
+	_, fenced := m.startFences[opID]
+	m.mu.Unlock()
+	if reserved {
+		t.Fatal("setup self-test: the parked START already reserved the instance")
+	}
+	if !fenced {
+		t.Fatal("setup self-test: the parked START has no dispatch fence")
+	}
+
+	stopConn := dispatchRequest(t, listener, "STOP "+opID)
+	defer stopConn.Close()
+
+	// Release the START: it reserves and launches; the waiting STOP
+	// converges the instance instead of reporting `OK absent`.
+	release()
+
+	stopReply := readReply(t, stopConn)
+	if stopReply != builderManagerRespOK {
+		t.Fatalf("STOP reply = %q, want OK (a completed compensating STOP must never be overtaken by the released START)", stopReply)
+	}
+
+	// The raced START's own reply: its launch was claimed by the STOP and
+	// converged — the internal refusal, never OK. The reply is emitted
+	// only after that failed-start convergence completed, so it is the
+	// deterministic barrier for the final converged state below.
+	startReply := readReply(t, startConn)
+	if startReply != builderManagerRespInternal {
+		t.Fatalf("raced START reply = %q, want internal (the STOP claimed and converged its launch)", startReply)
+	}
+
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("instance map entry survived the converged STOP")
+	}
+	waitInstanceResidueGone(t, opID)
+}
+
+// TestBuilderClientCompensatingStopConvergesDispatchedStart proves the
+// compensation end to end through the PRODUCTION client and the REAL
+// manager dispatch: the START round-trip parks inside the dispatch-fence
+// window until the caller context cancels (ambiguous START), the P2
+// client issues the compensating STOP on a fresh context, the manager
+// waits out the fence, the released START reserves and launches, and the
+// compensating STOP converges that instance before replying OK. The
+// client's proven-convergence verdict then stands with no live instance,
+// no residue, and no process left.
+func TestBuilderClientCompensatingStopConvergesDispatchedStart(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+	fakeLeaderSeam(t, true)
+	managerPeerRootSeam(t)
+	listener := realDispatchFixture(t, m)
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	engaged, release := startFenceHoldFixture(t, opID)
+
+	// The production client dials the REAL manager endpoint; the test
+	// mount's peer credentials match the resolved builder identity.
+	fakeManagerUID(t, os.Getuid(), os.Getgid())
+	fakeManagerPeer(t, os.Getuid(), os.Getgid())
+	origPath := builderClientSocketPath
+	builderClientSocketPath = listener.Addr().String()
+	t.Cleanup(func() { builderClientSocketPath = origPath })
+
+	startErrCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		startErrCh <- (&builderManagerClient{}).Start(ctx, opID)
+	}()
+
+	select {
+	case <-engaged:
+	case <-time.After(10 * time.Second):
+		t.Fatal("dispatched START never parked inside the fence window")
+	}
+
+	// The caller context cancels while the manager holds the START in its
+	// fence window: the client's read aborts (ambiguous) and the
+	// compensating STOP is issued on a fresh context.
+	cancel()
+
+	// Release the START: it reserves and launches; the already-waiting
+	// compensating STOP converges the instance and the client's
+	// proven-convergence verdict stands.
+	release()
+
+	select {
+	case err := <-startErrCh:
+		if err == nil {
+			t.Fatal("ambiguous START must not report success")
+		}
+		var mgrErr *builderManagerError
+		if !errors.As(err, &mgrErr) || mgrErr.kind != builderManagerRespInternal {
+			t.Fatalf("Start error = %v, want the proven-convergence internal refusal", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("client Start did not return after the compensating STOP converged")
+	}
+
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("instance map entry survived the compensating STOP")
+	}
+	waitInstanceResidueGone(t, opID)
 }

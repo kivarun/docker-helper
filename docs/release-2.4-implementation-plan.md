@@ -179,6 +179,16 @@ lives), so this converges to a clean state in every ambiguity case:
 no live op instance, no op state, no op socket. The ambiguous START is
 surfaced as `docker_build_failed`.
 
+The `OK absent` answer is ordered against START dispatch (START/STOP
+fence): an accepted START registers a dispatch fence before its
+reservation, the fence settles exactly when the reservation is installed
+or the START is refused, and a STOP for the same id waits the fence out
+instead of reporting convergence — it then converges whatever the START
+created (or reports absent when the START was refused). A completed
+compensating STOP therefore cannot be overtaken by an earlier accepted
+START of the same id. The fence is transient in-flight state (removed
+when the START settles), not a tombstone.
+
 The same rule applies to a lost STOP response: after a STOP
 deadline/ambiguity, re-issue STOP once on the fresh cleanup context; an
 `OK absent` reply then closes the ambiguity. PURGE failures at daemon
@@ -207,7 +217,9 @@ Mandatory ambiguity tests (`builder_manager_rpc_test.go`):
   manager); reply `OK`.
 - STOP: kill the exact op process group (the `setsid` RootlessKit
   session leader, see §4), reap, remove op runtime/state/socket; reply
-  `OK`. Idempotent: already absent → `OK absent`.
+  `OK`. Idempotent: already absent → `OK absent`; the absent answer waits
+  out any accepted-but-unsettled START of the same id first (START/STOP
+  fence above).
 - PURGE: terminate every builder-owned op process group, remove all
   op-private runtime/state; reply `OK`. No adoption, no reconciliation,
   no persistent cache recovery.
