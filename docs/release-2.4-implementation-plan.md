@@ -243,10 +243,20 @@ Mandatory ambiguity tests (`builder_manager_rpc_test.go`):
   with its idempotent dir re-removal) runs strictly before the OK, so the
   OK instant carries zero live processes and zero path residue, and an
   immediate same-ID START afterwards is admitted against clean paths.
+  There is exactly ONE child Wait owner per leader; stop attempts never
+  call Process.Wait and reap through that owner's signal. The OK is
+  truthful: the group is proven dead (bounded escalation to SIGKILL plus
+  a bounded finalize wait), the leader reaped, and the exact directory
+  removal verified. A stop attempt that cannot fully converge replies
+  `ERR internal` and RETAINS the map entry and its ceiling capacity for
+  retry through the same stop owner; an unexpected leader exit settles
+  the remaining group members before removing directories.
 - PURGE: terminate every builder-owned op process group, remove all
   op-private runtime/state; reply `OK` only after each converged
-  instance's launch settlement (same quiescence contract as STOP). No
-  adoption, no reconciliation, no persistent cache recovery.
+  instance's launch settlement (same quiescence contract as STOP) and
+  with the same truthful non-convergence semantics (`ERR internal`,
+  retained entries). No adoption, no reconciliation, no persistent cache
+  recovery.
 - Manager startup performs PURGE semantics before accepting requests.
 
 ### Backend launch mechanics (P2-refined)

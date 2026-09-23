@@ -504,23 +504,23 @@ func TestBuilderManagerStopBeforeSpawn(t *testing.T) {
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("reservation missing")
 	}
+	inst := m.instances[opID]
 
 	// STOP while the launch is blocked before spawn; the quiescence await
-	// holds the OK until the launch settles.
+	// holds the OK until the launch settles. Observe the claim (the
+	// phase), prove the OK cannot arrive while parked, then release.
 	stopCh := make(chan string, 1)
 	go func() { stopCh <- m.stop(opID, 0) }()
-	if !waitInstance(t, m, opID, false) {
-		t.Fatal("STOP claim did not remove the reservation")
-	}
+	waitPhase(t, inst, builderInstanceStopping)
 	select {
 	case resp := <-stopCh:
 		t.Fatalf("STOP replied %q while the parked launch was still in flight (quiescence await missing)", resp)
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	// Unblock the seam: the launch observes the stop claim at its next
-	// check (no child ever spawned), converges (removes its re-created
-	// dirs), and settles; the STOP then reports convergence.
+	// Unblock the seam: the launch observes the stop claim at its spawn
+	// check (no child ever spawned), settles its own pre-spawn state, and
+	// the attempt then converges; the STOP reports OK only afterwards.
 	close(spawnBlocker)
 	select {
 	case resp := <-stopCh:
@@ -588,14 +588,13 @@ func TestBuilderManagerStopWaitsLaunchQuiescence(t *testing.T) {
 		t.Fatal("setup self-test: the parked launch already created the runtime dir")
 	}
 
-	// STOP: claims and converges the pre-spawn instance (no leader, fast
-	// cleanup), then the quiescence await holds the OK until the parked
+	// STOP: claims (observed via the phase) and converges the pre-spawn
+	// instance, then the quiescence await holds the OK until the parked
 	// launch settles.
 	stopResp := make(chan string, 1)
 	go func() { stopResp <- m.stop(opID, 0) }()
-	if !waitInstance(t, m, opID, false) {
-		t.Fatal("STOP claim did not remove the reservation")
-	}
+	inst := m.instances[opID]
+	waitPhase(t, inst, builderInstanceStopping)
 	select {
 	case resp := <-stopResp:
 		t.Fatalf("STOP replied %q while the old launch was still in flight (quiescence await missing)", resp)
@@ -626,13 +625,12 @@ func TestBuilderManagerStopWaitsLaunchQuiescence(t *testing.T) {
 
 	// An immediate same-ID START after the OK is admitted cleanly, and
 	// the old (settled) launch cannot remove the NEW instance's paths.
+	// bindFakeBuildkitdSocket doubles as the barrier that the new
+	// instance's runtime dir exists (it waits for it) before binding.
 	start2Resp := make(chan string, 1)
 	go func() { start2Resp <- m.start(opID, nil) }()
 	if !waitInstance(t, m, opID, true) {
 		t.Fatal("immediate same-ID START after OK not admitted")
-	}
-	if _, err := os.Lstat(opRuntimeDir(opID)); err != nil {
-		t.Fatalf("new instance's runtime dir missing after admission: %v", err)
 	}
 	bindFakeBuildkitdSocket(t, opID)
 	select {
@@ -895,18 +893,28 @@ func stopFenceWaitFixture(t *testing.T, target string) <-chan struct{} {
 	return engagedCh
 }
 
-// launchHoldFixture parks every launchInstance of target at its top —
-// before the refuse-to-adopt checks and directory creation — until
-// released; engaged signals the park. Same idiom and bounded-park
-// backstop as startFenceHoldFixture.
+// launchHoldFixture parks the FIRST launchInstance of target at its top
+// — before the refuse-to-adopt checks and directory creation — until
+// released; engaged signals the park. Later launches of the same op id
+// proceed normally. Same idiom and bounded-park backstop as
+// startFenceHoldFixture.
 func launchHoldFixture(t *testing.T, target string) (engaged <-chan struct{}, release func()) {
 	t.Helper()
 	engagedCh := make(chan struct{}, 1)
 	releaseCh := make(chan struct{})
 	var releaseOnce sync.Once
 	orig := builderLaunchHold
+	var mu sync.Mutex
+	parked := false
 	builderLaunchHold = func(opID string) {
 		if opID != target {
+			return
+		}
+		mu.Lock()
+		first := !parked
+		parked = true
+		mu.Unlock()
+		if !first {
 			return
 		}
 		select {
@@ -925,6 +933,84 @@ func launchHoldFixture(t *testing.T, target string) (engaged <-chan struct{}, re
 		releaseOnce.Do(func() { close(releaseCh) })
 	})
 	return engagedCh, func() { releaseOnce.Do(func() { close(releaseCh) }) }
+}
+
+// waitPhase polls bounded for the instance's phase to equal want (the
+// deterministic observation point for a stop claim: claimStop sets the
+// phase synchronously at attempt start).
+func waitPhase(t *testing.T, inst *builderInstance, want builderInstancePhase) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		inst.mu.Lock()
+		phase := inst.phase
+		inst.mu.Unlock()
+		if phase == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("instance phase = %v, want %v", phase, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// waitDescendants polls bounded for at least want members of the
+// leader's process group other than the leader itself; returns them.
+func waitDescendants(t *testing.T, pgid int, want int) []int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		found := findGroupDescendants(pgid)
+		if len(found) >= want {
+			return found
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process group %d never showed %d descendants (found %v)", pgid, want, found)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitProcessExit polls bounded until pid is no longer alive.
+func waitProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !processAlive(pid) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d still alive", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitProcessStays asserts for a bounded window that pid REMAINS alive
+// (the pre-existence self-test: the descendants outlive a dead leader
+// before the manager settles them).
+func waitProcessStays(t *testing.T, pid int, window time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			t.Fatalf("process %d did not stay alive (pre-existence broken)", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// assertDirsAbsentAt fails when either op directory still exists (direct
+// assertion, no polling: the F1.3/F2 zero-residue-at-OK contract).
+func assertDirsAbsentAt(t *testing.T, opID string) {
+	t.Helper()
+	if _, err := os.Lstat(opRuntimeDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime dir exists at the observation instant: %v", err)
+	}
+	if _, err := os.Lstat(opStateDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state dir exists at the observation instant: %v", err)
+	}
 }
 
 // dispatchRequest opens one real connection to the dispatch listener and
@@ -1431,5 +1517,266 @@ func TestBuilderManagerIngressSettlesRejectedOlderConnections(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F2: truthful STOP and process ownership.
+// ---------------------------------------------------------------------------
+
+// TestBuilderManagerStopGroupSurvivalEscalation: a REAL session leader
+// whose child traps SIGTERM survives the graceful window; the STOP
+// escalates to SIGKILL and may reply OK only after the WHOLE group —
+// leader, child, and any in-group sleeper — is proven dead and the exact
+// directories are removed. Pre-existence is asserted for the leader and
+// the TERM-trapping child before the STOP.
+func TestBuilderManagerStopGroupSurvivalEscalation(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+
+	orig := builderNewRootlessKitCommand
+	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+		_ = opID
+		_ = rtDir
+		_ = stDir
+		_ = env
+		// Leader busy-waits (dies on SIGTERM); its child traps SIGTERM
+		// and survives the graceful window, forcing the escalation. The
+		// loops are sleep-free so every group member is long-lived and
+		// the descendant identity is stable.
+		cmd := exec.Command("sh", "-c", `sh -c 'trap "" TERM; while :; do :; done' & while :; do :; done`)
+		return cmd
+	}
+	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	startResp := make(chan string, 1)
+	go func() { startResp <- m.start(opID, nil) }()
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("reservation missing")
+	}
+	inst := m.instances[opID]
+	pid := waitLeaderPid(t, inst)
+	descendants := waitDescendants(t, pid, 1)
+	if !processAlive(descendants[0]) {
+		t.Fatal("pre-existence self-test: TERM-trapping child not alive")
+	}
+
+	// The STOP escalates through the full graceful window (~5s) before
+	// SIGKILL; the OK is only possible after the whole group died.
+	stopResp := make(chan string, 1)
+	go func() { stopResp <- m.stop(opID, 0) }()
+	select {
+	case resp := <-stopResp:
+		if resp != builderManagerRespOK {
+			t.Fatalf("STOP = %q, want OK after the group escalation", resp)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("STOP did not converge through the SIGKILL escalation")
+	}
+
+	if !processGroupGone(pid) {
+		t.Fatalf("process group %d survived the escalated STOP", pid)
+	}
+	if processAlive(pid) || processAlive(descendants[0]) {
+		t.Fatalf("leader/child alive after the escalated STOP: leader=%d child=%d", pid, descendants[0])
+	}
+	assertDirsAbsentAt(t, opID)
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("instance map entry survived the converged STOP")
+	}
+}
+
+// TestBuilderManagerStopRetainsOnDirCleanupFailure: the exact directory
+// cleanup is part of the truthful STOP contract. When the removal fails,
+// the STOP answers ERR internal, RETAINS the map entry (ownership and
+// ceiling capacity) instead of releasing an instance whose state was not
+// cleaned, and a retry STOP through the same owner converges.
+func TestBuilderManagerStopRetainsOnDirCleanupFailure(t *testing.T) {
+	m, rtRoot, stRoot := processTestManager(t)
+	seamCA(t)
+	fakeLeaderSeam(t, true)
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	startResp := make(chan string, 1)
+	go func() { startResp <- m.start(opID, nil) }()
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("reservation missing")
+	}
+
+	// Make both op-directory parents unwritable: RemoveAll of the op
+	// dirs fails deterministically while their interior is removable.
+	opsParents := []string{filepath.Join(rtRoot, "ops"), filepath.Join(stRoot, "ops")}
+	for _, d := range opsParents {
+		if err := os.Chmod(d, 0o500); err != nil {
+			t.Fatalf("cannot chmod %s: %v", d, err)
+		}
+		defer os.Chmod(d, 0o700)
+	}
+
+	if resp := m.stop(opID, 0); resp != builderManagerRespInternal {
+		t.Fatalf("STOP with failed dir cleanup = %q, want internal (truthful refusal to report success)", resp)
+	}
+	// Retained: the entry and its ceiling slot survive, the state is not
+	// half-removed.
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("failed STOP released the instance entry (capacity leaked on unproven cleanup)")
+	}
+	if _, err := os.Lstat(opRuntimeDir(opID)); err != nil {
+		t.Fatalf("runtime dir vanished despite the failed cleanup: %v", err)
+	}
+
+	// Retry through the same owner after the cleanup can succeed.
+	for _, d := range opsParents {
+		if err := os.Chmod(d, 0o700); err != nil {
+			t.Fatalf("cannot restore %s: %v", d, err)
+		}
+	}
+	if resp := m.stop(opID, 0); resp != builderManagerRespOK {
+		t.Fatalf("retry STOP = %q, want OK", resp)
+	}
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("retry did not release the entry")
+	}
+	assertDirsAbsentAt(t, opID)
+}
+
+// TestBuilderManagerStopSelfExitRace: the STOP's claim is followed by a
+// self-exiting leader. The single Wait owner reaps the leader and skips
+// convergence (the claimant owns it); the claimant settles through the
+// reap signal without ever calling Process.Wait — no second Wait owner,
+// no double terminal cleanup.
+func TestBuilderManagerStopSelfExitRace(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+
+	flag := filepath.Join(t.TempDir(), "leader-exit-flag")
+	orig := builderNewRootlessKitCommand
+	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+		_ = opID
+		_ = rtDir
+		_ = stDir
+		_ = env
+		return exec.Command("sh", "-c", "while [ ! -f "+flag+" ]; do sleep 0.05; done")
+	}
+	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	startResp := make(chan string, 1)
+	go func() { startResp <- m.start(opID, nil) }()
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("reservation missing")
+	}
+	inst := m.instances[opID]
+	pid := waitLeaderPid(t, inst)
+
+	// Claim first (observed via the phase), then trigger the self-exit:
+	// the deterministic ordering of the race the pre-F2 code lost.
+	stopResp := make(chan string, 1)
+	go func() { stopResp <- m.stop(opID, 0) }()
+	waitPhase(t, inst, builderInstanceStopping)
+
+	// Trigger the self-exit: the Wait owner reaps (its Wait was already
+	// blocked on the alive leader), observes the claim, and skips
+	// convergence; the claimant settles through the reap signal without
+	// ever calling Process.Wait.
+	if err := os.WriteFile(flag, []byte("go\n"), 0o600); err != nil {
+		t.Fatalf("cannot write the exit flag: %v", err)
+	}
+
+	select {
+	case resp := <-stopResp:
+		if resp != builderManagerRespOK {
+			t.Fatalf("STOP = %q, want OK after the self-exited leader was settled", resp)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("STOP did not converge after the leader self-exited")
+	}
+	if processAlive(pid) {
+		t.Fatalf("leader %d still alive/reaped after the converged STOP", pid)
+	}
+	assertDirsAbsentAt(t, opID)
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("instance map entry survived the converged STOP")
+	}
+}
+
+// TestBuilderManagerSelfExitSettlesDescendantsBeforeDirs: a leader that
+// exits on its own while its child and grandchild stay alive in the
+// group. The unexpected-exit owner must settle the whole group (kill,
+// verify disappearance) BEFORE removing the exact directories; the test
+// pre-existence-proves both descendants alive under the live leader
+// before triggering the exit.
+func TestBuilderManagerSelfExitSettlesDescendantsBeforeDirs(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+
+	orig := builderNewRootlessKitCommand
+	exitFlag := filepath.Join(t.TempDir(), "leader-exit-flag")
+	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+		_ = opID
+		_ = rtDir
+		_ = stDir
+		_ = env
+		// Leader forks a middle sh which forks a grandchild and
+		// busy-waits; the leader stays alive until the test's exit flag,
+		// then self-exits, leaving both descendants alive in its process
+		// group. The middle's output is redirected so the descendants
+		// release the leader's diagnostic pipe ends (the pipe-blocking
+		// case is the documented bounded behavior). All loops are
+		// sleep-free so every group member is long-lived and the
+		// descendant identity is stable.
+		cmd := exec.Command("sh", "-c", `sh -c 'sh -c "while :; do :; done" & while :; do :; done' >/dev/null 2>&1 & while [ ! -f `+exitFlag+` ]; do :; done`)
+		return cmd
+	}
+	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	startResp := make(chan string, 1)
+	go func() { startResp <- m.start(opID, nil) }()
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("reservation missing")
+	}
+	inst := m.instances[opID]
+	pid := waitLeaderPid(t, inst)
+
+	// Pre-existence: the leader alive, both descendants alive in its
+	// group, and the op paths in place (all three will have to be
+	// settled).
+	descendants := waitDescendants(t, pid, 2)
+	waitProcessStays(t, descendants[0], 300*time.Millisecond)
+	waitProcessStays(t, descendants[1], 300*time.Millisecond)
+
+	// Trigger the self-exit. The unexpected-exit owner must settle the
+	// whole group (kill, verify disappearance) BEFORE removing the exact
+	// directories; a later STOP observes the terminal state as OK absent.
+	if err := os.WriteFile(exitFlag, []byte("go\n"), 0o600); err != nil {
+		t.Fatalf("cannot write the exit flag: %v", err)
+	}
+
+	// The unexpected-exit owner settles the group and then the paths; a
+	// later STOP observes the terminal state as OK absent.
+	select {
+	case resp := <-startResp:
+		if resp != builderManagerRespInternal {
+			t.Fatalf("self-exited START = %q, want internal", resp)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("self-exited START did not converge")
+	}
+	// The claim-observed launch reply does not wait the owning attempt's
+	// convergence; the instance's terminal settlement is the barrier for
+	// the state assertions below.
+	select {
+	case <-inst.done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("unexpected-exit settlement did not complete")
+	}
+	if !processGroupGone(pid) {
+		t.Fatalf("descendants of group %d survived the unexpected-exit settlement", pid)
+	}
+	assertDirsAbsentAt(t, opID)
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("unexpected-exit did not release the map entry")
 	}
 }

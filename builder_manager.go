@@ -53,7 +53,19 @@ const (
 
 	// builderStopGracefulTimeout bounds the SIGTERM->SIGKILL escalation.
 	builderStopGracefulTimeout = 5 * time.Second
+
+	// builderStopFinalizeTimeout bounds the post-escalation group-death
+	// and reap wait inside one stop attempt (covers the zombie window
+	// between SIGKILL delivery and the group's full disappearance).
+	builderStopFinalizeTimeout = 2 * time.Second
 )
+
+// errBuilderStopNotConverged is the truthful-STOP failure: a stop attempt
+// ended without the process group proven dead, the leader reaped, and the
+// exact directories removed. The instance entry and its ceiling slot stay
+// retained for retry; STOP/PURGE reply ERR internal and a later STOP
+// retries through the same owner.
+var errBuilderStopNotConverged = errors.New("builder stop did not converge")
 
 // identity guard seams (unit-test injectable; production defaults below).
 var (
@@ -197,6 +209,13 @@ type builderInstance struct {
 	// work (directory creation, spawn, failed-start convergence) can run
 	// after the STOP reported convergence (F1.3 quiescence).
 	launchDone chan struct{}
+
+	// reaped is the reap signal: closed exactly once by the instance's
+	// single child Wait owner right after leader.Wait() returned, on any
+	// path (self-exit or stop-killed). Stop attempts never call
+	// Process.Wait themselves; they await this signal, so there is
+	// exactly ONE Wait owner per leader (F2).
+	reaped chan struct{}
 }
 
 // builderManager owns the per-operation ephemeral BuildKit instance
@@ -380,6 +399,7 @@ func (m *builderManager) start(opID string, settled func()) string {
 		diag:        newBoundedBuffer(builderInstanceDiagMaxBytes),
 		done:        make(chan struct{}),
 		launchDone:  make(chan struct{}),
+		reaped:      make(chan struct{}),
 	}
 	m.instances[opID] = inst
 	close(fence)
@@ -463,9 +483,16 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 
 	inst.mu.Lock()
 	if inst.phase != builderInstanceStarting {
-		// A concurrent STOP claimed/cancelled this launch.
 		inst.mu.Unlock()
-		m.convergeFailedStart(inst)
+		// A stop attempt owns the terminal convergence. Nothing was
+		// spawned, so no stop right is needed for a kill; the launch
+		// settles its own pre-spawn filesystem state (the dirs it
+		// created) without blocking on the attempt. A removal failure
+		// keeps the entry retained (truthful retry) instead of releasing
+		// a reservation over surviving paths.
+		if err := m.removeInstanceDirs(opID); err == nil {
+			m.removeReservation(inst)
+		}
 		return false
 	}
 	spawnErr := cmd.Start()
@@ -481,40 +508,56 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 		return false
 	}
 
+	// One child Wait owner per instance, started immediately after the
+	// spawn and BEFORE the pid persist: it is the ONLY goroutine that
+	// Waits the leader (F2 single-Wait-owner rule) and closes the reap
+	// signal every stop attempt waits out. Starting it here closes the
+	// claim window in which a stop attempt would otherwise await a Wait
+	// owner that does not exist yet. When the leader later exits without
+	// a STOP, this owner performs the terminal cleanup (unexpected-exit
+	// contract, §18 of the plan).
+	go m.awaitInstanceExit(inst)
+
 	// Persist the leader PID for crash-cleanup identity proofing.
 	if err := os.WriteFile(filepath.Join(rtDir, "instance.pid"), []byte(strconv.Itoa(inst.pid)+"\n"), 0600); err != nil {
 		m.managerDiagf("START %s: cannot persist instance pid: %v", opID, err)
-		m.stopInstance(inst)
+		if inst.stopRightTaken() {
+			// A stop attempt owns convergence; this launch just settles.
+			return false
+		}
+		m.convergeFailedStart(inst)
 		return false
 	}
-
-	// One child Wait owner per instance: when the leader exits without a
-	// STOP, the instance goes terminal and cleans up (unexpected-exit
-	// contract, §18 of the plan).
-	go m.awaitInstanceExit(inst)
 
 	// Bounded readiness: leader alive + expected socket entry with the
 	// expected owner/mode contract.
 	if !m.awaitReadiness(inst) {
+		inst.mu.Lock()
+		claimed := inst.phase != builderInstanceStarting
+		inst.mu.Unlock()
+		if claimed {
+			// The stop attempt (STOP/PURGE/self-exit owner) observed the
+			// claim and owns convergence; this launch just settles.
+			m.managerDiagf("START %s: launch cancelled by a stop claim", opID)
+			return false
+		}
 		m.managerDiagf("START %s: readiness failed", opID)
-		m.stopInstance(inst)
+		m.convergeFailedStart(inst)
 		return false
 	}
 
-	// SUCCESS: phase -> running (unless a concurrent STOP already claimed).
+	// SUCCESS: phase -> running (unless a stop attempt claimed).
 	inst.mu.Lock()
 	if inst.phase == builderInstanceStarting {
 		inst.phase = builderInstanceRunning
 	}
-	stillStarting := inst.phase == builderInstanceRunning
 	stopping := inst.phase == builderInstanceStopping
 	inst.mu.Unlock()
 	if stopping {
-		// A STOP raced during the readiness wait: converge now.
-		m.stopInstance(inst)
+		// A stop attempt owns convergence; this launch settles (the
+		// instance was never reported running) without touching it.
 		return false
 	}
-	_ = stillStarting
 	return true
 }
 
@@ -532,20 +575,25 @@ func (m *builderManager) removeReservation(inst *builderInstance) {
 	m.mu.Unlock()
 }
 
-// convergeFailedStart is the START failure convergence: terminate any
-// spawned process group, reap it, remove op runtime/state, remove the map
-// reservation. No half-admitted instance. The dir removal runs AFTER the
-// stop owner settled because a stop claim that raced the launch may have
-// removed the (then still absent) dirs before launchInstance created
-// them; the failed launch must not leave its own re-creation behind
-// (RemoveAll is idempotent).
+// convergeFailedStart is the START failure convergence for the launch's
+// own failure paths (CA resolve, spawn, pid persist, readiness deadline):
+// claim the stop right and run one stop attempt through the shared owner.
+// When a stop attempt is already in flight it owns convergence; this
+// launch must not block on it (the attempt awaits this launch's
+// settlement), so it just returns — the launch's reply is the internal
+// refusal either way, and no dir of a possibly-live instance is touched.
 func (m *builderManager) convergeFailedStart(inst *builderInstance) {
-	m.stopInstance(inst)
-	m.removeInstanceDirs(inst.operationID)
+	if inst.claimStop() {
+		_ = m.runStopAttempt(inst, false)
+	}
 }
 
-// claimStop claims the single stop right for an instance. Returns true
-// exactly once per instance lifecycle.
+// claimStop claims the single stop right for an instance: the gate for
+// every convergence (STOP, PURGE, START failure paths, unexpected
+// self-exit). Returns false while another attempt is in flight or the
+// instance is already terminal. The claim is released at the end of every
+// attempt (success or failure), so a failed attempt leaves the retained
+// entry re-claimable for the next caller's retry.
 func (inst *builderInstance) claimStop() bool {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
@@ -555,6 +603,41 @@ func (inst *builderInstance) claimStop() bool {
 	inst.stopClaimed = true
 	inst.phase = builderInstanceStopping
 	return true
+}
+
+// releaseStopClaim ends this attempt: the stop right returns for a retry
+// (terminal state aside). The instance entry, its ceiling slot, and its
+// possibly-live process group stay owned.
+func (inst *builderInstance) releaseStopClaim() {
+	inst.mu.Lock()
+	inst.stopClaimed = false
+	inst.mu.Unlock()
+}
+
+// stopRightTaken reports whether the instance's phase already moved off
+// `starting` (a stop attempt claimed it, or it is terminal). A launch
+// observing this must settle without touching the instance the attempt
+// converges.
+func (inst *builderInstance) stopRightTaken() bool {
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	return inst.phase != builderInstanceStarting
+}
+
+// awaitAttemptEnd blocks until the current stop attempt ended (its claim
+// released) or the instance reached the terminal phase. Attempt durations
+// are bounded by the stop constants, so the wait is bounded.
+func (inst *builderInstance) awaitAttemptEnd() {
+	for {
+		inst.mu.Lock()
+		claimed := inst.stopClaimed
+		terminal := inst.phase == builderInstanceDone
+		inst.mu.Unlock()
+		if !claimed || terminal {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // leaderPidSnapshot returns the current leader pid (0 when none).
@@ -580,57 +663,105 @@ func (inst *builderInstance) signalProcessGroup(sig syscall.Signal) bool {
 
 // stopInstance is THE cleanup owner for one instance. It is
 // concurrency-safe against racing STOPs, PURGE, START failure paths, and
-// self-exit: exactly one claimant performs the kill/reap/cleanup and the
-// done channel closes exactly once.
-func (m *builderManager) stopInstance(inst *builderInstance) {
-	if !inst.claimStop() {
-		// Another owner (STOP/PURGE/await-exit) already owns convergence;
-		// wait for it to finish so callers observe a settled state.
-		<-inst.done
-		return
+// self-exit. Convergence is gated by the stop-right claim: the claimant
+// runs one bounded kill/reap/cleanup attempt; the others wait that
+// attempt out and then claim for themselves (a failed attempt leaves the
+// entry retained, so the next caller IS the retry). It returns nil only
+// when the instance is terminal: process group proven gone, leader
+// reaped by the single Wait owner, exact directories removed, done
+// closed, entry released. A non-convergence returns
+// errBuilderStopNotConverged with the entry RETAINED (ownership and
+// ceiling capacity kept; no unproven-live process released) for the
+// caller to surface as ERR internal and retry.
+func (m *builderManager) stopInstance(inst *builderInstance) error {
+	for {
+		if inst.claimStop() {
+			return m.runStopAttempt(inst, true)
+		}
+		inst.mu.Lock()
+		terminal := inst.phase == builderInstanceDone
+		inst.mu.Unlock()
+		if terminal {
+			<-inst.done
+			return nil
+		}
+		// Another attempt is in flight (bounded): wait it out, then
+		// claim the retry.
+		inst.awaitAttemptEnd()
 	}
+}
 
-	deadline := time.Now().Add(builderStopGracefulTimeout)
-	// Cancel a still-starting launch/readiness wait: mark stopping so
-	// launchInstance's spawn/readiness checks observe the claim.
+// runStopAttempt is one bounded stop attempt, run by the claimant. The
+// reap is NEVER performed here: the instance's single child Wait owner
+// (awaitInstanceExit) owns the Wait and closes the reap signal, which
+// this attempt awaits — STOP must not race cmd.Wait vs Process.Wait.
+//
+// awaitLaunch: when the caller is not the launch goroutine itself, the
+// attempt first awaits the launch settlement (launchDone) so the exact
+// directory cleanup below sees a quiesced filesystem for this op id —
+// the launch's mkdir and its claim-observed re-removal both run strictly
+// before the cleanup, and no re-creation can race the removal. The
+// launch's own attempt passes false (its filesystem work is its own).
+func (m *builderManager) runStopAttempt(inst *builderInstance, awaitLaunch bool) error {
+	defer inst.releaseStopClaim()
+
 	inst.mu.Lock()
 	leader := inst.leader
 	pid := inst.pid
 	inst.mu.Unlock()
 
 	if leader != nil && leader.Process != nil {
+		// Settle the whole group (the setsid leader's pid IS its pgid);
+		// the claim already marked the phase so launchInstance's
+		// spawn/readiness checks observe it.
 		inst.signalProcessGroup(syscall.SIGTERM)
 	}
 	// Wait bounded for group death, escalating to SIGKILL.
-	for time.Now().Before(deadline) {
-		if leader == nil || processGroupGone(pid) {
-			break
-		}
+	deadline := time.Now().Add(builderStopGracefulTimeout)
+	for leader != nil && !processGroupGone(pid) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if leader != nil && !processGroupGone(pid) {
 		inst.signalProcessGroup(syscall.SIGKILL)
 	}
-	// Reap the leader exactly once (the single Wait owner; a self-exit
-	// winner skips this because awaitInstanceExit already Waited).
 	if leader != nil {
-		_, _ = leader.Process.Wait()
+		// Finalize: the group must be PROVEN gone (covers the zombie
+		// window between SIGKILL delivery and full disappearance) and the
+		// leader reaped by the single Wait owner, before any cleanup.
+		finalize := time.Now().Add(builderStopFinalizeTimeout)
+		for !processGroupGone(pid) && time.Now().Before(finalize) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !processGroupGone(pid) {
+			m.managerDiagf("STOP %s: process group %d did not fully die; retaining entry for retry", inst.operationID, pid)
+			return fmt.Errorf("%w: process group %d did not fully die", errBuilderStopNotConverged, pid)
+		}
+		select {
+		case <-inst.reaped:
+		case <-time.After(builderStopFinalizeTimeout):
+			m.managerDiagf("STOP %s: leader reap not observed by the Wait owner; retaining entry for retry", inst.operationID)
+			return fmt.Errorf("%w: leader reap not observed", errBuilderStopNotConverged)
+		}
 	}
 
-	// Prove descendants are gone before removing directories.
-	if pid > 1 && !processGroupGone(pid) {
-		m.managerDiagf("STOP %s: process group %d did not fully die; not removing dirs", inst.operationID, pid)
-	} else {
-		m.removeInstanceDirs(inst.operationID)
+	// Terminal convergence: launch settlement, exact dir removal
+	// (verified), entry release, terminal phase, done closed once — by
+	// the claimant only.
+	if awaitLaunch {
+		<-inst.launchDone
 	}
-
+	if err := m.removeInstanceDirs(inst.operationID); err != nil {
+		m.managerDiagf("STOP %s: directory cleanup failed; retaining entry for retry: %v", inst.operationID, err)
+		return fmt.Errorf("%w: %v", errBuilderStopNotConverged, err)
+	}
+	m.removeReservation(inst)
 	inst.mu.Lock()
 	inst.phase = builderInstanceDone
 	inst.leader = nil
 	inst.pid = 0
 	inst.mu.Unlock()
-	m.removeReservation(inst)
 	close(inst.done)
+	return nil
 }
 
 // processGroupGone reports whether the process group with pgid pid has no
@@ -643,10 +774,14 @@ func processGroupGone(pgid int) bool {
 	return syscall.Kill(-pgid, 0) == syscall.ESRCH
 }
 
-// awaitInstanceExit is the instance's single child Wait owner for
-// self-exit. If the leader exits without a STOP, this owner performs the
-// terminal cleanup (runtime/state removal, map entry removal) so no
-// zombie instance consumes the ceiling.
+// awaitInstanceExit is the instance's single child Wait owner: the ONLY
+// goroutine that Waits the leader. When the leader exits without a STOP,
+// this owner claims the stop right (the single cleanup gate — the claim
+// closes the window in which a racing STOP could converge the same
+// instance twice) and settles the remaining group members BEFORE any
+// directory removal, so no descendant keeps living under removed paths.
+// When a STOP already owns convergence, the reap (above) is this owner's
+// whole contribution.
 func (m *builderManager) awaitInstanceExit(inst *builderInstance) {
 	inst.mu.Lock()
 	leader := inst.leader
@@ -655,6 +790,7 @@ func (m *builderManager) awaitInstanceExit(inst *builderInstance) {
 		return
 	}
 	waitErr := leader.Wait()
+	close(inst.reaped)
 
 	inst.mu.Lock()
 	stopping := inst.phase == builderInstanceStopping || inst.stopClaimed
@@ -664,20 +800,18 @@ func (m *builderManager) awaitInstanceExit(inst *builderInstance) {
 		return
 	}
 
-	// Unexpected exit: bounded diagnostic tail, then terminal cleanup.
+	// Unexpected exit: bounded diagnostic tail, then terminal convergence
+	// through the shared stop owner — claiming the stop right first.
 	if tail := inst.diag.tailForDiagnostics(); tail != "" {
 		m.managerDiagf("instance %s exited unexpectedly (wait=%v); child output tail:\n%s", inst.operationID, waitErr, tail)
 	} else {
 		m.managerDiagf("instance %s exited unexpectedly (wait=%v)", inst.operationID, waitErr)
 	}
-	m.removeInstanceDirs(inst.operationID)
-	inst.mu.Lock()
-	inst.phase = builderInstanceDone
-	inst.leader = nil
-	inst.pid = 0
-	inst.mu.Unlock()
-	m.removeReservation(inst)
-	close(inst.done)
+	if !inst.claimStop() {
+		// A racing owner claimed between the check and here; it converges.
+		return
+	}
+	m.runStopAttempt(inst, true)
 }
 
 // awaitReadiness implements the bounded readiness contract: leader alive,
@@ -712,16 +846,26 @@ func (m *builderManager) awaitReadiness(inst *builderInstance) bool {
 	return false
 }
 
-// removeInstanceDirs removes the exact op runtime and state directories.
-// Paths derive from the canonical op id (validated by isOperationID), never
-// from raw input; remove the exact tree, never an arbitrary path.
-func (m *builderManager) removeInstanceDirs(opID string) {
+// removeInstanceDirs removes the exact op runtime and state directories
+// and verifies their disappearance. Paths derive from the canonical op id
+// (validated by isOperationID), never from raw input; remove the exact
+// tree, never an arbitrary path. An error means the cleanup did not
+// complete; callers converge truthfully (retain for retry) instead of
+// reporting success over remaining state.
+func (m *builderManager) removeInstanceDirs(opID string) error {
 	if !isOperationID(opID) {
 		m.managerDiagf("refusing to remove instance dirs for noncanonical op id")
-		return
+		return fmt.Errorf("refusing to remove instance dirs for noncanonical op id")
 	}
 	_ = os.RemoveAll(opRuntimeDir(opID))
 	_ = os.RemoveAll(opStateDir(opID))
+	if _, err := os.Lstat(opRuntimeDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("runtime dir still present after removal: %v", err)
+	}
+	if _, err := os.Lstat(opStateDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("state dir still present after removal: %v", err)
+	}
+	return nil
 }
 
 // tailForDiagnostics returns a bounded sanitized tail of the instance
@@ -841,7 +985,11 @@ func builderStalePidIdentity(pid int, opID string, uid int) bool {
 // residue, and FAIL CLOSED rather than kill a process whose identity
 // cannot be proven.
 func (m *builderManager) startupPurge() error {
-	// Live instances (should be none at startup, but converge if so).
+	// Live instances (should be none at startup, but converge if so) —
+	// synchronously through the single stop owner: claiming the stop
+	// right and THEN handing the attempt to a fresh stopInstance would
+	// double-claim (the new call sees the claim taken and waits for done
+	// that only a claimant closes), so the attempt runs on this goroutine.
 	m.mu.Lock()
 	snapshot := make([]*builderInstance, 0, len(m.instances))
 	for _, inst := range m.instances {
@@ -849,11 +997,8 @@ func (m *builderManager) startupPurge() error {
 	}
 	m.mu.Unlock()
 	for _, inst := range snapshot {
-		if inst.claimStop() {
-			go m.stopInstance(inst)
-			<-inst.done
-		} else {
-			<-inst.done
+		if err := m.stopInstance(inst); err != nil {
+			return err
 		}
 	}
 
@@ -1157,8 +1302,13 @@ func (m *builderManager) stop(opID string, seq int) string {
 		m.mu.Unlock()
 		if ok {
 			// stopInstance is safe for racing callers: exactly one claimant
-			// performs the kill/reap/cleanup; the others wait for done.
-			m.stopInstance(inst)
+			// performs the kill/reap/cleanup attempt; the others wait it
+			// out and claim the retry. A non-convergence is truthful:
+			// ERR internal with the entry retained (ownership and ceiling
+			// capacity kept; no unproven-live process released).
+			if err := m.stopInstance(inst); err != nil {
+				return builderManagerRespInternal
+			}
 			// Launch quiescence: the OK is emitted only after the
 			// instance's launch goroutine fully settled, so no post-claim
 			// launch work (directory re-creation, spawn, failed-start
@@ -1197,9 +1347,18 @@ func (m *builderManager) purge() string {
 		snapshot = append(snapshot, inst)
 	}
 	m.mu.Unlock()
+	converged := true
 	for _, inst := range snapshot {
-		m.stopInstance(inst)
+		if err := m.stopInstance(inst); err != nil {
+			converged = false
+			continue
+		}
 		<-inst.launchDone
+	}
+	if !converged {
+		// Truthful PURGE: retained entries (and their capacity) stay for
+		// a retry PURGE through the same stop owner.
+		return builderManagerRespInternal
 	}
 	return builderManagerRespOK
 }
