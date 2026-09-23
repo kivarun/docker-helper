@@ -476,7 +476,12 @@ func TestBuilderManagerReadinessFailureKillsGroupAndRemovesDirs(t *testing.T) {
 
 // TestBuilderManagerStopBeforeSpawn: STOP claims during the launch
 // window before cmd.Start; the child never spawns (no group to kill) and
-// the instance converges cleanly.
+// the instance converges cleanly. With the F1.3 quiescence await the
+// STOP's OK cannot arrive while the parked launch is still in flight, so
+// the STOP runs asynchronously: the test observes the claim, releases
+// the launch (its post-claim convergence runs: claim check, dir
+// re-removal), and only then reads the OK — at which instant the
+// converged state carries no path residue without polling.
 func TestBuilderManagerStopBeforeSpawn(t *testing.T) {
 	m, _, _ := processTestManager(t)
 	seamCA(t)
@@ -500,13 +505,41 @@ func TestBuilderManagerStopBeforeSpawn(t *testing.T) {
 		t.Fatal("reservation missing")
 	}
 
-	// STOP while the launch is blocked before spawn.
-	if resp := m.stop(opID, 0); resp != builderManagerRespOK {
-		t.Fatalf("STOP before spawn = %q, want OK", resp)
+	// STOP while the launch is blocked before spawn; the quiescence await
+	// holds the OK until the launch settles.
+	stopCh := make(chan string, 1)
+	go func() { stopCh <- m.stop(opID, 0) }()
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("STOP claim did not remove the reservation")
 	}
+	select {
+	case resp := <-stopCh:
+		t.Fatalf("STOP replied %q while the parked launch was still in flight (quiescence await missing)", resp)
+	case <-time.After(500 * time.Millisecond):
+	}
+
 	// Unblock the seam: the launch observes the stop claim at its next
-	// check (no child ever spawned).
+	// check (no child ever spawned), converges (removes its re-created
+	// dirs), and settles; the STOP then reports convergence.
 	close(spawnBlocker)
+	select {
+	case resp := <-stopCh:
+		if resp != builderManagerRespOK {
+			t.Fatalf("STOP before spawn = %q, want OK", resp)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("STOP did not converge after the launch settled")
+	}
+
+	// Zero residue at the OK instant, without polling: the launch's
+	// settlement (and its dir re-removal) preceded the OK.
+	if _, err := os.Lstat(opRuntimeDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime dir exists at the STOP's OK instant: %v", err)
+	}
+	if _, err := os.Lstat(opStateDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state dir exists at the STOP's OK instant: %v", err)
+	}
+
 	select {
 	case resp := <-respCh:
 		if resp != builderManagerRespInternal {
@@ -517,6 +550,101 @@ func TestBuilderManagerStopBeforeSpawn(t *testing.T) {
 	}
 	if !waitInstance(t, m, opID, false) {
 		t.Fatal("instance not removed")
+	}
+}
+
+// TestBuilderManagerStopWaitsLaunchQuiescence is the F1.3 proof for the
+// earliest launch window: the launch is parked BEFORE its filesystem
+// work (no dirs created yet), a STOP claims and converges the pre-spawn
+// instance, and — without the quiescence await — would reply OK while
+// the released launch could still create the op paths and only converge
+// them afterwards. With the await: the STOP's OK arrives only after the
+// old launch fully settled; at the OK instant there is zero residue
+// (asserted directly, without polling) and nothing live; an immediate
+// same-ID START after the OK is admitted cleanly (no refuse-to-adopt
+// internal error from post-OK path re-creation), and the old launch
+// cannot remove the NEW instance's paths.
+func TestBuilderManagerStopWaitsLaunchQuiescence(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+	fakeLeaderSeam(t, true)
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	launchEngaged, launchRelease := launchHoldFixture(t, opID)
+
+	startResp := make(chan string, 1)
+	go func() { startResp <- m.start(opID, nil) }()
+
+	// The launch is parked before any filesystem work.
+	select {
+	case <-launchEngaged:
+	case <-time.After(10 * time.Second):
+		t.Fatal("launch never parked before the filesystem work")
+	}
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("reservation missing")
+	}
+	if _, err := os.Lstat(opRuntimeDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("setup self-test: the parked launch already created the runtime dir")
+	}
+
+	// STOP: claims and converges the pre-spawn instance (no leader, fast
+	// cleanup), then the quiescence await holds the OK until the parked
+	// launch settles.
+	stopResp := make(chan string, 1)
+	go func() { stopResp <- m.stop(opID, 0) }()
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("STOP claim did not remove the reservation")
+	}
+	select {
+	case resp := <-stopResp:
+		t.Fatalf("STOP replied %q while the old launch was still in flight (quiescence await missing)", resp)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// Release: the launch creates its dirs (post-claim re-creation),
+	// observes the stop claim, converges (dirs re-removed), and settles;
+	// only then does the STOP report convergence.
+	launchRelease()
+	select {
+	case resp := <-stopResp:
+		if resp != builderManagerRespOK {
+			t.Fatalf("STOP reply = %q, want OK", resp)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("STOP did not converge after the old launch settled")
+	}
+
+	// Zero residue AT the OK instant (direct assertions, no polling): the
+	// launch's settlement strictly preceded the OK.
+	if _, err := os.Lstat(opRuntimeDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime dir exists at the STOP's OK instant: %v", err)
+	}
+	if _, err := os.Lstat(opStateDir(opID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state dir exists at the STOP's OK instant: %v", err)
+	}
+
+	// An immediate same-ID START after the OK is admitted cleanly, and
+	// the old (settled) launch cannot remove the NEW instance's paths.
+	start2Resp := make(chan string, 1)
+	go func() { start2Resp <- m.start(opID, nil) }()
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("immediate same-ID START after OK not admitted")
+	}
+	if _, err := os.Lstat(opRuntimeDir(opID)); err != nil {
+		t.Fatalf("new instance's runtime dir missing after admission: %v", err)
+	}
+	bindFakeBuildkitdSocket(t, opID)
+	select {
+	case resp := <-start2Resp:
+		if resp != builderManagerRespOK {
+			t.Fatalf("immediate same-ID START = %q, want OK", resp)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("immediate same-ID START did not converge")
+	}
+	if _, err := os.Lstat(opRuntimeDir(opID)); err != nil {
+		t.Fatalf("new instance's runtime dir removed after its OK: %v", err)
 	}
 }
 
@@ -765,6 +893,38 @@ func stopFenceWaitFixture(t *testing.T, target string) <-chan struct{} {
 	}
 	t.Cleanup(func() { builderStopFenceWait = orig })
 	return engagedCh
+}
+
+// launchHoldFixture parks every launchInstance of target at its top —
+// before the refuse-to-adopt checks and directory creation — until
+// released; engaged signals the park. Same idiom and bounded-park
+// backstop as startFenceHoldFixture.
+func launchHoldFixture(t *testing.T, target string) (engaged <-chan struct{}, release func()) {
+	t.Helper()
+	engagedCh := make(chan struct{}, 1)
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	orig := builderLaunchHold
+	builderLaunchHold = func(opID string) {
+		if opID != target {
+			return
+		}
+		select {
+		case engagedCh <- struct{}{}:
+		default:
+		}
+		select {
+		case <-releaseCh:
+		case <-time.After(10 * time.Second):
+			// Bounded park (same liveness-backstop idiom as the seam
+			// children's binary-liveness guard).
+		}
+	}
+	t.Cleanup(func() {
+		builderLaunchHold = orig
+		releaseOnce.Do(func() { close(releaseCh) })
+	})
+	return engagedCh, func() { releaseOnce.Do(func() { close(releaseCh) }) }
 }
 
 // dispatchRequest opens one real connection to the dispatch listener and

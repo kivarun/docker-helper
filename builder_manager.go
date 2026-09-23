@@ -77,6 +77,13 @@ var (
 	// fence wait, so committed tests actually execute that branch instead
 	// of racing past it.
 	builderStopFenceWait func(opID string)
+
+	// builderLaunchHold is a test-only seam invoked at the top of
+	// launchInstance, before the refuse-to-adopt checks and directory
+	// creation (production: nil). It parks the launch in the pre-
+	// filesystem window so tests can hold a STOP's quiescence await
+	// against launch work that runs after the STOP's claim.
+	builderLaunchHold func(opID string)
 )
 
 // builderNewRootlessKitCommand constructs the RootlessKit leader command
@@ -183,6 +190,13 @@ type builderInstance struct {
 	diag        *boundedBuffer
 	stopClaimed bool
 	done        chan struct{} // closed exactly once when terminal cleanup finished
+
+	// launchDone is the launch settlement signal: closed exactly once
+	// when launchInstance returns, on any path. A STOP that converged
+	// this instance awaits it before replying OK, so no post-claim launch
+	// work (directory creation, spawn, failed-start convergence) can run
+	// after the STOP reported convergence (F1.3 quiescence).
+	launchDone chan struct{}
 }
 
 // builderManager owns the per-operation ephemeral BuildKit instance
@@ -365,6 +379,7 @@ func (m *builderManager) start(opID string, settled func()) string {
 		phase:       builderInstanceStarting,
 		diag:        newBoundedBuffer(builderInstanceDiagMaxBytes),
 		done:        make(chan struct{}),
+		launchDone:  make(chan struct{}),
 	}
 	m.instances[opID] = inst
 	close(fence)
@@ -382,10 +397,25 @@ func (m *builderManager) start(opID string, settled func()) string {
 // and bounded readiness wait. On ANY failure it converges to a clean
 // state (process group killed/reaped, dirs removed, map entry removed)
 // and returns false.
+//
+// The launch settles (closes inst.launchDone) exactly when this function
+// returns, on any path. A STOP that claimed this instance awaits that
+// settlement before reporting convergence: every post-claim launch step
+// — directory creation, the spawn-phase claim check, the failed-start
+// convergence with its idempotent dir re-removal — runs strictly before
+// the STOP's OK, so the OK instant carries zero live processes and zero
+// path residue, and an immediate same-ID START after the OK is admitted
+// against clean paths.
 func (m *builderManager) launchInstance(inst *builderInstance) bool {
+	defer close(inst.launchDone)
+
 	opID := inst.operationID
 	rtDir := opRuntimeDir(opID)
 	stDir := opStateDir(opID)
+
+	if builderLaunchHold != nil {
+		builderLaunchHold(opID)
+	}
 
 	// Refuse to adopt: if the paths already exist, a previous instance for
 	// this op id was not reaped — fail closed.
@@ -1109,6 +1139,12 @@ func (m *builderManager) handleConnection(conn *net.UnixConn, stderr io.Writer, 
 // holds only the absent answer — instance convergence and other commands
 // proceed concurrently. seq 0 (direct callers outside the accept loop)
 // has nothing older and skips the barrier.
+//
+// The convergence answer (OK) carries the launch-quiescence contract
+// (F1.3): it is emitted only after the converged instance's launch
+// goroutine settled, so zero live processes and zero path residue exist
+// at the OK instant and an immediate same-ID START afterwards is
+// admitted against clean paths.
 func (m *builderManager) stop(opID string, seq int) string {
 	barrierSettled := false
 	for {
@@ -1123,6 +1159,11 @@ func (m *builderManager) stop(opID string, seq int) string {
 			// stopInstance is safe for racing callers: exactly one claimant
 			// performs the kill/reap/cleanup; the others wait for done.
 			m.stopInstance(inst)
+			// Launch quiescence: the OK is emitted only after the
+			// instance's launch goroutine fully settled, so no post-claim
+			// launch work (directory re-creation, spawn, failed-start
+			// convergence) runs after this STOP reported convergence.
+			<-inst.launchDone
 			return builderManagerRespOK
 		}
 		if fence != nil {
@@ -1147,7 +1188,8 @@ func (m *builderManager) stop(opID string, seq int) string {
 
 // purge is the runtime PURGE protocol operation: snapshot/claim all
 // manager-owned instances, stop them with the same STOP owner, remove
-// op-private state, return OK only after convergence.
+// op-private state, return OK only after convergence — including each
+// instance's launch settlement (the same quiescence contract as STOP).
 func (m *builderManager) purge() string {
 	m.mu.Lock()
 	snapshot := make([]*builderInstance, 0, len(m.instances))
@@ -1157,6 +1199,7 @@ func (m *builderManager) purge() string {
 	m.mu.Unlock()
 	for _, inst := range snapshot {
 		m.stopInstance(inst)
+		<-inst.launchDone
 	}
 	return builderManagerRespOK
 }

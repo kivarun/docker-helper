@@ -237,10 +237,16 @@ Mandatory ambiguity tests (`builder_manager_rpc_test.go`):
   session leader, see §4), reap, remove op runtime/state/socket; reply
   `OK`. Idempotent: already absent → `OK absent`; the absent answer waits
   out any accepted-but-unsettled START of the same id first (START/STOP
-  fence above).
+  fence above). The convergence answer additionally awaits the old
+  launch's settlement (launch quiescence): every post-claim launch step
+  (directory creation, spawn-phase claim check, failed-start convergence
+  with its idempotent dir re-removal) runs strictly before the OK, so the
+  OK instant carries zero live processes and zero path residue, and an
+  immediate same-ID START afterwards is admitted against clean paths.
 - PURGE: terminate every builder-owned op process group, remove all
-  op-private runtime/state; reply `OK`. No adoption, no reconciliation,
-  no persistent cache recovery.
+  op-private runtime/state; reply `OK` only after each converged
+  instance's launch settlement (same quiescence contract as STOP). No
+  adoption, no reconciliation, no persistent cache recovery.
 - Manager startup performs PURGE semantics before accepting requests.
 
 ### Backend launch mechanics (P2-refined)
