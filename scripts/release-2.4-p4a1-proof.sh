@@ -427,6 +427,79 @@ SSL_CERT_FILE_VAL="$(printf '%s\n' "$ENV_BK" | grep -F "SSL_CERT_FILE=" | head -
 [ -n "$SSL_CERT_FILE_VAL" ] || fail "child env has no SSL_CERT_FILE"
 say "child env = production contract (HOME=state root, per-op XDG_RUNTIME_DIR, fixed PATH, USER=builder) (PASS)"
 
+# The unit child's full mount table (for the hardening-leaving diff against
+# the direct control below).
+evidence_cmd mountinfo-unit.txt cat "/proc/$BK_PID/mountinfo"
+
+# ---------------------------------------------------------------------------
+# 4b. direct composition control (M0-style, OUTSIDE the unit)
+# ---------------------------------------------------------------------------
+# The same rootlesskit+buildkitd composition, the SAME child environment,
+# spawned from this root shell (setpriv) instead of the systemd unit. When
+# the unit child cannot run the same build but this control can, the
+# difference is the manager's unit environment (mount namespace hardening,
+# seccomp, LSM), not the composition. Record-only: never fails the proof.
+say "=== 4b. direct composition control (same env, outside the unit) ==="
+DIRECT_ROOT="$P4A1_WORK/direct"
+mkdir -p "$DIRECT_ROOT/rt" "$DIRECT_ROOT/st/root" "$DIRECT_ROOT/st/rootlesskit-state"
+chown -R "$BUILDER_UID:$BUILDER_GID" "$DIRECT_ROOT"
+DIRECT_SOCK="$DIRECT_ROOT/rt/buildkitd.sock"
+DIRECT_RK=""
+setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
+  env "HOME=$MGR_STATE" "USER=$BUILDER_USER" "XDG_RUNTIME_DIR=$DIRECT_ROOT/rt" \
+  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/libexec/docker-helper/buildkit" \
+  SSL_CERT_FILE="$(printf '%s\n' "$ENV_BK" | grep -F 'SSL_CERT_FILE=' | head -1 | cut -d= -f2-)" \
+  nohup /usr/bin/rootlesskit \
+  --net=slirp4netns \
+  --copy-up=/etc \
+  --disable-host-loopback \
+  --state-dir="$DIRECT_ROOT/st/rootlesskit-state" \
+  /usr/libexec/docker-helper/buildkit/buildkitd \
+  --rootless \
+  --root="$DIRECT_ROOT/st/root" \
+  --addr="unix://$DIRECT_SOCK" \
+  > "$P4A1_WORK/direct-buildkitd.log" 2>&1 &
+DIRECT_RK=$!
+DIRECT_READY=0
+for _ in $(seq 1 40); do
+  if ! kill -0 "$DIRECT_RK" 2>/dev/null; then break; fi
+  [ -S "$DIRECT_SOCK" ] && DIRECT_READY=1 && break
+  sleep 0.5
+done
+DIRECT_PID_BK="$(pgrep -f "^/usr/libexec/docker-helper/buildkit/buildkitd --rootless" | head -1 || true)"
+evidence direct-control.txt "direct rootlesskit pid: $DIRECT_RK (alive: $(kill -0 "$DIRECT_RK" 2>/dev/null && echo yes || echo no))
+direct buildkitd pid: $DIRECT_PID_BK
+direct socket ready: $DIRECT_READY
+direct buildkitd log:
+$(cat "$P4A1_WORK/direct-buildkitd.log" 2>/dev/null || true)
+direct buildkitd mountinfo:
+$(cat "/proc/$DIRECT_PID_BK/mountinfo" 2>/dev/null || true)"
+if [ "$DIRECT_READY" = 1 ]; then
+  if DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" "$BUILDCTL" --addr "unix://$DIRECT_SOCK" build \
+      --progress=plain --frontend=dockerfile.v0 \
+      --local "context=$CTX" --local "dockerfile=$CTX" \
+      --output "type=docker,name=p4a1-proof:direct,dest=$P4A1_WORK/out-direct.tar" \
+      > "$P4A1_WORK/build-direct.log" 2>&1; then
+    say "control: the SAME build works OUTSIDE the unit (the unit environment is the differentiator)"
+    printf 'DIRECT-CONTROL=BUILD-OK\n' >> "$P4A1_WORK/direct-buildkitd.log"
+  else
+    say "control: the SAME build also fails OUTSIDE the unit (the composition itself is the suspect)"
+    printf 'DIRECT-CONTROL=BUILD-FAILED\n' >> "$P4A1_WORK/direct-buildkitd.log"
+    tail -10 "$P4A1_WORK/build-direct.log" || true
+  fi
+  tail -30 "$P4A1_WORK/build-direct.log" 2>/dev/null || true
+else
+  say "control: the direct composition did not reach readiness (see direct-control.txt)"
+fi
+# settle ONLY the direct tree (the rootlesskit parent carries Pdeathsig for
+# the buildkitd child; slirp4netns is its direct fork)
+DIRECT_SL="$(pgrep -P "$DIRECT_RK" -x slirp4netns || true)"
+kill "$DIRECT_RK" 2>/dev/null || true
+sleep 1
+kill -9 "$DIRECT_SL" 2>/dev/null || true
+DIRECT_BK_LEFT="$(pgrep -f "^/usr/libexec/docker-helper/buildkit/buildkitd --rootless.*--root=$DIRECT_ROOT" || true)"
+kill -9 "$DIRECT_BK_LEFT" 2>/dev/null || true
+
 # real build: outbound TLS pull + export tar (the CA bundle is exercised)
 CTX="$P4A1_WORK/ctx-main"
 mkdir -p "$CTX"
