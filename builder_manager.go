@@ -58,6 +58,15 @@ const (
 	// and reap wait inside one stop attempt (covers the zombie window
 	// between SIGKILL delivery and the group's full disappearance).
 	builderStopFinalizeTimeout = 2 * time.Second
+
+	// builderInstanceWaitDelay bounds how long the single Wait owner's
+	// cmd.Wait may stay blocked on the leader's diagnostic pipes after
+	// the leader itself has exited (group members inheriting stdout/
+	// stderr keep the pipe ends open). F4: once the bound elapses the
+	// Wait owner returns and the existing convergence settles the
+	// remaining group members. Fixed protocol constant, not operator
+	// policy.
+	builderInstanceWaitDelay = 2 * time.Second
 )
 
 // errBuilderStopNotConverged is the truthful-STOP failure: a stop attempt
@@ -480,6 +489,16 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 	// Go equivalent of setsid: the child becomes session and process-group
 	// leader; instance.pid identifies THAT leader.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// F4: bound the Wait owner's exposure to inherited pipes. When the
+	// leader exits while group members still hold the ends of its
+	// diagnostic pipes, cmd.Wait would otherwise block until those ends
+	// are closed — and the convergence that would close them runs after
+	// the Wait, so nothing would settle the group on its own. WaitDelay
+	// makes the single Wait owner return once the leader has exited; the
+	// existing convergence then settles the remaining group members
+	// through the bounded escalation. There is still exactly one Wait
+	// owner and one cleanup owner.
+	cmd.WaitDelay = builderInstanceWaitDelay
 
 	inst.mu.Lock()
 	if inst.phase != builderInstanceStarting {

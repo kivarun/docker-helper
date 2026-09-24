@@ -1643,10 +1643,13 @@ func TestBuilderManagerStopRetainsOnDirCleanupFailure(t *testing.T) {
 }
 
 // TestBuilderManagerStopSelfExitRace: the STOP's claim is followed by a
-// self-exiting leader. The single Wait owner reaps the leader and skips
-// convergence (the claimant owns it); the claimant settles through the
-// reap signal without ever calling Process.Wait — no second Wait owner,
-// no double terminal cleanup.
+// self-exiting leader that leaves a live pipe-holding child in the group
+// (F4: the child inherits the leader's diagnostic pipe ends). The single
+// Wait owner reaps the leader and skips convergence (the claimant owns
+// it); the claimant's escalation kills the child, which closes the
+// inherited pipe ends and lets the Wait owner return, then settles
+// through the reap signal — no second Wait owner, no double terminal
+// cleanup.
 func TestBuilderManagerStopSelfExitRace(t *testing.T) {
 	m, _, _ := processTestManager(t)
 	seamCA(t)
@@ -1658,7 +1661,9 @@ func TestBuilderManagerStopSelfExitRace(t *testing.T) {
 		_ = rtDir
 		_ = stDir
 		_ = env
-		return exec.Command("sh", "-c", "while [ ! -f "+flag+" ]; do sleep 0.05; done")
+		// Sleep-free loops: stable group identity; the child inherits the
+		// leader's stdout/stderr (the diagnostic pipes) with no redirect.
+		return exec.Command("sh", "-c", `while :; do :; done & while [ ! -f `+flag+` ]; do :; done`)
 	}
 	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
 
@@ -1670,6 +1675,10 @@ func TestBuilderManagerStopSelfExitRace(t *testing.T) {
 	}
 	inst := m.instances[opID]
 	pid := waitLeaderPid(t, inst)
+	child := waitDescendants(t, pid, 1)[0]
+	if !processAlive(pid) || !processAlive(child) {
+		t.Fatal("pre-existence self-test: leader or pipe-holding child not alive")
+	}
 
 	// Claim first (observed via the phase), then trigger the self-exit:
 	// the deterministic ordering of the race the pre-F2 code lost.
@@ -1693,8 +1702,8 @@ func TestBuilderManagerStopSelfExitRace(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("STOP did not converge after the leader self-exited")
 	}
-	if processAlive(pid) {
-		t.Fatalf("leader %d still alive/reaped after the converged STOP", pid)
+	if !processGroupGone(pid) {
+		t.Fatalf("pipe-holding child of group %d survived the converged STOP", pid)
 	}
 	assertDirsAbsentAt(t, opID)
 	if !waitInstance(t, m, opID, false) {
@@ -2042,4 +2051,82 @@ func TestBuilderManagerStartupPurgeResidue(t *testing.T) {
 		}
 		assertDirsAbsentAt(t, opID)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// F4: unexpected-exit inherited-pipe deadlock.
+// ---------------------------------------------------------------------------
+
+// TestBuilderManagerSelfExitInheritedPipesUnblocksWaitOwner: a session
+// leader stays alive until a flag while its child stays in the group and
+// INHERITS the leader's stdout/stderr (the manager's diagnostic pipes);
+// the leader then exits independently. Before the fix, the single Wait
+// owner blocked in cmd.Wait until the pipe-holding child died — nothing
+// killed it, so the unexpected-exit convergence never happened on its
+// own. With the bounded exec.Cmd.WaitDelay the owner returns after the
+// leader's exit, claims the stop right, settles the remaining group
+// members, reaps, removes the exact paths, and releases the entry.
+func TestBuilderManagerSelfExitInheritedPipesUnblocksWaitOwner(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	seamCA(t)
+
+	flag := filepath.Join(t.TempDir(), "leader-exit-flag")
+	orig := builderNewRootlessKitCommand
+	builderNewRootlessKitCommand = func(opID, rtDir, stDir string, env []string) *exec.Cmd {
+		_ = opID
+		_ = rtDir
+		_ = stDir
+		_ = env
+		// The leader busy-waits on the flag (no transient sleep children:
+		// stable group identity); its child is sleep-free, stays in the
+		// group, and inherits the leader's diagnostic pipe ends.
+		return exec.Command("sh", "-c", `while :; do :; done & while [ ! -f `+flag+` ]; do :; done`)
+	}
+	t.Cleanup(func() { builderNewRootlessKitCommand = orig })
+
+	opID := "op_0123456789abcdef0123456789abcdef"
+	startResp := make(chan string, 1)
+	go func() { startResp <- m.start(opID, nil) }()
+	if !waitInstance(t, m, opID, true) {
+		t.Fatal("reservation missing")
+	}
+	inst := m.instances[opID]
+	pid := waitLeaderPid(t, inst)
+	child := waitDescendants(t, pid, 1)[0]
+
+	// Pre-existence: leader and pipe-holding child both alive.
+	if !processAlive(pid) || !processAlive(child) {
+		t.Fatal("pre-existence self-test: leader or child not alive")
+	}
+
+	// The leader exits independently; the child lives on holding the
+	// inherited pipe ends.
+	if err := os.WriteFile(flag, []byte("go\n"), 0o600); err != nil {
+		t.Fatalf("cannot write the exit flag: %v", err)
+	}
+
+	// The unexpected-exit owner must settle: terminal barrier first, then
+	// the state assertions. The child is killed by the convergence owner,
+	// the leader is reaped, the exact paths are removed, the entry is
+	// released.
+	select {
+	case <-inst.done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("unexpected-exit convergence did not complete (Wait owner still blocked on the inherited pipes?)")
+	}
+	select {
+	case resp := <-startResp:
+		if resp != builderManagerRespInternal {
+			t.Fatalf("cancelled START = %q, want internal", resp)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled START did not converge")
+	}
+	if !processGroupGone(pid) {
+		t.Fatalf("pipe-holding child of group %d survived the unexpected-exit settlement", pid)
+	}
+	assertDirsAbsentAt(t, opID)
+	if !waitInstance(t, m, opID, false) {
+		t.Fatal("unexpected-exit did not release the map entry")
+	}
 }
