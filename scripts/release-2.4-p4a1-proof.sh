@@ -119,7 +119,7 @@ path, payload = sys.argv[1], sys.argv[2].encode()
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(180)
 s.connect(path)
-s.sendall(payload)
+s.sendall(payload + b"\n")
 resp = b""
 try:
     while True:
