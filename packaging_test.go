@@ -771,6 +771,7 @@ func TestUnitNoRestrictSUIDSGID(t *testing.T) {
 		path string
 	}{
 		{"system unit", "packaging/systemd/system/docker-helper.service"},
+		{"builder unit", "packaging/systemd/system/docker-helper-builder.service"},
 	}
 
 	for _, tt := range tests {
@@ -869,6 +870,185 @@ func TestSystemdTimeoutStopSecContract(t *testing.T) {
 		got := timeoutStopSecViolation(tc.content)
 		if !strings.Contains(got, tc.want) {
 			t.Errorf("fixture %q: violation = %q, want substring %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// --- Builder systemd unit tests (Release 2.4 P4-A1) ---
+
+// TestBuilderSystemUnitFile verifies the proposed docker-helper-builder
+// service unit: the dedicated unprivileged builder identity, the
+// systemd-managed runtime/state roots with the planned 0750 modes, the
+// weak Before= coupling, the bounded restart behavior, the deliberate
+// NoNewPrivileges exception, the minimal capability floor (CAP_SETUID
+// CAP_SETGID, nothing more), the deliberately omitted namespace and
+// SUID restrictions, the safe filesystem hardening, and the systemd
+// default control-group kill discipline (no KillMode directive may
+// narrow it).
+func TestBuilderSystemUnitFile(t *testing.T) {
+	path := "packaging/systemd/system/docker-helper-builder.service"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("builder unit %s not found: %v", path, err)
+	}
+	content := string(data)
+	lines := strings.Split(content, "\n")
+
+	active := func(directive string) (string, bool) {
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.HasPrefix(trimmed, directive) {
+				return strings.TrimSpace(strings.TrimPrefix(trimmed, directive)), true
+			}
+		}
+		return "", false
+	}
+
+	if got, ok := active("ExecStart="); !ok || got != "/usr/bin/docker-helper builder serve" {
+		t.Errorf("ExecStart = %q (present %v), want /usr/bin/docker-helper builder serve", got, ok)
+	}
+	if got, ok := active("User="); !ok || got != "docker-helper-builder" {
+		t.Errorf("User = %q (present %v), want docker-helper-builder", got, ok)
+	}
+	if got, ok := active("Group="); !ok || got != "docker-helper-builder" {
+		t.Errorf("Group = %q (present %v), want docker-helper-builder", got, ok)
+	}
+	for _, directive := range []string{
+		"RuntimeDirectory=docker-helper-builder",
+		"RuntimeDirectoryMode=0750",
+		"StateDirectory=docker-helper-builder",
+		"StateDirectoryMode=0750",
+		"Restart=on-failure",
+		"RestartSec=2s",
+		"Before=docker-helper.service",
+		"CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
+		"ProtectSystem=full",
+		"ReadWritePaths=/run/docker-helper-builder /var/lib/docker-helper-builder",
+		"ProtectHome=read-only",
+		"PrivateTmp=false",
+		"ProtectKernelTunables=true",
+		"ProtectKernelModules=true",
+		"ProtectKernelLogs=true",
+		"ProtectControlGroups=true",
+		"ProtectClock=true",
+		"ProtectHostname=true",
+		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
+	} {
+		if !strings.Contains(content, directive) {
+			t.Errorf("builder unit must contain %q", directive)
+		}
+	}
+
+	// The recorded NNP exception: NoNewPrivileges must NOT be active.
+	if got, ok := active("NoNewPrivileges="); ok {
+		t.Errorf("builder unit must not set NoNewPrivileges (the recorded rootlesskit newuidmap exception), found %q", got)
+	}
+	// Namespace/SUID restrictions must stay omitted for rootlesskit.
+	for _, directive := range []string{"RestrictNamespaces=", "RestrictSUIDSGID="} {
+		if got, ok := active(directive); ok {
+			t.Errorf("builder unit must not set %s (rootlesskit/newuidmap mechanics), found %q", directive, got)
+		}
+	}
+	// No capability widening beyond the planned floor.
+	if got, ok := active("CapabilityBoundingSet="); ok && got != "CAP_SETUID CAP_SETGID" {
+		t.Errorf("CapabilityBoundingSet = %q, want exactly CAP_SETUID CAP_SETGID (no widening without a failed live proof and review)", got)
+	}
+	if got, ok := active("AmbientCapabilities="); ok && got != "" {
+		t.Errorf("AmbientCapabilities must be unset, found %q", got)
+	}
+	// The kill discipline must stay the systemd default (control-group):
+	// the whole-cgroup kill settles every builder-owned descendant
+	// (including unanchored slirp4netns) on stop/restart.
+	if got, ok := active("KillMode="); ok && got != "control-group" {
+		t.Errorf("KillMode = %q, want the control-group default (omit the directive)", got)
+	}
+	// Stop timeout contract: exactly one active TimeoutStopSec= with the
+	// builder value 30s (distinct from the main daemon's 45s contract).
+	if vals := activeTimeoutStopSec(content); len(vals) != 1 || vals[0] != "30s" {
+		t.Errorf("builder unit active TimeoutStopSec values = %v, want exactly [30s]", vals)
+	}
+	// No hard Requires= on any active line (weak coupling only).
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "Requires=") {
+			t.Error("builder unit must not hard-require anything (weak coupling)")
+		}
+	}
+}
+
+// TestBuilderSystemUnitPATHMatchesChildPath verifies the builder unit
+// declares an explicit PATH exactly equal to the manager's per-instance
+// child PATH (builderManagerChildPath): one fixed PATH owns the
+// rootlesskit/newuidmap/slirp4netns helper lookups and the buildkitd
+// buildkit-runc resolution; the unit-level declaration must never
+// diverge from it.
+func TestBuilderSystemUnitPATHMatchesChildPath(t *testing.T) {
+	path := "packaging/systemd/system/docker-helper-builder.service"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("builder unit %s not found: %v", path, err)
+	}
+
+	var declared string
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Environment=PATH=") {
+			declared = strings.TrimPrefix(trimmed, "Environment=PATH=")
+			break
+		}
+	}
+	if declared == "" {
+		t.Fatal("builder unit must declare an explicit Environment=PATH= contract")
+	}
+	if declared != builderManagerChildPath {
+		t.Errorf("builder unit PATH = %q, want %q (must equal builderManagerChildPath)", declared, builderManagerChildPath)
+	}
+}
+
+// TestProvisionBuilderScript verifies the one builder identity +
+// subordinate-ID provisioning owner: the canonical identity constants,
+// the useradd/usermod delegation (upstream shadow-utils is the only
+// /etc/subuid and /etc/subgid WRITER), the >= 65536 range verification,
+// the both-databases interval collection for the collision-free
+// computation, and fail-closed behavior.
+func TestProvisionBuilderScript(t *testing.T) {
+	path := "packaging/scripts/lib/provision-builder.sh"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("provisioning script %s not found: %v", path, err)
+	}
+	content := string(data)
+
+	for _, want := range []string{
+		"set -eu",
+		"IDENTITY=docker-helper-builder",
+		"BUILDER_HOME=/var/lib/docker-helper-builder",
+		"BUILDER_SHELL=/usr/sbin/nologin",
+		"SUBID_COUNT=65536",
+		"useradd --system --home \"$BUILDER_HOME\" --shell \"$BUILDER_SHELL\" \"$IDENTITY\"",
+		"usermod --add-subuids",
+		"usermod --add-subuids \"$start-$end\" --add-subgids \"$start-$end\" \"$IDENTITY\"",
+		"[ \"$count\" -ge \"$SUBID_COUNT\" ]",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("provisioning script must contain %q", want)
+		}
+	}
+
+	// Database-ownership gate: the passwd/subid database WRITER is
+	// upstream shadow-utils exclusively. The literal database paths must
+	// appear exactly once each (the read-only constant definitions);
+	// any other occurrence (a write redirection, a temp copy, an echo
+	// pipeline) would be a second, forbidden writer.
+	for _, db := range []string{"/etc/subuid", "/etc/subgid"} {
+		if got := strings.Count(content, db); got != 1 {
+			t.Errorf("%s appears %d times in the provisioning script, want exactly 1 (the read-only constant; the mutation is delegated to usermod)", db, got)
 		}
 	}
 }
@@ -6871,7 +7051,7 @@ func TestWorkflowRunBlocksReferenceExistingLocalPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scriptRef := regexp.MustCompile(`scripts/[A-Za-z0-9_./-]+`)
+	scriptRef := regexp.MustCompile(`(?:^|[\s"'=])(scripts/[A-Za-z0-9_./-]+)`)
 	scanned := 0
 	for _, entry := range entries {
 		name := entry.Name()
@@ -6909,7 +7089,8 @@ func TestWorkflowRunBlocksReferenceExistingLocalPaths(t *testing.T) {
 			if strings.HasPrefix(trimmed, "#") {
 				return
 			}
-			for _, token := range scriptRef.FindAllString(line, -1) {
+			for _, match := range scriptRef.FindAllStringSubmatch(line, -1) {
+				token := match[1]
 				if _, err := os.Stat(token); err != nil {
 					t.Errorf("%s: run block references non-existent local path %q", path, token)
 				}

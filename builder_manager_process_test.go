@@ -2392,7 +2392,7 @@ func TestBuilderManagerStartupPurgeUnreadableIdentityFailsClosed(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	if _, ok := builderScanOwnedStateDirGroups(opID, os.Getuid()); ok {
+	if _, ok := builderScanOwnedStateDirGroups(opID, os.Getuid(), ""); ok {
 		t.Fatal("scan reported a complete enumeration while a same-uid identity was unreadable")
 	}
 	if err := m.startupPurge(); err == nil {
@@ -2419,4 +2419,484 @@ func zombieState(pid int) bool {
 		return false
 	}
 	return state[0] == 'Z'
+}
+
+// ---------------------------------------------------------------------------
+// P4: the systemd unit-cgroup startup boundary.
+// ---------------------------------------------------------------------------
+
+// unitBoundaryFixture installs the P4 unit-boundary seam: the manager
+// recognizes the docker-helper-builder.service cgroup path as its own unit
+// boundary even though the test process is not running under systemd.
+func unitBoundaryFixture(t *testing.T) string {
+	t.Helper()
+	unitCgroup := "/system.slice/" + builderManagerUnitCgroupName
+	orig := builderUnitCgroupPathFunc
+	builderUnitCgroupPathFunc = func() (string, bool) { return unitCgroup, true }
+	t.Cleanup(func() { builderUnitCgroupPathFunc = orig })
+	return unitCgroup
+}
+
+// cgroupMembershipFixture replaces the per-pid cgroup-path reader: the
+// listed pids report the given path, the listed error pids report an
+// inconclusive read, and every other pid falls through to the real reader.
+// This mounts synthetic unit-cgroup membership for fixture processes only;
+// all other classification stays real.
+func cgroupMembershipFixture(t *testing.T, paths map[int]string, errorPids map[int]error) {
+	t.Helper()
+	orig := builderProcCgroupPathFunc
+	builderProcCgroupPathFunc = func(pid int) (string, error) {
+		if err, ok := errorPids[pid]; ok {
+			return "", err
+		}
+		if path, ok := paths[pid]; ok {
+			return path, nil
+		}
+		return orig(pid)
+	}
+	t.Cleanup(func() { builderProcCgroupPathFunc = orig })
+}
+
+// orphanGroupFixture creates a REAL orphaned process group whose leader is
+// a setsid'd shell with a busy-wait child; the argv carries NO per-op
+// anchor argument, so cgroup membership is the only ownership evidence
+// available. Construction mirrors ownedResidueFixture: a launcher exits
+// after the setsid'd leader reports its pid, so the leader is orphaned and
+// reapable. Pre-existence is asserted. Cleanup kills the whole group.
+func orphanGroupFixture(t *testing.T) (leaderPid, childPid int) {
+	t.Helper()
+	dir := t.TempDir()
+	leaderScript := filepath.Join(dir, "leader.sh")
+	childScript := filepath.Join(dir, "child.sh")
+	leaderPidOut := filepath.Join(dir, "leader.pid")
+	childPidOut := filepath.Join(dir, "child.pid")
+	child := `echo $$ > ` + childPidOut + `
+while :; do :; done`
+	if err := os.WriteFile(childScript, []byte(child), 0o700); err != nil {
+		t.Fatalf("cannot write the child script: %v", err)
+	}
+	leader := `echo $$ > ` + leaderPidOut + `
+sh ` + childScript + ` &
+while [ ! -s ` + childPidOut + ` ]; do :; done
+while :; do :; done`
+	if err := os.WriteFile(leaderScript, []byte(leader), 0o700); err != nil {
+		t.Fatalf("cannot write the leader script: %v", err)
+	}
+	launcher := exec.Command("/bin/bash", "-c",
+		`setsid /bin/bash `+leaderScript+` & while [ ! -s `+childPidOut+` ]; do sleep 0.05; done`)
+	if err := launcher.Run(); err != nil {
+		t.Fatalf("cannot launch the orphan group fixture: %v", err)
+	}
+	raw, err := os.ReadFile(leaderPidOut)
+	if err != nil {
+		t.Fatalf("cannot read the leader pid: %v", err)
+	}
+	leaderPid, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad leader pid %q: %v", raw, err)
+	}
+	raw, err = os.ReadFile(childPidOut)
+	if err != nil {
+		t.Fatalf("cannot read the child pid: %v", err)
+	}
+	childPid, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad child pid %q: %v", raw, err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-leaderPid, syscall.SIGKILL)
+	})
+	if !processAlive(leaderPid) || !processAlive(childPid) {
+		t.Fatal("orphan group fixture: pre-existence failed")
+	}
+	return leaderPid, childPid
+}
+
+// TestBuilderUnitCgroupPath pins the boundary recognition: only a unified
+// (cgroup v2) cgroup path whose final component is exactly
+// docker-helper-builder.service is the unit boundary; anything else — a
+// different unit, a parent path, or an unreadable entry — is no boundary
+// and keeps the boundary-independent fail-closed purge semantics.
+func TestBuilderUnitCgroupPath(t *testing.T) {
+	unit := "/system.slice/" + builderManagerUnitCgroupName
+	t.Run("service cgroup recognized", func(t *testing.T) {
+		orig := builderProcCgroupPathFunc
+		builderProcCgroupPathFunc = func(pid int) (string, error) {
+			_ = pid
+			return unit, nil
+		}
+		t.Cleanup(func() { builderProcCgroupPathFunc = orig })
+		got, ok := builderReadUnitCgroupPath()
+		if !ok || got != unit {
+			t.Fatalf("builderReadUnitCgroupPath = (%q, %v), want (%q, true)", got, ok, unit)
+		}
+	})
+	t.Run("different unit not recognized", func(t *testing.T) {
+		orig := builderProcCgroupPathFunc
+		builderProcCgroupPathFunc = func(pid int) (string, error) {
+			_ = pid
+			return "/system.slice/docker-helper.service", nil
+		}
+		t.Cleanup(func() { builderProcCgroupPathFunc = orig })
+		if _, ok := builderReadUnitCgroupPath(); ok {
+			t.Fatal("a foreign unit cgroup must not be recognized as the boundary")
+		}
+	})
+	t.Run("unreadable entry not recognized", func(t *testing.T) {
+		orig := builderProcCgroupPathFunc
+		builderProcCgroupPathFunc = func(pid int) (string, error) {
+			_ = pid
+			return "", errors.New("procfs unavailable")
+		}
+		t.Cleanup(func() { builderProcCgroupPathFunc = orig })
+		if _, ok := builderReadUnitCgroupPath(); ok {
+			t.Fatal("an unreadable cgroup entry must not be recognized as the boundary")
+		}
+	})
+	t.Run("real self read is absolute when a v2 entry exists", func(t *testing.T) {
+		path, err := builderProcCgroupPath(os.Getpid())
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the test process must exist")
+			}
+			t.Skipf("no unified cgroup v2 entry in this environment: %v", err)
+		}
+		if path == "" || !strings.HasPrefix(path, "/") {
+			t.Fatalf("unified cgroup path %q is not an absolute path", path)
+		}
+	})
+}
+
+// TestBuilderScanUnitOwnedGroups pins the P4 membership classification of
+// the global boundary scan: a same-uid process inside the unit cgroup
+// subtree is owned by MEMBERSHIP (the command line is not consulted — an
+// unanchored descendant is as owned as an anchored leader); a same-uid
+// process outside the boundary is skipped without tainting the
+// enumeration; an inconclusive cgroup read taints it; and the manager's
+// own pid is excluded.
+func TestBuilderScanUnitOwnedGroups(t *testing.T) {
+	t.Run("in-unit unanchored group owned by membership", func(t *testing.T) {
+		opID := "op_0123456789abcdef0123456789abcdef"
+		unitCgroup := unitBoundaryFixture(t)
+		leaderPid, childPid := orphanGroupFixture(t)
+		cgroupMembershipFixture(t, map[int]string{
+			leaderPid: unitCgroup,
+			childPid:  unitCgroup,
+		}, nil)
+
+		pgids, ok := builderScanUnitOwnedGroups(unitCgroup, os.Getuid())
+		if !ok {
+			t.Fatal("unit scan reported an inconclusive enumeration over a clean fixture")
+		}
+		if len(pgids) != 1 || pgids[0] != leaderPid {
+			t.Fatalf("unit scan pgids = %v, want [%d] (the unanchored in-unit group)", pgids, leaderPid)
+		}
+		// Contrast: the legacy anchor-only scan sees nothing for the
+		// unanchored group — the membership scan is the added power.
+		legacyPgids, ok := builderScanOwnedStateDirGroups(opID, os.Getuid(), "")
+		if !ok || len(legacyPgids) != 0 {
+			t.Fatalf("legacy anchor scan = (%v, %v), want no matches for an unanchored group", legacyPgids, ok)
+		}
+		// Contrast: the unit-boundary per-op scan owns the group by
+		// membership as well.
+		unitPgids, ok := builderScanOwnedStateDirGroups(opID, os.Getuid(), unitCgroup)
+		if !ok || len(unitPgids) != 1 || unitPgids[0] != leaderPid {
+			t.Fatalf("unit-mode per-op scan = (%v, %v), want [%d]", unitPgids, ok, leaderPid)
+		}
+	})
+
+	t.Run("outside-boundary same-uid process skipped without taint", func(t *testing.T) {
+		unitCgroup := unitBoundaryFixture(t)
+		leaderPid, childPid := orphanGroupFixture(t)
+		foreign := "/system.slice/some-other.service"
+		cgroupMembershipFixture(t, map[int]string{
+			leaderPid: foreign,
+			childPid:  foreign,
+		}, nil)
+
+		pgids, ok := builderScanUnitOwnedGroups(unitCgroup, os.Getuid())
+		if !ok {
+			t.Fatal("an outside-boundary process must be skipped, not taint the enumeration")
+		}
+		if len(pgids) != 0 {
+			t.Fatalf("unit scan pgids = %v, want none (outside the boundary)", pgids)
+		}
+		if !processAlive(leaderPid) || !processAlive(childPid) {
+			t.Fatal("the scan signaled an outside-boundary process")
+		}
+	})
+
+	t.Run("outside-boundary zombie skipped without taint", func(t *testing.T) {
+		unitCgroup := unitBoundaryFixture(t)
+		zombie := exec.Command("sh", "-c", `while :; do :; done`)
+		if err := zombie.Start(); err != nil {
+			t.Fatalf("cannot start zombie fixture: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = zombie.Process.Wait() // reap at teardown
+		})
+		zpid := zombie.Process.Pid
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(zpid), "cmdline"))
+			if err == nil && len(raw) > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("zombie fixture never reached the alive readable-cmdline state")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if err := syscall.Kill(zpid, syscall.SIGKILL); err != nil {
+			t.Fatalf("cannot kill the zombie fixture: %v", err)
+		}
+		for {
+			if zombieState(zpid) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("zombie fixture never reached state Z")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		foreign := "/system.slice/some-other.service"
+		cgroupMembershipFixture(t, map[int]string{zpid: foreign}, nil)
+
+		pgids, ok := builderScanUnitOwnedGroups(unitCgroup, os.Getuid())
+		if !ok {
+			t.Fatal("an outside-boundary zombie must be skipped, not taint the enumeration")
+		}
+		if len(pgids) != 0 {
+			t.Fatalf("unit scan pgids = %v, want none", pgids)
+		}
+		if !zombieState(zpid) {
+			t.Fatal("the zombie fixture did not stay a zombie (the scan signaled it?)")
+		}
+	})
+
+	t.Run("inconclusive cgroup read taints", func(t *testing.T) {
+		unitCgroup := unitBoundaryFixture(t)
+		leaderPid, _ := orphanGroupFixture(t)
+		cgroupMembershipFixture(t, nil, map[int]error{
+			leaderPid: errors.New("injected inconclusive read"),
+		})
+
+		if _, ok := builderScanUnitOwnedGroups(unitCgroup, os.Getuid()); ok {
+			t.Fatal("an inconclusive cgroup read must taint the enumeration")
+		}
+		if !processAlive(leaderPid) {
+			t.Fatal("an owned fixture was signaled by a scan-only classification")
+		}
+	})
+
+	t.Run("manager self excluded", func(t *testing.T) {
+		unitCgroup := unitBoundaryFixture(t)
+		self := os.Getpid()
+		// Pretend the test process itself sits inside the boundary: the
+		// scan must still exclude it.
+		cgroupMembershipFixture(t, map[int]string{self: unitCgroup}, nil)
+		pgids, ok := builderScanUnitOwnedGroups(unitCgroup, os.Getuid())
+		if !ok {
+			t.Fatal("unexpected taint")
+		}
+		for _, pgid := range pgids {
+			if pgid == self {
+				t.Fatalf("the manager's own pid %d was collected", self)
+			}
+		}
+	})
+}
+
+// TestBuilderManagerStartupPurgeUnitBoundary proves the startup contract
+// UNDER the P4 unit boundary: the boundary scan settles every live
+// builder-owned process group (membership proof, including unanchored
+// members), which resolves the previously fail-closed ambiguous residue
+// states — pid-file-less residue, a live recorded pid with an unproven
+// cmdline, a reused pid, an outside-boundary zombie — while an
+// inconclusive boundary scan still refuses startup and an outside-boundary
+// live process is never signaled.
+func TestBuilderManagerStartupPurgeUnitBoundary(t *testing.T) {
+	t.Run("pid-file-less residue removed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		unitBoundaryFixture(t)
+
+		// The legacy F5.1 contract refuses this state; the boundary scan
+		// (here: provably empty — no faked membership) proves no owned
+		// process exists, so the residue is removable.
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (the unit boundary resolves pid-file-less residue)", err)
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("unanchored in-unit group settled and removed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		unitCgroup := unitBoundaryFixture(t)
+		leaderPid, childPid := orphanGroupFixture(t)
+		cgroupMembershipFixture(t, map[int]string{
+			leaderPid: unitCgroup,
+			childPid:  unitCgroup,
+		}, nil)
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (membership is the ownership proof)", err)
+		}
+		if processAlive(leaderPid) || processAlive(childPid) || !processGroupGone(leaderPid) {
+			t.Fatalf("unanchored in-unit group survived: leader=%d child=%d", leaderPid, childPid)
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("unit-owned live recorded pid with unproven cmdline settled", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		unitCgroup := unitBoundaryFixture(t)
+		leaderPid, childPid := orphanGroupFixture(t)
+		writeResiduePid(t, opID, leaderPid)
+		cgroupMembershipFixture(t, map[int]string{
+			leaderPid: unitCgroup,
+			childPid:  unitCgroup,
+		}, nil)
+
+		// The cmdline does not satisfy builderStalePidIdentity (no
+		// anchor); under the unit boundary the recorded pid is owned by
+		// membership and is settled through the same escalation owner.
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil", err)
+		}
+		if processAlive(leaderPid) || processAlive(childPid) || !processGroupGone(leaderPid) {
+			t.Fatalf("unit-owned recorded group survived: leader=%d child=%d", leaderPid, childPid)
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("reused pid outside the boundary: no signal, dirs removed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		unitBoundaryFixture(t)
+		foreign := exec.Command("sh", "-c", boundedSleepScript())
+		if err := foreign.Start(); err != nil {
+			t.Fatalf("cannot start foreign fixture: %v", err)
+		}
+		killForeignProcess(t, foreign)
+		fpid := foreign.Process.Pid
+		writeResiduePid(t, opID, fpid)
+		cgroupMembershipFixture(t, map[int]string{
+			fpid: "/system.slice/some-other.service",
+		}, nil)
+
+		// The recorded pid was reused by a process outside the unit
+		// boundary: the recorded instance is provably gone; the residue is
+		// removed and the foreign process is never signaled.
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (reused pid outside the boundary)", err)
+		}
+		if !processAlive(fpid) {
+			t.Fatal("a reused (foreign) pid was signaled by the boundary purge")
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("zombie outside the boundary does not taint", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		unitBoundaryFixture(t)
+		zombie := exec.Command("sh", "-c", `while :; do :; done`)
+		if err := zombie.Start(); err != nil {
+			t.Fatalf("cannot start zombie fixture: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = zombie.Process.Wait() // reap at teardown
+		})
+		zpid := zombie.Process.Pid
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(zpid), "cmdline"))
+			if err == nil && len(raw) > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("zombie fixture never reached the alive readable-cmdline state")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if err := syscall.Kill(zpid, syscall.SIGKILL); err != nil {
+			t.Fatalf("cannot kill the zombie fixture: %v", err)
+		}
+		for {
+			if zombieState(zpid) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("zombie fixture never reached state Z")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cgroupMembershipFixture(t, map[int]string{
+			zpid: "/system.slice/some-other.service",
+		}, nil)
+
+		// A zombie outside the boundary is foreign by membership; the
+		// legacy taint does not apply and the pid-file-less residue is
+		// removed.
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil", err)
+		}
+		if !zombieState(zpid) {
+			t.Fatal("an outside-boundary zombie was signaled by the purge")
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("two owned groups settled without ambiguity", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		unitCgroup := unitBoundaryFixture(t)
+		pidA, childA := ownedResidueFixture(t, opID)
+		pidB, childB := ownedResidueFixture(t, opID)
+		cgroupMembershipFixture(t, map[int]string{
+			pidA: unitCgroup, childA: unitCgroup,
+			pidB: unitCgroup, childB: unitCgroup,
+		}, nil)
+
+		// The boundary scan settles BOTH groups globally; the per-op
+		// ambiguity rule cannot wedge a service restart over two residue
+		// generations.
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (boundary scan settles both groups)", err)
+		}
+		if processAlive(pidA) || processAlive(childA) || processAlive(pidB) || processAlive(childB) {
+			t.Fatal("an owned group survived the boundary settlement")
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("inconclusive boundary scan fails closed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		unitBoundaryFixture(t)
+		leaderPid, _ := orphanGroupFixture(t)
+		cgroupMembershipFixture(t, nil, map[int]error{
+			leaderPid: errors.New("injected inconclusive read"),
+		})
+
+		if err := m.startupPurge(); err == nil {
+			t.Fatal("startupPurge succeeded while the boundary scan was inconclusive (must fail closed)")
+		}
+		if !processAlive(leaderPid) {
+			t.Fatal("an owned fixture was signaled despite the inconclusive enumeration")
+		}
+		if _, serr := os.Lstat(opRuntimeDir(opID)); serr != nil {
+			t.Fatal("residue removed despite the fail-closed refusal")
+		}
+	})
 }
