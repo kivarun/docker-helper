@@ -931,9 +931,7 @@ func TestBuilderSystemUnitFile(t *testing.T) {
 		"ReadWritePaths=/run/docker-helper-builder /var/lib/docker-helper-builder",
 		"ProtectHome=read-only",
 		"PrivateTmp=false",
-		"ProtectKernelTunables=true",
 		"ProtectKernelModules=true",
-		"ProtectKernelLogs=true",
 		"ProtectControlGroups=true",
 		"ProtectClock=true",
 		"ProtectHostname=true",
@@ -941,6 +939,16 @@ func TestBuilderSystemUnitFile(t *testing.T) {
 	} {
 		if !strings.Contains(content, directive) {
 			t.Errorf("builder unit must contain %q", directive)
+		}
+	}
+	// ProtectKernelTunables and ProtectKernelLogs must stay ABSENT: their
+	// locked /proc submounts make every inherited procfs mount fail the
+	// kernel mount_too_revealing visibility rule for the buildkitd RUN
+	// containers' fresh procfs mounts (failed live proof: runc "error
+	// mounting proc ... operation not permitted").
+	for _, directive := range []string{"ProtectKernelTunables=", "ProtectKernelLogs="} {
+		if got, ok := active(directive); ok {
+			t.Errorf("builder unit must not set %s (locked /proc submounts break the buildkitd container procfs mount), found %q", directive, got)
 		}
 	}
 

@@ -67,13 +67,22 @@ AmbientCapabilities=
 
 # Filesystem-namespace hardening. This unit never creates Docker mount
 # pins (only the root daemon does), so a mount namespace here is safe.
+# ProtectKernelTunables and ProtectKernelLogs are deliberately ABSENT:
+# they mount locked submounts under /proc (systemd-inaccessible regular
+# files at /proc/kallsyms|kcore|kmsg and read-only /proc/{sys,acpi,bus}
+# binds). The buildkitd RUN containers mount their own fresh procfs, and
+# kernel mount_too_revealing denies a fresh procfs instance in a
+# non-initial user namespace when every already-visible procfs mount in
+# the inherited namespace carries locked submounts over non-empty
+# directories (failed live proof: runc "error mounting proc ...
+# operation not permitted", P4-A1 runs 35985523417+). The inherited
+# /proc must stay clean for the sandbox composition this unit exists to
+# run.
 ProtectSystem=full
 ReadWritePaths=/run/docker-helper-builder /var/lib/docker-helper-builder
 ProtectHome=read-only
 PrivateTmp=false
-ProtectKernelTunables=true
 ProtectKernelModules=true
-ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true

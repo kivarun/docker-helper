@@ -120,6 +120,9 @@ cleanup() {
 }
 trap cleanup EXIT
 P4A1_WORK="$(mktemp -d "${P4A1_WORK_BASE:-/tmp/release-2.4-p4a1-work.XXXXXXXX}")"
+# Traversable by the builder identity: the direct-control composition and
+# buildctl-launched exports need to reach their own state under the workdir.
+chmod 711 "$P4A1_WORK"
 
 new_op_id() {
   printf 'op_%s' "$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
