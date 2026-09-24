@@ -699,11 +699,16 @@ $(for pid in "$OLD_MGR" "$OLD_RK" "$OLD_BK" "$OLD_SL"; do printf 'pid %s: %s\n' 
 
 kill -9 "$OLD_MGR"
 
-# systemd must restart the unit (Restart=on-failure) into a fresh manager
+# systemd must restart the unit (Restart=on-failure) into a fresh manager;
+# the stale socket of the killed generation cannot satisfy the wait: the
+# restart is only proven by an ACTIVE unit with a NEW MainPID and its own
+# bound socket.
 RESTARTED=0
 for _ in $(seq 1 120); do
   NEW_MGR="$(systemctl show -p MainPID --value "$UNIT")"
-  if [ -n "$NEW_MGR" ] && [ "$NEW_MGR" != "$OLD_MGR" ] && [ -S "$MGR_SOCK" ]; then
+  STATE="$(systemctl show -p ActiveState --value "$UNIT")"
+  if [ "$STATE" = "active" ] && [ -n "$NEW_MGR" ] && [ "$NEW_MGR" != "0" ] \
+    && [ "$NEW_MGR" != "$OLD_MGR" ] && [ -S "$MGR_SOCK" ]; then
     RESTARTED=1
     break
   fi
