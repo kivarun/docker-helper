@@ -1494,11 +1494,15 @@ func builderScanOwnedStateDirGroups(opID string, uid int, unitCgroup string) ([]
 		return nil, false
 	}
 	pgids := make(map[int]bool)
+	self := os.Getpid()
 	for _, entry := range entries {
 		name := entry.Name()
 		pid, err := strconv.Atoi(name)
 		if err != nil || pid <= 1 {
 			continue
+		}
+		if pid == self {
+			continue // the manager itself (in-unit by definition)
 		}
 		procDir := filepath.Join("/proc", name)
 		stat, err := os.Stat(procDir)
