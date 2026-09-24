@@ -378,7 +378,7 @@ CG_ALL="$(
 evidence cgroups.txt "$CG_ALL"
 for pid in "$MGR_PID" "$RK_PID" "$BK_PID" "$SL_PID"; do
   CG="$(proc_cgroup "$pid")"
-  [ "$CG" = "0:$UNIT_CGROUP" ] || fail "process $pid cgroup is '$CG', want 0:$UNIT_CGROUP (unit membership)"
+  [ "$CG" = "0::$UNIT_CGROUP" ] || fail "process $pid cgroup is '$CG', want 0::$UNIT_CGROUP (unit membership)"
 done
 say "manager + rootlesskit + buildkitd + slirp4netns all in the unit cgroup (PASS)"
 
