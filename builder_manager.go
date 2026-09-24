@@ -958,6 +958,12 @@ var builderResolveSystemCAFunc = builderResolveSystemCA
 // CA bundle and returns SSL_CERT_FILE env for the buildkitd child. It
 // never chmods host material and never adds user config. ok=false means
 // START fails closed.
+//
+// The selected path is passed in its resolved real-path form: the child
+// reads the bundle through rootlesskit's --copy-up=/etc tmpfs, which
+// materializes a symlink itself (possibly broken) rather than its target
+// (rootlesskit#225; the M0/M1 realpath fix). A real file resolves to
+// itself, so this only changes the openSUSE symlink case.
 func builderResolveSystemCA() ([]string, bool) {
 	for _, path := range builderSystemCABundleCandidates {
 		info, err := os.Stat(path)
@@ -970,7 +976,11 @@ func builderResolveSystemCA() ([]string, bool) {
 			continue
 		}
 		_ = f.Close()
-		return []string{"SSL_CERT_FILE=" + path}, true
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil || resolved == "" {
+			continue
+		}
+		return []string{"SSL_CERT_FILE=" + resolved}, true
 	}
 	return nil, false
 }
