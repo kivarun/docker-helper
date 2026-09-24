@@ -72,6 +72,7 @@ REPO_DIR="${P4A1_REPO_DIR:-$SCRIPT_DIR/..}"
 PROVISION_SCRIPT="${P4A1_PROVISION_SCRIPT:-$REPO_DIR/packaging/scripts/lib/provision-builder.sh}"
 UNIT_FILE="${P4A1_UNIT_FILE:-$REPO_DIR/packaging/systemd/system/docker-helper-builder.service}"
 HELPER_BIN="${P4A1_HELPER_BIN:-/usr/bin/docker-helper}"
+BUILDCTL=/usr/libexec/docker-helper/buildkit/buildctl
 
 BUILDER_USER=docker-helper-builder
 MGR_RUNTIME=/run/docker-helper-builder
@@ -438,7 +439,7 @@ mkdir -p "$SESSION_DOCKER_CONFIG"
 echo '{}' > "$SESSION_DOCKER_CONFIG/config.json"
 
 BUILD_LOG="$P4A1_WORK/build-main.log"
-if ! DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" buildctl --addr "unix://$OP_SOCK" build \
+if ! DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" "$BUILDCTL" --addr "unix://$OP_SOCK" build \
     --progress=plain --frontend=dockerfile.v0 \
     --local "context=$CTX" --local "dockerfile=$CTX" \
     --output "type=docker,name=p4a1-proof:main,dest=$P4A1_WORK/out-main.tar" \
@@ -478,7 +479,7 @@ FROM alpine:3.20
 RUN mkdir -p /m1
 RUN cat $P4A1_WORK/root-marker > /m1/leak.txt 2>&1; echo rc=\$? >> /m1/leak.txt
 EOF
-  if ! DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" buildctl --addr "unix://$OP_SOCK" build \
+  if ! DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" "$BUILDCTL" --addr "unix://$OP_SOCK" build \
       --progress=plain --frontend=dockerfile.v0 \
       --local "context=$CTX_MARKER" --local "dockerfile=$CTX_MARKER" \
       --output "type=docker,name=p4a1-proof:marker,dest=$P4A1_WORK/out-marker.tar" \
@@ -596,7 +597,7 @@ RUN sleep 3 && echo step2 > /m1/s2
 RUN sleep 3 && echo step3 > /m1/s3
 RUN sleep 3 && echo step4 > /m1/s4
 EOF
-( DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" buildctl --addr "unix://$KILL_SOCK" build \
+( DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" "$BUILDCTL" --addr "unix://$KILL_SOCK" build \
     --progress=plain --frontend=dockerfile.v0 \
     --local "context=$CTX_KILL" --local "dockerfile=$CTX_KILL" \
     --output "type=docker,name=p4a1-proof:kill,dest=$P4A1_WORK/out-kill.tar" \
@@ -679,7 +680,7 @@ cat > "$CTX_FRESH/Dockerfile" <<'EOF'
 FROM alpine:3.20
 RUN mkdir -p /m1 && echo fresh-write > /m1/marker.txt
 EOF
-if ! DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" buildctl --addr "unix://$FRESH_SOCK" build \
+if ! DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" "$BUILDCTL" --addr "unix://$FRESH_SOCK" build \
     --progress=plain --frontend=dockerfile.v0 \
     --local "context=$CTX_FRESH" --local "dockerfile=$CTX_FRESH" \
     --output "type=docker,name=p4a1-proof:fresh,dest=$P4A1_WORK/out-fresh.tar" \
@@ -704,7 +705,7 @@ RESP_START_S="$(mgr_call "START $OP_STOPTEST")"
 STOP_SOCK="$MGR_RUNTIME/ops/$OP_STOPTEST/buildkitd.sock"
 for _ in $(seq 1 20); do [ -S "$STOP_SOCK" ] && break; sleep 0.5; done
 [ -S "$STOP_SOCK" ] || fail "per-op socket (stop test) missing"
-( DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" buildctl --addr "unix://$STOP_SOCK" build \
+( DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" "$BUILDCTL" --addr "unix://$STOP_SOCK" build \
     --progress=plain --frontend=dockerfile.v0 \
     --local "context=$CTX_KILL" --local "dockerfile=$CTX_KILL" \
     --output "type=docker,name=p4a1-proof:stoptest,dest=$P4A1_WORK/out-stoptest.tar" \
