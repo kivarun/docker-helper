@@ -37,7 +37,8 @@
 #      builder uid mapping to in-ns root plus the provisioned subordinate
 #      range; the child environment is exactly the production contract
 #      (HOME=state root, per-op XDG_RUNTIME_DIR, fixed PATH,
-#      SSL_CERT_FILE=resolved system bundle; NO USER — unlike M0/M1);
+#      SSL_CERT_FILE=resolved system bundle, USER=builder identity — the
+#      M0/M1-proven contract buildkitd's rootless detection needs);
 #   4. killing the manager during an active build: systemd restarts the
 #      unit and settles ALL old children including the unanchored
 #      slirp4netns (control-group kill); the new generation's startup
@@ -398,8 +399,8 @@ BK_SUBUID_START="$(awk '$1 == 1 {print $2}' "/proc/$BK_PID/uid_map" | head -1)"
 [ "$BK_SUBUID_START" = "$SUBUID_START" ] || fail "subordinate mapping starts at $BK_SUBUID_START, want the provisioned $SUBUID_START"
 say "uid_map: in-ns root -> builder uid $BK_MAP0; subordinate range starts at $BK_SUBUID_START (PASS)"
 
-# child environment: the exact production contract (differs from M0/M1,
-# which set USER= and a shared XDG_RUNTIME_DIR)
+# child environment: the exact production contract (the per-op
+# XDG_RUNTIME_DIR differs from M0/M1, which shared /run/user/<uid>)
 ENV_RK="$(proc_environ "$RK_PID")"
 ENV_BK="$(proc_environ "$BK_PID")"
 evidence child-env.txt "rootlesskit $RK_PID environ:
@@ -415,12 +416,13 @@ env_check() {
 env_check "$ENV_BK" HOME "$MGR_STATE"
 env_check "$ENV_BK" XDG_RUNTIME_DIR "$MGR_RUNTIME/ops/$OP_MAIN"
 env_check "$ENV_BK" PATH "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/libexec/docker-helper/buildkit"
-if printf '%s\n' "$ENV_BK" | grep -q "^USER="; then
-  fail "child env carries USER= (M0/M1 leftover; the production child env is the explicit contract)"
+env_check "$ENV_BK" USER "$BUILDER_USER"
+if [ -z "$(printf '%s\n' "$ENV_BK" | grep -F 'SSL_CERT_FILE=' || true)" ]; then
+  fail "child env has no SSL_CERT_FILE"
 fi
 SSL_CERT_FILE_VAL="$(printf '%s\n' "$ENV_BK" | grep -F "SSL_CERT_FILE=" | head -1 | cut -d= -f2- || true)"
 [ -n "$SSL_CERT_FILE_VAL" ] || fail "child env has no SSL_CERT_FILE"
-say "child env = production contract (HOME=state root, per-op XDG_RUNTIME_DIR, fixed PATH, no USER) (PASS)"
+say "child env = production contract (HOME=state root, per-op XDG_RUNTIME_DIR, fixed PATH, USER=builder) (PASS)"
 
 # real build: outbound TLS pull + export tar (the CA bundle is exercised)
 CTX="$P4A1_WORK/ctx-main"

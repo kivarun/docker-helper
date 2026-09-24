@@ -251,6 +251,7 @@ func TestBuilderManagerChildReceivesSelectedCABundleEnv(t *testing.T) {
 	got := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
 	want := []string{
 		"HOME=" + builderManagerStateRoot,
+		"USER=" + builderManagerBuilderUser,
 		"XDG_RUNTIME_DIR=" + opRuntimeDir(opID),
 		"PATH=" + builderManagerChildPath,
 		"SSL_CERT_FILE=" + bundle,

@@ -486,8 +486,15 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 	}
 
 	// Explicit child environment; no os.Environ() inheritance.
+	// USER names the builder identity for buildkitd's rootless-mode
+	// detection (isRootlessConfig: RunningInUserNS && $USER != "" &&
+	// $USER != "root"); without it buildkitd v0.33 falls back to the
+	// root defaults and its OTEL trace controller mkdirs /run/buildkit,
+	// which an in-namespace root cannot create (M0/M1 carried USER and
+	// are the proven composition).
 	env := []string{
 		"HOME=" + builderManagerStateRoot,
+		"USER=" + builderManagerBuilderUser,
 		"XDG_RUNTIME_DIR=" + rtDir,
 		"PATH=" + builderManagerChildPath,
 	}
