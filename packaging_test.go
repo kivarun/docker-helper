@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -117,14 +119,21 @@ func TestScriptSyntax(t *testing.T) {
 		{"bash", "build-static.sh"},
 		{"bash", "build-bundle.sh"},
 		{"bash", "build-packages.sh"},
+		{"bash", "build-buildkit-payload.sh"},
 		{"bash", "build-manpages.sh"},
 		{"bash", "build-selinux-policy.sh"},
+		{"bash", "scripts/release-candidate.sh"},
+		{"bash", "scripts/release-2.4-p4b-packages-2404.sh"},
+		{"bash", "scripts/release-2.4-p4b-tw.sh"},
+		{"bash", "scripts/release-2.4-p4b-tw-vm.sh"},
+		{"bash", "scripts/uat-upgrade-baseline-fixture.sh"},
 		{"sh", "packaging/scripts/deb/postinstall.sh"},
 		{"sh", "packaging/scripts/deb/preremove.sh"},
 		{"sh", "packaging/scripts/deb/postremove.sh"},
 		{"sh", "packaging/scripts/rpm/postinstall.sh"},
 		{"sh", "packaging/scripts/rpm/preremove.sh"},
 		{"sh", "packaging/scripts/rpm/postremove.sh"},
+		{"sh", "packaging/scripts/lib/provision-builder.sh"},
 	}
 
 	for _, tt := range tests {
@@ -684,6 +693,60 @@ func TestSystemUnitPATHMatchesSELinuxResolver(t *testing.T) {
 	want := strings.Join(dockerCLISearchPath, ":")
 	if declared != want {
 		t.Errorf("unit PATH = %q, want %q (must equal dockerCLISearchPath)", declared, want)
+	}
+}
+
+// TestMainUnitBuilderCoupling verifies the weak builder-backend coupling in
+// the main unit: Wants= + After= on docker-helper-builder.service (the
+// builder pulls in and orders before the daemon on every start), NO hard
+// Requires= (builder unavailability must only fail BUILD requests closed
+// while run/pull/registry-login stay available), and the main unit's
+// NoNewPrivileges=true remains untouched (the NNP exception is recorded for
+// the BUILDER unit only).
+func TestMainUnitBuilderCoupling(t *testing.T) {
+	path := "packaging/systemd/system/docker-helper.service"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("system unit %s not found: %v", path, err)
+	}
+	lines := strings.Split(string(data), "\n")
+
+	// active joins EVERY active line carrying the directive (the main unit
+	// legitimately has multiple Wants=/After= lines).
+	active := func(directive string) (string, bool) {
+		var found []string
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.HasPrefix(trimmed, directive) {
+				found = append(found, strings.TrimSpace(strings.TrimPrefix(trimmed, directive)))
+			}
+		}
+		if len(found) == 0 {
+			return "", false
+		}
+		return strings.Join(found, " "), true
+	}
+
+	if got, ok := active("Wants="); !ok || !strings.Contains(got, "docker-helper-builder.service") {
+		t.Errorf("main unit Wants= = %q (present %v), want to include docker-helper-builder.service", got, ok)
+	}
+	if got, ok := active("After="); !ok || !strings.Contains(got, "docker-helper-builder.service") {
+		t.Errorf("main unit After= = %q (present %v), want to include docker-helper-builder.service", got, ok)
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "Requires=") && strings.Contains(trimmed, "docker-helper-builder.service") {
+			t.Errorf("main unit must not hard-require the builder service (weak coupling only): %q", trimmed)
+		}
+	}
+	if got, ok := active("NoNewPrivileges="); !ok || got != "true" {
+		t.Errorf("main unit NoNewPrivileges = %q (present %v), want true (the NNP exception is the builder unit only)", got, ok)
 	}
 }
 
@@ -1312,6 +1375,11 @@ type systemScriptEnv struct {
 	// selection (AA_ENABLED_PATH / SELINUX_ENFORCE_PATH).
 	aaEnabledPath      string
 	selinuxEnforcePath string
+	// Emulated /etc/subuid and /etc/subgid databases (the uninstall --purge
+	// identity deregistration reads them through the SUBUID_DB/SUBGID_DB
+	// overrides).
+	subuidDB string
+	subgidDB string
 }
 
 // dest returns a path under the emulated system root.
@@ -1555,6 +1623,10 @@ exit 0
 	// production scripts support (AA_ENABLED_PATH / SELINUX_ENFORCE_PATH).
 	e.aaEnabledPath = filepath.Join(aaDir, "enabled")
 	e.selinuxEnforcePath = filepath.Join(selinuxDir, "enforce")
+	// Emulated subid databases for the uninstall --purge identity
+	// deregistration contract.
+	e.subuidDB = e.dest("etc/subuid")
+	e.subgidDB = e.dest("etc/subgid")
 	return e
 }
 
@@ -1578,6 +1650,35 @@ exit 0
 	if err := os.WriteFile(filepath.Join(e.scriptDir, "systemd", "system", "docker-helper.service"), []byte("[Service]"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// Release 2.4 builder backend bundle members: the builder unit, the
+	// pinned BuildKit payload, and the provisioning owner fixture (a logging
+	// fake — the REAL provisioner mutates host account state and must never
+	// execute in the Go test environment; content contracts are covered by
+	// the source tests and the CI install proofs).
+	if err := os.WriteFile(filepath.Join(e.scriptDir, "systemd", "system", "docker-helper-builder.service"), []byte("[Service]"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(e.scriptDir, "buildkit"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range []string{"buildkitd", "buildctl", "buildkit-runc", "LICENSE", "MANIFEST"} {
+		if err := os.WriteFile(filepath.Join(e.scriptDir, "buildkit", member), []byte("fixture-buildkit-"+member), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(e.scriptDir, "scripts"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.scriptDir, "scripts", "provision-builder.sh"), []byte(fmt.Sprintf(`#!/bin/sh
+echo "provision-builder: $@" >> "%s"
+[ "${PROVISION_FAIL:-false}" = "true" ] && {
+  echo "provision-builder: FAILED: test-injected failure" >&2
+  exit 1
+}
+exit 0
+`, e.logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(e.scriptDir, "apparmor"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1589,6 +1690,9 @@ exit 0
 		"PATH=" + e.fakeBinDir + ":" + os.Getenv("PATH"),
 		"BINARY_DEST=" + e.dest("bin/docker-helper"),
 		"UNIT_DEST=" + e.dest("etc/systemd/system/docker-helper.service"),
+		"BUILDER_UNIT_DEST=" + e.dest("etc/systemd/system/docker-helper-builder.service"),
+		"BUILDKIT_BIN_DEST=" + e.dest("usr/libexec/docker-helper/buildkit"),
+		"BUILDKIT_DOC_DEST=" + e.dest("usr/share/doc/docker-helper/buildkit"),
 		"AA_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-system"),
 		"AA_STATE_FILE=" + e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
 		"AA_LEGACY_FRAGMENT=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
@@ -1629,6 +1733,13 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 		"PATH=" + e.fakeBinDir + ":" + os.Getenv("PATH"),
 		"BINARY_DEST=" + e.dest("bin/docker-helper"),
 		"UNIT_DEST=" + e.dest("etc/systemd/system/docker-helper.service"),
+		"BUILDER_UNIT_DEST=" + e.dest("etc/systemd/system/docker-helper-builder.service"),
+		"BUILDKIT_BIN_DIR=" + e.dest("usr/libexec/docker-helper/buildkit"),
+		"BUILDKIT_DOC_DIR=" + e.dest("usr/share/doc/docker-helper/buildkit"),
+		"BUILDER_STATE_DIR=" + e.dest("var/lib/docker-helper-builder"),
+		"BUILDER_RUNTIME_DIR=" + e.dest("run/docker-helper-builder"),
+		"SUBUID_DB=" + e.subuidDB,
+		"SUBGID_DB=" + e.subgidDB,
 		"AA_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-system"),
 		"AA_STATE_FILE=" + e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
 		"AA_LEGACY_FRAGMENT=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
@@ -3145,11 +3256,30 @@ func TestNfpmConfigFile(t *testing.T) {
 	for _, path := range []string{
 		"/usr/bin/docker-helper",
 		"/usr/lib/systemd/system/docker-helper.service",
+		"/usr/lib/systemd/system/docker-helper-builder.service",
 		"/etc/apparmor.d/docker-helper-system",
 		"/usr/share/docker-helper/apparmor/local/curl",
+		// Builder backend: the pinned BuildKit payload (exact proven
+		// executable set), its license/manifest material, and the ONE
+		// provisioning owner shipped for the scriptlets to execute.
+		"/usr/libexec/docker-helper/buildkit/buildkitd",
+		"/usr/libexec/docker-helper/buildkit/buildctl",
+		"/usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"/usr/share/doc/docker-helper/buildkit/LICENSE",
+		"/usr/share/doc/docker-helper/buildkit/MANIFEST",
+		"/usr/share/docker-helper/lib/provision-builder.sh",
 	} {
 		if !strings.Contains(content, path) {
 			t.Errorf("nfpm.yaml missing required destination: %s", path)
+		}
+	}
+
+	// The payload is the EXACT proven executable set: the CNI and QEMU
+	// helpers are unused by the slirp4netns composition and must not be
+	// shipped (plan §7).
+	for _, unused := range []string{"buildkit-cni-", "buildkit-qemu-"} {
+		if strings.Contains(content, unused) {
+			t.Errorf("nfpm.yaml must not ship unused BuildKit helpers: %s", unused)
 		}
 	}
 
@@ -3229,6 +3359,13 @@ func TestNfpmConfigFile(t *testing.T) {
 	if !strings.Contains(debSection, "apparmor") {
 		t.Error("DEB depends must include apparmor")
 	}
+	// Builder identity provisioning (useradd/usermod) and the distro-owned
+	// builder runtime the unit executes.
+	for _, dep := range []string{"passwd", "uidmap", "rootlesskit", "slirp4netns"} {
+		if !strings.Contains(debSection, dep) {
+			t.Errorf("DEB depends must include %s (builder provisioning/runtime)", dep)
+		}
+	}
 	for _, line := range strings.Split(debSection, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "- docker") {
 			t.Error("DEB depends must not include docker package")
@@ -3265,6 +3402,14 @@ func TestNfpmConfigFile(t *testing.T) {
 	// not be turned into a version-floor substitute for libselinux.
 	if !strings.Contains(rpmSection, "policycoreutils") {
 		t.Error("RPM depends must include policycoreutils")
+	}
+	// Builder provisioning + runtime on openSUSE Tumbleweed: useradd/usermod
+	// AND newuidmap/newgidmap come from shadow there (there is no uidmap
+	// package in the Tumbleweed OSS repo).
+	for _, dep := range []string{"shadow", "rootlesskit", "slirp4netns"} {
+		if !strings.Contains(rpmSection, dep) {
+			t.Errorf("RPM depends must include %s (builder provisioning/runtime)", dep)
+		}
 	}
 	for _, line := range strings.Split(rpmSection, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "- docker") {
@@ -3379,6 +3524,48 @@ func TestBuildPackagesScriptContent(t *testing.T) {
 // TestPackageMetadataIntegration builds packages with a dummy binary and
 // verifies metadata: contents, modes, dependencies, conffiles/config flags.
 // Skipped only when nfpm is unavailable.
+// writeSyntheticBuildkitPayload stages the five BuildKit payload members
+// with the /usr-rooted layout under tmpDir/buildkit (the metadata-test
+// fixture for the nfpm.yaml payload src entries).
+func writeSyntheticBuildkitPayload(t *testing.T, tmpDir string) {
+	t.Helper()
+	for _, member := range []string{
+		"buildkit/usr/libexec/docker-helper/buildkit/buildkitd",
+		"buildkit/usr/libexec/docker-helper/buildkit/buildctl",
+		"buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"buildkit/usr/share/doc/docker-helper/buildkit/LICENSE",
+		"buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST",
+	} {
+		path := filepath.Join(tmpDir, member)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		mode := os.FileMode(0644)
+		if strings.HasSuffix(member, "buildkitd") || strings.HasSuffix(member, "buildctl") || strings.HasSuffix(member, "buildkit-runc") {
+			mode = 0755
+		}
+		if err := os.WriteFile(path, []byte("fixture-"+filepath.Base(member)), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// rewriteBuildkitSrcs rewrites the payload src entries of the packaged
+// nfpm.yaml to the synthetic staging paths under tmpDir.
+func rewriteBuildkitSrcs(configContent, tmpDir string) string {
+	for _, src := range []string{
+		"dist/buildkit/usr/libexec/docker-helper/buildkit/buildkitd",
+		"dist/buildkit/usr/libexec/docker-helper/buildkit/buildctl",
+		"dist/buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"dist/buildkit/usr/share/doc/docker-helper/buildkit/LICENSE",
+		"dist/buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST",
+	} {
+		configContent = strings.ReplaceAll(configContent,
+			"src: "+src, "src: "+filepath.Join(tmpDir, strings.TrimPrefix(src, "dist/")))
+	}
+	return configContent
+}
+
 func TestPackageMetadataIntegration(t *testing.T) {
 	requirePackagingTool(t, "nfpm")
 
@@ -3407,6 +3594,9 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	// Create dummy compressed man pages (required by nfpm.yaml).
 	man1, man5 := writeDummyManPages(t, tmpDir)
 
+	// Create the synthetic pinned BuildKit payload (required by nfpm.yaml).
+	writeSyntheticBuildkitPayload(t, tmpDir)
+
 	// Create a temporary nFPM config that uses the dummy binary and tmp output.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -3421,6 +3611,8 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+man5)
 	// Replace dist/completions/docker-helper with the dummy completion path.
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
+	// Replace the pinned BuildKit payload srcs with the synthetic staging.
+	configContent = rewriteBuildkitSrcs(configContent, tmpDir)
 	// Replace ${VERSION} with test version.
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
 
@@ -3512,6 +3704,9 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	// Create dummy compressed man pages (required by nfpm.yaml).
 	man1, man5 := writeDummyManPages(t, tmpDir)
 
+	// Create the synthetic pinned BuildKit payload (required by nfpm.yaml).
+	writeSyntheticBuildkitPayload(t, tmpDir)
+
 	// Create a temporary nFPM config.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -3522,6 +3717,7 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+man1)
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+man5)
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
+	configContent = rewriteBuildkitSrcs(configContent, tmpDir)
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
 
 	configFile := filepath.Join(tmpDir, "nfpm.yaml")
@@ -3829,6 +4025,14 @@ func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
 	if !strings.Contains(depends, "apparmor") {
 		t.Error("DEB Depends must include apparmor")
 	}
+	// Builder identity provisioning (useradd/usermod = passwd) and the
+	// distro-owned builder runtime (rootlesskit, slirp4netns, newuidmap/
+	// newgidmap = uidmap on Debian/Ubuntu).
+	for _, dep := range []string{"passwd", "uidmap", "rootlesskit", "slirp4netns"} {
+		if !strings.Contains(depends, dep) {
+			t.Errorf("DEB Depends must include %s (builder provisioning/runtime)", dep)
+		}
+	}
 	if strings.Contains(depends, "docker") {
 		t.Error("DEB Depends must not include docker package")
 	}
@@ -3887,6 +4091,13 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	if !strings.Contains(requires, "policycoreutils") {
 		t.Error("RPM Requires must include policycoreutils")
 	}
+	// Builder provisioning + runtime on openSUSE Tumbleweed (useradd/usermod
+	// and newuidmap/newgidmap come from shadow there).
+	for _, dep := range []string{"shadow", "rootlesskit", "slirp4netns"} {
+		if !strings.Contains(requires, dep) {
+			t.Errorf("RPM Requires must include %s (builder provisioning/runtime)", dep)
+		}
+	}
 	// Check for docker dependency (various package names).
 	for _, dep := range []string{"docker.io", "docker-ce", "docker-" + "community"} {
 		if strings.Contains(requires, dep) {
@@ -3923,8 +4134,15 @@ func verifyPackageContents(t *testing.T, format, contents string) {
 	for _, path := range []string{
 		"/usr/bin/docker-helper",
 		"/usr/lib/systemd/system/docker-helper.service",
+		"/usr/lib/systemd/system/docker-helper-builder.service",
 		"/etc/apparmor.d/docker-helper-system",
 		"/usr/share/docker-helper/apparmor/local/curl",
+		"/usr/libexec/docker-helper/buildkit/buildkitd",
+		"/usr/libexec/docker-helper/buildkit/buildctl",
+		"/usr/libexec/docker-helper/buildkit/buildkit-runc",
+		"/usr/share/doc/docker-helper/buildkit/LICENSE",
+		"/usr/share/doc/docker-helper/buildkit/MANIFEST",
+		"/usr/share/docker-helper/lib/provision-builder.sh",
 	} {
 		if !strings.Contains(contents, path) {
 			t.Errorf("%s missing required path: %s", format, path)
@@ -3962,13 +4180,20 @@ func verifyPackageModes(t *testing.T, format, contents string) {
 			continue
 		}
 		switch path {
-		case "usr/bin/docker-helper":
+		case "usr/bin/docker-helper",
+			"usr/libexec/docker-helper/buildkit/buildkitd",
+			"usr/libexec/docker-helper/buildkit/buildctl",
+			"usr/libexec/docker-helper/buildkit/buildkit-runc":
 			if mode != "-rwxr-xr-x" {
 				t.Errorf("%s: %s mode = %s, want -rwxr-xr-x (0755)", format, path, mode)
 			}
 		case "usr/lib/systemd/system/docker-helper.service",
+			"usr/lib/systemd/system/docker-helper-builder.service",
 			"etc/apparmor.d/docker-helper-system",
-			"usr/share/docker-helper/apparmor/local/curl":
+			"usr/share/docker-helper/apparmor/local/curl",
+			"usr/share/doc/docker-helper/buildkit/LICENSE",
+			"usr/share/doc/docker-helper/buildkit/MANIFEST",
+			"usr/share/docker-helper/lib/provision-builder.sh":
 			if mode != "-rw-r--r--" {
 				t.Errorf("%s: %s mode = %s, want -rw-r--r-- (0644)", format, path, mode)
 			}
@@ -3988,13 +4213,20 @@ func verifyRPMModesPerms(t *testing.T, modeOutput string) {
 		mode := parts[0]
 		path := strings.TrimPrefix(parts[1], "/")
 		switch path {
-		case "usr/bin/docker-helper":
+		case "usr/bin/docker-helper",
+			"usr/libexec/docker-helper/buildkit/buildkitd",
+			"usr/libexec/docker-helper/buildkit/buildctl",
+			"usr/libexec/docker-helper/buildkit/buildkit-runc":
 			if mode != "-rwxr-xr-x" {
 				t.Errorf("RPM: %s mode = %s, want -rwxr-xr-x", path, mode)
 			}
 		case "usr/lib/systemd/system/docker-helper.service",
+			"usr/lib/systemd/system/docker-helper-builder.service",
 			"etc/apparmor.d/docker-helper-system",
-			"usr/share/docker-helper/apparmor/local/curl":
+			"usr/share/docker-helper/apparmor/local/curl",
+			"usr/share/doc/docker-helper/buildkit/LICENSE",
+			"usr/share/doc/docker-helper/buildkit/MANIFEST",
+			"usr/share/docker-helper/lib/provision-builder.sh":
 			if mode != "-rw-r--r--" {
 				t.Errorf("RPM: %s mode = %s, want -rw-r--r--", path, mode)
 			}
@@ -4003,6 +4235,140 @@ func verifyRPMModesPerms(t *testing.T, modeOutput string) {
 }
 
 // --- Full pipeline integration test (requires nfpm + musl-gcc) ---
+
+// TestBuildKitPayloadPinConsistency verifies the pinned BuildKit identity is
+// owned by build-buildkit-payload.sh alone and that the surfaces that quote
+// it (the implementation plan §7 pin, the P4-A1 workflow, the P4-A1 record
+// digests) carry the same values, and that the install-proof scripts derive
+// the pins from the owner instead of hardcoding them.
+func TestBuildKitPayloadPinConsistency(t *testing.T) {
+	pins := buildkitPayloadPins(t)
+
+	planData, err := os.ReadFile("docs/release-2.4-implementation-plan.md")
+	if err != nil {
+		t.Fatalf("implementation plan not found: %v", err)
+	}
+	plan := string(planData)
+	if !strings.Contains(plan, pins["BUILDKIT_TARBALL"]) {
+		t.Error("plan §7 must record the same pinned BuildKit tarball digest as build-buildkit-payload.sh")
+	}
+
+	workflowData, err := os.ReadFile(".github/workflows/release-2.4-p4a1-builder-unit.yml")
+	if err != nil {
+		t.Fatalf("P4-A1 workflow not found: %v", err)
+	}
+	workflow := string(workflowData)
+	if !strings.Contains(workflow, pins["BUILDKIT_TARBALL"]) {
+		t.Error("P4-A1 workflow must carry the same pinned BuildKit tarball digest as build-buildkit-payload.sh")
+	}
+
+	recordData, err := os.ReadFile("docs/release-2.4-build-sandbox.md")
+	if err != nil {
+		t.Fatalf("build-sandbox record not found: %v", err)
+	}
+	record := string(recordData)
+	for key, name := range map[string]string{"BUILDKITD": "buildkitd", "BUILDCTL": "buildctl", "BUILDKIT_RUNC": "buildkit-runc"} {
+		if !strings.Contains(record, pins[key]) {
+			t.Errorf("the P4-A1 record must carry the same pinned %s digest as build-buildkit-payload.sh", name)
+		}
+	}
+
+	for _, proof := range []string{"scripts/release-2.4-p4b-packages-2404.sh", "scripts/release-2.4-p4b-tw.sh"} {
+		data, err := os.ReadFile(proof)
+		if err != nil {
+			t.Fatalf("%s not found: %v", proof, err)
+		}
+		content := string(data)
+		for _, pin := range pins {
+			if strings.Contains(content, pin) {
+				t.Errorf("%s must not hardcode a pinned BuildKit digest; it derives the pins from build-buildkit-payload.sh (the single owner)", proof)
+			}
+		}
+		if !strings.Contains(content, "pin()") || !strings.Contains(content, "build-buildkit-payload.sh") {
+			t.Errorf("%s must derive the payload pins from build-buildkit-payload.sh", proof)
+		}
+	}
+}
+
+// TestBuildKitPayloadScriptContract verifies the pinned payload staging
+// owner: the pinned tarball is digest-verified BEFORE any staging, the
+// extraction is the exact proven executable set, the LICENSE digest is
+// verified, the MANIFEST records the version + digests, and the verified
+// upstream NOTICE absence is recorded (not fabricated).
+func TestBuildKitPayloadScriptContract(t *testing.T) {
+	data, err := os.ReadFile("build-buildkit-payload.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	for _, want := range []string{
+		`BUILDKIT_VERSION="v0.33.0"`,
+		"BUILDKIT_TARBALL_SHA256=",
+		"BUILDKIT_LICENSE_SHA256=",
+		"ACTUAL_SHA256=",
+		"LICENSE_SHA=",
+		"bin/buildkitd bin/buildctl bin/buildkit-runc",
+		"MANIFEST",
+		"buildkit-version=",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("build-buildkit-payload.sh must contain %q", want)
+		}
+	}
+
+	// Digest verification must precede any staging (the extraction and the
+	// install lines come after both verification points).
+	tarballIdx := strings.Index(content, "ACTUAL_SHA256=\"$(sha256sum")
+	licenseIdx := strings.Index(content, "LICENSE_SHA=\"$(sha256sum")
+	stageIdx := strings.Index(content, "install -d -m 0755 \"$BIN_DIR\"")
+	if tarballIdx < 0 || licenseIdx < 0 || stageIdx < 0 {
+		t.Fatal("build-buildkit-payload.sh verification/staging landmarks not found")
+	}
+	if tarballIdx > stageIdx || licenseIdx > stageIdx {
+		t.Error("build-buildkit-payload.sh must verify the tarball and LICENSE digests BEFORE staging")
+	}
+
+	// The verify-first reuse path must compare every member against the pins
+	// (the second assembler pass must reuse verified bytes, not re-download).
+	if !strings.Contains(content, "verify_staged") {
+		t.Error("build-buildkit-payload.sh must carry the verify-first re-staging path")
+	}
+
+	// The upstream NOTICE absence is recorded as a fact, not fabricated.
+	if !strings.Contains(content, "NOTICE") {
+		t.Error("build-buildkit-payload.sh must record the upstream NOTICE disposition")
+	}
+}
+
+// TestBundleBuilderMembers verifies build-bundle.sh carries the builder
+// backend bundle members: the builder unit, the pinned BuildKit payload
+// (flat buildkit/ layout), the provisioning script, and their mandatory
+// tarball-path assertions.
+func TestBundleBuilderMembers(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	for _, want := range []string{
+		"systemd/system/docker-helper-builder.service",
+		"buildkit/buildkitd",
+		"buildkit/buildctl",
+		"buildkit/buildkit-runc",
+		"buildkit/LICENSE",
+		"buildkit/MANIFEST",
+		"scripts/provision-builder.sh",
+		"docker-helper-${VERSION}-linux-amd64/systemd/system/docker-helper-builder.service",
+		"docker-helper-${VERSION}-linux-amd64/buildkit/buildkitd",
+		"docker-helper-${VERSION}-linux-amd64/scripts/provision-builder.sh",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("build-bundle.sh must reference %q", want)
+		}
+	}
+}
 
 // TestPackageBuildIntegration runs the full build-packages.sh pipeline
 // and verifies the resulting packages. Skipped when nfpm is unavailable.
@@ -4076,6 +4442,202 @@ func TestPackageBuildIntegration(t *testing.T) {
 	if rpmPath := packagingInspectTool(t, "rpm"); rpmPath != "" {
 		verifyRPMPackage(t, rpmPath, rpmFile)
 	}
+
+	// Build the tarball from the same staged payload (build-packages.sh
+	// staged dist/buildkit through the single pinned payload owner;
+	// build-bundle.sh reuses that staging verify-first) and prove the pinned
+	// BuildKit payload is byte-identical across all three formats.
+	bundleOut, bundleErr := exec.Command("bash", "build-bundle.sh", testVersion).CombinedOutput()
+	if bundleErr != nil {
+		t.Fatalf("build-bundle.sh failed: %v\n%s", bundleErr, bundleOut)
+	}
+	verifyBuildkitPayloadAcrossFormats(t, testVersion, debFile, rpmFile)
+}
+
+// buildkitPayloadPins reads the pinned BuildKit identities from their single
+// owner (build-buildkit-payload.sh): tarball digest, LICENSE digest, the
+// three executable digests, and the generated MANIFEST digest.
+func buildkitPayloadPins(t *testing.T) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile("build-buildkit-payload.sh")
+	if err != nil {
+		t.Fatalf("build-buildkit-payload.sh not found: %v", err)
+	}
+	re := regexp.MustCompile(`^([A-Z_]+[A-Z0-9]*)*_SHA256="([0-9a-f]{64})"$`)
+	pins := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if m := re.FindStringSubmatch(line); m != nil {
+			pins[m[1]] = m[2]
+		}
+	}
+	for _, key := range []string{"BUILDKIT_TARBALL", "BUILDKIT_LICENSE", "BUILDKIT_MANIFEST", "BUILDKITD", "BUILDCTL", "BUILDKIT_RUNC"} {
+		if pins[key] == "" {
+			t.Errorf("build-buildkit-payload.sh does not pin %s", key)
+		}
+	}
+	return pins
+}
+
+// verifyBuildkitPayloadAcrossFormats extracts the pinned BuildKit payload
+// members from the built tarball, DEB and RPM and fails closed when the
+// digests differ across formats or do not match the pinned owner constants.
+// Extraction tooling availability follows the packagingInspectTool pattern:
+// a format whose extraction tool is missing (outside packaging-integration
+// mode) logs and skips that format; in packaging-integration mode the tools
+// are required.
+func verifyBuildkitPayloadAcrossFormats(t *testing.T, version, debFile, rpmFile string) {
+	t.Helper()
+	pins := buildkitPayloadPins(t)
+
+	roots := make(map[string]string, 3) // format -> extraction root
+	tarDir := t.TempDir()
+	tarFile := filepath.Join("dist", "docker-helper-"+version+"-linux-amd64.tar.gz")
+	if _, err := os.Stat(tarFile); err != nil {
+		t.Fatalf("tarball not found: %v", err)
+	}
+	if out, err := exec.Command("tar", "xzf", tarFile, "-C", tarDir).CombinedOutput(); err != nil {
+		t.Fatalf("tar extraction failed: %v\n%s", err, out)
+	}
+	roots["tar"] = filepath.Join(tarDir, "docker-helper-"+version+"-linux-amd64")
+
+	if dpkgDeb := packagingInspectTool(t, "dpkg-deb"); dpkgDeb != "" {
+		debDir := t.TempDir()
+		if out, err := exec.Command(dpkgDeb, "-x", debFile, debDir).CombinedOutput(); err != nil {
+			t.Fatalf("dpkg-deb extraction failed: %v\n%s", err, out)
+		}
+		roots["deb"] = debDir
+	} else if _, arStatus, _ := packagingToolPolicy(t, "ar"); arStatus == packagingToolOK {
+		// dpkg-deb is unavailable; a DEB is a standard ar archive
+		// (debian-binary/control.tar.gz/data.tar.gz), so the data payload
+		// extracts with ar + tar alone.
+		debDir := t.TempDir()
+		debAbs, err := filepath.Abs(debFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		arCmd := exec.Command("ar", "x", debAbs)
+		arCmd.Dir = debDir
+		if out, err := arCmd.CombinedOutput(); err != nil {
+			t.Fatalf("ar extraction failed: %v\n%s", err, out)
+		}
+		if out, err := exec.Command("tar", "xzf", filepath.Join(debDir, "data.tar.gz"), "-C", debDir).CombinedOutput(); err != nil {
+			t.Fatalf("DEB data.tar.gz extraction failed: %v\n%s", err, out)
+		}
+		roots["deb"] = debDir
+	}
+
+	// nFPM's RPM payload carries absolute cpio entry names; GNU cpio is
+	// required for the --no-absolute-filenames extraction (the release
+	// producer enforces the same requirement). The authoritative gate is
+	// the extraction itself: a busybox cpio fails it and the failure is
+	// handled per the current mode below.
+	if _, ok := roots["rpm"]; !ok {
+		if _, status, _ := packagingToolPolicy(t, "rpm2cpio"); status == packagingToolOK {
+			cpioPath, cpioStatus, cpioErr := packagingToolPolicy(t, "cpio")
+			if cpioStatus != packagingToolOK {
+				t.Fatalf("cpio missing in packaging-integration mode: %v", cpioErr)
+			}
+			rpmDir := t.TempDir()
+			cpioData := &bytes.Buffer{}
+			cmd := exec.Command("rpm2cpio", rpmFile)
+			cmd.Stdout = cpioData
+			if err := cmd.Run(); err != nil && cpioData.Len() == 0 {
+				t.Fatalf("rpm2cpio produced no payload: %v", err)
+			}
+			cpioProc := exec.Command(cpioPath, "-idmu", "--no-absolute-filenames", "--quiet")
+			cpioProc.Stdin = cpioData
+			cpioProc.Dir = rpmDir
+			if out, err := cpioProc.CombinedOutput(); err != nil {
+				if packagingIntegrationMode() {
+					t.Fatalf("RPM payload extraction failed: %v\n%s", err, out)
+				}
+				t.Logf("RPM payload extraction failed, skipping optional RPM verification: %v", err)
+			} else {
+				roots["rpm"] = rpmDir
+			}
+		}
+	}
+
+	if len(roots) < 2 {
+		if packagingIntegrationMode() {
+			t.Fatal("expected at least two extraction roots in packaging-integration mode")
+		}
+		t.Skip("no package extraction tooling available, skipping cross-format payload identity check")
+	}
+
+	// format -> member-relative path (under the /usr-rooted layout; the
+	// tarball uses the flat bundle layout).
+	paths := map[string]map[string]string{
+		"tar": {
+			"buildkitd":     "buildkit/buildkitd",
+			"buildctl":      "buildkit/buildctl",
+			"buildkit-runc": "buildkit/buildkit-runc",
+			"LICENSE":       "buildkit/LICENSE",
+			"MANIFEST":      "buildkit/MANIFEST",
+		},
+		"deb": {
+			"buildkitd":     "usr/libexec/docker-helper/buildkit/buildkitd",
+			"buildctl":      "usr/libexec/docker-helper/buildkit/buildctl",
+			"buildkit-runc": "usr/libexec/docker-helper/buildkit/buildkit-runc",
+			"LICENSE":       "usr/share/doc/docker-helper/buildkit/LICENSE",
+			"MANIFEST":      "usr/share/doc/docker-helper/buildkit/MANIFEST",
+		},
+		"rpm": {
+			"buildkitd":     "usr/libexec/docker-helper/buildkit/buildkitd",
+			"buildctl":      "usr/libexec/docker-helper/buildkit/buildctl",
+			"buildkit-runc": "usr/libexec/docker-helper/buildkit/buildkit-runc",
+			"LICENSE":       "usr/share/doc/docker-helper/buildkit/LICENSE",
+			"MANIFEST":      "usr/share/doc/docker-helper/buildkit/MANIFEST",
+		},
+	}
+
+	pinFor := map[string]string{
+		"buildkitd":     pins["BUILDKITD"],
+		"buildctl":      pins["BUILDCTL"],
+		"buildkit-runc": pins["BUILDKIT_RUNC"],
+		"LICENSE":       pins["BUILDKIT_LICENSE"],
+		"MANIFEST":      pins["BUILDKIT_MANIFEST"],
+	}
+	for _, member := range []string{"buildkitd", "buildctl", "buildkit-runc", "LICENSE", "MANIFEST"} {
+		digests := make(map[string]string)
+		for format, root := range roots {
+			rel, ok := paths[format][member]
+			if !ok {
+				continue
+			}
+			file := filepath.Join(root, rel)
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatalf("%s missing payload member %s at %s: %v", format, member, rel, err)
+			}
+			sum := fmt.Sprintf("%x", sha256Sum(raw))
+			digests[format] = sum
+			if want := pinFor[member]; sum != want {
+				t.Errorf("%s: payload member %s digest %s != pinned %s", format, member, sum, want)
+			}
+		}
+		seen := make(map[string]bool)
+		for format, sum := range digests {
+			if seen[sum] {
+				continue
+			}
+			seen[sum] = true
+			if len(seen) == 1 {
+				continue
+			}
+			t.Errorf("payload member %s digests differ across formats (at least two distinct: %s=%s)", member, format, sum)
+		}
+		if got := len(digests); got > 0 {
+			t.Logf("payload member %s byte-identical across %d formats", member, got)
+		}
+	}
+}
+
+// sha256Sum computes the SHA-256 of raw bytes (stdlib only).
+func sha256Sum(data []byte) []byte {
+	sum := sha256.Sum256(data)
+	return sum[:]
 }
 
 // --- Lifecycle script behavioral tests ---
@@ -4304,6 +4866,15 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 	// Replace migration state paths with test-controlled paths.
 	modified = strings.ReplaceAll(modified, "/var/lib/docker-helper/apparmor/managed-boundaries", "$AA_STATE_FILE")
 	modified = strings.ReplaceAll(modified, "/etc/apparmor.d/docker-helper.d/managed-roots", "$AA_LEGACY_FRAGMENT")
+	// Replace builder runtime/state paths with test-controlled paths BEFORE
+	// the main paths (the builder strings contain the main stem as a
+	// prefix; every purge rm must land inside the test tree, never at the
+	// real system paths).
+	modified = strings.ReplaceAll(modified, "/var/lib/docker-helper-builder", "$BUILDER_STATE_DIR")
+	modified = strings.ReplaceAll(modified, "/run/docker-helper-builder", "$BUILDER_RUNTIME_DIR")
+	modified = strings.ReplaceAll(modified, "/var/lib/docker-helper", "$STATE_DIR")
+	modified = strings.ReplaceAll(modified, "/run/docker-helper", "$RUNTIME_DIR")
+	modified = strings.ReplaceAll(modified, "/etc/docker-helper", "$TEST_CONFIG_DIR")
 	modifiedFile := filepath.Join(scriptDir, "modified.sh")
 	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
 		t.Fatal(err)
@@ -4314,6 +4885,22 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		if err := os.MkdirAll(testRunDir, 0755); err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	// Default: the builder provisioning owner is a logging fake; the caller
+	// can override PROVISION_BUILDER (or set PROVISION_FAIL) via extraEnv.
+	// Tests that need the REAL provisioner content pass its repo path
+	// explicitly; the real provisioner must never execute in the Go test
+	// environment (it mutates the host account databases).
+	if err := os.WriteFile(filepath.Join(fakeDir, "provision-builder"), []byte(fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+[ "${PROVISION_FAIL:-false}" = "true" ] && {
+  echo "provision-builder: FAILED: test-injected failure" >&2
+  exit 1
+}
+exit 0
+`, logFile)), 0755); err != nil {
+		t.Fatal(err)
 	}
 
 	// Default: AppArmor LSM is active. Tests can override by providing
@@ -4371,6 +4958,12 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		"SELINUX_ENFORCE_PATH="+selinuxEnforcePath,
 		"AA_STATE_FILE="+aaStateFile,
 		"AA_LEGACY_FRAGMENT="+aaLegacyFragment,
+		"BUILDER_STATE_DIR="+filepath.Join(tmpDir, "var", "lib", "docker-helper-builder"),
+		"BUILDER_RUNTIME_DIR="+filepath.Join(tmpDir, "run", "docker-helper-builder"),
+		"STATE_DIR="+filepath.Join(tmpDir, "var", "lib", "docker-helper"),
+		"RUNTIME_DIR="+filepath.Join(tmpDir, "run", "docker-helper"),
+		"TEST_CONFIG_DIR="+filepath.Join(tmpDir, "etc", "docker-helper"),
+		"PROVISION_BUILDER="+filepath.Join(fakeDir, "provision-builder"),
 	)
 	env = append(env, extraEnv...)
 
@@ -4446,18 +5039,24 @@ func TestDebPostinstallInactive(t *testing.T) {
 	if !found {
 		t.Error("must call systemctl daemon-reload")
 	}
-	// Must not issue a restart operation, start, or enable when the service
-	// was inactive: the was_active guard must keep it inactive.
+	// Must not issue a restart operation, start, or enable of the MAIN
+	// service when it was inactive: the was_active guard must keep the
+	// daemon inactive. The BUILDER service enablement is unconditional
+	// (package activation enables both units; the daemon start coupling is
+	// the main unit's Wants=).
 	for _, c := range calls {
-		if strings.Contains(c, "restart") || strings.Contains(c, " start") || strings.Contains(c, "enable") {
-			t.Errorf("must not restart/start/enable service when inactive: %s", c)
+		if strings.Contains(c, "restart") ||
+			strings.Contains(c, " start docker-helper.service") ||
+			strings.Contains(c, "enable docker-helper.service") {
+			t.Errorf("must not restart/start/enable the main service when inactive: %s", c)
 		}
 	}
 }
 
 // TestDebPostinstallActive verifies postinst on upgrade (active):
 // is-active -> replace -> daemon-reload -> the inactive-safe restart
-// operation, and never start/enable.
+// operation, and never start/enable of the MAIN service (the builder
+// unit enablement is unconditional).
 func TestDebPostinstallActive(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, true, false)
@@ -4476,8 +5075,10 @@ func TestDebPostinstallActive(t *testing.T) {
 			restarts++
 			continue
 		}
-		if strings.Contains(c, " start") || strings.Contains(c, "enable") {
-			t.Errorf("an active service must be restarted, not started/enabled: %s", c)
+		// The builder enablement is unconditional (both units enabled);
+		// the MAIN service must be restarted, not started/enabled.
+		if strings.Contains(c, " start docker-helper.service") || strings.Contains(c, "enable docker-helper.service") {
+			t.Errorf("an active main service must be restarted, not started/enabled: %s", c)
 		}
 	}
 	if restarts != 1 {
@@ -4929,8 +5530,10 @@ func TestRpmPostinstallActive(t *testing.T) {
 			restarts++
 			continue
 		}
-		if strings.Contains(c, " start") || strings.Contains(c, "enable") {
-			t.Errorf("an active service must be restarted, not started/enabled: %s", c)
+		// The builder enablement is unconditional (both units enabled);
+		// the MAIN service must be restarted, not started/enabled.
+		if strings.Contains(c, " start docker-helper.service") || strings.Contains(c, "enable docker-helper.service") {
+			t.Errorf("an active main service must be restarted, not started/enabled: %s", c)
 		}
 	}
 	if restarts != 1 {
@@ -10939,5 +11542,544 @@ func TestUATRedactFunctionsMaskBearerSentinels(t *testing.T) {
 				t.Errorf("%s redact output carries no replacement marker: %s", script, redacted)
 			}
 		})
+	}
+}
+
+// --- Release 2.4 P4 packaging lifecycle tests ---
+//
+// These tests exercise the wired packaging lifecycle through the production
+// scripts with fake process/seam tools; the REAL provisioning, install, and
+// upgrade semantics are proven against generated packages by the CI
+// packaging jobs (scripts/release-2.4-p4b-*.sh) and the canonical producer.
+
+// TestDebPostinstallProvisionsBuilderThroughOwner verifies the DEB postinst
+// executes the canonical provisioning owner exactly once per configure, that
+// the provisioning happens BEFORE any MAC/daemon-reload work, and that a
+// second configure (dpkg recovery) stays an idempotent no-op success.
+func TestDebPostinstallProvisionsBuilderThroughOwner(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, nil)
+	if code != 0 {
+		t.Fatalf("postinst should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	provisions, reloadIdx, provisionIdx := 0, -1, -1
+	for i, c := range calls {
+		if strings.Contains(c, "provision-builder") {
+			provisions++
+			if provisionIdx < 0 {
+				provisionIdx = i
+			}
+		}
+		if strings.Contains(c, "daemon-reload") && reloadIdx < 0 {
+			reloadIdx = i
+		}
+	}
+	if provisions != 1 {
+		t.Errorf("postinst must execute the provisioning owner exactly once, got %d calls", provisions)
+	}
+	if reloadIdx >= 0 && provisionIdx > reloadIdx {
+		t.Errorf("provisioning must precede daemon-reload (provision %d, reload %d)", provisionIdx, reloadIdx)
+	}
+	// The builder unit enablement (package activation enables both units).
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "enable docker-helper-builder.service") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("postinst must enable docker-helper-builder.service")
+	}
+
+	// A second configure run (the dpkg recovery path) is an idempotent
+	// success and calls the owner exactly once again.
+	_, _, code = runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, nil)
+	if code != 0 {
+		t.Fatalf("second configure should exit 0 (idempotent), got %d", code)
+	}
+}
+
+// TestDebPostinstallProvisionerFailureClosed verifies a provisioning failure
+// aborts the DEB configuration fail-closed: nothing after the provisioning
+// call runs (no MAC work, no daemon-reload, no enable, no restart).
+func TestDebPostinstallProvisionerFailureClosed(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	out, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{"PROVISION_FAIL=true"})
+	if code == 0 {
+		t.Fatal("postinst must fail when provisioning fails")
+	}
+	if !strings.Contains(out, "provision-builder: FAILED") {
+		t.Errorf("the provisioning failure must surface to the operator, got: %s", out)
+	}
+	for _, c := range readLifecycleScriptCalls(t, logFile) {
+		if strings.Contains(c, "--replace") || strings.Contains(c, "daemon-reload") ||
+			strings.Contains(c, "enable") || strings.Contains(c, "restart") {
+			t.Errorf("nothing may run after a provisioning failure: %s", c)
+		}
+	}
+}
+
+// TestRpmPostinstallProvisionsBuilderThroughOwner verifies the RPM %post
+// executes the canonical provisioning owner exactly once, before the MAC
+// handling and daemon-reload, and enables the builder unit.
+func TestRpmPostinstallProvisionsBuilderThroughOwner(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	provisions, reloadIdx, provisionIdx := 0, -1, -1
+	for i, c := range calls {
+		if strings.Contains(c, "provision-builder") {
+			provisions++
+			if provisionIdx < 0 {
+				provisionIdx = i
+			}
+		}
+		if strings.Contains(c, "daemon-reload") && reloadIdx < 0 {
+			reloadIdx = i
+		}
+	}
+	if provisions != 1 {
+		t.Errorf("rpm postinst must execute the provisioning owner exactly once, got %d calls", provisions)
+	}
+	if reloadIdx >= 0 && provisionIdx > reloadIdx {
+		t.Errorf("provisioning must precede daemon-reload (provision %d, reload %d)", provisionIdx, reloadIdx)
+	}
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "enable docker-helper-builder.service") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("rpm postinst must enable docker-helper-builder.service")
+	}
+}
+
+// TestRpmPostinstallProvisionerFailureClosed verifies a provisioning failure
+// aborts the RPM %post fail-closed.
+func TestRpmPostinstallProvisionerFailureClosed(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{"PROVISION_FAIL=true"})
+	if code == 0 {
+		t.Fatal("rpm postinst must fail when provisioning fails")
+	}
+	if !strings.Contains(out, "provision-builder: FAILED") {
+		t.Errorf("the provisioning failure must surface to the operator, got: %s", out)
+	}
+	for _, c := range readLifecycleScriptCalls(t, logFile) {
+		if strings.Contains(c, "--replace") || strings.Contains(c, "semodule") ||
+			strings.Contains(c, "daemon-reload") || strings.Contains(c, "enable") || strings.Contains(c, "restart") {
+			t.Errorf("nothing may run after a provisioning failure: %s", c)
+		}
+	}
+}
+
+// TestPreremoveStopsAndDisablesBuilderService verifies both preremove
+// scriptlets stop and disable the builder service together with the main
+// service on removal, and tolerate hosts where the builder unit was never
+// installed (a 2.3 → 2.4 upgrade host mid-removal).
+func TestPreremoveStopsAndDisablesBuilderService(t *testing.T) {
+	t.Run("deb_active_both", func(t *testing.T) {
+		fakeDir, logFile := setupScriptTest(t)
+		// Both services active+enabled.
+		writeFakeSystemctl(t, fakeDir, logFile, true, true)
+		writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+		_, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
+			[]string{"remove"}, true, nil)
+		if code != 0 {
+			t.Fatalf("deb preremove should exit 0, got %d", code)
+		}
+		calls := readLifecycleScriptCalls(t, logFile)
+		assertLifecycleCall(t, calls, "stop docker-helper.service")
+		assertLifecycleCall(t, calls, "stop docker-helper-builder.service")
+		assertLifecycleCall(t, calls, "disable docker-helper.service")
+		assertLifecycleCall(t, calls, "disable docker-helper-builder.service")
+	})
+	t.Run("rpm_final_erase_both", func(t *testing.T) {
+		fakeDir, logFile := setupScriptTest(t)
+		writeFakeSystemctl(t, fakeDir, logFile, true, true)
+		writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+		_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+			[]string{"0"}, true, nil)
+		if code != 0 {
+			t.Fatalf("rpm preremove should exit 0, got %d", code)
+		}
+		calls := readLifecycleScriptCalls(t, logFile)
+		assertLifecycleCall(t, calls, "stop docker-helper.service")
+		assertLifecycleCall(t, calls, "stop docker-helper-builder.service")
+		assertLifecycleCall(t, calls, "disable docker-helper-builder.service")
+	})
+	t.Run("builder_unit_absent_tolerated", func(t *testing.T) {
+		for _, script := range []string{"packaging/scripts/deb/preremove.sh", "packaging/scripts/rpm/preremove.sh"} {
+			fakeDir, logFile := setupScriptTest(t)
+			// Main active; the builder unit does not exist on this host.
+			if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"), []byte(fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+case "$*" in
+  *"docker-helper-builder.service"*)
+    case "$*" in
+      *"is-active"*) exit 3 ;;
+      *"is-enabled"*) exit 4 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  *"is-active"*) exit 0 ;;
+  *"is-enabled"*) exit 0 ;;
+  *) exit 0 ;;
+esac
+`, logFile)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+			arg := "remove"
+			if strings.Contains(script, "rpm/") {
+				arg = "0"
+			}
+			_, _, code := runScript(t, script, fakeDir, logFile, []string{arg}, true, nil)
+			if code != 0 {
+				t.Fatalf("%s must tolerate the absent builder unit, got exit %d", script, code)
+			}
+			for _, c := range readLifecycleScriptCalls(t, logFile) {
+				if strings.Contains(c, "docker-helper-builder.service") && strings.Contains(c, "stop") {
+					t.Errorf("%s must not stop the absent builder unit: %s", script, c)
+				}
+			}
+		}
+	})
+}
+
+// assertLifecycleCall asserts the exact "tool action" call is recorded.
+func assertLifecycleCall(t *testing.T, calls []string, want string) {
+	t.Helper()
+	for _, c := range calls {
+		if strings.Contains(c, want) {
+			return
+		}
+	}
+	t.Errorf("expected lifecycle call %q, got %v", want, calls)
+}
+
+// TestDebPostremovePurgeRemovesBuilderState verifies the DEB purge action
+// removes the builder runtime/state directories alongside the main state
+// (the recorded choice: the identity itself is kept on package removal; only
+// the tarball --purge removes it). The purge never touches unrelated files.
+func TestDebPostremovePurgeRemovesBuilderState(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	tmpDir := t.TempDir()
+
+	builderState := filepath.Join(tmpDir, "var", "lib", "docker-helper-builder")
+	builderRun := filepath.Join(tmpDir, "run", "docker-helper-builder")
+	for _, d := range []string{builderState, builderRun} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "sentinel"), []byte("state"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelated := filepath.Join(tmpDir, "unrelated")
+	if err := os.WriteFile(unrelated, []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The harness maps the purge paths to test-controlled dirs; point the
+	// builder dirs at THIS test's fixture so the removal is observable.
+	_, _, code := runScript(t, "packaging/scripts/deb/postremove.sh", fakeDir, logFile,
+		[]string{"purge"}, true, []string{
+			"BUILDER_STATE_DIR=" + builderState,
+			"BUILDER_RUNTIME_DIR=" + builderRun,
+		})
+	if code != 0 {
+		t.Fatalf("postremove purge should exit 0, got %d", code)
+	}
+	for _, d := range []string{builderState, builderRun} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("purge must remove %s", d)
+		}
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Error("purge must not remove unrelated files")
+	}
+}
+
+// TestInstallSystemProvisionsBuilderFirst verifies the tarball installer
+// runs the canonical provisioning owner as its FIRST installation mutation,
+// before the binary/unit/payload files are placed, and that a provisioning
+// failure aborts the installer with NO files installed and no service
+// actions.
+func TestInstallSystemProvisionsBuilderFirst(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+
+	// The fixture provisioning owner fails for this test (t.Setenv scopes
+	// the failure injection to the run below).
+	t.Setenv("PROVISION_FAIL", "true")
+
+	// Sentinel file: if the installer placed anything, this fails.
+	sentinel := []byte("sentinel")
+	if err := os.WriteFile(env.dest("bin/docker-helper"), sentinel, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	env.fakeSystemctl(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+case "$*" in
+  *"is-active"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+`, env.logFile))
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatalf("install must fail when provisioning fails: %s", out)
+	}
+	if !strings.Contains(out, "provision-builder: FAILED") {
+		t.Errorf("the provisioning failure must surface, got: %s", out)
+	}
+	calls := readLifecycleCalls(t, env.logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") || strings.Contains(c, "enable") || strings.Contains(c, " start") {
+			t.Errorf("no service action may follow a provisioning failure: %s", c)
+		}
+	}
+	if _, err := os.Stat(env.dest("etc/systemd/system/docker-helper.service")); !os.IsNotExist(err) {
+		t.Error("no unit may be installed when provisioning fails")
+	}
+	if _, err := os.Stat(env.dest("usr/libexec/docker-helper/buildkit/buildkitd")); !os.IsNotExist(err) {
+		t.Error("no payload may be installed when provisioning fails")
+	}
+	// The sentinel binary is replaced only by a SUCCESSFUL install path; a
+	// failed provisioning aborts before install_binary.
+	if _, err := os.Stat(env.dest("usr/libexec/docker-helper/buildkit")); !os.IsNotExist(err) {
+		t.Error("payload dir must not exist when provisioning fails")
+	}
+}
+
+// TestInstallSystemInstallsBuilderUnitAndPayload verifies the tarball
+// installer places the builder unit, the pinned payload members with their
+// modes, and enables BOTH units (builder first) when starting the service.
+func TestInstallSystemInstallsBuilderUnitAndPayload(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.fakeSystemctl(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+case "$*" in
+  *"is-active"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+`, env.logFile))
+
+	testRoot := t.TempDir()
+	if _, err := env.run(t, "--yes --allowed-root "+testRoot, ""); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	unitData, err := os.ReadFile(env.dest("etc/systemd/system/docker-helper-builder.service"))
+	if err != nil || len(unitData) == 0 {
+		t.Errorf("builder unit must be installed: %v", err)
+	}
+	for _, member := range []string{"buildkitd", "buildctl", "buildkit-runc"} {
+		info, err := os.Stat(env.dest(filepath.Join("usr/libexec/docker-helper/buildkit", member)))
+		if err != nil {
+			t.Errorf("payload member %s must be installed: %v", member, err)
+			continue
+		}
+		if mode := info.Mode().Perm(); mode != 0755 {
+			t.Errorf("payload member %s mode %v, want 0755", member, mode)
+		}
+	}
+	for _, member := range []string{"LICENSE", "MANIFEST"} {
+		info, err := os.Stat(env.dest(filepath.Join("usr/share/doc/docker-helper/buildkit", member)))
+		if err != nil {
+			t.Errorf("payload doc %s must be installed: %v", member, err)
+			continue
+		}
+		if mode := info.Mode().Perm(); mode != 0644 {
+			t.Errorf("payload doc %s mode %v, want 0644", member, mode)
+		}
+	}
+
+	calls := readLifecycleCalls(t, env.logFile)
+	builderEnable, mainEnable := -1, -1
+	for i, c := range calls {
+		if strings.Contains(c, "enable docker-helper-builder.service") && builderEnable < 0 {
+			builderEnable = i
+		}
+		if strings.Contains(c, "enable docker-helper.service") && mainEnable < 0 {
+			mainEnable = i
+		}
+	}
+	if builderEnable < 0 || mainEnable < 0 {
+		t.Errorf("both units must be enabled (builder=%d main=%d), calls: %v", builderEnable, mainEnable, calls)
+	}
+	if builderEnable >= 0 && mainEnable >= 0 && builderEnable > mainEnable {
+		t.Errorf("the builder unit must be enabled before the main unit")
+	}
+}
+
+// TestUninstallSystemRemovesBuilderArtifacts verifies the tarball
+// uninstaller removes the builder unit, the payload, and stops/disables the
+// builder service while KEEPING the identity outside --purge.
+func TestUninstallSystemRemovesBuilderArtifacts(t *testing.T) {
+	env := newSystemUninstallScriptEnv(t)
+	// An installed builder unit + payload in the emulated system root.
+	if err := os.WriteFile(env.dest("etc/systemd/system/docker-helper-builder.service"), []byte("[Service]"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(env.dest("usr/libexec/docker-helper/buildkit"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.dest("usr/libexec/docker-helper/buildkit/buildkitd"), []byte("payload"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := env.run(t, "--yes", ""); err != nil {
+		t.Fatalf("uninstall failed: %v", err)
+	}
+
+	if _, err := os.Stat(env.dest("etc/systemd/system/docker-helper-builder.service")); !os.IsNotExist(err) {
+		t.Error("builder unit should be removed")
+	}
+	if _, err := os.Stat(env.dest("usr/libexec/docker-helper/buildkit")); !os.IsNotExist(err) {
+		t.Error("payload should be removed")
+	}
+}
+
+// TestUninstallSystemPurgeRemovesBuilderStateAndIdentity verifies --purge
+// removes the builder runtime/state dirs AND deregisters the identity: the
+// subordinate-ID ranges are removed through upstream shadow-utils usermod
+// (--del-subuids/--del-subgids, one per provisioned range), then userdel.
+// The identity is KEPT without --purge.
+func TestUninstallSystemPurgeRemovesBuilderStateAndIdentity(t *testing.T) {
+	env := newSystemUninstallScriptEnv(t)
+
+	// Builder state/runtime + subid databases in the emulated system root.
+	if err := os.MkdirAll(env.dest("var/lib/docker-helper-builder"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(env.dest("run/docker-helper-builder"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.dest("run/docker-helper-builder/marker"), []byte("runtime"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.dest("var/lib/docker-helper-builder/marker"), []byte("state"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.subuidDB, []byte("docker-helper-builder:231072:65536\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.subgidDB, []byte("docker-helper-builder:231072:65536\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Fakes: id (the identity exists), usermod/userdel/groupdel (log).
+	if err := os.WriteFile(filepath.Join(env.fakeBinDir, "id"), []byte(fmt.Sprintf(`#!/bin/bash
+echo "$0 $@" >> "%s"
+exit 0
+`, env.logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.fakeBinDir, "usermod"), []byte(fmt.Sprintf(`#!/bin/bash
+echo "$0 $@" >> "%s"
+exit 0
+`, env.logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.fakeBinDir, "userdel"), []byte(fmt.Sprintf(`#!/bin/bash
+echo "$0 $@" >> "%s"
+exit 0
+`, env.logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.fakeBinDir, "groupdel"), []byte(fmt.Sprintf(`#!/bin/bash
+echo "$0 $@" >> "%s"
+exit 0
+`, env.logFile)), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := env.run(t, "--yes --purge", ""); err != nil {
+		t.Fatalf("uninstall --purge failed: %v", err)
+	}
+
+	if _, err := os.Stat(env.dest("var/lib/docker-helper-builder")); !os.IsNotExist(err) {
+		t.Error("builder state should be removed with --purge")
+	}
+	if _, err := os.Stat(env.dest("run/docker-helper-builder")); !os.IsNotExist(err) {
+		t.Error("builder runtime should be removed with --purge")
+	}
+	calls := readLifecycleCalls(t, env.logFile)
+	assertLifecycleCall(t, calls, "usermod --del-subuids 231072-296607")
+	assertLifecycleCall(t, calls, "usermod --del-subgids 231072-296607")
+	assertLifecycleCall(t, calls, "userdel docker-helper-builder")
+
+	// Without --purge the identity is kept: no usermod/userdel calls happen.
+	env2 := newSystemUninstallScriptEnv(t)
+	if _, err := env2.run(t, "--yes", ""); err != nil {
+		t.Fatalf("uninstall failed: %v", err)
+	}
+	for _, c := range readLifecycleCalls(t, env2.logFile) {
+		if strings.Contains(c, "userdel") || strings.Contains(c, "--del-sub") {
+			t.Errorf("identity must be kept without --purge: %s", c)
+		}
+	}
+}
+
+// TestUpgrade230BaselineWiring verifies the pinned released v2.3.0
+// upgrade-baseline identity lives in the fixture owner and that the P4b
+// install-proof scripts consume it through the fixture fetch functions
+// (never hardcoded digests).
+func TestUpgrade230BaselineWiring(t *testing.T) {
+	fixture, err := os.ReadFile(upgradeBaselineFixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureContent := string(fixture)
+	for _, must := range []string{
+		`UPGRADE230_VERSION="2.3.0"`,
+		"UPGRADE230_DEB_SHA256=\"50ece50c580ad74b35d68a6dd151c01fdd115f10e66d42a810f1f86827ac86cb\"",
+		"UPGRADE230_RPM_SHA256=\"546b51a922c7f49d0f102f6ba5542069d77aa03fa5674997ed3a74feb16135e6\"",
+	} {
+		if !strings.Contains(fixtureContent, must) {
+			t.Errorf("upgrade-baseline fixture must define %s", must)
+		}
+	}
+
+	for _, proof := range []string{"scripts/release-2.4-p4b-packages-2404.sh", "scripts/release-2.4-p4b-tw.sh"} {
+		data, err := os.ReadFile(proof)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "upgrade230_fetch_") {
+			t.Errorf("%s must resolve the v2.3.0 baseline via the fixture fetch function", proof)
+		}
+		for _, sha := range []string{"50ece50c580ad74b35d68a6dd151c01fdd115f10e66d42a810f1f86827ac86cb", "546b51a922c7f49d0f102f6ba5542069d77aa03fa5674997ed3a74feb16135e6"} {
+			if strings.Contains(content, sha) {
+				t.Errorf("%s must not hardcode the v2.3.0 baseline SHA-256; the fixture is the single owner", proof)
+			}
+		}
 	}
 }
