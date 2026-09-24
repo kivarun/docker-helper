@@ -234,14 +234,11 @@ type workloadMACCoordinator struct {
 	cleanupStalePins func(operationID string) error
 }
 
-// newWorkloadMACCoordinatorForMode builds the workload MAC coordinator for
-// the given deployment mode. It returns nil for non-system mode and when no
-// supported MAC backend is active (mirroring the session MAC coordinator
-// invariant), so run requests fail closed per request in that case.
-func newWorkloadMACCoordinatorForMode(cfg *Config, detectLSM func() (LSMBackend, error)) (*workloadMACCoordinator, error) {
-	if cfg.Mode != ModeSystem {
-		return nil, nil
-	}
+// newWorkloadMACCoordinatorForActiveBackend builds the workload MAC
+// coordinator for the active MAC backend. MAC confinement is mandatory for
+// the system service, so a missing backend is a construction error, never a
+// nil coordinator.
+func newWorkloadMACCoordinatorForActiveBackend(cfg *Config, detectLSM func() (LSMBackend, error)) (*workloadMACCoordinator, error) {
 	backend, err := detectLSM()
 	if err != nil {
 		return nil, err
@@ -256,7 +253,7 @@ func newWorkloadMACCoordinatorForMode(cfg *Config, detectLSM func() (LSMBackend,
 	case LSMSELinux:
 		c.backend = newWorkloadSELinuxBackend()
 	default:
-		return nil, nil
+		return nil, fmt.Errorf("no MAC backend active (the system service requires AppArmor or enforcing SELinux)")
 	}
 	c.docker = cliContainerProvenance()
 	c.cleanupStalePins = c.cleanupStalePinsIn

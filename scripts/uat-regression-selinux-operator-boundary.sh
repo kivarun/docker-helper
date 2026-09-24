@@ -35,7 +35,7 @@ fi
 
 # --- ensure /opt is an authorized global root -----------------------------------------
 dh config allowed-root add /opt >/dev/null 2>&1 || true
-dh reload --system >/dev/null 2>&1 || reg_fail "config reload failed after adding /opt root"
+dh reload >/dev/null 2>&1 || reg_fail "config reload failed after adding /opt root"
 
 # --- operator pre-creates the compatible fcontext boundary -----------------------------
 BND="/opt/uat-op-bnd-$RANDOM"
@@ -70,7 +70,7 @@ reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; 
 # The session workspace is under /opt (the non-home allowed root this group
 # deliberately exercises), so /opt must be in the principal's own allowed roots
 # for the inherit-scope Session authorization to permit it.
-dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
+dh principal allowed-root add "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
 # --- Session uses the existing compatible coverage --------------------------------------
@@ -97,7 +97,7 @@ else
 fi
 
 # --- Session cleanup must not delete the operator rule ----------------------------------
-if dh session delete --system "$SID" >/dev/null 2>&1; then
+if dh session delete "$SID" >/dev/null 2>&1; then
   reg_ok "session deleted"
 else
   reg_fail "session delete failed"

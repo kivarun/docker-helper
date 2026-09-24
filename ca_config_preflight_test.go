@@ -292,10 +292,18 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", nonexistentRuntime)
 	t.Setenv("XDG_STATE_HOME", nonexistentState)
 
-	// Prevent reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSocket })
+	// System-only client contract: the default endpoint is the system socket
+	// with the operator credential at the canonical client store.
+	origSocketPath := systemSocketPath
+	systemSocketPath = filepath.Join(dir, "nonexistent", "docker-helper.sock")
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "docker-helper"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docker-helper", "credential.token"), []byte("test-admin-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Point to a non-existent CA path while injection is disabled.
 	badPath := filepath.Join(dir, "nonexistent.crt")
@@ -573,16 +581,15 @@ func TestSystemModeCAOutsideSourceAllowsUnrelatedMutation(t *testing.T) {
 	}
 }
 
-func TestUserModeCAArbitraryPath(t *testing.T) {
-	// User mode must accept arbitrary absolute CA paths.
+func TestNonRootCAArbitraryPath(t *testing.T) {
+	// Non-root clients must accept arbitrary absolute CA paths.
 	_, caPath := setupCAConfigPreflightTest(t)
 
-	// Ensure user mode.
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 1000 }
 	defer func() { EffectiveUID = origUID }()
 
-	// Set path and enable auto (should succeed with valid CA in user mode).
+	// Set path and enable auto (should succeed with a valid CA).
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
 	if code != 0 {
@@ -649,8 +656,9 @@ func TestLoadAndPrepareRuntimeConfigSystemModeAcceptsOutsideCA(t *testing.T) {
 	}
 }
 
-func TestLoadAndPrepareRuntimeConfigUserModeAcceptsArbitraryCA(t *testing.T) {
-	// loadAndPrepareRuntimeConfig in user mode must accept arbitrary absolute CA paths.
+func TestLoadAndPrepareRuntimeConfigAcceptsArbitraryCA(t *testing.T) {
+	// loadAndPrepareRuntimeConfig must accept arbitrary absolute CA paths;
+	// trusted-CA preparation writes to the (seamed) runtime directory.
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	caPath := filepath.Join(dir, "test-ca.crt")
@@ -668,24 +676,26 @@ func TestLoadAndPrepareRuntimeConfigUserModeAcceptsArbitraryCA(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Mock user mode.
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = origUID }()
-
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return configPath }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// Use XDG environment variables for user mode paths.
+	// The runtime/state directory seams point at isolated fixture paths.
 	runtimeDir := filepath.Join(dir, "runtime")
 	stateDir := filepath.Join(dir, "state")
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_STATE_HOME", stateDir)
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	defer func() { getRuntimeDirFunc = origRuntime }()
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return stateDir }
+	defer func() { getStateDirFunc = origState }()
 
 	loaded, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
-		t.Fatalf("loadAndPrepareRuntimeConfig should accept arbitrary CA path in user mode: %v", err)
+		t.Fatalf("loadAndPrepareRuntimeConfig should accept arbitrary CA path: %v", err)
 	}
 	if loaded.TrustedCAPath != caPath {
 		t.Errorf("TrustedCAPath = %q, want %q", loaded.TrustedCAPath, caPath)
@@ -859,35 +869,6 @@ func TestTrustedCAPreflightSystemStoppedDisableInjection(t *testing.T) {
 	}
 	if inj != "disabled" {
 		t.Errorf("trusted_ca_injection = %q, want disabled", inj)
-	}
-	assertNoTrustedCAPreflightWarning(t, stderr.String())
-}
-
-func TestTrustedCAPreflightUserModeNoWarning(t *testing.T) {
-	// User mode must never emit the confined-readability warning, even when
-	// enabling auto with the daemon stopped.
-	configPath, caPath := setupCAConfigPreflightTest(t)
-	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         testAllowedRootDir(t),
-		"session_ttl":          "12h",
-		"trusted_ca_injection": "disabled",
-		"trusted_ca_path":      caPath,
-	})
-
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	t.Cleanup(func() { EffectiveUID = origUID })
-
-	origAttemptReload := attemptReload
-	attemptReload = func() reloadOutcome {
-		return reloadOutcome{reloadDaemonNotRunning, nil}
-	}
-	t.Cleanup(func() { attemptReload = origAttemptReload })
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	assertNoTrustedCAPreflightWarning(t, stderr.String())
 }

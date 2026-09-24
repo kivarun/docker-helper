@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,14 +24,22 @@ func TestResolveDefaultEndpointNonRoot(t *testing.T) {
 	EffectiveUID = func() int { return 1000 }
 
 	dir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	runtimeDir := filepath.Join(dir, "docker-helper")
-	os.MkdirAll(runtimeDir, 0755)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 
-	tokenPath := filepath.Join(dir, "admin.token")
+	tokenPath := filepath.Join(dir, "credential.token")
 	writeTestTokenFile(t, tokenPath, "test-token")
 
-	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
+	// The non-root default endpoint is the system socket. Stub the canonical
+	// system socket path to a real listening fake and prove the default
+	// endpoint actually connects with the explicit token file.
+	socketPath := filepath.Join(dir, "system-socket", "docker-helper.sock")
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	origSocketPath := systemSocketPath
+	systemSocketPath = socketPath
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
+
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -99,12 +108,6 @@ func TestResolveDefaultEndpointFallsBackToSystem(t *testing.T) {
 
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
-	// Don't create user socket.
-
-	// Mock systemSocketExists to return true.
-	origSystemSocket := systemSocketExists
-	systemSocketExists = func() bool { return true }
-	defer func() { systemSocketExists = origSystemSocket }()
 
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 	tokenPath := filepath.Join(dir, "xdg_config", "docker-helper", "credential.token")
@@ -112,7 +115,8 @@ func TestResolveDefaultEndpointFallsBackToSystem(t *testing.T) {
 	os.MkdirAll(tokenDir, 0755)
 	writeTestTokenFile(t, tokenPath, "test-token")
 
-	// Should fall back to system socket since user socket doesn't exist.
+	// The default endpoint resolves to the system socket with the installed
+	// credential token.
 	client, err := resolveOperatorClient(operatorClientOptions{})
 	if err != nil {
 		t.Fatalf("resolveOperatorClient: %v", err)
@@ -135,7 +139,6 @@ func TestResolveSystemEndpointNonRoot(t *testing.T) {
 	writeTestTokenFile(t, tokenPath, "test-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
-		System:    true,
 		TokenFile: tokenPath,
 	})
 	if err != nil {
@@ -158,9 +161,7 @@ func TestResolveSystemDefaultTokenPath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 
 	// Non-root: no token file provided, should use credential path.
-	_, err := resolveOperatorClient(operatorClientOptions{
-		System: true,
-	})
+	_, err := resolveOperatorClient(operatorClientOptions{})
 	if err == nil {
 		t.Fatal("expected error when credential file doesn't exist")
 	}
@@ -170,33 +171,88 @@ func TestResolveSystemDefaultTokenPath(t *testing.T) {
 	}
 }
 
-func TestResolveSystemNoFallsBackToUser(t *testing.T) {
-	orig := EffectiveUID
-	defer func() { EffectiveUID = orig }()
+// TestResolveOperatorTokenPathOwnerSelection pins the owner-credential
+// selection to the exact canonical paths: root resolves the system admin
+// token, non-root resolves the installed user credential. Both come from the
+// existing owner's seams, so the selection does not depend on runner
+// HOME/XDG/NSS specifics.
+func TestResolveOperatorTokenPathOwnerSelection(t *testing.T) {
+	origUID := EffectiveUID
+	origCred := credentialPathFunc
+	defer func() {
+		EffectiveUID = origUID
+		credentialPathFunc = origCred
+	}()
+
+	credPath := filepath.Join(t.TempDir(), "docker-helper", "credential.token")
+	credentialPathFunc = func() (string, error) { return credPath, nil }
+
+	tests := []struct {
+		name string
+		uid  int
+		want string
+	}{
+		{"root resolves the system admin token", 0, filepath.Join(systemConfigDir, "admin.token")},
+		{"non-root resolves the installed credential", 1000, credPath},
+	}
+	for _, tc := range tests {
+		EffectiveUID = func() int { return tc.uid }
+		path, err := resolveOperatorTokenPath()
+		if err != nil {
+			t.Fatalf("%s: resolveOperatorTokenPath: %v", tc.name, err)
+		}
+		if path != tc.want {
+			t.Errorf("%s: resolved %q, want %q", tc.name, path, tc.want)
+		}
+	}
+}
+
+// TestResolveOperatorTokenPathNonRootFailureFailsClosed is the regression for
+// the removed admin-token fallback: a non-root credential-path resolution
+// failure is returned to the caller by both resolution stages (default system
+// endpoint and explicit unix endpoint) and never selects an admin token path.
+// The would-be fallback location (user config dir / admin.token) is populated
+// with a valid readable token, so the pre-fix fallback behavior (resolving
+// that path and constructing the client from it) would fail this test.
+func TestResolveOperatorTokenPathNonRootFailureFailsClosed(t *testing.T) {
+	origUID := EffectiveUID
+	origCred := credentialPathFunc
+	origConfigPath := getConfigPathFunc
+	defer func() {
+		EffectiveUID = origUID
+		credentialPathFunc = origCred
+		getConfigPathFunc = origConfigPath
+	}()
+
 	EffectiveUID = func() int { return 1000 }
+	credErr := errors.New("cannot determine home directory: $HOME is not defined")
+	credentialPathFunc = func() (string, error) { return "", credErr }
 
-	dir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
+	// A readable admin token at the would-be fallback location makes the
+	// undesired fallback possible and observable.
+	configDir := t.TempDir()
+	getConfigPathFunc = func() string { return filepath.Join(configDir, "config.json") }
+	writeTestTokenFile(t, filepath.Join(configDir, "admin.token"), "admin-token-fallback-marker")
 
-	// Create a working user daemon socket — should NOT be used with --system.
-	userSocket := filepath.Join(dir, "docker-helper.sock")
-	userListener, err := net.Listen("unix", userSocket)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer userListener.Close()
-
-	// --system should try system socket, not user socket.
-	_, err = resolveOperatorClient(operatorClientOptions{
-		System: true,
-	})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	// The error should be about the system token file, not about connection.
-	if !strings.Contains(err.Error(), "token") {
-		t.Errorf("expected token error, got: %v", err)
+	for _, tc := range []struct {
+		name string
+		opts operatorClientOptions
+	}{
+		{"default system endpoint", operatorClientOptions{}},
+		{"explicit unix endpoint", operatorClientOptions{Endpoint: "unix:///run/docker-helper/docker-helper.sock"}},
+	} {
+		client, err := resolveOperatorClient(tc.opts)
+		if client != nil {
+			t.Errorf("%s: client constructed on credential-path failure", tc.name)
+		}
+		if err == nil {
+			t.Fatalf("%s: expected credential-path failure, got nil (fallback would use %s)",
+				tc.name, filepath.Join(configDir, "admin.token"))
+		}
+		if !errors.Is(err, credErr) {
+			t.Errorf("%s: error = %v, want the credential-path resolution error (an admin token path was selected)",
+				tc.name, err)
+		}
 	}
 }
 
@@ -345,7 +401,7 @@ func TestResolveEndpointPlainPathNoTokenFile(t *testing.T) {
 	defer server.Close()
 
 	// Auto-resolved token for unix endpoint (non-root uses credential.token).
-	// resolveSystemModeTokenPath for non-root returns credentialPath() which is
+	// resolveOperatorTokenPath for non-root returns credentialPath() which is
 	// $XDG_CONFIG_HOME/docker-helper/credential.token.
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 	tokenPath := filepath.Join(dir, "xdg_config", "docker-helper", "credential.token")
@@ -353,7 +409,7 @@ func TestResolveEndpointPlainPathNoTokenFile(t *testing.T) {
 	os.MkdirAll(tokenDir, 0755)
 	writeTestTokenFile(t, tokenPath, "test-token")
 
-	// No TokenFile — should auto-resolve via resolveSystemModeTokenPath.
+	// No TokenFile — should auto-resolve via resolveOperatorTokenPath.
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint: socketPath,
 	})
@@ -492,7 +548,7 @@ func TestUnixEndpointAutoToken(t *testing.T) {
 	os.MkdirAll(tokenDir, 0755)
 	writeTestTokenFile(t, tokenPath, "test-token")
 
-	// No TokenFile — should auto-resolve via resolveSystemModeTokenPath.
+	// No TokenFile — should auto-resolve via resolveOperatorTokenPath.
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint: "unix:///" + socketPath,
 	})
@@ -525,7 +581,7 @@ func TestAgentCommandsEndpointFlagsNoTokenFile(t *testing.T) {
 			t.Fatalf("%v: exit code %d", cmd, code)
 		}
 		out := stdout.String()
-		for _, flag := range []string{"--system", "--endpoint"} {
+		for _, flag := range []string{"--endpoint"} {
 			if !strings.Contains(out, flag) {
 				t.Errorf("%v --help should contain %q", cmd, flag)
 			}
@@ -545,7 +601,7 @@ func TestSessionCleanupNoOperatorFlags(t *testing.T) {
 		t.Fatalf("exit code %d", code)
 	}
 	out := stdout.String()
-	for _, flag := range []string{"--system", "--endpoint", "--token-file"} {
+	for _, flag := range []string{"--endpoint", "--token-file"} {
 		if strings.Contains(out, flag) {
 			t.Errorf("session cleanup --help should NOT contain %q", flag)
 		}
@@ -742,7 +798,7 @@ func TestResolveDefaultEndpointSystemFallbackWithoutRuntimeDir(t *testing.T) {
 
 // TestOperatorCommandDefaultSystemEndpointWithoutRuntimeDir proves the
 // documented default at the command level: a non-root operator command
-// without --system/--endpoint/XDG_RUNTIME_DIR resolves the system socket and
+// without --endpoint/XDG_RUNTIME_DIR resolves the system socket and
 // authenticates normally with the installed credential.
 func TestOperatorCommandDefaultSystemEndpointWithoutRuntimeDir(t *testing.T) {
 	origUID := EffectiveUID
@@ -807,7 +863,7 @@ func TestOperatorEndpointGrammarExitsTwo(t *testing.T) {
 		wantRC  int
 		wantErr string
 	}{
-		{name: "system and endpoint mutually exclusive", args: []string{"--system", "--endpoint", "/tmp/nonexistent.sock"}, wantRC: 2, wantErr: "--system and --endpoint are mutually exclusive"},
+		{name: "unknown --system flag", args: []string{"--system"}, wantRC: 2, wantErr: "flag provided but not defined"},
 		{name: "malformed endpoint", args: []string{"--endpoint", "bogus"}, wantRC: 2, wantErr: "unsupported endpoint scheme"},
 		{name: "http endpoint without token file", args: []string{"--endpoint", "http://127.0.0.1:1"}, wantRC: 2, wantErr: "--endpoint requires --token-file for http endpoints"},
 		{name: "explicitly empty endpoint", args: []string{"--endpoint", ""}, wantRC: 2, wantErr: "--endpoint value must not be empty"},
@@ -833,7 +889,7 @@ func TestOperatorEndpointGrammarExitsTwo(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("unix endpoint without --token-file: exit = %d, want 1 (runtime), stderr: %s", code, stderr.String())
 	}
-	for _, grammarErr := range []string{"mutually exclusive", "requires --token-file", "unsupported endpoint scheme"} {
+	for _, grammarErr := range []string{"unknown flag", "requires --token-file", "unsupported endpoint scheme"} {
 		if strings.Contains(stderr.String(), grammarErr) {
 			t.Errorf("valid syntax must not fail with the grammar error %q, got: %s", grammarErr, stderr.String())
 		}
@@ -842,8 +898,8 @@ func TestOperatorEndpointGrammarExitsTwo(t *testing.T) {
 
 // TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands proves no
 // command that registers the operator flag trio was left on the
-// late-validation path: every command carrying --system/--endpoint/
-// --token-file flags rejects the mutually exclusive combination with exit 2
+// late-validation path: every command carrying --endpoint/
+// --token-file flags rejects the malformed endpoint with exit 2
 // from Invocation.Validate (with the minimum required positionals supplied
 // so the command-specific arity check cannot mask the grammar result).
 func TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands(t *testing.T) {
@@ -865,7 +921,7 @@ func TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands(t *testing.T) {
 		}
 		fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 		c.NewInvocation(fs)
-		if fs.Lookup("system") != nil && fs.Lookup("endpoint") != nil && fs.Lookup("token-file") != nil {
+		if fs.Lookup("endpoint") != nil && fs.Lookup("token-file") != nil {
 			commands = append(commands, operatorCommand{path: path, cmd: c})
 		}
 	}
@@ -877,18 +933,18 @@ func TestOperatorEndpointGrammarMatrixCoversAllOperatorCommands(t *testing.T) {
 	}
 
 	for _, oc := range commands {
-		args := append(append([]string{}, oc.path...), "--system", "--endpoint", "/tmp/nonexistent.sock")
+		args := append(append([]string{}, oc.path...), "--endpoint", "bogus")
 		for i := 0; i < oc.cmd.MinPosArgs; i++ {
 			args = append(args, "x")
 		}
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters(args, &stdout, &stderr)
 		if code != 2 {
-			t.Errorf("%v: exit = %d, want 2 for the mutually exclusive endpoint grammar, stderr: %s", oc.path, code, stderr.String())
+			t.Errorf("%v: exit = %d, want 2 for the endpoint grammar, stderr: %s", oc.path, code, stderr.String())
 			continue
 		}
-		if !strings.Contains(stderr.String(), "--system and --endpoint are mutually exclusive") {
-			t.Errorf("%v: stderr must name the mutual-exclusion grammar error, got: %s", oc.path, stderr.String())
+		if !strings.Contains(stderr.String(), "unsupported endpoint scheme") {
+			t.Errorf("%v: stderr must name the endpoint grammar error, got: %s", oc.path, stderr.String())
 		}
 
 		// The explicitly empty endpoint spelling is the same structural

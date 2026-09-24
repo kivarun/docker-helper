@@ -78,8 +78,23 @@ func TestSessionCleanupNoCASideEffectCLI(t *testing.T) {
 	configPath, _, _, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
+	// The offline cleanup owns the system runtime/state directories; the
+	// test points both seams at the isolated fixture directories.
+	// The offline cleanup owns the system runtime/state directories; the
+	// test points both seams at the isolated fixture directories. The state
+	// layout is the system one: <state>/docker-helper.db.
 	stateHome := os.Getenv("XDG_STATE_HOME")
-	dbPath := filepath.Join(stateHome, "docker-helper", "docker-helper.db")
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	origRuntime := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntime })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return stateHome + "-layout" }
+	t.Cleanup(func() { getStateDirFunc = origState })
+	if err := os.MkdirAll(stateHome+"-layout", 0755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(stateHome+"-layout", "docker-helper.db")
 
 	db, err := openDatabase(dbPath)
 	if err != nil {
@@ -103,50 +118,8 @@ func TestSessionCleanupNoCASideEffectCLI(t *testing.T) {
 		t.Fatalf("expected 'removed' in output, got: %s", cleanupOut.String())
 	}
 
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
 	trustedCADir := filepath.Join(runtimeDir, "docker-helper", "trusted-ca")
 	if _, err := os.Stat(trustedCADir); !os.IsNotExist(err) {
 		t.Error("session cleanup CLI should not create trusted-ca runtime artifacts")
-	}
-}
-
-func TestReloadNoXDGRuntimeDir(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
-	// The XDG runtime-directory resolution error is the documented default
-	// failure only when the system-socket fallback is also unavailable; an
-	// environment with a system socket must resolve the system socket
-	// instead (pinned by the operator default-endpoint tests). Mock the
-	// availability seam so this failure mode stays deterministic in any
-	// environment.
-	origSystemSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSystemSocket })
-
-	reloadOut, reloadErr := &bytes.Buffer{}, &bytes.Buffer{}
-	code := runCommandWithWriters([]string{"reload"}, reloadOut, reloadErr)
-	if code != 1 {
-		t.Fatalf("expected exit code 1, got %d: stdout=%s stderr=%s", code, reloadOut.String(), reloadErr.String())
-	}
-	if !strings.Contains(reloadErr.String(), "XDG_RUNTIME_DIR") {
-		t.Fatalf("expected stderr to contain 'XDG_RUNTIME_DIR', got: %s", reloadErr.String())
-	}
-}
-
-func TestSessionListNoXDGRuntimeDir(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
-	// Same deterministic fallback contract as TestReloadNoXDGRuntimeDir:
-	// the XDG resolution error applies only when the system-socket
-	// fallback is unavailable too.
-	origSystemSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSystemSocket })
-
-	listOut, listErr := &bytes.Buffer{}, &bytes.Buffer{}
-	code := runCommandWithWriters([]string{"session", "list"}, listOut, listErr)
-	if code != 1 {
-		t.Fatalf("expected exit code 1, got %d: stdout=%s stderr=%s", code, listOut.String(), listErr.String())
-	}
-	if !strings.Contains(listErr.String(), "XDG_RUNTIME_DIR") {
-		t.Fatalf("expected stderr to contain 'XDG_RUNTIME_DIR', got: %s", listErr.String())
 	}
 }

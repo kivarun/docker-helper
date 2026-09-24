@@ -595,7 +595,6 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	result, err := createSystemSession(t, app)
@@ -1142,7 +1141,6 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	result, err := createSystemSession(t, app)

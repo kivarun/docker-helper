@@ -134,7 +134,7 @@ type operation struct {
 	// It is cleaned up after the operation completes or fails.
 	stagedCtx *stagedBuildContext
 	// macLeaseRelease releases the session-use lease held by this operation.
-	// nil when no lease was acquired (user mode or no MAC backend).
+	// nil when no lease was acquired (no MAC backend).
 	macLeaseRelease func()
 	// capacityRelease releases the fixed Release-2.2 capacity slot of this
 	// operation. It is set at final admission (transferred from the

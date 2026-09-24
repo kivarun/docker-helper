@@ -521,7 +521,10 @@ func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path)}
+	reqBody := map[string]string{
+		"principal": testOwnerUsername,
+		"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0].Path),
+	}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))

@@ -12,40 +12,16 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/term"
 )
-
-// DeploymentMode represents the deployment mode of the daemon.
-type DeploymentMode string
-
-const (
-	ModeUser   DeploymentMode = "user"
-	ModeSystem DeploymentMode = "system"
-)
-
-// systemUserUnitPath is the system-wide location of the user systemd unit
-// installed by the RPM/DEB package. The init command copies this file to
-// the user's ~/.config/systemd/user/ directory on first initialization.
-const systemUserUnitPath = "/usr/lib/systemd/user/docker-helper.service"
 
 // EffectiveUID returns the effective UID of the process.
 // Can be replaced in tests.
 var EffectiveUID = func() int { return os.Geteuid() }
-
-// resolveDeploymentMode determines the deployment mode from the effective UID.
-func resolveDeploymentMode() DeploymentMode {
-	if EffectiveUID() == 0 {
-		return ModeSystem
-	}
-	return ModeUser
-}
 
 type Config struct {
 	AllowedRoots          []AllowedRootEntry
@@ -62,9 +38,7 @@ type Config struct {
 	OperationRetentionTTL time.Duration
 	OperationMaxCompleted int
 	OperationLogMaxBytes  int64
-	// Deployment mode (computed from effective UID).
-	Mode DeploymentMode
-	// HTTPAddress is the loopback TCP listen address for system mode.
+	// HTTPAddress is the loopback TCP listen address.
 	HTTPAddress string
 	// Trusted CA injection (runtime-only, computed from file config).
 	TrustedCAInjection   string // "disabled" or "auto"
@@ -144,7 +118,6 @@ var configFields = []configFieldSpec{
 	{name: "database_path"},
 	{name: "admin_token_path"},
 	{name: "admin_token"},
-	{name: "mode"},
 }
 
 func lookupConfigField(name string) (configFieldSpec, bool) {
@@ -275,22 +248,7 @@ func getConfigPath() string {
 	if p := os.Getenv("DOCKER_HELPER_CONFIG"); p != "" {
 		return p
 	}
-
-	mode := resolveDeploymentMode()
-	if mode == ModeSystem {
-		return "/etc/docker-helper/config.json"
-	}
-
-	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
-	if xdgConfig == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		xdgConfig = filepath.Join(home, ".config")
-	}
-
-	return filepath.Join(xdgConfig, "docker-helper", "config.json")
+	return "/etc/docker-helper/config.json"
 }
 
 // getConfigPathFunc is injectable for testing.
@@ -307,34 +265,11 @@ func getConfigDir() string {
 }
 
 func getRuntimeDir() (string, error) {
-	mode := resolveDeploymentMode()
-	if mode == ModeSystem {
-		return "/run/docker-helper", nil
-	}
-
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if dir == "" {
-		return "", errors.New("XDG_RUNTIME_DIR is not set, cannot determine runtime directory")
-	}
-	return filepath.Join(dir, "docker-helper"), nil
+	return "/run/docker-helper", nil
 }
 
 func getStateDir() string {
-	mode := resolveDeploymentMode()
-	if mode == ModeSystem {
-		return "/var/lib/docker-helper"
-	}
-
-	xdgState := os.Getenv("XDG_STATE_HOME")
-	if xdgState == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		xdgState = filepath.Join(home, ".local", "state")
-	}
-
-	return filepath.Join(xdgState, "docker-helper")
+	return "/var/lib/docker-helper"
 }
 
 // decodeAndValidateConfigDocument is the ONE strict ingest boundary of a
@@ -433,12 +368,10 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 		httpAddress = fc.HTTPAddress
 	}
 
-	mode := resolveDeploymentMode()
-
-	// System mode with trusted_ca_injection=auto requires trusted_ca_path.
+	// trusted_ca_injection=auto requires trusted_ca_path.
 	// This is enforced before runtime directory creation or any CA I/O to
 	// protect against manually edited config.json bypassing CLI preflight.
-	if mode == ModeSystem && trustedCAInjection == "auto" {
+	if trustedCAInjection == "auto" {
 		if fc.TrustedCAPath == "" {
 			return nil, fmt.Errorf("trusted_ca_path is required when trusted_ca_injection is \"auto\"")
 		}
@@ -449,15 +382,8 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 		return nil, err
 	}
 
-	// Create runtime directory with mode-appropriate permissions.
-	if mode == ModeSystem {
-		if err := os.MkdirAll(runtimeDir, 0755); err != nil {
-			return nil, fmt.Errorf("cannot create runtime directory: %w", err)
-		}
-	} else {
-		if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-			return nil, fmt.Errorf("cannot create runtime directory: %w", err)
-		}
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		return nil, fmt.Errorf("cannot create runtime directory: %w", err)
 	}
 
 	stateDir := getStateDirFunc()
@@ -484,7 +410,6 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 		OperationRetentionTTL: opRetentionTTL,
 		OperationMaxCompleted: ec.OperationMaxCompleted,
 		OperationLogMaxBytes:  ec.OperationLogMaxBytes,
-		Mode:                  mode,
 		HTTPAddress:           httpAddress,
 		TrustedCAInjection:    trustedCAInjection,
 		TrustedCAPath:         fc.TrustedCAPath,
@@ -504,31 +429,23 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 
 // resolveAuditEnabled returns the effective audit_enabled value.
 // When cfg is non-nil, the explicit value always wins.
-// When cfg is nil (absent from config file):
-//   - system mode: audit is always enabled regardless of log_level;
-//   - user mode: audit is enabled only when log_level is debug.
-func resolveAuditEnabled(cfg *bool, level slog.Level, mode DeploymentMode) bool {
+// When cfg is nil (absent from config file), audit is always enabled
+// regardless of log_level.
+func resolveAuditEnabled(cfg *bool) bool {
 	if cfg != nil {
 		return *cfg
 	}
-	if mode == ModeSystem {
-		return true
-	}
-	return level == slog.LevelDebug
+	return true
 }
 
 // resolveAuditSource returns the source description for audit_enabled.
 // "explicit" — the operator set audit_enabled in config.
-// "system_default" — audit_enabled absent, system mode defaults to enabled.
-// "log_level" — audit_enabled absent, user mode derived from log_level.
-func resolveAuditSource(cfg *bool, mode DeploymentMode) string {
+// "system_default" — audit_enabled absent, defaults to enabled.
+func resolveAuditSource(cfg *bool) string {
 	if cfg != nil {
 		return "explicit"
 	}
-	if mode == ModeSystem {
-		return "system_default"
-	}
-	return "log_level"
+	return "system_default"
 }
 
 // resolveTrustedCAInjection returns the effective injection mode.
@@ -695,7 +612,7 @@ type effectiveConfigValues struct {
 	OperationMaxCompleted int    // default 200
 	OperationLogMaxBytes  int64  // default 4194304
 	TrustedCAInjection    string // default "disabled"
-	HTTPAddress           string // mode-specific (system: default 127.0.0.1:52375, user: "")
+	HTTPAddress           string // default 127.0.0.1:52375
 }
 
 // resolveEffectiveConfig computes the effective config values from a fileConfig.
@@ -705,10 +622,8 @@ func resolveEffectiveConfig(fc fileConfig) effectiveConfigValues {
 	if level == "" {
 		level = "info"
 	}
-	slogLevel, _ := parseLogLevel(level)
-	mode := resolveDeploymentMode()
-	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel, mode)
-	auditSource := resolveAuditSource(fc.AuditEnabled, mode)
+	auditEnabled := resolveAuditEnabled(fc.AuditEnabled)
+	auditSource := resolveAuditSource(fc.AuditEnabled)
 	// shutdown_timeout: default is the maximum "30s"; legacy Release 1 values
 	// above the maximum are bounded to it so config show reflects the effective
 	// runtime value (see resolveShutdownTimeout).
@@ -887,55 +802,6 @@ func parseSessionTTL(s string) (time.Duration, error) {
 	return d, nil
 }
 
-// installUserSystemdUnit copies the system-wide user systemd unit to the
-// user's ~/.config/systemd/user/ directory and runs daemon-reload.
-// It is a no-op if the user unit already exists or the system unit is not found.
-// Can be replaced in tests.
-var installUserSystemdUnit = func(stdout, stderr io.Writer) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	userUnitDir := filepath.Join(home, ".config", "systemd", "user")
-	userUnitPath := filepath.Join(userUnitDir, "docker-helper.service")
-
-	// Do not overwrite an existing user unit.
-	if _, err := os.Stat(userUnitPath); err == nil {
-		return
-	}
-
-	// Source unit must exist (RPM/DEB install).
-	data, err := os.ReadFile(systemUserUnitPath)
-	if err != nil {
-		return
-	}
-
-	if err := os.MkdirAll(userUnitDir, 0700); err != nil {
-		fmt.Fprintf(stderr, "warning: cannot create systemd user directory: %v\n", err)
-		return
-	}
-	if err := os.WriteFile(userUnitPath, data, 0644); err != nil {
-		fmt.Fprintf(stderr, "warning: cannot install systemd user unit: %v\n", err)
-		return
-	}
-
-	fmt.Fprintln(stdout, "Systemd user unit installed at:")
-	fmt.Fprintln(stdout, userUnitPath)
-
-	// Best-effort daemon-reload.
-	if err := exec.Command("systemctl", "--user", "daemon-reload").Run(); err != nil {
-		fmt.Fprintf(stderr, "warning: systemctl --user daemon-reload failed: %v\n", err)
-		fmt.Fprintf(stdout, "\n")
-		fmt.Fprintf(stdout, "To start the service:\n")
-		fmt.Fprintf(stdout, "  systemctl --user daemon-reload\n")
-		fmt.Fprintf(stdout, "  systemctl --user enable --now docker-helper\n")
-	} else {
-		fmt.Fprintf(stdout, "\n")
-		fmt.Fprintf(stdout, "To start the service:\n")
-		fmt.Fprintf(stdout, "  systemctl --user enable --now docker-helper\n")
-	}
-}
-
 // initCoreResult is the result of running the core init logic.
 type initCoreResult struct {
 	allowedRoot    string
@@ -948,20 +814,12 @@ type initCoreResult struct {
 // It does not prepare MAC state; workspace MAC state is owned by
 // the session lifecycle.
 func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, error) {
-	mode := resolveDeploymentMode()
 	configPath := getConfigPathFunc()
 	configDir := filepath.Dir(configPath)
 	stateDir := getStateDirFunc()
 
-	// Create directories with mode-appropriate permissions.
-	if mode == ModeSystem {
-		if err := os.MkdirAll(configDir, 0755); err != nil {
-			return nil, fmt.Errorf("cannot create config directory: %w", err)
-		}
-	} else {
-		if err := os.MkdirAll(configDir, 0700); err != nil {
-			return nil, fmt.Errorf("cannot create config directory: %w", err)
-		}
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return nil, fmt.Errorf("cannot create config directory: %w", err)
 	}
 
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
@@ -972,9 +830,9 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	// to the helper-owned config/state trees immediately after their creation
 	// and before config/admin-token are written, so the created files get the
 	// correct labels and the first daemon start succeeds. Relabel failure is
-	// fatal (no misleading partial initialization). AppArmor system mode and
-	// user mode never invoke SELinux relabel.
-	if err := applyDeploymentSELinuxRelabel(mode); err != nil {
+	// fatal (no misleading partial initialization). AppArmor system mode
+	// never invokes SELinux relabel.
+	if err := applyDeploymentSELinuxRelabel(); err != nil {
 		return nil, err
 	}
 
@@ -1030,8 +888,8 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	// would otherwise inherit the generic config directory type and the
 	// first admin-token rotation under confinement would fail. Relabel
 	// failure is fatal (no misleading partial initialization). AppArmor
-	// system mode and user mode never invoke SELinux relabel.
-	if err := applyAdminTokenDeploymentRelabel(mode, adminTokenPath); err != nil {
+	// system mode never invokes SELinux relabel.
+	if err := applyAdminTokenDeploymentRelabel(adminTokenPath); err != nil {
 		// The token file was just created by this initCore call (an existing
 		// token is rejected above): a failed relabel must not leave it on
 		// disk, or the next init is poisoned by the "admin.token already
@@ -1052,10 +910,6 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Configuration:")
 	fmt.Fprintln(stdout, configPath)
-
-	if mode == ModeUser {
-		installUserSystemdUnit(stdout, stderr)
-	}
 
 	return &initCoreResult{
 		allowedRoot:    allowedRoot,
@@ -1168,23 +1022,7 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		}
 	}
 
-	mode := resolveDeploymentMode()
-
-	if mode == ModeUser {
-		// User mode: check if system daemon is running.
-		if systemSocketExists() {
-			return initUserWithSystemDaemon(stdout, stderr)
-		}
-		// No system daemon: check Docker access.
-		if err := checkDockerAccess(); err != nil {
-			return fmt.Errorf("no system daemon and cannot connect to Docker daemon: %w", err)
-		}
-		// Docker accessible: standalone user init with admin token.
-		_, err := initCore(allowedRoot, stdout, stderr)
-		return err
-	}
-
-	// System mode: validate MAC backend and initialize.
+	// Validate the MAC backend and initialize.
 	backend, err := detectLSM()
 	if err != nil {
 		return fmt.Errorf("system mode requires an active MAC backend: %w", err)
@@ -1203,95 +1041,6 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 			return err
 		},
 	)
-}
-
-// checkDockerAccess checks if the Docker daemon is reachable by connecting
-// to its Unix socket directly. Returns nil if Docker is accessible.
-// Can be replaced in tests.
-var checkDockerAccess = func() error {
-	paths := []string{"/run/docker.sock", "/var/run/docker.sock"}
-	if host := os.Getenv("DOCKER_HOST"); strings.HasPrefix(host, "unix://") {
-		paths = []string{strings.TrimPrefix(host, "unix://")}
-	}
-	for _, p := range paths {
-		conn, err := net.DialTimeout("unix", p, time.Second)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-	}
-	return errors.New("cannot connect to Docker daemon")
-}
-
-// initUserWithSystemDaemon prompts for a credential token and installs it
-// for use with the system daemon. This is used when the user runs init
-// but the system daemon is already running.
-func initUserWithSystemDaemon(stdout, stderr io.Writer) error {
-	fmt.Fprintln(stderr, "System daemon detected.")
-	fmt.Fprintln(stderr, "Enter credential token provided by the admin:")
-
-	isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
-	var token string
-	var err error
-	if isTerminal {
-		token, err = readTokenHidden("Credential token: ", stderr)
-	} else {
-		token, err = readTokenFromReader(os.Stdin)
-	}
-	if err != nil {
-		return err
-	}
-
-	return installCredentialForInit(token, stdout, stderr)
-}
-
-// installCredentialForInit validates the token, checks credential state,
-// and installs the credential if absent. This is the shared bootstrap path
-// used by both production and tests.
-func installCredentialForInit(token string, stdout, stderr io.Writer) error {
-	if err := validateCredentialToken(token); err != nil {
-		return err
-	}
-
-	state, err := checkCredentialState(token)
-	if err != nil {
-		return err
-	}
-
-	switch state {
-	case credentialMatch:
-		fmt.Fprintln(stdout, "Credential already installed.")
-		return nil
-	case credentialConflict:
-		credPath, _ := credentialPath()
-		return fmt.Errorf(
-			"different credential already installed at %s; to replace it, run: docker-helper credential install --force",
-			credPath,
-		)
-	case credentialAbsent:
-		// No credential installed yet — proceed to install.
-	}
-
-	credPath, err := installCredential(credentialInstallConfig{
-		reader:     strings.NewReader(token),
-		writer:     safeWriteCredential,
-		uid:        EffectiveUID,
-		isTerminal: func() bool { return false },
-		readPassword: func() (string, error) {
-			return token, nil
-		},
-		force: false,
-	})
-	if err != nil {
-		if errors.Is(err, ErrCredentialAlreadyExists) {
-			fmt.Fprintln(stderr, "Use --force to replace the existing credential.")
-		}
-		return err
-	}
-
-	fmt.Fprintln(stdout, "Credential installed successfully.")
-	fmt.Fprintf(stdout, "Stored at: %s\n", credPath)
-	return nil
 }
 
 // resolveAllowedRoot normalizes and validates an allowed-root path.
@@ -1680,14 +1429,11 @@ func effectiveTrustedCAFromRaw(raw map[string]json.RawMessage) (injection, path 
 
 // trustedCAPreflightWarningRequired reports whether a successful config
 // mutation needs the trusted-CA confined-readability warning. It is true only
-// in system mode when the mutation changed an ACTIVE trusted-CA configuration
+// when the mutation changed an ACTIVE trusted-CA configuration
 // (trusted_ca_injection=auto with a source path) from oldInj/oldPath to
 // newInj/newPath. It never predicts MAC policy; it only reports that confined
 // readability was not proven because the daemon was not running.
-func trustedCAPreflightWarningRequired(mode DeploymentMode, oldInj, oldPath, newInj, newPath string) bool {
-	if mode != ModeSystem {
-		return false
-	}
+func trustedCAPreflightWarningRequired(oldInj, oldPath, newInj, newPath string) bool {
 	if newInj != "auto" || newPath == "" {
 		return false
 	}

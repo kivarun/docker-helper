@@ -9,8 +9,7 @@
   - [Authority model](#authority-model)
   - [Credentials and Session capability](#credentials-and-session-capability)
 - [Deployment](#deployment)
-  - [User mode](#user-mode)
-  - [System mode](#system-mode)
+  - [System service](#system-service)
   - [Transports](#transports)
   - [systemd services](#systemd-services)
   - [Mandatory access control](#mandatory-access-control)
@@ -145,9 +144,9 @@ Principal (OS identity, authorization ceiling)
   JOIN through `launchers` to `principals`).
 - A credential is a rotatable authentication key, never an owner. Ownership
   is derived from persistent state, never from the token.
-- User mode is the transparent daemon-owner Principal plus `default`
-  Launcher case of this same ownership model, not a different permanent
-  ownership class. The pre-delegation ownerless states exist only as
+- There is no per-user daemon and no user-mode ownership class: the system
+  service is the only deployment, and every Principal owns its Launchers
+  through the same model. Pre-delegation ownerless states exist only as
   migration inputs (see [Ownership migration](#ownership-migration)).
 - The CLI is never an authorization authority; the daemon resolves and
   enforces all policy.
@@ -184,53 +183,9 @@ Every Principal has a real Launcher named `default`, provisioned atomically
 at Principal creation (see [Principal provisioning](#principal-provisioning)).
 It is a normal stored Launcher object — not a virtual or synthesized
 fallback — and it is addressed implicitly only when a caller omits the
-Launcher selector. User mode maps all ownership transparently onto one
-daemon-owner Principal and its `default` Launcher, so quick start requires
-no Principal, Launcher, or credential and preserves the effective
-global-root semantics; system mode requires explicit ownership: an
-authenticated Principal resolves its own default Launcher when no explicit
-selector is supplied.
-
-#### User-mode owner reservation
-
-In user mode the daemon-owner Principal (resolved at startup by
-`ensureUserModeOwnership`, identified by the cached
-`App.userModeDefault.principalID`) and its `default` Launcher (identified by
-`App.userModeDefault.launcherID`) are reserved: the transparent ownership
-chain is exactly the state the startup contract requires (Principal enabled
-with zero stored roots, deferring completely to the global user-mode roots;
-default Launcher enabled, named `default`, `inherit` scope, zero roots).
-Public control-plane mutations that would corrupt that chain are rejected
-with the stable `409 user_mode_owner_reserved` conflict before any durable
-or runtime change:
-
-- daemon-owner Principal: disable, delete, allowed-root add, allowed-root
-  set-access, allowed-root remove (re-enabling an already-enabled Principal
-  is the natural no-op);
-- daemon-owner `default` Launcher: disable, delete, rename away from
-  `default`, restricted scope, and any non-empty inherit replacement, plus
-  every narrow allowed-root mutation — add, set-access, remove
-  (re-enable, rename to `default`, and `inherit` with zero roots are
-  no-ops; inherit with roots is `400 invalid_allowed_roots` for every
-  launcher).
-
-The reservation is owned by one App-aware policy owner
-(`usermode_owner.go`); identity is the startup-resolved chain state, never
-a username or Launcher name, so system mode and other Principals' `default`
-Launchers (and any additional Launchers under the daemon-owner Principal)
-remain fully mutable. Each guard runs inside the same `lifecycleMu`
-serialization boundary as the mutation it protects, before any quiesce or
-durable change, so a rejected mutation cannot strand the running daemon or
-turn the next startup into a fail-closed rejection. The lock-owning wrappers
-also acquire the current policy snapshot (the global allowed roots) inside
-that same critical section, preserving the reload boundary's
-`lifecycleMu -> a.mu` ordering: a global-root narrowing that linearizes
-before a Principal allowed-root add or Launcher scope replacement is
-observed by that mutation. An unknown Principal is not reserved (the
-mutation path reports its normal `principal_not_found`); a Principal lookup
-failure aborts the mutation fail-closed through the normal internal-error
-path. Audit records of a rejected mutation carry the
-`user_mode_owner_reserved` result.
+Launcher selector. An authenticated Principal resolves its own default
+Launcher when no explicit selector is supplied; an admin token must
+always name the target explicitly.
 
 ### Authority model
 
@@ -239,7 +194,7 @@ target-resolution contract:
 
 | Authority | Authenticates | Maximum control scope | Session-create target resolution | Legal narrowing selectors (Session list) |
 |---|---|---|---|---|
-| Admin token | the administrator | full control plane: all Principals, Launchers, Principal and Launcher credentials, all Sessions, configuration, reload, admin-token rotation | system mode: exactly one explicit selector required (`400 missing_launcher_selector`); user mode: the local daemon-owner `default` Launcher | `?principal=USER` and/or `?launcher=LAUNCHER`; a `dhl_` Launcher ID is valid without a Principal, a Launcher name requires the Principal scope |
+| Admin token | the administrator | full control plane: all Principals, Launchers, Principal and Launcher credentials, all Sessions, configuration, reload, admin-token rotation | exactly one explicit selector required (`400 missing_launcher_selector`) | `?principal=USER` and/or `?launcher=LAUNCHER`; a `dhl_` Launcher ID is valid without a Principal, a Launcher name requires the Principal scope |
 | Principal credential | one Principal | that Principal's resources: its Launchers and their credentials, its own Principal credential, `principal show` on itself, and the Sessions owned by its Principal's Launchers | its Principal's `default` Launcher, or an explicit own Launcher | `?launcher=` (name or ID) inside its own scope; `--principal` is illegal, even for its own Principal |
 | Launcher credential | one Launcher | that Launcher's Sessions, the credential self-introspection surfaces (`GET /auth` authority/classification introspection; `GET /self` own-resource introspection), and atomic rotation of exactly its own authenticated Launcher credential; no other Launcher/Principal control-plane capability | its own Launcher (forced) | none — there is no narrowing contract for this authority |
 | Session token | one Session | its issued filesystem snapshot's data plane: `POST /build`, `POST /run`, `POST /pull`, `POST /registry/login`, and that Session's operation endpoints | not a control authority; not accepted by control endpoints or `GET /auth` | none |
@@ -339,9 +294,8 @@ operator capability and is never a default recommendation.
 
 Credential token and storage rules:
 
-- Admin token: generated by `docker-helper init`, stored at `admin.token`
-  (user mode: user config directory; system mode:
-  `/etc/docker-helper/admin.token`), SHA-256 hash loaded into memory at
+- Admin token: generated by `docker-helper init`, stored at
+  `/etc/docker-helper/admin.token`, SHA-256 hash loaded into memory at
   server start, sent as `Authorization: Bearer <token>`, compared with
   `crypto/subtle.ConstantTimeCompare`;
 - Principal credential: credential token prefixed `dhc_` (64 hex
@@ -360,9 +314,9 @@ Credential token and storage rules:
 #### Credential install
 
 The `credential install` command installs a non-admin credential token for
-`docker-helper --system`. The credential may belong to a Principal or a
-Launcher; the daemon resolves its owner and authorization scope when the
-token is used. It is not run as root.
+the docker-helper system service. The credential may belong to a Principal
+or a Launcher; the daemon resolves its owner and authorization scope when
+the token is used. It is not run as root.
 
 - Token format: `dhc_` + 64 lowercase hex characters (68 total).
 - Token stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`
@@ -373,21 +327,21 @@ token is used. It is not run as root.
   deletion. Write failure leaves existing file intact.
 - Root invocation rejected with clear message.
 
-Token resolution for `--system` mode:
+Token resolution for the system service:
  1. `--token-file` — explicit path, always wins.
- 2. Non-root `--system` — credential.token from `credentialPath()`.
- 3. Root `--system` — `/etc/docker-helper/admin.token`.
+ 2. Root — `/etc/docker-helper/admin.token`.
+ 3. Non-root — credential.token from `credentialPath()`
+    (`${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`).
 
-Endpoint and token resolution for default (no `--system`) mode:
- 1. `--token-file` — explicit path, always wins.
- 2. If the user socket exists, select it and use `admin.token` in the user
-    config directory.
- 3. Otherwise — including when no user runtime directory is resolvable
-    (a non-root operator without `XDG_RUNTIME_DIR`) — if the system socket
-    exists, select it and use non-root `credential.token` or root
-    `/etc/docker-helper/admin.token`.
- 4. Once selected, an unavailable/failing endpoint is returned as an error;
-    the client does not retry another daemon.
+Credential-path resolution failure fails closed: the error is returned to
+the caller, and no admin token path (system or otherwise) is selected as a
+fallback.
+
+Endpoint resolution: the system socket
+`/run/docker-helper/docker-helper.sock` is the default endpoint (an
+explicit `--endpoint` overrides it). Once selected, an unavailable/failing
+endpoint is returned as an error; the client does not retry another
+daemon.
 
 Direct shell HTTP examples in the shipped documentation feed bearer
 headers to curl through stdin/file-backed input (the header-from-stdin
@@ -395,18 +349,9 @@ form) and never expand bearer values into process argv.
 
 ## Deployment
 
-### User mode
+### System service
 
-- **Effective UID**: non-root
-- **Config**: `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json`
-- **State**: `${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper`
-- **Runtime**: `$XDG_RUNTIME_DIR/docker-helper`
-- **Transport**: Unix socket only, at
-  `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock` with `0600`
-  permissions
-- **Execution identity**: daemon UID:GID for daemon-owner (user-mode) Sessions
-
-### System mode
+There is one daemon deployment: the root-owned system service.
 
 - **Effective UID**: root
 - **Config**: `/etc/docker-helper/config.json`
@@ -418,10 +363,16 @@ form) and never expand bearer values into process argv.
   `http_address`, startup-only)
 - **Execution identity**: the owning Principal's UID:GID
 
+Non-root users and agents are first-class clients. They authenticate
+through installed credentials (a Principal or Launcher credential stored
+by `credential install`, or an explicit `--token-file`); no per-user
+daemon, per-user config, or per-user runtime exists. A non-root
+`docker-helper init`/`serve` is refused before any side effect: the
+system service is the only daemon deployment.
+
 ### Transports
 
-- **User mode**: Unix socket only
-- **System mode**: Unix socket + loopback HTTP (`127.0.0.1:<port>`)
+Unix socket + loopback HTTP (`127.0.0.1:<port>`).
 
 One handler, one API, one auth policy on both transports. Transport does
 not determine identity or authorization. Transports are local only:
@@ -429,7 +380,7 @@ non-loopback listeners, TLS, and remote execution are not part of the
 current implementation (see [Current limitations and
 non-goals](#current-limitations-and-non-goals)).
 
-The Unix listener is authoritative. In system mode the optional loopback
+The Unix listener is authoritative. The optional loopback
 TCP listener is attempted after a successful Unix bind; a TCP bind failure
 (a local unprivileged user can occupy the configured port) is DEGRADED
 STARTUP, not daemon failure: the Unix listener stays live and serves the
@@ -443,15 +394,13 @@ the current contract is Unix-authoritative with degraded-TCP startup.)
 
 ### systemd services
 
-Both deployment modes ship systemd unit files (see [systemd units and
-hardening](#systemd-units-and-hardening)): a user unit installed under the
-user's systemd manager and a system unit under the system manager. The
-units carry the shutdown/restart contract ([Shutdown](#shutdown)) and the
-hardening profile of each mode.
+The deployment ships one systemd system unit (see [systemd units and
+hardening](#systemd-units-and-hardening)). It carries the shutdown/restart
+contract ([Shutdown](#shutdown)) and the hardening profile.
 
 ### Mandatory access control
 
-System mode requires exactly one supported enforcing backend:
+The deployment requires exactly one supported enforcing backend:
 
 - AppArmor confines the daemon with the `/etc/apparmor.d/docker-helper-system`
   profile and uses explicit managed AppArmor MAC boundaries for path-level
@@ -460,17 +409,17 @@ System mode requires exactly one supported enforcing backend:
   helper-owned boundary state file `/var/lib/docker-helper/apparmor/managed-boundaries`;
   managed boundaries are stored there, outside config.json. These managed
   boundaries are MAC state, not authorization roots;
-- SELinux confines the daemon as `docker_helper_t` and system-mode containers
+- SELinux confines the daemon as `docker_helper_t` and containers
   as the MCS-constrained `docker_helper_container_t` type.
 
 Neither backend, both backends, and permissive SELinux fail closed. SELinux
 workspace access is type-based and does not reproduce AppArmor's per-path
 managed-boundary rule; canonical application-level allowed-root validation
-remains authoritative in both modes.
+remains authoritative under either backend.
 
 Descriptor-safe recursive relabeling: SELinux recursive workspace
 relabeling is delegated to the upstream libselinux `selinux_restorecon`
-implementation; supported SELinux system mode requires a proven
+implementation; supported SELinux deployment requires a proven
 descriptor-safe implementation — `libselinux1 >= 3.11`, the rewrite that
 labels each inode through `/proc/self/fd` paths so a pathname replacement
 racing the tree walk cannot redirect a relabel to a foreign inode. The floor
@@ -560,14 +509,14 @@ every agent input before passing it to Docker.
 ```
 docker-helper init
     │
-    ├── creates config directory (system mode 0755, user mode 0700)
+    ├── creates config directory (0755)
     ├── creates state directory (0700)
     ├── applies the deployment SELinux relabel to the config/state trees
-    │   (system mode, enforcing SELinux; before any file is written)
+    │   (enforcing SELinux; before any file is written)
     ├── writes config.json
     ├── generates admin token (dht_<64 hex chars>)
     ├── applies the exact admin-token relabel to the token file
-    │   (system mode, enforcing SELinux; after the token is written)
+    │   (enforcing SELinux; after the token is written)
     └── on relabel failure removes the just-created token file, so no
         partial initialization is left behind (the next init is not
         poisoned by the existing-token preflight)
@@ -577,7 +526,6 @@ docker-helper serve
     ├── loads config.json
     ├── reads admin token, computes SHA-256 hash
     ├── opens SQLite database and initializes the schema (DB init)
-    ├── provisions user-mode ownership (ensureUserModeOwnership)
     ├── runs the Session ownership migration (idempotent;
     │   see Ownership migration)
     ├── runs the default-Launcher migration (idempotent)
@@ -585,7 +533,7 @@ docker-helper serve
     │   (compatibility backfill or fail-closed validation)
     ├── creates the workload MAC coordinator and reconciles
     │   helper-owned workload MAC state (ReconcileStartup)
-    ├── creates the Session MAC coordinator (nil in user mode), wires
+    ├── creates the Session MAC coordinator, wires
     │   the pending-workload coverage gate, and reconciles live
     │   sessions' MAC state (ReconcileLiveSessions)
     ├── deletes expired session rows (expires_at <= now) — after both
@@ -623,10 +571,7 @@ public error); an empty username keeps `missing_username`; OS account
 absence remains `os_user_not_found`; an existing Principal remains
 `409 principal_exists`; the structured audit classifies the refused create
 `invalid_username` and retains the supplied PrincipalName through its JSON
-escaping. The user-mode daemon-owner username (resolved by UID at startup)
-passes through the same grammar before it is used as a Principal DB
-identity: a control-bearing resolved spelling fails startup closed with no
-ownership state inserted and no ownership migration run.
+escaping.
 
 The create resolves the OS user (`uid`, `gid`, `home`) and atomically
 creates:
@@ -742,7 +687,7 @@ derive the immutable Session filesystem snapshot
     ↓
 derive the concrete issued MAC trees from that snapshot
     (sessionMACBoundaries(snapshot): every concrete issued tree — the
-     workspace plus, in system mode, every additional issued root)
+     workspace plus every additional issued root)
     ↓
 prepare and verify MAC coverage for every concrete issued tree through
 the sessionMACCoordinator
@@ -830,15 +775,6 @@ canonical requested path, which may name a resolved symlink target) stays
 in the operational log and never reaches the client; no Session, bearer,
 container, pin, or workload-MAC state is created by a refused request.
 
-In user mode the issuance-time narrowing is bounded to the workspace: user
-mode has no `CAP_SYS_ADMIN` for inode-pinned mounts (see
-[User-mode run mounts](#user-mode-run-mounts)), so every requested root's
-canonical path must equal the canonical workspace — an omitted or empty
-request issues the inherited workspace-only snapshot, an explicit workspace
-root may narrow its access, and any other requested root is the same typed
-`invalid_filesystem_policy` refusal. System mode issues the full disjoint
-snapshot and pins every issued root through the same inode-pinning owner.
-
 The persisted snapshot is immutable Session child state
 (`session_filesystem_snapshot_entries`, ordered `position` entries with
 `UNIQUE(session_id, path)` and `ON DELETE CASCADE` from `sessions`), and
@@ -922,9 +858,8 @@ both.
 
 #### Admin authority
 
-A system-mode admin token must supply exactly one explicit selector
-(`400 missing_launcher_selector`); a user-mode admin token with no
-selector resolves the local daemon-owner `default` Launcher.
+An admin token must supply exactly one explicit selector
+(`400 missing_launcher_selector`).
 
 An admin may send `--principal USER` (mapped to the `principal` wire
 field) or `--launcher LAUNCHER` — an ID-shaped selector is forwarded as
@@ -1069,9 +1004,7 @@ MAC/runtime cleanup owners:
   active runtime;
 - an individually disabled launcher stays disabled through parent
   enable/disable transitions; re-enabling the principal or parent does not
-  re-enable it;
-- in user mode the reserved transparent owner chain rejects corrupting
-  mutations (see [User-mode owner reservation](#user-mode-owner-reservation)).
+  re-enable it.
 
 ### Credential lifecycle
 
@@ -1235,8 +1168,7 @@ migrates transparently at startup.
 |---|---|
 | pre-delegation Principal credential rows | preserved byte-for-byte as Principal credentials (`launcher_id NULL`, no launcher credential fabricated) |
 | attributable sessions owned directly by the Principal | re-owned by that principal's `default` launcher |
-| user-mode NULL-owner sessions | attributed to the daemon-owner default launcher |
-| system-mode NULL-owner (admin) sessions | invalidated (removed; never left ownerless) |
+| NULL-owner sessions (any release) | invalidated (removed; never left ownerless) |
 | dangling principal reference | migration fails closed, legacy table intact (transaction rollback) |
 
 A dangling reference, a schema-shape mismatch, or a foreign-key violation
@@ -1265,7 +1197,7 @@ An allowed root and the issued Session filesystem snapshot are an explicitly
 granted filesystem **capability** — path tree plus access modes —
 not a path ceiling layered over the Principal's Unix DAC. Accepted semantics:
 
-- In system mode the root-owned helper may perform the necessary
+- The root-owned helper may perform the necessary
   helper-mediated reads inside the granted capability regardless of whether
   the specific Principal could read the same inode through its own host
   Unix credentials (the helper does not assume the Principal identity; root
@@ -1285,10 +1217,6 @@ not a path ceiling layered over the Principal's Unix DAC. Accepted semantics:
   not a reproduction of the Principal's host login credential set: host
   supplementary groups are not propagated, so permissions depending on
   those group memberships may differ.
-- User mode has no separate capability-semantics gap: the non-root daemon is naturally
-  bounded by its own DAC identity (the daemon owner is the only Principal).
-  This is an implementation consequence of the same capability model, not a
-  second filesystem-capability model.
 - Release 2.4 does not automatically close this boundary. The build sandbox
   redesigns the builder execution/root/network boundary (see
   [`release-2.4-build-sandbox.md`](release-2.4-build-sandbox.md)); moving
@@ -1364,11 +1292,9 @@ parent-policy mutations (see
 `effective Principal roots` is the Principal ceiling owned by
 `effectivePrincipalAllowedRoots`: the meet of the global roots and the
 stored Principal roots — path intersection with `read_only`-dominant
-access meet — with one documented exception: in user mode the
-daemon-owner Principal with zero stored roots collapses onto the global
-roots. `effective Launcher roots` are the Principal ceiling for `inherit`
-scope, or the meet of that ceiling with the Launcher's stored entries for
-`restricted` scope.
+access meet; zero stored roots mean an empty ceiling. `effective Launcher
+roots` are the Principal ceiling for `inherit` scope, or the meet of that
+ceiling with the Launcher's stored entries for `restricted` scope.
 
 #### Parent-ceiling narrowing cascades stored descendants
 
@@ -1441,7 +1367,7 @@ transitions remain owned exclusively by the immutable Session filesystem
 snapshot and the per-workload exposure materialization; Session MAC
 preparation never interprets access modes.
 
-Distinct from Session MAC preparation, system-mode `docker-helper init`
+Distinct from Session MAC preparation, `docker-helper init`
 under enforcing SELinux applies the installed fcontext rules to docker-helper's
 own deployment state: the helper-owned `/etc/docker-helper/**` (config) and
 `/var/lib/docker-helper/**` (state) trees are relabeled to
@@ -1463,24 +1389,21 @@ executable the daemon will exec (resolved over the same PATH the service
 uses), so the confined `docker_helper_t` domain can execute it with the
 `container_runtime_exec_t` type the distro/container-selinux fcontext rules
 already define — never a recursive `/usr/bin` relabel and never a `bin_t`
-execute grant. AppArmor system mode and user mode perform no SELinux
+execute grant. AppArmor deployments perform no SELinux
 relabel; on upgrade/reinstall the packaged `restorecon -R
 /etc/docker-helper` migrates an existing admin token written before the dedicated type existed to the
 dedicated type without changing its value.
 
-Initialization defaults follow the selected deployment identity:
+Initialization defaults follow the deployment identity:
 
-- interactive non-root initialization defaults `allowed_roots` to the current
-  user's home directory;
 - interactive root initialization defaults `allowed_roots` to `/home`;
-- the shared root validator permits root to select exact `/home` or `/opt`,
-  while non-root validation continues to reject those broad namespaces;
+- the shared root validator permits root to select exact `/home` or `/opt`;
 - non-interactive initialization requires an explicit `--allowed-root`.
 
-When a non-root `docker-helper init` detects an existing system daemon, it uses
-the Principal-credential onboarding path instead of creating a competing user
-daemon configuration. The standalone `credential install` command exposes the
-same user-scoped credential store directly.
+A non-root `docker-helper init`/`serve` is refused before any side effect:
+the system service is the only daemon deployment. Non-root clients obtain
+authority through installed credentials
+(`docker-helper credential install`).
 
 Application acceptance of a root does not by itself prove MAC access. AppArmor
 requires the corresponding managed boundary rule. SELinux requires a permitted
@@ -1562,9 +1485,7 @@ root (set-access; never changes the scope mode), and `DELETE
 .../allowed-roots` removes one root; removal never changes the scope mode,
 so removing the last root leaves the launcher restricted with an empty
 root set (fail-closed: no admissible session workspace until an explicit
-inherit). Every narrow launcher root mutation — add, set-access, and
-remove — rejects the user-mode reserved default launcher with
-`409 user_mode_owner_reserved`. The CLI verbs are
+inherit). The CLI verbs are
 `launcher allowed-root add/list/set-access/remove/inherit` and
 `principal allowed-root add/list/set-access/remove`;
 `launcher scope` no longer exists in the CLI.
@@ -1924,35 +1845,35 @@ rotation replaces the existing credential and its token).
 CLI surface (every Launcher command accepts the common operator flags):
 
 ```
-docker-helper launcher create [--system] [--endpoint ENDPOINT]
+docker-helper launcher create [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER]
     [--allowed-root PATH]... [--issue-credential | --no-credential] [--json] NAME
-docker-helper launcher list [--system] [--endpoint ENDPOINT]
+docker-helper launcher list [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
-docker-helper launcher show [--system] [--endpoint ENDPOINT]
+docker-helper launcher show [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
-docker-helper launcher set [--system] [--endpoint ENDPOINT]
+docker-helper launcher set [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--name NAME]
     [--enabled true|false] [--json] [LAUNCHER]
-docker-helper launcher delete [--system] [--endpoint ENDPOINT]
+docker-helper launcher delete [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
-docker-helper launcher allowed-root add [--system] [--endpoint ENDPOINT]
+docker-helper launcher allowed-root add [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--access ACCESS] [--json] [LAUNCHER] PATH
-docker-helper launcher allowed-root set-access [--system] [--endpoint ENDPOINT]
+docker-helper launcher allowed-root set-access [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER] PATH ACCESS
-docker-helper launcher allowed-root list [--system] [--endpoint ENDPOINT]
+docker-helper launcher allowed-root list [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
-docker-helper launcher allowed-root remove [--system] [--endpoint ENDPOINT]
+docker-helper launcher allowed-root remove [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER] PATH
-docker-helper launcher allowed-root inherit [--system] [--endpoint ENDPOINT]
+docker-helper launcher allowed-root inherit [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
-docker-helper launcher credential create [--system] [--endpoint ENDPOINT]
+docker-helper launcher credential create [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
-docker-helper launcher credential show [--system] [--endpoint ENDPOINT]
+docker-helper launcher credential show [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
-docker-helper launcher credential rotate [--system] [--endpoint ENDPOINT]
+docker-helper launcher credential rotate [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
-docker-helper launcher credential delete [--system] [--endpoint ENDPOINT]
+docker-helper launcher credential delete [--endpoint ENDPOINT]
     [--token-file PATH] [--principal USER] [--json] [LAUNCHER]
 ```
 
@@ -1997,10 +1918,10 @@ only its own output option (`--json`) — no endpoint or authentication
 flags:
 
 ```
-docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json] WORKSPACE
-docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
-docker-helper session show [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]
-docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]
+docker-helper session create [--endpoint ENDPOINT] [--token-file PATH] [--filesystem-root PATH=ACCESS]... [--principal USER] [--launcher LAUNCHER] [--json] WORKSPACE
+docker-helper session list [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]
+docker-helper session show [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]
+docker-helper session delete [--endpoint ENDPOINT] [--token-file PATH] SESSION_ID [--json]
 docker-helper session cleanup [--json]
 ```
 
@@ -2062,12 +1983,10 @@ outcome (no existence disclosure).
 `session cleanup` — removes expired sessions from the local state
 database; the offline local-state maintenance owner, deliberately not an
 API-backed command: it has no endpoint or authentication flags, must run
-locally with the daemon stopped, and does not require an admin token.
-Offline cleanup of the system deployment must run with the identity and
-privilege that owns the system deployment state (normally root); a
-non-root invocation is user-mode local-state maintenance of the caller's
-own user-mode state and never operates on the system deployment's
-`/var/lib/docker-helper`. Deletes rows
+locally on the daemon host with the daemon stopped, and does not require
+an admin token. It must run with the identity and privilege that owns the
+state database being maintained (root for the system deployment's
+`/var/lib/docker-helper`). Deletes rows
 whose `expires_at` has passed; active sessions are untouched; reports the
 number of removed rows (`{removed}` under `--json`).
 
@@ -2209,7 +2128,6 @@ Operator flags for API-backed commands (`principal`, `launcher`,
 `completion roots`):
 
 ```
---system              connect to system daemon (Unix socket)
 --endpoint ENDPOINT   explicit endpoint (/path, unix:///path, or http://127.0.0.1:port)
 --token-file PATH     token file path (auto-resolved for Unix sockets)
 ```
@@ -2313,7 +2231,7 @@ commands are `serve`, `init`, `reload`, `session`, `config`, `principal`,
 general commands are `version` and `help`.
 
 `apparmor` — inspect managed AppArmor MAC boundaries for an AppArmor
-system deployment: `apparmor root list` is read-only backend diagnostic
+deployment: `apparmor root list` is read-only backend diagnostic
 inspection of the boundary state the Session MAC lifecycle prepared (the
 `apparmor root` spelling is a retained compatibility form; it never
 mutates state and is not an authorization API — the Session MAC lifecycle
@@ -2322,7 +2240,7 @@ names print one per line, the bare name array under `--json`), and
 `apparmor check` validates the shipped profile against the installed
 policy (the human status line by default, `{valid}` under `--json`).
 
-`selinux` — inspect SELinux system-policy state for a SELinux system
+`selinux` — inspect SELinux system-policy state for a SELinux
 deployment. Subcommand: `check` (validate that the `docker_helper` policy
 module is loaded and docker-helper-owned file contexts are consistent with
 the active policy; read-only operator diagnostics that never mutates
@@ -2356,7 +2274,7 @@ command exits with a non-zero status. If rollback and reload after rollback
 succeed, config.json and the daemon are synchronized. If the reload after
 rollback fails, they may diverge until the next manual reload or restart.
 
-In system mode with the daemon stopped, a successful mutation that changes an
+With the daemon stopped, a successful mutation that changes an
 active trusted-CA configuration (`trusted_ca_injection=auto` with a source
 path) persists the validated config and prints a warning to stderr: the CA
 file was validated locally, but confined MAC readability cannot be verified
@@ -2399,8 +2317,8 @@ missing stored root, and only the removal of the stale entry through
 `remove` (which works with the daemon down, like every config mutation)
 restores a startable config.
 
-`http_address` is configurable in system mode only and requires a daemon
-restart to take effect. It is not included in the reloadable field list.
+`http_address` requires a daemon restart to take effect. It is not
+included in the reloadable field list.
 
 `docker-helper reload` — ask the running daemon to re-read `config.json`
 and apply changes without restarting. Reloadable fields:
@@ -2602,8 +2520,7 @@ workload-MAC preparation failure (rolled-back and retained variants),
 build staging failure including the staging-ceiling refusal, final-admission
 refusal, `cmd.Start` failure, pre-start cancellation/shutdown, normal
 success, Docker failure, explicit cancel, and daemon-shutdown
-termination. The user-mode deployment obeys the same fixed ceilings
-without gaining system-mode mechanics.
+termination.
 
 The narrow build sub-ceiling exists so the generic run concurrency stays
 usable while worst-case staging composition stays safe (see
@@ -2769,9 +2686,9 @@ Canonical mount-source resolution
     │
 Filesystem exposure resolution against the persisted snapshot
     │
-Source pinning + workload MAC preparation (system mode; in the
+Source pinning + workload MAC preparation (in the
     accepted order with fail-closed rollback, see
-    [System-mode run mounts](#system-mode-run-mounts))
+    [Run mounts: inode pinning and workload MAC](#run-mounts-inode-pinning-and-workload-mac))
     │
 Operation registration (supervisor admission — atomic with shutdown gate)
     │
@@ -2804,11 +2721,9 @@ capability that resolves outside stays fail-closed; a refused writable
 exposure is answered `read_only_root` before any pin/operation/Docker
 state exists, and the MAC lease is released.
 
-`helper_socket` validation is mode-aware: when the boolean is requested in
-user mode the request is rejected (`invalid_helper_socket`) before any
-lease, pin, or operation state exists. In system mode the capability is
-accepted and a user mount may not use the injected mount point itself
-(`invalid_mount`). The capability also owns the socket locator: the daemon
+`helper_socket` is accepted and a user mount may not use the injected
+mount point itself (`invalid_mount`). The capability also owns the socket
+locator: the daemon
 injects the server-owned `DOCKER_HELPER_SOCKET_PATH=/run/docker-helper/docker-helper.sock`
 when the caller omitted it, accepts a caller-supplied exactly-canonical
 value as one docker argv entry (remaining part of the caller env-key
@@ -2846,7 +2761,7 @@ Validation details:
   writable-parent query (the source itself resolves `read_write` and no
   effective `read_only` region exists strictly below it inside the
   snapshot). The enforcement implementation's intermediate-path/ancestor
-  containment invariants apply on top: in system mode the canonical source
+  containment invariants apply on top: the canonical source
   is inode-pinned through the real host tree with
   `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS`, so no symlinked intermediate
   component may participate in the enforced pathname, and the exposure/MAC
@@ -2883,7 +2798,7 @@ namespace is deliberately neutral: only the Launcher is the Session owner;
 the Session and Principal labels are provenance. The run-only Operation ID
 label is the correlation key between a container and its helper-owned
 workload MAC state (see
-[System-mode run mounts](#system-mode-run-mounts)); reconciliation uses
+[Run mounts: inode pinning and workload MAC](#run-mounts-inode-pinning-and-workload-mac)); reconciliation uses
 that label, never a PID.
 
 ### Pull
@@ -3063,13 +2978,13 @@ Fail closed: a source/target that fails any boundary is refused — the CSV
 reader normalizes the literal CRLF pair to LF inside quoted fields, a
 whitespace-padded or empty value fails the Docker value validation, and a
 NUL byte fails exec argv. Refusal timing follows the two value classes.
-Caller-controlled bind facts — the container target in every mode and the
-canonical resolved source in user mode, where the resolved host path
-itself is the bind source — are proven representable at request
+Caller-controlled bind facts — the container target and the caller-resolved
+mount source (the workspace-relative source's resolved host path is the
+bind source) — are proven representable at request
 validation: before pinning, before workload-MAC preparation, before the
 operation admission, before `run.start`, and before any Docker state, and
 such a refusal answers `invalid_mount`. Actual daemon-owned or prepared
-bind sources — the system-mode pinned source, the trusted-CA prepared
+bind sources — the pinned source, the trusted-CA prepared
 source, and the helper-socket runtime projection source — become known
 only after the pins and the workload MAC state are prepared, so a
 serialization failure of one of them surfaces after that preparation but
@@ -3141,7 +3056,7 @@ writable-exposure permission). Run materialization and the workload MAC
 projection consume this same accepted exposure plan; the MAC
 backends do not load snapshots or recompute writable-parent semantics.
 
-#### System-mode run mounts
+#### Run mounts: inode pinning and workload MAC
 
 The caller-mount count ceiling is checked immediately after
 request decoding/basic validation, before the Session MAC-use lease,
@@ -3155,7 +3070,7 @@ request-body limit is not the security owner of this count, and no
 private mount namespace is introduced: existing pins remain visible to
 dockerd.
 
-In system mode, every bind-mount source has already been accepted by the
+Every bind-mount source has already been accepted by the
 filesystem exposure resolution (issued snapshot authority). The helper
 then opens "/" as a root file descriptor. The source path is converted
 to a root-relative path and opened with `openat2` using
@@ -3260,21 +3175,6 @@ with positive absence proof, then projection state removal; reconciliation
 entries carry no worker handle and never adopt or signal workers by PID.
 Container correlation uses the reserved server-owned runtime
 labels (schema, `com.dockerhelper.operation.id`, Session ID), never a PID.
-
-#### User-mode run mounts
-
-In user mode, the resolved mount source must equal the canonical
-`session.Workspace`. Subdirectory and file mounts are rejected as
-`invalid_mount`. The caller-mount count ceiling is mode-independent: a
-user-mode run request is refused with `too_many_mounts` beyond the same
-fixed 16 caller mounts even though user mode creates no inode pins.
-
-This restriction exists because user mode lacks `CAP_SYS_ADMIN` for
-inode-pinned mounts. The security of the workspace-root mount relies on
-the workspace-parent write invariant: the sandboxed agent does not have
-host-side write access to the parent directory of the workspace. Since the
-agent cannot replace the workspace directory entry, the pathname remains
-stable between validation and the Docker bind mount.
 
 #### Build context
 
@@ -3490,9 +3390,9 @@ docker-helper injects the CA into containers started via `POST /run`:
     supported. Other CA-related environment variables like `SSL_CERT_FILE`,
     `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` are not used.
 
-`trusted_ca_path` is an absolute path to the accepted CA file. In user mode any
-readable absolute path works. In system mode the confined daemon must also be
-permitted to read the source under the active MAC backend, so the supported
+`trusted_ca_path` is an absolute path to the accepted CA file. The
+confined daemon must be permitted to read the source under the active MAC
+backend, so the supported
 locations are the helper-owned `/etc/docker-helper` config tree (always
 readable by the confined daemon) and the standard system CA-bundle paths the
 shipped AppArmor/SELinux policy permits. Paths outside the shipped policy are
@@ -3509,7 +3409,7 @@ existing helper Unix socket through its own existing runtime directory.
 The canonical public name is `helper_socket`; no parallel transport or
 socket exists.
 
-In system mode the daemon injects one additional read-only bind mount:
+The daemon injects one additional read-only bind mount:
 
 ```
 /run/docker-helper (host runtime directory)
@@ -3575,22 +3475,14 @@ reachable, an unauthenticated call stays refused, the private runtime
 stays unreadable and immutable, and the escalation stays dead); under
 enforcing SELinux the shipped policy grants the workload
 exactly the traversal and socket-connect permissions needed to reach the
-socket and nothing else; under AppArmor system mode the workload remains
+socket and nothing else; under AppArmor the workload remains
 confined by the generated per-workload
 `docker-helper-workload-<operation-id>` profile (Docker's SELinux labeling
 is disabled with `label=disable`, which does not disable AppArmor — see
-[System-mode run mounts](#system-mode-run-mounts)), and the same isolation
+[Run mounts: inode pinning and workload MAC](#run-mounts-inode-pinning-and-workload-mac)), and the same isolation
 is provided by the helper-owned filesystem permissions, the read-only
 mount, the privilege floor, and unchanged bearer authentication:
 reachability to the helper socket grants no authority.
-
-In user mode the runtime directory is owned by the daemon owner with
-`0700` permissions, and user-mode workloads run under that same UID, so a
-directory projection would expose the daemon's full runtime state
-(including other Sessions' Docker CLI configuration) to the workload.
-`--helper-socket` therefore fails closed in user mode with the stable
-`invalid_helper_socket` error. This is a documented limitation (since
-2.1.1, still current in Release 2.2), not an oversight.
 
 `run.start` and `run.finish` audit records include a `helper_socket`
 boolean (true only when the projection was active for that run). The
@@ -3663,8 +3555,8 @@ regular internal force-cleanup phase. New values above `30s` are rejected by
 `config set`. For upgrade compatibility with releases that accepted any
 positive `shutdown_timeout`, a persisted value above `30s` is loaded but
 bounded to `30s` at startup/reload with an operational warning; `config
-show` reports the bounded effective value. The shipped system and user
-units both carry `TimeoutStopSec=45s`.
+show` reports the bounded effective value. The shipped system unit
+carries `TimeoutStopSec=45s`.
 
 The shutdown budget is read from the daemon's *current* configuration at the
 moment shutdown begins: a `shutdown_timeout` changed via reload is honored by
@@ -3672,32 +3564,20 @@ the next stop without a restart.
 
 ### systemd units and hardening
 
-Two units are shipped: `packaging/systemd/user/docker-helper.service` and
-`packaging/systemd/system/docker-helper.service`. Both are `Type=exec`
-with `Restart=on-failure`, `RestartSec=5s`, `TimeoutStopSec=45s`,
-`UMask=0077`, and `StartLimitIntervalSec=60s` / `StartLimitBurst=3`
-(restart limit: if reached, `systemctl reset-failed` before starting
-again).
+One system unit is shipped: `packaging/systemd/system/docker-helper.service`.
+It is `Type=exec` with `Restart=on-failure`, `RestartSec=5s`,
+`TimeoutStopSec=45s`, `UMask=0077`, and `StartLimitIntervalSec=60s` /
+`StartLimitBurst=3` (restart limit: if reached, `systemctl reset-failed`
+before starting again).
 
-Shared hardening: `NoNewPrivileges=true`, `RestrictNamespaces=true`,
-`RestrictRealtime=true`. `RestrictSUIDSGID` is deliberately omitted in
-both units because its seccomp filtering blocks the `openat2` staging
+Hardening: `NoNewPrivileges=true`, `RestrictNamespaces=true`,
+`RestrictRealtime=true`. `RestrictSUIDSGID` is deliberately omitted
+because its seccomp filtering blocks the `openat2` staging
 primitive on supported kernels.
-
-User unit: `ExecStart=%h/.local/bin/docker-helper serve` with
-`ExecReload` for non-restarting reloads; configuration and state
-directories are created by `docker-helper init` using standard XDG paths;
-non-standard `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are supported when
-they are present in the systemd user manager environment. Logout
-behavior follows the user manager: without
-`loginctl enable-linger`, the user manager and all services normally stop
-after the last user session ends; with linger, the user manager continues
-running and the service stays active after logout.
 
 System unit:
 
-- `ExecStart=/usr/bin/docker-helper serve`; `ExecReload=... reload
-  --system`.
+- `ExecStart=/usr/bin/docker-helper serve`; `ExecReload=... reload`.
 - Directory declarations: `ConfigurationDirectory=docker-helper`
   (mode `0755`), `StateDirectory=docker-helper` (mode `0700`),
   `RuntimeDirectory=docker-helper` (mode `0755`), and
@@ -3765,9 +3645,9 @@ Current error codes (non-exhaustive):
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
-| `invalid_helper_socket` | `POST /run` | `helper_socket` requested in user mode, or an active helper-socket request supplies a conflicting `DOCKER_HELPER_SOCKET_PATH` instead of the canonical server-owned locator |
+| `invalid_helper_socket` | `POST /run` | an active helper-socket request supplies a conflicting `DOCKER_HELPER_SOCKET_PATH` instead of the canonical server-owned locator |
 | `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause for a request spelling admitted by the lexical ceiling proof, and the bounded authorization-shape refusal (`workspace must be inside an allowed root`) for a spelling outside it — an unadmitted spelling is refused without any host filesystem probing (authorization-before-probing; see [Session workspace](#session-workspace)). For an admitted spelling whose privileged resolution or stat fails, the message is the stable non-disclosing diagnosis selected once through the shared admitted-path diagnosis: `workspace path does not exist` when the path does not exist, the same bounded authorization-shape refusal when the daemon may not resolve or consume the pathname (fail-closed containment — identical to the successful-resolution refusal, so an escaping symlink answers with the same policy meaning on every backend), or the bare resolution/access failure otherwise; the probe's errno and any probed or resolved pathname stay in the operational log |
-| `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
+| `missing_launcher_selector` | `POST /sessions` | admin request supplies no launcher selector |
 | `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
 | `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
 | `lifecycle_busy` | `POST /sessions` | the lifecycle coordination was held by another transition when the create arrived; the non-waiting admission refuses the create without queueing (HTTP 503; no Session, no resolved policy state; the client decides whether to retry) |
@@ -3787,7 +3667,6 @@ Current error codes (non-exhaustive):
 | `registry_auth_denied` | `POST /registry/login` | docker login: authentication/authorization denied |
 | `registry_login_failed` | `POST /registry/login` | docker login failed and the failure is not classified |
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
-| `user_mode_owner_reserved` | Principal/Launcher mutation endpoints (user mode) | the target is the reserved transparent user-mode owner chain (daemon-owner Principal or its `default` Launcher) and the mutation would violate the startup contract |
 | `invalid_username` | `POST /principals` | the supplied username is outside the Principal username text grammar (refused before OS lookup; an empty username is `missing_username`, OS account absence is `os_user_not_found`) |
 
 After successful session authentication, every `POST /pull`,
@@ -3844,19 +3723,13 @@ Audit output is controlled by the optional `audit_enabled` field in
 1. Explicit `audit_enabled: true` enables audit.
 2. Explicit `audit_enabled: false` disables audit, including when
    `log_level` is `debug`.
-3. When `audit_enabled` is absent:
-   - **system mode** (running as UID 0): audit is always enabled,
-     regardless of `log_level`;
-   - **user mode** (running as non-root):
-     `log_level=debug` enables audit; every other `log_level` disables it.
+3. When `audit_enabled` is absent, audit is enabled (the system default).
 
-`docker-helper init` omits `audit_enabled` from the generated config.
-In user mode, since the default `log_level` is `info`, audit is disabled
-by default. In system mode, audit is enabled by default. The
-`audit_enabled_source` field in `docker-helper config show` indicates how
-the effective value was derived: `"explicit"` (set in config.json),
-`"system_default"` (absent, system mode), or `"log_level"` (absent, user
-mode derived from `log_level`). When audit is disabled, no audit records
+`docker-helper init` omits `audit_enabled` from the generated config, so
+audit is enabled by default. The `audit_enabled_source` field in
+`docker-helper config show` indicates how the effective value was
+derived: `"explicit"` (set in config.json) or `"system_default"`
+(absent). When audit is disabled, no audit records
 are written, no audit encoding or writer errors are emitted, and
 operational logging and request handling are unaffected.
 
@@ -3991,7 +3864,7 @@ Result codes:
 | `invalid_json` | the request body fails strict JSON request decoding (malformed JSON, wrong JSON type for a schema field, unknown top-level field rejected by the endpoint schema, or trailing second JSON values/data) |
 | `conflicting_selectors` | both `launcher_id` and `principal` selectors present |
 | `invalid_selector` | an explicitly present selector is empty or malformed |
-| `missing_launcher_selector` | system-mode admin request supplies no selector |
+| `missing_launcher_selector` | admin request supplies no selector |
 | `launcher_not_found` | the selected launcher does not exist under the resolved principal (404) |
 | `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is not strictly inside the effective allowed roots (the allowed root itself is an authority ceiling, not a valid Session workspace) |
@@ -4112,7 +3985,7 @@ Emitted before a container starts.
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection is active for this run |
 | `helper_socket` | boolean | true when the helper runtime projection is active for this run |
-| `workload_mac_backend` | string | system mode only: the MAC backend that materialized the already-accepted filesystem exposure plan for this run (`apparmor` or `selinux`); absent in user mode. This is an observability fact, not a policy authority; generated internal profile/projection paths are deliberately not audited |
+| `workload_mac_backend` | string | the MAC backend that materialized the already-accepted filesystem exposure plan for this run (`apparmor` or `selinux`). This is an observability fact, not a policy authority; generated internal profile/projection paths are deliberately not audited |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |
@@ -4152,7 +4025,7 @@ Does not include `request_id` because completion is not request-scoped.
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection was active for this run |
 | `helper_socket` | boolean | true when the helper runtime projection was active for this run |
-| `workload_mac_backend` | string | system mode only: the MAC backend that materialized the already-accepted filesystem exposure plan for this run (`apparmor` or `selinux`); absent in user mode. This is an observability fact, not a policy authority; generated internal profile/projection paths are deliberately not audited |
+| `workload_mac_backend` | string | the MAC backend that materialized the already-accepted filesystem exposure plan for this run (`apparmor` or `selinux`). This is an observability fact, not a policy authority; generated internal profile/projection paths are deliberately not audited |
 | `principal_name` | string | owning Principal name, derived through the Launcher (present for all Sessions) |
 | `launcher_id` | string | owning Launcher ID (present for all Sessions) |
 | `launcher_name` | string | owning Launcher name (present for all Sessions) |
@@ -4397,7 +4270,7 @@ the canonical containment/policy proof. The `pathWithin` function uses
 
 For operations that pass paths to Docker, additional measures close the
 TOCTOU gap: builds use an isolated staging copy with FD-relative
-`openat2` traversal; system-mode run mounts use inode-pinned
+`openat2` traversal; run mounts use inode-pinned
 helper-owned mounts via `open_tree` + `move_mount`.
 
 ### Symlink escape
@@ -4447,12 +4320,9 @@ credentials, and session tokens are never logged (see
 ### Direct docker.sock access
 
 docker-helper does not expose `docker.sock`. The agent communicates only
-through the HTTP API.
-
-- **User mode**: Unix socket has `0600` permissions.
-- **System mode**: Unix socket has `0666` permissions, but security is
-  enforced through bearer authentication and authorization, not socket
-  permissions alone.
+through the HTTP API. The Unix socket has `0666` permissions; security is
+enforced through bearer authentication and authorization, not socket
+permissions alone.
 
 ### Container security
 
@@ -4461,24 +4331,24 @@ docker-helper applies a fixed security policy when running containers:
 - `--rm` — remove the container on exit;
 - the server-owned workload privilege floor — the run argv owner emits
   `--cap-drop ALL` and `--security-opt no-new-privileges:true` for every
-  workload in every mode, before any backend option, and no request field
+  workload, before any backend option, and no request field
   can disable or weaken them. Linux no-new-privileges and the dropped
   capability set keep an image-delivered or build-staging-delivered
   SUID/SGID executable at the workload's own execution identity, so the
   strongest privilege a hostile workload can reach is its server-owned
   `--user` identity with no container capabilities;
-- user mode and AppArmor system mode pass `--security-opt label=disable`
+- AppArmor deployments pass `--security-opt label=disable`
   (SELinux labeling disabled; this does not disable AppArmor — an AppArmor
-  system-mode run workload is additionally confined by the generated
+  run workload is additionally confined by the generated
   per-workload AppArmor profile, see
-  [System-mode run mounts](#system-mode-run-mounts));
-- SELinux system mode uses
-  `--security-opt label=type:docker_helper_container_t` and keeps MCS
+  [Run mounts: inode pinning and workload MAC](#run-mounts-inode-pinning-and-workload-mac));
+- SELinux deployments use
+  `--security-opt label=type:docker_helper_container_t` and keep MCS
   confinement;
-- `--user <uid>:<gid>` — run as the session owner principal's UID and GID,
-  or daemon UID:GID for daemon-owner (user-mode) sessions; the execution
-  identity is server-owned and authoritative — the image `USER`/ENTRYPOINT
-  never substitutes for it and cannot weaken the privilege floor.
+- `--user <uid>:<gid>` — run as the owning Principal's UID and GID; the
+  execution identity is server-owned and authoritative — the image
+  `USER`/ENTRYPOINT never substitutes for it and cannot weaken the
+  privilege floor.
 
 The workload MAC backends stay additional independent confinement layers;
 they never compute or relax the privilege floor. The hostile
@@ -4494,7 +4364,7 @@ The staging owner writes only into helper-owned staging under the runtime
 directory. Every staged regular file is created by copying content and then
 preserving the source's ordinary permission bits while stripping the SUID
 and SGID privilege bits at the single staging copy point: the staged copy is
-helper-owned (root-owned in system mode), so transferring a source privilege
+helper-owned (root-owned), so transferring a source privilege
 bit would deliver a privilege-granting setuid/setgid binary through Docker's
 build context. The source file itself is never modified, staged hardlink
 entries share the first staged copy's inode and inherit the same stripped

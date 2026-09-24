@@ -2,6 +2,19 @@
 
 This file summarizes user-visible release changes. Commit-level history remains available through the GitHub compare links for each release.
 
+## [2.3.0] - 2026-09-20
+
+Release 2.3 removes user-mode daemon support: the root-owned system service is the only daemon deployment, and non-root users and agents remain first-class clients through installed credentials.
+
+### Highlights
+
+- One deployment: the per-user daemon/service/socket/config/state path is gone. `docker-helper init` and `serve` run as root only — a non-root invocation is refused before any side effect — and no XDG runtime/config/state daemon resolution exists anywhere in production. Non-root clients authenticate through installed Principal or Launcher credentials (`docker-helper credential install`) or an explicit `--token-file`.
+- The transparent daemon-owner Principal/default-Launcher bootstrap and its reservation policy are deleted: every Principal owns its `default` Launcher through the ordinary ownership model, and there is no special-case owner chain. An admin Session create requires an explicit launcher selector (`400 missing_launcher_selector`); Principal and Launcher credentials resolve their own scope.
+- One default endpoint: `/run/docker-helper/docker-helper.sock`. The retired `--system` flag is removed from every command (the migration path from 2.2 refuses it as an unknown flag), the CLI never probes a user socket, and the retired `mode` config-show projection is gone (`config show mode` is an unknown field; there is no deployment mode to project). Agent commands resolve `DOCKER_HELPER_SOCKET_PATH` or the system socket.
+- One mandatory MAC contract: session and workload MAC coordinators are unconditional, every run pins every mount source through the inode-pinning primitive, and the helper-socket runtime projection is always available. `audit_enabled` defaults to enabled (`system_default`); an explicit config value wins.
+- Packaging is system-only: the DEB/RPM no longer ship the systemd user unit, and the tarball ships only `install-system.sh`/`uninstall-system.sh`, the system unit, and the system AppArmor profile. `session cleanup` owns the system deployment's `/run` and `/var/lib` state through the root identity.
+- Non-root refusal wording: `docker-helper init`/`serve` as non-root answers that the command must be run as root (the system service is the only daemon deployment). Existing 2.2 system-service state and schema continue normally at startup: pre-delegation ownership migrates as before, and NULL-owner sessions (any release) are invalidated rather than adopted. Historical 2.2 user-mode daemon state is not adopted, imported, or transferred: user-mode sessions, operations, admin token, and per-user state are not migrated and remain an explicit operator cleanup matter.
+
 ## [2.2.0] - 2026-09-19
 
 Release 2.2 adds one complete filesystem-policy capability: every allowed root carries an explicit access mode, and system mode independently enforces read-only exposures with the mandatory MAC backend.

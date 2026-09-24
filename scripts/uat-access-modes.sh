@@ -213,7 +213,7 @@ api() {
 # issue_launcher_credential USER LAUNCHER_ID CREDFILE
 issue_launcher_credential() {
   local out token
-  out="$(dh launcher credential create --system --principal "$1" --json "$2" 2>/dev/null || true)"
+  out="$(dh launcher credential create --principal "$1" --json "$2" 2>/dev/null || true)"
   token="$(printf '%s' "$out" | json_field token)"
   [ -n "$token" ] || return 1
   printf '%s\n' "$token" > "$3"; chmod 600 "$3"
@@ -223,7 +223,7 @@ issue_launcher_credential() {
 # prints the session ID on success (the bearer is stored in /tmp/uat-am-<id>).
 create_session() {
   local cred="$1" ws="$2" out id
-  out="$(dh session create --system --token-file "$cred" "$ws" --json 2>&1 || true)"
+  out="$(dh session create --token-file "$cred" "$ws" --json 2>&1 || true)"
   id="$(printf '%s' "$out" | json_field id)"
   if [ -z "$id" ]; then
     printf 'session create failed (workspace %s): %s\n' \
@@ -236,7 +236,7 @@ create_session() {
 
 # show_snapshot SESSION_ID — prints the issued snapshot as PATH/ACCESS lines.
 show_snapshot() {
-  dh session show --system "$1" 2>/dev/null \
+  dh session show "$1" 2>/dev/null \
     | sed -n '/^FILESYSTEM SNAPSHOT/,$p' | tail -n +2
 }
 
@@ -386,20 +386,20 @@ else
 fi
 
 # Principal with the 2.2 tree policy.
-dh principal create --system --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
-dh principal set --system "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
+dh principal create --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
+dh principal set "$PRINCIPAL" enabled true >/dev/null 2>&1 || true
 
 # P3: principal allowed-root add with omitted --access -> read_write.
-if dh principal allowed-root add --system "$PRINCIPAL" "$TREE" >/dev/null 2>&1 \
-    && [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE")" = read_write ]; then
+if dh principal allowed-root add "$PRINCIPAL" "$TREE" >/dev/null 2>&1 \
+    && [ "$(dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE")" = read_write ]; then
   acc_ok "P3 principal allowed-root add with omitted --access -> read_write (rich projection)"
 else
   acc_fail "P3 principal allowed-root add (omitted --access) failed"
 fi
 
 # P4: principal allowed-root add --access read_only for the RO region.
-if dh principal allowed-root add --system --access read_only "$PRINCIPAL" "$WS/pipeline-inputs" >/dev/null 2>&1 \
-    && [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
+if dh principal allowed-root add --access read_only "$PRINCIPAL" "$WS/pipeline-inputs" >/dev/null 2>&1 \
+    && [ "$(dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
   acc_ok "P4 principal allowed-root add --access read_only (rich projection shows read_only)"
 else
   acc_fail "P4 principal allowed-root add --access read_only failed"
@@ -408,9 +408,9 @@ fi
 # P4b: the Principal owns the project path itself (read_write) so scenario 10
 # can narrow exactly this root with set-access (set-access requires an
 # existing root; it cannot reach into the parent TREE entry).
-if dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
+if dh principal allowed-root add --access read_write "$PRINCIPAL" \
     "$WS/project" >/dev/null 2>&1 \
-    && [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/project")" = read_write ]; then
+    && [ "$(dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/project")" = read_write ]; then
   acc_ok "P4b principal owns the project root (read_write, rich projection)"
 else
   acc_fail "P4b principal project-root add failed"
@@ -421,22 +421,22 @@ fi
 # collect-all step: a failed verification must never skip the flip-back
 # mutation and leave the fixture (pipeline-inputs = read_write) corrupted for
 # the downstream read_only scenarios.
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_write >/dev/null 2>&1; then
+if dh principal allowed-root set-access "$PRINCIPAL" "$WS/pipeline-inputs" read_write >/dev/null 2>&1; then
   acc_ok "P5 set-access to read_write accepted"
 else
   acc_fail "P5 set-access to read_write failed"
 fi
-if [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_write ]; then
+if [ "$(dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_write ]; then
   acc_ok "P5 rich projection shows read_write after the flip"
 else
   acc_fail "P5 read_write verification failed"
 fi
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1; then
+if dh principal allowed-root set-access "$PRINCIPAL" "$WS/pipeline-inputs" read_only >/dev/null 2>&1; then
   acc_ok "P5 set-access back to read_only accepted"
 else
   acc_fail "P5 set-access back to read_only failed"
 fi
-if [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
+if [ "$(dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$WS/pipeline-inputs")" = read_only ]; then
   acc_ok "P5 rich projection shows read_only after the flip back"
 else
   acc_fail "P5 read_only verification failed"
@@ -460,7 +460,7 @@ MAIN_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put.out --write-out '%{http_
 # P6 asserts the projection via the indented JSON of launcher show: the access
 # is on the line following the path, hence grep -A1.
 if [ "$MAIN_PUT_HTTP" = 200 ] \
-    && dh launcher show --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null \
+    && dh launcher show --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null \
       | grep -A1 -F "\"path\": \"$WS/pipeline-inputs\"" | grep -q '"access": "read_only"'; then
   acc_ok "P6 rich launcher scope replacement (PUT allowed_roots, access per entry)"
 else
@@ -470,7 +470,7 @@ fi
 # P7: the canonical allowed_roots projection is the only launcher roots
 # projection; the retired allowed_root_entries spelling is not an alias and
 # must be refused by the PUT route.
-MAIN_SHOW="$(dh launcher show --system --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
+MAIN_SHOW="$(dh launcher show --principal "$PRINCIPAL" --json "$MAIN_L_ID" 2>/dev/null || true)"
 if printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_roots"' \
     && ! printf '%s\n' "$MAIN_SHOW" | grep -q '"allowed_root_entries"'; then
   acc_ok "P7 launcher projection carries allowed_roots only"
@@ -499,7 +499,7 @@ LEGACY_PUT_HTTP="$(curl --silent --output /tmp/uat-am-put2.out --write-out '%{ht
   -d "{\"scope\":\"restricted\",\"allowed_roots\":[\"$LEGACY\"]}" \
   "http://localhost/principals/$PRINCIPAL/launchers/$LEGACY_L_ID/allowed-roots" 2>/dev/null || true)"
 if [ "$LEGACY_PUT_HTTP" = 200 ] \
-    && dh launcher show --system --principal "$PRINCIPAL" --json "$LEGACY_L_ID" 2>/dev/null \
+    && dh launcher show --principal "$PRINCIPAL" --json "$LEGACY_L_ID" 2>/dev/null \
       | grep -A1 -F "\"path\": \"$LEGACY\"" | grep -q '"access": "read_write"'; then
   acc_ok "P9 legacy path-only scope replacement maps the path to read_write"
 else
@@ -513,7 +513,7 @@ WIDEN_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
   '{"name":"widen","scope":"restricted","allowed_roots":["'"$TREE"'"]}')"
 WIDEN_L_ID="$(printf '%s' "$WIDEN_L_JSON" | json_field id)"
 [ -n "$WIDEN_L_ID" ] || { echo "error: launcher 'widen' create failed: $WIDEN_L_JSON" >&2; exit 1; }
-if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
+if dh launcher allowed-root add --principal "$PRINCIPAL" --access read_write \
     "$WIDEN_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1; then
   acc_ok "P7 setup: launcher stored a read_write grant on the Principal read_only region"
 else
@@ -531,11 +531,11 @@ SUB_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
   '{"name":"sub","scope":"restricted","allowed_roots":["'"$TREE"'"]}')"
 SUB_L_ID="$(printf '%s' "$SUB_L_JSON" | json_field id)"
 [ -n "$SUB_L_ID" ] || { echo "error: launcher 'sub' create failed: $SUB_L_JSON" >&2; exit 1; }
-dh principal allowed-root add --system --access read_write "$PRINCIPAL" \
+dh principal allowed-root add --access read_write "$PRINCIPAL" \
   "$WS/pipeline-inputs/sub" >/dev/null 2>&1 || true
-dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
+dh launcher allowed-root add --principal "$PRINCIPAL" --access read_only \
   "$SUB_L_ID" "$WS/pipeline-inputs" >/dev/null 2>&1 || true
-dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_write \
+dh launcher allowed-root add --principal "$PRINCIPAL" --access read_write \
   "$SUB_L_ID" "$WS/pipeline-inputs/sub" >/dev/null 2>&1 || true
 acc_ok "P8 setup: launcher sub carries RW -> RO -> RW transitions"
 
@@ -547,7 +547,7 @@ BUILD_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
   '{"name":"buildro","scope":"restricted","allowed_roots":["'"$BUILDROOT"'"]}')"
 BUILD_L_ID="$(printf '%s' "$BUILD_L_JSON" | json_field id)"
 [ -n "$BUILD_L_ID" ] || { echo "error: launcher 'buildro' create failed: $BUILD_L_JSON" >&2; exit 1; }
-if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
+if dh launcher allowed-root set-access --principal "$PRINCIPAL" \
     "$BUILD_L_ID" "$BUILDROOT" read_only >/dev/null 2>&1; then
   acc_ok "build-RO setup: launcher buildro carries a single read_only root"
 else
@@ -750,7 +750,7 @@ printf '%s\n' "$LEGACY_OUT" | grep -q 'LEGACY-RW-OK' \
 # scenario 10: snapshot immutability across parent policy mutations
 # ==============================================================================
 scenario "10: existing Session keeps its snapshot; new Sessions get the new mode"
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/project" read_only >/dev/null 2>&1; then
+if dh principal allowed-root set-access "$PRINCIPAL" "$WS/project" read_only >/dev/null 2>&1; then
   acc_ok "10 parent policy mutation: project narrowed to read_only"
 else
   acc_fail "10 principal set-access for the immutability pair failed"
@@ -774,7 +774,7 @@ else
     acc_fail "10 new Session did not receive the narrowed mode (base: $RESIDUE_BASE)"
   fi
 fi
-if dh principal allowed-root set-access --system "$PRINCIPAL" "$WS/project" read_write >/dev/null 2>&1; then
+if dh principal allowed-root set-access "$PRINCIPAL" "$WS/project" read_write >/dev/null 2>&1; then
   if snapshot_has "$SA2_ID" "$WS/project" read_only; then
     acc_ok "10 issued snapshot is immutable: SA2 keeps read_only after the parent was restored"
   else
@@ -814,7 +814,7 @@ chown -R "$PRINCIPAL:$PRINCIPAL" "$RUNDIR"
 chmod -R u+rwX,go+rX "$RUNDIR"
 
 # N-create: Launcher credential + per-Session issuance-time narrowing.
-NARROW_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
+NARROW_OUT="$(dh session create --token-file /tmp/uat-am-cred-main \
   "$RUNDIR" --json \
   --filesystem-root "$RUNDIR=read_only" \
   --filesystem-root "$RUNDIR/project=read_write" \
@@ -852,8 +852,8 @@ fi
 # defect while the effective Launcher ceiling permits read_write at the
 # child.
 if [ -n "${SN_ID:-}" ]; then
-  SN_SELF="$(dh self --system --token-file "/tmp/uat-am-tok-$SN_ID" --json 2>&1)" \
-    && SN_SHOW_DOC="$(dh session show --system "$SN_ID" --json 2>&1)" \
+  SN_SELF="$(dh self --token-file "/tmp/uat-am-tok-$SN_ID" --json 2>&1)" \
+    && SN_SHOW_DOC="$(dh session show "$SN_ID" --json 2>&1)" \
     || acc_fail "13 self or session show CLI failed for the narrowed Session: $(printf '%s\n' "${SN_SELF:-}" "${SN_SHOW_DOC:-}" | redact | head -4 | tr '\n' ' ')"
   SN_SELF_RES="$(printf '%s\n' "${SN_SELF:-}" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["resource"], sort_keys=True))' 2>/dev/null)"
   SN_SHOW_RES="$(printf '%s\n' "${SN_SHOW_DOC:-}" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))' 2>/dev/null)"
@@ -963,7 +963,7 @@ fi
 # never an accepted silence.
 if N_BASE="$(residue_state)" && N_BEFORE="$(session_list_count)"; then
   N_AUDIT_SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
-  WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-main \
+  WIDEN_OUT="$(dh session create --token-file /tmp/uat-am-cred-main \
     "$WS" --json \
     --filesystem-root "$WS=read_write" \
     --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
@@ -1027,8 +1027,8 @@ if dh config allowed-root set-access "$TREE/global-ro" read_only >/dev/null 2>&1
 else
   acc_fail "G global ceiling set-access to read_only failed"
 fi
-if dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$TREE/global-ro" >/dev/null 2>&1 \
-    && [ "$(dh principal allowed-root list --system --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE/global-ro")" = read_write ]; then
+if dh principal allowed-root add --access read_write "$PRINCIPAL" "$TREE/global-ro" >/dev/null 2>&1 \
+    && [ "$(dh principal allowed-root list --json "$PRINCIPAL" 2>/dev/null | allowed_root_json_access "$TREE/global-ro")" = read_write ]; then
   acc_ok "G Principal carries read_write on the global read_only subtree"
 else
   acc_fail "G Principal read_write add failed"
@@ -1037,7 +1037,7 @@ G_L_JSON="$(api POST "/principals/$PRINCIPAL/launchers" \
   '{"name":"globalro","scope":"restricted","allowed_roots":["'"$TREE"'/global-ro"]}')"
 G_L_ID="$(printf '%s' "$G_L_JSON" | json_field id)"
 [ -n "$G_L_ID" ] || { echo "error: launcher 'globalro' create failed: $G_L_JSON" >&2; exit 1; }
-if dh launcher show --system --principal "$PRINCIPAL" --json "$G_L_ID" 2>/dev/null \
+if dh launcher show --principal "$PRINCIPAL" --json "$G_L_ID" 2>/dev/null \
     | grep -A1 -F "\"path\": \"$TREE/global-ro\"" | grep -q '"access": "read_write"'; then
   acc_ok "G Launcher carries read_write on the same subtree (rich projection)"
 else
@@ -1103,7 +1103,7 @@ fi
 scenario "SYM: Admin and Principal credential narrowing symmetry"
 
 # Admin authority: same valid narrowing as scenario N, on the main workspace.
-SYM_ADMIN_OUT="$(dh session create --system --token-file /etc/docker-helper/admin.token \
+SYM_ADMIN_OUT="$(dh session create --token-file /etc/docker-helper/admin.token \
   --launcher "$MAIN_L_ID" "$WS" --json \
   --filesystem-root "$WS=read_only" \
   --filesystem-root "$WS/project=read_write" \
@@ -1126,7 +1126,7 @@ else
   acc_fail "16 Admin issued snapshot wrong: $(show_snapshot "${SYM_ADMIN_ID:-}" 2>/dev/null | tr '\n' '; ')"
 fi
 if SYM_ADMIN_BEFORE="$(session_list_count)"; then
-  SYM_ADMIN_WIDEN_OUT="$(dh session create --system --token-file /etc/docker-helper/admin.token \
+  SYM_ADMIN_WIDEN_OUT="$(dh session create --token-file /etc/docker-helper/admin.token \
     --launcher "$MAIN_L_ID" "$WS" --json \
     --filesystem-root "$WS=read_only" \
     --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
@@ -1151,7 +1151,7 @@ if reg_principal_credential "$PRINCIPAL" /tmp/uat-am-cred-principal; then
 else
   acc_fail "16 Principal credential issuance failed"
 fi
-SYM_PRIN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-principal \
+SYM_PRIN_OUT="$(dh session create --token-file /tmp/uat-am-cred-principal \
   "$WS" --json \
   --filesystem-root "$WS=read_only" \
   --filesystem-root "$WS/project=read_write" \
@@ -1174,7 +1174,7 @@ else
   acc_fail "16 Principal issued snapshot wrong: $(show_snapshot "${SYM_PRIN_ID:-}" 2>/dev/null | tr '\n' '; ')"
 fi
 if SYM_PRIN_BEFORE="$(session_list_count)"; then
-  SYM_PRIN_WIDEN_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-principal \
+  SYM_PRIN_WIDEN_OUT="$(dh session create --token-file /tmp/uat-am-cred-principal \
     "$WS" --json \
     --filesystem-root "$WS=read_only" \
     --filesystem-root "$WS/pipeline-inputs=read_write" 2>&1 || true)"
@@ -1298,18 +1298,18 @@ chmod -R u+rwX,go+rX "$MR_WS" "$MR_OPT"
 # matching Principal entries, so the restricted multiroot Launcher carries
 # exactly the /home/<user> RW + /opt/<user> RW ceiling.
 if dh config allowed-root add --access read_write "$MR_OPT" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$MR_OPT" >/dev/null 2>&1 \
-    && dh principal allowed-root add --system --access read_write "$PRINCIPAL" "$MR_HOME" >/dev/null 2>&1 \
+    && dh principal allowed-root add --access read_write "$PRINCIPAL" "$MR_OPT" >/dev/null 2>&1 \
+    && dh principal allowed-root add --access read_write "$PRINCIPAL" "$MR_HOME" >/dev/null 2>&1 \
     && [ "$(dh config allowed-root list --json 2>/dev/null | allowed_root_json_access "$MR_OPT")" = read_write ]; then
   acc_ok "MR setup: second effective root $MR_OPT (global RW + Principal RW)"
 else
   acc_fail "MR setup: second effective root setup failed"
 fi
-MR_L_JSON="$(dh launcher create --system --principal "$PRINCIPAL" multiroot --no-credential --json 2>/dev/null || true)"
+MR_L_JSON="$(dh launcher create --principal "$PRINCIPAL" multiroot --no-credential --json 2>/dev/null || true)"
 MR_L_ID="$(printf '%s' "$MR_L_JSON" | json_field id)"
 if [ -n "$MR_L_ID" ] \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_L_ID" "$MR_HOME" >/dev/null 2>&1 \
-    && dh launcher allowed-root add --system --principal "$PRINCIPAL" "$MR_L_ID" "$MR_OPT" >/dev/null 2>&1; then
+    && dh launcher allowed-root add --principal "$PRINCIPAL" "$MR_L_ID" "$MR_HOME" >/dev/null 2>&1 \
+    && dh launcher allowed-root add --principal "$PRINCIPAL" "$MR_L_ID" "$MR_OPT" >/dev/null 2>&1; then
   acc_ok "MR setup: multiroot Launcher carries $MR_HOME + $MR_OPT"
 else
   acc_fail "MR setup: multiroot Launcher setup failed: $MR_L_JSON"
@@ -1318,7 +1318,7 @@ issue_launcher_credential "$PRINCIPAL" "$MR_L_ID" /tmp/uat-am-cred-multiroot \
   || { echo "error: multiroot launcher credential issuance failed" >&2; exit 1; }
 
 # MR1: workspace implicit grant + two external roots through the public CLI.
-MR1_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+MR1_OUT="$(dh session create --token-file /tmp/uat-am-cred-multiroot \
   "$MR_WS" --json \
   --filesystem-root "$MR_HELPER=read_only" \
   --filesystem-root "$MR_CACHE=read_write" 2>&1 || true)"
@@ -1405,7 +1405,7 @@ fi
 
 # MR2: an explicit workspace root at read_only replaces the implicit grant:
 # the relative workspace writable mount is refused read_only_root.
-MR2_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+MR2_OUT="$(dh session create --token-file /tmp/uat-am-cred-multiroot \
   "$MR_WS" --json \
   --filesystem-root "$MR_WS=read_only" \
   --filesystem-root "$MR_CACHE=read_write" 2>&1 || true)"
@@ -1456,7 +1456,7 @@ fi
 if ! MR3_BASE="$(residue_state)" || ! MR3_BEFORE="$(session_list_count)"; then
   acc_blocked "MR3 pre-attempt inventory unavailable (fail-closed residue/session)"
 else
-  MR3_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+  MR3_OUT="$(dh session create --token-file /tmp/uat-am-cred-multiroot \
     "$MR_WS" --json \
     --filesystem-root "$MR_OUTSIDE=read_write" 2>&1 || true)"
   if printf '%s\n' "$MR3_OUT" | grep -q 'invalid_filesystem_policy' \
@@ -1472,7 +1472,7 @@ else
   # the cannot-resolve branch, so the two causes differ only in the branch,
   # never in the public code or in created state.
   MR3_MISSING="$MR_OPT/uat-am-does-not-exist"
-  MR3_OUT2="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+  MR3_OUT2="$(dh session create --token-file /tmp/uat-am-cred-multiroot \
     "$MR_WS" --json \
     --filesystem-root "$MR3_MISSING=read_write" 2>&1 || true)"
   if printf '%s\n' "$MR3_OUT2" | grep -q 'invalid_filesystem_policy' \
@@ -1493,14 +1493,14 @@ rm -rf "$MR_OUTSIDE"
 # requested read_write there is refused, while a selected MR_OPT RW root
 # preserves the protected transition inside the issued snapshot and a
 # writable parent exposure of it is refused.
-if dh launcher allowed-root add --system --principal "$PRINCIPAL" --access read_only \
+if dh launcher allowed-root add --principal "$PRINCIPAL" --access read_only \
     "$MR_L_ID" "$MR_OPT/repos" >/dev/null 2>&1; then
   acc_ok "MR4 setup: launcher carries the nested read_only repos root"
 else
   acc_fail "MR4 setup: nested read_only launcher root failed"
 fi
 MR4_BEFORE="$(session_list_count)"
-MR4_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+MR4_OUT="$(dh session create --token-file /tmp/uat-am-cred-multiroot \
   "$MR_WS" --json \
   --filesystem-root "$MR_HELPER=read_write" 2>&1 || true)"
 if printf '%s\n' "$MR4_OUT" | grep -q 'invalid_filesystem_policy' \
@@ -1510,7 +1510,7 @@ if printf '%s\n' "$MR4_OUT" | grep -q 'invalid_filesystem_policy' \
 else
   acc_fail "MR4 widening under the nested launcher RO was not refused"
 fi
-MR5_OUT="$(dh session create --system --token-file /tmp/uat-am-cred-multiroot \
+MR5_OUT="$(dh session create --token-file /tmp/uat-am-cred-multiroot \
   "$MR_WS" --json \
   --filesystem-root "$MR_OPT=read_write" 2>&1 || true)"
 MR5_ID="$(printf '%s' "$MR5_OUT" | json_field id)"
@@ -1548,7 +1548,7 @@ printf '%s\n' "$MR5_RO_OUT" | grep -q 'MR5-RO-OK' \
 # MR6: an issued Session keeps its snapshot after the parent policy changes
 # (flip MR_OPT to read_only, verify, flip back). The snapshot is immutable
 # and the issued RW cache stays writable.
-if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
+if dh launcher allowed-root set-access --principal "$PRINCIPAL" \
     "$MR_L_ID" "$MR_OPT" read_only >/dev/null 2>&1 \
     && [ -n "${MR1_ID:-}" ] \
     && snapshot_has "$MR1_ID" "$MR_CACHE" read_write \
@@ -1565,13 +1565,13 @@ if dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
 else
   acc_fail "MR6 parent-policy change or snapshot verification failed"
 fi
-dh launcher allowed-root set-access --system --principal "$PRINCIPAL" \
+dh launcher allowed-root set-access --principal "$PRINCIPAL" \
   "$MR_L_ID" "$MR_OPT" read_write >/dev/null 2>&1 || true
 
 # MR7: packaged completion smoke — the candidate's generated Bash completion,
 # sourced in a fresh shell, drives the daemon-backed Session create-policy
-# query through the already-created multiroot Launcher credential (--system
-# --token-file; no selector needed: the credential's own effective roots are
+# query through the already-created multiroot Launcher credential (--token-
+# file; no selector needed: the credential's own effective roots are
 # exactly the two launcher boundaries). The daemon-backed proof is the
 # contrast with a failed query: a broken credential degrades to the generic
 # filesystem candidates at /, while the real credential renders exactly the
@@ -1597,7 +1597,7 @@ MR7_PROBE='
 # MR7a negative contrast: a broken credential fails the daemon query and the
 # completion degrades to the generic filesystem candidates at /.
 MR7_NEG_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
-  docker-helper session create --system --token-file /tmp/uat-am-no-such-credential / 2>/dev/null || true)"
+  docker-helper session create --token-file /tmp/uat-am-no-such-credential / 2>/dev/null || true)"
 if printf '%s\n' "$MR7_NEG_OUT" | grep -qE '^/(etc|usr|var|tmp|proc|sys|dev|run|sbin|bin)$'; then
   acc_ok "MR7a negative contrast: failed credential query degrades to generic filesystem candidates"
 else
@@ -1606,7 +1606,7 @@ fi
 # MR7b positive: the multiroot Launcher credential reaches the daemon-backed
 # create-policy query; at / exactly the two boundary segments are rendered.
 MR7_POS_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
-  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot / 2>/dev/null || true)"
+  docker-helper session create --token-file /tmp/uat-am-cred-multiroot / 2>/dev/null || true)"
 if printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | grep -qx '/home' \
     && printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | grep -qx '/opt' \
     && [ "$(printf '%s\n' "$MR7_POS_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 2 ] \
@@ -1619,7 +1619,7 @@ fi
 # MR7c partial component: /h resolves toward the home boundary through the
 # same policy source.
 MR7_H_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
-  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot /h 2>/dev/null || true)"
+  docker-helper session create --token-file /tmp/uat-am-cred-multiroot /h 2>/dev/null || true)"
 if printf '%s\n' "$MR7_H_OUT" | grep -v '^$' | sort -u | grep -qx '/home' \
     && [ "$(printf '%s\n' "$MR7_H_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 1 ]; then
   acc_ok "MR7c partial component '/h' resolves toward the home boundary (daemon-backed)"
@@ -1629,7 +1629,7 @@ fi
 # MR7d the --filesystem-root PATH side uses the same policy source: at / the
 # same two boundaries, no generic filesystem entries.
 MR7_ROOT_OUT="$(bash --noprofile --norc -ec "$MR7_PROBE" _ "$MR_CRED_SCRIPT" \
-  docker-helper session create --system --token-file /tmp/uat-am-cred-multiroot --filesystem-root / 2>/dev/null || true)"
+  docker-helper session create --token-file /tmp/uat-am-cred-multiroot --filesystem-root / 2>/dev/null || true)"
 if printf '%s\n' "$MR7_ROOT_OUT" | grep -v '^$' | sort -u | grep -qx '/home' \
     && printf '%s\n' "$MR7_ROOT_OUT" | grep -v '^$' | sort -u | grep -qx '/opt' \
     && [ "$(printf '%s\n' "$MR7_ROOT_OUT" | grep -v '^$' | sort -u | wc -l)" -eq 2 ]; then
@@ -1647,7 +1647,7 @@ rm -f "$MR_CRED_SCRIPT"
 scenario "Z: no container/mount-pin/workload-MAC/runtime residue"
 for sid in "$SA_ID" "$SB_ID" "$SC_ID" "$SL_ID" "$SD_ID" "${SA2_ID:-}" "${SA3_ID:-}" "${SN_ID:-}" "${SN2_ID:-}" "${G_ID:-}" "${SYM_ADMIN_ID:-}" "${SYM_PRIN_ID:-}" "${MR1_ID:-}" "${MR2_ID:-}" "${MR5_ID:-}"; do
   [ -n "$sid" ] || continue
-  dh session delete --system "$sid" >/dev/null 2>&1 || acc_fail "Z session $sid delete failed"
+  dh session delete "$sid" >/dev/null 2>&1 || acc_fail "Z session $sid delete failed"
 done
 wait_no_helper_containers
 Z_WAIT_RC=$?

@@ -2711,82 +2711,9 @@ func TestRenderFragmentBoundaryTerminology(t *testing.T) {
 	}
 }
 
-func TestUserProfileContainsDockerBuildx(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper")
-	if err != nil {
-		t.Fatalf("cannot read user profile (repository artifact): %v", err)
-	}
-	content := string(data)
-
-	// Binary rules must use rix (read + inherit + execute) for plugin discovery.
-	buildxBinaries := []string{
-		"/usr/local/lib/docker/cli-plugins/docker-buildx rix,",
-		"/usr/local/libexec/docker/cli-plugins/docker-buildx rix,",
-		"/usr/lib/docker/cli-plugins/docker-buildx rix,",
-		"/usr/libexec/docker/cli-plugins/docker-buildx rix,",
-	}
-	for _, p := range buildxBinaries {
-		if !strings.Contains(content, p) {
-			t.Errorf("user profile missing buildx binary rule: %s", p)
-		}
-	}
-
-	// Directory read rules are required for Docker CLI plugin discovery.
-	buildxDirs := []string{
-		"/usr/local/lib/docker/cli-plugins/ r,",
-		"/usr/local/libexec/docker/cli-plugins/ r,",
-		"/usr/lib/docker/cli-plugins/ r,",
-		"/usr/libexec/docker/cli-plugins/ r,",
-	}
-	for _, p := range buildxDirs {
-		if !strings.Contains(content, p) {
-			t.Errorf("user profile missing buildx directory rule: %s", p)
-		}
-	}
-
-	// Must NOT contain broad cli-plugins wildcard.
-	if strings.Contains(content, "cli-plugins/**") {
-		t.Error("user profile must not grant broad cli-plugins/** execute")
-	}
-}
-
-func TestAppArmorUserProfileParserValidation(t *testing.T) {
-	if _, err := exec.LookPath("apparmor_parser"); err != nil {
-		t.Skip("apparmor_parser not available")
-	}
-
-	data, err := os.ReadFile("packaging/apparmor/docker-helper")
-	if err != nil {
-		t.Fatalf("cannot read user profile template: %v", err)
-	}
-
-	// Render the template: replace placeholders with valid values.
-	content := strings.ReplaceAll(string(data), "@@BINARY_PATH@@", "/usr/bin/docker-helper-test")
-	content = strings.ReplaceAll(content, "# @@WORKSPACE_RULE@@", "")
-
-	if strings.Contains(content, "@@BINARY_PATH@@") {
-		t.Fatal("rendered profile still contains @@BINARY_PATH@@")
-	}
-	if strings.Contains(content, "# @@WORKSPACE_RULE@@") {
-		t.Fatal("rendered profile still contains # @@WORKSPACE_RULE@@")
-	}
-
-	dir := t.TempDir()
-	profilePath := filepath.Join(dir, "docker-helper")
-	if err := os.WriteFile(profilePath, []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", profilePath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("user profile parser validation failed: %v\n%s", err, out)
-	}
-}
-
 func TestBuildxDirectoryRulesHaveRead(t *testing.T) {
 	profiles := map[string]string{
 		"system": "packaging/apparmor/docker-helper-system",
-		"user":   "packaging/apparmor/docker-helper",
 	}
 
 	for name, path := range profiles {
@@ -2816,7 +2743,6 @@ func TestBuildxDirectoryRulesHaveRead(t *testing.T) {
 func TestBuildxBinaryRulesHaveRix(t *testing.T) {
 	profiles := map[string]string{
 		"system": "packaging/apparmor/docker-helper-system",
-		"user":   "packaging/apparmor/docker-helper",
 	}
 
 	for name, path := range profiles {
@@ -2852,7 +2778,6 @@ func TestBuildxBinaryRulesHaveRix(t *testing.T) {
 func TestBuildxNoBroadWildcard(t *testing.T) {
 	profiles := map[string]string{
 		"system": "packaging/apparmor/docker-helper-system",
-		"user":   "packaging/apparmor/docker-helper",
 	}
 
 	for name, path := range profiles {
@@ -2898,12 +2823,11 @@ func TestBuildxNoBroadWildcard(t *testing.T) {
 // read-only.
 //
 // Trusted CA preparation reads the configured trusted_ca_path from within
-// the confined daemon in both system and user mode, so both profiles must
-// cover the openSUSE location used for administrator-installed CA material.
+// the confined daemon, so the shipped profile must cover the openSUSE
+// location used for administrator-installed CA material.
 func TestAppArmorProfilesOpenSUSETrustAnchorsReadOnly(t *testing.T) {
 	profiles := map[string]string{
 		"system": "packaging/apparmor/docker-helper-system",
-		"user":   "packaging/apparmor/docker-helper",
 	}
 
 	for name, path := range profiles {
@@ -2955,7 +2879,6 @@ func TestAppArmorProfilesOpenSUSETrustAnchorsReadOnly(t *testing.T) {
 func TestAppArmorProfilesNoBroadPKIAccess(t *testing.T) {
 	profiles := map[string]string{
 		"system": "packaging/apparmor/docker-helper-system",
-		"user":   "packaging/apparmor/docker-helper",
 	}
 
 	for name, path := range profiles {

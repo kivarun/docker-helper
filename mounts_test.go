@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -65,7 +66,6 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 
 func TestMountRelativeSubdir(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 	mockDetectLSM(t, LSMAppArmor, nil)
@@ -111,7 +111,6 @@ func TestMountRelativeSubdir(t *testing.T) {
 
 func TestMountRegularFile(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 	mockDetectLSM(t, LSMAppArmor, nil)
@@ -551,7 +550,6 @@ func TestDockerSecurityOpt(t *testing.T) {
 
 func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMSELinux)
 
 	result, err := createSystemSession(t, app)
@@ -605,7 +603,6 @@ func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 
 func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
 	result, err := createSystemSession(t, app)
@@ -657,9 +654,8 @@ func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 	}
 }
 
-func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
+func TestRunMissingMACBackendFailsClosed(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 
 	result, err := createSystemSession(t, app)
 	if err != nil {
@@ -676,15 +672,9 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
-	// Mock LSM detection error
-	origSEL := selinuxEnabled
-	origAA := appArmorLSMActive
-	selinuxEnabled = func() (bool, bool, error) { return false, false, fmt.Errorf("test error") }
-	appArmorLSMActive = func() (bool, error) { return false, nil }
-	t.Cleanup(func() {
-		selinuxEnabled = origSEL
-		appArmorLSMActive = origAA
-	})
+	// A missing workload MAC coordinator means no supported MAC backend is
+	// active: the run handler must fail closed before any Docker state.
+	app.WorkloadMAC = nil
 
 	reqBody := map[string]any{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
@@ -710,59 +700,6 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 	app.OperationSupervisor.mu.RUnlock()
 	if currentOps != initialOps {
 		t.Errorf("supervisor modified by LSM detection failure: expected %d ops, got %d", initialOps, currentOps)
-	}
-}
-
-func TestRunLSMNoneFailsClosed(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
-
-	result, err := createSystemSession(t, app)
-	if err != nil {
-		t.Fatalf("createSessionAuthorized() error: %v", err)
-	}
-
-	app.OperationSupervisor = newOperationSupervisor()
-
-	dockerInvoked := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerInvoked = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	// Mock: no MAC backend active (LSMNone)
-	origSEL := selinuxEnabled
-	origAA := appArmorLSMActive
-	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
-	appArmorLSMActive = func() (bool, error) { return false, nil }
-	t.Cleanup(func() {
-		selinuxEnabled = origSEL
-		appArmorLSMActive = origAA
-	})
-
-	reqBody := map[string]any{"image": "alpine:latest"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if dockerInvoked {
-		t.Error("Docker must not be invoked when no MAC backend is active")
-	}
-
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
-	}
-
-	// Verify supervisor was not modified.
-	app.OperationSupervisor.mu.RLock()
-	currentOps := len(app.OperationSupervisor.ops)
-	app.OperationSupervisor.mu.RUnlock()
-	if currentOps != 0 {
-		t.Errorf("supervisor must not be modified when LSMNone: got %d ops", currentOps)
 	}
 }
 
@@ -868,9 +805,14 @@ func TestMountCommaTargetRoundTripsThroughDockerGrammar(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
+	var mu sync.Mutex
 	var dockerArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerArgs = append([]string(nil), args...)
+		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
+			mu.Lock()
+			dockerArgs = append([]string(nil), args...)
+			mu.Unlock()
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -892,7 +834,9 @@ func TestMountCommaTargetRoundTripsThroughDockerGrammar(t *testing.T) {
 		t.Fatalf("expected status %d, got %d (body=%s)", http.StatusCreated, w.Code, w.Body.String())
 	}
 
+	mu.Lock()
 	specs := dockerMountValues(t, dockerArgs)
+	mu.Unlock()
 	if len(specs) != 1 {
 		t.Fatalf("expected exactly one --mount value, got %q", specs)
 	}
@@ -929,9 +873,14 @@ func TestMountCommaWorkspaceSourceRoundTripsThroughDockerGrammar(t *testing.T) {
 		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
+	var mu sync.Mutex
 	var dockerArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerArgs = append([]string(nil), args...)
+		if len(args) > 2 && args[0] == "--config" && args[2] == "run" {
+			mu.Lock()
+			dockerArgs = append([]string(nil), args...)
+			mu.Unlock()
+		}
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -953,7 +902,9 @@ func TestMountCommaWorkspaceSourceRoundTripsThroughDockerGrammar(t *testing.T) {
 		t.Fatalf("expected status %d, got %d (body=%s)", http.StatusCreated, w.Code, w.Body.String())
 	}
 
+	mu.Lock()
 	specs := dockerMountValues(t, dockerArgs)
+	mu.Unlock()
 	if len(specs) != 1 {
 		t.Fatalf("expected exactly one --mount value, got %q", specs)
 	}

@@ -25,38 +25,27 @@ func TestResolveAuditEnabled(t *testing.T) {
 	tests := []struct {
 		name     string
 		cfg      *bool
-		level    string
-		mode     DeploymentMode
 		expected bool
 		source   string
 	}{
-		// System mode: absent always yields true regardless of log level.
-		{"system + absent + info", nil, "info", ModeSystem, true, "system_default"},
-		{"system + absent + error", nil, "error", ModeSystem, true, "system_default"},
-		{"system + absent + debug", nil, "debug", ModeSystem, true, "system_default"},
-		// System mode: explicit always wins.
-		{"system + explicit false", &falseVal, "info", ModeSystem, false, "explicit"},
-		{"system + explicit true", &trueVal, "info", ModeSystem, true, "explicit"},
-		// User mode: absent yields true only at debug.
-		{"user + absent + info", nil, "info", ModeUser, false, "log_level"},
-		{"user + absent + debug", nil, "debug", ModeUser, true, "log_level"},
-		{"user + absent + warn", nil, "warn", ModeUser, false, "log_level"},
-		{"user + absent + error", nil, "error", ModeUser, false, "log_level"},
-		// User mode: explicit always wins.
-		{"user + explicit false + debug", &falseVal, "debug", ModeUser, false, "explicit"},
-		{"user + explicit true + info", &trueVal, "info", ModeUser, true, "explicit"},
+		// Absent always yields true regardless of log level.
+		{"absent + info", nil, true, "system_default"},
+		{"absent + error", nil, true, "system_default"},
+		{"absent + debug", nil, true, "system_default"},
+		// Explicit always wins.
+		{"explicit false", &falseVal, false, "explicit"},
+		{"explicit true", &trueVal, true, "explicit"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			level, _ := parseLogLevel(tt.level)
-			got := resolveAuditEnabled(tt.cfg, level, tt.mode)
+			got := resolveAuditEnabled(tt.cfg)
 			if got != tt.expected {
-				t.Errorf("resolveAuditEnabled(%v, %s, %s) = %v, want %v", tt.cfg, tt.level, tt.mode, got, tt.expected)
+				t.Errorf("resolveAuditEnabled(%v) = %v, want %v", tt.cfg, got, tt.expected)
 			}
-			src := resolveAuditSource(tt.cfg, tt.mode)
+			src := resolveAuditSource(tt.cfg)
 			if src != tt.source {
-				t.Errorf("resolveAuditSource(%v, %s) = %q, want %q", tt.cfg, tt.mode, src, tt.source)
+				t.Errorf("resolveAuditSource(%v) = %q, want %q", tt.cfg, src, tt.source)
 			}
 		})
 	}
@@ -73,31 +62,22 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 		expectedAudit bool
 		expectedSrc   string
 	}{
-		// User mode: absent derived from log_level.
 		{
-			name:          "user + absent + info -> false / log_level",
+			name:          "absent -> true / system_default",
 			logLevel:      "info",
 			auditEnabled:  nil,
-			expectedAudit: false,
-			expectedSrc:   "log_level",
-		},
-		{
-			name:          "user + absent + debug -> true / log_level",
-			logLevel:      "debug",
-			auditEnabled:  nil,
 			expectedAudit: true,
-			expectedSrc:   "log_level",
+			expectedSrc:   "system_default",
 		},
-		// User mode: explicit always wins.
 		{
-			name:          "user + explicit false + debug -> false / explicit",
+			name:          "explicit false wins",
 			logLevel:      "debug",
 			auditEnabled:  &falseVal,
 			expectedAudit: false,
 			expectedSrc:   "explicit",
 		},
 		{
-			name:          "user + explicit true + info -> true / explicit",
+			name:          "explicit true wins",
 			logLevel:      "info",
 			auditEnabled:  &trueVal,
 			expectedAudit: true,
@@ -105,29 +85,17 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 		},
 	}
 
-	saveUID := EffectiveUID
-	defer func() { EffectiveUID = saveUID }()
-	EffectiveUID = func() int { return 1000 }
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			t.Setenv("XDG_CONFIG_HOME", dir)
-			t.Setenv("XDG_RUNTIME_DIR", dir)
-
-			configDir := filepath.Join(dir, "docker-helper")
-			if err := os.MkdirAll(configDir, 0700); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-
-			configPath := filepath.Join(configDir, "config.json")
+			configPath := filepath.Join(dir, "config.json")
 			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
 			allowedRoot := testAllowedRootDir(t)
 			cfg := map[string]any{
-				"allowed_root": allowedRoot,
-				"session_ttl":  "12h",
-				"log_level":    tt.logLevel,
+				"allowed_roots": []string{allowedRoot},
+				"session_ttl":   "12h",
+				"log_level":     tt.logLevel,
 			}
 			if tt.auditEnabled != nil {
 				cfg["audit_enabled"] = *tt.auditEnabled
@@ -140,17 +108,20 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 				t.Fatalf("write config: %v", err)
 			}
 
-			loaded, err := loadAndPrepareRuntimeConfig()
+			fileData, err := os.ReadFile(configPath)
 			if err != nil {
-				t.Fatalf("loadAndPrepareRuntimeConfig: %v", err)
+				t.Fatalf("read config: %v", err)
 			}
-			if loaded.AuditEnabled != tt.expectedAudit {
-				t.Errorf("audit_enabled = %v, want %v", loaded.AuditEnabled, tt.expectedAudit)
+			_, fc, err := decodeAndValidateConfigDocument(fileData)
+			if err != nil {
+				t.Fatalf("decode config: %v", err)
 			}
-
-			ec := resolveEffectiveConfig(*loadFileConfigSafe(t, configPath))
+			ec := resolveEffectiveConfig(*fc)
+			if ec.AuditEnabled != tt.expectedAudit {
+				t.Errorf("audit = %v, want %v", ec.AuditEnabled, tt.expectedAudit)
+			}
 			if ec.AuditEnabledSource != tt.expectedSrc {
-				t.Errorf("audit_enabled_source = %q, want %q", ec.AuditEnabledSource, tt.expectedSrc)
+				t.Errorf("audit source = %q, want %q", ec.AuditEnabledSource, tt.expectedSrc)
 			}
 		})
 	}
@@ -165,47 +136,37 @@ func TestResolveEffectiveConfigAuditEnabled(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		effectiveUID  int
 		logLevel      string
 		auditEnabled  *bool
 		expectedAudit bool
 		expectedSrc   string
 	}{
-		// System mode: absent always true regardless of log_level.
+		// Absent is always the system default, regardless of log_level.
 		{
-			name:          "system + absent + info -> true / system_default",
-			effectiveUID:  0,
+			name:          "absent + info -> true / system_default",
 			logLevel:      "info",
 			auditEnabled:  nil,
 			expectedAudit: true,
 			expectedSrc:   "system_default",
 		},
 		{
-			name:          "system + explicit false -> false / explicit",
-			effectiveUID:  0,
+			name:          "absent + debug -> true / system_default",
+			logLevel:      "debug",
+			auditEnabled:  nil,
+			expectedAudit: true,
+			expectedSrc:   "system_default",
+		},
+		{
+			name:          "explicit false -> false / explicit",
 			logLevel:      "info",
 			auditEnabled:  &falseVal,
 			expectedAudit: false,
 			expectedSrc:   "explicit",
 		},
-		// User mode via resolveEffectiveConfig.
-		{
-			name:          "user + absent + info -> false / log_level",
-			effectiveUID:  1000,
-			logLevel:      "info",
-			auditEnabled:  nil,
-			expectedAudit: false,
-			expectedSrc:   "log_level",
-		},
 	}
-
-	saveUID := EffectiveUID
-	defer func() { EffectiveUID = saveUID }()
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			EffectiveUID = func() int { return tt.effectiveUID }
-
 			fc := fileConfig{
 				Level:        tt.logLevel,
 				AuditEnabled: tt.auditEnabled,
@@ -273,15 +234,21 @@ func (w *panicOnWriteWriter) Write(p []byte) (int, error) {
 
 func TestInitOmitsAuditEnabled(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_STATE_HOME", dir)
+	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(dir, "docker-helper", "config.json"))
 
 	// Use a valid workspace root (not under /tmp).
 	rootDir := testAllowedRootDir(t)
 
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
+	mockDetectLSM(t, LSMAppArmor, nil)
+
+	// Init is system-only: the runInit root gate is bypassed with the UID
+	// seam, and the state-directory seam points at the isolated fixture.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+	origState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origState })
 
 	if err := runInit(rootDir, io.Discard, io.Discard); err != nil {
 		t.Fatalf("runInit: %v", err)

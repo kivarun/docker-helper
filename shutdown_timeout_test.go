@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// setupShutdownTimeoutConfig writes a minimal user-mode config with an optional
+// setupShutdownTimeoutConfig writes a minimal valid config with an optional
 // shutdown_timeout value ("" omits the key) and isolates the daemon load seams.
 func setupShutdownTimeoutConfig(t *testing.T, shutdownTimeout string) {
 	t.Helper()
@@ -36,14 +36,15 @@ func setupShutdownTimeoutConfig(t *testing.T, shutdownTimeout string) {
 	}
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	runtimeDir, _ := stubSystemRuntimeDirsForTest(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 
 	// Prevent reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	t.Cleanup(func() { systemSocketExists = origSocket })
+	origSocketPath := systemSocketPath
+	systemSocketPath = filepath.Join(dir, "runtime", "docker-helper", "nonexistent.sock")
+	t.Cleanup(func() { systemSocketPath = origSocketPath })
 }
 
 // TestShutdownTimeoutLegacyUpgradeBoundedAtLoad proves Release 1 (v1.0.2)

@@ -18,7 +18,6 @@ import (
 
 func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -42,7 +41,6 @@ func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 
 func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
@@ -70,96 +68,9 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 	}
 }
 
-func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	subdir := filepath.Join(result.Session.Workspace, "subdir")
-	if err := os.MkdirAll(subdir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	// User mode has no inode pinning, so only the canonical workspace root
-	// carries the pathname-stability invariant a bind source needs: a
-	// workspace-contained subdirectory is refused before any pin, operation,
-	// or Docker state exists.
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "invalid_mount") {
-		t.Errorf("refusal is not invalid_mount: %s", w.Body.String())
-	}
-	if dockerCalled {
-		t.Error("docker must not be called for a refused user-mode mount")
-	}
-	if len(app.OperationSupervisor.ops) != 0 {
-		t.Error("a refused user-mode mount must not create an operation")
-	}
-}
-
-func TestRunMountUserModeRejectsFile(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	filePath := filepath.Join(result.Session.Workspace, "testfile.txt")
-	if err := os.WriteFile(filePath, []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	dockerCalled := false
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerCalled = true
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	// A workspace-contained regular file is refused in user mode before any
-	// operation or Docker state exists.
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"testfile.txt","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "invalid_mount") {
-		t.Errorf("refusal is not invalid_mount: %s", w.Body.String())
-	}
-	if dockerCalled {
-		t.Error("docker must not be called for a refused user-mode file mount")
-	}
-	if len(app.OperationSupervisor.ops) != 0 {
-		t.Error("a refused user-mode mount must not create an operation")
-	}
-}
-
 func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 
@@ -195,36 +106,6 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 	}
 }
 
-func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	subdir := filepath.Join(result.Session.Workspace, "subdir")
-	if err := os.MkdirAll(subdir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// The refused user-mode subdirectory mount is answered before operation
-	// registration: the supervisor stays empty and Docker is never called.
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-	if len(app.OperationSupervisor.ops) != 0 {
-		t.Error("a refused user-mode mount must not create an operation")
-	}
-}
-
 // getLastOp returns the first operation from the supervisor (there should be exactly one).
 func getLastOp(sup *operationSupervisor) *operation {
 	sup.mu.RLock()
@@ -239,7 +120,6 @@ func getLastOp(sup *operationSupervisor) *operation {
 func TestRunSecondPinError(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -314,7 +194,6 @@ func TestRunSecondPinError(t *testing.T) {
 func TestRunSupervisorShuttingDown(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
@@ -383,7 +262,6 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.Config.RuntimeDir = ""
 	app.OperationSupervisor = newOperationSupervisor()
@@ -444,7 +322,6 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -515,60 +392,10 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	}
 }
 
-// TestRunUserModeUsesResolvedMountSourceWithoutPinning verifies user mode skips
-// workspace mount source pinning and uses the resolved source path directly.
-func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
-	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeUser
-	app.OperationSupervisor = newOperationSupervisor()
-
-	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0].Path))
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	pinCalled := false
-	app.PinMountSourceFn = func(sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-		pinCalled = true
-		return nil, errors.New("should not be called")
-	}
-
-	var dockerArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		dockerArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{
-		"image":"alpine",
-		"mounts":[{"source":".","target":"/data"}]
-	}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
-
-	// A: PinMountSourceFn must not be called in user mode.
-	if pinCalled {
-		t.Error("PinMountSourceFn should not be called in user mode")
-	}
-
-	// B: Docker argv must use the resolved workspace path, not a pinned path.
-	argsStr := strings.Join(dockerArgs, " ")
-	expectedMount := fmt.Sprintf("type=bind,source=%s,target=/data", result.Session.Workspace)
-	if !strings.Contains(argsStr, expectedMount) {
-		t.Errorf("argv should contain resolved mount spec %q, got args: %v", expectedMount, dockerArgs)
-	}
-}
-
 // TestRunStartErrorCleansPinsOnce verifies cleanup on cmd.Start failure.
 func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -626,7 +453,6 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -683,7 +509,6 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 func TestRunCleanupReverseOrder(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -757,7 +582,6 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -820,7 +644,6 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
-	app.Config.Mode = ModeSystem
 	installTestWorkloadMACForTest(t, app, LSMAppArmor)
 	app.OperationSupervisor = newOperationSupervisor()
 

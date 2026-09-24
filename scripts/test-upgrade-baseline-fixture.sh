@@ -283,6 +283,22 @@ else
   ok "RPM wrapper with PATH override never invokes curl"
 fi
 
+# The v2.2.0 Release-2.3 migration wrapper must be wired to ITS dedicated
+# override variables: a PATH override carrying wrong bytes is rejected and
+# never falls back to any download (a typo'd variable name would silently
+# resolve the wrong family).
+: > "$CALL_LOG"
+if UAT_UPGRADE22_DEB_PATH="$WORK/caller.bin" run_fixture_fn upgrade22_fetch_deb "$WORK/deb22-badpath.bin" >/dev/null 2>&1; then
+  bad "upgrade22 DEB wrapper accepted a wrong-hash PATH override"
+else
+  ok "upgrade22 DEB wrapper rejects a wrong-hash PATH override (fail closed)"
+fi
+if [ -s "$CALL_LOG" ]; then
+  bad "upgrade22 DEB wrapper with PATH override must not fall back to a download"
+else
+  ok "upgrade22 DEB wrapper with PATH override never invokes curl"
+fi
+
 # --- Summary ------------------------------------------------------------------
 echo
 echo "=============== test-upgrade-baseline-fixture summary ==============="

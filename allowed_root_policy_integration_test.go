@@ -557,7 +557,7 @@ func TestAmbiguousSchemaFailsUnchanged(t *testing.T) {
 }
 
 // =============================================================================
-// Init: forbidden user-mode root
+// Init: forbidden root
 // =============================================================================
 
 func TestInitForbiddenUserRootFailsBeforeState(t *testing.T) {
@@ -575,14 +575,7 @@ func TestInitForbiddenUserRootFailsBeforeState(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(forbiddenRoot) }()
 
-	// Save and restore EffectiveUID
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = origUID }()
-
-	// Standalone user init (no system daemon, Docker accessible).
-	restore := mockStandaloneUserInit()
-	defer restore()
+	mockDetectLSM(t, LSMAppArmor, nil)
 
 	var stdout, stderr bytes.Buffer
 	err = runInit(forbiddenRoot, &stdout, &stderr)
@@ -1057,7 +1050,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		}
 	})
 
-	t.Run("config_add_user_mode", func(t *testing.T) {
+	t.Run("config_add_non_root_client", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},

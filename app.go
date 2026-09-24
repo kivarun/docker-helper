@@ -47,14 +47,16 @@ type App struct {
 	// rotateAdminToken. Production default is os.Rename; tests can fail it
 	// deterministically.
 	RotateRenameFn func(oldpath, newpath string) error
-	// MACCoordinator is the session MAC coordinator owner.
-	// nil in user mode or when no MAC driver is active.
+	// MACCoordinator is the session MAC coordinator owner. A started daemon
+	// constructs it mandatorily (MAC confinement is a startup preflight);
+	// it is nil only in directly constructed test App fixtures.
 	MACCoordinator *sessionMACCoordinator
 	// WorkloadMAC is the workload MAC coordinator owner. It owns
 	// operation/container-lifetime workload MAC state, separate from the
 	// session MAC coordinator's Session MAC lifecycle coverage over the
 	// concrete issued trees of the immutable Session filesystem snapshot.
-	// nil in user mode or when no MAC backend is active.
+	// A started daemon constructs it mandatorily; it is nil only in
+	// directly constructed test App fixtures.
 	WorkloadMAC *workloadMACCoordinator
 	// InspectOperationContainers, when set, overrides the Docker-based
 	// correlated-run container inspection used by the container-absence
@@ -65,9 +67,6 @@ type App struct {
 	// container inspection used by checked Launcher/Principal deletion. It is a
 	// narrow test seam; production default shells out to the Docker CLI.
 	InspectHelperContainers func(ctx context.Context, launcherID string) ([]helperContainer, error)
-	// userModeDefault is the user-mode daemon-owner Principal/Launcher resolved
-	// at startup by ensureUserModeOwnership. nil in system mode.
-	userModeDefault *userModeDefaultLauncher
 }
 
 // pinMountSource calls PinMountSourceFn if set, otherwise the
@@ -286,7 +285,8 @@ func (a *App) deletePrincipalWithMAC(username string) ([]string, error) {
 }
 
 // releaseSessionBindings releases MAC bindings for the given session IDs
-// through the MAC coordinator. No-op if the coordinator is nil.
+// through the MAC coordinator. Defensive no-op for directly constructed test
+// App fixtures; a started daemon always carries the coordinator.
 func (a *App) releaseSessionBindings(sessionIDs []string) {
 	if a.MACCoordinator == nil {
 		return

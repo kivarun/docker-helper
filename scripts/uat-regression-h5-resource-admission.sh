@@ -589,8 +589,8 @@ fi
 service_healthy "recovery"
 
 # --- cleanup -------------------------------------------------------------------
-dh principal delete --system "$USER_A" >/dev/null 2>&1 || true
-dh principal delete --system "$USER_B" >/dev/null 2>&1 || true
+dh principal delete "$USER_A" >/dev/null 2>&1 || true
+dh principal delete "$USER_B" >/dev/null 2>&1 || true
 userdel -r "$USER_A" >/dev/null 2>&1 || true
 userdel -r "$USER_B" >/dev/null 2>&1 || true
 rm -f "$cred_a" "$cred_b" /tmp/h5-*.log /tmp/h5-*.err /tmp/h5-*.out /tmp/h5-hostile-body.json

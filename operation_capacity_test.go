@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-// newCapacityTestApp creates a user-mode test app with a supervisor and one
+// newCapacityTestApp creates a test app with a supervisor and one
 // admin Session whose workspace exists, wired for long-lived fake Docker
 // processes. The terminateForShutdown cleanup bounds every fake process.
 func newCapacityTestApp(t *testing.T) (*App, *CreatedSession) {

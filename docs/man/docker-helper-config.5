@@ -3,16 +3,12 @@
 docker-helper-config \- docker-helper configuration file format
 .SH SYNOPSIS
 .B /etc/docker-helper/config.json
-.br
-.B $XDG_CONFIG_HOME/docker-helper/config.json
 .SH DESCRIPTION
 .B docker-helper
-uses a JSON configuration file to control daemon behavior. The file location
-depends on deployment mode:
+uses a JSON configuration file to control daemon behavior. The configuration
+file is the root-owned system deployment's file:
 .IP \(bu 4
 \fISystem mode\fR: \fI/etc/docker-helper/config.json\fR
-.IP \(bu 4
-\fIUser mode\fR: \fI$XDG_CONFIG_HOME/docker-helper/config.json\fR (defaults to ~/.config/docker-helper/config.json)
 .PP
 The environment variable \fBDOCKER_HELPER_CONFIG\fR can override the config path.
 .SH CONFIGURATION FILES
@@ -137,9 +133,7 @@ Logging level: \fBdebug\fR, \fBinfo\fR, \fBwarn\fR, or \fBerror\fR.
 .TP
 .B audit_enabled (boolean, optional)
 Enable the audit event stream. When absent, the effective value
-depends on deployment mode: in system mode (effective UID 0) audit is always
-\fBtrue\fR; in user mode it is \fBtrue\fR only when effective \fBlog_level\fR is
-\fBdebug\fR, \fBfalse\fR otherwise. An explicit value always overrides the default.
+is \fBtrue\fR (\fBsystem_default\fR). An explicit value always overrides the default.
 The audit stream covers authentication, session, principal, launcher,
 credential, admin, and Docker-operation events.
 .TP
@@ -178,9 +172,8 @@ Absolute path to a regular file containing exactly one PEM-encoded
 X.509 CA certificate. No additional PEM blocks or content. Required when
 \fBtrusted_ca_injection\fR is set to "auto".
 .RS 4
-In user mode any readable absolute path works. In system mode the confined
-daemon must also be permitted to read the path under the active AppArmor or
-SELinux policy; the supported locations are the helper-owned
+The confined daemon must also be permitted to read the path under the active
+AppArmor or SELinux policy; the supported locations are the helper-owned
 \fI/etc/docker-helper/\fR config tree and the standard system CA-bundle paths
 the shipped policy permits. Paths outside the shipped policy are the
 operator's responsibility to make readable under that MAC policy. The file
@@ -235,16 +228,6 @@ Unix socket
 .TP
 .B /run/docker-helper/mounts/*
 Mount-pin runtime directory
-.SS User Mode
-.TP
-.B $XDG_CONFIG_HOME/docker-helper/config.json
-Configuration file
-.TP
-.B $XDG_STATE_HOME/docker-helper
-State directory (database)
-.TP
-.B $XDG_RUNTIME_DIR/docker-helper
-Runtime directory (socket)
 .PP
 The admin token is always located at \fIdirname(config_path)/admin.token\fR.
 When \fBDOCKER_HELPER_CONFIG\fR overrides the config path, the admin token

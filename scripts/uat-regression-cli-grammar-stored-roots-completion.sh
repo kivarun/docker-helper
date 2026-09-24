@@ -52,7 +52,7 @@ mkdir -p "$TMPDIR_REG20"
 # cleanup_principal USER removes the fixture Principal and its OS user.
 cleanup_principal() {
   local user="$1"
-  dh principal delete --system "$user" >/dev/null 2>&1 || true
+  dh principal delete "$user" >/dev/null 2>&1 || true
   userdel -r "$user" >/dev/null 2>&1 || true
 }
 
@@ -370,7 +370,7 @@ subcase_d() {
   home="$(reg_setup_principal "$user")" || { reg_fail "D: fixture setup failed"; return; }
   mkdir -p "$home/d1"
   chown -R "$user:$user" "$home"
-  dh launcher create --system --principal "$user" legacyprobe --allowed-root "$home/d1" --no-credential >/dev/null 2>&1
+  dh launcher create --principal "$user" legacyprobe --allowed-root "$home/d1" --no-credential >/dev/null 2>&1
 
   local out rc
   # 1. config show carries only the canonical allowed_roots projection.
@@ -436,10 +436,10 @@ subcase_e() {
   chown -R "$user:$user" "$home"
 
   # Seed stored roots in every family through the real CLI.
-  dh launcher create --system --principal "$user" build-agent --no-credential >/dev/null 2>&1
+  dh launcher create --principal "$user" build-agent --no-credential >/dev/null 2>&1
   dh config allowed-root add "$home/e2" >/dev/null 2>&1
-  dh principal allowed-root add --system "$user" "$home/e1" >/dev/null 2>&1
-  dh launcher allowed-root add --system --principal "$user" build-agent "$home/e2" >/dev/null 2>&1
+  dh principal allowed-root add "$user" "$home/e1" >/dev/null 2>&1
+  dh launcher allowed-root add --principal "$user" build-agent "$home/e2" >/dev/null 2>&1
 
   local script="$TMPDIR_REG20/completion-20.bash"
   if ! dh completion bash > "$script" 2>/dev/null || [ ! -s "$script" ]; then
@@ -486,7 +486,7 @@ subcase_e() {
   # 6. launcher allowed-root remove: the ambiguous first positional offers
   #    the selector domain plus the default Launcher's STORED roots (exact
   #    canonical paths, unlike add's navigable boundary segments).
-  dh launcher allowed-root add --system --principal "$user" "$home/e1" >/dev/null 2>&1
+  dh launcher allowed-root add --principal "$user" "$home/e1" >/dev/null 2>&1
   local expected_remove
   expected_remove="$(printf '%s\n%s\n' "$(dh completion selectors launcher --principal "$user" 2>/dev/null)" "$(dh completion roots launcher --principal "$user" 2>/dev/null)" | LC_ALL=C sort -u)"
   out="$(run_completion "$script" /usr/bin/docker-helper launcher allowed-root remove --principal "$user" "")"
@@ -497,7 +497,7 @@ subcase_e() {
   #    (derived from the authoritative list — fixture provisioning may
   #    seed the Principal's home as a stored root too).
   local stored_pr
-  stored_pr="$(dh principal allowed-root list --system "$user" 2>/dev/null)"
+  stored_pr="$(dh principal allowed-root list "$user" 2>/dev/null)"
   out="$(run_completion "$script" /usr/bin/docker-helper principal allowed-root remove "$user" "")"
   assert_completion "E: principal remove USER PATH offers the stored Principal roots" "$stored_pr" "$out" || true
 

@@ -552,14 +552,11 @@ For root, /home is used as the default.
 In non-interactive mode (stdin is not a terminal), --allowed-root
 is required.
 
-System mode (effective UID 0):
+System mode (effective UID 0, the only daemon deployment):
   The allowed root is the system-wide authorization ceiling.
   init does not prepare MAC state.
   MAC coverage for a concrete workspace is prepared by the session
-  lifecycle at session creation.
-
-User mode (non-root):
-  No MAC preparation is required.`,
+  lifecycle at session creation.`,
 
 	Presentation: exceptionPresentation("interactive setup workflow with one-time admin-token disclosure"),
 
@@ -568,6 +565,14 @@ User mode (non-root):
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
+				// The system service is the only daemon deployment: a
+				// non-root init invocation answers the canonical refusal
+				// before any argument or TTY validation.
+				if EffectiveUID() != 0 {
+					fmt.Fprintln(stderr, "docker-helper init must be run as root (the system service is the only daemon deployment)")
+					return 1
+				}
+
 				isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
 				resolved, err := resolveAllowedRootForInit(*allowedRoot, os.Stdin, stderr, isTerminal)
 				if err != nil {
@@ -593,7 +598,7 @@ User mode (non-root):
 // If flagValue is provided, it is validated and returned.
 // If not provided and isTerminal is true, the user is prompted interactively.
 // If not provided and isTerminal is false, an error is returned.
-// The prompt default is /home for root, or the user's home directory otherwise.
+// The prompt default is /home (init is root-only).
 func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writer, isTerminal bool) (string, error) {
 	if flagValue != "" {
 		return resolveAllowedRoot(flagValue)
@@ -613,17 +618,10 @@ func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writ
 	return resolveAllowedRoot(input)
 }
 
-// getInitDefaultRoot returns the default path for the init prompt.
-// Root gets /home; non-root gets the user's home directory.
+// getInitDefaultRoot returns the interactive default for the init prompt.
+// Init is root-only, so the canonical default is /home.
 func getInitDefaultRoot() string {
-	if EffectiveUID() == 0 {
-		return "/home"
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return home
+	return "/home"
 }
 
 // accessFlag is the presence-aware --access flag value shared by the
@@ -804,7 +802,7 @@ type versionResult struct {
 var reloadCommand = &Command{
 	Name:    "reload",
 	Summary: "Reload configuration from disk",
-	Usage:   "docker-helper reload [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
+	Usage:   "docker-helper reload [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	Help: `Ask the running daemon to re-read config.json and apply changes without restarting.
 
 The following configurable fields are applied at runtime:
@@ -838,12 +836,12 @@ configuration and this command returns an error.`,
 	Presentation: humanJSONPresentation(),
 
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Validate: func() error {
 				return validateOperatorEndpointOptions(operatorClientOptions{
-					System:      *system,
+
 					Endpoint:    endpoint.value,
 					EndpointSet: endpoint.set,
 					TokenFile:   *tokenFile,
@@ -851,7 +849,7 @@ configuration and this command returns an error.`,
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				return runReload(stdout, stderr, operatorClientOptions{
-					System:    *system,
+
 					Endpoint:  endpoint.value,
 					TokenFile: *tokenFile,
 				}, *jsonOut)
