@@ -77,7 +77,16 @@ UNIT_CGROUP="/system.slice/$UNIT"
 KEEP="${P4A1_KEEP:-}"
 
 say() { printf '%s %s\n' "$PREFIX" "$*"; }
-fail() { printf '%s FAILED: %s\n' "$PREFIX" "$*" >&2; exit 1; }
+fail() {
+  # Self-diagnosis on failure: the manager's stderr goes to the journal;
+  # its diagnostics carry the exact launch-failure reason (spawn errors,
+  # child output tails, purge refusals).
+  set +e
+  journalctl -u "$UNIT" --no-pager -n 200 > "$EVIDENCE_DIR/manager-journal-on-fail.txt" 2>&1
+  set -e
+  printf '%s FAILED: %s\n' "$PREFIX" "$*" >&2
+  exit 1
+}
 
 evidence() {
   local name="$1" content="$2"
