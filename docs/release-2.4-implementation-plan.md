@@ -262,18 +262,36 @@ Mandatory ambiguity tests (`builder_manager_rpc_test.go`):
   `instance.pid` through a `/proc` enumeration of live owned groups:
   an exact per-op anchor argument (`--state-dir=.../rootlesskit-state`
   or `--root=.../root`) plus the manager uid positively identifies a
-  group; zero identified groups means plain residue (removed, verified),
-  one group is settled through the same bounded escalation owner, and
-  ambiguity (more than one group) or an incomplete enumeration fails
-  closed with the directories retained and startup refused. Liveness is
-  a tri-state: ESRCH proves death; nil/EPERM mean alive; any other errno
-  is undecidable and fails closed. A pid file without its trailing
-  newline is a crash-mid-write truncation and never becomes a valid pid.
-  The identity model is best-effort cmdline evidence by design: the
-  authoritative ownership boundary (the unit cgroup containing exactly
-  the manager's instance processes) is a P4 dependency of the builder
-  service packaging; no parallel supervisor or reconciliation mechanism
-  is introduced.
+  group; one identified group is settled through the same bounded
+  escalation owner (its verified group death, which takes unanchored
+  members of that group with it, is the removal proof); ambiguity (more
+  than one group) or an incomplete enumeration fails closed with the
+  directories retained and startup refused. Liveness is a tri-state:
+  ESRCH proves death; nil/EPERM mean alive; any other errno is
+  undecidable and fails closed. A pid file without its trailing newline
+  is a crash-mid-write truncation and never becomes a valid pid.
+  Error classification (F5.1): a verified disappearance (an entry that
+  vanished between listing and inspection: ENOENT on stat/cmdline, ESRCH
+  on Getpgid) never taints the enumeration; an inconclusive inspection
+  (a non-ENOENT read error, or a same-uid entry whose cmdline reads
+  empty — the identity itself is unreadable, e.g. a zombie) taints it
+  and fails closed. Silent skips never become proof of absence: zero
+  anchored matches do NOT authorize removal by themselves. Removal
+  additionally requires the recorded pid's group to be verifiably gone
+  (`kill(-pid,0) == ESRCH`); a live unproven member of that group (an
+  unanchored descendant of a dead recorded leader) fails closed with
+  the directories retained and startup refused, and with no pid file
+  and zero anchored matches the directories are retained and startup
+  refused outright.
+  States that currently require operator intervention and can only be
+  resolved automatically by the P4 systemd cgroup guarantee (the
+  builder service unit cgroup containing exactly the manager's instance
+  processes — no parallel supervisor or reconciliation mechanism): (i)
+  op dirs with no pid file and zero anchored matches (indistinguishable
+  pre-spawn residue from an undetectable unanchored group); (ii) a
+  recorded group with live unproven members; (iii) same-uid entries
+  with unreadable identities; (iv) pid reuse ambiguity. The identity
+  model remains best-effort cmdline evidence until P4.
 
 ### Backend launch mechanics (P2-refined)
 

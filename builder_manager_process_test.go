@@ -2136,13 +2136,15 @@ func TestBuilderManagerSelfExitInheritedPipesUnblocksWaitOwner(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // exitedLeaderResidueFixture creates a real orphaned process group whose
-// LEADER has already exited while a live child remains in the group; the
-// child's command line carries the exact per-op --root anchor so the /proc
-// enumeration can identify the surviving group. The leader is setsid'd
-// (the group creator) so the child's pgid equals the leader's pid. The
-// leader's death is awaited before returning; pre-existence of the live
-// child is asserted. Cleanup kills the whole group.
-func exitedLeaderResidueFixture(t *testing.T, opID string) (leaderPid, childPid int) {
+// LEADER has already exited while a live child remains in the group. The
+// child's command line carries the exact per-op --root anchor when
+// anchored is true, so the /proc enumeration can identify the surviving
+// group; an unanchored child (anchored=false) is invisible to the anchor
+// enumeration. The leader is setsid'd (the group creator) so the child's
+// pgid equals the leader's pid. The leader's death is awaited before
+// returning; pre-existence of the live child is asserted. Cleanup kills
+// the whole group.
+func exitedLeaderResidueFixture(t *testing.T, opID string, anchored bool) (leaderPid, childPid int) {
 	t.Helper()
 	dir := t.TempDir()
 	leaderScript := filepath.Join(dir, "leader.sh")
@@ -2154,8 +2156,12 @@ while :; do :; done`
 	if err := os.WriteFile(childScript, []byte(child), 0o700); err != nil {
 		t.Fatalf("cannot write the child script: %v", err)
 	}
+	childArgs := ""
+	if anchored {
+		childArgs = ` --root=` + filepath.Join(opStateDir(opID), "root")
+	}
 	leader := `echo $$ > ` + leaderPidOut + `
-sh ` + childScript + ` --root=` + filepath.Join(opStateDir(opID), "root") + ` &
+sh ` + childScript + childArgs + ` &
 while [ ! -s ` + childPidOut + ` ]; do :; done
 exit 0`
 	if err := os.WriteFile(leaderScript, []byte(leader), 0o700); err != nil {
@@ -2220,7 +2226,7 @@ func TestBuilderManagerStartupPurgeCrashResidue(t *testing.T) {
 		m, _, _ := processTestManager(t)
 		opID := "op_0123456789abcdef0123456789abcdef"
 		makeResidueDir(t, opID)
-		leaderPid, childPid := exitedLeaderResidueFixture(t, opID)
+		leaderPid, childPid := exitedLeaderResidueFixture(t, opID, true)
 
 		if err := m.startupPurge(); err != nil {
 			t.Fatalf("startupPurge = %v, want nil (the surviving group is identified and settled)", err)
@@ -2234,15 +2240,25 @@ func TestBuilderManagerStartupPurgeCrashResidue(t *testing.T) {
 		assertDirsAbsentAt(t, opID)
 	})
 
-	t.Run("pre-spawn dirs removed", func(t *testing.T) {
+	t.Run("pre-spawn dirs fail closed without pid file", func(t *testing.T) {
 		m, _, _ := processTestManager(t)
 		opID := "op_0123456789abcdef0123456789abcdef"
 		makeResidueDir(t, opID)
 
-		if err := m.startupPurge(); err != nil {
-			t.Fatalf("startupPurge = %v, want nil", err)
+		// F5.1: with no authoritative pid file and no anchored live
+		// process, zero matches do not prove an unknown group gone (a
+		// pre-spawn dir is indistinguishable on disk from a crash window
+		// whose group is undetectable): the directories are retained and
+		// startup is refused.
+		if err := m.startupPurge(); err == nil {
+			t.Fatal("startupPurge succeeded over pid-file-less residue with zero matches (must fail closed)")
 		}
-		assertDirsAbsentAt(t, opID)
+		if _, serr := os.Lstat(opRuntimeDir(opID)); serr != nil {
+			t.Fatal("residue removed despite zero-match fail-closed refusal")
+		}
+		if _, serr := os.Lstat(opStateDir(opID)); serr != nil {
+			t.Fatal("state residue removed despite zero-match fail-closed refusal")
+		}
 	})
 
 	t.Run("truncated pid file never becomes a valid pid", func(t *testing.T) {
@@ -2251,8 +2267,9 @@ func TestBuilderManagerStartupPurgeCrashResidue(t *testing.T) {
 		makeResidueDir(t, opID)
 		// A live foreign process whose full decimal pid was written
 		// WITHOUT the trailing newline (a crash-mid-write truncation).
-		// The pre-F5 parser accepted it and failed closed forever; the
-		// truncation rule routes the dir to the enumeration instead.
+		// The pre-F5 parser accepted the prefix as a pid; F5 routed the
+		// dir to the enumeration; F5.1 retains the directories because
+		// zero anchor matches do not prove an unknown group gone.
 		foreign := exec.Command("sh", "-c", boundedSleepScript())
 		if err := foreign.Start(); err != nil {
 			t.Fatalf("cannot start foreign fixture: %v", err)
@@ -2263,13 +2280,15 @@ func TestBuilderManagerStartupPurgeCrashResidue(t *testing.T) {
 			t.Fatalf("cannot write truncated pid file: %v", err)
 		}
 
-		if err := m.startupPurge(); err != nil {
-			t.Fatalf("startupPurge = %v, want nil (truncated pid is not authoritative)", err)
+		if err := m.startupPurge(); err == nil {
+			t.Fatal("startupPurge succeeded over a truncated pid file (must fail closed)")
 		}
 		if !processAlive(fpid) {
 			t.Fatal("a foreign live process was signaled because of a truncated pid file")
 		}
-		assertDirsAbsentAt(t, opID)
+		if _, serr := os.Lstat(opRuntimeDir(opID)); serr != nil {
+			t.Fatal("residue removed despite truncated-pid fail-closed refusal")
+		}
 	})
 
 	t.Run("two owned groups ambiguous fails closed", func(t *testing.T) {
@@ -2295,7 +2314,7 @@ func TestBuilderManagerStartupPurgeCrashResidue(t *testing.T) {
 		m, _, _ := processTestManager(t)
 		opID := "op_0123456789abcdef0123456789abcdef"
 		makeResidueDir(t, opID)
-		leaderPid, childPid := exitedLeaderResidueFixture(t, opID)
+		leaderPid, childPid := exitedLeaderResidueFixture(t, opID, true)
 		writeResiduePid(t, opID, leaderPid)
 
 		if err := m.startupPurge(); err != nil {
@@ -2325,4 +2344,79 @@ func TestBuilderProcessLivenessTriState(t *testing.T) {
 	if got := builderLivenessOf(0); got != builderProcessDead {
 		t.Fatalf("builderLivenessOf(0) = %v, want dead", got)
 	}
+}
+
+// TestBuilderManagerStartupPurgeUnreadableIdentityFailsClosed: a
+// same-uid process whose /proc identity is unreadable — deterministically
+// a zombie child of the test process (stat state Z, empty cmdline while
+// unreaped) — makes the enumeration inconclusive. The purge must fail
+// closed (directories retained, no signal), and the scan itself must
+// report the tainted enumeration instead of a clean zero-match.
+func TestBuilderManagerStartupPurgeUnreadableIdentityFailsClosed(t *testing.T) {
+	m, _, _ := processTestManager(t)
+	opID := "op_0123456789abcdef0123456789abcdef"
+	makeResidueDir(t, opID)
+
+	zombie := exec.Command("sh", "-c", `while :; do :; done`)
+	if err := zombie.Start(); err != nil {
+		t.Fatalf("cannot start zombie fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = zombie.Process.Wait() // reap at teardown
+	})
+	zpid := zombie.Process.Pid
+	// Deterministic zombie state: the process first proves alive with a
+	// readable cmdline, is killed, and its /proc stat reports state Z
+	// while unreaped (its cmdline reads empty).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(zpid), "cmdline"))
+		if err == nil && len(raw) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("zombie fixture never reached the alive readable-cmdline state")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := syscall.Kill(zpid, syscall.SIGKILL); err != nil {
+		t.Fatalf("cannot kill the zombie fixture: %v", err)
+	}
+	for {
+		if zombieState(zpid) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("zombie fixture never reached state Z")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if _, ok := builderScanOwnedStateDirGroups(opID, os.Getuid()); ok {
+		t.Fatal("scan reported a complete enumeration while a same-uid identity was unreadable")
+	}
+	if err := m.startupPurge(); err == nil {
+		t.Fatal("startupPurge succeeded while a same-uid identity was unreadable (must fail closed)")
+	}
+	if _, serr := os.Lstat(opRuntimeDir(opID)); serr != nil {
+		t.Fatal("residue removed despite unreadable-identity fail-closed refusal")
+	}
+}
+
+// zombieState reports whether /proc/<pid>/stat's state field is 'Z'
+// (unreaped zombie).
+func zombieState(pid int) bool {
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false
+	}
+	rest, ok := strings.CutPrefix(string(raw), strconv.Itoa(pid)+" (")
+	if !ok {
+		return false
+	}
+	_, state, found := strings.Cut(rest, ") ")
+	if !found || state == "" {
+		return false
+	}
+	return state[0] == 'Z'
 }
