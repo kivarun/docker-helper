@@ -36,18 +36,28 @@ TimeoutStopSec=30s
 # the per-op BuildKit lifecycle, and holds no credentials and no Docker
 # or docker.sock authority.
 
-# Capability floor: the two capabilities the setuid-root
-# newuidmap/newgidmap transition needs for its own elevation, plus
-# CAP_DAC_OVERRIDE, which the transition additionally needs to open the
-# child's /proc/<pid>/{uid,gid}_map for writing: the child is the builder
-# uid and owns its procfs entries, so the euid-0 opener is NOT the owner
-# and the write-open fails with EACCES without it (failed live proof:
-# "newuidmap ... open of uid_map failed: Permission denied" under the
-# CAP_SETUID CAP_SETGID-only floor, P4-A1 run 35981016063). The bounding
-# set limits what the elevation may use; the manager itself holds no
+# Capability floor: the capabilities the setuid-root newuidmap/newgidmap
+# elevation needs for the child userns mapping on kernel >= 6.17, each
+# added only on a failed live proof:
+#   CAP_SETUID/CAP_SETGID  the mapping capability over the parent
+#                          namespace (new_idmap_permitted);
+#   CAP_DAC_OVERRIDE       the write-open of the child's
+#                          /proc/<pid>/{uid,gid}_map: the child owns its
+#                          procfs entries, so the euid-0 opener is not
+#                          the owner (failed proof run 35981016063:
+#                          "open of uid_map failed: Permission denied");
+#   CAP_SYS_ADMIN          the map_write gate "adjusting namespace
+#                          settings requires capabilities on the target"
+#                          (failed proof run 35981655091: "write to
+#                          uid_map failed: Operation not permitted");
+#   CAP_SETFCAP            verify_root_map: mapping in-namespace root
+#                          requires the opener to hold CAP_SETFCAP over
+#                          the parent namespace.
+# The bounding set caps the elevation only; the manager itself holds no
 # capabilities (CapEff 0, verified by the proof). Everything else is
-# bounded. Verified live by the P4-A1 unit proof before packaging.
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID
+# bounded. No further widening without another failed live proof and
+# review.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SETFCAP
 AmbientCapabilities=
 
 # RestrictNamespaces and RestrictSUIDSGID are deliberately omitted:

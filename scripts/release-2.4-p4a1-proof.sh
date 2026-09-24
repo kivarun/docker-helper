@@ -28,9 +28,9 @@
 #      (dedicated identity + subuid/subgid, idempotent re-run no-op);
 #   2. the proposed unit installs and starts; the manager process shows the
 #      recorded NNP exception (NoNewPrivs: 0) and the minimal capability
-#      bounding set (CapBnd = CAP_DAC_OVERRIDE|CAP_SETGID|CAP_SETUID
-#      exactly — DAC_OVERRIDE is the failed-proof widening the setuid
-#      newuidmap open of the child's uid_map needs; CapEff 0);
+#      bounding set (CapBnd = DAC_OVERRIDE|SETGID|SETUID|SYS_ADMIN|
+#      SETFCAP exactly — the kernel 6.17 uid_map-write gates proven by
+#      failed runs; CapEff 0);
 #   3. during a REAL build: manager, rootlesskit, buildkitd and the
 #      unanchored slirp4netns are ALL members of the unit cgroup
 #      (0::/system.slice/docker-helper-builder.service); uid_map shows the
@@ -301,7 +301,7 @@ stat -c '%U:%G %a %n' "$MGR_RUNTIME" "$MGR_STATE")"
 MGR_NNP="$(proc_field "$MGR_PID" NoNewPrivs)"
 [ "$MGR_NNP" = "0" ] || fail "manager NoNewPrivs=$MGR_NNP, want 0 (the recorded NNP exception)"
 MGR_CAPBND="$(proc_field "$MGR_PID" CapBnd)"
-[ "$MGR_CAPBND" = "00000000000000c2" ] || fail "manager CapBnd=$MGR_CAPBND, want 00000000000000c2 (CAP_DAC_OVERRIDE|CAP_SETGID|CAP_SETUID exactly; DAC_OVERRIDE is the failed-proof widening the setuid newuidmap open of the child's uid_map needs)"
+[ "$MGR_CAPBND" = "00000000800002c2" ] || fail "manager CapBnd=$MGR_CAPBND, want 00000000800002c2 (DAC_OVERRIDE|SETGID|SETUID|SYS_ADMIN|SETFCAP exactly; SYS_ADMIN/SETFCAP are the kernel 6.17 uid_map-write gates, DAC_OVERRIDE the failed-proof open gate)"
 MGR_CAPEFF="$(proc_field "$MGR_PID" CapEff)"
 [ "$MGR_CAPEFF" = "0000000000000000" ] || fail "manager CapEff=$MGR_CAPEFF, want 0 (the bounding set caps the elevation, not the manager)"
 say "manager NoNewPrivs=0 (recorded exception), CapBnd=DAC_OVERRIDE|SETGID|SETUID exactly, CapEff=0 (PASS)"
