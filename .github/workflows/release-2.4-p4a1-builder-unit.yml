@@ -89,6 +89,7 @@ jobs:
             exit 1
           fi
           echo "BuildKit tarball SHA256 verified: $ACTUAL_SHA256"
+          sudo install -d -m 0755 /tmp/buildkit-extract
           sudo tar -xzf /tmp/buildkit.tgz -C /tmp/buildkit-extract
           sudo install -d -m 0755 /usr/libexec/docker-helper/buildkit
           sudo install -m 0755 /tmp/buildkit-extract/bin/buildkitd /usr/libexec/docker-helper/buildkit/buildkitd

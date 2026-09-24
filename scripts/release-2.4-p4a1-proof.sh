@@ -526,6 +526,11 @@ systemctl stop "$UNIT"
 # systemd-wiped runtime tree state) and one truncated pid file.
 AMBIG_OP="op_11111111111111111111111111111111"
 TRUNC_OP="op_22222222222222222222222222222222"
+# The stop wiped the systemd RuntimeDirectory (the whole /run root);
+# recreate the root itself as root (setpriv cannot mkdir under /run), then
+# the residue entries as the builder identity exactly as the manager would
+# own them.
+install -d -o "$BUILDER_UID" -g "$BUILDER_GID" -m 0750 "$MGR_RUNTIME"
 setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
   sh -c "mkdir -p '$MGR_STATE/ops/$AMBIG_OP/root' '$MGR_STATE/ops/$AMBIG_OP/rootlesskit-state' '$MGR_RUNTIME/ops/$AMBIG_OP' '$MGR_STATE/ops/$TRUNC_OP/root' '$MGR_RUNTIME/ops/$TRUNC_OP' '$MGR_RUNTIME/ops/not-canonical' '$MGR_STATE/ops/not-canonical'"
 # truncated = NO trailing newline (crash mid-write); the value is a live

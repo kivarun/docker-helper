@@ -58,6 +58,7 @@ if [ "$ACTUAL_SHA256" != "$BUILDKIT_SHA256" ]; then
 fi
 echo "BuildKit tarball SHA256 verified: $ACTUAL_SHA256"
 install -d -m 0755 /usr/libexec/docker-helper/buildkit
+install -d -m 0755 /tmp/p4a1/buildkit-extract
 tar -xzf /tmp/p4a1/buildkit.tgz -C /tmp/p4a1/buildkit-extract
 install -m 0755 /tmp/p4a1/buildkit-extract/bin/buildkitd /usr/libexec/docker-helper/buildkit/buildkitd
 install -m 0755 /tmp/p4a1/buildkit-extract/bin/buildctl /usr/libexec/docker-helper/buildkit/buildctl
