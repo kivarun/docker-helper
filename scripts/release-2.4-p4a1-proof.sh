@@ -442,6 +442,17 @@ evidence_cmd mountinfo-unit.txt cat "/proc/$BK_PID/mountinfo"
 # the unit child cannot run the same build but this control can, the
 # difference is the manager's unit environment (mount namespace hardening,
 # seccomp, LSM), not the composition. Record-only: never fails the proof.
+# the shared build context and docker config (created before both builds)
+CTX="$P4A1_WORK/ctx-main"
+mkdir -p "$CTX"
+cat > "$CTX/Dockerfile" <<'EOF'
+FROM alpine:3.20
+RUN mkdir -p /m1 && echo p4a1-main > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt && ls -la /var/run/docker.sock /run/docker.sock > /m1/socks.txt 2>&1 || true
+EOF
+SESSION_DOCKER_CONFIG="$P4A1_WORK/docker-config"
+mkdir -p "$SESSION_DOCKER_CONFIG"
+echo '{}' > "$SESSION_DOCKER_CONFIG/config.json"
+
 say "=== 4b. direct composition control (same env, outside the unit) ==="
 DIRECT_ROOT="$P4A1_WORK/direct"
 mkdir -p "$DIRECT_ROOT/rt" "$DIRECT_ROOT/st/root" "$DIRECT_ROOT/st/rootlesskit-state"
@@ -503,17 +514,6 @@ sleep 1
 kill -9 "$DIRECT_SL" 2>/dev/null || true
 DIRECT_BK_LEFT="$(pgrep -f "^/usr/libexec/docker-helper/buildkit/buildkitd --rootless.*--root=$DIRECT_ROOT" || true)"
 kill -9 "$DIRECT_BK_LEFT" 2>/dev/null || true
-
-# real build: outbound TLS pull + export tar (the CA bundle is exercised)
-CTX="$P4A1_WORK/ctx-main"
-mkdir -p "$CTX"
-cat > "$CTX/Dockerfile" <<'EOF'
-FROM alpine:3.20
-RUN mkdir -p /m1 && echo p4a1-main > /m1/marker.txt && cat /proc/self/uid_map > /m1/uid_map.txt && id > /m1/id.txt && ls -la /var/run/docker.sock /run/docker.sock > /m1/socks.txt 2>&1 || true
-EOF
-SESSION_DOCKER_CONFIG="$P4A1_WORK/docker-config"
-mkdir -p "$SESSION_DOCKER_CONFIG"
-echo '{}' > "$SESSION_DOCKER_CONFIG/config.json"
 
 BUILD_LOG="$P4A1_WORK/build-main.log"
 if ! DOCKER_CONFIG="$SESSION_DOCKER_CONFIG" "$BUILDCTL" --addr "unix://$OP_SOCK" build \
