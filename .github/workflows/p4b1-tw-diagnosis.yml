@@ -1,0 +1,94 @@
+name: p4b1-tw-selinux-diagnosis
+
+# DIAGNOSTIC scratch workflow for the Release 2.4 P4-B1 Tumbleweed SELinux
+# %post failure. Never part of the release pipeline; runs on demand from a
+# scratch branch and is deleted after the diagnosis report.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ubuntu-parity-pp:
+    # Build the .pp with the producer-parity Ubuntu 24.04 toolchain and extract
+    # the payload .pp from the candidate RPM for the cross-toolchain attempts
+    # inside the Tumbleweed guest.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install SELinux build tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y checkpolicy policycoreutils-dev policycoreutils-python-utils rpm cpio
+
+      - name: Download candidate set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-2.4-p4b-candidate-36022298876-1
+          path: dist/candidate
+          repository: kivarun/docker-helper
+          run-id: 36022298876
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build producer-parity .pp and extract payload .pp
+        run: |
+          P4B_CANDIDATE_DIR="${{ github.workspace }}/dist/candidate" \
+            scripts/p4b1-tw-diagnosis-ubuntu.sh
+
+      - name: Upload ubuntu .pp evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p4b1-ubuntu-pp-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/p4b1-ubuntu-evidence
+          if-no-files-found: error
+
+  tumbleweed-guest:
+    # The exact Tumbleweed guest environment of the failing %post: official
+    # cloud qcow2, SELinux-enforcing boot, manual replication of the %post
+    # SELinux step, CIL capture, symbol resolution, cross-toolchain attempts.
+    needs: ubuntu-parity-pp
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download candidate set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-2.4-p4b-candidate-36022298876-1
+          path: dist/candidate
+          repository: kivarun/docker-helper
+          run-id: 36022298876
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download ubuntu-parity .pp
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: p4b1-ubuntu-pp-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/ubuntu-pp
+
+      - name: Run Tumbleweed guest diagnosis
+        env:
+          P4B_CANDIDATE_DIR: ${{ github.workspace }}/dist/candidate
+          P4B1_UBUNTU_PP_DIR: ${{ github.workspace }}/dist/ubuntu-pp
+          P4B_EVIDENCE_DIR: ${{ runner.temp }}/p4b1-tw-evidence
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: scripts/p4b1-tw-diagnosis-vm.sh
+
+      - name: Upload diagnosis evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p4b1-tw-diagnosis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/p4b1-tw-evidence
+          if-no-files-found: error
