@@ -11,6 +11,13 @@ overrides:
     depends:
       - systemd
       - apparmor
+      # Builder identity + subordinate-ID provisioning (useradd/usermod).
+      - passwd
+      # Builder backend runtime (distro-owned; the pinned BuildKit payload
+      # is product-shipped, rootlesskit/slirp4netns/newuidmap are not).
+      - rootlesskit
+      - slirp4netns
+      - uidmap
     scripts:
       postinstall: packaging/scripts/deb/postinstall.sh
       preremove: packaging/scripts/deb/preremove.sh
@@ -32,6 +39,11 @@ overrides:
       # SELinux workload read-only exposure path.
       # The SELinux backend fails closed when the binary is missing.
       - bindfs
+      # Builder backend runtime on openSUSE Tumbleweed: shadow (useradd/
+      # usermod AND newuidmap/newgidmap), rootlesskit, slirp4netns.
+      - shadow
+      - rootlesskit
+      - slirp4netns
     scripts:
       postinstall: packaging/scripts/rpm/postinstall.sh
       preremove: packaging/scripts/rpm/preremove.sh
@@ -45,6 +57,45 @@ contents:
 
   - src: packaging/systemd/system/docker-helper.service
     dst: /usr/lib/systemd/system/docker-helper.service
+    file_info:
+      mode: 0644
+
+  - src: packaging/systemd/system/docker-helper-builder.service
+    dst: /usr/lib/systemd/system/docker-helper-builder.service
+    file_info:
+      mode: 0644
+
+  - src: packaging/scripts/lib/provision-builder.sh
+    dst: /usr/share/docker-helper/lib/provision-builder.sh
+    file_info:
+      mode: 0644
+
+  # Pinned BuildKit payload (one immutable payload across every format;
+  # staged by build-buildkit-payload.sh which verifies the upstream SHA-256
+  # before staging). /usr/libexec/docker-helper/buildkit is the fixed
+  # product prefix the builder manager resolves.
+  - src: dist/buildkit/usr/libexec/docker-helper/buildkit/buildkitd
+    dst: /usr/libexec/docker-helper/buildkit/buildkitd
+    file_info:
+      mode: 0755
+
+  - src: dist/buildkit/usr/libexec/docker-helper/buildkit/buildctl
+    dst: /usr/libexec/docker-helper/buildkit/buildctl
+    file_info:
+      mode: 0755
+
+  - src: dist/buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc
+    dst: /usr/libexec/docker-helper/buildkit/buildkit-runc
+    file_info:
+      mode: 0755
+
+  - src: dist/buildkit/usr/share/doc/docker-helper/buildkit/LICENSE
+    dst: /usr/share/doc/docker-helper/buildkit/LICENSE
+    file_info:
+      mode: 0644
+
+  - src: dist/buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST
+    dst: /usr/share/doc/docker-helper/buildkit/MANIFEST
     file_info:
       mode: 0644
 

@@ -24,9 +24,25 @@ if systemctl is-active --quiet docker-helper.service; then
   fi
 fi
 
+# Stop the builder service too (the main unit's Wants= only pulls it in on
+# start; it is not a stop-bound). Tolerant of hosts where the unit was never
+# installed (e.g. a 2.3 → 2.4 upgrade host) — absence is a normal no-op.
+if systemctl is-active --quiet docker-helper-builder.service 2>/dev/null; then
+  if ! systemctl stop docker-helper-builder.service; then
+    exit 1
+  fi
+fi
+
 # Disable the service if it is enabled.
 if systemctl is-enabled --quiet docker-helper.service 2>/dev/null; then
   if ! systemctl disable docker-helper.service; then
+    exit 1
+  fi
+fi
+
+# Disable the builder service if it is enabled (same tolerance).
+if systemctl is-enabled --quiet docker-helper-builder.service 2>/dev/null; then
+  if ! systemctl disable docker-helper-builder.service; then
     exit 1
   fi
 fi

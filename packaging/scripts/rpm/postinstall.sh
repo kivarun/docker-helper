@@ -13,9 +13,20 @@ fi
 was_active=false
 systemctl is-active --quiet docker-helper.service && was_active=true
 
+# Builder identity + subordinate-ID provisioning through the ONE canonical
+# provisioning owner (packaging/scripts/lib/provision-builder.sh, shipped as
+# /usr/share/docker-helper/lib/provision-builder.sh): executed, never
+# re-implemented. Idempotent (verify-first) and fail-closed: a provisioning
+# failure aborts the scriptlet so rpm reports the failure.
+PROVISION_BUILDER="${PROVISION_BUILDER:-/usr/share/docker-helper/lib/provision-builder.sh}"
+if ! sh "$PROVISION_BUILDER"; then
+  echo "error: builder identity provisioning failed; package scriptlet aborted" >&2
+  exit 1
+fi
+
 # Detect MAC backend(s).
-aa_enabled="$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null | tr -d '[:space:]')" || true
-selinux_enforcing="$(cat /sys/fs/selinux/enforce 2>/dev/null | tr -d '[:space:]')" || true
+aa_enabled="$(tr -d '[:space:]' < /sys/module/apparmor/parameters/enabled 2>/dev/null)" || true
+selinux_enforcing="$(tr -d '[:space:]' < /sys/fs/selinux/enforce 2>/dev/null)" || true
 
 aa_active=false
 selinux_active=false
@@ -83,6 +94,14 @@ fi
 
 # Reload systemd unit files.
 if ! systemctl daemon-reload; then
+  exit 1
+fi
+
+# Enable the builder service (Package activation enables both units; the
+# main unit's Wants= provides the start coupling on the daemon's own
+# starts). Failure to enable is a real installation failure.
+if ! systemctl enable docker-helper-builder.service; then
+  echo "error: systemctl enable docker-helper-builder.service failed" >&2
   exit 1
 fi
 

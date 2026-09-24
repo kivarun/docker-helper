@@ -21,6 +21,15 @@ planned post-Release-2.
 - `install-system.sh` — system installer script (requires root)
 - `uninstall-system.sh` — system uninstaller script (requires root)
 - `systemd/system/docker-helper.service` — systemd system service unit
+- `systemd/system/docker-helper-builder.service` — builder backend service
+  unit (the sandboxed per-build-operation BuildKit boundary; recorded
+  NoNewPrivileges exception + minimal capability floor)
+- `buildkit/` — the pinned upstream BuildKit v0.33.0 payload
+  (`buildkitd`, `buildctl`, `buildkit-runc`) with its upstream `LICENSE`
+  and the recorded-provenance `MANIFEST`; installed to
+  `/usr/libexec/docker-helper/buildkit/` by the installer
+- `scripts/provision-builder.sh` — the builder identity + subordinate-ID
+  provisioning owner (executed by the installer)
 - `apparmor/docker-helper-system` — system AppArmor profile, installed
   as `/etc/apparmor.d/docker-helper-system`
 - `apparmor/local/curl` — AppArmor local-profile snippet for curl
@@ -78,10 +87,15 @@ active backend from kernel state and configures it:
   changing anything — the dual-active configuration is unsupported.
 
 The installer always:
+- Provisions the dedicated builder identity and its subordinate-ID ranges
+  through `scripts/provision-builder.sh` (the one provisioning owner;
+  idempotent and fail-closed)
 - Copies the binary to `/usr/bin/docker-helper`
-- Installs the systemd system unit
+- Installs the systemd system units (daemon + builder backend) and the
+  pinned BuildKit payload to `/usr/libexec/docker-helper/buildkit/`
 - Runs `docker-helper init` to create initial configuration
-- Enables and starts the service
+- Enables and starts the service (the main unit's weak `Wants=` pulls the
+  builder service in on start)
 
 Uninstall:
 

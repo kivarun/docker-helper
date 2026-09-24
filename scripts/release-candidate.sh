@@ -107,6 +107,9 @@ mkdir -p "$DIST_DIR/completions"
   || fail "completion generation failed"
 [ -s "$DIST_DIR/completions/docker-helper" ] \
   || fail "completion generation produced empty output"
+echo "--- pinned BuildKit payload (build-buildkit-payload.sh) ---"
+"$REPO_ROOT/build-buildkit-payload.sh" "$PAYLOAD_DIR/buildkit" \
+  || fail "build-buildkit-payload.sh failed"
 
 # Stage the immutable shared payload; fail closed on any missing member.
 cp "$DIST_DIR/docker-helper" "$PAYLOAD_DIR/docker-helper"
@@ -115,7 +118,12 @@ cp "$DIST_DIR/man/docker-helper.1.gz" "$PAYLOAD_DIR/man/docker-helper.1.gz"
 cp "$DIST_DIR/man/docker-helper-config.5.gz" "$PAYLOAD_DIR/man/docker-helper-config.5.gz"
 cp "$DIST_DIR/completions/docker-helper" "$PAYLOAD_DIR/completions/docker-helper"
 for member in docker-helper docker_helper.pp man/docker-helper.1.gz \
-  man/docker-helper-config.5.gz completions/docker-helper; do
+  man/docker-helper-config.5.gz completions/docker-helper \
+  buildkit/usr/libexec/docker-helper/buildkit/buildkitd \
+  buildkit/usr/libexec/docker-helper/buildkit/buildctl \
+  buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc \
+  buildkit/usr/share/doc/docker-helper/buildkit/LICENSE \
+  buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST; do
   [ -s "$PAYLOAD_DIR/$member" ] || fail "shared payload member missing or empty: $member"
 done
 chmod -R a-w "$PAYLOAD_DIR"
@@ -243,6 +251,11 @@ PAYLOAD_MEMBERS=(
   "man5 man/docker-helper-config.5.gz usr/share/man/man5/docker-helper-config.5.gz usr/share/man/man5/docker-helper-config.5.gz"
   "completion completions/docker-helper usr/share/bash-completion/completions/docker-helper usr/share/bash-completion/completions/docker-helper"
   "selinux-policy selinux/docker_helper.pp - usr/share/selinux/docker_helper.pp"
+  "buildkitd buildkit/buildkitd usr/libexec/docker-helper/buildkit/buildkitd usr/libexec/docker-helper/buildkit/buildkitd"
+  "buildctl buildkit/buildctl usr/libexec/docker-helper/buildkit/buildctl usr/libexec/docker-helper/buildkit/buildctl"
+  "buildkit-runc buildkit/buildkit-runc usr/libexec/docker-helper/buildkit/buildkit-runc usr/libexec/docker-helper/buildkit/buildkit-runc"
+  "buildkit-license buildkit/LICENSE usr/share/doc/docker-helper/buildkit/LICENSE usr/share/doc/docker-helper/buildkit/LICENSE"
+  "buildkit-manifest buildkit/MANIFEST usr/share/doc/docker-helper/buildkit/MANIFEST usr/share/doc/docker-helper/buildkit/MANIFEST"
 )
 
 for entry in "${PAYLOAD_MEMBERS[@]}"; do

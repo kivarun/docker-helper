@@ -20,6 +20,8 @@ case "$1" in
     rm -rf /etc/docker-helper
     rm -rf /var/lib/docker-helper
     rm -rf /run/docker-helper
+    rm -rf /var/lib/docker-helper-builder
+    rm -rf /run/docker-helper-builder
 
     # Clean up the legacy managed-roots fragment on purge.
     rm -f /etc/apparmor.d/docker-helper.d/managed-roots

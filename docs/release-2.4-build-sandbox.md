@@ -442,6 +442,45 @@ after the failure:
   unit-membership classification matched the manager itself and the purge
   signaled its own group; run 35988943581).
 
+### Capability floor security implications (P4 packaging review, 2026-09-24)
+
+The frozen builder bounding set
+(`CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SETFCAP`) is
+reviewed explicitly before packaging freezes it; this section records what
+the floor means at the unit's trust boundary.
+
+- **The bounding set is the elevation ceiling for every setuid-root helper,
+  not just the intended ones.** With `NoNewPrivileges` deliberately absent,
+  exec'ing any setuid-root binary from the unit yields euid 0 with
+  permitted/effective caps = inheritable ∪ bounding (capabilities(7)
+  root-exec rule; systemd grants the unit no inheritable/ambient
+  capabilities, so in practice exactly the five floor capabilities).
+  `newuidmap`/`newgidmap` get exactly what they need (proven); so does every
+  other setuid-root executable the builder identity can invoke.
+- **What CAP_SYS_ADMIN grants that elevation.** The P4-A1 failed proof
+  (kernel ≥ 6.17 `map_write` gate, run 35981655091) forces CAP_SYS_ADMIN
+  into the *initial* namespaces for the setuid-root mapping write. In that
+  context CAP_SYS_ADMIN is host-mount authority (mount/umount, namespace
+  operations); together with CAP_DAC_OVERRIDE a setuid-root helper such as
+  util-linux `mount` (setuid-root on the supported targets) can mount
+  attacker-controlled filesystem images. That is the concrete residual
+  exposure of the floor.
+- **Why the exposure is bounded.** The elevation is reachable only by code
+  running as the dedicated builder identity on the host: the manager (whose
+  own capabilities are zero — CapEff 0, proven) and its legitimate children.
+  Build-context code executes inside the per-operation user namespace and
+  cannot reach the host builder identity. The builder identity holds no
+  docker.sock/credential authority, is not a sudo/wheel member, and the
+  PATH contract restricts helper resolution to the fixed system paths plus
+  the product payload directory. The setuid-root binaries' own gates
+  (`su`/`sudo` authentication, `passwd` account checks) still apply.
+- **No silent widening.** The five entries are each a failed live proof;
+  `TestBuilderSystemUnitFile` pins the exact set and refuses any
+  difference. Further widening requires another failed live proof and
+  explicit review. The alternative (a lower floor) fails the composition on
+  kernel ≥ 6.17 with the recorded EPERM; the alternative (root-side build
+  execution) is the boundary Release 2.4 exists to remove.
+
 ### Results
 
 | Target | Result | Evidence |
@@ -467,11 +506,14 @@ systemd 261, SELinux enabled, no user-namespace restrict sysctl.
 ### Remaining after P4-A1
 
 - Ubuntu 26.04 target (the M0/M1 matrix third target) is not yet exercised
-  by the P4-A1 workflow;
-- the packaging lifecycle (DEB/RPM/tarball wiring of the unit, the
-  provisioner, and the pinned payload) and the main daemon unit's weak
-  ordering touch-up remain P4 follow-ups;
-- MAC policy (AppArmor/SELinux) for the builder service is P5.
+  by the P4 workflows;
+- the DEB/RPM/tarball packaging lifecycle and its install-time proofs
+  (Ubuntu 24.04 + Tumbleweed, generated packages) are the P4 packaging
+  scope; Ubuntu 26.04 join and the main-unit ordering touch-up are part of
+  that packaging landing;
+- MAC policy (AppArmor/SELinux) for the builder service is P5;
+- the daemon startup manager verification / shutdown cleanup integration
+  (P6) and the final hostile-build UAT matrix (P7) remain open.
 
 ## Builder authority
 

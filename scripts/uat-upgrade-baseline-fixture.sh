@@ -22,7 +22,10 @@
 #     pre-2.2 path-only release; access-mode migration scenarios);
 #   - v2.2.0: the Release 2.3 system-mode-only migration baseline (the last
 #     dual-deployment release; the user-unit removal and no-user-state
-#     adoption upgrade scenarios).
+#     adoption upgrade scenarios);
+#   - v2.3.0: the Release 2.4 builder-introduction baseline (the last
+#     pre-builder release; the builder identity/subuid provisioning, builder
+#     unit + payload install, and weak Wants/After coupling upgrade scenarios).
 #
 # The pinned VERSION and SHA-256 values are IDENTITY and are NEVER overridable
 # by environment variables. Only the artifact SOURCE may be overridden, for
@@ -81,6 +84,7 @@
 #   upgrade22_fetch_deb DEST — same for the pinned v2.2.0 DEB.
 #   upgrade22_fetch_rpm DEST — same for the pinned v2.2.0 RPM.
 
+# shellcheck disable=SC2034  # consumed as globals by the sourcing UAT drivers
 UPGRADE_BASELINE_VERSION="2.0.0"
 
 UPGRADE_BASELINE_DEB_SHA256="81a95a312f2cabec0d2ca26a71944f0dfbc78bcef22345c1608fb17091d7b4ed"
@@ -198,6 +202,7 @@ upgrade_baseline_fetch_rpm() {
 # The hashes below were verified against the published v2.1.1 release
 # SHA256SUMS (and the downloaded bytes re-hashed) BEFORE being pinned here.
 
+# shellcheck disable=SC2034  # consumed as globals by the sourcing UAT drivers
 UPGRADE211_VERSION="2.1.1"
 
 UPGRADE211_DEB_SHA256="86bc9b99f674ef1306795376a6ede32f4e25c342509dbae48a56300c6a85a140"
@@ -255,6 +260,7 @@ upgrade211_fetch_rpm() {
 # The hashes below were verified against the published v2.2.0 release
 # SHA256SUMS (and the downloaded bytes re-hashed) BEFORE being pinned here.
 
+# shellcheck disable=SC2034  # consumed as globals by the sourcing UAT drivers
 UPGRADE22_VERSION="2.2.0"
 
 UPGRADE22_DEB_SHA256="d29470d181abd0749b4053958f8f0c621506efb6afc45273db01e4bfb701cff8"
@@ -295,4 +301,64 @@ upgrade22_fetch_rpm() {
     return $?
   fi
   upgrade_baseline_fetch_url "$UPGRADE22_RPM_URL" "$UPGRADE22_RPM_SHA256" "$dest"
+}
+
+# ---------------------------------------------------------------------------
+# Released stable v2.3.0 — the Release 2.4 builder-introduction baseline
+# ---------------------------------------------------------------------------
+#
+# The natural baseline for the Release 2.4 packaging lifecycle is the released
+# stable v2.3.0: the last pre-builder release. A 2.3 deployment has one root
+# daemon using rootful `docker build`, no builder identity, no builder unit,
+# and no BuildKit payload; the 2.4 package install over it provisions the
+# identity, installs the builder unit + payload, and adds the weak
+# Wants/After coupling. The same integrity contract applies: the pinned
+# VERSION and SHA-256 values are IDENTITY and are never overridable by
+# environment variables; only the artifact SOURCE may be overridden, with
+# deterministic precedence and a fail-closed explicit override.
+#
+# The hashes below were verified against the published v2.3.0 release
+# SHA256SUMS (and the downloaded bytes re-hashed) BEFORE being pinned here.
+
+# shellcheck disable=SC2034  # consumed as globals by the sourcing UAT drivers
+UPGRADE230_VERSION="2.3.0"
+
+UPGRADE230_DEB_SHA256="50ece50c580ad74b35d68a6dd151c01fdd115f10e66d42a810f1f86827ac86cb"
+UPGRADE230_DEB_URL="https://github.com/kivarun/docker-helper/releases/download/v2.3.0/docker-helper_2.3.0_amd64.deb"
+
+UPGRADE230_RPM_SHA256="546b51a922c7f49d0f102f6ba5542069d77aa03fa5674997ed3a74feb16135e6"
+UPGRADE230_RPM_URL="https://github.com/kivarun/docker-helper/releases/download/v2.3.0/docker-helper-2.3.0-1.x86_64.rpm"
+
+# upgrade230_fetch_deb DEST — resolve + verify the v2.3.0 DEB
+# (UAT_UPGRADE230_DEB_PATH -> UAT_UPGRADE230_DEB_URL -> canonical).
+upgrade230_fetch_deb() {
+  local dest="$1"
+  local path="${UAT_UPGRADE230_DEB_PATH:-}"
+  local url="${UAT_UPGRADE230_DEB_URL:-}"
+  if [ -n "$path" ]; then
+    upgrade_baseline_source_from "$path" "$UPGRADE230_DEB_SHA256" "$dest"
+    return $?
+  fi
+  if [ -n "$url" ]; then
+    upgrade_baseline_fetch_url "$url" "$UPGRADE230_DEB_SHA256" "$dest"
+    return $?
+  fi
+  upgrade_baseline_fetch_url "$UPGRADE230_DEB_URL" "$UPGRADE230_DEB_SHA256" "$dest"
+}
+
+# upgrade230_fetch_rpm DEST — resolve + verify the v2.3.0 RPM
+# (UAT_UPGRADE230_RPM_PATH -> UAT_UPGRADE230_RPM_URL -> canonical).
+upgrade230_fetch_rpm() {
+  local dest="$1"
+  local path="${UAT_UPGRADE230_RPM_PATH:-}"
+  local url="${UAT_UPGRADE230_RPM_URL:-}"
+  if [ -n "$path" ]; then
+    upgrade_baseline_source_from "$path" "$UPGRADE230_RPM_SHA256" "$dest"
+    return $?
+  fi
+  if [ -n "$url" ]; then
+    upgrade_baseline_fetch_url "$url" "$UPGRADE230_RPM_SHA256" "$dest"
+    return $?
+  fi
+  upgrade_baseline_fetch_url "$UPGRADE230_RPM_URL" "$UPGRADE230_RPM_SHA256" "$dest"
 }

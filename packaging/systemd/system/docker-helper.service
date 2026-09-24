@@ -5,6 +5,13 @@ StartLimitIntervalSec=60s
 StartLimitBurst=3
 After=network-online.target docker.socket apparmor.service
 Wants=network-online.target
+# Weak builder-backend coupling (no Requires=): the builder service is
+# pulled in and ordered before the daemon on every start (fresh install,
+# upgrade, reboot) while builder unavailability still only fails BUILD
+# requests closed — run/pull/registry-login stay available, and the daemon
+# recovers dynamically when the builder manager returns (Release-2.4 plan §5).
+Wants=docker-helper-builder.service
+After=docker-helper-builder.service
 ConditionSecurity=|apparmor
 ConditionSecurity=|selinux
 

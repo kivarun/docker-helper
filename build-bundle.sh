@@ -34,6 +34,7 @@
 #     systemd/
 #       system/
 #         docker-helper.service
+#         docker-helper-builder.service
 #   apparmor/
 #       docker-helper
 #       docker-helper-system
@@ -41,7 +42,15 @@
 #         curl
 #   selinux/
 #       docker_helper.pp
-#     skills/
+#   buildkit/
+#     buildkitd
+#     buildctl
+#     buildkit-runc
+#     LICENSE
+#     MANIFEST
+#   scripts/
+#     provision-builder.sh
+#   skills/
 #       docker-helper/
 #         SKILL.md
 #     man/
@@ -85,7 +94,12 @@ if [[ -n "$PAYLOAD_DIR" ]]; then
   echo "=== Assembling from shared release payload: $PAYLOAD_DIR ==="
   for member in docker-helper docker_helper.pp \
     man/docker-helper.1.gz man/docker-helper-config.5.gz \
-    completions/docker-helper; do
+    completions/docker-helper \
+    buildkit/usr/libexec/docker-helper/buildkit/buildkitd \
+    buildkit/usr/libexec/docker-helper/buildkit/buildctl \
+    buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc \
+    buildkit/usr/share/doc/docker-helper/buildkit/LICENSE \
+    buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST; do
     if [[ ! -s "$PAYLOAD_DIR/$member" ]]; then
       echo "error: shared release payload member missing or empty: $PAYLOAD_DIR/$member" >&2
       exit 1
@@ -101,6 +115,10 @@ else
   # failed compilation FAILS the bundle build (fail-closed).
   echo "=== Building SELinux policy module ==="
   bash "$SCRIPT_DIR/build-selinux-policy.sh" "$OUT_DIR"
+
+  # Stage the pinned BuildKit payload through its single owner (the same
+  # owner and pin build-packages.sh consumes: one pinned payload).
+  bash "$SCRIPT_DIR/build-buildkit-payload.sh" "$OUT_DIR/buildkit"
 fi
 
 # --- Step 2: Assemble bundle directory ---
@@ -130,10 +148,46 @@ cp "$SCRIPT_DIR/packaging/uninstall-system.sh" "$BUNDLE_DIR/uninstall-system.sh"
 chmod 755 "$BUNDLE_DIR/install-system.sh"
 chmod 755 "$BUNDLE_DIR/uninstall-system.sh"
 
-# Systemd units
+# Systemd units (main daemon + builder backend)
 mkdir -p "$BUNDLE_DIR/systemd/system"
 cp "$SCRIPT_DIR/packaging/systemd/system/docker-helper.service" \
    "$BUNDLE_DIR/systemd/system/docker-helper.service"
+cp "$SCRIPT_DIR/packaging/systemd/system/docker-helper-builder.service" \
+   "$BUNDLE_DIR/systemd/system/docker-helper-builder.service"
+
+# Pinned BuildKit payload (flat bundle layout; install-system.sh maps each
+# file to its product path). Source: the staged payload in --payload mode,
+# the dist staging in developer mode — both produced by the single pinned
+# payload owner.
+if [[ -n "$PAYLOAD_DIR" ]]; then
+  rm -rf "$BUNDLE_DIR/buildkit"
+  mkdir -p "$BUNDLE_DIR/buildkit"
+  cp -r "$PAYLOAD_DIR/buildkit/usr/libexec/docker-helper/buildkit/." \
+        "$BUNDLE_DIR/buildkit/"
+  cp -r "$PAYLOAD_DIR/buildkit/usr/share/doc/docker-helper/buildkit/." \
+        "$BUNDLE_DIR/buildkit/"
+else
+  rm -rf "$BUNDLE_DIR/buildkit"
+  mkdir -p "$BUNDLE_DIR/buildkit"
+  cp "$OUT_DIR/buildkit/usr/libexec/docker-helper/buildkit/buildkitd" \
+     "$OUT_DIR/buildkit/usr/libexec/docker-helper/buildkit/buildctl" \
+     "$OUT_DIR/buildkit/usr/libexec/docker-helper/buildkit/buildkit-runc" \
+     "$BUNDLE_DIR/buildkit/"
+  cp "$OUT_DIR/buildkit/usr/share/doc/docker-helper/buildkit/LICENSE" \
+     "$OUT_DIR/buildkit/usr/share/doc/docker-helper/buildkit/MANIFEST" \
+     "$BUNDLE_DIR/buildkit/"
+fi
+chmod 755 "$BUNDLE_DIR/buildkit/buildkitd" \
+          "$BUNDLE_DIR/buildkit/buildctl" \
+          "$BUNDLE_DIR/buildkit/buildkit-runc"
+chmod 644 "$BUNDLE_DIR/buildkit/LICENSE" "$BUNDLE_DIR/buildkit/MANIFEST"
+
+# Builder identity provisioning script (the ONE provisioning owner; the
+# tarball installer executes it, never re-implements it)
+mkdir -p "$BUNDLE_DIR/scripts"
+cp "$SCRIPT_DIR/packaging/scripts/lib/provision-builder.sh" \
+   "$BUNDLE_DIR/scripts/provision-builder.sh"
+chmod 755 "$BUNDLE_DIR/scripts/provision-builder.sh"
 
 # AppArmor profiles
 mkdir -p "$BUNDLE_DIR/apparmor/local"
@@ -244,6 +298,28 @@ if [[ ! -s "$BUNDLE_DIR/selinux/docker_helper.pp" ]]; then
 fi
 echo "OK: SELinux policy artifact present: selinux/docker_helper.pp"
 
+# The pinned BuildKit payload must be present and non-empty in the bundle;
+# its staged bytes must also match the MANIFEST the payload owner generated.
+if [[ ! -s "$BUNDLE_DIR/buildkit/buildkitd" ]] || [[ ! -s "$BUNDLE_DIR/buildkit/buildctl" ]] \
+   || [[ ! -s "$BUNDLE_DIR/buildkit/buildkit-runc" ]] || [[ ! -s "$BUNDLE_DIR/buildkit/LICENSE" ]] \
+   || [[ ! -s "$BUNDLE_DIR/buildkit/MANIFEST" ]]; then
+  echo "FAIL: pinned BuildKit payload missing or empty in bundle: buildkit/" >&2
+  exit 1
+fi
+echo "OK: pinned BuildKit payload present: buildkit/"
+while IFS='=' read -r key value; do
+  case "$key" in
+    buildkitd-sha256|buildctl-sha256|buildkit-runc-sha256)
+      actual="$(sha256sum "$BUNDLE_DIR/buildkit/${key%%-sha256}" | awk '{print $1}')"
+      if [[ "$actual" != "$value" ]]; then
+        echo "FAIL: BuildKit payload digest mismatch for $key: manifest $value != staged $actual" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done < "$BUNDLE_DIR/buildkit/MANIFEST"
+echo "OK: BuildKit payload binaries match their MANIFEST digests"
+
 # Check tarball contains the exact mandatory set of paths.
 EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/docker-helper"
@@ -252,9 +328,16 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/install-system.sh"
   "docker-helper-${VERSION}-linux-amd64/uninstall-system.sh"
   "docker-helper-${VERSION}-linux-amd64/systemd/system/docker-helper.service"
+  "docker-helper-${VERSION}-linux-amd64/systemd/system/docker-helper-builder.service"
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-system"
   "docker-helper-${VERSION}-linux-amd64/apparmor/local/curl"
   "docker-helper-${VERSION}-linux-amd64/selinux/docker_helper.pp"
+  "docker-helper-${VERSION}-linux-amd64/buildkit/buildkitd"
+  "docker-helper-${VERSION}-linux-amd64/buildkit/buildctl"
+  "docker-helper-${VERSION}-linux-amd64/buildkit/buildkit-runc"
+  "docker-helper-${VERSION}-linux-amd64/buildkit/LICENSE"
+  "docker-helper-${VERSION}-linux-amd64/buildkit/MANIFEST"
+  "docker-helper-${VERSION}-linux-amd64/scripts/provision-builder.sh"
   "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper.1.gz"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper-config.5.gz"
@@ -283,7 +366,9 @@ fi
 echo "OK: all tarball entries (files and directories) owned 0:0"
 
 # Check executable bits for files that must be executable.
-for f in docker-helper install-system.sh uninstall-system.sh; do
+for f in docker-helper install-system.sh uninstall-system.sh \
+         buildkit/buildkitd buildkit/buildctl buildkit/buildkit-runc \
+         scripts/provision-builder.sh; do
   PERMS=$(tar tzvf "$TARBALL" | grep "docker-helper-${VERSION}-linux-amd64/${f}$" | awk '{print $1}')
   if [[ "$PERMS" =~ ^-rwx ]]; then
     echo "OK: $f has executable bit"

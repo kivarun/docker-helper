@@ -29,6 +29,16 @@ BINARY_DEST="${BINARY_DEST:-/usr/bin/docker-helper}"
 UNIT_SRC="${UNIT_SRC:-systemd/system/docker-helper.service}"
 UNIT_DEST="${UNIT_DEST:-/etc/systemd/system/docker-helper.service}"
 UNIT_NAME="${UNIT_NAME:-docker-helper.service}"
+BUILDER_UNIT_SRC="${BUILDER_UNIT_SRC:-systemd/system/docker-helper-builder.service}"
+BUILDER_UNIT_DEST="${BUILDER_UNIT_DEST:-/etc/systemd/system/docker-helper-builder.service}"
+BUILDER_UNIT_NAME="${BUILDER_UNIT_NAME:-docker-helper-builder.service}"
+# ONE builder provisioning owner (packaging/scripts/lib/provision-builder.sh,
+# shipped in the bundle as scripts/provision-builder.sh): executed, never
+# re-implemented.
+PROVISION_BUILDER_SRC="${PROVISION_BUILDER_SRC:-scripts/provision-builder.sh}"
+BUILDKIT_BIN_SRC="${BUILDKIT_BIN_SRC:-buildkit}"
+BUILDKIT_BIN_DEST="${BUILDKIT_BIN_DEST:-/usr/libexec/docker-helper/buildkit}"
+BUILDKIT_DOC_DEST="${BUILDKIT_DOC_DEST:-/usr/share/doc/docker-helper/buildkit}"
 AA_PROFILE_SRC="${AA_PROFILE_SRC:-apparmor/docker-helper-system}"
 AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
 AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
@@ -140,6 +150,27 @@ check_bundled_assets() {
 		error "systemd unit not found at $unit_path"
 		exit 1
 	fi
+
+	# Release 2.4 builder backend bundle members: the builder unit, the
+	# pinned BuildKit payload, and the provisioning script. A tarball that
+	# lost any of them fails the preflight BEFORE any system mutation.
+	local builder_unit_path="$script_dir/$BUILDER_UNIT_SRC"
+	if [[ ! -f "$builder_unit_path" ]]; then
+		error "builder systemd unit not found at $builder_unit_path"
+		exit 1
+	fi
+	local provisioner_path="$script_dir/$PROVISION_BUILDER_SRC"
+	if [[ ! -f "$provisioner_path" ]]; then
+		error "builder provisioning script not found at $provisioner_path"
+		exit 1
+	fi
+	local payload_member
+	for payload_member in buildkitd buildctl buildkit-runc LICENSE MANIFEST; do
+		if [[ ! -s "$script_dir/$BUILDKIT_BIN_SRC/$payload_member" ]]; then
+			error "pinned BuildKit payload member missing or empty: $BUILDKIT_BIN_SRC/$payload_member"
+			exit 1
+		fi
+	done
 }
 
 check_systemctl() {
@@ -405,6 +436,39 @@ install_binary() {
 	chmod 0755 "$BINARY_DEST"
 }
 
+# provision_builder runs the ONE canonical provisioning owner (identity +
+# subordinate-ID ranges, verify-first idempotent, fail-closed). It mutates
+# the account state, so it runs as the first installation mutation, before
+# any package-shaped file is placed; a provisioning failure aborts the
+# installer before the service can be touched.
+provision_builder() {
+	info "Provisioning the builder identity (scripts/provision-builder.sh)"
+	if ! sh "$script_dir/$PROVISION_BUILDER_SRC"; then
+		error "builder identity provisioning failed; installation aborted"
+		exit 1
+	fi
+}
+
+install_builder_unit() {
+	info "Installing builder systemd unit to $BUILDER_UNIT_DEST"
+	cp "$script_dir/$BUILDER_UNIT_SRC" "$BUILDER_UNIT_DEST"
+	chmod 0644 "$BUILDER_UNIT_DEST"
+}
+
+install_buildkit_payload() {
+	local member
+	for member in buildkitd buildctl buildkit-runc; do
+		info "Installing pinned BuildKit payload member to $BUILDKIT_BIN_DEST/$member"
+		install -d -m 0755 "$BUILDKIT_BIN_DEST"
+		install -m 0755 "$script_dir/$BUILDKIT_BIN_SRC/$member" "$BUILDKIT_BIN_DEST/$member"
+	done
+	for member in LICENSE MANIFEST; do
+		info "Installing BuildKit license/manifest to $BUILDKIT_DOC_DEST/$member"
+		install -d -m 0755 "$BUILDKIT_DOC_DEST"
+		install -m 0644 "$script_dir/$BUILDKIT_BIN_SRC/$member" "$BUILDKIT_DOC_DEST/$member"
+	done
+}
+
 install_unit() {
 	info "Installing systemd system unit to $UNIT_DEST"
 	cp "$script_dir/$UNIT_SRC" "$UNIT_DEST"
@@ -419,8 +483,9 @@ install_apparmor_profile() {
 
 prepare_apparmor_state() {
 	info "Preparing AppArmor managed boundaries state"
-	local state_dir="$(dirname "$AA_STATE_FILE")"
-	local top_state_dir="$(dirname "$state_dir")"
+	local state_dir top_state_dir
+	state_dir="$(dirname "$AA_STATE_FILE")"
+	top_state_dir="$(dirname "$state_dir")"
 
 	# Ensure the top-level state directory exists with the systemd
 	# StateDirectory security contract (0700).
@@ -450,7 +515,8 @@ cleanup_legacy_apparmor_state() {
 	# migrated copy is the authoritative one before the legacy file is removed.
 	if [[ -f "$AA_LEGACY_FRAGMENT" ]] && [[ -f "$AA_STATE_FILE" ]]; then
 		rm -f "$AA_LEGACY_FRAGMENT"
-		local legacy_dir="$(dirname "$AA_LEGACY_FRAGMENT")"
+		local legacy_dir
+		legacy_dir="$(dirname "$AA_LEGACY_FRAGMENT")"
 		if [[ -d "$legacy_dir" ]] && [[ -z "$(ls -A "$legacy_dir" 2>/dev/null)" ]]; then
 			rmdir "$legacy_dir" 2>/dev/null || true
 		fi
@@ -545,6 +611,12 @@ reload_systemd() {
 }
 
 enable_and_start_service() {
+	info "Enabling $BUILDER_UNIT_NAME"
+	if ! "$SYSTEMCTL" enable "$BUILDER_UNIT_NAME"; then
+		error "Failed to enable $BUILDER_UNIT_NAME"
+		exit 1
+	fi
+
 	info "Enabling $UNIT_NAME"
 	if ! "$SYSTEMCTL" enable "$UNIT_NAME"; then
 		error "Failed to enable $UNIT_NAME"
@@ -591,8 +663,11 @@ main() {
 	check_allowed_root
 	check_active_service
 
+	provision_builder
 	install_binary
 	install_unit
+	install_builder_unit
+	install_buildkit_payload
 	install_completion
 
 	if [[ "$selected_mac" == "apparmor" ]]; then
