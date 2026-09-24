@@ -357,6 +357,122 @@ the existing Session Docker config; Release 2.4 explicitly does not promise
 persistent build cache. The 2.4 implementation plan builds on this frozen
 selection.
 
+## P4-A1 production unit-boundary record — 2026-09-24
+
+P4-A1 installed and proved the REAL production builder service boundary
+before packaging: the proposed
+`packaging/systemd/system/docker-helper-builder.service` unit runs the real
+`docker-helper builder serve` manager (identity, subuids, and subgids
+provisioned by the real `packaging/scripts/lib/provision-builder.sh`), which
+drives the real per-operation RootlessKit + pinned BuildKit payload. The
+proof scripts (`scripts/release-2.4-p4a1-proof.sh` + Tumbleweed guest/
+VM-side scripts) and the workflow
+(`.github/workflows/release-2.4-p4a1-builder-unit.yml`) follow the M0/M1
+harness pattern. Docker on the Ubuntu runner and Docker in the Tumbleweed
+guest are not part of the passing path; the buildctl export tar and the
+container sanity probes run only when the Engine is reachable.
+
+Proven properties:
+
+1. provisioning is idempotent and fail-closed: the dedicated
+   `docker-helper-builder` identity (nologin shell, home = state root), one
+   subordinate range of 65536 written to both `/etc/subuid` and `/etc/subgid`
+   through `usermod` delegation only; re-run is a no-op. Observed
+   allocations: 999/987 with subids `231072:65536` (Ubuntu 24.04),
+   475/475 with `165536:65536` (Tumbleweed);
+2. the unit starts the manager with the recorded NoNewPrivileges exception
+   (`NoNewPrivs: 0`) and the minimal capability floor
+   (`CapBnd = 0x802000c2`, `CapEff = 0`);
+3. during a real `FROM alpine:3.20` HTTPS build, the manager, the
+   RootlessKit leader, the buildkitd child, and the unanchored
+   slirp4netns descendant are ALL members of
+   `0::/system.slice/docker-helper-builder.service`; the buildkitd
+   `uid_map` maps in-namespace root to the builder uid and the provisioned
+   subordinate range (0→999, 1→231072 on 24.04; 0→475, 1→165536 on
+   Tumbleweed); the child environment is the explicit production contract
+   (HOME=state root, USER=builder, per-op XDG_RUNTIME_DIR, fixed PATH,
+   SSL_CERT_FILE=resolved bundle);
+4. killing the manager (SIGKILL during an active build) restarts the unit
+   and settles ALL old children including the unanchored slirp4netns
+   (control-group kill); the new generation's startup purge removes the
+   residue the wiped runtime tree left behind; a fresh build round-trips;
+5. a service stop during an active build settles all children bounded by
+   `TimeoutStopSec=30s`; the persistent state residue is cleaned by the
+   next start's purge (unit membership is NOT per-op ownership);
+6. the startup invariant end to end: ambiguous pid-file-less residue
+   (the pre-pid-write crash window and the systemd-wiped runtime tree) and
+   truncated pid files are removed at start over the unit boundary, while
+   noncanonical ops entries are preserved; the legacy fail-closed purge
+   semantics remain unchanged outside the unit boundary;
+7. the resolved `SSL_CERT_FILE` is real-path-resolved and readable inside
+   the child mount namespace; a real HTTPS build exercises the bundle.
+
+### The capability floor is failed-proof derived
+
+The plan §5 floor (`CAP_SETUID CAP_SETGID`) was insufficient on kernel
+6.17; three live failures determined the minimal floor, each fixed only
+after the failure:
+
+- `CAP_DAC_OVERRIDE` — the setuid-root `newuidmap` open of the child's
+  `/proc/<pid>/uid_map` failed EACCES (run 35981016063);
+- `CAP_SYS_ADMIN` — the kernel `map_write` gate ("adjusting namespace
+  settings requires capabilities on the target") failed EPERM (run
+  35981655091);
+- `CAP_SETFCAP` — `verify_root_map` requires the opener to hold it over
+  the parent namespace to map in-namespace root (added with the same
+  run's fix).
+
+### Other live corrections to the composition
+
+- `USER=` must be part of the explicit child environment: buildkitd
+  rootless-mode detection (`isRootlessConfig`) requires a non-root
+  `$USER`; without it the daemon's OTEL trace controller mkdirs
+  `/run/buildkit` and fails (run 35982869630).
+- The per-op socket readiness contract is the containerd
+  `sys.GetLocalListener` shape: 0660 builder:builder, never
+  world-accessible (run 35983853898; M0 recorded the same `srw-rw----`).
+- The unit must not place locked submounts under `/proc`:
+  `ProtectKernelTunables`, `ProtectKernelLogs`, and `ProtectHostname` each
+  add such submounts, which disqualify the inherited procfs mount from the
+  kernel `mount_too_revealing` visibility rule and deny the RUN
+  containers' fresh procfs mounts EPERM (runs 35985523417 and 35987764605;
+  the direct control composition, run green at 35988943581, isolated the
+  unit environment as the differentiator).
+- The manager's per-op residue scan now excludes its own process (the
+  unit-membership classification matched the manager itself and the purge
+  signaled its own group; run 35988943581).
+
+### Results
+
+| Target | Result | Evidence |
+|---|---|---|
+| Ubuntu 24.04 (hosted runner) | **PASS** | run [35991353450](https://github.com/kivarun/docker-helper/actions/runs/35991353450), artifact `release-2.4-p4a1-2404-35991353450-1`, digest `sha256:0cd302fd65abe004154cc8cf33c699fb8f12c4e18398aa80f3d64b34e4560466` |
+| openSUSE Tumbleweed (QEMU/KVM VM) | **PASS** | run [35991353450](https://github.com/kivarun/docker-helper/actions/runs/35991353450), artifact `release-2.4-p4a1-tw-35991353450-1`, digest `sha256:5fb89075a7fb80be26ea6110f0f4cd62d73cd0f029ffbb6995ec121d969ed0d2` |
+
+Tested commit: `1a625f82896c4d3c841bcaea911bc8c50ebe5d42`. Binary SHA-256
+`5f11b22796f954ccea52ba56870e479db3576a899f29739eab426fe0c0e52e49`; unit
+`59035ffd88e4499c41f1a42462b7e7c9bae0c6d733b10a8a1d256d98807e32f5`;
+provisioner `5ede306828ebffea76e095c539b4b2b930d7b2d333e101d2e08ae89c03594945`;
+pinned BuildKit v0.33.0
+(`157da954fa081d9ec4f063d62029fbbf12437c1d47ab63080594eae5a85b36f2` buildkitd,
+`0b45ae3696f836bf711dbd78138e403924d7733f0b2328ba29a7fcf9ad5f1dfd` buildctl,
+`0acdd302ddc5540b2e445b683661bfada9935c702f9008ffb0481abcda16c9b4`
+buildkit-runc), tarball digest
+`b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead`.
+Environments: Ubuntu 24.04.5 LTS, kernel 6.17.0-1022-azure, systemd 255,
+`apparmor_restrict_unprivileged_userns=1` (unchanged default; the passing
+path does not relax it); openSUSE Tumbleweed 20260922, kernel 7.2.6-1,
+systemd 261, SELinux enabled, no user-namespace restrict sysctl.
+
+### Remaining after P4-A1
+
+- Ubuntu 26.04 target (the M0/M1 matrix third target) is not yet exercised
+  by the P4-A1 workflow;
+- the packaging lifecycle (DEB/RPM/tarball wiring of the unit, the
+  provisioner, and the pinned payload) and the main daemon unit's weak
+  ordering touch-up remain P4 follow-ups;
+- MAC policy (AppArmor/SELinux) for the builder service is P5.
+
 ## Builder authority
 
 The sandbox is narrower than exposing Docker authority to the caller.

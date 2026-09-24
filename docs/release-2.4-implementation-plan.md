@@ -283,15 +283,19 @@ Mandatory ambiguity tests (`builder_manager_rpc_test.go`):
   the directories retained and startup refused, and with no pid file
   and zero anchored matches the directories are retained and startup
   refused outright.
-  States that currently require operator intervention and can only be
-  resolved automatically by the P4 systemd cgroup guarantee (the
-  builder service unit cgroup containing exactly the manager's instance
-  processes — no parallel supervisor or reconciliation mechanism): (i)
-  op dirs with no pid file and zero anchored matches (indistinguishable
-  pre-spawn residue from an undetectable unanchored group); (ii) a
-  recorded group with live unproven members; (iii) same-uid entries
-  with unreadable identities; (iv) pid reuse ambiguity. The identity
-  model remains best-effort cmdline evidence until P4.
+   States that are now resolved automatically under the P4 production
+   systemd unit boundary (the builder service unit cgroup containing
+   exactly the manager's instance processes — no parallel supervisor or
+   reconciliation mechanism; proven by the P4-A1 record in
+   `docs/release-2.4-build-sandbox.md`): (i) op dirs with no pid file and
+   zero anchored matches (indistinguishable pre-spawn residue from an
+   undetectable unanchored group) are removed at start when the manager
+   runs under the unit boundary; (ii) a recorded group with live
+   unproven members and (iii) same-uid entries with unreadable identities
+   fail closed outside the unit and are settled by the unit's cgroup-kill
+   restart cycle under it; (iv) pid reuse ambiguity fails closed. Outside
+   the unit boundary the identity model remains best-effort cmdline
+   evidence with fail-closed refusal.
 
 ### Backend launch mechanics (P2-refined)
 
