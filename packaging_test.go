@@ -934,19 +934,21 @@ func TestBuilderSystemUnitFile(t *testing.T) {
 		"ProtectKernelModules=true",
 		"ProtectControlGroups=true",
 		"ProtectClock=true",
-		"ProtectHostname=true",
 		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
 	} {
 		if !strings.Contains(content, directive) {
 			t.Errorf("builder unit must contain %q", directive)
 		}
 	}
-	// ProtectKernelTunables and ProtectKernelLogs must stay ABSENT: their
-	// locked /proc submounts make every inherited procfs mount fail the
-	// kernel mount_too_revealing visibility rule for the buildkitd RUN
-	// containers' fresh procfs mounts (failed live proof: runc "error
-	// mounting proc ... operation not permitted").
-	for _, directive := range []string{"ProtectKernelTunables=", "ProtectKernelLogs="} {
+	// ProtectKernelTunables, ProtectKernelLogs, and ProtectHostname must
+	// stay ABSENT: their locked /proc submounts (inaccessible regular
+	// files at /proc/kallsyms|kcore|kmsg, read-only
+	// /proc/sys/kernel/{hostname,domainname} and /proc/{sys,acpi,bus}
+	// binds) disqualify every inherited procfs mount from the kernel
+	// mount_too_revealing visibility rule, and the buildkitd RUN
+	// containers' fresh procfs mounts are then denied EPERM (failed live
+	// proof: runc "error mounting proc ... operation not permitted").
+	for _, directive := range []string{"ProtectKernelTunables=", "ProtectKernelLogs=", "ProtectHostname="} {
 		if got, ok := active(directive); ok {
 			t.Errorf("builder unit must not set %s (locked /proc submounts break the buildkitd container procfs mount), found %q", directive, got)
 		}

@@ -449,7 +449,8 @@ chown -R "$BUILDER_UID:$BUILDER_GID" "$DIRECT_ROOT"
 DIRECT_SOCK="$DIRECT_ROOT/rt/buildkitd.sock"
 DIRECT_RK=""
 setpriv --reuid "$BUILDER_UID" --regid "$BUILDER_GID" --clear-groups \
-  env "HOME=$MGR_STATE" "USER=$BUILDER_USER" "XDG_RUNTIME_DIR=$DIRECT_ROOT/rt" \
+  env -u XDG_CONFIG_HOME -u XDG_DATA_HOME \
+  "HOME=$MGR_STATE" "USER=$BUILDER_USER" "XDG_RUNTIME_DIR=$DIRECT_ROOT/rt" \
   "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/libexec/docker-helper/buildkit" \
   SSL_CERT_FILE="$(printf '%s\n' "$ENV_BK" | grep -F 'SSL_CERT_FILE=' | head -1 | cut -d= -f2-)" \
   nohup /usr/bin/rootlesskit \

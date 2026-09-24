@@ -85,7 +85,13 @@ PrivateTmp=false
 ProtectKernelModules=true
 ProtectControlGroups=true
 ProtectClock=true
-ProtectHostname=true
+# ProtectHostname is deliberately ABSENT: it bind-mounts
+# /proc/sys/kernel/{hostname,domainname} read-only. Those locked submounts
+# sit over regular files, which disqualifies every inherited /proc mount
+# from the kernel mount_too_revealing visibility rule; the buildkitd RUN
+# containers' fresh procfs mounts are then denied EPERM (failed live
+# proof, same runc "error mounting proc ... operation not permitted" as
+# the ProtectKernelTunables/ProtectKernelLogs case above).
 # Same address-family set as the main unit; rootlesskit/slirp4netns need
 # AF_INET/AF_INET6/AF_UNIX/AF_NETLINK (verified by the P4-A1 unit proof).
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
