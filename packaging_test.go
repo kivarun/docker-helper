@@ -3370,6 +3370,9 @@ func TestNfpmConfigFile(t *testing.T) {
 		if strings.HasPrefix(strings.TrimSpace(line), "- docker") {
 			t.Error("DEB depends must not include docker package")
 		}
+		if strings.HasPrefix(strings.TrimSpace(line), "- container-selinux") {
+			t.Error("DEB depends must not include container-selinux (DEB is AppArmor-only)")
+		}
 	}
 
 	// RPM overrides: lifecycle scripts and depends.
@@ -3414,6 +3417,14 @@ func TestNfpmConfigFile(t *testing.T) {
 	for _, line := range strings.Split(rpmSection, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "- docker") {
 			t.Error("RPM depends must not include docker package")
+		}
+		// container-selinux must appear ONLY as the conditional rich
+		// dependency (the Tumbleweed docker package pattern, bsc#1252672),
+		// never as an unconditional entry: an AppArmor or bare RPM host must
+		// not gain the container policy stack.
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- container-selinux") && trimmed != `- "(container-selinux if selinux-policy)"` {
+			t.Errorf("RPM depends container-selinux entry must be the quoted conditional rich dependency, got: %s", trimmed)
 		}
 	}
 	// The DEB is AppArmor-only and must not acquire SELinux dependencies.
@@ -3882,12 +3893,20 @@ func TestRPMBackendDependencies(t *testing.T) {
 	deps := parseYAMLListItems(dependsSection)
 
 	// Assert exact presence of each required dependency.
+	// "(container-selinux if selinux-policy)" (quoted in the YAML source) is
+	// the RPM-only conditional rich dependency the Tumbleweed docker package
+	// itself ships (bsc#1252672): the SELinux docker_helper module requires
+	// container-selinux symbols (P4-B1 diagnosis: without them the %post
+	// semodule link fails at the module's require statements), but only on
+	// hosts where SELinux policy is installed; it must never become an
+	// unconditional dependency.
 	required := []string{
 		"systemd",
 		"apparmor-parser",
 		"apparmor-abstractions",
 		"policycoreutils",
 		"policycoreutils-python-utils",
+		`"(container-selinux if selinux-policy)"`,
 	}
 	for _, want := range required {
 		found := false
@@ -4040,6 +4059,11 @@ func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
 	if strings.Contains(depends, "libselinux") {
 		t.Error("DEB Depends must not include libselinux (DEB is AppArmor-only)")
 	}
+	// container-selinux is an RPM-only conditional dependency (the SELinux
+	// module's require symbols); the DEB must never gain it.
+	if strings.Contains(depends, "container-selinux") {
+		t.Error("DEB Depends must not include container-selinux (DEB is AppArmor-only)")
+	}
 
 	// Conffiles — extract control tarball and verify no conffiles
 	// (dynamic AppArmor state is not package-owned).
@@ -4096,6 +4120,24 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	for _, dep := range []string{"shadow", "rootlesskit", "slirp4netns"} {
 		if !strings.Contains(requires, dep) {
 			t.Errorf("RPM Requires must include %s (builder provisioning/runtime)", dep)
+		}
+	}
+	// The container-selinux symbols required by the docker_helper SELinux
+	// module are expressed as the conditional rich dependency (the same one
+	// the Tumbleweed docker package ships, bsc#1252672), asserted here from
+	// the BUILT RPM metadata — not merely the config source text: without the
+	// module's required symbols the %post semodule link fails on SELinux hosts
+	// without container-selinux (P4-B1).
+	if !strings.Contains(requires, "(container-selinux if selinux-policy)") {
+		t.Error("RPM Requires must include the conditional rich dependency (container-selinux if selinux-policy)")
+	}
+	// container-selinux must stay conditional: an unconditional entry would
+	// pull the container policy stack onto every RPM host regardless of its
+	// MAC backend. The rich dependency line contains the name inside the
+	// conditional expression; an unconditional entry is its own bare line.
+	for _, line := range strings.Split(requires, "\n") {
+		if strings.TrimSpace(line) == "container-selinux" {
+			t.Error("RPM Requires must not include an unconditional container-selinux entry (must stay the conditional rich dependency)")
 		}
 	}
 	// Check for docker dependency (various package names).

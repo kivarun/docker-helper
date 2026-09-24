@@ -39,6 +39,15 @@ overrides:
       # SELinux workload read-only exposure path.
       # The SELinux backend fails closed when the binary is missing.
       - bindfs
+      # The SELinux docker_helper module requires container-selinux symbols
+      # (attributes container_domain/container_net_domain, types
+      # container_runtime_t/container_runtime_exec_t/container_var_run_t).
+      # Without them the %post semodule link fails at the module's require
+      # statements (P4-B1 diagnosis: cil:33 typeattributeset). The same
+      # conditional dependency the Tumbleweed docker package itself ships
+      # (bsc#1252672): only where SELinux policy is installed, never an
+      # unconditional container-selinux or Docker dependency.
+      - "(container-selinux if selinux-policy)"
       # Builder backend runtime on openSUSE Tumbleweed: shadow (useradd/
       # usermod AND newuidmap/newgidmap), rootlesskit, slirp4netns.
       - shadow
