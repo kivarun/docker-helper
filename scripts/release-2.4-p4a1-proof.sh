@@ -353,7 +353,7 @@ done
 SOCK_UID="$(stat -c '%u' "$OP_SOCK")"
 SOCK_MODE="$(stat -c '%a' "$OP_SOCK")"
 [ "$SOCK_UID" = "$BUILDER_UID" ] || fail "per-op socket uid $SOCK_UID != builder uid $BUILDER_UID"
-[ "$SOCK_MODE" = "600" ] || fail "per-op socket mode $SOCK_MODE, want 600"
+[ "$SOCK_MODE" = "660" ] || fail "per-op socket mode $SOCK_MODE, want 660 (containerd sys.GetLocalListener chmod 0660; the M0-observed shape)"
 say "per-op socket present, builder-owned, private (PASS)"
 
 # locate the instance process tree by the op-scoped argv anchors

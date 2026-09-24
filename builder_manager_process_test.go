@@ -111,7 +111,7 @@ func bindFakeBuildkitdSocket(t *testing.T, opID string) net.Listener {
 	if err != nil {
 		t.Fatalf("cannot bind fake buildkitd socket: %v", err)
 	}
-	if err := os.Chmod(opSocketPath(opID), 0600); err != nil {
+	if err := os.Chmod(opSocketPath(opID), 0o660); err != nil {
 		t.Fatalf("cannot chmod fake socket: %v", err)
 	}
 	t.Cleanup(func() { listener.Close() })

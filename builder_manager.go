@@ -888,9 +888,11 @@ func (m *builderManager) awaitReadiness(inst *builderInstance) bool {
 			if err := unix.Stat(socketPath, &st); err == nil {
 				if st.Mode&unix.S_IFSOCK != 0 && st.Uid == uint32(m.uid) {
 					perm := st.Mode & 0o777
-					// Private contract: owner-only or owner+group; never
-					// world-accessible.
-					if perm&0o077 == 0 {
+					// Private contract (the buildkitd socket shape:
+					// containerd sys.GetLocalListener chmods 0660;
+					// M0 evidence srw-rw----): owner-only or
+					// owner+group; never world-accessible.
+					if perm&0o007 == 0 && (perm&0o070 == 0o060 || perm&0o070 == 0) {
 						return true
 					}
 				}
