@@ -2130,3 +2130,199 @@ func TestBuilderManagerSelfExitInheritedPipesUnblocksWaitOwner(t *testing.T) {
 		t.Fatal("unexpected-exit did not release the map entry")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F5: crash-safe startup recovery.
+// ---------------------------------------------------------------------------
+
+// exitedLeaderResidueFixture creates a real orphaned process group whose
+// LEADER has already exited while a live child remains in the group; the
+// child's command line carries the exact per-op --root anchor so the /proc
+// enumeration can identify the surviving group. The leader is setsid'd
+// (the group creator) so the child's pgid equals the leader's pid. The
+// leader's death is awaited before returning; pre-existence of the live
+// child is asserted. Cleanup kills the whole group.
+func exitedLeaderResidueFixture(t *testing.T, opID string) (leaderPid, childPid int) {
+	t.Helper()
+	dir := t.TempDir()
+	leaderScript := filepath.Join(dir, "leader.sh")
+	childScript := filepath.Join(dir, "child.sh")
+	leaderPidOut := filepath.Join(dir, "leader.pid")
+	childPidOut := filepath.Join(dir, "child.pid")
+	child := `echo $$ > ` + childPidOut + `
+while :; do :; done`
+	if err := os.WriteFile(childScript, []byte(child), 0o700); err != nil {
+		t.Fatalf("cannot write the child script: %v", err)
+	}
+	leader := `echo $$ > ` + leaderPidOut + `
+sh ` + childScript + ` --root=` + filepath.Join(opStateDir(opID), "root") + ` &
+while [ ! -s ` + childPidOut + ` ]; do :; done
+exit 0`
+	if err := os.WriteFile(leaderScript, []byte(leader), 0o700); err != nil {
+		t.Fatalf("cannot write the leader script: %v", err)
+	}
+	launcher := exec.Command("/bin/bash", "-c",
+		`setsid /bin/bash `+leaderScript+` & while [ ! -s `+childPidOut+` ]; do sleep 0.05; done`)
+	if err := launcher.Run(); err != nil {
+		t.Fatalf("cannot launch the exited-leader fixture: %v", err)
+	}
+	rawLeader, err := os.ReadFile(leaderPidOut)
+	if err != nil {
+		t.Fatalf("cannot read the leader pid: %v", err)
+	}
+	leaderPid, err = strconv.Atoi(strings.TrimSpace(string(rawLeader)))
+	if err != nil {
+		t.Fatalf("bad leader pid %q: %v", rawLeader, err)
+	}
+	rawChild, err := os.ReadFile(childPidOut)
+	if err != nil {
+		t.Fatalf("cannot read the child pid: %v", err)
+	}
+	childPid, err = strconv.Atoi(strings.TrimSpace(string(rawChild)))
+	if err != nil {
+		t.Fatalf("bad child pid %q: %v", rawChild, err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-leaderPid, syscall.SIGKILL)
+	})
+	waitProcessExit(t, leaderPid)
+	if !processAlive(childPid) {
+		t.Fatal("exited-leader fixture: live child pre-existence failed")
+	}
+	return leaderPid, childPid
+}
+
+// TestBuilderManagerStartupPurgeCrashResidue proves the F5 startup
+// recovery contract for residue WITHOUT an authoritative instance.pid:
+// the crash window between the spawn and the durable pid write leaves
+// either a live owned leader, an exited leader with a live anchored
+// descendant, or plain pre-spawn dirs; a truncated pid file never
+// becomes a valid pid; more than one owned group behind one op dir is
+// ambiguous and fails closed with no signal and retained directories.
+func TestBuilderManagerStartupPurgeCrashResidue(t *testing.T) {
+	t.Run("live owned leader without pid file", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		seamCA(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		pid, child := ownedResidueFixture(t, opID)
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (positively identified group settled)", err)
+		}
+		if processAlive(pid) || processAlive(child) || !processGroupGone(pid) {
+			t.Fatalf("owned leader group survived crash-window purge: leader=%d child=%d", pid, child)
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("exited leader with live anchored descendant", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		leaderPid, childPid := exitedLeaderResidueFixture(t, opID)
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (the surviving group is identified and settled)", err)
+		}
+		if processAlive(childPid) {
+			t.Fatalf("anchored descendant %d survived crash-window purge", childPid)
+		}
+		if !processGroupGone(leaderPid) {
+			t.Fatalf("group %d survived crash-window purge", leaderPid)
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("pre-spawn dirs removed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil", err)
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("truncated pid file never becomes a valid pid", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		// A live foreign process whose full decimal pid was written
+		// WITHOUT the trailing newline (a crash-mid-write truncation).
+		// The pre-F5 parser accepted it and failed closed forever; the
+		// truncation rule routes the dir to the enumeration instead.
+		foreign := exec.Command("sh", "-c", boundedSleepScript())
+		if err := foreign.Start(); err != nil {
+			t.Fatalf("cannot start foreign fixture: %v", err)
+		}
+		killForeignProcess(t, foreign)
+		fpid := foreign.Process.Pid
+		if err := os.WriteFile(filepath.Join(opRuntimeDir(opID), "instance.pid"), []byte(strconv.Itoa(fpid)), 0o600); err != nil {
+			t.Fatalf("cannot write truncated pid file: %v", err)
+		}
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (truncated pid is not authoritative)", err)
+		}
+		if !processAlive(fpid) {
+			t.Fatal("a foreign live process was signaled because of a truncated pid file")
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+
+	t.Run("two owned groups ambiguous fails closed", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		pidA, _ := ownedResidueFixture(t, opID)
+		pidB, _ := ownedResidueFixture(t, opID)
+
+		err := m.startupPurge()
+		if err == nil {
+			t.Fatal("startupPurge succeeded over ambiguous residue (must fail closed)")
+		}
+		if !processAlive(pidA) || !processAlive(pidB) {
+			t.Fatal("ambiguous purge signaled an owned group (no speculative kill allowed)")
+		}
+		if _, serr := os.Lstat(opRuntimeDir(opID)); serr != nil {
+			t.Fatal("residue removed despite ambiguous fail-closed refusal")
+		}
+	})
+
+	t.Run("dead leader with live descendant and pid file", func(t *testing.T) {
+		m, _, _ := processTestManager(t)
+		opID := "op_0123456789abcdef0123456789abcdef"
+		makeResidueDir(t, opID)
+		leaderPid, childPid := exitedLeaderResidueFixture(t, opID)
+		writeResiduePid(t, opID, leaderPid)
+
+		if err := m.startupPurge(); err != nil {
+			t.Fatalf("startupPurge = %v, want nil (dead leader's surviving group is settled)", err)
+		}
+		if processAlive(childPid) || !processGroupGone(leaderPid) {
+			t.Fatalf("surviving descendant group survived purge: leader=%d child=%d", leaderPid, childPid)
+		}
+		assertDirsAbsentAt(t, opID)
+	})
+}
+
+// TestBuilderProcessLivenessTriState pins the kill(pid,0) classification:
+// a live pid is alive, a reaped pid is provably dead, and pid<=1 is dead
+// without ever signaling anything.
+func TestBuilderProcessLivenessTriState(t *testing.T) {
+	if got := builderLivenessOf(os.Getpid()); got != builderProcessAlive {
+		t.Fatalf("builderLivenessOf(self) = %v, want alive", got)
+	}
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatalf("cannot create a reaped dead pid: %v", err)
+	}
+	if got := builderLivenessOf(dead.Process.Pid); got != builderProcessDead {
+		t.Fatalf("builderLivenessOf(reaped) = %v, want dead", got)
+	}
+	if got := builderLivenessOf(0); got != builderProcessDead {
+		t.Fatalf("builderLivenessOf(0) = %v, want dead", got)
+	}
+}

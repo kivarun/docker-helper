@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -980,11 +981,14 @@ func builderStalePidIdentity(pid int, opID string, uid int) bool {
 	if err := syscall.Kill(pid, 0); err != nil {
 		return false
 	}
-	// Owner check.
-	if stat, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
-		if uint32(stat.Sys().(*syscall.Stat_t).Uid) != uint32(uid) {
-			return false
-		}
+	// Owner check. A failed stat cannot prove ownership; an incomplete
+	// identity proof must never authorize a signal (F5).
+	stat, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
+	if err != nil {
+		return false
+	}
+	if uint32(stat.Sys().(*syscall.Stat_t).Uid) != uint32(uid) {
+		return false
 	}
 	// Group-leader check: pgid == pid.
 	pgid, err := syscall.Getpgid(pid)
@@ -1047,9 +1051,11 @@ func (m *builderManager) startupPurge() error {
 
 // killOwnedResidueGroup terminates a verified-owned live residue group
 // through the shared bounded escalation (SIGTERM -> SIGKILL, verified
-// group death). The exact ownership (uid, pgid==pid, argv0, the exact
-// --state-dir argument) was proven by builderStalePidIdentity BEFORE any
-// signal; fail closed when the group survives.
+// group death). The exact ownership was proven BEFORE any signal: either
+// the full builderStalePidIdentity leader proof (pid file path) or the
+// builderScanOwnedStateDirGroups anchor enumeration (crash-window path,
+// where the pgid identifies the group). Fail closed when the group
+// survives.
 func (m *builderManager) killOwnedResidueGroup(opID string, pid int) error {
 	signal := func(sig syscall.Signal) bool {
 		if err := syscall.Kill(-pid, sig); err != nil && err != syscall.ESRCH {
@@ -1064,15 +1070,96 @@ func (m *builderManager) killOwnedResidueGroup(opID string, pid int) error {
 	return nil
 }
 
+// builderScanOwnedStateDirGroups enumerates /proc for live processes of
+// the manager's uid whose command line carries an exact per-op anchor
+// argument for this operation's own state paths: --state-dir=
+// <stDir>/rootlesskit-state for the rootlesskit leader and --root=
+// <stDir>/root for the buildkitd child. It returns the distinct process
+// group ids behind those processes.
+//
+// Absence of owned processes is only concluded from a complete
+// enumeration: a failing /proc ReadDir yields ok=false and the caller
+// must fail closed (F5). Unreadable cmdline entries are skipped WITHOUT
+// tainting the enumeration: every manager-owned process runs with the
+// manager's own uid, and a same-uid process's cmdline is readable by the
+// manager, so an unreadable entry is provably not owned; a vanishing
+// entry (ENOENT) is a process that died mid-scan and cannot be a live
+// owned group member either. The identity model is best-effort by
+// design: an authoritative cgroup membership boundary is a P4 dependency
+// (builder service packaging), not a parallel supervisor here.
+func builderScanOwnedStateDirGroups(opID string, uid int) ([]int, bool) {
+	stDir := opStateDir(opID)
+	anchors := map[string]bool{
+		"--state-dir=" + filepath.Join(stDir, "rootlesskit-state"): true,
+		"--root=" + filepath.Join(stDir, "root"):                   true,
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, false
+	}
+	pgids := make(map[int]bool)
+	for _, entry := range entries {
+		name := entry.Name()
+		pid, err := strconv.Atoi(name)
+		if err != nil || pid <= 1 {
+			continue
+		}
+		procDir := filepath.Join("/proc", name)
+		stat, err := os.Stat(procDir)
+		if err != nil {
+			continue // died mid-scan; cannot be a live owned member
+		}
+		if uint32(stat.Sys().(*syscall.Stat_t).Uid) != uint32(uid) {
+			continue // different owner: provably not ours
+		}
+		raw, err := os.ReadFile(filepath.Join(procDir, "cmdline"))
+		if err != nil {
+			// Unreadable: provably not owned (same-uid cmdline is always
+			// readable), or died mid-scan. Skipped, enumeration intact.
+			continue
+		}
+		matched := false
+		for _, part := range strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00") {
+			if anchors[part] {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		pgid, err := syscall.Getpgid(pid)
+		if err != nil {
+			continue // died between the cmdline read and now
+		}
+		pgids[pgid] = true
+	}
+	out := make([]int, 0, len(pgids))
+	for pgid := range pgids {
+		out = append(out, pgid)
+	}
+	sort.Ints(out)
+	return out, true
+}
+
 // purgeDiskResidue scans <root>/ops/<op_id> crash residue under both
-// fixed roots and converges it through the startup contract (F3):
-// canonical op-id names only; the persisted pid is resolved and PROVEN
-// before any signal — a verified-owned live group is terminated through
-// the shared escalation and its disappearance verified; a dead or absent
-// pid is plain residue; a live pid that cannot be proven owned (unknown,
-// mismatched, reused) fails closed WITHOUT any signal or removal; the
-// exact canonical path removal is verified, and cleanup errors fail
-// closed.
+// fixed roots and converges it through the startup contract (F3+F5):
+// canonical op-id names only; every removal is preceded by an
+// enumeration of live owned groups behind the op dir. The persisted pid,
+// when present and valid (exactly "<pid>\n"), is classified through the
+// liveness tri-state: proven dead falls through to the enumeration
+// (live group members may remain), undecidable liveness fails closed,
+// and a live pid that cannot be proven owned as the exact rootlesskit
+// leader (unknown, mismatched, reused) fails closed WITHOUT any signal
+// or removal. A positively identified live leader is settled through the
+// existing bounded escalation owner before the enumeration. Dirs without
+// a valid pid — the crash window between the spawn and the durable pid
+// write, truncated pid files, pre-spawn dirs — are resolved through the
+// /proc anchor enumeration: zero owned groups means plain residue, one
+// owned group is settled through the same termination owner, and
+// ambiguity or an incomplete enumeration fails closed with the
+// directories retained. The exact canonical path removal is verified,
+// and cleanup errors fail closed.
 func (m *builderManager) purgeDiskResidue(root string) error {
 	opsDir := filepath.Join(root, "ops")
 	entries, err := os.ReadDir(opsDir)
@@ -1092,21 +1179,51 @@ func (m *builderManager) purgeDiskResidue(root string) error {
 		}
 		opDir := filepath.Join(opsDir, name)
 		if pid := readInstancePid(opDir); pid > 0 {
-			switch {
-			case !processAlive(pid):
-				// Dead pid named by the pid file: plain residue.
-			case builderStalePidIdentity(pid, name, m.uid):
-				// Exactly owned live process group: settle it, then
-				// remove its state.
+			switch builderLivenessOf(pid) {
+			case builderProcessUnknown:
+				// Undecidable liveness: never treated as death (F5).
+				m.managerDiagf("startup purge: liveness of persisted pid %d for op %s is undecidable; refusing startup", pid, name)
+				return fmt.Errorf("startup purge: liveness of persisted pid %d for op %s is undecidable; refusing startup", pid, name)
+			case builderProcessAlive:
+				if !builderStalePidIdentity(pid, name, m.uid) {
+					// Live but unproven (foreign or reused pid): fail
+					// closed. No signal, no removal.
+					m.managerDiagf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, name)
+					return fmt.Errorf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, name)
+				}
+				// Exactly owned live leader: settle it through the
+				// existing termination owner before the enumeration.
 				if err := m.killOwnedResidueGroup(name, pid); err != nil {
 					return err
 				}
-			default:
-				// Live but unproven (foreign or reused pid): fail closed.
-				// No signal, no removal.
-				m.managerDiagf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, name)
-				return fmt.Errorf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, name)
+			case builderProcessDead:
+				// The leader is gone, but live owned group members may
+				// remain behind the op dir; the enumeration below
+				// decides.
 			}
+		}
+		// Enumerate live owned groups behind this op dir (the /proc
+		// fallback for absent/truncated pid files, the crash window, and
+		// dead leaders with surviving members). Incomplete enumeration
+		// does not prove absence.
+		pgids, ok := builderScanOwnedStateDirGroups(name, m.uid)
+		if !ok {
+			m.managerDiagf("startup purge: /proc enumeration failed for op %s; refusing startup", name)
+			return fmt.Errorf("startup purge: /proc enumeration failed for op %s; refusing startup", name)
+		}
+		switch len(pgids) {
+		case 0:
+			// No owned process remains: plain residue.
+		case 1:
+			// Positively identified by the exact per-op anchor and uid:
+			// settle through the existing bounded escalation owner.
+			if err := m.killOwnedResidueGroup(name, pgids[0]); err != nil {
+				return err
+			}
+		default:
+			// Ambiguous: more than one owned group behind one op dir.
+			m.managerDiagf("startup purge: %d owned groups behind op %s; refusing startup", len(pgids), name)
+			return fmt.Errorf("startup purge: %d owned groups behind op %s; refusing startup", len(pgids), name)
 		}
 		if err := os.RemoveAll(opDir); err != nil {
 			return fmt.Errorf("startup purge: cannot remove residue %s: %v", opDir, err)
@@ -1118,25 +1235,57 @@ func (m *builderManager) purgeDiskResidue(root string) error {
 	return nil
 }
 
-// readInstancePid reads and parses instance.pid (0 when absent/invalid).
+// readInstancePid reads and parses instance.pid. The manager always
+// writes the decimal pid followed by exactly one newline; a file without
+// the trailing newline is a crash-mid-write truncation and cannot become
+// a valid pid, because a decimal prefix may name a different live
+// process (F5). Returns 0 when absent, unreadable, truncated, or
+// invalid.
 func readInstancePid(opDir string) int {
 	raw, err := os.ReadFile(filepath.Join(opDir, "instance.pid"))
-	if err != nil {
+	if err != nil || len(raw) == 0 || raw[len(raw)-1] != '\n' {
 		return 0
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
+	pid, err := strconv.Atoi(strings.TrimRight(string(raw), "\n"))
+	if err != nil || pid <= 0 {
 		return 0
 	}
 	return pid
 }
 
-// processAlive reports whether pid names a live process.
-func processAlive(pid int) bool {
+// builderProcessLiveness is the kill(pid, 0) tri-state the startup purge
+// must distinguish (F5): ESRCH proves the process is gone; nil and EPERM
+// both mean a live process (EPERM merely denies the signal to a foreign
+// process); any other errno is undecidable and must fail closed rather
+// than be treated as death.
+type builderProcessLiveness int
+
+const (
+	builderProcessDead builderProcessLiveness = iota
+	builderProcessAlive
+	builderProcessUnknown
+)
+
+// builderLivenessOf classifies a pid without signaling it.
+func builderLivenessOf(pid int) builderProcessLiveness {
 	if pid <= 1 {
-		return false
+		return builderProcessDead
 	}
-	return syscall.Kill(pid, 0) == nil
+	err := syscall.Kill(pid, 0)
+	switch {
+	case err == nil || errors.Is(err, syscall.EPERM):
+		return builderProcessAlive
+	case errors.Is(err, syscall.ESRCH):
+		return builderProcessDead
+	default:
+		return builderProcessUnknown
+	}
+}
+
+// processAlive reports whether pid names a process that exists; an
+// undecidable liveness is never reported as death.
+func processAlive(pid int) bool {
+	return builderLivenessOf(pid) == builderProcessAlive
 }
 
 // removeStaleManagerSocket removes a stale manager socket ONLY after

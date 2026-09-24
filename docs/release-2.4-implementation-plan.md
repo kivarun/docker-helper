@@ -258,6 +258,22 @@ Mandatory ambiguity tests (`builder_manager_rpc_test.go`):
   retained entries). No adoption, no reconciliation, no persistent cache
   recovery.
 - Manager startup performs PURGE semantics before accepting requests.
+  Crash-safe recovery (F5) resolves residue without an authoritative
+  `instance.pid` through a `/proc` enumeration of live owned groups:
+  an exact per-op anchor argument (`--state-dir=.../rootlesskit-state`
+  or `--root=.../root`) plus the manager uid positively identifies a
+  group; zero identified groups means plain residue (removed, verified),
+  one group is settled through the same bounded escalation owner, and
+  ambiguity (more than one group) or an incomplete enumeration fails
+  closed with the directories retained and startup refused. Liveness is
+  a tri-state: ESRCH proves death; nil/EPERM mean alive; any other errno
+  is undecidable and fails closed. A pid file without its trailing
+  newline is a crash-mid-write truncation and never becomes a valid pid.
+  The identity model is best-effort cmdline evidence by design: the
+  authoritative ownership boundary (the unit cgroup containing exactly
+  the manager's instance processes) is a P4 dependency of the builder
+  service packaging; no parallel supervisor or reconciliation mechanism
+  is introduced.
 
 ### Backend launch mechanics (P2-refined)
 
