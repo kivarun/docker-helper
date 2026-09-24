@@ -264,7 +264,9 @@ systemctl start "$UNIT"
 systemctl is-active "$UNIT" >/dev/null || { systemctl status "$UNIT" --no-pager -l || true; fail "unit failed to start"; }
 
 MGR_PID="$(systemctl show -p MainPID --value "$UNIT")"
-[ -n "$MGR_PID" ] && [ "$MGR_PID" != "0" ] || fail "unit has no MainPID"
+if [ -z "$MGR_PID" ] || [ "$MGR_PID" = "0" ]; then
+  fail "unit has no MainPID"
+fi
 for _ in $(seq 1 40); do
   [ -S "$MGR_SOCK" ] && break
   sleep 0.5
@@ -433,8 +435,8 @@ say "real HTTPS build through the real manager under the unit: PASS"
 # SSL_CERT_FILE must resolve INSIDE the child's mount namespace (the
 # openSUSE symlink-under-copy-up case; see the CA section below)
 CA_TARGET_PROOF="$(readlink -f "$SSL_CERT_FILE_VAL" 2>/dev/null || echo "$SSL_CERT_FILE_VAL")"
-CA_CHILD_SHA="$(cat "/proc/$BK_PID/root$SSL_CERT_FILE_VAL" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
-CA_HOST_SHA="$(cat "$CA_TARGET_PROOF" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+CA_CHILD_SHA="$(sha256sum < "/proc/$BK_PID/root$SSL_CERT_FILE_VAL" 2>/dev/null | awk '{print $1}' || true)"
+CA_HOST_SHA="$(sha256sum < "$CA_TARGET_PROOF" 2>/dev/null | awk '{print $1}' || true)"
 evidence ca-check.txt "SSL_CERT_FILE (child env):   $SSL_CERT_FILE_VAL
 host realpath:              $CA_TARGET_PROOF
 sha256 through child ns:    $CA_CHILD_SHA
@@ -474,7 +476,9 @@ in-build uid_map line 1: $UID_MAP_IN_BUILD
 in-build host-side uid:  $BUILD_HOST_UID
 docker.sock visibility:  $SOCKS_OBS
 host-root marker probe:  $MARKER_OUT"
-  [ -n "$BUILD_HOST_UID" ] && [ "$BUILD_HOST_UID" != "0" ] || fail "in-build uid 0 maps to host uid 0"
+  if [ -z "$BUILD_HOST_UID" ] || [ "$BUILD_HOST_UID" = "0" ]; then
+    fail "in-build uid 0 maps to host uid 0"
+  fi
   if printf '%s\n' "$SOCKS_OBS" | grep -v "No such file" | grep -q "docker.sock"; then
     fail "build RUN saw a docker socket"
   fi
@@ -583,7 +587,9 @@ OLD_RK="$(pgrep -f "rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_KILL/rootlesskit
 OLD_BK="$(pgrep -f "buildkitd --rootless --root=$MGR_STATE/ops/$OP_KILL/root" | head -1 || true)"
 OLD_SL="$(pgrep -x slirp4netns | head -1 || true)"
 for pid in "$OLD_MGR" "$OLD_RK" "$OLD_BK" "$OLD_SL"; do
-  [ -n "$pid" ] && [ -d "/proc/$pid" ] || fail "kill-test pre-existence: process $pid missing"
+  if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
+    fail "kill-test pre-existence: process $pid missing"
+  fi
 done
 evidence kill-before.txt "manager=$OLD_MGR rootlesskit=$OLD_RK buildkitd=$OLD_BK slirp4netns=$OLD_SL
 buildctl=$BUILDCTL_PID (active build)
@@ -688,7 +694,9 @@ S_RK="$(pgrep -f "rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_STOPTEST/rootlessk
 S_BK="$(pgrep -f "buildkitd --rootless --root=$MGR_STATE/ops/$OP_STOPTEST/root" | head -1 || true)"
 S_SL="$(pgrep -x slirp4netns | head -1 || true)"
 for pid in "$S_MGR" "$S_RK" "$S_BK" "$S_SL"; do
-  [ -n "$pid" ] && [ -d "/proc/$pid" ] || fail "stop-test pre-existence: process $pid missing"
+  if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
+    fail "stop-test pre-existence: process $pid missing"
+  fi
 done
 
 STOP_T0="$(date +%s)"
