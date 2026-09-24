@@ -252,6 +252,11 @@ type builderManager struct {
 	ingress     builderIngress
 	uid, gid    int
 	diag        *boundedBuffer // manager-level operational diagnostics
+
+	// stderr mirrors the operational diagnostics to the service's
+	// journal (systemd StandardError=journal). nil in tests that build
+	// the manager directly; the buffer remains the programmatic owner.
+	stderr io.Writer
 }
 
 func newBuilderManager(uid, gid int) *builderManager {
@@ -587,7 +592,11 @@ func (m *builderManager) launchInstance(inst *builderInstance) bool {
 }
 
 func (m *builderManager) managerDiagf(format string, args ...any) {
-	m.diag.Write([]byte(fmt.Sprintf(format, args...) + "\n"))
+	line := fmt.Sprintf(format, args...) + "\n"
+	m.diag.Write([]byte(line))
+	if m.stderr != nil {
+		_, _ = m.stderr.Write([]byte(line))
+	}
 }
 
 // removeReservation removes the map reservation for a failed START that
@@ -1928,6 +1937,9 @@ func runBuilderServe(stdout, stderr io.Writer) error {
 	}
 
 	m := newBuilderManager(-1, -1)
+	// Mirror the operational diagnostics to the service stderr (the unit
+	// journal); the bounded buffer stays the programmatic owner.
+	m.stderr = stderr
 	// Resolve the concrete builder identity for ownership checks.
 	u, err := builderLookupUser(builderManagerBuilderUser)
 	if err != nil {
