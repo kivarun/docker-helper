@@ -7,7 +7,9 @@
 #   systemd unit docker-helper-builder.service
 #     (User/Group=docker-helper-builder, RuntimeDirectory/StateDirectory,
 #      deliberate NoNewPrivileges exception, CapabilityBoundingSet=
-#      CAP_SETUID CAP_SETGID, KillMode default = control-group)
+#      CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID (the DAC_OVERRIDE entry is
+#      the failed-proof widening for the setuid newuidmap uid_map open),
+#      KillMode default = control-group)
 #     ExecStart=/usr/bin/docker-helper builder serve   <- REAL manager role
 #       | narrow START/STOP/PURGE protocol over
 #       v /run/docker-helper-builder/manager.sock (0600 builder-owned)
@@ -26,7 +28,9 @@
 #      (dedicated identity + subuid/subgid, idempotent re-run no-op);
 #   2. the proposed unit installs and starts; the manager process shows the
 #      recorded NNP exception (NoNewPrivs: 0) and the minimal capability
-#      bounding set (CapBnd = CAP_SETUID|CAP_SETGID exactly);
+#      bounding set (CapBnd = CAP_DAC_OVERRIDE|CAP_SETGID|CAP_SETUID
+#      exactly — DAC_OVERRIDE is the failed-proof widening the setuid
+#      newuidmap open of the child's uid_map needs; CapEff 0);
 #   3. during a REAL build: manager, rootlesskit, buildkitd and the
 #      unanchored slirp4netns are ALL members of the unit cgroup
 #      (0::/system.slice/docker-helper-builder.service); uid_map shows the
@@ -297,10 +301,10 @@ stat -c '%U:%G %a %n' "$MGR_RUNTIME" "$MGR_STATE")"
 MGR_NNP="$(proc_field "$MGR_PID" NoNewPrivs)"
 [ "$MGR_NNP" = "0" ] || fail "manager NoNewPrivs=$MGR_NNP, want 0 (the recorded NNP exception)"
 MGR_CAPBND="$(proc_field "$MGR_PID" CapBnd)"
-[ "$MGR_CAPBND" = "00000000000000c0" ] || fail "manager CapBnd=$MGR_CAPBND, want 00000000000000c0 (CAP_SETUID|CAP_SETGID exactly)"
+[ "$MGR_CAPBND" = "00000000000000c2" ] || fail "manager CapBnd=$MGR_CAPBND, want 00000000000000c2 (CAP_DAC_OVERRIDE|CAP_SETGID|CAP_SETUID exactly; DAC_OVERRIDE is the failed-proof widening the setuid newuidmap open of the child's uid_map needs)"
 MGR_CAPEFF="$(proc_field "$MGR_PID" CapEff)"
-[ "$MGR_CAPEFF" = "0000000000000000" ] || fail "manager CapEff=$MGR_CAPEFF, want 0"
-say "manager NoNewPrivs=0 (recorded exception) and CapBnd=CAP_SETUID|CAP_SETGID exactly (PASS)"
+[ "$MGR_CAPEFF" = "0000000000000000" ] || fail "manager CapEff=$MGR_CAPEFF, want 0 (the bounding set caps the elevation, not the manager)"
+say "manager NoNewPrivs=0 (recorded exception), CapBnd=DAC_OVERRIDE|SETGID|SETUID exactly, CapEff=0 (PASS)"
 
 # The manager's own environment is systemd-provided (User= services get
 # HOME/USER/LOGNAME from the account); recorded against M0/M1, which ran

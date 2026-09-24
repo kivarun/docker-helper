@@ -880,8 +880,10 @@ func TestSystemdTimeoutStopSecContract(t *testing.T) {
 // service unit: the dedicated unprivileged builder identity, the
 // systemd-managed runtime/state roots with the planned 0750 modes, the
 // weak Before= coupling, the bounded restart behavior, the deliberate
-// NoNewPrivileges exception, the minimal capability floor (CAP_SETUID
-// CAP_SETGID, nothing more), the deliberately omitted namespace and
+// NoNewPrivileges exception, the minimal capability floor (CAP_DAC_OVERRIDE
+// CAP_SETGID CAP_SETUID — DAC_OVERRIDE is the failed-proof widening the
+// setuid-root newuidmap open of the child's uid_map needs; nothing more),
+// the deliberately omitted namespace and
 // SUID restrictions, the safe filesystem hardening, and the systemd
 // default control-group kill discipline (no KillMode directive may
 // narrow it).
@@ -924,7 +926,7 @@ func TestBuilderSystemUnitFile(t *testing.T) {
 		"Restart=on-failure",
 		"RestartSec=2s",
 		"Before=docker-helper.service",
-		"CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
+		"CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID",
 		"ProtectSystem=full",
 		"ReadWritePaths=/run/docker-helper-builder /var/lib/docker-helper-builder",
 		"ProtectHome=read-only",
@@ -952,9 +954,9 @@ func TestBuilderSystemUnitFile(t *testing.T) {
 			t.Errorf("builder unit must not set %s (rootlesskit/newuidmap mechanics), found %q", directive, got)
 		}
 	}
-	// No capability widening beyond the planned floor.
-	if got, ok := active("CapabilityBoundingSet="); ok && got != "CAP_SETUID CAP_SETGID" {
-		t.Errorf("CapabilityBoundingSet = %q, want exactly CAP_SETUID CAP_SETGID (no widening without a failed live proof and review)", got)
+	// No capability widening beyond the failed-proof floor.
+	if got, ok := active("CapabilityBoundingSet="); ok && got != "CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID" {
+		t.Errorf("CapabilityBoundingSet = %q, want exactly CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID (the setuid-root newuidmap open of the child's uid_map failed EACCES without DAC_OVERRIDE; no further widening without another failed live proof and review)", got)
 	}
 	if got, ok := active("AmbientCapabilities="); ok && got != "" {
 		t.Errorf("AmbientCapabilities must be unset, found %q", got)

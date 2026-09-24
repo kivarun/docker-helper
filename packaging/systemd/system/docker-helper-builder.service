@@ -36,10 +36,18 @@ TimeoutStopSec=30s
 # the per-op BuildKit lifecycle, and holds no credentials and no Docker
 # or docker.sock authority.
 
-# Capability floor: exactly the two capabilities the setuid-root
-# newuidmap/newgidmap transition needs for its own elevation; everything
-# else is bounded. Verified live by the P4-A1 unit proof before packaging.
-CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+# Capability floor: the two capabilities the setuid-root
+# newuidmap/newgidmap transition needs for its own elevation, plus
+# CAP_DAC_OVERRIDE, which the transition additionally needs to open the
+# child's /proc/<pid>/{uid,gid}_map for writing: the child is the builder
+# uid and owns its procfs entries, so the euid-0 opener is NOT the owner
+# and the write-open fails with EACCES without it (failed live proof:
+# "newuidmap ... open of uid_map failed: Permission denied" under the
+# CAP_SETUID CAP_SETGID-only floor, P4-A1 run 35981016063). The bounding
+# set limits what the elevation may use; the manager itself holds no
+# capabilities (CapEff 0, verified by the proof). Everything else is
+# bounded. Verified live by the P4-A1 unit proof before packaging.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID
 AmbientCapabilities=
 
 # RestrictNamespaces and RestrictSUIDSGID are deliberately omitted:
