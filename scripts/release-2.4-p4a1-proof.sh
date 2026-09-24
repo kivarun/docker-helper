@@ -356,10 +356,12 @@ SOCK_MODE="$(stat -c '%a' "$OP_SOCK")"
 [ "$SOCK_MODE" = "660" ] || fail "per-op socket mode $SOCK_MODE, want 660 (containerd sys.GetLocalListener chmod 0660; the M0-observed shape)"
 say "per-op socket present, builder-owned, private (PASS)"
 
-# locate the instance process tree by the op-scoped argv anchors
-RK_PID="$(pgrep -f "rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_MAIN/rootlesskit-state" | head -1 || true)"
+# locate the instance process tree by the op-scoped argv anchors; the
+# rootlesskit parent's cmdline embeds the buildkitd child argv, so every
+# pattern anchors on the argv head (the child is the exec'd buildkitd)
+RK_PID="$(pgrep -f "^/usr/bin/rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_MAIN/rootlesskit-state" | head -1 || true)"
 [ -n "$RK_PID" ] || fail "rootlesskit leader pid not found"
-BK_PID="$(pgrep -f "buildkitd --rootless --root=$MGR_STATE/ops/$OP_MAIN/root" | head -1 || true)"
+BK_PID="$(pgrep -f "^/usr/libexec/docker-helper/buildkit/buildkitd --rootless" | head -1 || true)"
 [ -n "$BK_PID" ] || fail "buildkitd pid not found"
 SL_PID="$(pgrep -x slirp4netns | head -1 || true)"
 [ -n "$SL_PID" ] || fail "slirp4netns pid not found (unanchored descendant)"
@@ -603,8 +605,8 @@ BUILDCTL_PID=$!
 
 # pre-existence of the full tree before the kill (negative self-tests)
 OLD_MGR="$MGR_PID"
-OLD_RK="$(pgrep -f "rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_KILL/rootlesskit-state" | head -1 || true)"
-OLD_BK="$(pgrep -f "buildkitd --rootless --root=$MGR_STATE/ops/$OP_KILL/root" | head -1 || true)"
+OLD_RK="$(pgrep -f "^/usr/bin/rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_KILL/rootlesskit-state" | head -1 || true)"
+OLD_BK="$(pgrep -f "^/usr/libexec/docker-helper/buildkit/buildkitd --rootless" | head -1 || true)"
 OLD_SL="$(pgrep -x slirp4netns | head -1 || true)"
 for pid in "$OLD_MGR" "$OLD_RK" "$OLD_BK" "$OLD_SL"; do
   if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
@@ -710,8 +712,8 @@ for _ in $(seq 1 20); do [ -S "$STOP_SOCK" ] && break; sleep 0.5; done
 STOPTCTL_PID=$!
 
 S_MGR="$(systemctl show -p MainPID --value "$UNIT")"
-S_RK="$(pgrep -f "rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_STOPTEST/rootlesskit-state" | head -1 || true)"
-S_BK="$(pgrep -f "buildkitd --rootless --root=$MGR_STATE/ops/$OP_STOPTEST/root" | head -1 || true)"
+S_RK="$(pgrep -f "^/usr/bin/rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_STOPTEST/rootlesskit-state" | head -1 || true)"
+S_BK="$(pgrep -f "^/usr/libexec/docker-helper/buildkit/buildkitd --rootless" | head -1 || true)"
 S_SL="$(pgrep -x slirp4netns | head -1 || true)"
 for pid in "$S_MGR" "$S_RK" "$S_BK" "$S_SL"; do
   if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
