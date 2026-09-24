@@ -681,8 +681,9 @@ EOF
     > "$P4A1_WORK/build-kill.log" 2>&1 ) &
 BUILDCTL_PID=$!
 
-# pre-existence of the full tree before the kill (negative self-tests)
-OLD_MGR="$MGR_PID"
+# pre-existence of the full tree before the kill (negative self-tests);
+# the manager pid is the CURRENT generation's (section 6 restarted it)
+OLD_MGR="$(systemctl show -p MainPID --value "$UNIT")"
 OLD_RK="$(pgrep -f "^/usr/bin/rootlesskit.*--state-dir=$MGR_STATE/ops/$OP_KILL/rootlesskit-state" | head -1 || true)"
 OLD_BK="$(pgrep -f "^/usr/libexec/docker-helper/buildkit/buildkitd --rootless" | head -1 || true)"
 OLD_SL="$(pgrep -x slirp4netns | head -1 || true)"
