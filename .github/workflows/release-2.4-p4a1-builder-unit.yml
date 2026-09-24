@@ -1,0 +1,147 @@
+name: Release 2.4 P4-A1 builder unit proof
+
+# P4-A1: the production builder systemd unit boundary, proven live before
+# full packaging:
+#   - Ubuntu 24.04 hosted runner: the real docker-helper builder serve under
+#     the real proposed unit (real rootlesskit, pinned BuildKit payload,
+#     real provision-builder.sh identity/subuids), with the cgroup,
+#     environment, uid_map, kill-restart, stop, and startup-invariant proofs;
+#   - openSUSE Tumbleweed: the same composition inside the official Cloud
+#     qcow2 through the canonical Tumbleweed VM harness.
+# Ubuntu 26.04 and the packaging lifecycle remain explicit P4 follow-ups
+# (documented in the implementation plan).
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p4a1-builder-unit.yml
+      - scripts/release-2.4-p4a1-*.sh
+      - packaging/systemd/system/docker-helper-builder.service
+      - packaging/scripts/lib/provision-builder.sh
+      - builder_manager.go
+
+permissions:
+  contents: read
+
+jobs:
+  probe-static-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate probe scripts
+        run: |
+          bash -n scripts/release-2.4-p4a1-proof.sh
+          bash -n scripts/release-2.4-p4a1-tw.sh
+          bash -n scripts/release-2.4-p4a1-tw-vm.sh
+          shellcheck scripts/release-2.4-p4a1-proof.sh
+          shellcheck scripts/release-2.4-p4a1-tw.sh
+          shellcheck -x scripts/release-2.4-p4a1-tw-vm.sh
+          sh -n packaging/scripts/lib/provision-builder.sh
+          shellcheck packaging/scripts/lib/provision-builder.sh
+
+  builder-unit-proof-2404:
+    # The production composition on the Ubuntu 24.04 hosted runner
+    # (systemd, AppArmor userns restriction default-on, distro
+    # rootlesskit profile).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install probe dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y uidmap slirp4netns rootlesskit curl shellcheck
+          sudo systemctl unmask --now docker.service docker.socket || true
+          sudo systemctl start docker || true
+          sudo docker version || true
+
+      - name: Build docker-helper from the proof commit
+        run: |
+          go build -o docker-helper .
+          sudo install -m 0755 docker-helper /usr/bin/docker-helper
+          /usr/bin/docker-helper builder serve --help | head -2
+
+      - name: Install the pinned BuildKit payload at the product paths
+        run: |
+          BUILDKIT_VERSION=v0.33.0
+          # Pinned digest: verified against the official release SBOM subject
+          # (buildkit-v0.33.0.linux-amd64.sbom.json -> digest.sha256) and by an
+          # independent download comparison. No plain .sha256 sidecar exists.
+          BUILDKIT_SHA256=b6242896d343100808dcbe37565caf381e0a444a6a83d7255926bb1519248ead
+          curl -fsSL -o /tmp/buildkit.tgz \
+            "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz"
+          ACTUAL_SHA256="$(sha256sum /tmp/buildkit.tgz | awk '{print $1}')"
+          if [ "$ACTUAL_SHA256" != "$BUILDKIT_SHA256" ]; then
+            echo "BuildKit tarball SHA256 mismatch: expected $BUILDKIT_SHA256, got $ACTUAL_SHA256" >&2
+            exit 1
+          fi
+          echo "BuildKit tarball SHA256 verified: $ACTUAL_SHA256"
+          sudo tar -xzf /tmp/buildkit.tgz -C /tmp/buildkit-extract
+          sudo install -d -m 0755 /usr/libexec/docker-helper/buildkit
+          sudo install -m 0755 /tmp/buildkit-extract/bin/buildkitd /usr/libexec/docker-helper/buildkit/buildkitd
+          sudo install -m 0755 /tmp/buildkit-extract/bin/buildctl /usr/libexec/docker-helper/buildkit/buildctl
+          sudo install -m 0755 /tmp/buildkit-extract/bin/buildkit-runc /usr/libexec/docker-helper/buildkit/buildkit-runc
+
+      - name: Run P4-A1 production unit-boundary proof
+        run: |
+          sudo -E env "PATH=$PATH" \
+            P4A1_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p4a1-evidence" \
+            scripts/release-2.4-p4a1-proof.sh
+
+      - name: Upload P4-A1 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p4a1-2404-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p4a1-evidence
+          if-no-files-found: error
+
+  builder-unit-proof-tumbleweed:
+    # The same production composition inside the official openSUSE
+    # Tumbleweed Cloud qcow2 (QEMU/KVM), with the in-guest pinned BuildKit
+    # payload installation and the /etc CA symlink check.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build docker-helper from the proof commit
+        run: go build -o docker-helper .
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed P4-A1 proof
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          P4A1_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p4a1-tw-evidence" \
+            scripts/release-2.4-p4a1-tw-vm.sh
+
+      - name: Upload Tumbleweed P4-A1 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p4a1-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p4a1-tw-evidence
+          if-no-files-found: warn

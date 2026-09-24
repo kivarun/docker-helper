@@ -41,8 +41,13 @@ const (
 	builderManagerBuilderGroup = "docker-helper-builder"
 
 	// RootlessKit may find its distro helpers (newuidmap, newgidmap,
-	// slirp4netns) through exactly this manager-owned PATH.
-	builderManagerChildPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+	// slirp4netns) through exactly this manager-owned PATH, and the
+	// bundled buildkitd resolves its OCI worker helper buildkit-runc
+	// through the same child PATH (upstream exec.LookPath over
+	// defaultCommandCandidates ["buildkit-runc", "runc"]); the product
+	// payload directory is therefore part of the fixed child PATH.
+	builderManagerChildPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:" +
+		"/usr/libexec/docker-helper/buildkit"
 
 	// builderInstanceDiagMaxBytes is the fixed internal diagnostic ceiling
 	// for one instance's RootlessKit/buildkitd combined stdout/stderr
@@ -1013,6 +1018,139 @@ func builderStalePidIdentity(pid int, opID string, uid int) bool {
 	return false
 }
 
+// builderManagerUnitCgroupName is the canonical systemd unit cgroup name of
+// the builder service: the P4 identity-boundary token. The manager
+// recognizes the boundary by its own unified (cgroup v2) cgroup path ending
+// in exactly this name; the unit's control-group kill discipline (systemd
+// default) is the outer safety net that settles every builder-owned process
+// — anchored or not — when a prior service generation stops.
+const builderManagerUnitCgroupName = "docker-helper-builder.service"
+
+// builderProcCgroupPathFunc is the per-process unified-cgroup-path reader
+// seam (production: builderProcCgroupPath). Injectable for tests.
+var builderProcCgroupPathFunc = builderProcCgroupPath
+
+// builderUnitCgroupPathFunc is the unit-cgroup boundary seam (production:
+// builderReadUnitCgroupPath). Injectable for tests.
+var builderUnitCgroupPathFunc = builderReadUnitCgroupPath
+
+// builderReadUnitCgroupPath returns the manager's own unified cgroup path
+// when the running process provably sits inside the docker-helper-builder
+// service cgroup (cgroup v2), and false otherwise — manual runs, cgroup v1,
+// or any other unit name keep the boundary-independent fail-closed purge
+// semantics. The cgroup path is kernel-owned truth for a live process: the
+// unprivileged manager cannot shape it, and a unit name only appears here
+// when systemd placed the process there.
+func builderReadUnitCgroupPath() (string, bool) {
+	path, err := builderProcCgroupPathFunc(os.Getpid())
+	if err != nil {
+		return "", false
+	}
+	if filepath.Base(path) != builderManagerUnitCgroupName {
+		return "", false
+	}
+	return path, true
+}
+
+// builderProcCgroupPath reads the unified (cgroup v2) cgroup path of one
+// process from /proc/<pid>/cgroup (the single "0::<path>" line). A missing
+// entry (os.ErrNotExist) means the process died between the /proc listing
+// and this read — a verified disappearance (F5.1). Any other error,
+// including the absence of a v2 line, is an inconclusive inspection and
+// taints the calling enumeration.
+func builderProcCgroupPath(pid int) (string, error) {
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		// Unified line grammar: "<0>:<no controllers>:<path>".
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 || parts[0] != "0" || parts[1] != "" {
+			continue
+		}
+		if parts[2] == "" {
+			return "", errors.New("empty unified cgroup path")
+		}
+		return parts[2], nil
+	}
+	return "", errors.New("no unified cgroup v2 entry")
+}
+
+// procCgroupWithin reports whether a unified cgroup path is the unit cgroup
+// itself or lies inside its subtree: systemd's control-group kill
+// discipline covers the whole subtree.
+func procCgroupWithin(path, unitCgroup string) bool {
+	return path == unitCgroup || strings.HasPrefix(path, unitCgroup+"/")
+}
+
+// builderScanUnitOwnedGroups enumerates the live processes of the builder
+// uid inside the manager's unit cgroup subtree, excluding the manager
+// process itself. Under the P4 service-unit boundary, membership inside
+// this cgroup IS the ownership proof for builder-owned residue: systemd is
+// the only boundary that can place builder-uid processes there, and it
+// fully stopped the prior service generation (control-group kill) before
+// this manager generation started. The command line is NOT consulted — an
+// unanchored member (slirp4netns) is as owned as an anchored leader, which
+// is exactly what the cmdline-anchor enumeration cannot see.
+//
+// ok=false is an inconclusive enumeration and the caller must fail closed
+// (F5.1 rules: a verified disappearance never taints; a non-ENOENT read
+// error does).
+func builderScanUnitOwnedGroups(unitCgroup string, uid int) ([]int, bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, false
+	}
+	pgids := make(map[int]bool)
+	self := os.Getpid()
+	for _, entry := range entries {
+		name := entry.Name()
+		pid, err := strconv.Atoi(name)
+		if err != nil || pid <= 1 {
+			continue
+		}
+		procDir := filepath.Join("/proc", name)
+		stat, err := os.Stat(procDir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // died mid-scan: verified disappearance
+			}
+			return nil, false // inconclusive inspection
+		}
+		if uint32(stat.Sys().(*syscall.Stat_t).Uid) != uint32(uid) {
+			continue // different owner: provably not ours
+		}
+		if pid == self {
+			continue // the manager itself
+		}
+		path, err := builderProcCgroupPathFunc(pid)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // died mid-scan: verified disappearance
+			}
+			return nil, false // inconclusive inspection
+		}
+		if !procCgroupWithin(path, unitCgroup) {
+			continue // outside the unit boundary: not owned by this unit
+		}
+		pgid, err := syscall.Getpgid(pid)
+		if err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				continue // died between the classification and now
+			}
+			return nil, false // inconclusive inspection
+		}
+		pgids[pgid] = true
+	}
+	out := make([]int, 0, len(pgids))
+	for pgid := range pgids {
+		out = append(out, pgid)
+	}
+	sort.Ints(out)
+	return out, true
+}
+
 // startupPurge performs startup PURGE semantics: terminate every
 // manager-owned op process group found live in the instance map, remove
 // op-private runtime/state, and scan crash residue left on disk. No
@@ -1021,7 +1159,25 @@ func builderStalePidIdentity(pid int, opID string, uid int) bool {
 // persisted process identity before signaling, remove dead/verified-owned
 // residue, and FAIL CLOSED rather than kill a process whose identity
 // cannot be proven.
+//
+// The P4 systemd unit boundary changes the residue model when the manager
+// provably runs inside the docker-helper-builder service cgroup: cgroup
+// membership (plus the builder uid) is then the ownership proof for
+// builder-owned residue — stronger than and independent of the per-op
+// cmdline anchors — and the boundary guarantees the prior service
+// generation was fully stopped (its whole cgroup settled) before this
+// generation started. The purge first settles every live builder-owned
+// process group found inside the unit cgroup subtree (including unanchored
+// members the anchor scan cannot see); the absence of a live owned process
+// afterwards is PROVEN, not inferred, and resolves the previously
+// fail-closed ambiguous states below (F5.1): pid-file-less residue,
+// unreadable same-uid identities outside the boundary, and reused pids.
 func (m *builderManager) startupPurge() error {
+	unitCgroup, inUnit := builderUnitCgroupPathFunc()
+	if inUnit {
+		m.managerDiagf("startup purge: P4 unit cgroup boundary active (%s)", unitCgroup)
+	}
+
 	// Live instances (should be none at startup, but converge if so) —
 	// synchronously through the single stop owner: claiming the stop
 	// right and THEN handing the attempt to a fresh stopInstance would
@@ -1036,6 +1192,26 @@ func (m *builderManager) startupPurge() error {
 	for _, inst := range snapshot {
 		if err := m.stopInstance(inst); err != nil {
 			return err
+		}
+	}
+
+	// The unit boundary: settle every live builder-owned process group
+	// inside the unit cgroup subtree. These can only be residue of an
+	// already-stopped prior service generation (systemd starts a new
+	// generation only into an empty control group); the settlement is
+	// justified by cgroup membership, without any cmdline attribution,
+	// and is what later authorizes the pid-file-less residue removal
+	// below.
+	if inUnit {
+		pgids, ok := builderScanUnitOwnedGroups(unitCgroup, m.uid)
+		if !ok {
+			m.managerDiagf("startup purge: unit-cgroup enumeration failed; refusing startup")
+			return fmt.Errorf("startup purge: unit-cgroup enumeration failed; refusing startup")
+		}
+		for _, pgid := range pgids {
+			if err := m.killOwnedResidueGroup("unit residue group", pgid); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1061,7 +1237,7 @@ func (m *builderManager) startupPurge() error {
 	}
 	sort.Strings(opIDs)
 	for _, opID := range opIDs {
-		if err := m.purgeOpResidue(opID); err != nil {
+		if err := m.purgeOpResidue(opID, unitCgroup); err != nil {
 			return err
 		}
 	}
@@ -1098,18 +1274,32 @@ func (m *builderManager) canonicalOpsEntries(root string) ([]string, error) {
 // classified through the liveness tri-state: undecidable liveness fails
 // closed; a live pid that cannot be proven owned as the exact rootlesskit
 // leader (unknown, mismatched, reused) fails closed WITHOUT any signal or
-// removal; a positively identified live leader is settled through the
-// existing bounded escalation owner before the enumeration. The /proc
-// anchor enumeration then positively identifies remaining anchored owned
-// groups: one group is settled through the same termination owner and its
-// verified group death is the removal proof; ambiguity (more than one
+// removal — except under the P4 unit boundary, where a live recorded pid
+// inside the unit cgroup subtree is owned residue by membership (settled
+// through the existing bounded escalation owner) and a live recorded pid
+// outside the boundary is a reused pid whose recorded instance is provably
+// gone (no signal; the directories are removable residue); a positively
+// identified live leader is settled through the existing bounded escalation
+// owner before the enumeration. The /proc enumeration then positively
+// identifies remaining owned groups behind this op — anchored groups
+// always, and under the unit boundary additionally in-unit groups by
+// membership — one group is settled through the same termination owner and
+// its verified group death is the removal proof; ambiguity (more than one
 // group) fails closed. After the anchored convergence, a recorded pid's
 // group must be verifiably gone (kill(-pid,0) == ESRCH): live unproven
 // members (e.g. an unanchored descendant of a dead recorded leader) fail
-// closed with the directories retained. With NO authoritative pid file,
-// zero anchored matches do not prove an unknown group gone and fail
-// closed. Incomplete enumeration and removal failures fail closed.
-func (m *builderManager) purgeOpResidue(opID string) error {
+// closed with the directories retained — except under the unit boundary,
+// where such members were already settled by the boundary scan above and a
+// still-live recorded group can only hold foreign members (reused pid), so
+// the recorded instance is provably gone and the directories are removed
+// without any signal. With NO authoritative pid file, zero anchored matches
+// do not prove an unknown group gone and fail closed in the legacy mode;
+// under the unit boundary the boundary scan proved the absence of every
+// live owned process, so the directories are residue of a prior, fully
+// settled service generation (the pre-pid-write crash window or the
+// systemd-wiped runtime tree) and are removed. Incomplete enumeration and
+// removal failures fail closed.
+func (m *builderManager) purgeOpResidue(opID string, unitCgroup string) error {
 	rtDir := opRuntimeDir(opID)
 	pid := readInstancePid(rtDir)
 	if pid > 0 {
@@ -1120,14 +1310,32 @@ func (m *builderManager) purgeOpResidue(opID string) error {
 			return fmt.Errorf("startup purge: liveness of persisted pid %d for op %s is undecidable; refusing startup", pid, opID)
 		case builderProcessAlive:
 			if !builderStalePidIdentity(pid, opID, m.uid) {
-				// Live but unproven (foreign or reused pid): fail
-				// closed. No signal, no removal.
-				m.managerDiagf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, opID)
-				return fmt.Errorf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, opID)
+				if unitCgroup == "" {
+					// Live but unproven (foreign or reused pid): fail
+					// closed. No signal, no removal.
+					m.managerDiagf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, opID)
+					return fmt.Errorf("startup purge: live process %d for op %s could not be proven owned; refusing startup", pid, opID)
+				}
+				// P4 unit boundary: classify the live recorded pid by
+				// cgroup membership. Inside the unit subtree it is owned
+				// residue by membership (the cgroup is the ownership
+				// proof, stronger than the cmdline identity): settle it
+				// through the same bounded escalation owner. Outside the
+				// boundary it is a reused pid: the recorded instance is
+				// provably gone and the recorded group holds no owned
+				// members (the boundary scan settled those); no signal.
+				if path, err := builderProcCgroupPathFunc(pid); err == nil && procCgroupWithin(path, unitCgroup) {
+					if err := m.killOwnedResidueGroup("op "+opID+" (unit-owned)", pid); err != nil {
+						return err
+					}
+					break
+				}
+				m.managerDiagf("startup purge: persisted pid %d for op %s was reused by a process outside the unit boundary; recorded instance is gone", pid, opID)
+				break
 			}
 			// Exactly owned live leader: settle it through the existing
 			// termination owner before the enumeration.
-			if err := m.killOwnedResidueGroup(opID, pid); err != nil {
+			if err := m.killOwnedResidueGroup("op "+opID, pid); err != nil {
 				return err
 			}
 		case builderProcessDead:
@@ -1135,11 +1343,11 @@ func (m *builderManager) purgeOpResidue(opID string) error {
 			// remain behind the op; the enumeration below decides.
 		}
 	}
-	// Enumerate live anchored owned groups behind this op (the /proc
+	// Enumerate live owned groups behind this op (the /proc
 	// fallback for absent/truncated pid files, the crash window, and
 	// dead leaders with surviving members). Incomplete enumeration does
 	// not prove absence (F5.1).
-	pgids, ok := builderScanOwnedStateDirGroups(opID, m.uid)
+	pgids, ok := builderScanOwnedStateDirGroups(opID, m.uid, unitCgroup)
 	if !ok {
 		m.managerDiagf("startup purge: /proc enumeration failed for op %s; refusing startup", opID)
 		return fmt.Errorf("startup purge: /proc enumeration failed for op %s; refusing startup", opID)
@@ -1147,21 +1355,29 @@ func (m *builderManager) purgeOpResidue(opID string) error {
 	switch len(pgids) {
 	case 0:
 		if pid == 0 {
-			// No authoritative pid file and no anchored live process
-			// (F5.1): zero matches do not prove an unknown group gone —
-			// an unanchored member of an unrecorded group is
-			// undetectable here. Retain the directories and fail closed;
-			// the P4 cgroup boundary resolves this state.
-			m.managerDiagf("startup purge: no pid file and no anchored process behind op %s; zero matches do not prove an unknown group gone; refusing startup", opID)
-			return fmt.Errorf("startup purge: no pid file and no anchored process behind op %s; refusing startup", opID)
+			if unitCgroup == "" {
+				// No authoritative pid file and no anchored live process
+				// (F5.1): zero matches do not prove an unknown group gone —
+				// an unanchored member of an unrecorded group is
+				// undetectable here. Retain the directories and fail closed.
+				m.managerDiagf("startup purge: no pid file and no anchored process behind op %s; zero matches do not prove an unknown group gone; refusing startup", opID)
+				return fmt.Errorf("startup purge: no pid file and no anchored process behind op %s; refusing startup", opID)
+			}
+			// P4 unit boundary: the boundary scan above proved that no
+			// live builder-owned process exists at all (inside the
+			// boundary nothing can be owned, and outside it only exact
+			// per-op anchors are owned). The directories are residue of a
+			// prior, fully settled service generation and are removable.
+			m.managerDiagf("startup purge: no pid file behind op %s; the unit boundary proves the prior service generation settled; removing residue", opID)
 		}
 		// pid > 0: the recorded group's own liveness check below decides.
 	case 1:
-		// Positively identified by the exact per-op anchor and uid:
+		// Positively identified by the exact per-op anchor and uid (or,
+		// under the unit boundary, additionally by in-unit membership):
 		// settle through the existing bounded escalation owner; the
 		// verified group death (which takes unanchored members of the
 		// same group with it) is the removal proof.
-		if err := m.killOwnedResidueGroup(opID, pgids[0]); err != nil {
+		if err := m.killOwnedResidueGroup("op "+opID, pgids[0]); err != nil {
 			return err
 		}
 	default:
@@ -1170,12 +1386,20 @@ func (m *builderManager) purgeOpResidue(opID string) error {
 		return fmt.Errorf("startup purge: %d owned groups behind op %s; refusing startup", len(pgids), opID)
 	}
 	if pid > 0 && !processGroupGone(pid) {
-		// The recorded group still has live members that the anchor
-		// enumeration could not prove owned (e.g. an unanchored
-		// descendant of the dead recorded leader): no speculative
-		// signal, no removal (F5.1).
-		m.managerDiagf("startup purge: recorded group %d for op %s still has live unproven members; refusing startup", pid, opID)
-		return fmt.Errorf("startup purge: recorded group %d for op %s still has live unproven members; refusing startup", pid, opID)
+		if unitCgroup == "" {
+			// The recorded group still has live members that the anchor
+			// enumeration could not prove owned (e.g. an unanchored
+			// descendant of the dead recorded leader): no speculative
+			// signal, no removal (F5.1).
+			m.managerDiagf("startup purge: recorded group %d for op %s still has live unproven members; refusing startup", pid, opID)
+			return fmt.Errorf("startup purge: recorded group %d for op %s still has live unproven members; refusing startup", pid, opID)
+		}
+		// P4 unit boundary: any owned member of the recorded group was
+		// inside the unit cgroup subtree and was already settled by the
+		// boundary scan; a still-live group can only hold foreign members
+		// (reused pid outside the boundary). The recorded instance is
+		// provably gone: no signal, the directories are removable.
+		m.managerDiagf("startup purge: recorded group %d for op %s holds no owned members under the unit boundary; removing residue", pid, opID)
 	}
 	for _, dir := range []string{rtDir, opStateDir(opID)} {
 		if err := os.RemoveAll(dir); err != nil {
@@ -1191,11 +1415,11 @@ func (m *builderManager) purgeOpResidue(opID string) error {
 // killOwnedResidueGroup terminates a verified-owned live residue group
 // through the shared bounded escalation (SIGTERM -> SIGKILL, verified
 // group death). The exact ownership was proven BEFORE any signal: either
-// the full builderStalePidIdentity leader proof (pid file path) or the
-// builderScanOwnedStateDirGroups anchor enumeration (crash-window path,
-// where the pgid identifies the group). Fail closed when the group
-// survives.
-func (m *builderManager) killOwnedResidueGroup(opID string, pid int) error {
+// the full builderStalePidIdentity leader proof (pid file path), the
+// builderScanOwnedStateDirGroups anchor enumeration (crash-window path),
+// or the P4 unit-cgroup membership proof. label names the residue in
+// diagnostics. Fail closed when the group survives.
+func (m *builderManager) killOwnedResidueGroup(label string, pid int) error {
 	signal := func(sig syscall.Signal) bool {
 		if err := syscall.Kill(-pid, sig); err != nil && err != syscall.ESRCH {
 			return false
@@ -1204,7 +1428,7 @@ func (m *builderManager) killOwnedResidueGroup(opID string, pid int) error {
 	}
 	if err := terminateGroupBounded(pid, signal); err != nil {
 		m.managerDiagf("startup purge: %v; refusing startup", err)
-		return fmt.Errorf("startup purge: owned group %d for op %s did not die", pid, opID)
+		return fmt.Errorf("startup purge: owned group %d (%s) did not die", pid, label)
 	}
 	return nil
 }
@@ -1216,23 +1440,32 @@ func (m *builderManager) killOwnedResidueGroup(opID string, pid int) error {
 // <stDir>/root for the buildkitd child. It returns the distinct process
 // group ids behind those processes.
 //
+// With a non-empty unitCgroup (the P4 systemd unit boundary), the
+// classification extends: a same-uid process inside the unit cgroup
+// subtree is owned by cgroup MEMBERSHIP regardless of its command line
+// (the boundary scan settles it before the per-op decisions; its
+// cmdline is not consulted), while a same-uid process outside the
+// boundary is foreign by membership and never taints the enumeration —
+// the per-op anchor proof still applies to it best-effort, with an
+// unreadable or empty (zombie) cmdline skipped instead of tainted: a
+// process outside the unit boundary cannot be owned residue of this
+// service generation.
+//
 // Error classification (F5.1): a verified disappearance never taints the
 // enumeration — an entry that vanished between listing and inspection
-// (ENOENT on stat/cmdline, ESRCH on Getpgid) is a process that died
+// (ENOENT on stat/cmdline/cgroup, ESRCH on Getpgid) is a process that died
 // mid-scan and cannot be a live owned group member. An INCONCLUSIVE
 // inspection does taint it: a failed /proc ReadDir, a non-ENOENT stat or
 // cmdline read error, or a same-uid entry whose cmdline read succeeds
 // but is empty (the identity itself is unreadable, e.g. a zombie) yield
-// ok=false and the caller must fail closed. Silent skips must never
-// become proof of absence.
+// ok=false and the caller must fail closed — with the unit-cgroup
+// exception above. Silent skips never become proof of absence.
 //
 // Unanchored group members (processes without a per-op anchor argument)
-// are NOT enumerable here; a group whose members are all unanchored is
-// undetectable by this scan, which is exactly why a zero-match result
-// must not by itself authorize residue removal. The authoritative
-// membership boundary is a P4 dependency (builder service cgroup), not a
-// parallel supervisor here.
-func builderScanOwnedStateDirGroups(opID string, uid int) ([]int, bool) {
+// are NOT enumerable by the anchor scan; under the unit boundary the
+// builderScanUnitOwnedGroups membership scan is the authoritative
+// enumeration for them. No parallel supervisor exists here.
+func builderScanOwnedStateDirGroups(opID string, uid int, unitCgroup string) ([]int, bool) {
 	stDir := opStateDir(opID)
 	anchors := map[string]bool{
 		"--state-dir=" + filepath.Join(stDir, "rootlesskit-state"): true,
@@ -1260,16 +1493,50 @@ func builderScanOwnedStateDirGroups(opID string, uid int) ([]int, bool) {
 		if uint32(stat.Sys().(*syscall.Stat_t).Uid) != uint32(uid) {
 			continue // different owner: provably not ours
 		}
+		if unitCgroup != "" {
+			path, err := builderProcCgroupPathFunc(pid)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue // died mid-scan: verified disappearance
+				}
+				return nil, false // inconclusive inspection
+			}
+			if procCgroupWithin(path, unitCgroup) {
+				// Inside the unit boundary: owned by membership. The
+				// cmdline is not consulted (an unreadable identity here
+				// is still owned residue; the settle's verified group
+				// death is the proof).
+				pgid, err := syscall.Getpgid(pid)
+				if err != nil {
+					if errors.Is(err, syscall.ESRCH) {
+						continue // died between the classification and now
+					}
+					return nil, false // inconclusive inspection
+				}
+				pgids[pgid] = true
+				continue
+			}
+		}
 		raw, err := os.ReadFile(filepath.Join(procDir, "cmdline"))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue // died mid-scan: verified disappearance
 			}
+			if unitCgroup != "" {
+				// Outside the unit boundary: foreign by membership; the
+				// anchor proof is best-effort and a non-ENOENT read
+				// error does not taint this classification.
+				continue
+			}
 			return nil, false // inconclusive inspection (unreadable identity)
 		}
 		if len(raw) == 0 {
 			// Same-uid entry with an unreadable identity (empty cmdline,
-			// e.g. a zombie): inconclusive, not absence.
+			// e.g. a zombie): inconclusive, not absence — outside the
+			// unit boundary it is foreign by membership and skipped.
+			if unitCgroup != "" {
+				continue
+			}
 			return nil, false
 		}
 		matched := false

@@ -1,0 +1,78 @@
+[Unit]
+Description=Docker Helper builder backend (sandboxed BuildKit instances)
+Documentation=man:docker-helper(1)
+# Weak ordering only (no Requires=): builder unavailability fails BUILD
+# requests closed while run/pull/registry-login stay available, and the
+# daemon recovers dynamically when the manager returns.
+Before=docker-helper.service
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/docker-helper builder serve
+User=docker-helper-builder
+Group=docker-helper-builder
+RuntimeDirectory=docker-helper-builder
+RuntimeDirectoryMode=0750
+StateDirectory=docker-helper-builder
+StateDirectoryMode=0750
+UMask=0077
+# Same canonical PATH contract as the manager's per-instance child PATH
+# (builderManagerChildPath in builder_manager.go): the bundled BuildKit
+# payload directory is the tail entry, so rootlesskit's distro helpers and
+# buildkitd's buildkit-runc OCI helper resolve through one fixed list.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/usr/libexec/docker-helper/buildkit
+
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+
+# NoNewPrivileges is deliberately ABSENT for this unit only (the recorded
+# Release-2.4 exception): RootlessKit's builder-side mechanics need the
+# setuid-root newuidmap/newgidmap elevation, which NoNewPrivileges=true
+# disables. The main docker-helper.service keeps NoNewPrivileges=true.
+# This unit runs as the dedicated unprivileged builder identity, owns only
+# the per-op BuildKit lifecycle, and holds no credentials and no Docker
+# or docker.sock authority.
+
+# Capability floor: exactly the two capabilities the setuid-root
+# newuidmap/newgidmap transition needs for its own elevation; everything
+# else is bounded. Verified live by the P4-A1 unit proof before packaging.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+
+# RestrictNamespaces and RestrictSUIDSGID are deliberately omitted:
+# rootlesskit requires user/network/mount namespaces for the builder user,
+# and the seccomp filters would break the setuid newuidmap/newgidmap
+# elevation the NNP exception above deliberately permits.
+
+# Filesystem-namespace hardening. This unit never creates Docker mount
+# pins (only the root daemon does), so a mount namespace here is safe.
+ProtectSystem=full
+ReadWritePaths=/run/docker-helper-builder /var/lib/docker-helper-builder
+ProtectHome=read-only
+PrivateTmp=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# Same address-family set as the main unit; rootlesskit/slirp4netns need
+# AF_INET/AF_INET6/AF_UNIX/AF_NETLINK (verified by the P4-A1 unit proof).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=docker-helper-builder
+
+# KillMode is deliberately left at the systemd default (control-group):
+# on service stop/restart, ALL processes in the unit cgroup — the manager,
+# every RootlessKit leader, buildkitd, and unanchored descendants such as
+# slirp4netns — are settled. That whole-cgroup guarantee is the outer
+# process-tree safety net and the startup-purge boundary proof; per-op
+# ownership remains the manager's START/STOP/PURGE contract.
+
+[Install]
+WantedBy=multi-user.target
