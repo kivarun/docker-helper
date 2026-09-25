@@ -279,7 +279,10 @@ say "P2 asserts OK"
 # --- P2b: failed SELinux module load must not touch the running daemon --------
 
 log "P2b: semodule failure cannot trigger daemon start/restart (negative proof)"
-/usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config for the negative-proof phase"
+mkdir -p "$ALLOWED_ROOT" || fail "cannot create the allowed root $ALLOWED_ROOT"
+/usr/bin/docker-helper init --allowed-root "$ALLOWED_ROOT" \
+  >"$EVIDENCE_DIR/init-negative-phase.log" 2>&1 \
+  || { tail -20 "$EVIDENCE_DIR/init-negative-phase.log"; fail "cannot init the docker-helper config for the negative-proof phase (the real init error is above)"; }
 systemctl start "$MAIN_UNIT" || fail "cannot start the main daemon for the negative-proof phase"
 [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] || fail "main daemon not active after start"
 OLD_PID="$(systemctl show "$MAIN_UNIT" -p MainPID --value)"
