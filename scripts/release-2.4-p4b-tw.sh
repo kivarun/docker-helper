@@ -278,6 +278,17 @@ say "P2 asserts OK"
 
 # --- P2b: failed SELinux module load must not touch the running daemon --------
 
+# The enforcing-SELinux `docker-helper init` relabels the exact docker CLI
+# executable the daemon will exec (applyDeploymentSELinuxRelabel), so the
+# docker CLI must be present before init — the same prerequisite a real
+# operator satisfies (install-system.sh requires docker too). The engine
+# itself is asserted reachable in the P4 tarball phase.
+log "installing docker via zypper (docker CLI required by init's SELinux relabel; engine needed by the tarball phase)"
+if ! command -v docker >/dev/null 2>&1; then
+  zypper --non-interactive install -y docker >"$EVIDENCE_DIR/zypper-install-docker.log" 2>&1 \
+    || { tail -20 "$EVIDENCE_DIR/zypper-install-docker.log"; fail "cannot install docker in the guest"; }
+fi
+
 log "P2b: semodule failure cannot trigger daemon start/restart (negative proof)"
 mkdir -p "$ALLOWED_ROOT" || fail "cannot create the allowed root $ALLOWED_ROOT"
 /usr/bin/docker-helper init --allowed-root "$ALLOWED_ROOT" \
@@ -359,11 +370,6 @@ tar xzf "$TARBALL" -C "$WORK_TAR"
 BUNDLE="$WORK_TAR/docker-helper-${VERSION}-linux-amd64"
 [ -x "$BUNDLE/install-system.sh" ] || fail "bundle missing install-system.sh"
 
-if ! command -v docker >/dev/null 2>&1; then
-  log "docker missing in the guest; installing via zypper"
-  zypper --non-interactive install -y docker >"$EVIDENCE_DIR/zypper-install-docker.log" 2>&1 \
-    || { tail -20 "$EVIDENCE_DIR/zypper-install-docker.log"; fail "cannot install docker in the guest"; }
-fi
 systemctl start docker >/dev/null 2>&1 || true
 docker info >/dev/null 2>&1 || fail "docker engine not reachable in the guest (required by install-system.sh)"
 
