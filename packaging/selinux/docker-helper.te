@@ -646,6 +646,14 @@ allow init_t docker_helper_builder_runtime_t:sock_file { unlink };
 allow init_t docker_helper_builder_state_t:file { unlink };
 allow init_t docker_helper_builder_state_t:lnk_file { unlink };
 
+# The systemd executor mounts the unit's tmpfs-backed runtime directory into
+# its mount-rootfs when the unit's hardening directives create a mount
+# namespace (live AVCs, P5-S1 Tumbleweed run, three attempts in one window):
+#   scontext=system_u:system_r:init_t:s0
+#   tcontext=system_u:object_r:docker_helper_builder_runtime_t:s0 tclass=dir
+#   denied { mounton } path=/run/systemd/mount-rootfs/run/docker-helper-builder
+allow init_t docker_helper_builder_runtime_t:dir { mounton };
+
 # journald: the manager writes its operational diagnostics to the
 # inherited systemd journal stream socket (StandardOutput=journal,
 # StandardError=journal). Mirror of the proven daemon rule.
@@ -676,6 +684,11 @@ allow docker_helper_builder_t passwd_file_t:file { read open getattr };
 # detection at startup. Search only; the same access the daemon's Docker CLI
 # children get from live evidence.
 allow docker_helper_builder_t cgroup_t:dir { search };
+
+# cgroup cpu.max read at process startup (live AVC, same window as above):
+#   scontext=docker_helper_builder_t tcontext=cgroup_t tclass=file
+#   denied { read } name=cpu.max dev=cgroup2
+allow docker_helper_builder_t cgroup_t:file { read open };
 
 # START resolves the system CA bundle for the child SSL_CERT_FILE
 # (fail closed without one): stat/open of the ca-bundle candidates and

@@ -111,7 +111,7 @@ avc_window() {
   date="$(date -d "@$since" '+%m/%d/%Y %H:%M:%S' 2>/dev/null || true)"
   while [ "$tries" -gt 0 ]; do
     if systemctl is-active --quiet auditd 2>/dev/null; then
-      out="$(ausearch -m AVC,USER_AVC -ts "$date" 2>/dev/null || true)"
+      out="$(ausearch -m AVC -m USER_AVC -ts "$date" 2>/dev/null || true)"
     else
       out="$(journalctl -k --since "@$since" --no-pager 2>/dev/null \
         | grep -a 'avc:' || true)"
@@ -383,8 +383,11 @@ printf '%s\n' "$SANITY_AVC" > "$EVIDENCE_DIR/sanity-avc.txt"
 if ! printf '%s\n' "$SANITY_AVC" | grep -aqF 'docker_helper_config_t'; then
   transient_journal sanity > "$EVIDENCE_DIR/sanity-transient-journal.txt"
   {
-    echo "=== raw audit log tail ==="
-    tail -50 /var/log/audit/audit.log 2>/dev/null || true
+    echo "=== full audit-window records (all event companions) ==="
+    grep -a "msg=audit($SANITY_START" /var/log/audit/audit.log 2>/dev/null || true
+    echo "=== manager journal (systemd starts/mounts in the window) ==="
+    journalctl --since "@$SANITY_START" --no-pager 2>/dev/null \
+      | grep -a 'docker-helper\|p5s1' | tail -40 || true
     echo "=== klog AVCs ==="
     journalctl -k --no-pager 2>/dev/null | grep -a 'avc:' | tail -20 || true
   } > "$EVIDENCE_DIR/sanity-audit-raw.txt"
@@ -421,7 +424,7 @@ else
     echo "=== builder dirs after the failed start ==="
     ls -laZ /run/docker-helper-builder /var/lib/docker-helper-builder 2>&1 || true
     echo "=== audit window (ausearch) ==="
-    ausearch -m AVC,USER_AVC --start today 2>/dev/null | tail -80 || true
+    ausearch -m AVC -m USER_AVC --start today 2>/dev/null | tail -80 || true
     echo "=== kernel log (journalctl -k) ==="
     journalctl -k --no-pager 2>/dev/null | grep -a 'avc:' | tail -40 || true
     echo "=== unit journal ==="
