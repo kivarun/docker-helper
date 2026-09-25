@@ -188,6 +188,10 @@ EOF
 chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT"
 
 # --- P0: enforcing preflight ---------------------------------------------------
+# Only the pre-image facts: LSM state and the base tooling. The SELinux policy
+# tooling (semodule/semanage/restorecon) and the container policy module are
+# pulled in BY the candidate RPM's conditional dependencies and asserted after
+# the install (P1) — the P4b packaging proof established that dependency path.
 log "P0: enforcing SELinux preflight"
 LSM="$(cat /sys/kernel/security/lsm 2>/dev/null || true)"
 printf '%s\n' "$LSM" | grep -aqw selinux || fail "SELinux is not an active LSM ($LSM)"
@@ -195,9 +199,7 @@ if printf '%s\n' "$LSM" | grep -aqw apparmor; then
   fail "AppArmor is concurrently active ($LSM)"
 fi
 [ "$(getenforce 2>/dev/null)" = "Enforcing" ] || fail "getenforce != Enforcing"
-semodule -l 2>/dev/null | grep -qw container \
-  || fail "SELinux container policy module not loaded (prerequisite for docker_helper)"
-for tool in semodule semanage restorecon getenforce systemd-run stat systemctl; do
+for tool in zypper rpm systemctl stat systemd-run; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool not found"
 done
 if [ -e /etc/os-release ]; then
@@ -225,6 +227,9 @@ zypper --non-interactive install -y --allow-unsigned-rpm "$RPM" \
 [ "$(rpm -q --qf '%{VERSION}' docker-helper)" = "$VERSION" ] || fail "RPM version mismatch"
 semodule -l 2>/dev/null | grep -qw docker_helper \
   || fail "SELinux docker_helper module not loaded after the RPM %posttrans"
+for tool in semodule semanage restorecon getenforce; do
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool not found after the RPM install"
+done
 systemctl is-enabled "$UNIT" 2>/dev/null | grep -qx enabled || fail "$UNIT not enabled"
 id "$BUILDER_USER" >/dev/null 2>&1 || fail "builder identity not provisioned"
 [ "$(stat -c '%a' /usr/libexec/docker-helper/buildkit/buildkitd)" = "755" ] || fail "payload mode wrong"
