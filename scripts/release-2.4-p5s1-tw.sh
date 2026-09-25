@@ -100,9 +100,17 @@ audit_window_start() {
   log "audit window starts at epoch $AVC_EPOCH"
 }
 
-# avc_window <since-epoch> — all kernel AVC lines of the window.
+# avc_window <since-epoch> — all kernel AVC lines of the window. When auditd
+# runs, the audit log is the authoritative source; journalctl -k is the
+# fallback (never both).
 avc_window() {
   local since="$1"
+  if systemctl is-active --quiet auditd 2>/dev/null; then
+    local date
+    date="$(date -d "@$since" '+%m/%d/%Y %H:%M:%S' 2>/dev/null || true)"
+    ausearch -m AVC,USER_AVC -ts "$date" 2>/dev/null || true
+    return
+  fi
   journalctl -k --since "@$since" --no-pager 2>/dev/null \
     | grep -a 'avc:' || true
 }
@@ -234,6 +242,33 @@ systemctl is-enabled "$UNIT" 2>/dev/null | grep -qx enabled || fail "$UNIT not e
 id "$BUILDER_USER" >/dev/null 2>&1 || fail "builder identity not provisioned"
 [ "$(stat -c '%a' /usr/libexec/docker-helper/buildkit/buildkitd)" = "755" ] || fail "payload mode wrong"
 
+# Post-install policy-shape evidence: the module's fc rules are live now.
+{
+  echo "=== module ==="
+  semodule -l 2>/dev/null | grep -w docker_helper || true
+  echo "=== matchpathcon (post module load) ==="
+  for p in /usr/bin/docker-helper /usr/bin/rootlesskit \
+           /run/docker-helper-builder /var/lib/docker-helper-builder \
+           /usr/libexec/docker-helper/buildkit/buildkitd \
+           /usr/libexec/docker-helper/buildkit/buildctl \
+           /usr/libexec/docker-helper/buildkit/buildkit-runc; do
+    echo "$p -> $(matchpathcon "$p" 2>/dev/null || echo 'no rule')"
+  done
+} > "$EVIDENCE_DIR/policy-shape.txt"
+
+# Best-effort auditd for fresh AVC evidence (same pattern as the SELinux UAT
+# VM construction); evidence only, never a prerequisite.
+if ! rpm -q audit >/dev/null 2>&1; then
+  zypper --non-interactive install -y audit >"$EVIDENCE_DIR/zypper-install-audit.log" 2>&1 || true
+fi
+if command -v ausearch >/dev/null 2>&1; then
+  systemctl enable --now auditd >/dev/null 2>&1 || true
+  auditctl -e 1 >/dev/null 2>&1 || true
+  log "auditd enabled for fresh AVC evidence"
+else
+  log "auditd/ausearch unavailable; AVC evidence will be journal-level only"
+fi
+
 # File-context expectations (matchpathcon: the policy view, independent of file
 # existence).
 expect_context() {
@@ -258,12 +293,61 @@ fi
 systemctl start docker >/dev/null 2>&1 || true
 docker info >/dev/null 2>&1 || fail "docker engine not reachable in the guest"
 
+# reset_failed_builder clears the unit's failed state so a bounded re-try is
+# not blocked by the StartLimitBurst limiter.
+reset_failed_builder() {
+  systemctl reset-failed "$UNIT" 2>/dev/null || true
+}
+
+# --- P2h: permissive bootstrap + full AVC harvest --------------------------------
+# Deliberately BEFORE the enforcing bootstrap: the permissive builder domain
+# runs the whole flow (unit start, RPC, launch attempt) with every check
+# logged, so a failed enforcing start still yields the complete evidence for
+# the next AVC. No permission is granted from this harvest in this run; the
+# harvest is the evidence the shipped policy is refined against.
+log "P2h: permissive bootstrap + harvest (docker_helper_builder_t permissive)"
+audit_window_start
+HARVEST_START="$AVC_EPOCH"
+semanage permissive -a docker_helper_builder_t || fail "cannot make the builder domain permissive"
+PERMISSIVE_SET=true
+reset_failed_builder
+if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2h-start-stderr.txt"; then
+  wait_for_builder_socket 50 || fail "manager socket did not appear (permissive start)"
+  MGR_PID="$(systemctl show "$UNIT" -p MainPID --value)"
+  MGR_CTX="$(cat "/proc/$MGR_PID/attr/current" 2>/dev/null || true)"
+  [ "$MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
+    || fail "manager process context = '$MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
+  [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+    || fail "manager.sock label wrong: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
+  say "P2h permissive bootstrap OK (manager in docker_helper_builder_t, socket labeled)"
+else
+  fail "cannot start the builder unit even permissive (unit journal: $(journalctl -u "$UNIT" -b --no-pager 2>/dev/null | tail -5 | tr '\n' ' '))"
+fi
+BUILD_PERM_OUT="$(attempt_build)" && BUILD_PERM_RC=0 || BUILD_PERM_RC=$?
+save_build_output "$EVIDENCE_DIR/build-attempt-permissive-output.txt" "$BUILD_PERM_OUT"
+log "permissive build attempt exit code: $BUILD_PERM_RC"
+builder_avc_window "$HARVEST_START" > "$EVIDENCE_DIR/builder-avc-harvest.txt" || true
+avc_window "$HARVEST_START" > "$EVIDENCE_DIR/all-avc-harvest.txt" || true
+journalctl -u "$UNIT" --since "@$HARVEST_START" --no-pager > "$EVIDENCE_DIR/builder-journal-harvest.txt" 2>&1
+journalctl -u "$MAIN_UNIT" --since "@$HARVEST_START" --no-pager > "$EVIDENCE_DIR/daemon-journal-harvest.txt" 2>&1
+cleanup_permissive
+HARVEST_LINES="$(grep -ac 'avc:' "$EVIDENCE_DIR/builder-avc-harvest.txt" 2>/dev/null || true)"
+[ "${HARVEST_LINES:-0}" -gt 0 ] || fail "permissive harvest is empty (kernel audit window capture broken)"
+FORBIDDEN_HITS="$(forbidden_surface_hits "$EVIDENCE_DIR/builder-avc-harvest.txt")"
+if [ -n "$FORBIDDEN_HITS" ]; then
+  printf '%s\n' "$FORBIDDEN_HITS" > "$EVIDENCE_DIR/forbidden-surface-hits.txt"
+  fail "the builder domain attempted a forbidden surface during the full permissive run (see forbidden-surface-hits.txt)"
+fi
+say "P2h permissive harvest OK ($HARVEST_LINES builder-domain AVC records, zero forbidden-surface attempts)"
+
 # --- P2: enforcing bootstrap ----------------------------------------------------
 P2_ENFORCING_OK=false
 P2_NOTE=""
 log "P2: enforcing bootstrap (manager in docker_helper_builder_t)"
 audit_window_start
+AVC_P2_START="$AVC_EPOCH"
 
+reset_failed_builder
 if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2-start-stderr.txt"; then
   MGR_PID="$(systemctl show "$UNIT" -p MainPID --value)"
   { [ -n "$MGR_PID" ] && [ "$MGR_PID" != "0" ]; } || fail "builder unit MainPID missing"
@@ -293,10 +377,21 @@ else
   P2_NOTE="enforcing start failed; unit journal + AVCs captured"
   journalctl -u "$UNIT" -b --no-pager > "$EVIDENCE_DIR/builder-start-failure-journal.txt" 2>&1 || true
   systemctl status "$UNIT" --no-pager > "$EVIDENCE_DIR/builder-start-status.txt" 2>&1 || true
+  # Capture everything that exists on the builder roots after the failed
+  # start: a partially created runtime dir and its label are the primary
+  # diagnostic.
+  {
+    echo "=== /run/docker-helper-builder ==="
+    ls -laZ /run/docker-helper-builder 2>&1 || true
+    echo "=== /var/lib/docker-helper-builder ==="
+    ls -laZ /var/lib/docker-helper-builder 2>&1 || true
+    echo "=== matchpathcon ==="
+    matchpathcon /run/docker-helper-builder /var/lib/docker-helper-builder 2>&1 || true
+  } > "$EVIDENCE_DIR/builder-start-failure-labels.txt"
   log "P2 NOTE: $P2_NOTE"
 fi
-builder_avc_window "$AVC_EPOCH" > "$EVIDENCE_DIR/builder-avc-p2.txt" || true
-avc_window "$AVC_EPOCH" > "$EVIDENCE_DIR/all-avc-p2.txt" || true
+builder_avc_window "$AVC_P2_START" > "$EVIDENCE_DIR/builder-avc-p2.txt" || true
+avc_window "$AVC_P2_START" > "$EVIDENCE_DIR/all-avc-p2.txt" || true
 
 # --- P3: enforcing daemon transport + expected boundary build attempt ------------
 P3_ENFORCING_OK=false
@@ -346,32 +441,6 @@ if [ "$P2_ENFORCING_OK" = true ]; then
 else
   log "P3 skipped (bootstrap not enforcing-green)"
 fi
-
-# --- P4: permissive harvest ------------------------------------------------------
-log "P4: permissive harvest (docker_helper_builder_t permissive, same build attempt)"
-audit_window_start
-semanage permissive -a docker_helper_builder_t || fail "cannot make the builder domain permissive"
-PERMISSIVE_SET=true
-HARVEST_START="$(date +%s)"
-if ! systemctl is-active --quiet "$UNIT"; then
-  systemctl start "$UNIT" || fail "cannot start the builder unit even permissive (transition/entrypoint rules)"
-fi
-wait_for_builder_socket 50 || fail "manager socket did not appear (permissive start)"
-BUILD_PERM_OUT="$(attempt_build)" && BUILD_PERM_RC=0 || BUILD_PERM_RC=$?
-save_build_output "$EVIDENCE_DIR/build-attempt-permissive-output.txt" "$BUILD_PERM_OUT"
-log "permissive build attempt exit code: $BUILD_PERM_RC"
-builder_avc_window "$HARVEST_START" > "$EVIDENCE_DIR/builder-avc-harvest.txt" || true
-avc_window "$HARVEST_START" > "$EVIDENCE_DIR/all-avc-harvest.txt" || true
-journalctl -u "$UNIT" --since "@$HARVEST_START" --no-pager > "$EVIDENCE_DIR/builder-journal-harvest.txt" 2>&1
-cleanup_permissive
-HARVEST_LINES="$(grep -ac 'avc:' "$EVIDENCE_DIR/builder-avc-harvest.txt" 2>/dev/null || true)"
-[ "${HARVEST_LINES:-0}" -gt 0 ] || fail "permissive harvest is empty (kernel audit window capture broken)"
-FORBIDDEN_HITS="$(forbidden_surface_hits "$EVIDENCE_DIR/builder-avc-harvest.txt")"
-if [ -n "$FORBIDDEN_HITS" ]; then
-  printf '%s\n' "$FORBIDDEN_HITS" > "$EVIDENCE_DIR/forbidden-surface-hits.txt"
-  fail "the builder domain attempted a forbidden surface during the full permissive run (see forbidden-surface-hits.txt)"
-fi
-say "P4 permissive harvest OK ($HARVEST_LINES builder-domain AVC records, zero forbidden-surface attempts)"
 
 # --- P5: enforcing negative proofs ----------------------------------------------
 log "P5: enforcing negative proofs (transient units in docker_helper_builder_t)"
