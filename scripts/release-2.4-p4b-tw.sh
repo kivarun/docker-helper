@@ -148,13 +148,13 @@ assert_rpm_files() {
     printf '%s\n' "$list" | grep -qxF "$path" || fail "RPM file list missing $path"
   done
   modes="$(rpm -q docker-helper --qf '[%{FILEMODES:perms} %{FILENAMES}\n]' | grep -E '/(buildkitd|buildctl|buildkit-runc|docker-helper-builder\.service|LICENSE|MANIFEST)$')"
-  printf '%s\n' "$modes" | grep -qF "-rwxr-xr-x /usr/libexec/docker-helper/buildkit/buildkitd" \
+  printf '%s\n' "$modes" | grep -qF -- "-rwxr-xr-x /usr/libexec/docker-helper/buildkit/buildkitd" \
     || fail "RPM buildkitd mode wrong: $modes"
-  printf '%s\n' "$modes" | grep -qF "-rwxr-xr-x /usr/libexec/docker-helper/buildkit/buildctl" \
+  printf '%s\n' "$modes" | grep -qF -- "-rwxr-xr-x /usr/libexec/docker-helper/buildkit/buildctl" \
     || fail "RPM buildctl mode wrong"
-  printf '%s\n' "$modes" | grep -qF "-rwxr-xr-x /usr/libexec/docker-helper/buildkit/buildkit-runc" \
+  printf '%s\n' "$modes" | grep -qF -- "-rwxr-xr-x /usr/libexec/docker-helper/buildkit/buildkit-runc" \
     || fail "RPM buildkit-runc mode wrong"
-  printf '%s\n' "$modes" | grep -qF "-rw-r--r-- /usr/lib/systemd/system/docker-helper-builder.service" \
+  printf '%s\n' "$modes" | grep -qF -- "-rw-r--r-- /usr/lib/systemd/system/docker-helper-builder.service" \
     || fail "RPM builder unit mode wrong"
   owners="$(rpm -q docker-helper --qf '[%{FILEUSERNAME}:%{FILEGROUPNAME} %{FILENAMES}\n]' | grep -E '/usr/libexec/docker-helper/buildkit/buildkitd$')"
   printf '%s\n' "$owners" | grep -qF "root:root /usr/libexec/docker-helper/buildkit/buildkitd" \
@@ -277,8 +277,12 @@ OLD_PID="$(systemctl show "$MAIN_UNIT" -p MainPID --value)"
 # scriptlet PATH (scriptlets inherit the invoking root PATH). The shim
 # passes the -l container-policy precondition through to the real semodule
 # and fails every install (-i) invocation.
-printf '#!/bin/sh\n[ "$1" = "-l" ] && exec /usr/sbin/semodule "$@"\necho "poisoned semodule (P4-B1.2 negative proof)" >&2\nexit 1\n' \
-  > /usr/local/sbin/semodule
+cat > /usr/local/sbin/semodule <<'POISON'
+#!/bin/sh
+[ "$1" = "-l" ] && exec /usr/sbin/semodule "$@"
+echo "poisoned semodule (P4-B1.2 negative proof)" >&2
+exit 1
+POISON
 chmod 0755 /usr/local/sbin/semodule
 set +e
 POISON_OUT="$(rpm -Uvh --replacepkgs "$RPM" 2>&1)"
