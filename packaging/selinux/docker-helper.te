@@ -86,6 +86,7 @@ module docker_helper 1.1;
 		type cgroup_t;
 		type proc_t;
 		type sysctl_net_t;
+		type sysctl_t;
 		type kernel_t;
 		type setfiles_exec_t;
 		type selinux_config_t;
@@ -582,6 +583,9 @@ allow docker_helper_t cgroup_t:file { read open };
 # per-op runtime/state trees, the rootlesskit launch vehicle) and holds NO
 # daemon authority — no helper config, no admin token, no Session
 # workspace types, no Docker socket, no daemon-owned runtime/state types.
+# The rootlesskit launch vehicle's post-exec mechanics live in the
+# dedicated child domain (docker_helper_rootlesskit_t, P5-S2); the manager
+# domain keeps the startup-purge surface only.
 #
 # Domain binding (P5-S1 item 2): the builder unit binds this domain
 # explicitly through SELinuxContext= (the same mechanism as the main
@@ -678,27 +682,12 @@ allow docker_helper_builder_t docker_helper_builder_runtime_t:sock_file { create
 allow docker_helper_builder_t docker_helper_builder_runtime_t:file { create read write open getattr setattr unlink };
 
 # State root and per-op state dirs: startup purge scan + removal, and the
-# START-time rootlesskit-state/root directory creation.
+# START-time rootlesskit-state/root directory creation. The rootlesskit
+# state-lock flock moved to the child domain (P5-S2; the enforcing P5-S1
+# evidence attributed that denial to comm="rootlesskit", never to the
+# manager).
 allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };
-
-# (P5-S2, first evidence-proven child-process grant): rootlesskit's flock of
-# its per-op state lock file. Live enforcing AVC evidence from the P5-S1
-# Tumbleweed proof (P3 run 36145749182, post-relabel P6 run 36168484020,
-# full proof run 36175618802 — every enforcing build attempt failed at
-# exactly this denial, and the recovery never started because of it):
-#   avc:  denied  { lock } for  comm="rootlesskit"
-#   path="/var/lib/docker-helper-builder/ops/op_9a78d76ad72342a01bdf210933a33ba8/rootlesskit-state/lock"
-#   scontext=system_u:system_r:docker_helper_builder_t:s0
-#   tcontext=system_u:object_r:docker_helper_builder_state_t:s0
-#   tclass=file permissive=0
-#   (child output: "[rootlesskit:parent] error: failed to lock
-#   .../rootlesskit-state/lock: permission denied")
-# The whole op state tree is builder-owned deployment state (the fc rule
-# covers /var/lib/docker-helper-builder(/.*)?); the grant stays on the
-# tree's file class and adds nothing else. The rest of the child-process
-# surface (rootlesskit mechanics beyond the state files, helper execs,
-# buildkitd) remains ungranted (P5-S2).
-allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink lock };
+allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };
 
 # Identity guard: the startup execution-identity verification resolves
 # the builder user through /etc/passwd (same access the daemon needs
@@ -751,13 +740,67 @@ allow docker_helper_builder_t cert_t:dir { search getattr };
 allow docker_helper_builder_t cert_t:lnk_file { getattr read };
 allow docker_helper_builder_t cert_t:file { getattr open read };
 
-# The manager's launch vehicle: exec the distro rootlesskit binary in
-# this domain (no transition) with the read/map shape the loader needs.
-# Everything rootlesskit does AFTER the exec is child-process MAC
-# (separate task): no grants below this line for rootlesskit's own
-# mechanics, its helper execs (newuidmap/newgidmap/slirp4netns), or the
-# bundled buildkitd.
-allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { read open execute execute_no_trans getattr map };
+# The manager's launch vehicle: exec the distro rootlesskit binary. The
+# exec TRANSITIONS into the dedicated child domain (the type_transition
+# below): the manager needs only the execute grant to launch it, and every
+# post-exec rootlesskit check runs in docker_helper_rootlesskit_t. The
+# helper execs (newuidmap/newgidmap/slirp4netns) and the bundled buildkitd
+# remain ungranted for BOTH domains (the deliberate P5-S2 boundary).
+allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute };
+
+# --- docker_helper_rootlesskit_t: the rootlesskit child domain (P5-S2) ---
+#
+# The manager's launch vehicle execs the distro rootlesskit binary; the
+# child runs in this dedicated domain via a pointed type_transition from
+# docker_helper_builder_t on the existing docker_helper_rootlesskit_exec_t
+# label. The shared docker-helper binary is untouched (executing
+# docker_helper_exec_t has no transition rule into this domain), and the
+# unit's SELinuxContext= binding still owns the builder domain. The child
+# domain holds the rootlesskit-owned state-tree access only, moved from the
+# manager by AVC evidence. It gets NO manager rights, NO helper execs
+# (slirp4netns, newuidmap/newgidmap, buildkitd), and no capabilities: those
+# are the next deliberate P5-S2 boundaries and need their own evidence.
+type docker_helper_rootlesskit_t, domain;
+role system_r types docker_helper_rootlesskit_t;
+
+# Pointed exec transition: the ONLY path into this domain.
+type_transition docker_helper_builder_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;
+allow docker_helper_builder_t docker_helper_rootlesskit_t:process { transition };
+
+# The child's own entry file: entrypoint for the transition plus the
+# loader access (the shape the manager's former no-transition exec grant
+# carried; the loader checks now run in the child domain).
+allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute getattr map };
+
+# Rootlesskit's own access into the builder-owned state tree, moved from
+# the manager by AVC evidence. Enforcing P5-S1 windows: comm="rootlesskit"
+# denied { lock } on .../rootlesskit-state/lock (tclass=file) — the
+# child's first action. Permissive harvest windows: comm="rootlesskit"
+# denied { read open }, { lock }, and repeated { write } on the
+# .../rootlesskit-state directory, plus the child's state-file
+# create/write for the lock file and the pid bookkeeping. The manager
+# keeps its startup-purge surface; the child does not unlink or rmdir
+# manager-owned state (the purge owns removal), and the child's only
+# state-tree socket is its own api.sock (comm="rootlesskit" denied
+# { create } and { unlink } on tclass=sock_file).
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };
+allow docker_helper_rootlesskit_t docker_helper_builder_state_t:sock_file { create unlink };
+
+# The child inherits the manager's inst.diag output pipe (Stdout/Stderr of
+# the launch vehicle; the manager pumps it into its diagnostics buffer).
+# The exec-time inherited-fd check closes ungranted inherited fds, which
+# would silence the child's own failure output — the same fd-use shape the
+# proven builder_t journald-socket rule covers for the manager.
+allow docker_helper_rootlesskit_t docker_helper_builder_t:fifo_file { write };
+
+# Rootlesskit reads the user-namespace limit before the userns setup
+# (live harvest AVC evidence, three independent runs: comm="rootlesskit"
+# denied { read open getattr } on /proc/sys/user/max_user_namespaces,
+# tcontext=system_u:object_r:sysctl_t:s0 tclass=file). Read-only; the
+# userns creation and the in-userns capability checks remain ungranted
+# (the next P5-S2 boundaries).
+allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };
 
 # Daemon transport to the builder manager (P5-S1 item 4): the daemon
 # dials manager.sock and the per-op buildkitd sockets, and nothing
