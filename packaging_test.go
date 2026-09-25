@@ -3780,41 +3780,52 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	}
 }
 
-// TestRPMPostinstallNoRecursiveRuntimeRestorecon guards against a regression
-// where the RPM postinstall recursively restorecon's the /run/docker-helper
+// TestRPMScriptletNoRecursiveRuntimeRestorecon guards against a regression
+// where the RPM scriptlets recursively restorecon the /run/docker-helper
 // runtime tree. The mount-pin namespace under /run/docker-helper/mounts holds
 // bind-mount aliases of the real workspace inodes; a recursive relabel through
 // them would relabel the actual workspace files to docker_helper_runtime_t,
-// corrupting the SELinux workspace model. The postinstall must only relabel
+// corrupting the SELinux workspace model. The scriptlets must only relabel
 // the helper-owned /run/docker-helper dir itself (non-recursively), never walk
-// the mounts namespace.
-func TestRPMPostinstallNoRecursiveRuntimeRestorecon(t *testing.T) {
-	data, err := os.ReadFile("packaging/scripts/rpm/postinstall.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	if strings.Contains(content, "restorecon -R /run/docker-helper") {
-		t.Error("rpm postinstall must not recursively restorecon /run/docker-helper (would walk mount-pin aliases and corrupt workspace SELinux labels)")
+// the mounts namespace — and since P4-B1.2 the relabels live in %posttrans.
+func TestRPMScriptletNoRecursiveRuntimeRestorecon(t *testing.T) {
+	for _, script := range []string{
+		"packaging/scripts/rpm/postinstall.sh",
+		"packaging/scripts/rpm/posttrans.sh",
+	} {
+		data, err := os.ReadFile(script)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "restorecon -R /run/docker-helper") {
+			t.Errorf("%s must not recursively restorecon /run/docker-helper (would walk mount-pin aliases and corrupt workspace SELinux labels)", script)
+		}
 	}
 }
 
-// TestRPMPostinstallBindfsRestorecon verifies the RPM postinstall applies the
-// shipped docker_helper_bindfs_exec_t file context to /usr/bin/bindfs. bindfs
-// is an explicit RPM Requires (the SELinux read-only projection backend) and
-// zypper installs it with the generic binary label; without the relabel the
-// confined daemon fails the projection worker exec with "fork/exec
+// TestRPMScriptletBindfsRestorecon verifies the RPM scriptlet contract for
+// the shipped docker_helper_bindfs_exec_t file context on /usr/bin/bindfs.
+// bindfs is an explicit RPM Requires (the SELinux read-only projection
+// backend) and zypper installs it with the generic binary label; without the
+// relabel the confined daemon fails the projection worker exec with "fork/exec
 // /usr/bin/bindfs: permission denied" (observed on the exact-candidate UAT).
-func TestRPMPostinstallBindfsRestorecon(t *testing.T) {
-	data, err := os.ReadFile("packaging/scripts/rpm/postinstall.sh")
+// Since P4-B1.2 the relabels run in %posttrans (scriptlet ordering contract);
+// %post must not carry them.
+func TestRPMScriptletBindfsRestorecon(t *testing.T) {
+	postinstall, err := os.ReadFile("packaging/scripts/rpm/postinstall.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
+	if strings.Contains(string(postinstall), "restorecon /usr/bin/bindfs") {
+		t.Error("rpm postinstall must not restorecon /usr/bin/bindfs (relabels are owned by the posttrans scriptlet since P4-B1.2)")
+	}
 
-	if !strings.Contains(content, "restorecon /usr/bin/bindfs") {
-		t.Error("rpm postinstall must restorecon /usr/bin/bindfs (shipped docker_helper_bindfs_exec_t file context)")
+	posttrans, err := os.ReadFile("packaging/scripts/rpm/posttrans.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(posttrans), "restorecon /usr/bin/bindfs") {
+		t.Error("rpm posttrans must restorecon /usr/bin/bindfs (shipped docker_helper_bindfs_exec_t file context)")
 	}
 }
 
@@ -4078,6 +4089,30 @@ func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
 	}
 }
 
+// rpmScriptletSection extracts one scriptlet body from rpm -qp --scripts
+// output. The output is a flat sequence of "<name> scriptlet (using /bin/sh):"
+// headers; each body runs until the next header. An unknown scriptlet (or an
+// older rpm printing a different shell) yields an empty string, which the
+// callers assert as a missing contract.
+func rpmScriptletSection(t *testing.T, scripts, name string) string {
+	t.Helper()
+	header := name + " scriptlet (using /bin/sh):"
+	start := strings.Index(scripts, header)
+	if start < 0 {
+		return ""
+	}
+	rest := scripts[start+len(header):]
+	var body []string
+	lines := strings.Split(rest, "\n")
+	for i, line := range lines {
+		if i > 0 && strings.HasSuffix(line, " scriptlet (using /bin/sh):") {
+			break
+		}
+		body = append(body, line)
+	}
+	return strings.Join(body, "\n")
+}
+
 func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	t.Helper()
 
@@ -4090,6 +4125,64 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	cmd = exec.Command(rpmPath, "-qp", "--qf", "[%{FILEMODES:perms} %{FILENAMES}\\n]", rpmFile)
 	modeOut, _ := cmd.CombinedOutput()
 	verifyRPMModesPerms(t, string(modeOut))
+
+	// Scriptlet ordering contract (P4-B1.2), proven from the BUILT RPM
+	// metadata: the SELinux module load, the exact relabels and the deferred
+	// restart of an already-active service live in %posttrans (after
+	// container-selinux's own %posttrans module install); %post keeps
+	// provisioning, AppArmor, daemon-reload and enable and records the
+	// was-active decision for %posttrans.
+	cmd = exec.Command(rpmPath, "-qp", "--scripts", rpmFile)
+	out, _ = cmd.CombinedOutput()
+	postinstall := rpmScriptletSection(t, string(out), "postinstall")
+	posttrans := rpmScriptletSection(t, string(out), "posttrans")
+	if postinstall == "" {
+		t.Error("RPM must carry the postinstall scriptlet")
+	}
+	if posttrans == "" {
+		t.Fatal("RPM must carry the posttrans scriptlet (SELinux module load, relabels and deferred restart)")
+	}
+	if !strings.Contains(posttrans, "grep -qw container") {
+		t.Error("RPM posttrans must check the container policy precondition before loading the module")
+	}
+	if !strings.Contains(posttrans, "semodule -i /usr/share/selinux/docker_helper.pp") {
+		t.Error("RPM posttrans must load the shipped docker_helper.pp")
+	}
+	for _, rc := range []string{
+		"restorecon /usr/bin/docker-helper",
+		"restorecon /usr/bin/bindfs",
+		"restorecon -R /etc/docker-helper",
+		"restorecon -R /var/lib/docker-helper",
+		"restorecon /run/docker-helper",
+	} {
+		if !strings.Contains(posttrans, rc) {
+			t.Errorf("RPM posttrans must apply the exact restorecon: %s", rc)
+		}
+	}
+	if !strings.Contains(posttrans, "posttrans-state") {
+		t.Error("RPM posttrans must consume the was-active decision recorded by the postinstall scriptlet")
+	}
+	if !strings.Contains(posttrans, "try-restart docker-helper.service") {
+		t.Error("RPM posttrans must restart the previously active service after a successful module load")
+	}
+	// %post must not load the SELinux module (deferred to %posttrans).
+	if strings.Contains(postinstall, "semodule") {
+		t.Error("RPM postinstall must not invoke semodule (the module load is owned by the posttrans scriptlet)")
+	}
+	if !strings.Contains(postinstall, "posttrans-state") {
+		t.Error("RPM postinstall must record the was-active decision for the posttrans scriptlet")
+	}
+	// AppArmor and systemd behavior stays in %post, unchanged.
+	for _, want := range []string{
+		"apparmor_parser --replace",
+		"daemon-reload",
+		"enable docker-helper-builder.service",
+		"try-restart docker-helper.service",
+	} {
+		if !strings.Contains(postinstall, want) {
+			t.Errorf("RPM postinstall must keep: %s", want)
+		}
+	}
 
 	// Dependencies.
 	cmd = exec.Command(rpmPath, "-qp", "--requires", rpmFile)
@@ -4787,9 +4880,10 @@ esac
 }
 
 // writeFakeSemodule creates a semodule script that logs calls. The fake
-// reports the docker_helper module as installed when listing (-l) unless
-// SEMODULE_MODULE_PRESENT=false, so tests can exercise the presence-gated
-// preremove removal and its absence.
+// reports the container and docker_helper modules as installed when listing
+// (-l) unless SEMODULE_MODULE_PRESENT=false, so tests can exercise the
+// container-policy precondition of the posttrans module load and the
+// presence-gated preremove removal and its absence.
 func writeFakeSemodule(t *testing.T, fakeDir, logFile string, failInstall bool, failRemove bool) {
 	t.Helper()
 	failInstallStr := "false"
@@ -4805,6 +4899,7 @@ echo "$0 $@" >> "%s"
 case "$*" in
   *"-l"*)
     if [ "${SEMODULE_MODULE_PRESENT:-true}" = "true" ]; then
+      echo "container"
       echo "docker_helper"
     fi
     exit 0
@@ -5827,9 +5922,14 @@ func TestBuildSelinuxPolicyHelperProducesPP(t *testing.T) {
 	}
 }
 
-// TestRpmPostinstallSELinuxActive verifies RPM postinstall installs the
-// SELinux module and restores contexts when SELinux is enforcing.
-func TestRpmPostinstallSELinuxActive(t *testing.T) {
+// TestRpmPostinstallSelinuxDefersModuleLoad verifies the RPM scriptlet
+// ordering contract (P4-B1.2): on a SELinux enforcing fresh install the
+// %post records the was-active decision for the posttrans scriptlet and does NOT load
+// the SELinux module itself, because rpm runs every %post scriptlet of a
+// transaction before any %posttrans and container-selinux installs its
+// module in its own %posttrans (P4-B1 diagnosis: loading from %post fails
+// at the container-selinux require symbols).
+func TestRpmPostinstallSelinuxDefersModuleLoad(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, false, false)
 	writeFakeSemodule(t, fakeDir, logFile, false, false)
@@ -5854,43 +5954,43 @@ func TestRpmPostinstallSELinuxActive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+	// A test-owned runtime dir makes the posttrans-state handoff observable.
+	runtimeDir := filepath.Join(tmpDir, "run", "docker-helper")
+
+	_, stderr, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
 		[]string{"1"}, true, []string{
 			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
 			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"RUNTIME_DIR=" + runtimeDir,
 		})
 	if code != 0 {
-		t.Fatalf("rpm postinst should exit 0 when SELinux active, got %d", code)
+		t.Fatalf("rpm postinst should exit 0 when SELinux active, got %d (stderr: %s)", code, stderr)
+	}
+
+	stateData, err := os.ReadFile(runtimeDir + "-rpm/posttrans-state")
+	if err != nil {
+		t.Fatalf("postinstall must write the posttrans-state handoff: %v", err)
+	}
+	if string(stateData) != "was_active=false\n" {
+		t.Errorf("posttrans-state must record the was-active decision, got: %q", string(stateData))
 	}
 
 	calls := readLifecycleScriptCalls(t, logFile)
 
-	// Must call semodule -i
-	foundSemodule := false
+	// Must NOT load the SELinux module from %post (deferred to %posttrans).
 	for _, c := range calls {
-		if strings.Contains(c, "semodule") && strings.Contains(c, "-i") {
-			foundSemodule = true
-			if !strings.Contains(c, "/usr/share/selinux/docker_helper.pp") {
-				t.Errorf("semodule -i must use correct path: %s", c)
-			}
+		if strings.Contains(c, "semodule") {
+			t.Errorf("%%post must not invoke semodule (deferred to %%posttrans): %s", c)
+		}
+		if strings.Contains(c, "restorecon") {
+			t.Errorf("%%post must not invoke restorecon (deferred to %%posttrans): %s", c)
+		}
+		if strings.Contains(c, "restart") {
+			t.Errorf("%%post must not restart on a fresh install: %s", c)
 		}
 	}
-	if !foundSemodule {
-		t.Error("must call semodule -i to install SELinux module")
-	}
 
-	// Must call restorecon for the binary
-	foundRestorecon := false
-	for _, c := range calls {
-		if strings.Contains(c, "restorecon") && strings.Contains(c, "/usr/bin/docker-helper") {
-			foundRestorecon = true
-		}
-	}
-	if !foundRestorecon {
-		t.Error("must call restorecon for /usr/bin/docker-helper")
-	}
-
-	// Must call daemon-reload
+	// Must call daemon-reload (kept in %post).
 	foundDaemonReload := false
 	for _, c := range calls {
 		if strings.Contains(c, "daemon-reload") {
@@ -5909,9 +6009,11 @@ func TestRpmPostinstallSELinuxActive(t *testing.T) {
 	}
 }
 
-// TestRpmPostinstallSELinuxUpgrade verifies RPM postinstall replaces the
-// SELinux module on upgrade when SELinux is enforcing.
-func TestRpmPostinstallSELinuxUpgrade(t *testing.T) {
+// TestRpmPostinstallSelinuxUpgradeDefersRestart verifies that on upgrade
+// with SELinux enforcing and an already-active service, the %post records
+// the was-active decision for the posttrans scriptlet and performs neither the module
+// load nor the restart itself (P4-B1.2 scriptlet ordering contract).
+func TestRpmPostinstallSelinuxUpgradeDefersRestart(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, true, false)
 	writeFakeSemodule(t, fakeDir, logFile, false, false)
@@ -5933,37 +6035,37 @@ func TestRpmPostinstallSELinuxUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	runtimeDir := filepath.Join(tmpDir, "run", "docker-helper")
+
 	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
 		[]string{"2"}, true, []string{
 			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
 			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"RUNTIME_DIR=" + runtimeDir,
 		})
 	if code != 0 {
 		t.Fatalf("rpm postinst upgrade should exit 0, got %d", code)
 	}
 
+	stateData, err := os.ReadFile(runtimeDir + "-rpm/posttrans-state")
+	if err != nil {
+		t.Fatalf("postinstall must write the posttrans-state handoff on upgrade: %v", err)
+	}
+	if string(stateData) != "was_active=true\n" {
+		t.Errorf("posttrans-state must record was_active=true for the deferred restart, got: %q", string(stateData))
+	}
+
 	calls := readLifecycleScriptCalls(t, logFile)
 
-	// Must call semodule -i (replaces existing module)
-	foundSemodule := false
+	// No module load, no relabels, no restart from %post: all three belong
+	// to %posttrans on SELinux hosts.
 	for _, c := range calls {
-		if strings.Contains(c, "semodule") && strings.Contains(c, "-i") {
-			foundSemodule = true
+		if strings.Contains(c, "semodule") {
+			t.Errorf("%%post must not invoke semodule on upgrade (deferred to %%posttrans): %s", c)
 		}
-	}
-	if !foundSemodule {
-		t.Error("upgrade must call semodule -i to replace SELinux module")
-	}
-
-	// Must restart the active service across the package action
-	restarts := 0
-	for _, c := range calls {
 		if strings.Contains(c, "restart") {
-			restarts++
+			t.Errorf("%%post must not restart on SELinux hosts (deferred to %%posttrans): %s", c)
 		}
-	}
-	if restarts != 1 {
-		t.Errorf("upgrade must restart the active service exactly once, got %d", restarts)
 	}
 }
 
@@ -6149,61 +6251,195 @@ func TestRpmPostinstallBothMAC(t *testing.T) {
 
 	calls := readLifecycleScriptCalls(t, logFile)
 
-	// Must attempt both apparmor_parser and semodule
-	foundAA, foundSELinux := false, false
+	// Must attempt apparmor_parser (AppArmor behavior unchanged) and record
+	// the deferred SELinux decision; the semodule load itself belongs to
+	// %posttrans now.
+	foundAA := false
 	for _, c := range calls {
 		if strings.Contains(c, "apparmor_parser") && strings.Contains(c, "--replace") {
 			foundAA = true
 		}
-		if strings.Contains(c, "semodule") && strings.Contains(c, "-i") {
-			foundSELinux = true
+		if strings.Contains(c, "semodule") {
+			t.Errorf("%%post must not invoke semodule (deferred to %%posttrans): %s", c)
 		}
 	}
 	if !foundAA {
 		t.Error("must still attempt apparmor_parser when both are active")
 	}
-	if !foundSELinux {
-		t.Error("must still attempt semodule when both are active")
-	}
 }
 
-// TestRpmPostinstallSemoduleFailure verifies that when semodule -i fails,
-// the RPM postinstall fails the transaction.
-func TestRpmPostinstallSemoduleFailure(t *testing.T) {
-	fakeDir, logFile := setupScriptTest(t)
-	writeFakeSystemctl(t, fakeDir, logFile, false, false)
-	writeFakeSemodule(t, fakeDir, logFile, true, false)
+// TestRpmPosttrans covers the %posttrans SELinux contract (P4-B1.2): the
+// container-policy precondition, the module load, the exact relabels, and
+// the deferred restart of an already-active service — including the loud
+// failure modes that must never consume or trigger the restart decision.
+func TestRpmPosttrans(t *testing.T) {
+	cases := []struct {
+		name string
 
-	tmpDir := t.TempDir()
-	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
-	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
-	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
-		t.Fatal(err)
+		selinuxEnforcing bool
+		containerPresent bool
+		failInstall      bool
+		failRestart      bool
+		wasActive        bool
+
+		wantCode           int
+		wantModuleLoad     bool
+		wantRestart        bool
+		wantStatePreserved bool
+	}{
+		{
+			name:             "selinux inactive: silent no-op",
+			selinuxEnforcing: false,
+			wantCode:         0,
+		},
+		{
+			name:             "fresh install: module load and relabels, no restart",
+			selinuxEnforcing: true,
+			containerPresent: true,
+			wantCode:         0,
+			wantModuleLoad:   true,
+		},
+		{
+			name:             "active daemon: restart after module load and relabels",
+			selinuxEnforcing: true,
+			containerPresent: true,
+			wasActive:        true,
+			wantCode:         0,
+			wantModuleLoad:   true,
+			wantRestart:      true,
+		},
+		{
+			name:               "module load failure: loud failure, no restart, decision preserved",
+			selinuxEnforcing:   true,
+			containerPresent:   true,
+			failInstall:        true,
+			wasActive:          true,
+			wantCode:           1,
+			wantModuleLoad:     true,
+			wantStatePreserved: true,
+		},
+		{
+			name:               "container policy missing: loud failure before the load, no restart, decision preserved",
+			selinuxEnforcing:   true,
+			containerPresent:   false,
+			wasActive:          true,
+			wantCode:           1,
+			wantStatePreserved: true,
+		},
+		{
+			name:             "restart failure: loud failure",
+			selinuxEnforcing: true,
+			containerPresent: true,
+			failRestart:      true,
+			wasActive:        true,
+			wantCode:         1,
+			wantModuleLoad:   true,
+			wantRestart:      true,
+		},
 	}
 
-	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
-		[]string{"1"}, true, []string{
-			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
-			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDir, logFile := setupScriptTest(t)
+			writeFakeSystemctl(t, fakeDir, logFile, false, false)
+			writeFakeSemodule(t, fakeDir, logFile, tc.failInstall, false)
+			writeFakeRestorecon(t, fakeDir, logFile)
+
+			tmpDir := t.TempDir()
+			selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+			if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			enforceValue := "0"
+			if tc.selinuxEnforcing {
+				enforceValue = "1"
+			}
+			if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte(enforceValue), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			// The modified script under test resolves the fixed
+			// /run/docker-helper-rpm state path as $RUNTIME_DIR-rpm, so the
+			// test-owned runtime dir makes the handoff observable.
+			runtimeDir := filepath.Join(tmpDir, "run", "docker-helper")
+			statePath := runtimeDir + "-rpm/posttrans-state"
+			if tc.wasActive {
+				if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(statePath, []byte("was_active=true\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			env := []string{
+				"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+				"RUNTIME_DIR=" + runtimeDir,
+			}
+			if !tc.containerPresent {
+				env = append(env, "SEMODULE_MODULE_PRESENT=false")
+			}
+			if tc.failRestart {
+				env = append(env, "RESTART_FAIL=true")
+			}
+
+			_, stderr, code := runScript(t, "packaging/scripts/rpm/posttrans.sh", fakeDir, logFile,
+				nil, true, env)
+
+			if code != tc.wantCode {
+				t.Fatalf("posttrans exit code = %d, want %d", code, tc.wantCode)
+			}
+			if tc.wantCode != 0 && !strings.Contains(stderr, "error:") {
+				t.Errorf("failed posttrans must fail loudly with an error: got stderr: %s", stderr)
+			}
+
+			if tc.wantStatePreserved {
+				if _, err := os.Stat(statePath); err != nil {
+					t.Fatalf("the failed posttrans must preserve the deferred-restart decision for the recovery transaction: %v", err)
+				}
+			} else if tc.wasActive && tc.wantCode == 0 {
+				if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+					t.Fatalf("the successful posttrans must consume the deferred-restart decision: %v", err)
+				}
+			}
+
+			calls := readLifecycleScriptCalls(t, logFile)
+
+			loadIdx, restoreconIdx, restartIdx := -1, -1, -1
+			for i, c := range calls {
+				switch {
+				case strings.Contains(c, "semodule") && strings.Contains(c, "-i"):
+					loadIdx = i
+				case strings.Contains(c, "restorecon"):
+					if restoreconIdx < 0 {
+						restoreconIdx = i
+					}
+				case strings.Contains(c, "try-restart"):
+					restartIdx = i
+				}
+			}
+			if tc.wantModuleLoad {
+				if loadIdx < 0 {
+					t.Error("posttrans must load the shipped module with semodule -i")
+				} else if !strings.Contains(calls[loadIdx], "/usr/share/selinux/docker_helper.pp") {
+					t.Errorf("semodule -i must target the shipped .pp: %s", calls[loadIdx])
+				}
+				// The relabels run only after a successful load.
+				if tc.wantCode == 0 && restoreconIdx < 0 {
+					t.Error("posttrans must apply the exact restorecon set after a successful module load")
+				}
+			}
+			if tc.wantRestart {
+				if restartIdx < 0 {
+					t.Error("posttrans must restart the previously active service")
+				} else if restoreconIdx < 0 || loadIdx < 0 || loadIdx > restartIdx || restoreconIdx > restartIdx {
+					t.Errorf("restart must come after the module load and relabels (load=%d restorecon=%d restart=%d)", loadIdx, restoreconIdx, restartIdx)
+				}
+			}
+			if !tc.wantRestart && restartIdx >= 0 {
+				t.Errorf("posttrans must not restart: %s", calls[restartIdx])
+			}
 		})
-	if code == 0 {
-		t.Fatal("rpm postinst should fail when semodule -i fails")
-	}
-
-	calls := readLifecycleScriptCalls(t, logFile)
-	for _, c := range calls {
-		if strings.Contains(c, "daemon-reload") || strings.Contains(c, "restart") {
-			t.Error("must not proceed after semodule failure")
-		}
 	}
 }
 

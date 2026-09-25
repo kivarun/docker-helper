@@ -227,6 +227,25 @@ assert_payload
 assert_builder_unit_enabled
 assert_main_unit_coupling
 assert_selinux_module_loaded
+
+# P4-B1.2 scriptlet-ordering proof: the docker_helper module load lives in
+# %posttrans, which rpm runs after ALL %post scriptlets of the transaction
+# and, in transaction install order, after container-selinux's own
+# %posttrans. The zypper transaction log shows the %posttrans scriptlet
+# sections in execution order; the docker-helper posttrans marker must
+# appear after the container-selinux %posttrans section header.
+zlog="$EVIDENCE_DIR/zypper-install-candidate.log"
+container_pt="$(grep -n 'posttrans(container-selinux' "$zlog" | head -1 | cut -d: -f1)"
+helper_pt="$(grep -n 'docker-helper posttrans:' "$zlog" | head -1 | cut -d: -f1)"
+[ -n "$container_pt" ] || fail "container-selinux %posttrans not found in the transaction log (scriptlet-ordering proof)"
+[ -n "$helper_pt" ] || fail "docker-helper %posttrans output not found in the transaction log (scriptlet-ordering proof)"
+[ "$helper_pt" -gt "$container_pt" ] \
+  || fail "docker-helper %posttrans must run after container-selinux %posttrans (scriptlet-ordering proof)"
+
+# A fresh install never starts or restarts the main daemon.
+[ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "inactive" ] \
+  || fail "the RPM transaction must not start the main daemon on a fresh install"
+say "P1 scriptlet-ordering proof OK (container-selinux %posttrans before docker-helper %posttrans)"
 say "starting the builder service standalone (P4-A1 boundary asserts under the packaged unit)"
 systemctl start "$UNIT" || fail "systemctl start $UNIT failed"
 [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] || fail "builder service not active after start"
@@ -244,6 +263,44 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "idempotent rpm -U --replacepkg
 [ "$(subgid_entry)" = "$GID_ENTRY_BEFORE" ] || fail "subgid range changed across reinstall"
 assert_builder_unit_enabled
 say "P2 asserts OK"
+
+# --- P2b: failed SELinux module load must not touch the running daemon --------
+
+log "P2b: semodule failure cannot trigger daemon start/restart (negative proof)"
+/usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config for the negative-proof phase"
+systemctl start "$MAIN_UNIT" || fail "cannot start the main daemon for the negative-proof phase"
+[ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] || fail "main daemon not active after start"
+OLD_PID="$(systemctl show "$MAIN_UNIT" -p MainPID --value)"
+{ [ -n "$OLD_PID" ] && [ "$OLD_PID" != "0" ]; } || fail "main daemon MainPID missing"
+
+# Poison the module load with a failing semodule shim earlier in the
+# scriptlet PATH (scriptlets inherit the invoking root PATH). The shim
+# passes the -l container-policy precondition through to the real semodule
+# and fails every install (-i) invocation.
+printf '#!/bin/sh\n[ "$1" = "-l" ] && exec /usr/sbin/semodule "$@"\necho "poisoned semodule (P4-B1.2 negative proof)" >&2\nexit 1\n' \
+  > /usr/local/sbin/semodule
+chmod 0755 /usr/local/sbin/semodule
+set +e
+POISON_OUT="$(rpm -Uvh --replacepkgs "$RPM" 2>&1)"
+POISON_RC=$?
+set -e
+printf '%s\n' "$POISON_OUT" > "$EVIDENCE_DIR/failed-semodule-rpm.txt"
+[ "$POISON_RC" -ne 0 ] || fail "rpm -U must fail when the SELinux module load fails (poisoned semodule)"
+printf '%s\n' "$POISON_OUT" | grep -q "scriptlet failed" \
+  || fail "rpm must report the failing scriptlet (actual failure reporting is recorded; never claimed as rollback)"
+[ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
+  || fail "the failed module load must not stop the active daemon"
+[ "$(systemctl show "$MAIN_UNIT" -p MainPID --value)" = "$OLD_PID" ] \
+  || fail "the failed module load must not restart the active daemon"
+[ -f /run/docker-helper-rpm/posttrans-state ] \
+  || fail "a failed %posttrans must not consume the deferred-restart decision"
+assert_selinux_module_loaded
+rm -f /usr/local/sbin/semodule
+rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "recovery rpm -U --replacepkgs after the poisoned-semodule failure"
+[ "$(systemctl show "$MAIN_UNIT" -p MainPID --value)" != "$OLD_PID" ] \
+  || fail "the recovery posttrans must restart the previously active service"
+assert_selinux_module_loaded
+say "P2b asserts OK"
 
 # --- P3: failed provisioning + interrupted-install recovery --------------------
 
