@@ -299,6 +299,59 @@ reset_failed_builder() {
   systemctl reset-failed "$UNIT" 2>/dev/null || true
 }
 
+# --- P2a: audit pipeline sanity + main-unit baseline -----------------------------
+# (a) An AVC-pipeline sanity probe: a deliberate, harmless MAC denial from the
+# builder domain (reading /etc/shadow as a token file) must produce a visible
+# AVC. This proves the audit source works before any phase depends on AVC
+# evidence.
+log "P2a: audit pipeline sanity probe"
+audit_window_start
+SANITY_START="$AVC_EPOCH"
+if run_as_builder_domain root /usr/bin/docker-helper session list \
+    --token-file /etc/shadow >/tmp/p5s1-sanity.out 2>&1; then
+  fail "the builder domain unexpectedly read /etc/shadow (sanity probe inverted)"
+fi
+SANITY_AVC="$(avc_window "$SANITY_START")"
+printf '%s\n' "$SANITY_AVC" > "$EVIDENCE_DIR/sanity-avc.txt"
+assert_avc "$SANITY_AVC" 'shadow_t'
+say "P2a audit pipeline OK (deliberate shadow_t denial visible in the audit source)"
+
+# (b) The main unit is the proven enforcing path; starting it first establishes
+# a working baseline before any builder-domain phase.
+if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" != "active" ]; then
+  systemctl start "$MAIN_UNIT" || fail "the main daemon failed to start (baseline broken)"
+fi
+[ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
+  || fail "main daemon not active after start"
+systemctl cat "$UNIT" > "$EVIDENCE_DIR/builder-unit-runtime.txt" 2>&1
+audit_window_start
+
+# (c) Operator surface (config/init/principal/credential/session) once, before
+# any builder phase, so both the permissive harvest and the enforcing rounds
+# ride the same session.
+/usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config"
+/usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >/dev/null \
+  || fail "config allowed-root add failed"
+/usr/bin/docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null \
+  || fail "principal create failed"
+/usr/bin/docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null \
+  || fail "principal allowed-root add failed"
+CRED_OUT="$(/usr/bin/docker-helper credential create --name p5s1 "$PRINCIPAL")" \
+  || fail "credential create failed"
+printf '%s\n' "$CRED_OUT" | awk '/^[A-Za-z0-9_-]+$/{print; exit}' > "$CRED_FILE"
+chmod 0600 "$CRED_FILE"
+[ -s "$CRED_FILE" ] || fail "could not extract the credential token (value never echoed)"
+SESSION_JSON="$(/usr/bin/docker-helper session create --token-file "$CRED_FILE" "$WORKSPACE" --json)" \
+  || fail "session create failed (workspace MAC lifecycle must exercise the real daemon path)"
+printf '%s\n' "$SESSION_JSON" | sed 's/"token": "[^"]*"/"token": "REDACTED"/; s/"session_token":[^,]*,//' \
+  > "$EVIDENCE_DIR/session-create.json"
+WS_LABEL="$(stat -c '%C' "$WORKSPACE/buildctx/Dockerfile" 2>/dev/null || true)"
+echo "workspace Dockerfile label: $WS_LABEL" > "$EVIDENCE_DIR/workspace-label.txt"
+case "$WS_LABEL" in
+  *docker_helper_workspace_t*) ;;
+  *) log "WARN: workspace file label = '$WS_LABEL' (the session MAC relabel may be pending)" ;;
+esac
+
 # --- P2h: permissive bootstrap + full AVC harvest --------------------------------
 # Deliberately BEFORE the enforcing bootstrap: the permissive builder domain
 # runs the whole flow (unit start, RPC, launch attempt) with every check
@@ -321,7 +374,19 @@ if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2h-start-stderr.txt"; then
     || fail "manager.sock label wrong: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
   say "P2h permissive bootstrap OK (manager in docker_helper_builder_t, socket labeled)"
 else
-  fail "cannot start the builder unit even permissive (unit journal: $(journalctl -u "$UNIT" -b --no-pager 2>/dev/null | tail -5 | tr '\n' ' '))"
+  {
+    echo "=== /proc/cmdline ==="
+    cat /proc/cmdline
+    echo "=== builder dirs after the failed start ==="
+    ls -laZ /run/docker-helper-builder /var/lib/docker-helper-builder 2>&1 || true
+    echo "=== audit window (ausearch) ==="
+    ausearch -m AVC,USER_AVC --start today 2>/dev/null | tail -80 || true
+    echo "=== kernel log (journalctl -k) ==="
+    journalctl -k --no-pager 2>/dev/null | grep -a 'avc:' | tail -40 || true
+    echo "=== unit journal ==="
+    journalctl -u "$UNIT" -b --no-pager 2>&1 | tail -30 || true
+  } > "$EVIDENCE_DIR/builder-permissive-start-failure-diag.txt"
+  fail "cannot start the builder unit even permissive (see builder-permissive-start-failure-diag.txt)"
 fi
 BUILD_PERM_OUT="$(attempt_build)" && BUILD_PERM_RC=0 || BUILD_PERM_RC=$?
 save_build_output "$EVIDENCE_DIR/build-attempt-permissive-output.txt" "$BUILD_PERM_OUT"
@@ -330,6 +395,11 @@ builder_avc_window "$HARVEST_START" > "$EVIDENCE_DIR/builder-avc-harvest.txt" ||
 avc_window "$HARVEST_START" > "$EVIDENCE_DIR/all-avc-harvest.txt" || true
 journalctl -u "$UNIT" --since "@$HARVEST_START" --no-pager > "$EVIDENCE_DIR/builder-journal-harvest.txt" 2>&1
 journalctl -u "$MAIN_UNIT" --since "@$HARVEST_START" --no-pager > "$EVIDENCE_DIR/daemon-journal-harvest.txt" 2>&1
+{
+  echo "=== builder trees after the permissive round ==="
+  ls -laZ /run/docker-helper-builder 2>&1 || true
+  ls -laZ /var/lib/docker-helper-builder 2>&1 || true
+} > "$EVIDENCE_DIR/builder-tree-labels-after-harvest.txt"
 cleanup_permissive
 HARVEST_LINES="$(grep -ac 'avc:' "$EVIDENCE_DIR/builder-avc-harvest.txt" 2>/dev/null || true)"
 [ "${HARVEST_LINES:-0}" -gt 0 ] || fail "permissive harvest is empty (kernel audit window capture broken)"
@@ -339,6 +409,7 @@ if [ -n "$FORBIDDEN_HITS" ]; then
   fail "the builder domain attempted a forbidden surface during the full permissive run (see forbidden-surface-hits.txt)"
 fi
 say "P2h permissive harvest OK ($HARVEST_LINES builder-domain AVC records, zero forbidden-surface attempts)"
+systemctl stop "$UNIT" || fail "systemctl stop $UNIT failed after the permissive harvest"
 
 # --- P2: enforcing bootstrap ----------------------------------------------------
 P2_ENFORCING_OK=false
@@ -398,32 +469,11 @@ P3_ENFORCING_OK=false
 P3_NOTE=""
 if [ "$P2_ENFORCING_OK" = true ]; then
   log "P3: enforcing daemon transport (real manager RPC roundtrip)"
-  if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ]; then
-    systemctl stop "$MAIN_UNIT"
+  if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" != "active" ]; then
+    systemctl start "$MAIN_UNIT" || fail "cannot start the main daemon for the transport round"
   fi
-  /usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config"
-  /usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >/dev/null \
-    || fail "config allowed-root add failed"
-  /usr/bin/docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null \
-    || fail "principal create failed"
-  /usr/bin/docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null \
-    || fail "principal allowed-root add failed"
-  CRED_OUT="$(/usr/bin/docker-helper credential create --name p5s1 "$PRINCIPAL")" \
-    || fail "credential create failed"
-  printf '%s\n' "$CRED_OUT" | awk '/^[A-Za-z0-9_-]+$/{print; exit}' > "$CRED_FILE"
-  chmod 0600 "$CRED_FILE"
-  [ -s "$CRED_FILE" ] || fail "could not extract the credential token (value never echoed)"
-  SESSION_JSON="$(/usr/bin/docker-helper session create --token-file "$CRED_FILE" "$WORKSPACE" --json)" \
-    || fail "session create failed (workspace MAC lifecycle must exercise the real daemon path)"
-  printf '%s\n' "$SESSION_JSON" | sed 's/"token": "[^"]*"/"token": "REDACTED"/; s/"session_token":[^,]*,//' \
-    > "$EVIDENCE_DIR/session-create.json"
-  WS_LABEL="$(stat -c '%C' "$WORKSPACE/buildctx/Dockerfile" 2>/dev/null || true)"
-  echo "workspace Dockerfile label: $WS_LABEL" > "$EVIDENCE_DIR/workspace-label.txt"
-  case "$WS_LABEL" in
-    *docker_helper_workspace_t*) ;;
-    *) log "WARN: workspace file label = '$WS_LABEL' (the session MAC relabel may be pending)" ;;
-  esac
   audit_window_start
+  AVC_P3_START="$AVC_EPOCH"
   BUILD_OUT="$(attempt_build)" && BUILD_RC=0 || BUILD_RC=$?
   save_build_output "$EVIDENCE_DIR/build-attempt-output.txt" "$BUILD_OUT"
   log "enforcing build attempt exit code: $BUILD_RC"
@@ -432,11 +482,11 @@ if [ "$P2_ENFORCING_OK" = true ]; then
   else
     P3_NOTE="builder_start stage not visible in the operation log stream"
   fi
-  journalctl -u "$UNIT" --since "@$AVC_EPOCH" --no-pager > "$EVIDENCE_DIR/builder-journal-p3.txt" 2>&1
+  journalctl -u "$UNIT" --since "@$AVC_P3_START" --no-pager > "$EVIDENCE_DIR/builder-journal-p3.txt" 2>&1
   grep -aq 'START ' "$EVIDENCE_DIR/builder-journal-p3.txt" \
     || { P3_ENFORCING_OK=false; P3_NOTE="manager journal shows no START handling (the daemon RPC did not arrive)"; }
-  builder_avc_window "$AVC_EPOCH" > "$EVIDENCE_DIR/builder-avc-p3-enforcing.txt" || true
-  avc_window "$AVC_EPOCH" > "$EVIDENCE_DIR/all-avc-p3.txt" || true
+  builder_avc_window "$AVC_P3_START" > "$EVIDENCE_DIR/builder-avc-p3-enforcing.txt" || true
+  avc_window "$AVC_P3_START" > "$EVIDENCE_DIR/all-avc-p3.txt" || true
   say "P3 enforcing transport roundtrip OK (manager handled the uid-0 START; op stream shows builder_start)"
 else
   log "P3 skipped (bootstrap not enforcing-green)"
@@ -500,6 +550,7 @@ assert_avc "$NEG_AVC" 'docker_helper_workspace_t'
 say "P5 enforcing negative proofs OK (config, daemon socket, docker.sock, workspace)"
 
 # --- P6: upgrade relabel proof ----------------------------------------------------
+if [ "$P2_ENFORCING_OK" = true ]; then
 log "P6: upgrade relabel (poisoned labels corrected by the RPM %posttrans lifecycle)"
 if [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" != "active" ]; then
   systemctl start "$UNIT" || fail "builder not startable before P6"
@@ -522,6 +573,10 @@ log "post-relabel build attempt exit code: $BUILD_P6_RC"
 grep -aq 'builder_start' "$EVIDENCE_DIR/build-attempt-post-relabel.txt" \
   || fail "the daemon lost manager transport after the upgrade relabel"
 say "P6 upgrade relabel OK (labels corrected by the existing %posttrans lifecycle; RPC roundtrip intact)"
+else
+  log "P6/P7 skipped (bootstrap not enforcing-green)"
+  exit 1
+fi
 
 # --- P7: tarball lifecycle --------------------------------------------------------
 log "P7: tarball lifecycle on the enforcing host (install-system.sh)"

@@ -631,10 +631,15 @@ allow init_t docker_helper_builder_t:process { transition siginh };
 # systemd (init_t) creates the unit's RuntimeDirectory and StateDirectory
 # with the file_contexts label and removes them on service stop (same
 # mechanism as the main unit's runtime dir; mirror of the proven init_t
-# docker_helper_runtime_t grants). Stop cleanup unlinks the directory
-# contents (the manager socket, pid files, op residue) before rmdir.
-allow init_t docker_helper_builder_runtime_t:dir { create rmdir write remove_name };
-allow init_t docker_helper_builder_state_t:dir { create rmdir write remove_name };
+# docker_helper_runtime_t grants). setattr: systemd chowns the exec
+# directories to the service identity (setup_exec_directory -> chmod_and_chown/
+# path_chown_recursive) — a metadata change the main unit (root service)
+# never exercised because chowning root-owned dirs to root is a no-op;
+# for the dedicated builder identity the chown is real and requires setattr.
+# Stop cleanup unlinks the directory contents (the manager socket, pid
+# files, op residue) before rmdir.
+allow init_t docker_helper_builder_runtime_t:dir { create rmdir write remove_name setattr };
+allow init_t docker_helper_builder_state_t:dir { create rmdir write remove_name setattr };
 allow init_t docker_helper_builder_runtime_t:file { unlink };
 allow init_t docker_helper_builder_runtime_t:lnk_file { unlink };
 allow init_t docker_helper_builder_runtime_t:sock_file { unlink };
