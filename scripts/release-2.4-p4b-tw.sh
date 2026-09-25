@@ -299,10 +299,16 @@ systemctl start "$MAIN_UNIT" || fail "cannot start the main daemon for the negat
 OLD_PID="$(systemctl show "$MAIN_UNIT" -p MainPID --value)"
 { [ -n "$OLD_PID" ] && [ "$OLD_PID" != "0" ]; } || fail "main daemon MainPID missing"
 
-# Poison the module load with a failing semodule shim earlier in the
-# scriptlet PATH (scriptlets inherit the invoking root PATH). The shim
-# passes the -l container-policy precondition through to the real semodule
-# and fails every install (-i) invocation.
+# Poison the module load with a failing semodule shim. rpm scriptlets do
+# NOT inherit the invoking root PATH: rpm sets the scriptlet PATH from the
+# _install_script_path macro (upstream default
+# /sbin:/bin:/usr/sbin:/usr/bin:/usr/X11R6/bin), so /usr/local/sbin is
+# unreachable from the %posttrans. The shim is reached through the
+# scriptlet-path define on THIS invocation only (the narrow fault injection:
+# the shipped scriptlet and the real semodule stay untouched; the recovery
+# invocation below uses the default path). The shim passes the -l
+# container-policy precondition through to the real semodule and fails
+# every install (-i) invocation.
 cat > /usr/local/sbin/semodule <<'POISON'
 #!/bin/sh
 [ "$1" = "-l" ] && exec /usr/sbin/semodule "$@"
@@ -311,7 +317,8 @@ exit 1
 POISON
 chmod 0755 /usr/local/sbin/semodule
 set +e
-POISON_OUT="$(rpm -Uvh --replacepkgs "$RPM" 2>&1)"
+POISON_OUT="$(rpm -Uvh --replacepkgs "$RPM" \
+  --define '_install_script_path /usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' 2>&1)"
 POISON_RC=$?
 set -e
 printf '%s\n' "$POISON_OUT" > "$EVIDENCE_DIR/failed-semodule-rpm.txt"
