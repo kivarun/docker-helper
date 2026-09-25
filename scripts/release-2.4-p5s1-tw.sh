@@ -18,9 +18,10 @@
 #   P3  enforcing daemon transport: the root daemon performs a real
 #       manager RPC roundtrip through a build attempt; the build is
 #       EXPECTED to fail at the documented child-process boundary — the
-#       gate is the roundtrip itself (the manager handled the uid-0 START
-#       and the daemon received a well-formed reply) plus the enforcing
-#       AVC capture;
+#       gate is the op-ID-matched pair (the daemon journal's builder_start
+#       stage AND the manager journal's START handling for one operation
+#       ID; an arbitrary docker_build_failed terminal state is never
+#       accepted as the RPC proof) plus the enforcing AVC capture;
 #   P4  permissive harvest: docker_helper_builder_t is made permissive
 #       (semanage permissive) and the same build attempt runs once more;
 #       every builder_t AVC of the window is harvested as evidence. The
@@ -35,11 +36,20 @@
 #       enforcing AVC (uid-0 transients so the DAC layer cannot
 #       short-circuit the MAC check);
 #   P6  upgrade relabel: poisoned builder labels are corrected by the RPM
-#       %posttrans deployment lifecycle (rpm -U --replacepkgs), the
-#       builder keeps serving, and a fresh RPC roundtrip works;
+#       %posttrans deployment lifecycle (rpm -U --replacepkgs), the builder
+#       keeps serving, and the transport is re-proven by the op-ID-matched
+#       pair (the daemon's builder_start stage AND the manager's START
+#       handling for one operation ID, both services' journals + the AVC
+#       window captured for the exact attempt window; an arbitrary
+#       docker_build_failed terminal state is never accepted as the RPC
+#       proof). The enforcing child-process failure (the known rootlesskit
+#       { lock } denial on the builder state file) is fixed as S2 evidence;
 #   P7  tarball lifecycle: install-system.sh on the enforcing host loads
 #       the module and labels the builder trees; a poisoned-label rerun
-#       proves the relabel path; final docker-helper selinux check.
+#       proves the relabel path; the manager process context, the
+#       runtime/state root labels, and the manager.sock label are asserted
+#       after the fresh install and the rerun; final docker-helper
+#       selinux check.
 #
 # Runs as root inside the guest. Files transferred by the host-side
 # orchestrator (scripts/release-2.4-p5s1-tw-vm.sh) into /tmp/p5s1/.
@@ -149,6 +159,16 @@ assert_avc() {
     printf '%s\n' "$window" | grep -aqF "$frag" \
       || fail "expected an enforcing builder-domain AVC naming '$frag'"
   done
+}
+
+# builder_start_op_id <daemon-journal-file> — the operation ID of the
+# daemon's builder_start stage line in the given journal window (empty when
+# absent). The stage diagnostic is a daemon-journal line: the streamed op
+# buffer carries child output only, so the transport proof reads the
+# journals, never the CLI capture.
+builder_start_op_id() {
+  grep -a '"stage":"builder_start"' "$1" \
+    | grep -aoP '"operation_id":"\Kop_[0-9a-f]{32}' | head -1 || true
 }
 
 # wait_for_builder_socket <seconds> — bounded wait for the manager socket
@@ -540,17 +560,28 @@ if [ "$P2_ENFORCING_OK" = true ]; then
   BUILD_OUT="$(attempt_build)" && BUILD_RC=0 || BUILD_RC=$?
   save_build_output "$EVIDENCE_DIR/build-attempt-output.txt" "$BUILD_OUT"
   log "enforcing build attempt exit code: $BUILD_RC"
-  if grep -aq 'builder_start' "$EVIDENCE_DIR/build-attempt-output.txt"; then
-    P3_ENFORCING_OK=true
-  else
-    P3_NOTE="builder_start stage not visible in the operation log stream"
-  fi
+  # Exact-window evidence: BOTH services' journals plus the enforcing AVC
+  # window.
+  journalctl -u "$MAIN_UNIT" --since "@$AVC_P3_START" --no-pager > "$EVIDENCE_DIR/daemon-journal-p3.txt" 2>&1
   journalctl -u "$UNIT" --since "@$AVC_P3_START" --no-pager > "$EVIDENCE_DIR/builder-journal-p3.txt" 2>&1
-  grep -aq 'START ' "$EVIDENCE_DIR/builder-journal-p3.txt" \
-    || { P3_ENFORCING_OK=false; P3_NOTE="manager journal shows no START handling (the daemon RPC did not arrive)"; }
+  # Transport proof: the daemon's builder_start stage and the manager's
+  # START handling must name the SAME operation ID; an arbitrary
+  # docker_build_failed terminal state is not an RPC proof.
+  P3_OP_ID="$(builder_start_op_id "$EVIDENCE_DIR/daemon-journal-p3.txt")"
+  if [ -z "$P3_OP_ID" ]; then
+    P3_NOTE="the daemon journal has no builder_start stage in the P3 window (the attempt failed before the manager RPC)"
+  elif ! grep -aqF "START $P3_OP_ID" "$EVIDENCE_DIR/builder-journal-p3.txt"; then
+    P3_NOTE="the manager journal shows no START handling for $P3_OP_ID (the daemon RPC did not arrive)"
+  else
+    P3_ENFORCING_OK=true
+  fi
   builder_avc_window "$AVC_P3_START" > "$EVIDENCE_DIR/builder-avc-p3-enforcing.txt" || true
   avc_window "$AVC_P3_START" > "$EVIDENCE_DIR/all-avc-p3.txt" || true
-  say "P3 enforcing transport roundtrip OK (manager handled the uid-0 START; op stream shows builder_start)"
+  if [ "$P3_ENFORCING_OK" = true ]; then
+    say "P3 enforcing transport roundtrip OK (daemon builder_start + manager START for $P3_OP_ID)"
+  else
+    log "P3 NOTE: $P3_NOTE"
+  fi
 else
   log "P3 skipped (bootstrap not enforcing-green)"
 fi
@@ -633,12 +664,51 @@ rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
 [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] \
   || fail "builder unit stopped across the upgrade"
 audit_window_start
+P6_START="$AVC_EPOCH"
 BUILD_P6_OUT="$(attempt_build)" && BUILD_P6_RC=0 || BUILD_P6_RC=$?
 save_build_output "$EVIDENCE_DIR/build-attempt-post-relabel.txt" "$BUILD_P6_OUT"
 log "post-relabel build attempt exit code: $BUILD_P6_RC"
-grep -aq 'builder_start' "$EVIDENCE_DIR/build-attempt-post-relabel.txt" \
-  || fail "the daemon lost manager transport after the upgrade relabel"
-say "P6 upgrade relabel OK (labels corrected by the existing %posttrans lifecycle; RPC roundtrip intact)"
+
+# Exact-window evidence for the relabel round: BOTH services' journals plus
+# the AVC window. The daemon's builder_start diagnostic is a daemon-journal
+# line (the streamed op buffer carries child output only), so the transport
+# proof reads the journals, not the CLI capture.
+journalctl -u "$MAIN_UNIT" --since "@$P6_START" --no-pager > "$EVIDENCE_DIR/daemon-journal-p6.txt" 2>&1
+journalctl -u "$UNIT" --since "@$P6_START" --no-pager > "$EVIDENCE_DIR/builder-journal-p6.txt" 2>&1
+builder_avc_window "$P6_START" > "$EVIDENCE_DIR/builder-avc-p6.txt" || true
+avc_window "$P6_START" > "$EVIDENCE_DIR/all-avc-p6.txt" || true
+
+# Transport proof: the daemon's builder_start stage and the manager's START
+# handling must name the SAME operation ID. An arbitrary docker_build_failed
+# terminal state is NOT an RPC proof — the op-ID pair must match.
+P6_OP_ID="$(builder_start_op_id "$EVIDENCE_DIR/daemon-journal-p6.txt")"
+if [ -z "$P6_OP_ID" ]; then
+  { echo "=== daemon journal (P6 window) ==="; tail -30 "$EVIDENCE_DIR/daemon-journal-p6.txt"; } >&2
+  fail "the daemon journal has no builder_start stage in the P6 window (the attempt failed before the manager RPC)"
+fi
+if ! grep -aqF "START $P6_OP_ID" "$EVIDENCE_DIR/builder-journal-p6.txt"; then
+  { echo "=== daemon journal (P6 window) ==="; tail -30 "$EVIDENCE_DIR/daemon-journal-p6.txt"
+    echo "=== builder journal (P6 window) ==="; tail -30 "$EVIDENCE_DIR/builder-journal-p6.txt"
+    echo "=== builder-domain AVC window ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"; } >&2
+  fail "the manager journal shows no START handling for $P6_OP_ID (the RPC never reached the manager — S1 transport defect)"
+fi
+say "P6 transport confirmed (daemon builder_start + manager START for $P6_OP_ID)"
+
+# Child-process failure fixation (expected at the enforcing S1 boundary; the
+# full child MAC is P5-S2): the known rootlesskit { lock } denial on the
+# builder state file must be captured in the exact window.
+CHILD_LOCK_AVC="$(grep -a '{ lock }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+  | grep -a 'comm="rootlesskit"' | grep -a 'docker_helper_builder_state_t' || true)"
+printf '%s\n' "$CHILD_LOCK_AVC" > "$EVIDENCE_DIR/child-boundary-avc-p6.txt"
+[ -n "$CHILD_LOCK_AVC" ] || {
+  { echo "=== builder-domain AVC window ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"
+    echo "=== builder journal (P6 window) ==="; tail -40 "$EVIDENCE_DIR/builder-journal-p6.txt"; } >&2
+  fail "the enforcing child-process denial (rootlesskit { lock } on docker_helper_builder_state_t) was not captured after the relabel"
+}
+grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
+  > "$EVIDENCE_DIR/child-lock-journal-p6.txt" 2>/dev/null || true
+[ "$BUILD_P6_RC" != 0 ] || fail "the post-relabel build unexpectedly succeeded despite the enforcing child-MAC boundary"
+say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID; child failure recorded for S2)"
 else
   log "P6/P7 skipped (bootstrap not enforcing-green)"
   exit 1
@@ -663,25 +733,66 @@ BUNDLE="$WORK_TAR/docker-helper-${VERSION}-linux-amd64"
   || fail "tarball install did not install the builder unit"
 semodule -l 2>/dev/null | grep -qw docker_helper \
   || fail "module not loaded by install-system.sh"
-[ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] \
-  || fail "builder service not active after tarball install"
+
+# Manager context + builder-owned path labels after the tarball fresh
+# install (the manager is pulled in by the main unit's Wants= start).
+wait_for_builder_socket 50 || fail "manager socket did not appear after the tarball install"
+TAR_MGR_PID="$(systemctl show "$UNIT" -p MainPID --value)"
+{ [ -n "$TAR_MGR_PID" ] && [ "$TAR_MGR_PID" != "0" ]; } \
+  || fail "builder unit MainPID missing after the tarball install"
+TAR_MGR_CTX="$(cat "/proc/$TAR_MGR_PID/attr/current" 2>/dev/null || true)"
+[ "$TAR_MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
+  || fail "manager process context after the tarball install = '$TAR_MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
+[ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+  || fail "builder runtime root label wrong after the tarball install: $(stat -c '%C' /run/docker-helper-builder)"
+[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+  || fail "manager.sock label wrong after the tarball install: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
 [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
-  || fail "builder state label wrong after the tarball install"
+  || fail "builder state label wrong after the tarball install: $(stat -c '%C' /var/lib/docker-helper-builder)"
 [ "$(stat -c '%C' /usr/bin/rootlesskit)" = "system_u:object_r:docker_helper_rootlesskit_exec_t:s0" ] \
-  || fail "rootlesskit label wrong after the tarball install"
-# Tarball upgrade/reinstall relabel: poison, reinstall, verify.
+  || fail "rootlesskit label wrong after the tarball install: $(stat -c '%C' /usr/bin/rootlesskit)"
+{
+  echo "fresh_manager_pid=$TAR_MGR_PID"
+  echo "fresh_manager_context=$TAR_MGR_CTX"
+  echo "fresh_runtime_root=$(stat -c '%C' /run/docker-helper-builder)"
+  echo "fresh_manager_sock=$(stat -c '%C' /run/docker-helper-builder/manager.sock)"
+  echo "fresh_state_root=$(stat -c '%C' /var/lib/docker-helper-builder)"
+  echo "fresh_rootlesskit=$(stat -c '%C' /usr/bin/rootlesskit)"
+} > "$EVIDENCE_DIR/tarball-manager-labels.txt"
+
+# Tarball upgrade/reinstall relabel: poison, reinstall, verify the restore.
 chcon -t var_run_t /var/lib/docker-helper-builder \
   || fail "cannot poison the builder state label (tarball rerun)"
+[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:var_run_t:s0" ] \
+  || fail "state label poisoning did not take effect (tarball rerun)"
 if ! ( cd "$BUNDLE" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT" ) \
     >"$EVIDENCE_DIR/install-system-rerun.log" 2>&1; then
   tail -30 "$EVIDENCE_DIR/install-system-rerun.log"
   fail "install-system.sh rerun (upgrade) failed"
 fi
 [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
-  || fail "the tarball relabel path did not correct the builder state label"
-/usr/bin/docker-helper selinux check >/dev/null 2>&1 \
-  || fail "docker-helper selinux check failed after the tarball install"
-say "P7 tarball lifecycle OK (fresh install + poisoned-label rerun relabel; selinux check valid)"
+  || fail "the tarball relabel path did not correct the builder state label: $(stat -c '%C' /var/lib/docker-helper-builder)"
+RERUN_MGR_PID="$(systemctl show "$UNIT" -p MainPID --value)"
+{ [ -n "$RERUN_MGR_PID" ] && [ "$RERUN_MGR_PID" != "0" ]; } \
+  || fail "builder unit MainPID missing after the tarball rerun"
+RERUN_MGR_CTX="$(cat "/proc/$RERUN_MGR_PID/attr/current" 2>/dev/null || true)"
+[ "$RERUN_MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
+  || fail "manager process context after the tarball rerun = '$RERUN_MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
+[ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+  || fail "builder runtime root label wrong after the tarball rerun: $(stat -c '%C' /run/docker-helper-builder)"
+[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+  || fail "manager.sock label wrong after the tarball rerun: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
+{
+  echo "rerun_manager_pid=$RERUN_MGR_PID"
+  echo "rerun_manager_context=$RERUN_MGR_CTX"
+  echo "rerun_runtime_root=$(stat -c '%C' /run/docker-helper-builder)"
+  echo "rerun_manager_sock=$(stat -c '%C' /run/docker-helper-builder/manager.sock)"
+  echo "rerun_state_root=$(stat -c '%C' /var/lib/docker-helper-builder)"
+} >> "$EVIDENCE_DIR/tarball-manager-labels.txt"
+
+/usr/bin/docker-helper selinux check >"$EVIDENCE_DIR/selinux-check.txt" 2>&1 \
+  || { tail -20 "$EVIDENCE_DIR/selinux-check.txt"; fail "docker-helper selinux check failed after the tarball install"; }
+say "P7 tarball lifecycle OK (fresh install + poisoned-label rerun relabel; manager context, tree/socket labels, selinux check proven)"
 
 # --- summary ----------------------------------------------------------------------
 {
@@ -690,6 +801,7 @@ say "P7 tarball lifecycle OK (fresh install + poisoned-label rerun relabel; seli
   echo "tarball=$(sha256sum "$TARBALL" | awk '{print $1}')"
   echo "p2_enforcing_bootstrap=$P2_ENFORCING_OK"
   echo "p3_enforcing_transport=$P3_ENFORCING_OK"
+  echo "p6_relabel_transport_op_id=$P6_OP_ID"
   echo "enforcing_build_exit=$BUILD_RC"
   echo "permissive_build_exit=$BUILD_PERM_RC"
   echo "post_relabel_build_exit=$BUILD_P6_RC"
