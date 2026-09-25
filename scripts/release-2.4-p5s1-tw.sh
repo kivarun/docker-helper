@@ -42,8 +42,12 @@
 #       handling for one operation ID, both services' journals + the AVC
 #       window captured for the exact attempt window; an arbitrary
 #       docker_build_failed terminal state is never accepted as the RPC
-#       proof). The enforcing child-process failure (the known rootlesskit
-#       { lock } denial on the builder state file) is fixed as S2 evidence;
+#       proof). The build attempt also proves the P5-S2 boundary state:
+#       the P5-S1 rootlesskit { lock } denial must be GONE (the
+#       evidence-proven grant ships in the candidate policy), and the
+#       attempt's outcome — a full success, or the NEXT enforcing stopping
+#       point with the full evidence bundle — is reported, never
+#       auto-granted from the harvest;
 #   P7  tarball lifecycle: install-system.sh on the enforcing host loads
 #       the module and labels the builder trees; a poisoned-label rerun
 #       proves the relabel path; the manager process context, the
@@ -694,21 +698,40 @@ if ! grep -aqF "START $P6_OP_ID" "$EVIDENCE_DIR/builder-journal-p6.txt"; then
 fi
 say "P6 transport confirmed (daemon builder_start + manager START for $P6_OP_ID)"
 
-# Child-process failure fixation (expected at the enforcing S1 boundary; the
-# full child MAC is P5-S2): the known rootlesskit { lock } denial on the
-# builder state file must be captured in the exact window.
-CHILD_LOCK_AVC="$(grep -a '{ lock }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
+# P5-S2 boundary state: the P5-S1 rootlesskit { lock } denial on the builder
+# state file must be GONE (the evidence-proven lock grant ships in the
+# candidate policy). Neither the enforcing AVC window nor the manager
+# journal may carry the old failure anymore.
+OLD_LOCK_AVC="$(grep -a '{ lock }' "$EVIDENCE_DIR/builder-avc-p6.txt" \
   | grep -a 'comm="rootlesskit"' | grep -a 'docker_helper_builder_state_t' || true)"
-printf '%s\n' "$CHILD_LOCK_AVC" > "$EVIDENCE_DIR/child-boundary-avc-p6.txt"
-[ -n "$CHILD_LOCK_AVC" ] || {
-  { echo "=== builder-domain AVC window ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"
-    echo "=== builder journal (P6 window) ==="; tail -40 "$EVIDENCE_DIR/builder-journal-p6.txt"; } >&2
-  fail "the enforcing child-process denial (rootlesskit { lock } on docker_helper_builder_state_t) was not captured after the relabel"
-}
-grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
-  > "$EVIDENCE_DIR/child-lock-journal-p6.txt" 2>/dev/null || true
-[ "$BUILD_P6_RC" != 0 ] || fail "the post-relabel build unexpectedly succeeded despite the enforcing child-MAC boundary"
-say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID; child failure recorded for S2)"
+if [ -n "$OLD_LOCK_AVC" ]; then
+  printf '%s\n' "$OLD_LOCK_AVC" > "$EVIDENCE_DIR/child-boundary-avc-p6.txt"
+  fail "the P5-S1 rootlesskit { lock } denial on docker_helper_builder_state_t still occurs (the evidence-proven grant did not take effect)"
+fi
+if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
+  grep -aF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt" \
+    > "$EVIDENCE_DIR/child-lock-journal-p6.txt" 2>/dev/null || true
+  fail "the child still reports the rootlesskit state-lock failure (see child-lock-journal-p6.txt)"
+fi
+# Child output evidence: the manager journals the child's own output tail
+# when an instance exits unexpectedly.
+grep -aF -A 30 'child output tail' "$EVIDENCE_DIR/builder-journal-p6.txt" \
+  > "$EVIDENCE_DIR/child-output-p6.txt" 2>/dev/null || true
+
+# The attempt's outcome is the S2 boundary state: a full success ends the
+# child-boundary work; a failure is the NEXT enforcing stopping point —
+# recorded with the full evidence bundle and reported, never auto-granted
+# from the harvest.
+if [ "$BUILD_P6_RC" = 0 ]; then
+  say "P6 build SUCCEEDED after the relabel: the P5-S1 { lock } boundary was the last enforcing denial on the attempt path"
+else
+  { echo "=== builder-domain AVC window (P6) ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"
+    echo "=== builder journal (P6 window) ==="; tail -40 "$EVIDENCE_DIR/builder-journal-p6.txt"
+    echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
+    echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"; } >&2
+  fail "the build advanced past the P5-S1 { lock } boundary and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt)"
+fi
+say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
   log "P6/P7 skipped (bootstrap not enforcing-green)"
   exit 1
