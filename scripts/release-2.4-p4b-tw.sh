@@ -374,7 +374,20 @@ say "P3 asserts OK"
 log "P4: tarball install via the bundled install-system.sh (SELinux host)"
 rpm -e docker-helper || fail "rpm -e docker-helper (before the tarball phase) failed"
 [ ! -e /usr/lib/systemd/system/docker-helper-builder.service ] || fail "builder unit survived rpm -e"
-[ ! -d "$PAYLOAD_DIR" ] || fail "payload dir survived rpm -e"
+# rpm removes the owned payload FILES; the parent directories carry no rpm
+# dir entries (nfpm lists files only), so an EMPTY leftover dir is rpm
+# bookkeeping, not package residue. The residual-state proof is the absence
+# of every payload file plus an empty leftover dir; any non-empty leftover
+# is real residue and fails with evidence.
+[ ! -e "$PAYLOAD_DIR/buildkitd" ] || fail "payload buildkitd survived rpm -e"
+[ ! -e "$PAYLOAD_DIR/buildctl" ] || fail "payload buildctl survived rpm -e"
+[ ! -e "$PAYLOAD_DIR/buildkit-runc" ] || fail "payload buildkit-runc survived rpm -e"
+[ ! -e "$DOC_DIR/LICENSE" ] || fail "payload LICENSE survived rpm -e"
+[ ! -e "$DOC_DIR/MANIFEST" ] || fail "payload MANIFEST survived rpm -e"
+if [ -d "$PAYLOAD_DIR" ] && [ -n "$(ls -A "$PAYLOAD_DIR" 2>/dev/null)" ]; then
+  ls -la "$PAYLOAD_DIR" > "$EVIDENCE_DIR/payload-dir-residue.txt"
+  fail "payload dir has unexpected residue after rpm -e (see payload-dir-residue.txt)"
+fi
 assert_provisioned yes   # the identity is KEPT on package removal (recorded choice)
 if semodule -l 2>/dev/null | grep -qw docker_helper; then
   fail "SELinux docker_helper module must be removed by the RPM preremove"
