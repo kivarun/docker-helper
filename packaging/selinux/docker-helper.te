@@ -677,13 +677,15 @@ allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { getattr sear
 allow docker_helper_builder_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };
 allow docker_helper_builder_t docker_helper_builder_runtime_t:file { create read write open getattr setattr unlink };
 
-# State root and per-op state dirs: startup purge scan + removal, the
-# START-time rootlesskit-state/root directory creation, and (P5-S2, first
-# evidence-proven child-process grant) rootlesskit's flock of its per-op
-# state lock file. Live enforcing AVC evidence from the P5-S1 Tumbleweed
-# proof (P3 run 36145749182, post-relabel P6 run 36168484020, full proof
-# run 36175618802 — every enforcing build attempt failed at exactly this
-# denial, and the recovery never started because of it):
+# State root and per-op state dirs: startup purge scan + removal, and the
+# START-time rootlesskit-state/root directory creation.
+allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };
+
+# (P5-S2, first evidence-proven child-process grant): rootlesskit's flock of
+# its per-op state lock file. Live enforcing AVC evidence from the P5-S1
+# Tumbleweed proof (P3 run 36145749182, post-relabel P6 run 36168484020,
+# full proof run 36175618802 — every enforcing build attempt failed at
+# exactly this denial, and the recovery never started because of it):
 #   avc:  denied  { lock } for  comm="rootlesskit"
 #   path="/var/lib/docker-helper-builder/ops/op_9a78d76ad72342a01bdf210933a33ba8/rootlesskit-state/lock"
 #   scontext=system_u:system_r:docker_helper_builder_t:s0

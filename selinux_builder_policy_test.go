@@ -169,19 +169,22 @@ func TestSELinuxPolicyBuilderNoCapabilities(t *testing.T) {
 	}
 }
 
-// TestSELinuxPolicyBuilderStateFileLockGrant verifies the first
-// evidence-proven child-process grant on the builder state tree: the
-// rootlesskit state-lock flock permission, added to the exact existing
-// state-file rule and nothing broader. Live enforcing AVC evidence from the
-// P5-S1 Tumbleweed proof (runs 36145749182, 36168484020, 36175618802):
-// every enforcing build attempt failed at
-// `denied { lock } ... tcontext=system_u:object_r:docker_helper_builder_state_t:s0
-// tclass=file` for comm="rootlesskit".
-func TestSELinuxPolicyBuilderStateFileLockGrant(t *testing.T) {
+// TestSELinuxPolicyBuilderStateRules verifies the builder state-tree grants
+// stay exact: the dir rule unchanged from the P5-S1 proof (the startup
+// purge's tree traversal + the per-op dir lifecycle), and the file rule
+// carrying exactly the P5-S1 evidence-proven lock permission (the rootlesskit
+// state flock; live enforcing AVC evidence from the P5-S1 Tumbleweed proof,
+// runs 36145749182, 36168484020, 36175618802: every enforcing build attempt
+// failed at that denial). Nothing broader may appear.
+func TestSELinuxPolicyBuilderStateRules(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
-	want := "allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink lock };"
-	if !strings.Contains(policy, want) {
-		t.Errorf("the builder state-file rule must carry exactly the P5-S1 evidence-proven lock permission: %q", want)
+	for _, want := range []string{
+		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };",
+		"allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink lock };",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the builder state-tree grant must be exact: %q", want)
+		}
 	}
 }
 
