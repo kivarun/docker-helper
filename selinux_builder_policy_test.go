@@ -169,6 +169,22 @@ func TestSELinuxPolicyBuilderNoCapabilities(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyBuilderStateFileLockGrant verifies the first
+// evidence-proven child-process grant on the builder state tree: the
+// rootlesskit state-lock flock permission, added to the exact existing
+// state-file rule and nothing broader. Live enforcing AVC evidence from the
+// P5-S1 Tumbleweed proof (runs 36145749182, 36168484020, 36175618802):
+// every enforcing build attempt failed at
+// `denied { lock } ... tcontext=system_u:object_r:docker_helper_builder_state_t:s0
+// tclass=file` for comm="rootlesskit".
+func TestSELinuxPolicyBuilderStateFileLockGrant(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	want := "allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink lock };"
+	if !strings.Contains(policy, want) {
+		t.Errorf("the builder state-file rule must carry exactly the P5-S1 evidence-proven lock permission: %q", want)
+	}
+}
+
 // TestSELinuxFCBuilderTrees verifies the .fc labels the builder-owned trees
 // with the dedicated types and keeps the shared binary on docker_helper_exec_t
 // (the unit's SELinuxContext= binding never needs a second binary label).
