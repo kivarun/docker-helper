@@ -577,8 +577,12 @@ fi
 printf '%s\n' "$(cat /tmp/p5s1-n2.out)" > "$EVIDENCE_DIR/negative-daemon-socket.txt"
 
 # N3: docker.sock itself must be MAC-denied (a direct endpoint connect, the
-# same syscall class the daemon legitimately uses).
-if run_as_builder_domain n3 root /usr/bin/docker-helper pull alpine:3.24 \
+# same syscall class the daemon legitimately uses). The fake session token
+# clears the CLI's client-side token check so the dial really happens.
+if systemd-run --wait --quiet --unit="p5s1-n3" \
+    --property=SELinuxContext=system_u:system_r:docker_helper_builder_t:s0 \
+    --setenv=DOCKER_HELPER_SESSION_TOKEN=p5s1-fake-token \
+    /usr/bin/docker-helper pull alpine:3.24 \
     --endpoint unix:///run/docker.sock >/tmp/p5s1-n3.out 2>&1; then
   fail "the builder domain unexpectedly connected to /run/docker.sock"
 fi
@@ -602,8 +606,11 @@ printf '%s\n' "$NEG_AVC" | grep -aqE 'docker_helper_runtime_t|docker_helper_t' \
 # N3: the docker.sock denial names the Docker socket type or the dockerd domain.
 printf '%s\n' "$NEG_AVC" | grep -aqE 'container_var_run_t|container_runtime_t' \
   || fail "expected an enforcing builder-domain AVC naming docker.sock (N3)"
-# N4: the workspace read denial names the workspace type.
-assert_avc "$NEG_AVC" 'docker_helper_workspace_t'
+# N4: the workspace read denial names the workspace type; a /home workspace
+# keeps the host user_home_t label by design (the .te model: the daemon reads
+# /home workspaces through user_home_type grants), a relabeled non-home
+# workspace carries docker_helper_workspace_t.
+assert_avc "$NEG_AVC" 'docker_helper_workspace_t|user_home'
 say "P5 enforcing negative proofs OK (config, daemon socket, docker.sock, workspace)"
 
 # --- P6: upgrade relabel proof ----------------------------------------------------
