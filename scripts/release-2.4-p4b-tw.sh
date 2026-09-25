@@ -209,6 +209,26 @@ assert_selinux_module_loaded() {
     || fail "SELinux docker_helper module not loaded after the RPM %post scriptlet"
 }
 
+# assert_canonical_third_party_labels <phase> — the third-party binaries the
+# deployment lifecycle relabels at install (the rootlesskit launch vehicle,
+# the bindfs projection dependency) must carry exactly the label the CURRENT
+# fcontext policy resolves as canonical for their paths (matchpathcon). With
+# the module loaded the canonical type is the docker_helper exec type; after
+# a verified module removal it is whatever the distro policy says for the
+# path — the assert is self-consistent and never pinned to a specific type.
+assert_canonical_third_party_labels() {
+  local phase="$1" bin_path actual canonical
+  for bin_path in /usr/bin/rootlesskit /usr/bin/bindfs; do
+    [ -e "$bin_path" ] || fail "$phase: third-party binary missing: $bin_path"
+    actual="$(stat -c '%C' "$bin_path" 2>&1)" || fail "$phase: cannot stat $bin_path: $actual"
+    canonical="$(matchpathcon "$bin_path" 2>/dev/null | awk '{print $2}')"
+    [ -n "$canonical" ] || fail "$phase: matchpathcon resolved no canonical label for $bin_path"
+    [ "$actual" = "$canonical" ] \
+      || fail "$phase: $bin_path label '$actual' != canonical '$canonical' (uninstall lifecycle must restore third-party binary labels)"
+    echo "$phase $bin_path: $actual" >> "$EVIDENCE_DIR/third-party-labels-restore.txt"
+  done
+}
+
 # --- P1: RPM fresh install ----------------------------------------------------
 
 log "P1: RPM fresh install via zypper (real dependency resolution)"
@@ -392,6 +412,10 @@ assert_provisioned yes   # the identity is KEPT on package removal (recorded cho
 if semodule -l 2>/dev/null | grep -qw docker_helper; then
   fail "SELinux docker_helper module must be removed by the RPM preremove"
 fi
+# After the verified module removal the erase lifecycle must have restored
+# the third-party binaries' canonical labels (the relabel-then-restore
+# contract).
+assert_canonical_third_party_labels "rpm-e"
 
 mkdir -p "$ALLOWED_ROOT"
 WORK_TAR="$GUEST_FILES/bundle"
@@ -428,6 +452,9 @@ say "P4 tarball asserts OK"
 [ ! -d /run/docker-helper-builder ] || fail "builder runtime dir still present after purge"
 [ ! -d /var/lib/docker-helper-builder ] || fail "builder state dir still present after purge"
 assert_provisioned no
+# The tarball uninstaller must restore the third-party binary labels the same
+# way the RPM erase does.
+assert_canonical_third_party_labels "tarball-purge"
 say "P4 purge asserts OK"
 
 # --- P5: upgrade from the pinned released v2.3.0 baseline ----------------------
@@ -456,6 +483,11 @@ assert_payload
 assert_builder_unit_enabled
 assert_main_unit_coupling
 assert_selinux_module_loaded
+# The upgrade must NOT trigger label cleanup: with the module loaded the
+# canonical labels for the third-party binaries are the docker_helper exec
+# types, and the %posttrans relabel reapplies them (verified by the same
+# self-consistent assert).
+assert_canonical_third_party_labels "p5-upgrade"
 [ ! -e /etc/systemd/system/docker-helper-builder.service ] || fail "RPM upgrade must not install into /etc/systemd/system"
 say "P5 asserts OK"
 
