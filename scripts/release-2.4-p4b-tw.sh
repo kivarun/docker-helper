@@ -352,11 +352,17 @@ set +e
 POISON_OUT="$(rpm -Uvh --replacepkgs "$RPM" 2>&1)"
 POISON_RC=$?
 set -e
-[ "$POISON_RC" -ne 0 ] || fail "rpm -U must fail when provisioning fails (poisoned builder shell)"
+# rpm reports a failed %post scriptlet and still completes the transaction
+# (observed on Tumbleweed: the scriptlet failure is a logged report, the
+# exit code stays 0). The fail-closed proof is the provisioner's own
+# refusal plus the scriptlet-failure report, never the transaction exit
+# code.
 printf '%s\n' "$POISON_OUT" | grep -q "provision-builder: FAILED" \
   || fail "the provisioning failure must surface (provision-builder: FAILED)"
+printf '%s\n' "$POISON_OUT" | grep -q "scriptlet failed" \
+  || fail "rpm must report the failing %post scriptlet"
 evidence "failed-provisioning-rpm.txt" "$POISON_OUT"
-say "provisioner failed closed as required (rpm exit $POISON_RC)"
+say "provisioner failed closed as required (scriptlet failure reported; rpm exit $POISON_RC)"
 
 usermod -s /usr/sbin/nologin "$BUILDER_USER" || fail "cannot repair the builder shell"
 rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "recovery rpm -U --replacepkgs failed"
