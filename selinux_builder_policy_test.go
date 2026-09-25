@@ -270,6 +270,41 @@ func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicySlirp4netnsExecType verifies the P5-S2 step-3 exec type:
+// the type and its exact fcontext rule exist, execution is granted ONLY to
+// the rootlesskit child domain (never the manager or the daemon, never a
+// generic bin_t grant), and no other allow rule names the type.
+func TestSELinuxPolicySlirp4netnsExecType(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	fc := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.fc")
+	if !strings.Contains(policy, "type docker_helper_slirp4netns_exec_t, file_type;") {
+		t.Error("SELinux policy must declare docker_helper_slirp4netns_exec_t")
+	}
+	if !strings.Contains(fc, "/usr/bin/slirp4netns                --  system_u:object_r:docker_helper_slirp4netns_exec_t:s0") {
+		t.Error("file contexts must label /usr/bin/slirp4netns with the dedicated exec type")
+	}
+	want := "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans };"
+	if !strings.Contains(policy, want) {
+		t.Errorf("the slirp4netns execution grant must be exactly the child-domain execute pair: %q", want)
+	}
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "allow ") || !strings.Contains(trimmed, "docker_helper_slirp4netns_exec_t:") {
+			continue
+		}
+		if trimmed != want {
+			t.Errorf("no other domain may receive a slirp4netns execution grant: %s", trimmed)
+		}
+	}
+	// The manager must not gain the right to execute slirp4netns.
+	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_slirp4netns_exec_t") {
+		t.Error("the manager domain must not be able to execute slirp4netns")
+	}
+}
+
 // TestSELinuxPolicyRootlesskitIsolation verifies the rootlesskit child
 // domain receives no grant toward any forbidden surface (the same set the
 // builder domain is denied), carries no capability grants, and — for both
@@ -367,11 +402,13 @@ func TestDeploymentLifecycleIsOnlyBuilderRelabelOwner(t *testing.T) {
 			"restorecon -R /run/docker-helper-builder",
 			"restorecon -R /var/lib/docker-helper-builder",
 			"restorecon /usr/bin/rootlesskit",
+			"restorecon /usr/bin/slirp4netns",
 		},
 		"packaging/install-system.sh": {
 			"\"$RESTORECON\" -R /run/docker-helper-builder",
 			"\"$RESTORECON\" -R /var/lib/docker-helper-builder",
 			"\"$RESTORECON\" /usr/bin/rootlesskit",
+			"\"$RESTORECON\" /usr/bin/slirp4netns",
 		},
 	}
 	for path, wants := range owners {
@@ -392,11 +429,13 @@ func TestDeploymentLifecycleIsOnlyBuilderRelabelOwner(t *testing.T) {
 		"restorecon /var/lib/docker-helper-builder",
 		"restorecon -R /var/lib/docker-helper-builder",
 		"restorecon /usr/bin/rootlesskit",
+		"restorecon /usr/bin/slirp4netns",
 		"RESTORECON\" /run/docker-helper-builder",
 		"RESTORECON\" -R /run/docker-helper-builder",
 		"RESTORECON\" /var/lib/docker-helper-builder",
 		"RESTORECON\" -R /var/lib/docker-helper-builder",
 		"RESTORECON\" /usr/bin/rootlesskit",
+		"RESTORECON\" /usr/bin/slirp4netns",
 	}
 	// The erase-direction cleanup is a different, documented operation: the
 	// RPM preremove restores the third-party binaries' canonical labels
