@@ -102,17 +102,25 @@ audit_window_start() {
 
 # avc_window <since-epoch> — all kernel AVC lines of the window. When auditd
 # runs, the audit log is the authoritative source; journalctl -k is the
-# fallback (never both).
+# fallback (never both). The auditd userspace log is flushed asynchronously
+# and can lag (known UAT property), so poll briefly for the first record.
 avc_window() {
   local since="$1"
-  if systemctl is-active --quiet auditd 2>/dev/null; then
-    local date
-    date="$(date -d "@$since" '+%m/%d/%Y %H:%M:%S' 2>/dev/null || true)"
-    ausearch -m AVC,USER_AVC -ts "$date" 2>/dev/null || true
-    return
-  fi
-  journalctl -k --since "@$since" --no-pager 2>/dev/null \
-    | grep -a 'avc:' || true
+  local out="" tries=10
+  local date
+  date="$(date -d "@$since" '+%m/%d/%Y %H:%M:%S' 2>/dev/null || true)"
+  while [ "$tries" -gt 0 ]; do
+    if systemctl is-active --quiet auditd 2>/dev/null; then
+      out="$(ausearch -m AVC,USER_AVC -ts "$date" 2>/dev/null || true)"
+    else
+      out="$(journalctl -k --since "@$since" --no-pager 2>/dev/null \
+        | grep -a 'avc:' || true)"
+    fi
+    [ -n "$out" ] && break
+    sleep 1
+    tries=$((tries - 1))
+  done
+  printf '%s\n' "$out"
 }
 
 # builder_avc_window <since-epoch> — AVC lines whose source context is the
@@ -154,24 +162,27 @@ wait_for_builder_socket() {
   return 1
 }
 
-# run_as_builder_domain root|uid <cmd...> — systemd-run a transient unit bound
-# to the builder domain through the SAME SELinuxContext= binding the real unit
-# uses. Nothing else in the policy may transition into
+# run_as_builder_domain <name> <root|uid> <cmd...> — systemd-run a transient
+# unit bound to the builder domain through the SAME SELinuxContext= binding
+# the real unit uses. Nothing else in the policy may transition into
 # docker_helper_builder_t.
 run_as_builder_domain() {
-  local mode="$1"; shift
-  local name
-  name="p5s1-t-$(date +%s%N)"
+  local name="$1" mode="$2"; shift 2
   if [ "$mode" = "uid" ]; then
-    systemd-run --wait --quiet --unit="$name" \
+    systemd-run --wait --quiet --unit="p5s1-$name" \
       --property=SELinuxContext=system_u:system_r:docker_helper_builder_t:s0 \
       --uid="$BUILDER_USER" --gid="$BUILDER_USER" \
       "$@"
   else
-    systemd-run --wait --quiet --unit="$name" \
+    systemd-run --wait --quiet --unit="p5s1-$name" \
       --property=SELinuxContext=system_u:system_r:docker_helper_builder_t:s0 \
       "$@"
   fi
+}
+
+# transient_journal <name> — the transient unit's journal tail (diagnostics).
+transient_journal() {
+  journalctl -u "p5s1-$1" --no-pager 2>&1 | tail -20 || true
 }
 
 # attempt_build — one build attempt through the real daemon + session; prints
@@ -307,13 +318,16 @@ reset_failed_builder() {
 log "P2a: audit pipeline sanity probe"
 audit_window_start
 SANITY_START="$AVC_EPOCH"
-if run_as_builder_domain root /usr/bin/docker-helper session list \
+if run_as_builder_domain sanity root /usr/bin/docker-helper session list \
     --token-file /etc/shadow >/tmp/p5s1-sanity.out 2>&1; then
   fail "the builder domain unexpectedly read /etc/shadow (sanity probe inverted)"
 fi
 SANITY_AVC="$(avc_window "$SANITY_START")"
 printf '%s\n' "$SANITY_AVC" > "$EVIDENCE_DIR/sanity-avc.txt"
-assert_avc "$SANITY_AVC" 'shadow_t'
+if ! printf '%s\n' "$SANITY_AVC" | grep -aqF 'shadow_t'; then
+  transient_journal sanity > "$EVIDENCE_DIR/sanity-transient-journal.txt"
+  fail "the audit source shows no shadow_t AVC for the sanity probe (see sanity-transient-journal.txt)"
+fi
 say "P2a audit pipeline OK (deliberate shadow_t denial visible in the audit source)"
 
 # (b) The main unit is the proven enforcing path; starting it first establishes
@@ -500,7 +514,7 @@ NEG_START="$AVC_EPOCH"
 # N1: helper config + admin token (uid-0 transient so DAC cannot short-circuit
 # the MAC check). The token file sits under the config tree, so the config-dir
 # traversal denial is the first MAC wall the attempt hits.
-if run_as_builder_domain root /usr/bin/docker-helper config show >/tmp/p5s1-n1.out 2>&1; then
+if run_as_builder_domain n1 root /usr/bin/docker-helper config show >/tmp/p5s1-n1.out 2>&1; then
   fail "a process in the builder domain unexpectedly read the helper config/admin token"
 fi
 printf '%s\n' "$(cat /tmp/p5s1-n1.out)" > "$EVIDENCE_DIR/negative-config-show.txt"
@@ -508,7 +522,7 @@ printf '%s\n' "$(cat /tmp/p5s1-n1.out)" > "$EVIDENCE_DIR/negative-config-show.tx
 # N2: the daemon's helper socket must be unreachable from the builder domain
 # (a fake session token via --setenv so the CLI's client-side token check
 # passes and the connect attempt really happens).
-if systemd-run --wait --quiet --unit="p5s1-n2-$(date +%s%N)" \
+if systemd-run --wait --quiet --unit="p5s1-n2" \
     --property=SELinuxContext=system_u:system_r:docker_helper_builder_t:s0 \
     --setenv=DOCKER_HELPER_SESSION_TOKEN=p5s1-fake-token \
     /usr/bin/docker-helper pull alpine:3.24 \
@@ -519,7 +533,7 @@ printf '%s\n' "$(cat /tmp/p5s1-n2.out)" > "$EVIDENCE_DIR/negative-daemon-socket.
 
 # N3: docker.sock itself must be MAC-denied (a direct endpoint connect, the
 # same syscall class the daemon legitimately uses).
-if run_as_builder_domain root /usr/bin/docker-helper pull alpine:3.24 \
+if run_as_builder_domain n3 root /usr/bin/docker-helper pull alpine:3.24 \
     --endpoint unix:///run/docker.sock >/tmp/p5s1-n3.out 2>&1; then
   fail "the builder domain unexpectedly connected to /run/docker.sock"
 fi
@@ -527,7 +541,7 @@ printf '%s\n' "$(cat /tmp/p5s1-n3.out)" > "$EVIDENCE_DIR/negative-docker-sock.tx
 
 # N4: a Session-workspace file read must be MAC-denied (the token-file read
 # targets a workspace inode; DAC passes for the workspace files).
-if run_as_builder_domain root /usr/bin/docker-helper session list \
+if run_as_builder_domain n4 root /usr/bin/docker-helper session list \
     --token-file "$WORKSPACE/buildctx/Dockerfile" >/tmp/p5s1-n4.out 2>&1; then
   fail "the builder domain unexpectedly read the Session workspace"
 fi
