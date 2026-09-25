@@ -14,6 +14,10 @@
 #
 # Flags:
 #   --yes            Non-interactive: accept all defaults, init, enable+start.
+#                    On a reinstall this restores exactly the services that
+#                    were active before the install (both services are
+#                    stopped first — they exec the same binary — and a
+#                    previously-inactive main service is left stopped).
 #   --allowed-root P Required with --yes when /etc/docker-helper/config.json
 #                    is absent. Sets the initial allowed_root for init.
 #
@@ -71,6 +75,8 @@ interactive=true
 allowed_root=""
 script_dir=""
 service_was_active=false
+builder_service_was_active=false
+was_installed=false
 
 # --- Helpers ---
 
@@ -380,8 +386,34 @@ check_allowed_root() {
 
 # --- Service check ---
 
+# detect_existing_install records whether a previous installation exists
+# (the binary or the main unit file is present). It only gates the
+# post-install start behavior: a reinstall restores the previously-active
+# services and never starts a previously-inactive main service, while a
+# fresh install keeps the existing enable+start setup contract.
+detect_existing_install() {
+	if [[ -e "$BINARY_DEST" || -e "$UNIT_DEST" ]]; then
+		was_installed=true
+	fi
+}
+
+# check_active_service is the preflight owner of the service-activity
+# contract. It records the initial activity of BOTH services (the main
+# daemon and the builder backend) before anything is stopped, keeps the
+# single interactive confirmation, then stops the active services and
+# CONFIRMS both are down BEFORE any file mutation: both services exec the
+# same /usr/bin/docker-helper binary, so a still-running service would make
+# the binary replacement fail with "Text file busy". A failed stop aborts
+# the installation before provisioning or any destination file is touched.
 check_active_service() {
-	if ! "$SYSTEMCTL" is-active --quiet "$UNIT_NAME" 2>/dev/null; then
+	if "$SYSTEMCTL" is-active --quiet "$UNIT_NAME" 2>/dev/null; then
+		service_was_active=true
+	fi
+	if "$SYSTEMCTL" is-active --quiet "$BUILDER_UNIT_NAME" 2>/dev/null; then
+		builder_service_was_active=true
+	fi
+
+	if ! $service_was_active && ! $builder_service_was_active; then
 		return
 	fi
 
@@ -394,7 +426,13 @@ check_active_service() {
 	new_version="$("$script_dir/$BINARY_NAME" version 2>/dev/null || true)"
 
 	info ""
-	info "$UNIT_NAME is currently active."
+	info "The docker-helper services are currently active:"
+	if $service_was_active; then
+		info "  $UNIT_NAME"
+	fi
+	if $builder_service_was_active; then
+		info "  $BUILDER_UNIT_NAME"
+	fi
 	info ""
 
 	if [[ -n "$current_version" && -n "$new_version" ]]; then
@@ -409,23 +447,41 @@ check_active_service() {
 	fi
 	info ""
 
-	if ! ask "Stop the service and continue installation"; then
+	if ! ask "Stop the services and continue installation"; then
 		info "Aborting without changes."
 		info ""
-		info "To reinstall later, stop the service first:"
-		info "  systemctl stop $UNIT_NAME"
+		info "To reinstall later, stop the services first:"
+		info "  systemctl stop $UNIT_NAME $BUILDER_UNIT_NAME"
 		info ""
 		exit 0
 	fi
 
-	info "Stopping $UNIT_NAME"
-	if ! "$SYSTEMCTL" stop "$UNIT_NAME" 2>/dev/null; then
-		error "Failed to stop $UNIT_NAME"
-		error "Aborting without changes. Stop the service manually and retry."
-		exit 1
+	if $service_was_active; then
+		info "Stopping $UNIT_NAME"
+		if ! "$SYSTEMCTL" stop "$UNIT_NAME" 2>/dev/null; then
+			error "Failed to stop $UNIT_NAME"
+			error "Aborting without changes. Stop the service manually and retry."
+			exit 1
+		fi
+		if "$SYSTEMCTL" is-active --quiet "$UNIT_NAME" 2>/dev/null; then
+			error "$UNIT_NAME is still active after the stop attempt"
+			error "Aborting without changes. Stop the service manually and retry."
+			exit 1
+		fi
 	fi
-
-	service_was_active=true
+	if $builder_service_was_active; then
+		info "Stopping $BUILDER_UNIT_NAME"
+		if ! "$SYSTEMCTL" stop "$BUILDER_UNIT_NAME" 2>/dev/null; then
+			error "Failed to stop $BUILDER_UNIT_NAME"
+			error "Aborting without changes. Stop the service manually and retry."
+			exit 1
+		fi
+		if "$SYSTEMCTL" is-active --quiet "$BUILDER_UNIT_NAME" 2>/dev/null; then
+			error "$BUILDER_UNIT_NAME is still active after the stop attempt"
+			error "Aborting without changes. Stop the service manually and retry."
+			exit 1
+		fi
+	fi
 }
 
 # --- Installation steps ---
@@ -655,6 +711,23 @@ start_service() {
 	fi
 }
 
+# start_builder_service restores the builder backend when it was active
+# before the install. The main unit's Wants= coupling already pulls it in
+# when the main daemon is started, so this is a no-op then; it is the
+# restoration for the only-builder-active case, where no main start can be
+# relied on (and a previously-inactive main service must stay down).
+start_builder_service() {
+	info "Starting $BUILDER_UNIT_NAME"
+	if ! "$SYSTEMCTL" start "$BUILDER_UNIT_NAME"; then
+		error "Failed to start $BUILDER_UNIT_NAME"
+		info ""
+		info "Check status with:"
+		info "  systemctl status $BUILDER_UNIT_NAME"
+		info "  journalctl -u $BUILDER_UNIT_NAME"
+		exit 1
+	fi
+}
+
 # --- Main ---
 
 main() {
@@ -670,6 +743,7 @@ main() {
 	check_selected_mac_tools
 	check_docker
 	check_allowed_root
+	detect_existing_install
 	check_active_service
 
 	provision_builder
@@ -692,18 +766,36 @@ main() {
 	run_init
 	reload_systemd
 
+	# Restoration contract: restore exactly the services that were active
+	# before the installation. A previously-inactive main service is not
+	# started on a reinstall (the operator may have stopped it
+	# deliberately); starting the main daemon pulls the builder in through
+	# the unit's existing Wants= coupling, and the explicit builder start
+	# below is the restoration for the only-builder-active case. A fresh
+	# install keeps the existing enable+start setup contract.
 	if $service_was_active; then
 		start_service
-	else
-		if $interactive; then
-			if ask "Enable and start $UNIT_NAME"; then
-				enable_and_start_service
-			else
-				info "Service not started. Enable and start with:"
-				info "  systemctl enable --now $UNIT_NAME"
-			fi
+	fi
+	if $builder_service_was_active; then
+		start_builder_service
+	fi
+	if ! $service_was_active && ! $builder_service_was_active; then
+		if $was_installed; then
+			info ""
+			info "Reinstall complete. The services were inactive before the install"
+			info "and were left stopped:"
+			info "  systemctl start $UNIT_NAME"
 		else
-			enable_and_start_service
+			if $interactive; then
+				if ask "Enable and start $UNIT_NAME"; then
+					enable_and_start_service
+				else
+					info "Service not started. Enable and start with:"
+					info "  systemctl enable --now $UNIT_NAME"
+				fi
+			else
+				enable_and_start_service
+			fi
 		fi
 	fi
 
