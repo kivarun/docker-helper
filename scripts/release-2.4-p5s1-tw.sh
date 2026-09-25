@@ -211,6 +211,24 @@ transient_journal() {
   journalctl -u "p5s1-$1" --no-pager 2>&1 | tail -20 || true
 }
 
+# operator_surface_diag <base> — the daemon-side diagnostic bundle for an
+# operator-surface failure: the daemon unit journal (boot), the unit status,
+# the helper runtime/state tree listings with labels, and the kernel AVC
+# window. Evidence-only: no assertion reads these files.
+operator_surface_diag() {
+  local base="$1"
+  journalctl -u "$MAIN_UNIT" -b --no-pager > "$EVIDENCE_DIR/$base-daemon-journal.txt" 2>&1 || true
+  systemctl status "$MAIN_UNIT" --no-pager > "$EVIDENCE_DIR/$base-daemon-status.txt" 2>&1 || true
+  {
+    echo "=== /run/docker-helper ==="
+    ls -laZ /run/docker-helper 2>&1 || true
+    echo "=== /var/lib/docker-helper ==="
+    ls -laZ /var/lib/docker-helper 2>&1 || true
+  } > "$EVIDENCE_DIR/$base-runtime-labels.txt"
+  journalctl -k -b --no-pager 2>/dev/null | grep -a 'avc:' | tail -40 > "$EVIDENCE_DIR/$base-klog-avc.txt" || true
+  tail -40 /var/log/audit/audit.log > "$EVIDENCE_DIR/$base-audit.txt" 2>/dev/null || true
+}
+
 # attempt_build — one build attempt through the real daemon + session; prints
 # the streamed operation log, returns the CLI exit code.
 attempt_build() {
@@ -350,19 +368,20 @@ reset_failed_builder() {
 # (a-ii) The main unit is the proven enforcing path; starting it first
 # establishes a working baseline before any builder-domain phase.
 if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" != "active" ]; then
-  systemctl start "$MAIN_UNIT" || fail "the main daemon failed to start (baseline broken)"
+  systemctl start "$MAIN_UNIT" \
+    || { operator_surface_diag main-start; fail "the main daemon failed to start (baseline broken; see main-start-daemon-journal.txt)"; }
 fi
 [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
-  || fail "main daemon not active after start"
+  || { operator_surface_diag main-start; fail "main daemon not active after start"; }
 systemctl cat "$UNIT" > "$EVIDENCE_DIR/builder-unit-runtime.txt" 2>&1
 
 # (a-iii) Operator surface (principal/credential/session) once, before any
 # builder phase, so the sanity probe, the permissive harvest and the enforcing
 # rounds ride the same session.
 /usr/bin/docker-helper principal create --no-credential "$PRINCIPAL" >"$EVIDENCE_DIR/principal-create.txt" 2>&1 \
-  || fail "principal create failed (see principal-create.txt)"
+  || { operator_surface_diag principal-create; fail "principal create failed (see principal-create.txt + principal-create-daemon-journal.txt)"; }
 /usr/bin/docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" >"$EVIDENCE_DIR/principal-allowed-root.txt" 2>&1 \
-  || fail "principal allowed-root add failed (see principal-allowed-root.txt)"
+  || { operator_surface_diag principal-allowed-root; fail "principal allowed-root add failed (see principal-allowed-root.txt + principal-allowed-root-daemon-journal.txt)"; }
 CRED_OUT="$(/usr/bin/docker-helper credential create --name p5s1 "$PRINCIPAL" 2>"$EVIDENCE_DIR/credential-create-err.txt")" \
   || fail "credential create failed (see credential-create-err.txt)"
 CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
