@@ -485,9 +485,12 @@ if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2-start-stderr.txt"; then
   MGR_CTX="$(cat "/proc/$MGR_PID/attr/current" 2>/dev/null || true)"
   status="$(cat "/proc/$MGR_PID/status" 2>/dev/null || true)"
   printf '%s\n' "$status" > "$EVIDENCE_DIR/builder-manager-status.txt"
-  grep -q '^NoNewPrivs:[[:space:]]*0$' "$status" || fail "builder manager must show NoNewPrivs: 0"
-  grep -q '^CapEff:[[:space:]]*0000000000000000$' "$status" || fail "builder manager must hold no effective capabilities"
-  grep -q '^CapBnd:[[:space:]]*00000000802000c2$' "$status" || fail "builder manager CapBnd must stay 00000000802000c2"
+  printf '%s\n' "$status" | grep -q '^NoNewPrivs:[[:space:]]*0$' \
+    || fail "builder manager must show NoNewPrivs: 0"
+  printf '%s\n' "$status" | grep -q '^CapEff:[[:space:]]*0000000000000000$' \
+    || fail "builder manager must hold no effective capabilities"
+  printf '%s\n' "$status" | grep -q '^CapBnd:[[:space:]]*00000000802000c2$' \
+    || fail "builder manager CapBnd must stay 00000000802000c2"
   [ "$MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
     || fail "manager process context = '$MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
   wait_for_builder_socket 50 || fail "manager socket did not appear after unit activation"
