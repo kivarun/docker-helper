@@ -339,7 +339,8 @@ systemctl cat "$UNIT" > "$EVIDENCE_DIR/builder-unit-runtime.txt" 2>&1
   || fail "principal allowed-root add failed (see principal-allowed-root.txt)"
 CRED_OUT="$(/usr/bin/docker-helper credential create --name p5s1 "$PRINCIPAL" 2>"$EVIDENCE_DIR/credential-create-err.txt")" \
   || fail "credential create failed (see credential-create-err.txt)"
-printf '%s\n' "$CRED_OUT" | awk '/^[A-Za-z0-9_-]+$/{print; exit}' > "$CRED_FILE"
+CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
+printf '%s\n' "$CRED_TOKEN" > "$CRED_FILE"
 chmod 0600 "$CRED_FILE"
 [ -s "$CRED_FILE" ] || fail "could not extract the credential token (value never echoed)"
 SESSION_JSON="$(/usr/bin/docker-helper session create --token-file "$CRED_FILE" "$WORKSPACE" --json 2>"$EVIDENCE_DIR/session-create-err.txt")" \
