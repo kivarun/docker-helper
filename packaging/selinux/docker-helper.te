@@ -86,6 +86,7 @@ module docker_helper 1.1;
 		type cgroup_t;
 		type proc_t;
 		type sysctl_net_t;
+		type kernel_t;
 		type setfiles_exec_t;
 		type selinux_config_t;
 		type default_context_t;
@@ -698,6 +699,27 @@ allow docker_helper_builder_t cgroup_t:dir { search };
 #   scontext=docker_helper_builder_t tcontext=cgroup_t tclass=file
 #   denied { read } name=cpu.max dev=cgroup2
 allow docker_helper_builder_t cgroup_t:file { read open };
+
+# Startup purge /proc enumeration (live AVC storm, P5-S1 permissive-harvest
+# window; the enforcing managers crashed on exactly this first: "startup
+# purge: unit-cgroup enumeration failed; refusing startup"):
+#   scontext=docker_helper_builder_t tcontext=proc_t tclass=dir denied { read }
+#     (os.ReadDir("/proc") in builderScanUnitOwnedGroups)
+#   scontext=docker_helper_builder_t tcontext=<process domain> tclass=dir
+#     denied { getattr } path=/proc/<pid>
+#     (os.Stat of every listed pid directory: kernel threads are kernel_t,
+#     every system service is in the domain attribute)
+allow docker_helper_builder_t proc_t:dir { read };
+allow docker_helper_builder_t domain:dir { getattr };
+allow docker_helper_builder_t kernel_t:dir { getattr };
+
+# Go net-stack sysctl read at process startup (same window):
+#   scontext=docker_helper_builder_t tcontext=sysctl_net_t tclass=dir
+#     denied { search } name=net
+#   scontext=docker_helper_builder_t tcontext=sysctl_net_t tclass=file
+#     denied { read } then { open } name=somaxconn
+allow docker_helper_builder_t sysctl_net_t:dir { search };
+allow docker_helper_builder_t sysctl_net_t:file { read open };
 
 # START resolves the system CA bundle for the child SSL_CERT_FILE
 # (fail closed without one): stat/open of the ca-bundle candidates and

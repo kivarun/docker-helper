@@ -190,7 +190,7 @@ transient_journal() {
 # attempt_build — one build attempt through the real daemon + session; prints
 # the streamed operation log, returns the CLI exit code.
 attempt_build() {
-  DOCKER_HELPER_SESSION_TOKEN="$(cat "$CRED_FILE")" \
+  DOCKER_HELPER_SESSION_TOKEN="$(cat "$SESSION_TOKEN_FILE")" \
     docker-helper build buildctx --dockerfile Dockerfile --image p5s1:boundary 2>&1
 }
 
@@ -357,6 +357,12 @@ SESSION_JSON="$(/usr/bin/docker-helper session create --token-file "$CRED_FILE" 
   }
 printf '%s\n' "$SESSION_JSON" | sed 's/"token": "[^"]*"/"token": "REDACTED"/; s/"session_token":[^,]*,//' \
   > "$EVIDENCE_DIR/session-create.json"
+SESSION_TOKEN="$(printf '%s\n' "$SESSION_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
+SESSION_TOKEN_FILE=/tmp/p5s1-session.token
+printf '%s\n' "$SESSION_TOKEN" > "$SESSION_TOKEN_FILE"
+chmod 0600 "$SESSION_TOKEN_FILE"
+[ -s "$SESSION_TOKEN_FILE" ] || fail "could not extract the session token (value never echoed)"
+
 WS_LABEL="$(stat -c '%C' "$WORKSPACE/buildctx/Dockerfile" 2>/dev/null || true)"
 echo "workspace Dockerfile label: $WS_LABEL" > "$EVIDENCE_DIR/workspace-label.txt"
 case "$WS_LABEL" in
@@ -439,6 +445,9 @@ save_build_output "$EVIDENCE_DIR/build-attempt-permissive-output.txt" "$BUILD_PE
 log "permissive build attempt exit code: $BUILD_PERM_RC"
 builder_avc_window "$HARVEST_START" > "$EVIDENCE_DIR/builder-avc-harvest.txt" || true
 avc_window "$HARVEST_START" > "$EVIDENCE_DIR/all-avc-harvest.txt" || true
+grep -a 'msg=audit' /var/log/audit/audit.log 2>/dev/null \
+  | awk -v s="$HARVEST_START" '{ for (i = 1; i <= NF; i++) if ($i ~ /^msg=audit\(/) { ts = substr($i, 11); split(ts, t, "."); if (t[1] + 0 >= s + 0) print; break } }' \
+  > "$EVIDENCE_DIR/full-audit-records-harvest.txt" || true
 journalctl -u "$UNIT" --since "@$HARVEST_START" --no-pager > "$EVIDENCE_DIR/builder-journal-harvest.txt" 2>&1
 journalctl -u "$MAIN_UNIT" --since "@$HARVEST_START" --no-pager > "$EVIDENCE_DIR/daemon-journal-harvest.txt" 2>&1
 {
