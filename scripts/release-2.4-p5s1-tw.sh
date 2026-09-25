@@ -313,8 +313,9 @@ reset_failed_builder() {
 # --- P2a: config init + main-unit baseline + operator surface + audit sanity -----
 # (a-i) Config init and the global allowed root (CLI-side; no daemon running
 # yet). The system unit's serve needs an existing config on a fresh install.
-/usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config"
-/usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >/dev/null \
+/usr/bin/docker-helper init >"$EVIDENCE_DIR/init-output.txt" 2>&1 \
+  || fail "cannot init the docker-helper config (see init-output.txt)"
+/usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >"$EVIDENCE_DIR/allowed-root-add.txt" 2>&1 \
   || fail "config allowed-root add failed"
 
 # (a-ii) The main unit is the proven enforcing path; starting it first
