@@ -47,6 +47,9 @@ AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/manage
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
 SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
 SEMODULE="${SEMODULE:-semodule}"
+RESTORECON="${RESTORECON:-restorecon}"
+ROOTLESSKIT_BIN="${ROOTLESSKIT_BIN:-/usr/bin/rootlesskit}"
+BINDFS_BIN="${BINDFS_BIN:-/usr/bin/bindfs}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/docker-helper}"
 STATE_DIR="${STATE_DIR:-/var/lib/docker-helper}"
 RUNTIME_DIR="${RUNTIME_DIR:-/run/docker-helper}"
@@ -202,6 +205,44 @@ remove_apparmor_profile() {
 
 # --- SELinux ---
 
+# restore_third_party_binary_labels — after a verified-successful
+# docker_helper module removal the module's file-context rules are gone, so
+# the two third-party binaries the deployment lifecycle relabeled at install
+# (the rootlesskit launch vehicle and the bindfs projection dependency) must
+# be restored to the canonical labels the remaining fcontext policy resolves
+# for these paths. Pointed paths only: no other path is touched and no
+# fcontext rule is added or removed here. Every failure is an explicit
+# warning (best-effort, like the module removal); the restoration itself is
+# verified against matchpathcon, so an unverified or mismatched label never
+# counts as a successful cleanup. Mirrors the RPM preremove helper exactly.
+restore_third_party_binary_labels() {
+	if ! command -v "$RESTORECON" >/dev/null 2>&1; then
+		warn "restorecon not available; third-party binary labels not restored"
+		return
+	fi
+	info "Restoring third-party binary labels (rootlesskit, bindfs)"
+	if ! restore_err="$("$RESTORECON" "$ROOTLESSKIT_BIN" "$BINDFS_BIN" 2>&1 >/dev/null)"; then
+		warn "Failed to restore third-party binary labels (rootlesskit, bindfs): $restore_err"
+		return
+	fi
+	local label_path actual_label canonical_label
+	for label_path in "$ROOTLESSKIT_BIN" "$BINDFS_BIN"; do
+		if [[ ! -e "$label_path" ]]; then
+			warn "$label_path not present; third-party label restore skipped"
+			continue
+		fi
+		actual_label="$(stat -c '%C' "$label_path" 2>/dev/null)" || actual_label=""
+		canonical_label="$(matchpathcon "$label_path" 2>/dev/null | awk '{print $2}')" || canonical_label=""
+		if [[ -z "$actual_label" || -z "$canonical_label" ]]; then
+			warn "Cannot verify third-party label for $label_path (stat or matchpathcon unavailable)"
+			continue
+		fi
+		if [[ "$actual_label" != "$canonical_label" ]]; then
+			warn "$label_path label '$actual_label' does not match canonical '$canonical_label' after module removal"
+		fi
+	done
+}
+
 remove_selinux_policy() {
 	# Best-effort module removal mirroring the RPM final-erase semantics
 	# (packaging/scripts/rpm/preremove.sh): the docker_helper module is removed
@@ -212,10 +253,24 @@ remove_selinux_policy() {
 		warn "semodule not available; skipping SELinux policy module removal"
 		return
 	fi
+	# Absence is a normal idempotent no-op (same as the RPM preremove): an
+	# AppArmor-only host never installed our module and must not emit a bogus
+	# "failed to remove" warning.
+	if ! "$SEMODULE" -l 2>/dev/null | grep -qw docker_helper; then
+		return
+	fi
 	info "Removing SELinux policy module docker_helper (best-effort)"
 	if ! "$SEMODULE" -r docker_helper 2>/dev/null; then
 		warn "Failed to remove SELinux policy module docker_helper (may not be loaded)"
 	fi
+	# Verified cleanup: the module must actually be gone from the policy store
+	# before the third-party label restore runs; a module that remains after
+	# the removal attempt is an explicit warning (never a silent success).
+	if "$SEMODULE" -l 2>/dev/null | grep -qw docker_helper; then
+		warn "SELinux module docker_helper still installed after removal attempt; third-party binary labels not restored"
+		return
+	fi
+	restore_third_party_binary_labels
 }
 
 remove_selinux_artifact() {

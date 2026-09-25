@@ -54,6 +54,42 @@ if [ -r /sys/kernel/security/apparmor/profiles ] && \
   }
 fi
 
+# restore_third_party_binary_labels — after a verified-successful
+# docker_helper module removal the module's file-context rules are gone, so
+# the two third-party binaries the deployment lifecycle relabeled at install
+# (the rootlesskit launch vehicle and the bindfs projection dependency) must
+# be restored to the canonical labels the remaining fcontext policy resolves
+# for these paths. Pointed paths only: no other path is touched and no
+# fcontext rule is added or removed here. Every failure is an explicit
+# warning (best-effort, like the module removal); the restoration itself is
+# verified against matchpathcon, so an unverified or mismatched label never
+# counts as a successful cleanup.
+restore_third_party_binary_labels() {
+  if ! command -v restorecon >/dev/null 2>&1; then
+    echo "warning: restorecon not available; third-party binary labels not restored" >&2
+    return
+  fi
+  restorecon_err=""
+  if ! restorecon_err="$(restorecon /usr/bin/rootlesskit /usr/bin/bindfs 2>&1 >/dev/null)"; then
+    echo "warning: failed to restore third-party binary labels (rootlesskit, bindfs): $restorecon_err" >&2
+    return
+  fi
+  for label_path in /usr/bin/rootlesskit /usr/bin/bindfs; do
+    if [ ! -e "$label_path" ]; then
+      echo "warning: $label_path not present; third-party label restore skipped" >&2
+      continue
+    fi
+    actual_label="$(stat -c '%C' "$label_path" 2>/dev/null)" || actual_label=""
+    canonical_label="$(matchpathcon "$label_path" 2>/dev/null | awk '{print $2}')" || canonical_label=""
+    if [ -z "$actual_label" ] || [ -z "$canonical_label" ]; then
+      echo "warning: cannot verify third-party label for $label_path (stat or matchpathcon unavailable)" >&2
+      continue
+    fi
+    [ "$actual_label" = "$canonical_label" ] || \
+      echo "warning: $label_path label '$actual_label' does not match canonical '$canonical_label' after module removal" >&2
+  done
+}
+
 # Remove helper-owned local fcontext customizations BEFORE removing the
 # module. The confined daemon registers local fcontext rules for non-home
 # workspace boundaries (docker_helper_workspace_t); those local rules
@@ -78,6 +114,8 @@ fi
 # bounded pause: commit-time failures (semanage store locks, transient policy
 # reload problems under a busy systemd) can be transient; a persistent failure
 # keeps the warning and appends semodule's own stderr for diagnosability.
+# Cleanup is verified: after the removal attempts the module must actually be
+# gone from the policy store before the third-party label restore runs.
 if semodule -l 2>/dev/null | grep -qw docker_helper; then
   remove_err=""
   if ! remove_err="$(semodule -r docker_helper 2>&1 >/dev/null)"; then
@@ -85,6 +123,11 @@ if semodule -l 2>/dev/null | grep -qw docker_helper; then
     if ! remove_err="$(semodule -r docker_helper 2>&1 >/dev/null)"; then
       echo "warning: failed to remove SELinux module docker_helper: $remove_err" >&2
     fi
+  fi
+  if semodule -l 2>/dev/null | grep -qw docker_helper; then
+    echo "warning: SELinux module docker_helper still installed after removal attempts; third-party binary labels not restored" >&2
+  else
+    restore_third_party_binary_labels
   fi
 fi
 
