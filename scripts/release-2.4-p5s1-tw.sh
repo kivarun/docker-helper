@@ -310,8 +310,46 @@ reset_failed_builder() {
   systemctl reset-failed "$UNIT" 2>/dev/null || true
 }
 
-# --- P2a: audit pipeline sanity + main-unit baseline -----------------------------
-# (a) An AVC-pipeline sanity probe: a deliberate, harmless MAC denial from the
+# --- P2a: main-unit baseline + operator surface + audit sanity probe -------------
+# (a) The main unit is the proven enforcing path; starting it first establishes
+# a working baseline before any builder-domain phase.
+if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" != "active" ]; then
+  systemctl start "$MAIN_UNIT" || fail "the main daemon failed to start (baseline broken)"
+fi
+[ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
+  || fail "main daemon not active after start"
+systemctl cat "$UNIT" > "$EVIDENCE_DIR/builder-unit-runtime.txt" 2>&1
+audit_window_start
+
+
+# (b) Operator surface (config/init/principal/credential/session) once, before
+# any builder phase, so the sanity probe, the permissive harvest and the
+# enforcing rounds ride the same session.
+/usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config"
+/usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >/dev/null \
+  || fail "config allowed-root add failed"
+/usr/bin/docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null \
+  || fail "principal create failed"
+/usr/bin/docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null \
+  || fail "principal allowed-root add failed"
+CRED_OUT="$(/usr/bin/docker-helper credential create --name p5s1 "$PRINCIPAL")" \
+  || fail "credential create failed"
+printf '%s\n' "$CRED_OUT" | awk '/^[A-Za-z0-9_-]+$/{print; exit}' > "$CRED_FILE"
+chmod 0600 "$CRED_FILE"
+[ -s "$CRED_FILE" ] || fail "could not extract the credential token (value never echoed)"
+SESSION_JSON="$(/usr/bin/docker-helper session create --token-file "$CRED_FILE" "$WORKSPACE" --json)" \
+  || fail "session create failed (workspace MAC lifecycle must exercise the real daemon path)"
+printf '%s\n' "$SESSION_JSON" | sed 's/"token": "[^"]*"/"token": "REDACTED"/; s/"session_token":[^,]*,//' \
+  > "$EVIDENCE_DIR/session-create.json"
+WS_LABEL="$(stat -c '%C' "$WORKSPACE/buildctx/Dockerfile" 2>/dev/null || true)"
+echo "workspace Dockerfile label: $WS_LABEL" > "$EVIDENCE_DIR/workspace-label.txt"
+case "$WS_LABEL" in
+  *docker_helper_workspace_t*) ;;
+  *) log "WARN: workspace file label = '$WS_LABEL' (the session MAC relabel may be pending)" ;;
+esac
+
+
+# (c) An AVC-pipeline sanity probe: a deliberate, harmless MAC denial from the
 # builder domain must produce a visible AVC. The probe reads the helper config
 # tree as a token file (the N1 negative): a docker_helper_config_t denial is
 # guaranteed to be audited (the distro policy cannot dontaudit types it does
@@ -340,41 +378,6 @@ if ! printf '%s\n' "$SANITY_AVC" | grep -aqF 'docker_helper_config_t'; then
 fi
 say "P2a audit pipeline OK (deliberate docker_helper_config_t denial visible in the audit source)"
 
-# (b) The main unit is the proven enforcing path; starting it first establishes
-# a working baseline before any builder-domain phase.
-if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" != "active" ]; then
-  systemctl start "$MAIN_UNIT" || fail "the main daemon failed to start (baseline broken)"
-fi
-[ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ] \
-  || fail "main daemon not active after start"
-systemctl cat "$UNIT" > "$EVIDENCE_DIR/builder-unit-runtime.txt" 2>&1
-audit_window_start
-
-# (c) Operator surface (config/init/principal/credential/session) once, before
-# any builder phase, so both the permissive harvest and the enforcing rounds
-# ride the same session.
-/usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config"
-/usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >/dev/null \
-  || fail "config allowed-root add failed"
-/usr/bin/docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null \
-  || fail "principal create failed"
-/usr/bin/docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null \
-  || fail "principal allowed-root add failed"
-CRED_OUT="$(/usr/bin/docker-helper credential create --name p5s1 "$PRINCIPAL")" \
-  || fail "credential create failed"
-printf '%s\n' "$CRED_OUT" | awk '/^[A-Za-z0-9_-]+$/{print; exit}' > "$CRED_FILE"
-chmod 0600 "$CRED_FILE"
-[ -s "$CRED_FILE" ] || fail "could not extract the credential token (value never echoed)"
-SESSION_JSON="$(/usr/bin/docker-helper session create --token-file "$CRED_FILE" "$WORKSPACE" --json)" \
-  || fail "session create failed (workspace MAC lifecycle must exercise the real daemon path)"
-printf '%s\n' "$SESSION_JSON" | sed 's/"token": "[^"]*"/"token": "REDACTED"/; s/"session_token":[^,]*,//' \
-  > "$EVIDENCE_DIR/session-create.json"
-WS_LABEL="$(stat -c '%C' "$WORKSPACE/buildctx/Dockerfile" 2>/dev/null || true)"
-echo "workspace Dockerfile label: $WS_LABEL" > "$EVIDENCE_DIR/workspace-label.txt"
-case "$WS_LABEL" in
-  *docker_helper_workspace_t*) ;;
-  *) log "WARN: workspace file label = '$WS_LABEL' (the session MAC relabel may be pending)" ;;
-esac
 
 # --- P2h: permissive bootstrap + full AVC harvest --------------------------------
 # Deliberately BEFORE the enforcing bootstrap: the permissive builder domain

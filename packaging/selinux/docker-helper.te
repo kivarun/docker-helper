@@ -669,6 +669,14 @@ allow docker_helper_builder_t docker_helper_builder_state_t:file { create read w
 # for Docker user resolution).
 allow docker_helper_builder_t passwd_file_t:file { read open getattr };
 
+# cgroup2 root traversal at process startup (live AVC, P5-S1 Tumbleweed run):
+#   scontext=system_u:system_r:docker_helper_builder_t:s0
+#   tcontext=system_u:object_r:cgroup_t:s0 tclass=dir denied { search } name=/ dev=cgroup2
+# The Go runtime reads the unified cgroup2 root for container GOMAXPROCS
+# detection at startup. Search only; the same access the daemon's Docker CLI
+# children get from live evidence.
+allow docker_helper_builder_t cgroup_t:dir { search };
+
 # START resolves the system CA bundle for the child SSL_CERT_FILE
 # (fail closed without one): stat/open of the ca-bundle candidates and
 # the openSUSE symlink resolution (/etc/ssl/ca-bundle.pem ->
