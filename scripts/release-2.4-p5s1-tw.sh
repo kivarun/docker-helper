@@ -344,7 +344,15 @@ printf '%s\n' "$CRED_TOKEN" > "$CRED_FILE"
 chmod 0600 "$CRED_FILE"
 [ -s "$CRED_FILE" ] || fail "could not extract the credential token (value never echoed)"
 SESSION_JSON="$(/usr/bin/docker-helper session create --token-file "$CRED_FILE" "$WORKSPACE" --json 2>"$EVIDENCE_DIR/session-create-err.txt")" \
-  || fail "session create failed (see session-create-err.txt; the workspace MAC lifecycle must exercise the real daemon path)"
+  || {
+    journalctl -u "$MAIN_UNIT" --no-pager -n 40 \
+      > "$EVIDENCE_DIR/session-create-daemon-journal.txt" 2>&1
+    semanage fcontext -l 2>/dev/null | grep -a docker_helper \
+      > "$EVIDENCE_DIR/session-create-fcontext.txt" 2>&1
+    stat -c '%C' "$WORKSPACE" "$WORKSPACE/buildctx" "$WORKSPACE/buildctx/Dockerfile" \
+      > "$EVIDENCE_DIR/session-create-labels.txt" 2>&1
+    fail "session create failed (see session-create-err.txt; the workspace MAC lifecycle must exercise the real daemon path)"
+  }
 printf '%s\n' "$SESSION_JSON" | sed 's/"token": "[^"]*"/"token": "REDACTED"/; s/"session_token":[^,]*,//' \
   > "$EVIDENCE_DIR/session-create.json"
 WS_LABEL="$(stat -c '%C' "$WORKSPACE/buildctx/Dockerfile" 2>/dev/null || true)"
