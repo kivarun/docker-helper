@@ -1418,6 +1418,29 @@ func (e *systemScriptEnv) fakeSemodule(t *testing.T, script string) {
 	}
 }
 
+// fakeSemoduleStateful installs a semodule fake that lists docker_helper on
+// -l until a successful -r; the removal state is a marker file next to the
+// call log so the verified-cleanup post-checks observe a real state change.
+func (e *systemScriptEnv) fakeSemoduleStateful(t *testing.T, failRemove bool) {
+	t.Helper()
+	e.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+marker="${log_file}.module-removed"
+case "$*" in
+  *"-l"*) if [ ! -f "$marker" ]; then echo docker_helper; fi ;;
+  *"-r"*)
+    if [ "%v" = "true" ]; then
+      echo "semodule: Failed to remove module" >&2
+      exit 1
+    fi
+    : > "$marker"
+    ;;
+esac
+exit 0
+`, e.logFile, failRemove))
+}
+
 // fakeRestorecon installs a restorecon fake (SELinux path) into the fake bin dir.
 func (e *systemScriptEnv) fakeRestorecon(t *testing.T, script string) {
 	t.Helper()
@@ -1756,6 +1779,8 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 		"AA_PARSER=" + filepath.Join(e.fakeBinDir, "apparmor_parser"),
 		"SELINUX_PP_DEST=" + e.dest("usr/share/selinux/docker_helper.pp"),
 		"SYSTEMCTL=" + filepath.Join(e.fakeBinDir, "systemctl"),
+		"ROOTLESSKIT_BIN=" + e.dest("usr/bin/rootlesskit"),
+		"BINDFS_BIN=" + e.dest("usr/bin/bindfs"),
 	}
 	return e
 }
@@ -3253,11 +3278,7 @@ exit 0
 // currently active LSM.
 func TestUninstallSystemSELinuxModuleCleanup(t *testing.T) {
 	env := newSystemUninstallScriptEnv(t)
-	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$0 $@" >> "$log_file"
-exit 0
-`, env.logFile))
+	env.fakeSemoduleStateful(t, false)
 	// The installed policy artifact (tarball-installed stable path).
 	ppDest := env.dest("usr/share/selinux/docker_helper.pp")
 	if err := os.MkdirAll(filepath.Dir(ppDest), 0755); err != nil {
@@ -3274,11 +3295,15 @@ exit 0
 
 	semoduleSeen := false
 	for _, c := range env.calls(t) {
-		if strings.Contains(c, "semodule") {
-			semoduleSeen = true
-			if !strings.Contains(c, "-r") || !strings.Contains(c, "docker_helper") {
-				t.Errorf("semodule must remove docker_helper: %q", c)
-			}
+		if !strings.Contains(c, "semodule") {
+			continue
+		}
+		if strings.Contains(c, " -l") {
+			continue
+		}
+		semoduleSeen = true
+		if !strings.Contains(c, "-r") || !strings.Contains(c, "docker_helper") {
+			t.Errorf("semodule must remove docker_helper: %q", c)
 		}
 	}
 	if !semoduleSeen {
@@ -3301,12 +3326,9 @@ exit 0
 // common lifecycle completes and a useful warning is emitted.
 func TestUninstallSystemSELinuxModuleRemovalFailureWarns(t *testing.T) {
 	env := newSystemUninstallScriptEnv(t)
-	// semodule exists but fails (module may not be loaded).
-	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$0 $@" >> "$log_file"
-exit 1
-`, env.logFile))
+	// The module is listed (installed) but the removal itself fails — the
+	// "module may not be loaded" warning path.
+	env.fakeSemoduleStateful(t, true)
 	ppDest := env.dest("usr/share/selinux/docker_helper.pp")
 	if err := os.MkdirAll(filepath.Dir(ppDest), 0755); err != nil {
 		t.Fatal(err)
@@ -3349,6 +3371,164 @@ func TestUninstallSystemSELinuxMissingSemoduleWarns(t *testing.T) {
 	}
 	if _, err := os.Stat(ppDest); !os.IsNotExist(err) {
 		t.Error("SELinux policy artifact must be removed even without semodule")
+	}
+}
+
+// uninstallThirdPartyLabelEnv prepares the standard uninstall fixture with
+// the semodule/restorecon/stat/matchpathcon fakes, present third-party
+// binaries, and a label fixture. The semodule fake lists docker_helper on
+// -l and succeeds on -r; tests can override any piece afterwards.
+func uninstallThirdPartyLabelEnv(t *testing.T) (*systemScriptEnv, string) {
+	t.Helper()
+	env := newSystemUninstallScriptEnv(t)
+	env.fakeSemoduleStateful(t, false)
+	writeFakeRestorecon(t, env.fakeBinDir, env.logFile)
+	writeFakeStatAndMatchpathcon(t, env.fakeBinDir, env.logFile)
+	fixture := thirdPartyLabelFixture(t, labelFixtureEqual())
+	env.env = append(env.env,
+		"STAT_LABEL_FIXTURE="+fixture,
+		"MATCHPATHCON_FIXTURE="+fixture)
+	for _, binPath := range []string{env.dest("usr/bin/rootlesskit"), env.dest("usr/bin/bindfs")} {
+		if err := os.MkdirAll(filepath.Dir(binPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return env, fixture
+}
+
+// uninstallRestoreconCalls returns the restorecon call lines.
+func uninstallRestoreconCalls(t *testing.T, env *systemScriptEnv) []string {
+	t.Helper()
+	var calls []string
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "restorecon") {
+			calls = append(calls, c)
+		}
+	}
+	return calls
+}
+
+// TestUninstallSystemThirdPartyLabelRestoreSuccess verifies the tarball
+// uninstaller, after a verified-successful docker_helper module removal,
+// runs the pointed restorecon for exactly the two third-party binaries the
+// deployment lifecycle relabeled at install and verifies the restoration
+// against matchpathcon without warnings when the labels agree.
+func TestUninstallSystemThirdPartyLabelRestoreSuccess(t *testing.T) {
+	env, _ := uninstallThirdPartyLabelEnv(t)
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "warning") {
+		t.Errorf("verified label restore must not warn: %s", out)
+	}
+	calls := uninstallRestoreconCalls(t, env)
+	if len(calls) != 1 {
+		t.Fatalf("exactly one pointed restorecon call is expected, got %d: %v", len(calls), calls)
+	}
+	for _, want := range []string{"rootlesskit", "bindfs"} {
+		if !strings.Contains(calls[0], want) {
+			t.Errorf("restorecon call must cover %s: %s", want, calls[0])
+		}
+	}
+}
+
+// TestUninstallSystemThirdPartyLabelsModuleAbsentNoRestore verifies the
+// uninstaller on a host without the docker_helper module is a silent no-op:
+// no module removal, no label restore, no bogus warning.
+func TestUninstallSystemThirdPartyLabelsModuleAbsentNoRestore(t *testing.T) {
+	env, _ := uninstallThirdPartyLabelEnv(t)
+	env.fakeSemoduleStateful(t, false)
+	// Simulate the never-installed module: remove the listing until the
+	// marker exists — simplest is a semodule whose -l never lists.
+	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "warning") {
+		t.Errorf("absent module must be a silent no-op: %s", out)
+	}
+	if len(uninstallRestoreconCalls(t, env)) != 0 {
+		t.Error("no label restore must run when the module was never installed")
+	}
+}
+
+// TestUninstallSystemThirdPartyLabelsMissingBinaryWarns verifies a missing
+// third-party binary is an explicit warning while the present one is still
+// verified.
+func TestUninstallSystemThirdPartyLabelsMissingBinaryWarns(t *testing.T) {
+	env, _ := uninstallThirdPartyLabelEnv(t)
+	env.env = append(env.env, "ROOTLESSKIT_BIN="+env.dest("absent/rootlesskit"))
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "not present; third-party label restore skipped") {
+		t.Errorf("missing binary must be an explicit warning: %s", out)
+	}
+}
+
+// TestUninstallSystemThirdPartyLabelsSemoduleFailureWarns verifies a failed
+// module removal keeps the module installed, is reported explicitly, and
+// must NOT run the label restore (cleanup is verified before it is declared).
+func TestUninstallSystemThirdPartyLabelsSemoduleFailureWarns(t *testing.T) {
+	env, _ := uninstallThirdPartyLabelEnv(t)
+	env.fakeSemoduleStateful(t, true)
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall must complete despite module removal failure: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "still installed after removal attempt") {
+		t.Errorf("module remaining after removal attempt must be an explicit warning: %s", out)
+	}
+	if len(uninstallRestoreconCalls(t, env)) != 0 {
+		t.Error("label restore must not run when the module removal failed")
+	}
+}
+
+// TestUninstallSystemThirdPartyLabelsRestoreconFailureWarns verifies a
+// restorecon failure is an explicit warning and does not abort the uninstall.
+func TestUninstallSystemThirdPartyLabelsRestoreconFailureWarns(t *testing.T) {
+	env, _ := uninstallThirdPartyLabelEnv(t)
+	env.env = append(env.env, "RESTORECON_FAIL=true")
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall must complete despite label-restore failure: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Failed to restore third-party binary labels") {
+		t.Errorf("restorecon failure must be an explicit warning: %s", out)
+	}
+}
+
+// TestUninstallSystemThirdPartyLabelsMismatchWarns verifies the restoration
+// is checked against matchpathcon: a stale actual label that does not match
+// the canonical answer is an explicit warning, never a declared success.
+func TestUninstallSystemThirdPartyLabelsMismatchWarns(t *testing.T) {
+	env, _ := uninstallThirdPartyLabelEnv(t)
+	statFixture, matchpathconFixture := labelFixtureMismatch()
+	env.env = append(env.env,
+		"STAT_LABEL_FIXTURE="+thirdPartyLabelFixture(t, statFixture),
+		"MATCHPATHCON_FIXTURE="+thirdPartyLabelFixture(t, matchpathconFixture))
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "does not match canonical") {
+		t.Errorf("label mismatch must be an explicit warning: %s", out)
 	}
 }
 
@@ -5169,7 +5349,7 @@ func writeFakeSemodule(t *testing.T, fakeDir, logFile string, failInstall bool, 
 echo "$0 $@" >> "%s"
 case "$*" in
   *"-l"*)
-    if [ "${SEMODULE_MODULE_PRESENT:-true}" = "true" ]; then
+    if [ "${SEMODULE_MODULE_PRESENT:-true}" = "true" ] && [ ! -f "%s.module-removed" ]; then
       echo "container"
       echo "docker_helper"
     fi
@@ -5187,11 +5367,12 @@ case "$*" in
       echo "semodule: Failed to remove module" >&2
       exit 1
     fi
+    : > "%s.module-removed"
     exit 0
     ;;
   *) exit 0 ;;
 esac
-`, logFile, failInstallStr, failRemoveStr)
+`, logFile, logFile, failInstallStr, failRemoveStr, logFile)
 	if err := os.WriteFile(filepath.Join(fakeDir, "semodule"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -5221,16 +5402,62 @@ exit 0
 	}
 }
 
-// writeFakeRestorecon creates a restorecon script that logs calls.
+// writeFakeRestorecon creates a restorecon script that logs calls and
+// succeeds, unless RESTORECON_FAIL=true is exported (then it fails with a
+// diagnostic).
 func writeFakeRestorecon(t *testing.T, fakeDir, logFile string) {
 	t.Helper()
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$0 $@" >> "%s"
+[ "${RESTORECON_FAIL:-false}" = "true" ] && { echo "restorecon: test-injected failure" >&2; exit 1; }
 exit 0
 `, logFile)
 	if err := os.WriteFile(filepath.Join(fakeDir, "restorecon"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeFakeStatAndMatchpathcon installs stat and matchpathcon fakes that
+// answer label queries from env-driven fixture files keyed by path basename
+// ("name label" lines). The lifecycle scripts use stat and matchpathcon only
+// for the third-party label verification, so the fakes are inert for every
+// other lifecycle call.
+func writeFakeStatAndMatchpathcon(t *testing.T, fakeDir, logFile string) {
+	t.Helper()
+	stat := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+path=""
+for arg in "$@"; do path="$arg"; done
+awk -v p="$(basename "$path")" '$1 == p {print $2; exit}' "${STAT_LABEL_FIXTURE:?}"
+`, logFile)
+	matchpathcon := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+for arg in "$@"; do
+  case "$arg" in
+    -*) continue ;;
+    *) label="$(awk -v p="$(basename "$arg")" '$1 == p {print $2; exit}' "${MATCHPATHCON_FIXTURE:?}")"; printf '%%s %%s\n' "$arg" "$label"; break ;;
+  esac
+done
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeDir, "stat"), []byte(stat), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeDir, "matchpathcon"), []byte(matchpathcon), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// labelFixtureEqual returns fixture content whose stat and matchpathcon
+// answers agree for both third-party binaries (the verified-restore case).
+func labelFixtureEqual() string {
+	return "rootlesskit canonical-label\nbindfs canonical-label\n"
+}
+
+// labelFixtureMismatch returns fixture content whose stat and matchpathcon
+// answers disagree for rootlesskit (the unverified-cleanup warning case).
+func labelFixtureMismatch() (statFixture, matchpathconFixture string) {
+	return "rootlesskit stale-label\nbindfs canonical-label\n",
+		"rootlesskit canonical-label\nbindfs canonical-label\n"
 }
 
 // readCalls reads the command log.
@@ -5283,6 +5510,9 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 	modified = strings.ReplaceAll(modified, "/var/lib/docker-helper", "$STATE_DIR")
 	modified = strings.ReplaceAll(modified, "/run/docker-helper", "$RUNTIME_DIR")
 	modified = strings.ReplaceAll(modified, "/etc/docker-helper", "$TEST_CONFIG_DIR")
+	// Third-party binaries whose labels the uninstall lifecycle restores.
+	modified = strings.ReplaceAll(modified, "/usr/bin/rootlesskit", "$ROOTLESSKIT_BIN")
+	modified = strings.ReplaceAll(modified, "/usr/bin/bindfs", "$BINDFS_BIN")
 	modifiedFile := filepath.Join(scriptDir, "modified.sh")
 	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
 		t.Fatal(err)
@@ -5373,6 +5603,21 @@ exit 0
 		"TEST_CONFIG_DIR="+filepath.Join(tmpDir, "etc", "docker-helper"),
 		"PROVISION_BUILDER="+filepath.Join(fakeDir, "provision-builder"),
 	)
+	// Third-party binary fixtures present by default (the distro owns them,
+	// so they survive package removal); tests override the paths to a
+	// nonexistent location to exercise the missing-binary branch.
+	for _, pair := range []struct{ envName, rel string }{
+		{"ROOTLESSKIT_BIN", filepath.Join(tmpDir, "usr", "bin", "rootlesskit")},
+		{"BINDFS_BIN", filepath.Join(tmpDir, "usr", "bin", "bindfs")},
+	} {
+		if err := os.MkdirAll(filepath.Dir(pair.rel), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pair.rel, []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		env = append(env, pair.envName+"="+pair.rel)
+	}
 	env = append(env, extraEnv...)
 
 	if err := os.WriteFile(logFile, nil, 0644); err != nil {
@@ -5956,6 +6201,7 @@ func TestRpmPreremoveUpgrade(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, true, true)
 	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
 
 	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
 		[]string{"1"}, true, nil)
@@ -5966,6 +6212,9 @@ func TestRpmPreremoveUpgrade(t *testing.T) {
 	for _, c := range calls {
 		if strings.Contains(c, "stop") || strings.Contains(c, "disable") || strings.Contains(c, "-R") {
 			t.Errorf("rpm preun upgrade must not stop/disable/unload: %s", c)
+		}
+		if strings.Contains(c, "restorecon") {
+			t.Errorf("rpm preun upgrade must not restore third-party binary labels: %s", c)
 		}
 	}
 }
@@ -6915,9 +7164,15 @@ func TestRpmPreremoveSELinuxPresentRemovesModule(t *testing.T) {
 	writeFakeSystemctl(t, fakeDir, logFile, true, true)
 	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
 	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+	writeFakeStatAndMatchpathcon(t, fakeDir, logFile)
+	fixture := thirdPartyLabelFixture(t, labelFixtureEqual())
 
 	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
-		[]string{"0"}, true, nil)
+		[]string{"0"}, true, []string{
+			"STAT_LABEL_FIXTURE=" + fixture,
+			"MATCHPATHCON_FIXTURE=" + fixture,
+		})
 	if code != 0 {
 		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
 	}
@@ -6986,6 +7241,199 @@ func TestRpmPreremoveSELinuxRemovalFailureWarns(t *testing.T) {
 	}
 	if !strings.Contains(out, "SELinux") || !strings.Contains(out, "warning") {
 		t.Errorf("real module removal failure must be reported: %s", out)
+	}
+}
+
+// thirdPartyLabelFixture writes a basename-keyed label fixture file and
+// returns its path.
+func thirdPartyLabelFixture(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "labels.txt")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// assertNoRestoreconCall verifies no restorecon (and no verification tool)
+// was invoked.
+func assertNoRestoreconCall(t *testing.T, calls []string) {
+	t.Helper()
+	for _, c := range calls {
+		if strings.Contains(c, "restorecon") {
+			t.Errorf("third-party label restore must not run here: %s", c)
+		}
+	}
+}
+
+// TestRpmPreremoveFinalEraseRestoresThirdPartyLabels verifies the final-erase
+// preremove, after a verified-successful docker_helper module removal, runs
+// the pointed restorecon for exactly the two third-party binaries the
+// deployment lifecycle relabeled at install, and verifies the restoration
+// against matchpathcon without warnings when the labels agree.
+func TestRpmPreremoveFinalEraseRestoresThirdPartyLabels(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+	writeFakeStatAndMatchpathcon(t, fakeDir, logFile)
+	fixture := thirdPartyLabelFixture(t, labelFixtureEqual())
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			"STAT_LABEL_FIXTURE=" + fixture,
+			"MATCHPATHCON_FIXTURE=" + fixture,
+		})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+	if strings.Contains(out, "warning") {
+		t.Errorf("verified label restore must not warn: %s", out)
+	}
+	var restoreconCalls []string
+	for _, c := range readLifecycleScriptCalls(t, logFile) {
+		if strings.Contains(c, "restorecon") {
+			restoreconCalls = append(restoreconCalls, c)
+		}
+	}
+	if len(restoreconCalls) != 1 {
+		t.Fatalf("exactly one pointed restorecon call is expected, got %d: %v", len(restoreconCalls), restoreconCalls)
+	}
+	for _, want := range []string{"rootlesskit", "bindfs"} {
+		if !strings.Contains(restoreconCalls[0], want) {
+			t.Errorf("restorecon call must cover %s: %s", want, restoreconCalls[0])
+		}
+	}
+}
+
+// TestRpmPreremoveFinalEraseThirdPartyLabelsModuleAbsent verifies that when
+// the docker_helper module was never installed, the erase stays a silent
+// no-op: no module removal, no label restore, no warnings.
+func TestRpmPreremoveFinalEraseThirdPartyLabelsModuleAbsent(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+	writeFakeStatAndMatchpathcon(t, fakeDir, logFile)
+	fixture := thirdPartyLabelFixture(t, labelFixtureEqual())
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			"SEMODULE_MODULE_PRESENT=false",
+			"STAT_LABEL_FIXTURE=" + fixture,
+			"MATCHPATHCON_FIXTURE=" + fixture,
+		})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+	if strings.Contains(out, "warning") {
+		t.Errorf("absent module must be a silent no-op: %s", out)
+	}
+	assertNoRestoreconCall(t, readLifecycleScriptCalls(t, logFile))
+}
+
+// TestRpmPreremoveFinalEraseThirdPartyLabelsRestoreconFailure verifies a
+// restorecon failure is an explicit warning and does not abort the erase.
+func TestRpmPreremoveFinalEraseThirdPartyLabelsRestoreconFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+	writeFakeStatAndMatchpathcon(t, fakeDir, logFile)
+	fixture := thirdPartyLabelFixture(t, labelFixtureEqual())
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			"RESTORECON_FAIL=true",
+			"STAT_LABEL_FIXTURE=" + fixture,
+			"MATCHPATHCON_FIXTURE=" + fixture,
+		})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0 despite label-restore failure, got %d", code)
+	}
+	if !strings.Contains(out, "restore third-party binary labels") || !strings.Contains(out, "warning") {
+		t.Errorf("restorecon failure must be an explicit warning: %s", out)
+	}
+}
+
+// TestRpmPreremoveFinalEraseThirdPartyLabelsMissingBinary verifies a missing
+// third-party binary is reported (label restore skipped for it) and does not
+// abort the erase.
+func TestRpmPreremoveFinalEraseThirdPartyLabelsMissingBinary(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+	writeFakeStatAndMatchpathcon(t, fakeDir, logFile)
+	fixture := thirdPartyLabelFixture(t, labelFixtureEqual())
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			"ROOTLESSKIT_BIN=/nonexistent/rootlesskit",
+			"STAT_LABEL_FIXTURE=" + fixture,
+			"MATCHPATHCON_FIXTURE=" + fixture,
+		})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0 with a missing binary, got %d", code)
+	}
+	if !strings.Contains(out, "not present; third-party label restore skipped") {
+		t.Errorf("missing binary must be an explicit warning: %s", out)
+	}
+}
+
+// TestRpmPreremoveFinalEraseThirdPartyLabelsSemoduleFailure verifies a failed
+// module removal leaves the module installed, is reported explicitly, and
+// must NOT run the label restore (cleanup is verified before it is declared).
+func TestRpmPreremoveFinalEraseThirdPartyLabelsSemoduleFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, true)
+	writeFakeRestorecon(t, fakeDir, logFile)
+	writeFakeStatAndMatchpathcon(t, fakeDir, logFile)
+	fixture := thirdPartyLabelFixture(t, labelFixtureEqual())
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			"STAT_LABEL_FIXTURE=" + fixture,
+			"MATCHPATHCON_FIXTURE=" + fixture,
+		})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0 despite module removal failure, got %d", code)
+	}
+	if !strings.Contains(out, "still installed after removal attempts") {
+		t.Errorf("module remaining after removal attempts must be an explicit warning: %s", out)
+	}
+	assertNoRestoreconCall(t, readLifecycleScriptCalls(t, logFile))
+}
+
+// TestRpmPreremoveFinalEraseThirdPartyLabelsMismatchWarns verifies the
+// restoration is checked against matchpathcon: a stale actual label that does
+// not match the canonical answer is an explicit warning, never a declared
+// success.
+func TestRpmPreremoveFinalEraseThirdPartyLabelsMismatchWarns(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+	writeFakeStatAndMatchpathcon(t, fakeDir, logFile)
+	statFixture, matchpathconFixture := labelFixtureMismatch()
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{
+			"STAT_LABEL_FIXTURE=" + thirdPartyLabelFixture(t, statFixture),
+			"MATCHPATHCON_FIXTURE=" + thirdPartyLabelFixture(t, matchpathconFixture),
+		})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0 despite a label mismatch, got %d", code)
+	}
+	if !strings.Contains(out, "does not match canonical") {
+		t.Errorf("label mismatch must be an explicit warning: %s", out)
 	}
 }
 
