@@ -63,6 +63,7 @@ jobs:
           sh -n packaging/scripts/deb/preremove.sh
           sh -n packaging/scripts/deb/postremove.sh
           sh -n packaging/scripts/rpm/postinstall.sh
+          sh -n packaging/scripts/rpm/posttrans.sh
           sh -n packaging/scripts/rpm/preremove.sh
           sh -n packaging/scripts/rpm/postremove.sh
           sh -n packaging/scripts/lib/provision-builder.sh
@@ -79,6 +80,7 @@ jobs:
           shellcheck packaging/scripts/deb/preremove.sh
           shellcheck packaging/scripts/deb/postremove.sh
           shellcheck packaging/scripts/rpm/postinstall.sh
+          shellcheck packaging/scripts/rpm/posttrans.sh
           shellcheck packaging/scripts/rpm/preremove.sh
           shellcheck packaging/scripts/rpm/postremove.sh
           shellcheck packaging/scripts/lib/provision-builder.sh

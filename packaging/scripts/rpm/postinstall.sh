@@ -68,24 +68,17 @@ if [ "$aa_active" = "true" ]; then
 fi
 
 if [ "$selinux_active" = "true" ]; then
-  if ! semodule -i /usr/share/selinux/docker_helper.pp; then
-    exit 1
-  fi
-  if command -v restorecon >/dev/null 2>&1; then
-    restorecon /usr/bin/docker-helper || true
-    # bindfs is an explicit RPM Requires (SELinux read-only projection
-    # backend); apply the shipped docker_helper_bindfs_exec_t file context
-    # so the confined daemon can exec the projection worker.
-    restorecon /usr/bin/bindfs 2>/dev/null || true
-    restorecon -R /etc/docker-helper 2>/dev/null || true
-    restorecon -R /var/lib/docker-helper 2>/dev/null || true
-    # Relabel only the helper-owned /run/docker-helper dir itself to
-    # docker_helper_runtime_t. Never recurse into /run/docker-helper/mounts:
-    # those entries are bind-mount aliases of the real workspace inodes, and a
-    # recursive relabel through them would relabel the actual workspace files
-    # to docker_helper_runtime_t, corrupting the SELinux workspace model.
-    restorecon /run/docker-helper 2>/dev/null || true
-  fi
+  # RPM scriptlet ordering (P4-B1.2): container-selinux installs its policy
+  # module in ITS %posttrans, and rpm runs every %post scriptlet of a
+  # transaction before any %posttrans. Loading the docker_helper module from
+  # %post therefore fails on a fresh SELinux install: the container policy
+  # symbols it requires are only in the store after container-selinux's
+  # %posttrans (P4-B1 diagnosis: cil:33 typeattributeset). The module load,
+  # the exact relabels and the restart of an already-active service are
+  # owned by %posttrans (packaging/scripts/rpm/posttrans.sh); this scriptlet
+  # records only the was-active decision %posttrans needs.
+  mkdir -p /run/docker-helper-rpm
+  printf 'was_active=%s\n' "$was_active" > /run/docker-helper-rpm/posttrans-state
 fi
 
 if [ "$aa_active" = "false" ] && [ "$selinux_active" = "false" ]; then
@@ -105,13 +98,16 @@ if ! systemctl enable docker-helper-builder.service; then
   exit 1
 fi
 
-# Restart only if the service was already active. try-restart is the
-# inactive-safe restart operation: under this guard it enqueues the same
-# restart job `systemctl restart` would, and the shipped unit's
+# Restart only if the service was already active — except on SELinux hosts,
+# where %posttrans owns the restart after the module load and relabels
+# (scriptlet ordering contract, P4-B1.2). AppArmor and MAC-less hosts keep
+# the same-phase restart. try-restart is the inactive-safe restart
+# operation: under this guard it enqueues the same restart job
+# `systemctl restart` would, and the shipped unit's
 # RuntimeDirectoryPreserve=restart keeps the /run/docker-helper inode across
 # that restart, so a long-lived container bind-mounting /run/docker-helper
 # continues to see the recreated socket after the package action.
-if [ "$was_active" = "true" ]; then
+if [ "$was_active" = "true" ] && [ "$selinux_active" != "true" ]; then
   if ! systemctl try-restart docker-helper.service; then
     exit 1
   fi

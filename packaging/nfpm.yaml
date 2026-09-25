@@ -57,6 +57,13 @@ overrides:
       postinstall: packaging/scripts/rpm/postinstall.sh
       preremove: packaging/scripts/rpm/preremove.sh
       postremove: packaging/scripts/rpm/postremove.sh
+    # RPM-specific scriptlets (nfpm RPMScripts): the SELinux module load, the
+    # exact relabels and the deferred restart run in %posttrans — after ALL
+    # %post scriptlets of the transaction and, by install order, after
+    # container-selinux's own %posttrans module install (P4-B1.2).
+    rpm:
+      scripts:
+        posttrans: packaging/scripts/rpm/posttrans.sh
 
 contents:
   - src: dist/docker-helper
