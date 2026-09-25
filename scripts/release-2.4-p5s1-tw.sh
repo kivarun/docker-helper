@@ -22,13 +22,14 @@
 #       stage AND the manager journal's START handling for one operation
 #       ID; an arbitrary docker_build_failed terminal state is never
 #       accepted as the RPC proof) plus the enforcing AVC capture;
-#   P4  permissive harvest: docker_helper_builder_t is made permissive
-#       (semanage permissive) and the same build attempt runs once more;
-#       every builder_t AVC of the window is harvested as evidence. The
+#   P2h permissive harvest: docker_helper_builder_t AND
+#       docker_helper_rootlesskit_t are made permissive (semanage
+#       permissive) and the same build attempt runs once more; every
+#       builder-family AVC of the window is harvested as evidence. The
 #       harvest must contain NO attempt against any forbidden surface
 #       (docker.sock, daemon socket/types, admin token, config, Session
 #       workspace). The harvest is evidence for the next AVC only —
-#       child-process MAC is a separate task;
+#       child-process MAC refinement is a separate task;
 #   P5  enforcing negative proofs through transient units bound to
 #       docker_helper_builder_t via SELinuxContext=: helper-config and
 #       admin-token access, daemon-socket access, docker.sock access, and
@@ -100,11 +101,16 @@ BUILD_RC="skipped"
 BUILD_PERM_RC="skipped"
 BUILD_P6_RC="skipped"
 HARVEST_LINES=0
+ROOTLESSKIT_PERMISSIVE_SET=false
 
 cleanup_permissive() {
   if [ "$PERMISSIVE_SET" = true ]; then
     semanage permissive -d docker_helper_builder_t >/dev/null 2>&1 || true
     PERMISSIVE_SET=false
+  fi
+  if [ "$ROOTLESSKIT_PERMISSIVE_SET" = true ]; then
+    semanage permissive -d docker_helper_rootlesskit_t >/dev/null 2>&1 || true
+    ROOTLESSKIT_PERMISSIVE_SET=false
   fi
 }
 trap cleanup_permissive EXIT
@@ -140,9 +146,10 @@ avc_window() {
 }
 
 # builder_avc_window <since-epoch> — AVC lines whose source context is the
-# builder domain.
+# builder manager domain or the rootlesskit child domain (the launch
+# vehicle's post-exec domain, P5-S2).
 builder_avc_window() {
-  avc_window "$1" | grep -a 'scontext=system_u:system_r:docker_helper_builder_t' || true
+  avc_window "$1" | grep -aE 'scontext=system_u:system_r:docker_helper_(builder|rootlesskit)_t' || true
 }
 
 # forbidden_surface_hits <window-file> — AVC lines whose TARGET context hits a
@@ -453,7 +460,7 @@ say "P2a audit pipeline OK (deliberate docker_helper_config_t denial visible in 
 # logged, so a failed enforcing start still yields the complete evidence for
 # the next AVC. No permission is granted from this harvest in this run; the
 # harvest is the evidence the shipped policy is refined against.
-log "P2h: permissive bootstrap + harvest (docker_helper_builder_t permissive)"
+log "P2h: permissive bootstrap + harvest (builder + rootlesskit domains permissive)"
 # The harvest window must start strictly AFTER the sanity probe's records:
 # both windows use second-granularity epoch filters, and the probe's denial
 # can land in the second after its own window started. Wait out the probe's
@@ -463,6 +470,8 @@ audit_window_start
 HARVEST_START="$AVC_EPOCH"
 semanage permissive -a docker_helper_builder_t || fail "cannot make the builder domain permissive"
 PERMISSIVE_SET=true
+semanage permissive -a docker_helper_rootlesskit_t || fail "cannot make the rootlesskit child domain permissive"
+ROOTLESSKIT_PERMISSIVE_SET=true
 reset_failed_builder
 if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2h-start-stderr.txt"; then
   wait_for_builder_socket 50 || fail "manager socket did not appear (permissive start)"
@@ -732,6 +741,19 @@ if grep -aqF 'failed to lock' "$EVIDENCE_DIR/builder-journal-p6.txt"; then
     > "$EVIDENCE_DIR/child-lock-journal-p6.txt" 2>/dev/null || true
   fail "the child still reports the rootlesskit state-lock failure (see child-lock-journal-p6.txt)"
 fi
+# Transition proof (P5-S2): the enforcing window must name the rootlesskit
+# child domain — the manager's launch exec transitioned, so the child's
+# own checks (scontext=docker_helper_rootlesskit_t) are visible in the
+# window. Without the transition the window would carry only
+# docker_helper_builder_t records.
+RK_CTX_AVC="$(grep -a 'scontext=system_u:system_r:docker_helper_rootlesskit_t' "$EVIDENCE_DIR/builder-avc-p6.txt" | head -1 || true)"
+printf '%s\n' "$RK_CTX_AVC" > "$EVIDENCE_DIR/child-context-avc-p6.txt"
+[ -n "$RK_CTX_AVC" ] || {
+  { echo "=== builder-family AVC window (P6) ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"
+    echo "=== builder journal (P6 window) ==="; tail -40 "$EVIDENCE_DIR/builder-journal-p6.txt"; } >&2
+  fail "the rootlesskit child did not run in docker_helper_rootlesskit_t (no child-domain record in the enforcing window — the exec transition did not take effect)"
+}
+say "P6 rootlesskit context confirmed (docker_helper_rootlesskit_t from the launch transition)"
 # Child output evidence: the manager journals the child's own output tail
 # when an instance exits unexpectedly.
 grep -aF -A 30 'child output tail' "$EVIDENCE_DIR/builder-journal-p6.txt" \
@@ -742,13 +764,13 @@ grep -aF -A 30 'child output tail' "$EVIDENCE_DIR/builder-journal-p6.txt" \
 # recorded with the full evidence bundle and reported, never auto-granted
 # from the harvest.
 if [ "$BUILD_P6_RC" = 0 ]; then
-  say "P6 build SUCCEEDED after the relabel: the P5-S1 { lock } boundary was the last enforcing denial on the attempt path"
+  say "P6 build SUCCEEDED after the relabel: the rootlesskit child-domain boundary never enforced on the attempt path"
 else
-  { echo "=== builder-domain AVC window (P6) ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"
+  { echo "=== builder-family AVC window (P6) ==="; cat "$EVIDENCE_DIR/builder-avc-p6.txt"
     echo "=== builder journal (P6 window) ==="; tail -40 "$EVIDENCE_DIR/builder-journal-p6.txt"
     echo "=== daemon journal (P6 window) ==="; tail -20 "$EVIDENCE_DIR/daemon-journal-p6.txt"
     echo "=== build attempt output ==="; tail -20 "$EVIDENCE_DIR/build-attempt-post-relabel.txt"; } >&2
-  fail "the build advanced past the P5-S1 { lock } boundary and stopped at the NEXT enforcing boundary (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt)"
+  fail "the build advanced past the P5-S1 { lock } boundary and stopped at the NEXT enforcing boundary in docker_helper_rootlesskit_t (evidence: builder-avc-p6.txt, builder-journal-p6.txt, daemon-journal-p6.txt, child-output-p6.txt, build-attempt-post-relabel.txt)"
 fi
 say "P6 upgrade relabel OK (labels corrected by %posttrans; transport $P6_OP_ID)"
 else
