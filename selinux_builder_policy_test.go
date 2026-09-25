@@ -44,10 +44,12 @@ func TestSELinuxPolicyBuilderDomainTypes(t *testing.T) {
 }
 
 // TestSELinuxPolicyBuilderNoGlobalExecTransition verifies the policy adds NO
-// type_transition into the builder domain: the unit file's SELinuxContext= is
-// the single binding owner. Any type_transition naming docker_helper_builder_t
-// would auto-flip the named source context's execs (including operator CLI
-// invocations of the shared docker_helper_exec_t) into the builder domain.
+// type_transition INTO the builder domain: the unit file's SELinuxContext= is
+// the single binding owner. The destination token of a process-class
+// transition is what would auto-flip execs into the builder domain; a
+// transition whose SOURCE is the builder domain (the P5-S2 rootlesskit
+// launch vehicle) is a different, legitimate shape and does not violate the
+// invariant.
 func TestSELinuxPolicyBuilderNoGlobalExecTransition(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, line := range strings.Split(policy, "\n") {
@@ -55,7 +57,12 @@ func TestSELinuxPolicyBuilderNoGlobalExecTransition(t *testing.T) {
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "type_transition") && strings.Contains(trimmed, "docker_helper_builder_t") {
+		if !strings.HasPrefix(trimmed, "type_transition") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSuffix(trimmed, ";"))
+		// Process-class shape: "type_transition <source> <file>:process <dest>".
+		if len(fields) == 4 && strings.Contains(fields[2], ":process") && fields[3] == "docker_helper_builder_t" {
 			t.Errorf("no exec-type auto-transition into the builder domain may exist (the unit's SELinuxContext= is the single binding owner): %s", trimmed)
 		}
 	}
@@ -120,18 +127,25 @@ var forbiddenBuilderTargets = []string{
 	"user_home_dir_t",
 }
 
-// builderAllowTarget extracts the target type token of one
-// "allow docker_helper_builder_t <target>:<class>" line, or "" when the line
-// is not a builder-subject allow rule.
-func builderAllowTarget(trimmed string) string {
-	if !strings.HasPrefix(trimmed, "allow docker_helper_builder_t ") {
+// allowTargetToken extracts the target type token of one
+// "allow <subjectPrefix><target>:<class>" line, or "" when the line does not
+// start with the subject prefix.
+func allowTargetToken(trimmed, subjectPrefix string) string {
+	if !strings.HasPrefix(trimmed, subjectPrefix) {
 		return ""
 	}
-	rest := strings.TrimPrefix(trimmed, "allow docker_helper_builder_t ")
+	rest := strings.TrimPrefix(trimmed, subjectPrefix)
 	if idx := strings.IndexByte(rest, ':'); idx >= 0 {
 		return rest[:idx]
 	}
 	return ""
+}
+
+// builderAllowTarget extracts the target type token of one
+// "allow docker_helper_builder_t <target>:<class>" line, or "" when the line
+// is not a builder-subject allow rule.
+func builderAllowTarget(trimmed string) string {
+	return allowTargetToken(trimmed, "allow docker_helper_builder_t ")
 }
 
 // TestSELinuxPolicyBuilderIsolation verifies the builder domain receives no
@@ -170,20 +184,99 @@ func TestSELinuxPolicyBuilderNoCapabilities(t *testing.T) {
 }
 
 // TestSELinuxPolicyBuilderStateRules verifies the builder state-tree grants
-// stay exact: the dir rule unchanged from the P5-S1 proof (the startup
-// purge's tree traversal + the per-op dir lifecycle), and the file rule
-// carrying exactly the P5-S1 evidence-proven lock permission (the rootlesskit
-// state flock; live enforcing AVC evidence from the P5-S1 Tumbleweed proof,
-// runs 36145749182, 36168484020, 36175618802: every enforcing build attempt
-// failed at that denial). Nothing broader may appear.
+// stay exact: the manager's dir rule unchanged from the P5-S1 proof (the
+// startup purge's tree traversal + the per-op dir lifecycle) and the
+// manager's file rule without the lock permission (the lock moved to the
+// rootlesskit child domain, P5-S2). The child's own state-tree grants are
+// the rootlesskit-attributed evidence surface: the rootlesskit-state dir
+// lifecycle plus the state-lock flock, without unlink/rmdir (the purge owns
+// removal) and with the child's own api.sock socket lifecycle.
 func TestSELinuxPolicyBuilderStateRules(t *testing.T) {
 	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
 	for _, want := range []string{
 		"allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };",
-		"allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink lock };",
+		"allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };",
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:dir { search getattr read open write add_name remove_name lock };",
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:file { create open read write getattr setattr lock };",
+		"allow docker_helper_rootlesskit_t docker_helper_builder_state_t:sock_file { create unlink };",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("the builder state-tree grant must be exact: %q", want)
+		}
+	}
+}
+
+// TestSELinuxPolicyRootlesskitDomainTransition verifies the P5-S2 exec
+// transition: exactly one type_transition into the dedicated child domain,
+// only from the builder domain on the rootlesskit exec type; the child's
+// entry file carries the entrypoint plus loader access. The shared
+// docker-helper binary (docker_helper_exec_t) has no transition into either
+// special domain — the unit's SELinuxContext= stays the single builder
+// binding owner.
+func TestSELinuxPolicyRootlesskitDomainTransition(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"type docker_helper_rootlesskit_t, domain;",
+		"role system_r types docker_helper_rootlesskit_t;",
+		"type_transition docker_helper_builder_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;",
+		"allow docker_helper_builder_t docker_helper_rootlesskit_t:process { transition };",
+		"allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute getattr map };",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("SELinux policy must carry the rootlesskit transition rule: %q", want)
+		}
+	}
+	// Exactly one type_transition may target the child domain.
+	transitions := 0
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "type_transition") && strings.Contains(trimmed, "docker_helper_rootlesskit_t") {
+			transitions++
+		}
+	}
+	if transitions != 1 {
+		t.Errorf("exactly one type_transition into the rootlesskit child domain may exist, found %d", transitions)
+	}
+	// The manager's rootlesskit exec grant is transition-shaped: the old
+	// no-transition shape (execute_no_trans) is dead under the transition
+	// rule and must be gone.
+	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { read open execute execute_no_trans getattr map };") {
+		t.Error("the manager's rootlesskit exec grant must be execute-only under the transition rule")
+	}
+	if !strings.Contains(policy, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute };") {
+		t.Error("the manager must keep the execute grant needed to launch the rootlesskit vehicle")
+	}
+}
+
+// TestSELinuxPolicyRootlesskitIsolation verifies the rootlesskit child
+// domain receives no grant toward any forbidden surface (the same set the
+// builder domain is denied), carries no capability grants, and — for both
+// the manager and the child — holds no bin_t:file grant: the helper execs
+// (slirp4netns, newuidmap/newgidmap) and the bundled buildkitd are
+// deliberate P5-S2 boundaries.
+func TestSELinuxPolicyRootlesskitIsolation(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, line := range strings.Split(policy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, subject := range []string{"docker_helper_builder_t", "docker_helper_rootlesskit_t"} {
+			target := allowTargetToken(trimmed, "allow "+subject+" ")
+			if target == "" {
+				continue
+			}
+			if target == "bin_t" {
+				t.Errorf("no bin_t grant for %s (helper execs stay a P5-S2 boundary): %s", subject, trimmed)
+			}
+			for _, forbidden := range forbiddenBuilderTargets {
+				if target == forbidden {
+					t.Errorf("%s must not receive a grant toward %s: %s", subject, forbidden, trimmed)
+				}
+			}
+		}
+		if strings.HasPrefix(trimmed, "allow docker_helper_rootlesskit_t self:capability") {
+			t.Errorf("the rootlesskit child domain must hold no capability grants: %s", trimmed)
 		}
 	}
 }
