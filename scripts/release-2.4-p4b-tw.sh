@@ -247,11 +247,18 @@ helper_pt="$(grep -n 'docker-helper posttrans:' "$zlog" | head -1 | cut -d: -f1)
   || fail "the RPM transaction must not start the main daemon on a fresh install"
 say "P1 scriptlet-ordering proof OK (container-selinux %posttrans before docker-helper %posttrans)"
 say "starting the builder service standalone (P4-A1 boundary asserts under the packaged unit)"
+[ "$(stat -c %C /usr/bin/docker-helper 2>/dev/null)" = "system_u:object_r:docker_helper_exec_t:s0" ] \
+  || fail "/usr/bin/docker-helper label wrong: '$(stat -c %C /usr/bin/docker-helper 2>/dev/null)', want docker_helper_exec_t"
+[ "$(stat -c %C /usr/bin/bindfs 2>/dev/null)" = "system_u:object_r:docker_helper_bindfs_exec_t:s0" ] \
+  || fail "/usr/bin/bindfs label wrong: '$(stat -c %C /usr/bin/bindfs 2>/dev/null)', want docker_helper_bindfs_exec_t"
 systemctl start "$UNIT" || {
   journalctl -u "$UNIT" -b --no-pager > "$EVIDENCE_DIR/builder-start-failure-journal.txt" 2>&1 || true
   systemctl status "$UNIT" --no-pager > "$EVIDENCE_DIR/builder-start-status.txt" 2>&1 || true
-  journalctl -b --no-pager | grep -iE "avc|denied" | tail -60 > "$EVIDENCE_DIR/builder-start-avc.txt" 2>/dev/null || true
-  fail "systemctl start $UNIT failed (unit journal and AVC evidence captured)"
+  journalctl -k -b --no-pager | grep -iE "avc" | tail -40 > "$EVIDENCE_DIR/builder-start-avc-kernel.txt" 2>/dev/null || true
+  tail -40 /var/log/audit/audit.log > "$EVIDENCE_DIR/builder-start-audit.log" 2>/dev/null || true
+  matchpathcon /usr/bin/docker-helper /usr/bin/bindfs > "$EVIDENCE_DIR/builder-start-matchpathcon.txt" 2>&1 || true
+  ls -Z /usr/bin/docker-helper /usr/bin/bindfs >> "$EVIDENCE_DIR/builder-start-matchpathcon.txt" 2>&1 || true
+  fail "systemctl start $UNIT failed (unit journal, status, AVC and label evidence captured)"
 }
 [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] || fail "builder service not active after start"
 assert_builder_manager_process
