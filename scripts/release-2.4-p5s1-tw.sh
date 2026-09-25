@@ -761,6 +761,12 @@ TAR_MGR_CTX="$(cat "/proc/$TAR_MGR_PID/attr/current" 2>/dev/null || true)"
 } > "$EVIDENCE_DIR/tarball-manager-labels.txt"
 
 # Tarball upgrade/reinstall relabel: poison, reinstall, verify the restore.
+# The installer's own reinstall contract stops only the main unit, so the
+# still-running builder service (which execs the same /usr/bin/docker-helper
+# binary) must be stopped first — exactly the explicit stop the shipped
+# uninstaller performs (stop_builder_service). The rerun's main-unit start
+# pulls the builder back in through the unit Wants= coupling.
+systemctl stop "$UNIT" 2>/dev/null || true
 chcon -t var_run_t /var/lib/docker-helper-builder \
   || fail "cannot poison the builder state label (tarball rerun)"
 [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:var_run_t:s0" ] \
