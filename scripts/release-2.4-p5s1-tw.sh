@@ -761,12 +761,10 @@ TAR_MGR_CTX="$(cat "/proc/$TAR_MGR_PID/attr/current" 2>/dev/null || true)"
 } > "$EVIDENCE_DIR/tarball-manager-labels.txt"
 
 # Tarball upgrade/reinstall relabel: poison, reinstall, verify the restore.
-# The installer's own reinstall contract stops only the main unit, so the
-# still-running builder service (which execs the same /usr/bin/docker-helper
-# binary) must be stopped first — exactly the explicit stop the shipped
-# uninstaller performs (stop_builder_service). The rerun's main-unit start
-# pulls the builder back in through the unit Wants= coupling.
-systemctl stop "$UNIT" 2>/dev/null || true
+# The reinstall runs with BOTH services active (the builder has been serving
+# since the fresh install): the installer's service-activity contract stops
+# both, confirms they are down, replaces the binary, and restores the
+# previously-active services.
 chcon -t var_run_t /var/lib/docker-helper-builder \
   || fail "cannot poison the builder state label (tarball rerun)"
 [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:var_run_t:s0" ] \
@@ -778,6 +776,9 @@ if ! ( cd "$BUNDLE" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT" 
 fi
 [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
   || fail "the tarball relabel path did not correct the builder state label: $(stat -c '%C' /var/lib/docker-helper-builder)"
+# The installer's restoration restarted the manager: wait for the recreated
+# socket before asserting its label.
+wait_for_builder_socket 50 || fail "manager socket did not appear after the tarball rerun"
 RERUN_MGR_PID="$(systemctl show "$UNIT" -p MainPID --value)"
 { [ -n "$RERUN_MGR_PID" ] && [ "$RERUN_MGR_PID" != "0" ]; } \
   || fail "builder unit MainPID missing after the tarball rerun"
