@@ -742,11 +742,15 @@ allow docker_helper_builder_t cert_t:file { getattr open read };
 
 # The manager's launch vehicle: exec the distro rootlesskit binary. The
 # exec TRANSITIONS into the dedicated child domain (the type_transition
-# below): the manager needs only the execute grant to launch it, and every
-# post-exec rootlesskit check runs in docker_helper_rootlesskit_t. The
-# helper execs (newuidmap/newgidmap/slirp4netns) and the bundled buildkitd
-# remain ungranted for BOTH domains (the deliberate P5-S2 boundary).
-allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute };
+# below). The bprm open/read checks run in the SOURCE domain (live
+# enforcing AVC, P5-S2 run 36187436760 P6 window: comm="docker-helper"
+# denied { read open } on /usr/bin/rootlesskit, permissive=0 — the exec
+# never started until these were granted), so the manager needs execute
+# plus the bprm read/open; the loader-side checks (entrypoint/map) run in
+# the child domain. The helper execs (newuidmap/newgidmap/slirp4netns) and
+# the bundled buildkitd remain ungranted for BOTH domains (the deliberate
+# P5-S2 boundary).
+allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute read open };
 
 # --- docker_helper_rootlesskit_t: the rootlesskit child domain (P5-S2) ---
 #
@@ -768,9 +772,26 @@ type_transition docker_helper_builder_t docker_helper_rootlesskit_exec_t:process
 allow docker_helper_builder_t docker_helper_rootlesskit_t:process { transition };
 
 # The child's own entry file: entrypoint for the transition plus the
-# loader access (the shape the manager's former no-transition exec grant
-# carried; the loader checks now run in the child domain).
-allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute getattr map };
+# loader access, and execute_no_trans for rootlesskit's stage-2 re-exec of
+# ITSELF (live permissive harvest AVC, run 36187436760: comm="rootlesskit"
+# denied { execute_no_trans } on /usr/bin/rootlesskit from
+# docker_helper_rootlesskit_t — rootlesskit re-executes its own binary
+# inside the new user namespace and stays in this domain).
+allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };
+
+# The child's Go-runtime startup reads, mirrored from the proven manager
+# rules (the child is the same binary mechanics in a weaker domain):
+# the cgroup2 root walk for container GOMAXPROCS detection (live harvest
+# AVC, same run: comm="rootlesskit" denied { search } on the unified
+# cgroup2 root, system.slice and the builder service cgroup), the net-stack
+# sysctl read (comm="rootlesskit" denied { search } name=net, then
+# { read open } on somaxconn), and the /etc/passwd identity resolution
+# (comm="rootlesskit" denied { read open getattr } on /etc/passwd).
+allow docker_helper_rootlesskit_t cgroup_t:dir { search };
+allow docker_helper_rootlesskit_t cgroup_t:file { read open };
+allow docker_helper_rootlesskit_t sysctl_net_t:dir { search };
+allow docker_helper_rootlesskit_t sysctl_net_t:file { read open };
+allow docker_helper_rootlesskit_t passwd_file_t:file { read open getattr };
 
 # Rootlesskit's own access into the builder-owned state tree, moved from
 # the manager by AVC evidence. Enforcing P5-S1 windows: comm="rootlesskit"
