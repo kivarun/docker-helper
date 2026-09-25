@@ -198,7 +198,12 @@ save_build_output() {
 }
 
 # --- fixtures -------------------------------------------------------------------
-id "$PRINCIPAL" >/dev/null 2>&1 || useradd -m "$PRINCIPAL" || fail "cannot create the principal OS user"
+# The principal's home must sit under the global allowed root (the
+# principal-home contract), so the fixture user lives under $ALLOWED_ROOT.
+mkdir -p "$ALLOWED_ROOT" || fail "cannot create the allowed root"
+id "$PRINCIPAL" >/dev/null 2>&1 \
+  || useradd -m -d "$ALLOWED_ROOT/home/$PRINCIPAL" "$PRINCIPAL" \
+  || fail "cannot create the principal OS user"
 mkdir -p "$WORKSPACE/buildctx"
 cat > "$WORKSPACE/buildctx/Dockerfile" <<'EOF'
 FROM scratch
