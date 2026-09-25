@@ -50,6 +50,7 @@ SEMODULE="${SEMODULE:-semodule}"
 RESTORECON="${RESTORECON:-restorecon}"
 ROOTLESSKIT_BIN="${ROOTLESSKIT_BIN:-/usr/bin/rootlesskit}"
 BINDFS_BIN="${BINDFS_BIN:-/usr/bin/bindfs}"
+SLIRP4NETNS_BIN="${SLIRP4NETNS_BIN:-/usr/bin/slirp4netns}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/docker-helper}"
 STATE_DIR="${STATE_DIR:-/var/lib/docker-helper}"
 RUNTIME_DIR="${RUNTIME_DIR:-/run/docker-helper}"
@@ -207,26 +208,27 @@ remove_apparmor_profile() {
 
 # restore_third_party_binary_labels — after a verified-successful
 # docker_helper module removal the module's file-context rules are gone, so
-# the two third-party binaries the deployment lifecycle relabeled at install
-# (the rootlesskit launch vehicle and the bindfs projection dependency) must
-# be restored to the canonical labels the remaining fcontext policy resolves
-# for these paths. Pointed paths only: no other path is touched and no
-# fcontext rule is added or removed here. Every failure is an explicit
-# warning (best-effort, like the module removal); the restoration itself is
-# verified against matchpathcon, so an unverified or mismatched label never
-# counts as a successful cleanup. Mirrors the RPM preremove helper exactly.
+# the three third-party binaries the deployment lifecycle relabeled at
+# install (the rootlesskit launch vehicle, the bindfs projection dependency,
+# the slirp4netns user-network helper) must be restored to the canonical
+# labels the remaining fcontext policy resolves for these paths. Pointed
+# paths only: no other path is touched and no fcontext rule is added or
+# removed here. Every failure is an explicit warning (best-effort, like the
+# module removal); the restoration itself is verified against matchpathcon,
+# so an unverified or mismatched label never counts as a successful cleanup.
+# Mirrors the RPM preremove helper exactly.
 restore_third_party_binary_labels() {
 	if ! command -v "$RESTORECON" >/dev/null 2>&1; then
 		warn "restorecon not available; third-party binary labels not restored"
 		return
 	fi
-	info "Restoring third-party binary labels (rootlesskit, bindfs)"
-	if ! restore_err="$("$RESTORECON" "$ROOTLESSKIT_BIN" "$BINDFS_BIN" 2>&1 >/dev/null)"; then
-		warn "Failed to restore third-party binary labels (rootlesskit, bindfs): $restore_err"
+	info "Restoring third-party binary labels (rootlesskit, bindfs, slirp4netns)"
+	if ! restore_err="$("$RESTORECON" "$ROOTLESSKIT_BIN" "$BINDFS_BIN" "$SLIRP4NETNS_BIN" 2>&1 >/dev/null)"; then
+		warn "Failed to restore third-party binary labels (rootlesskit, bindfs, slirp4netns): $restore_err"
 		return
 	fi
 	local label_path actual_label canonical_label
-	for label_path in "$ROOTLESSKIT_BIN" "$BINDFS_BIN"; do
+	for label_path in "$ROOTLESSKIT_BIN" "$BINDFS_BIN" "$SLIRP4NETNS_BIN"; do
 		if [[ ! -e "$label_path" ]]; then
 			warn "$label_path not present; third-party label restore skipped"
 			continue

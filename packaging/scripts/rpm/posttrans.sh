@@ -58,6 +58,11 @@ if command -v restorecon >/dev/null 2>&1; then
   # the shipped docker_helper_rootlesskit_exec_t file context so the
   # confined builder manager can exec its launch vehicle.
   restorecon /usr/bin/rootlesskit 2>/dev/null || true
+  # slirp4netns is an explicit RPM Requires (the launch vehicle's
+  # user-network helper); apply the shipped
+  # docker_helper_slirp4netns_exec_t file context so the rootlesskit child
+  # domain can exec it (and only the rootlesskit child domain can).
+  restorecon /usr/bin/slirp4netns 2>/dev/null || true
   restorecon -R /etc/docker-helper 2>/dev/null || true
   restorecon -R /var/lib/docker-helper 2>/dev/null || true
   # Relabel only the helper-owned /run/docker-helper dir itself to

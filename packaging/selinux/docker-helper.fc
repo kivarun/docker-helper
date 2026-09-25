@@ -21,6 +21,9 @@
 # P5-S1: the builder manager's launch vehicle gets a dedicated exec type
 # so the builder domain's execution grant covers exactly this binary.
 /usr/bin/rootlesskit                --  system_u:object_r:docker_helper_rootlesskit_exec_t:s0
+# P5-S2: the launch vehicle's user-network helper (execution allowed only
+# from the rootlesskit child domain).
+/usr/bin/slirp4netns                --  system_u:object_r:docker_helper_slirp4netns_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
 /run/docker-helper(/.*)?                system_u:object_r:docker_helper_runtime_t:s0

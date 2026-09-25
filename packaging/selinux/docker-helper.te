@@ -620,6 +620,18 @@ type docker_helper_builder_state_t, file_type;
 # here.
 type docker_helper_rootlesskit_exec_t, file_type;
 
+# Dedicated exec type for the distro slirp4netns helper (P5-S2 step 3).
+# RootlessKit launches slirp4netns as its user-network helper; live
+# enforcing AVC evidence (P5-S1 Tumbleweed: run 36181122102 P6 window:
+# denied { execute } comm="rootlesskit" name="slirp4netns" tcontext=bin_t
+# permissive=0; permissive harvests: the same path plus
+# execute_no_trans) names /usr/bin/slirp4netns as the actual path. The
+# type keeps the grant to exactly this binary; execution is allowed ONLY
+# from the rootlesskit child domain — never a generic bin_t execution
+# grant and never the manager domain (the manager only launches
+# rootlesskit).
+type docker_helper_slirp4netns_exec_t, file_type;
+
 # Entrypoint: the builder unit execs the shared binary
 # (docker_helper_exec_t) under SELinuxContext=, so the builder domain
 # needs the same entrypoint shape the daemon domain has for its own
@@ -822,6 +834,17 @@ allow docker_helper_rootlesskit_t docker_helper_builder_t:fifo_file { write };
 # userns creation and the in-userns capability checks remain ungranted
 # (the next P5-S2 boundaries).
 allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };
+
+# The launch vehicle's user-network helper: rootlesskit forks and execs
+# the distro slirp4netns binary in ITS OWN domain (no transition rule
+# exists for this exec, so the no-transition check applies). Live AVC
+# evidence from the P5-S1 permissive harvests (runs 36168484020,
+# 36179424203, 36187436760): comm="rootlesskit" denied { execute } on the
+# path lookup and { execute_no_trans } on the actual exec of
+# /usr/bin/slirp4netns. Execute ONLY from the rootlesskit child domain;
+# slirp4netns's own runtime surface (namespace entries, tun_socket,
+# nsfs) and the manager domain's execution stay deliberately ungranted.
+allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans };
 
 # Daemon transport to the builder manager (P5-S1 item 4): the daemon
 # dials manager.sock and the per-op buildkitd sockets, and nothing

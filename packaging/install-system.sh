@@ -640,6 +640,9 @@ apply_selinux_restorecon() {
 	# have no builder dirs yet (restorecon no-ops); re-runs migrate dirs
 	# labeled under an older module to the dedicated types.
 	"$RESTORECON" /usr/bin/rootlesskit 2>/dev/null || true
+	# slirp4netns: the launch vehicle's user-network helper; the dedicated
+	# exec type is executable only from the rootlesskit child domain.
+	"$RESTORECON" /usr/bin/slirp4netns 2>/dev/null || true
 	"$RESTORECON" -R /run/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true
