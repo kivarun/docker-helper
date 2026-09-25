@@ -841,10 +841,15 @@ allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };
 # evidence from the P5-S1 permissive harvests (runs 36168484020,
 # 36179424203, 36187436760): comm="rootlesskit" denied { execute } on the
 # path lookup and { execute_no_trans } on the actual exec of
-# /usr/bin/slirp4netns. Execute ONLY from the rootlesskit child domain;
-# slirp4netns's own runtime surface (namespace entries, tun_socket,
-# nsfs) and the manager domain's execution stay deliberately ungranted.
-allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans };
+# /usr/bin/slirp4netns. Loader-side additions follow live enforcing AVCs
+# only (run 36199764374: denied { getattr } on the pre-exec stat and
+# { read open } on the bprm open/read of /usr/bin/slirp4netns,
+# scontext=docker_helper_rootlesskit_t tclass=file permissive=0; no map
+# denial was recorded, so no map grant). Execute ONLY from the rootlesskit
+# child domain; slirp4netns's own runtime surface (namespace entries,
+# tun_socket, nsfs) and the manager domain's execution stay deliberately
+# ungranted.
+allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans read open getattr };
 
 # Daemon transport to the builder manager (P5-S1 item 4): the daemon
 # dials manager.sock and the per-op buildkitd sockets, and nothing
