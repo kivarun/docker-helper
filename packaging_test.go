@@ -1021,6 +1021,13 @@ func TestBuilderSystemUnitFile(t *testing.T) {
 	if got, ok := active("NoNewPrivileges="); ok {
 		t.Errorf("builder unit must not set NoNewPrivileges (the recorded rootlesskit newuidmap exception), found %q", got)
 	}
+	// P5-S1 SELinux binding: the dedicated builder domain is pinned ONLY
+	// through the unit's SELinuxContext= — the policy carries no global
+	// exec-type auto-transition of the shared binary (asserted in
+	// selinux_builder_policy_test.go).
+	if got, ok := active("SELinuxContext="); !ok || got != "system_u:system_r:docker_helper_builder_t:s0" {
+		t.Errorf("SELinuxContext = %q (present %v), want system_u:system_r:docker_helper_builder_t:s0", got, ok)
+	}
 	// Namespace/SUID restrictions must stay omitted for rootlesskit.
 	for _, directive := range []string{"RestrictNamespaces=", "RestrictSUIDSGID="} {
 		if got, ok := active(directive); ok {
@@ -2779,14 +2786,14 @@ exit 0
 	// Every restorecon target must be a docker-helper-owned path: no Docker
 	// daemon/socket path may be relabeled by the installer.
 	allowedTargets := map[string]bool{
-		"/usr/bin/docker-helper":          true,
-		"/usr/bin/bindfs":                 true,
-		"/usr/bin/rootlesskit":            true,
-		"/etc/docker-helper":              true,
-		"/var/lib/docker-helper":          true,
-		"/run/docker-helper":              true,
-		"/run/docker-helper-builder":      true,
-		"/var/lib/docker-helper-builder":  true,
+		"/usr/bin/docker-helper":         true,
+		"/usr/bin/bindfs":                true,
+		"/usr/bin/rootlesskit":           true,
+		"/etc/docker-helper":             true,
+		"/var/lib/docker-helper":         true,
+		"/run/docker-helper":             true,
+		"/run/docker-helper-builder":     true,
+		"/var/lib/docker-helper-builder": true,
 	}
 	for _, c := range restoreconCalls {
 		target := c[strings.LastIndex(c, " ")+1:]

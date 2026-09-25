@@ -1,0 +1,153 @@
+name: Release 2.4 P5-S1 builder MAC proof
+
+# P5-S1: the SELinux builder bootstrap (docker_helper_builder_t + private
+# runtime/state types + unit SELinuxContext= binding) proven on the enforcing
+# openSUSE Tumbleweed Cloud qcow2 through the GENERATED candidate packages:
+#   - the manager starts in the dedicated builder domain;
+#   - manager.sock and the builder trees carry the dedicated types;
+#   - the root daemon performs a real manager RPC roundtrip (build attempt
+#     at the documented child-process boundary);
+#   - the builder domain cannot access docker.sock, the helper config/admin
+#     token, the daemon socket, or a Session workspace (enforcing AVC
+#     evidence);
+#   - builder-owned paths are labeled by the existing deployment lifecycle
+#     (RPM %posttrans + tarball install-system.sh; fresh install and
+#     poisoned-label upgrade/reinstall).
+# Full child-process MAC (rootlesskit/buildkitd inside the builder domain)
+# is a separate task.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - p3
+    paths:
+      - .github/workflows/release-2.4-p5s1-builder-mac.yml
+      - build-selinux-policy.sh
+      - build-buildkit-payload.sh
+      - build-packages.sh
+      - build-bundle.sh
+      - scripts/release-candidate.sh
+      - packaging/nfpm.yaml
+      - packaging/selinux/**
+      - packaging/systemd/system/docker-helper.service
+      - packaging/systemd/system/docker-helper-builder.service
+      - packaging/install-system.sh
+      - packaging/uninstall-system.sh
+      - packaging/scripts/**
+      - scripts/release-2.4-p5s1-*.sh
+      - scripts/test-packaging-integration.sh
+      - packaging_test.go
+      - selinux_builder_policy_test.go
+
+permissions:
+  contents: read
+
+jobs:
+  packaging-static-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate packaging and proof scripts
+        run: |
+          bash -n build-buildkit-payload.sh
+          bash -n build-packages.sh
+          bash -n build-bundle.sh
+          bash -n scripts/release-candidate.sh
+          bash -n packaging/install-system.sh
+          bash -n packaging/uninstall-system.sh
+          sh -n packaging/scripts/rpm/postinstall.sh
+          sh -n packaging/scripts/rpm/posttrans.sh
+          sh -n packaging/scripts/lib/provision-builder.sh
+          bash -n scripts/release-2.4-p5s1-tw.sh
+          bash -n scripts/release-2.4-p5s1-tw-vm.sh
+          shellcheck build-buildkit-payload.sh
+          shellcheck build-packages.sh
+          shellcheck build-bundle.sh
+          shellcheck packaging/install-system.sh
+          shellcheck packaging/uninstall-system.sh
+          shellcheck packaging/scripts/rpm/postinstall.sh
+          shellcheck packaging/scripts/rpm/posttrans.sh
+          shellcheck packaging/scripts/lib/provision-builder.sh
+          shellcheck -x scripts/release-2.4-p5s1-tw-vm.sh
+          shellcheck scripts/release-2.4-p5s1-tw.sh
+
+  packaging-build-and-go-tests:
+    # Builds the shared release payload ONCE through the canonical builders
+    # (so the candidate carries the current SELinux module), runs the
+    # packaging integration Go tests in required-tool mode, then stages the
+    # immutable candidate set for the VM proof.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install packaging build toolchain
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y musl-tools checkpolicy semodule-utils rpm dpkg cpio gzip
+
+      - name: Install pinned nFPM (single owner)
+        run: |
+          scripts/install-nfpm.sh
+
+      - name: Packaging integration Go tests (required-tool mode)
+        run: |
+          bash scripts/test-packaging-integration.sh
+
+      - name: Build + stage the immutable candidate set (canonical producer)
+        run: |
+          scripts/release-candidate.sh 2.4.0 "${{ github.sha }}"
+
+      - name: Upload candidate set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s1-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/candidate
+          if-no-files-found: error
+
+  builder-mac-tumbleweed:
+    # openSUSE Tumbleweed (official Cloud qcow2, QEMU/KVM, enforcing SELinux
+    # throughout): install the GENERATED candidate RPM and tarball and run
+    # the P5-S1 builder-domain bootstrap proof inside the guest.
+    needs: packaging-build-and-go-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download candidate set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-2.4-p5s1-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/candidate
+
+      - name: Run Tumbleweed P5-S1 builder-MAC proof
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          P5S1_CANDIDATE_DIR="${{ github.workspace }}/dist/candidate" \
+          P5S1_EVIDENCE_DIR="$RUNNER_TEMP/release-2.4-p5s1-tw-evidence" \
+            scripts/release-2.4-p5s1-tw-vm.sh
+
+      - name: Upload Tumbleweed P5-S1 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-2.4-p5s1-tw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-2.4-p5s1-tw-evidence
+          if-no-files-found: warn

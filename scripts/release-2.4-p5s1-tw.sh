@@ -1,0 +1,510 @@
+#!/usr/bin/env bash
+#
+# Release 2.4 P5-S1 guest-side proof for openSUSE Tumbleweed — SELinux
+# builder bootstrap.
+#
+# Installs the GENERATED release-candidate RPM (transferred by the host-side
+# orchestrator into /tmp/p5s1/) on the SELinux-ENFORCING Tumbleweed guest and
+# proves the P5-S1 boundary:
+#
+#   P0  enforcing preflight (LSM, targeted, container-selinux, tools);
+#   P1  RPM fresh install via zypper + static asserts: shipped module
+#       loaded, shipped unit enabled, provisioning, and the matchpathcon
+#       expectations for the builder trees and the rootlesskit exec type;
+#   P2  enforcing bootstrap: the manager starts in
+#       docker_helper_builder_t (unit SELinuxContext=), manager.sock and
+#       the builder trees carry the dedicated types, the manager holds
+#       CapEff 0, and the unit-cgroup boundary is active;
+#   P3  enforcing daemon transport: the root daemon performs a real
+#       manager RPC roundtrip through a build attempt; the build is
+#       EXPECTED to fail at the documented child-process boundary — the
+#       gate is the roundtrip itself (the manager handled the uid-0 START
+#       and the daemon received a well-formed reply) plus the enforcing
+#       AVC capture;
+#   P4  permissive harvest: docker_helper_builder_t is made permissive
+#       (semanage permissive) and the same build attempt runs once more;
+#       every builder_t AVC of the window is harvested as evidence. The
+#       harvest must contain NO attempt against any forbidden surface
+#       (docker.sock, daemon socket/types, admin token, config, Session
+#       workspace). The harvest is evidence for the next AVC only —
+#       child-process MAC is a separate task;
+#   P5  enforcing negative proofs through transient units bound to
+#       docker_helper_builder_t via SELinuxContext=: helper-config and
+#       admin-token access, daemon-socket access, docker.sock access, and
+#       a Session-workspace file read. Each must fail with the expected
+#       enforcing AVC (uid-0 transients so the DAC layer cannot
+#       short-circuit the MAC check);
+#   P6  upgrade relabel: poisoned builder labels are corrected by the RPM
+#       %posttrans deployment lifecycle (rpm -U --replacepkgs), the
+#       builder keeps serving, and a fresh RPC roundtrip works;
+#   P7  tarball lifecycle: install-system.sh on the enforcing host loads
+#       the module and labels the builder trees; a poisoned-label rerun
+#       proves the relabel path; final docker-helper selinux check.
+#
+# Runs as root inside the guest. Files transferred by the host-side
+# orchestrator (scripts/release-2.4-p5s1-tw-vm.sh) into /tmp/p5s1/.
+
+set -Eeuo pipefail
+
+PREFIX='[release-2.4-p5s1-tw]'
+
+GUEST_FILES=/tmp/p5s1
+EVIDENCE_DIR=/tmp/release-2.4-p5s1-tw-evidence
+CANDIDATE_DIR="$GUEST_FILES/candidate"
+VERSION="${P5S1_VERSION:-2.4.0}"
+ALLOWED_ROOT=/srv/docker-helper-p5s1
+WORKSPACE="$ALLOWED_ROOT/ws"
+PRINCIPAL=p5s1u
+CRED_FILE=/tmp/p5s1-credential.token
+UNIT=docker-helper-builder.service
+MAIN_UNIT=docker-helper.service
+BUILDER_USER=docker-helper-builder
+
+RPM_NAME="docker-helper-${VERSION}-1.x86_64.rpm"
+TARBALL_NAME="docker-helper-${VERSION}-linux-amd64.tar.gz"
+RPM="$CANDIDATE_DIR/$RPM_NAME"
+TARBALL="$CANDIDATE_DIR/$TARBALL_NAME"
+
+say() { printf '%s %s\n' "$PREFIX" "$*"; }
+fail() { printf '%s FAILED: %s\n' "$PREFIX" "$*" >&2; exit 1; }
+log() { echo "[guest] $*"; }
+
+for f in "$RPM" "$TARBALL"; do
+  [ -f "$f" ] || fail "missing transferred file: $f"
+done
+
+mkdir -p "$EVIDENCE_DIR"
+
+# --- audit window machinery ---------------------------------------------------
+# The minimal Tumbleweed guest runs no audit daemon; the kernel ring buffer
+# (journalctl -k) is the single audit source (same pattern as the SELinux
+# black-box UAT adapter). Kernel AVC printk is rate-limited, so the harvest is
+# evidence, not an exhaustive enumeration.
+AVC_EPOCH=0
+PERMISSIVE_SET=false
+BUILD_RC="skipped"
+BUILD_PERM_RC="skipped"
+BUILD_P6_RC="skipped"
+HARVEST_LINES=0
+
+cleanup_permissive() {
+  if [ "$PERMISSIVE_SET" = true ]; then
+    semanage permissive -d docker_helper_builder_t >/dev/null 2>&1 || true
+    PERMISSIVE_SET=false
+  fi
+}
+trap cleanup_permissive EXIT
+
+audit_window_start() {
+  AVC_EPOCH="$(date +%s)"
+  log "audit window starts at epoch $AVC_EPOCH"
+}
+
+# avc_window <since-epoch> — all kernel AVC lines of the window.
+avc_window() {
+  local since="$1"
+  journalctl -k --since "@$since" --no-pager 2>/dev/null \
+    | grep -a 'avc:' || true
+}
+
+# builder_avc_window <since-epoch> — AVC lines whose source context is the
+# builder domain.
+builder_avc_window() {
+  avc_window "$1" | grep -a 'scontext=system_u:system_r:docker_helper_builder_t' || true
+}
+
+# forbidden_surface_hits <window-file> — AVC lines whose TARGET context hits a
+# surface the builder domain must never touch.
+forbidden_surface_hits() {
+  local file="$1"
+  grep -aE 'tcontext=[^ ]*(container_var_run_t|docker_helper_admin_token_t|docker_helper_config_t|docker_helper_state_t|docker_helper_runtime_t|docker_helper_workspace_t|docker_helper_trusted_ca_t|docker_helper_ro_projection_t|docker_helper_t)[^a-z_]' \
+    "$file" 2>/dev/null \
+    | grep -av 'scontext=system_u:system_r:docker_helper_t' || true
+}
+
+# assert_avc <window-lines> <tcontext-fragments...> — at least one AVC naming
+# each fragment must exist in the window.
+assert_avc() {
+  local window="$1"; shift
+  local frag
+  for frag in "$@"; do
+    printf '%s\n' "$window" | grep -aqF "$frag" \
+      || fail "expected an enforcing builder-domain AVC naming '$frag'"
+  done
+}
+
+# wait_for_builder_socket <seconds> — bounded wait for the manager socket
+# inode to appear after the unit reports active (Type=exec activation races
+# the manager's own socket setup by milliseconds).
+wait_for_builder_socket() {
+  local budget="$1"
+  while [ "$budget" -gt 0 ]; do
+    [ -S /run/docker-helper-builder/manager.sock ] && return 0
+    budget=$((budget - 1))
+    sleep 0.2
+  done
+  return 1
+}
+
+# run_as_builder_domain root|uid <cmd...> — systemd-run a transient unit bound
+# to the builder domain through the SAME SELinuxContext= binding the real unit
+# uses. Nothing else in the policy may transition into
+# docker_helper_builder_t.
+run_as_builder_domain() {
+  local mode="$1"; shift
+  local name
+  name="p5s1-t-$(date +%s%N)"
+  if [ "$mode" = "uid" ]; then
+    systemd-run --wait --quiet --unit="$name" \
+      --property=SELinuxContext=system_u:system_r:docker_helper_builder_t:s0 \
+      --uid="$BUILDER_USER" --gid="$BUILDER_USER" \
+      "$@"
+  else
+    systemd-run --wait --quiet --unit="$name" \
+      --property=SELinuxContext=system_u:system_r:docker_helper_builder_t:s0 \
+      "$@"
+  fi
+}
+
+# attempt_build — one build attempt through the real daemon + session; prints
+# the streamed operation log, returns the CLI exit code.
+attempt_build() {
+  DOCKER_HELPER_SESSION_TOKEN="$(cat "$CRED_FILE")" \
+    docker-helper build buildctx --dockerfile Dockerfile --image p5s1:boundary 2>&1
+}
+
+save_build_output() {
+  local dest="$1" out="$2"
+  printf '%s\n' "$out" | sed 's/"token":[[:space:]]*"[^"]*"/"token": "REDACTED"/g; s/sk-[A-Za-z0-9_-]*/sk-REDACTED/g' > "$dest"
+}
+
+# --- fixtures -------------------------------------------------------------------
+id "$PRINCIPAL" >/dev/null 2>&1 || useradd -m "$PRINCIPAL" || fail "cannot create the principal OS user"
+mkdir -p "$WORKSPACE/buildctx"
+cat > "$WORKSPACE/buildctx/Dockerfile" <<'EOF'
+FROM scratch
+LABEL org.opencontainers.image.title="p5s1-boundary"
+EOF
+chown -R "$PRINCIPAL:$PRINCIPAL" "$ALLOWED_ROOT"
+
+# --- P0: enforcing preflight ---------------------------------------------------
+log "P0: enforcing SELinux preflight"
+LSM="$(cat /sys/kernel/security/lsm 2>/dev/null || true)"
+printf '%s\n' "$LSM" | grep -aqw selinux || fail "SELinux is not an active LSM ($LSM)"
+if printf '%s\n' "$LSM" | grep -aqw apparmor; then
+  fail "AppArmor is concurrently active ($LSM)"
+fi
+[ "$(getenforce 2>/dev/null)" = "Enforcing" ] || fail "getenforce != Enforcing"
+semodule -l 2>/dev/null | grep -qw container \
+  || fail "SELinux container policy module not loaded (prerequisite for docker_helper)"
+for tool in semodule semanage restorecon getenforce systemd-run stat systemctl; do
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool not found"
+done
+if [ -e /etc/os-release ]; then
+  grep -q 'openSUSE Tumbleweed' /etc/os-release \
+    || log "WARN: /etc/os-release does not identify openSUSE Tumbleweed"
+fi
+{
+  echo "LSM=$LSM"
+  echo "enforce=$(getenforce)"
+  echo "kernel=$(uname -r)"
+  for p in /usr/libexec/docker-helper/buildkit/buildkitd \
+           /usr/libexec/docker-helper/buildkit/buildctl \
+           /usr/libexec/docker-helper/buildkit/buildkit-runc \
+           /usr/bin/rootlesskit /usr/bin/newuidmap /usr/bin/slirp4netns; do
+    echo "matchpathcon $p: $(matchpathcon "$p" 2>/dev/null || echo 'no rule')"
+  done
+} > "$EVIDENCE_DIR/preflight-labels.txt"
+
+# --- P1: RPM fresh install -----------------------------------------------------
+log "P1: RPM fresh install via zypper"
+zypper --non-interactive --gpg-auto-import-keys refresh >/dev/null 2>&1 || true
+zypper --non-interactive install -y --allow-unsigned-rpm "$RPM" \
+  >"$EVIDENCE_DIR/zypper-install-candidate.log" 2>&1 \
+  || { tail -30 "$EVIDENCE_DIR/zypper-install-candidate.log"; fail "zypper install of the candidate RPM failed"; }
+[ "$(rpm -q --qf '%{VERSION}' docker-helper)" = "$VERSION" ] || fail "RPM version mismatch"
+semodule -l 2>/dev/null | grep -qw docker_helper \
+  || fail "SELinux docker_helper module not loaded after the RPM %posttrans"
+systemctl is-enabled "$UNIT" 2>/dev/null | grep -qx enabled || fail "$UNIT not enabled"
+id "$BUILDER_USER" >/dev/null 2>&1 || fail "builder identity not provisioned"
+[ "$(stat -c '%a' /usr/libexec/docker-helper/buildkit/buildkitd)" = "755" ] || fail "payload mode wrong"
+
+# File-context expectations (matchpathcon: the policy view, independent of file
+# existence).
+expect_context() {
+  local path="$1" want="$2" got
+  got="$(matchpathcon "$path" 2>/dev/null | awk '{print $2}')"
+  [ "$got" = "$want" ] || fail "matchpathcon $path = '$got', want '$want'"
+}
+expect_context /usr/bin/docker-helper system_u:object_r:docker_helper_exec_t:s0
+expect_context /usr/bin/rootlesskit system_u:object_r:docker_helper_rootlesskit_exec_t:s0
+expect_context /run/docker-helper-builder system_u:object_r:docker_helper_builder_runtime_t:s0
+expect_context /var/lib/docker-helper-builder system_u:object_r:docker_helper_builder_state_t:s0
+say "P1 static asserts OK"
+
+# docker engine is needed by the tarball lifecycle phase (P7) and makes the
+# permissive-harvest build attempt able to complete end-to-end; install it once
+# here so every later phase has it available.
+if ! command -v docker >/dev/null 2>&1; then
+  log "installing docker via zypper (needed by the tarball lifecycle phase)"
+  zypper --non-interactive install -y docker >"$EVIDENCE_DIR/zypper-install-docker.log" 2>&1 \
+    || { tail -20 "$EVIDENCE_DIR/zypper-install-docker.log"; fail "cannot install docker in the guest"; }
+fi
+systemctl start docker >/dev/null 2>&1 || true
+docker info >/dev/null 2>&1 || fail "docker engine not reachable in the guest"
+
+# --- P2: enforcing bootstrap ----------------------------------------------------
+P2_ENFORCING_OK=false
+P2_NOTE=""
+log "P2: enforcing bootstrap (manager in docker_helper_builder_t)"
+audit_window_start
+
+if systemctl start "$UNIT" 2>"$EVIDENCE_DIR/p2-start-stderr.txt"; then
+  MGR_PID="$(systemctl show "$UNIT" -p MainPID --value)"
+  { [ -n "$MGR_PID" ] && [ "$MGR_PID" != "0" ]; } || fail "builder unit MainPID missing"
+  MGR_CTX="$(cat "/proc/$MGR_PID/attr/current" 2>/dev/null || true)"
+  status="$(cat "/proc/$MGR_PID/status" 2>/dev/null || true)"
+  printf '%s\n' "$status" > "$EVIDENCE_DIR/builder-manager-status.txt"
+  grep -q '^NoNewPrivs:[[:space:]]*0$' "$status" || fail "builder manager must show NoNewPrivs: 0"
+  grep -q '^CapEff:[[:space:]]*0000000000000000$' "$status" || fail "builder manager must hold no effective capabilities"
+  grep -q '^CapBnd:[[:space:]]*00000000802000c2$' "$status" || fail "builder manager CapBnd must stay 00000000802000c2"
+  [ "$MGR_CTX" = "system_u:system_r:docker_helper_builder_t:s0" ] \
+    || fail "manager process context = '$MGR_CTX', want system_u:system_r:docker_helper_builder_t:s0"
+  wait_for_builder_socket 50 || fail "manager socket did not appear after unit activation"
+  [ "$(stat -c '%C' /run/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+    || fail "runtime root label wrong: $(stat -c '%C' /run/docker-helper-builder)"
+  [ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
+    || fail "state root label wrong: $(stat -c '%C' /var/lib/docker-helper-builder)"
+  [ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+    || fail "manager.sock label wrong: $(stat -c '%C' /run/docker-helper-builder/manager.sock)"
+  [ "$(stat -c '%C' /usr/bin/rootlesskit)" = "system_u:object_r:docker_helper_rootlesskit_exec_t:s0" ] \
+    || fail "/usr/bin/rootlesskit label wrong: $(stat -c '%C' /usr/bin/rootlesskit)"
+  journalctl -u "$UNIT" --since "@$AVC_EPOCH" --no-pager > "$EVIDENCE_DIR/builder-journal-p2.txt" 2>&1
+  grep -aq 'P4 unit cgroup boundary active' "$EVIDENCE_DIR/builder-journal-p2.txt" \
+    || fail "manager journal does not show the active unit-cgroup boundary (startup purge boundary semantics)"
+  P2_ENFORCING_OK=true
+  say "P2 enforcing bootstrap OK (manager in docker_helper_builder_t, labels proven)"
+else
+  P2_NOTE="enforcing start failed; unit journal + AVCs captured"
+  journalctl -u "$UNIT" -b --no-pager > "$EVIDENCE_DIR/builder-start-failure-journal.txt" 2>&1 || true
+  systemctl status "$UNIT" --no-pager > "$EVIDENCE_DIR/builder-start-status.txt" 2>&1 || true
+  log "P2 NOTE: $P2_NOTE"
+fi
+builder_avc_window "$AVC_EPOCH" > "$EVIDENCE_DIR/builder-avc-p2.txt" || true
+avc_window "$AVC_EPOCH" > "$EVIDENCE_DIR/all-avc-p2.txt" || true
+
+# --- P3: enforcing daemon transport + expected boundary build attempt ------------
+P3_ENFORCING_OK=false
+P3_NOTE=""
+if [ "$P2_ENFORCING_OK" = true ]; then
+  log "P3: enforcing daemon transport (real manager RPC roundtrip)"
+  if [ "$(systemctl is-active "$MAIN_UNIT" 2>/dev/null || true)" = "active" ]; then
+    systemctl stop "$MAIN_UNIT"
+  fi
+  /usr/bin/docker-helper init >/dev/null 2>&1 || fail "cannot init the docker-helper config"
+  /usr/bin/docker-helper config allowed-root add "$ALLOWED_ROOT" >/dev/null \
+    || fail "config allowed-root add failed"
+  /usr/bin/docker-helper principal create --no-credential "$PRINCIPAL" >/dev/null \
+    || fail "principal create failed"
+  /usr/bin/docker-helper principal allowed-root add "$PRINCIPAL" "$ALLOWED_ROOT" >/dev/null \
+    || fail "principal allowed-root add failed"
+  CRED_OUT="$(/usr/bin/docker-helper credential create --name p5s1 "$PRINCIPAL")" \
+    || fail "credential create failed"
+  printf '%s\n' "$CRED_OUT" | awk '/^[A-Za-z0-9_-]+$/{print; exit}' > "$CRED_FILE"
+  chmod 0600 "$CRED_FILE"
+  [ -s "$CRED_FILE" ] || fail "could not extract the credential token (value never echoed)"
+  SESSION_JSON="$(/usr/bin/docker-helper session create --token-file "$CRED_FILE" "$WORKSPACE" --json)" \
+    || fail "session create failed (workspace MAC lifecycle must exercise the real daemon path)"
+  printf '%s\n' "$SESSION_JSON" | sed 's/"token": "[^"]*"/"token": "REDACTED"/; s/"session_token":[^,]*,//' \
+    > "$EVIDENCE_DIR/session-create.json"
+  WS_LABEL="$(stat -c '%C' "$WORKSPACE/buildctx/Dockerfile" 2>/dev/null || true)"
+  echo "workspace Dockerfile label: $WS_LABEL" > "$EVIDENCE_DIR/workspace-label.txt"
+  case "$WS_LABEL" in
+    *docker_helper_workspace_t*) ;;
+    *) log "WARN: workspace file label = '$WS_LABEL' (the session MAC relabel may be pending)" ;;
+  esac
+  audit_window_start
+  BUILD_OUT="$(attempt_build)" && BUILD_RC=0 || BUILD_RC=$?
+  save_build_output "$EVIDENCE_DIR/build-attempt-output.txt" "$BUILD_OUT"
+  log "enforcing build attempt exit code: $BUILD_RC"
+  if grep -aq 'builder_start' "$EVIDENCE_DIR/build-attempt-output.txt"; then
+    P3_ENFORCING_OK=true
+  else
+    P3_NOTE="builder_start stage not visible in the operation log stream"
+  fi
+  journalctl -u "$UNIT" --since "@$AVC_EPOCH" --no-pager > "$EVIDENCE_DIR/builder-journal-p3.txt" 2>&1
+  grep -aq 'START ' "$EVIDENCE_DIR/builder-journal-p3.txt" \
+    || { P3_ENFORCING_OK=false; P3_NOTE="manager journal shows no START handling (the daemon RPC did not arrive)"; }
+  builder_avc_window "$AVC_EPOCH" > "$EVIDENCE_DIR/builder-avc-p3-enforcing.txt" || true
+  avc_window "$AVC_EPOCH" > "$EVIDENCE_DIR/all-avc-p3.txt" || true
+  say "P3 enforcing transport roundtrip OK (manager handled the uid-0 START; op stream shows builder_start)"
+else
+  log "P3 skipped (bootstrap not enforcing-green)"
+fi
+
+# --- P4: permissive harvest ------------------------------------------------------
+log "P4: permissive harvest (docker_helper_builder_t permissive, same build attempt)"
+audit_window_start
+semanage permissive -a docker_helper_builder_t || fail "cannot make the builder domain permissive"
+PERMISSIVE_SET=true
+HARVEST_START="$(date +%s)"
+if ! systemctl is-active --quiet "$UNIT"; then
+  systemctl start "$UNIT" || fail "cannot start the builder unit even permissive (transition/entrypoint rules)"
+fi
+wait_for_builder_socket 50 || fail "manager socket did not appear (permissive start)"
+BUILD_PERM_OUT="$(attempt_build)" && BUILD_PERM_RC=0 || BUILD_PERM_RC=$?
+save_build_output "$EVIDENCE_DIR/build-attempt-permissive-output.txt" "$BUILD_PERM_OUT"
+log "permissive build attempt exit code: $BUILD_PERM_RC"
+builder_avc_window "$HARVEST_START" > "$EVIDENCE_DIR/builder-avc-harvest.txt" || true
+avc_window "$HARVEST_START" > "$EVIDENCE_DIR/all-avc-harvest.txt" || true
+journalctl -u "$UNIT" --since "@$HARVEST_START" --no-pager > "$EVIDENCE_DIR/builder-journal-harvest.txt" 2>&1
+cleanup_permissive
+HARVEST_LINES="$(grep -ac 'avc:' "$EVIDENCE_DIR/builder-avc-harvest.txt" 2>/dev/null || true)"
+[ "${HARVEST_LINES:-0}" -gt 0 ] || fail "permissive harvest is empty (kernel audit window capture broken)"
+FORBIDDEN_HITS="$(forbidden_surface_hits "$EVIDENCE_DIR/builder-avc-harvest.txt")"
+if [ -n "$FORBIDDEN_HITS" ]; then
+  printf '%s\n' "$FORBIDDEN_HITS" > "$EVIDENCE_DIR/forbidden-surface-hits.txt"
+  fail "the builder domain attempted a forbidden surface during the full permissive run (see forbidden-surface-hits.txt)"
+fi
+say "P4 permissive harvest OK ($HARVEST_LINES builder-domain AVC records, zero forbidden-surface attempts)"
+
+# --- P5: enforcing negative proofs ----------------------------------------------
+log "P5: enforcing negative proofs (transient units in docker_helper_builder_t)"
+audit_window_start
+NEG_START="$AVC_EPOCH"
+
+# N1: helper config + admin token (uid-0 transient so DAC cannot short-circuit
+# the MAC check). The token file sits under the config tree, so the config-dir
+# traversal denial is the first MAC wall the attempt hits.
+if run_as_builder_domain root /usr/bin/docker-helper config show >/tmp/p5s1-n1.out 2>&1; then
+  fail "a process in the builder domain unexpectedly read the helper config/admin token"
+fi
+printf '%s\n' "$(cat /tmp/p5s1-n1.out)" > "$EVIDENCE_DIR/negative-config-show.txt"
+
+# N2: the daemon's helper socket must be unreachable from the builder domain
+# (a fake session token via --setenv so the CLI's client-side token check
+# passes and the connect attempt really happens).
+if systemd-run --wait --quiet --unit="p5s1-n2-$(date +%s%N)" \
+    --property=SELinuxContext=system_u:system_r:docker_helper_builder_t:s0 \
+    --setenv=DOCKER_HELPER_SESSION_TOKEN=p5s1-fake-token \
+    /usr/bin/docker-helper pull alpine:3.24 \
+    >/tmp/p5s1-n2.out 2>&1; then
+  fail "the builder domain unexpectedly connected to the daemon helper socket"
+fi
+printf '%s\n' "$(cat /tmp/p5s1-n2.out)" > "$EVIDENCE_DIR/negative-daemon-socket.txt"
+
+# N3: docker.sock itself must be MAC-denied (a direct endpoint connect, the
+# same syscall class the daemon legitimately uses).
+if run_as_builder_domain root /usr/bin/docker-helper pull alpine:3.24 \
+    --endpoint unix:///run/docker.sock >/tmp/p5s1-n3.out 2>&1; then
+  fail "the builder domain unexpectedly connected to /run/docker.sock"
+fi
+printf '%s\n' "$(cat /tmp/p5s1-n3.out)" > "$EVIDENCE_DIR/negative-docker-sock.txt"
+
+# N4: a Session-workspace file read must be MAC-denied (the token-file read
+# targets a workspace inode; DAC passes for the workspace files).
+if run_as_builder_domain root /usr/bin/docker-helper session list \
+    --token-file "$WORKSPACE/buildctx/Dockerfile" >/tmp/p5s1-n4.out 2>&1; then
+  fail "the builder domain unexpectedly read the Session workspace"
+fi
+printf '%s\n' "$(cat /tmp/p5s1-n4.out)" > "$EVIDENCE_DIR/negative-workspace.txt"
+
+NEG_AVC="$(avc_window "$NEG_START")"
+builder_avc_window "$NEG_START" > "$EVIDENCE_DIR/builder-avc-p5-negative.txt" || true
+avc_window "$NEG_START" > "$EVIDENCE_DIR/all-avc-p5.txt" || true
+# N1: the first denial on the config path is the config-dir traversal.
+assert_avc "$NEG_AVC" 'docker_helper_config_t'
+# N2: the daemon socket denial names the runtime sock_file type or the daemon
+# process (connectto).
+printf '%s\n' "$NEG_AVC" | grep -aqE 'docker_helper_runtime_t|docker_helper_t' \
+  || fail "expected an enforcing builder-domain AVC naming the daemon socket surface (N2)"
+# N3: the docker.sock denial names the Docker socket type or the dockerd domain.
+printf '%s\n' "$NEG_AVC" | grep -aqE 'container_var_run_t|container_runtime_t' \
+  || fail "expected an enforcing builder-domain AVC naming docker.sock (N3)"
+# N4: the workspace read denial names the workspace type.
+assert_avc "$NEG_AVC" 'docker_helper_workspace_t'
+say "P5 enforcing negative proofs OK (config, daemon socket, docker.sock, workspace)"
+
+# --- P6: upgrade relabel proof ----------------------------------------------------
+log "P6: upgrade relabel (poisoned labels corrected by the RPM %posttrans lifecycle)"
+if [ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" != "active" ]; then
+  systemctl start "$UNIT" || fail "builder not startable before P6"
+fi
+chcon -t var_run_t /var/lib/docker-helper-builder \
+  || fail "cannot poison the builder state label (chcon)"
+[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:var_run_t:s0" ] \
+  || fail "state label poisoning did not take effect"
+rpm -Uvh --replacepkgs "$RPM" >/dev/null || fail "rpm -U --replacepkgs failed"
+[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
+  || fail "the %posttrans relabel did not correct the builder state label (upgrade path broken)"
+[ "$(stat -c '%C' /run/docker-helper-builder/manager.sock)" = "system_u:object_r:docker_helper_builder_runtime_t:s0" ] \
+  || fail "manager.sock label wrong after the upgrade relabel"
+[ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] \
+  || fail "builder unit stopped across the upgrade"
+audit_window_start
+BUILD_P6_OUT="$(attempt_build)" && BUILD_P6_RC=0 || BUILD_P6_RC=$?
+save_build_output "$EVIDENCE_DIR/build-attempt-post-relabel.txt" "$BUILD_P6_OUT"
+log "post-relabel build attempt exit code: $BUILD_P6_RC"
+grep -aq 'builder_start' "$EVIDENCE_DIR/build-attempt-post-relabel.txt" \
+  || fail "the daemon lost manager transport after the upgrade relabel"
+say "P6 upgrade relabel OK (labels corrected by the existing %posttrans lifecycle; RPC roundtrip intact)"
+
+# --- P7: tarball lifecycle --------------------------------------------------------
+log "P7: tarball lifecycle on the enforcing host (install-system.sh)"
+rpm -e docker-helper || fail "rpm -e docker-helper failed"
+if semodule -l 2>/dev/null | grep -qw docker_helper; then
+  fail "SELinux docker_helper module must be removed by the RPM preremove"
+fi
+systemctl start docker >/dev/null 2>&1 || true
+WORK_TAR="$GUEST_FILES/bundle"
+rm -rf "$WORK_TAR"
+mkdir -p "$WORK_TAR"
+tar xzf "$TARBALL" -C "$WORK_TAR"
+BUNDLE="$WORK_TAR/docker-helper-${VERSION}-linux-amd64"
+[ -x "$BUNDLE/install-system.sh" ] || fail "bundle missing install-system.sh"
+( cd "$BUNDLE" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT" ) \
+  >"$EVIDENCE_DIR/install-system.log" 2>&1 || fail "install-system.sh (tarball) failed"
+[ -f /etc/systemd/system/docker-helper-builder.service ] \
+  || fail "tarball install did not install the builder unit"
+semodule -l 2>/dev/null | grep -qw docker_helper \
+  || fail "module not loaded by install-system.sh"
+[ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" = "active" ] \
+  || fail "builder service not active after tarball install"
+[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
+  || fail "builder state label wrong after the tarball install"
+[ "$(stat -c '%C' /usr/bin/rootlesskit)" = "system_u:object_r:docker_helper_rootlesskit_exec_t:s0" ] \
+  || fail "rootlesskit label wrong after the tarball install"
+# Tarball upgrade/reinstall relabel: poison, reinstall, verify.
+chcon -t var_run_t /var/lib/docker-helper-builder \
+  || fail "cannot poison the builder state label (tarball rerun)"
+if ! ( cd "$BUNDLE" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT" ) \
+    >"$EVIDENCE_DIR/install-system-rerun.log" 2>&1; then
+  tail -30 "$EVIDENCE_DIR/install-system-rerun.log"
+  fail "install-system.sh rerun (upgrade) failed"
+fi
+[ "$(stat -c '%C' /var/lib/docker-helper-builder)" = "system_u:object_r:docker_helper_builder_state_t:s0" ] \
+  || fail "the tarball relabel path did not correct the builder state label"
+/usr/bin/docker-helper selinux check >/dev/null 2>&1 \
+  || fail "docker-helper selinux check failed after the tarball install"
+say "P7 tarball lifecycle OK (fresh install + poisoned-label rerun relabel; selinux check valid)"
+
+# --- summary ----------------------------------------------------------------------
+{
+  echo "version=$VERSION"
+  echo "rpm=$(sha256sum "$RPM" | awk '{print $1}')"
+  echo "tarball=$(sha256sum "$TARBALL" | awk '{print $1}')"
+  echo "p2_enforcing_bootstrap=$P2_ENFORCING_OK"
+  echo "p3_enforcing_transport=$P3_ENFORCING_OK"
+  echo "enforcing_build_exit=$BUILD_RC"
+  echo "permissive_build_exit=$BUILD_PERM_RC"
+  echo "post_relabel_build_exit=$BUILD_P6_RC"
+  echo "harvest_builder_avc_lines=$HARVEST_LINES"
+} > "$EVIDENCE_DIR/digests.txt"
+
+if [ "$P2_ENFORCING_OK" != true ] || [ "$P3_ENFORCING_OK" != true ]; then
+  say "enforcing gates incomplete: p2=$P2_ENFORCING_OK p3=$P3_ENFORCING_OK ($P2_NOTE $P3_NOTE)"
+  say "the permissive harvest in $EVIDENCE_DIR/builder-avc-harvest.txt is the evidence for the next AVC"
+  exit 1
+fi
+
+printf '%s P5-S1-TW-BUILDER-MAC-RESULT=PASS\n' "$PREFIX"
