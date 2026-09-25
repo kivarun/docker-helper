@@ -382,7 +382,10 @@ func TestDeploymentLifecycleIsOnlyBuilderRelabelOwner(t *testing.T) {
 			}
 		}
 	}
-	// Builder relabel patterns in both script spellings.
+	// Builder relabel patterns in both script spellings. These are
+	// install-direction relabels: applying the builder-owned types to the
+	// builder trees and the third-party binaries the deployment lifecycle
+	// owns.
 	builderRelabelPatterns := []string{
 		"restorecon /run/docker-helper-builder",
 		"restorecon -R /run/docker-helper-builder",
@@ -395,6 +398,17 @@ func TestDeploymentLifecycleIsOnlyBuilderRelabelOwner(t *testing.T) {
 		"RESTORECON\" -R /var/lib/docker-helper-builder",
 		"RESTORECON\" /usr/bin/rootlesskit",
 	}
+	// The erase-direction cleanup is a different, documented operation: the
+	// RPM preremove restores the third-party binaries' canonical labels
+	// after the verified module removal (exact spelling checked positively
+	// by the behavioral tests). The erase lifecycle still must never relabel
+	// the builder TREES, so only the tree patterns apply there.
+	builderTreeRelabelPatterns := []string{
+		"restorecon /run/docker-helper-builder",
+		"restorecon -R /run/docker-helper-builder",
+		"restorecon /var/lib/docker-helper-builder",
+		"restorecon -R /var/lib/docker-helper-builder",
+	}
 	for _, path := range []string{
 		"packaging/scripts/lib/provision-builder.sh",
 		"packaging/scripts/deb/postinstall.sh",
@@ -405,7 +419,11 @@ func TestDeploymentLifecycleIsOnlyBuilderRelabelOwner(t *testing.T) {
 		"packaging/scripts/rpm/postremove.sh",
 	} {
 		content := readSELinuxPolicyFile(t, path)
-		for _, pattern := range builderRelabelPatterns {
+		patterns := builderRelabelPatterns
+		if path == "packaging/scripts/rpm/preremove.sh" {
+			patterns = builderTreeRelabelPatterns
+		}
+		for _, pattern := range patterns {
 			if strings.Contains(content, pattern) {
 				t.Errorf("%s must not carry a builder relabel (the deployment lifecycle owns it): %q", path, pattern)
 			}
