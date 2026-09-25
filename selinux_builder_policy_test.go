@@ -283,7 +283,7 @@ func TestSELinuxPolicySlirp4netnsExecType(t *testing.T) {
 	if !strings.Contains(fc, "/usr/bin/slirp4netns                --  system_u:object_r:docker_helper_slirp4netns_exec_t:s0") {
 		t.Error("file contexts must label /usr/bin/slirp4netns with the dedicated exec type")
 	}
-	want := "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans };"
+	want := "allow docker_helper_rootlesskit_t docker_helper_slirp4netns_exec_t:file { execute execute_no_trans read open getattr };"
 	if !strings.Contains(policy, want) {
 		t.Errorf("the slirp4netns execution grant must be exactly the child-domain execute pair: %q", want)
 	}
