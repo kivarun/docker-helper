@@ -220,7 +220,7 @@ func TestSELinuxPolicyRootlesskitDomainTransition(t *testing.T) {
 		"role system_r types docker_helper_rootlesskit_t;",
 		"type_transition docker_helper_builder_t docker_helper_rootlesskit_exec_t:process docker_helper_rootlesskit_t;",
 		"allow docker_helper_builder_t docker_helper_rootlesskit_t:process { transition };",
-		"allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute getattr map };",
+		"allow docker_helper_rootlesskit_t docker_helper_rootlesskit_exec_t:file { entrypoint read open execute execute_no_trans getattr map };",
 	} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("SELinux policy must carry the rootlesskit transition rule: %q", want)
@@ -237,14 +237,36 @@ func TestSELinuxPolicyRootlesskitDomainTransition(t *testing.T) {
 	if transitions != 1 {
 		t.Errorf("exactly one type_transition into the rootlesskit child domain may exist, found %d", transitions)
 	}
-	// The manager's rootlesskit exec grant is transition-shaped: the old
-	// no-transition shape (execute_no_trans) is dead under the transition
-	// rule and must be gone.
-	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { read open execute execute_no_trans getattr map };") {
-		t.Error("the manager's rootlesskit exec grant must be execute-only under the transition rule")
+	// The manager's rootlesskit exec grant is transition-shaped: execute plus
+	// the bprm read/open (the open/read checks run in the source domain), no
+	// execute_no_trans (dead under the transition rule), no loader perms.
+	if !strings.Contains(policy, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute read open };") {
+		t.Error("the manager's rootlesskit exec grant must be exactly { execute read open } under the transition rule")
 	}
-	if !strings.Contains(policy, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { execute };") {
-		t.Error("the manager must keep the execute grant needed to launch the rootlesskit vehicle")
+	if strings.Contains(policy, "allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { read open execute execute_no_trans getattr map };") {
+		t.Error("the manager's old no-transition rootlesskit exec grant must be gone")
+	}
+}
+
+// TestSELinuxPolicyRootlesskitMovedAccess verifies the child domain's
+// non-state grants are exactly the rootlesskit-attributed evidence surface:
+// the Go-runtime startup reads mirrored from the proven manager rules
+// (cgroup2 walk, net sysctl, passwd identity resolution), the
+// user-namespace limit read, and the inst.diag output pipe. Nothing else.
+func TestSELinuxPolicyRootlesskitMovedAccess(t *testing.T) {
+	policy := readSELinuxPolicyFile(t, "packaging/selinux/docker-helper.te")
+	for _, want := range []string{
+		"allow docker_helper_rootlesskit_t cgroup_t:dir { search };",
+		"allow docker_helper_rootlesskit_t cgroup_t:file { read open };",
+		"allow docker_helper_rootlesskit_t sysctl_net_t:dir { search };",
+		"allow docker_helper_rootlesskit_t sysctl_net_t:file { read open };",
+		"allow docker_helper_rootlesskit_t passwd_file_t:file { read open getattr };",
+		"allow docker_helper_rootlesskit_t sysctl_t:file { read open getattr };",
+		"allow docker_helper_rootlesskit_t docker_helper_builder_t:fifo_file { write };",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the rootlesskit child domain's moved access must be exact: %q", want)
+		}
 	}
 }
 
