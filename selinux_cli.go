@@ -49,12 +49,15 @@ const (
 // selinuxCheckPaths are docker-helper-owned paths whose file contexts, when
 // the path is present, must be consistent with the docker-helper.fc policy
 // defaults. The executable is required; these are optional (absent is not a
-// failure).
+// failure). The docker-helper-builder trees are the P5-S1 builder domain's
+// private runtime/state roots (absent until the builder service first runs).
 var selinuxCheckPaths = []string{
 	"/etc/docker-helper",
 	"/var/lib/docker-helper",
 	"/run/docker-helper",
 	"/run/docker-helper/trusted-ca",
+	"/var/lib/docker-helper-builder",
+	"/run/docker-helper-builder",
 }
 
 // selinuxCheckVerifier runs the read-only `docker-helper selinux check`

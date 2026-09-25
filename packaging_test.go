@@ -2747,32 +2747,46 @@ exit 0
 			restoreconCalls = append(restoreconCalls, c)
 		}
 	}
-	if len(restoreconCalls) != 5 {
-		t.Errorf("expected exactly 5 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
+	// Since P5-S1 the SELinux path also relabels the builder-owned trees
+	// (dedicated builder runtime/state types) and the rootlesskit launch
+	// vehicle (explicit RPM/tarball dependency; shipped exec type).
+	if len(restoreconCalls) != 8 {
+		t.Errorf("expected exactly 8 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
 	}
 	joined := strings.Join(restoreconCalls, "\n")
 	for _, want := range []string{
 		"restorecon /usr/bin/docker-helper",
 		"restorecon /usr/bin/bindfs",
+		"restorecon /usr/bin/rootlesskit",
 		"restorecon -R /etc/docker-helper",
 		"restorecon -R /var/lib/docker-helper",
 		"restorecon /run/docker-helper",
+		"restorecon -R /run/docker-helper-builder",
+		"restorecon -R /var/lib/docker-helper-builder",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("restorecon must include %q (got: %s)", want, joined)
 		}
 	}
-	if strings.Contains(joined, "restorecon -R /run/docker-helper") {
+	// The daemon runtime tree must never be relabeled recursively (the
+	// mount-alias relabel bug): the builder-owned runtime tree
+	// (/run/docker-helper-builder) carries no such aliases and is
+	// deliberately recursive since P5-S1.
+	if strings.Contains(joined, "restorecon -R /run/docker-helper ") ||
+		strings.Contains(joined, "restorecon -R /run/docker-helper\n") {
 		t.Error("restorecon must NEVER recurse into /run/docker-helper (mount-alias relabel bug)")
 	}
 	// Every restorecon target must be a docker-helper-owned path: no Docker
 	// daemon/socket path may be relabeled by the installer.
 	allowedTargets := map[string]bool{
-		"/usr/bin/docker-helper": true,
-		"/usr/bin/bindfs":        true,
-		"/etc/docker-helper":     true,
-		"/var/lib/docker-helper": true,
-		"/run/docker-helper":     true,
+		"/usr/bin/docker-helper":          true,
+		"/usr/bin/bindfs":                 true,
+		"/usr/bin/rootlesskit":            true,
+		"/etc/docker-helper":              true,
+		"/var/lib/docker-helper":          true,
+		"/run/docker-helper":              true,
+		"/run/docker-helper-builder":      true,
+		"/var/lib/docker-helper-builder":  true,
 	}
 	for _, c := range restoreconCalls {
 		target := c[strings.LastIndex(c, " ")+1:]
@@ -2789,7 +2803,12 @@ func TestInstallSystemSELinuxNoRecursiveRuntimeRestorecon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "restorecon -R /run/docker-helper") {
+	content := string(data)
+	// Exact-stem match: the builder-owned runtime tree
+	// (/run/docker-helper-builder) carries no mount aliases and is
+	// deliberately relabeled recursively since P5-S1.
+	if strings.Contains(content, "restorecon -R /run/docker-helper ") ||
+		strings.Contains(content, "restorecon -R /run/docker-helper\n") {
 		t.Error("install-system.sh must not recursively restorecon /run/docker-helper (would walk mount-pin aliases and corrupt workspace SELinux labels)")
 	}
 }
@@ -2844,7 +2863,7 @@ exit 0
 		if len(callsOf(t, env, "semodule")) == 0 {
 			t.Error("SElinux module load must happen once the floor is established")
 		}
-		if len(callsOf(t, env, "restorecon")) != 5 {
+		if len(callsOf(t, env, "restorecon")) != 8 {
 			t.Errorf("restorecon must still be applied on the SELinux path (got %d calls)", len(callsOf(t, env, "restorecon")))
 		}
 	})
@@ -3797,7 +3816,15 @@ func TestRPMScriptletNoRecursiveRuntimeRestorecon(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(data), "restorecon -R /run/docker-helper") {
+		content := string(data)
+		// The daemon runtime tree must never be relabeled recursively
+		// (the /run/docker-helper/mounts entries are bind-mount aliases of
+		// the real workspace inodes). The builder-owned runtime tree
+		// (/run/docker-helper-builder) carries no such aliases and is
+		// relabeled recursively on purpose since P5-S1; the exact-stem
+		// match below must not catch it.
+		if strings.Contains(content, "restorecon -R /run/docker-helper ") ||
+			strings.Contains(content, "restorecon -R /run/docker-helper\n") {
 			t.Errorf("%s must not recursively restorecon /run/docker-helper (would walk mount-pin aliases and corrupt workspace SELinux labels)", script)
 		}
 	}

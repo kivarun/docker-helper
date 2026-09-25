@@ -316,6 +316,8 @@ func TestSELinuxCheckReadOnlyContract(t *testing.T) {
 		{"matchpathcon", "-V", "/var/lib/docker-helper"},
 		{"matchpathcon", "-V", "/run/docker-helper"},
 		{"matchpathcon", "-V", "/run/docker-helper/trusted-ca"},
+		{"matchpathcon", "-V", "/var/lib/docker-helper-builder"},
+		{"matchpathcon", "-V", "/run/docker-helper-builder"},
 	}
 	if len(rec.cmds) != len(want) {
 		t.Fatalf("expected %d invocations, got %d: %v", len(want), len(rec.cmds), rec.cmds)

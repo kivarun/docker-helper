@@ -56,7 +56,7 @@
 # Remove:
 #   sudo semodule -r docker_helper
 
-module docker_helper 1.0;
+module docker_helper 1.1;
 
 	require {
 		attribute domain;
@@ -572,6 +572,122 @@ allow docker_helper_t cgroup_t:dir { search };
 #   scontext=docker_helper_t tcontext=cgroup_t tclass=file denied { read } comm="docker" name=cpu.max
 # Read/open only; no broader cgroup permissions.
 allow docker_helper_t cgroup_t:file { read open };
+
+# --- docker_helper_builder_t: builder manager domain (P5-S1) ---
+#
+# The builder backend (docker-helper-builder.service) runs the SAME shared
+# binary as the daemon but is a separate, deliberately weaker domain:
+# it owns only the per-op BuildKit instance lifecycle (manager socket,
+# per-op runtime/state trees, the rootlesskit launch vehicle) and holds NO
+# daemon authority — no helper config, no admin token, no Session
+# workspace types, no Docker socket, no daemon-owned runtime/state types.
+#
+# Domain binding (P5-S1 item 2): the builder unit binds this domain
+# explicitly through SELinuxContext= (the same mechanism as the main
+# daemon unit). There is deliberately NO exec-type auto-transition of the
+# shared docker_helper_exec_t to this domain: a type_transition would
+# flip EVERY execution of the shared binary — any operator CLI
+# invocation included — into the builder domain. The unit file is the
+# single binding owner; the only process rule here is systemd's explicit
+# SELinuxContext transition.
+#
+# The dedicated rootlesskit executable type keeps the manager's launch
+# grant narrow: the manager may execute the distro rootlesskit binary
+# only, never a generic bin_t execution grant (mirrors the bindfs
+# precedent; the restorecon wiring ships with the deployment lifecycle).
+type docker_helper_builder_t, domain;
+role system_r types docker_helper_builder_t;
+
+# Private file types for the builder-owned trees (RuntimeDirectory/
+# StateDirectory=docker-helper-builder). Deliberately separate from the
+# daemon's docker_helper_runtime_t/docker_helper_state_t: the builder's
+# persistent trees carry their own types, and the daemon's access to
+# them is limited to the manager-socket transport below.
+type docker_helper_builder_runtime_t, file_type;
+type docker_helper_builder_state_t, file_type;
+
+# Dedicated exec type for the distro rootlesskit binary. The builder
+# manager execs it in its own domain (no transition) as the launch
+# vehicle for every BuildKit instance; a dedicated type keeps the grant
+# to exactly this binary instead of a generic bin_t execution grant.
+# The child-process mechanics INSIDE rootlesskit/buildkitd (their own
+# execs, mounts, networking) are a separate MAC task and get NO grants
+# here.
+type docker_helper_rootlesskit_exec_t, file_type;
+
+# Entrypoint: the builder unit execs the shared binary
+# (docker_helper_exec_t) under SELinuxContext=, so the builder domain
+# needs the same entrypoint shape the daemon domain has for its own
+# start (mirrors the proven daemon rule).
+allow docker_helper_builder_t docker_helper_exec_t:file { read open execute getattr entrypoint };
+
+# systemd (init_t) binds the unit to the domain through SELinuxContext=.
+# No nnp_transition: the builder unit deliberately runs WITHOUT
+# NoNewPrivileges (the recorded Release-2.4 exception — the rootlesskit
+# newuidmap/newgidmap elevation), so the setexeccon transition checks
+# only transition and the signal-inheritance companion.
+allow init_t docker_helper_builder_t:process { transition siginh };
+
+# systemd (init_t) creates the unit's RuntimeDirectory and StateDirectory
+# with the file_contexts label and removes them on service stop (same
+# mechanism as the main unit's runtime dir; mirror of the proven init_t
+# docker_helper_runtime_t grants). Stop cleanup unlinks the directory
+# contents (the manager socket, pid files, op residue) before rmdir.
+allow init_t docker_helper_builder_runtime_t:dir { create rmdir write remove_name };
+allow init_t docker_helper_builder_state_t:dir { create rmdir write remove_name };
+allow init_t docker_helper_builder_runtime_t:file { unlink };
+allow init_t docker_helper_builder_runtime_t:lnk_file { unlink };
+allow init_t docker_helper_builder_runtime_t:sock_file { unlink };
+allow init_t docker_helper_builder_state_t:file { unlink };
+allow init_t docker_helper_builder_state_t:lnk_file { unlink };
+
+# journald: the manager writes its operational diagnostics to the
+# inherited systemd journal stream socket (StandardOutput=journal,
+# StandardError=journal). Mirror of the proven daemon rule.
+allow docker_helper_builder_t init_t:unix_stream_socket { getattr ioctl read write };
+
+# Runtime root, per-op runtime dirs, and the manager socket:
+# startup lstat of both roots and the stale-socket check, the 0600
+# socket create/setattr, per-op dir create/remove under ops/, and the
+# instance.pid persistence.
+allow docker_helper_builder_t docker_helper_builder_runtime_t:dir { getattr search read open write add_name remove_name create rmdir setattr };
+allow docker_helper_builder_t docker_helper_builder_runtime_t:sock_file { create getattr setattr unlink };
+allow docker_helper_builder_t docker_helper_builder_runtime_t:file { create read write open getattr setattr unlink };
+
+# State root and per-op state dirs: startup purge scan + removal, and
+# the START-time rootlesskit-state/root directory creation.
+allow docker_helper_builder_t docker_helper_builder_state_t:dir { getattr search read open write add_name remove_name create rmdir setattr };
+allow docker_helper_builder_t docker_helper_builder_state_t:file { create read write open getattr setattr unlink };
+
+# Identity guard: the startup execution-identity verification resolves
+# the builder user through /etc/passwd (same access the daemon needs
+# for Docker user resolution).
+allow docker_helper_builder_t passwd_file_t:file { read open getattr };
+
+# START resolves the system CA bundle for the child SSL_CERT_FILE
+# (fail closed without one): stat/open of the ca-bundle candidates and
+# the openSUSE symlink resolution (/etc/ssl/ca-bundle.pem ->
+# /var/lib/ca-certificates/ca-bundle.pem), all cert_t on Tumbleweed.
+allow docker_helper_builder_t cert_t:dir { search };
+allow docker_helper_builder_t cert_t:lnk_file { getattr read };
+allow docker_helper_builder_t cert_t:file { getattr open read };
+
+# The manager's launch vehicle: exec the distro rootlesskit binary in
+# this domain (no transition) with the read/map shape the loader needs.
+# Everything rootlesskit does AFTER the exec is child-process MAC
+# (separate task): no grants below this line for rootlesskit's own
+# mechanics, its helper execs (newuidmap/newgidmap/slirp4netns), or the
+# bundled buildkitd.
+allow docker_helper_builder_t docker_helper_rootlesskit_exec_t:file { read open execute execute_no_trans getattr map };
+
+# Daemon transport to the builder manager (P5-S1 item 4): the daemon
+# dials manager.sock and the per-op buildkitd sockets, and nothing
+# else. This is the ONLY access the daemon gets into the builder trees;
+# the builder domain gets no mirror-image access into any daemon-owned
+# type.
+allow docker_helper_t docker_helper_builder_runtime_t:dir { search };
+allow docker_helper_t docker_helper_builder_runtime_t:sock_file { getattr open read write };
+allow docker_helper_t docker_helper_builder_t:unix_stream_socket { connectto };
 
 # --- docker_helper_container_t: custom container domain ---
 

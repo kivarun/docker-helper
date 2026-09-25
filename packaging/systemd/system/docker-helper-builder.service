@@ -28,6 +28,16 @@ Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=30s
 
+# P5-S1 SELinux binding: the unit pins the dedicated builder domain
+# explicitly through SELinuxContext= (the same mechanism as the main
+# daemon unit). There is deliberately NO global exec-type auto-transition
+# of the shared docker_helper_exec_t to this domain in the SELinux
+# policy: a type_transition on the shared binary would flip every
+# operator CLI invocation into the builder domain. The unit file is the
+# single binding owner. On AppArmor and MAC-less hosts this line is
+# ignored by systemd.
+SELinuxContext=system_u:system_r:docker_helper_builder_t:s0
+
 # NoNewPrivileges is deliberately ABSENT for this unit only (the recorded
 # Release-2.4 exception): RootlessKit's builder-side mechanics need the
 # setuid-root newuidmap/newgidmap elevation, which NoNewPrivileges=true

@@ -577,6 +577,15 @@ apply_selinux_restorecon() {
 	# bindfs executable label for the workload read-only projection;
 	# best-effort like the rest of the tree.
 	"$RESTORECON" /usr/bin/bindfs 2>/dev/null || true
+	# P5-S1 builder-owned trees (dedicated builder runtime/state types).
+	# Recursive here is safe: these trees contain only builder-owned
+	# objects (manager/op sockets, pid files, per-op BuildKit state) — no
+	# workspace bind-mount aliases live under these stems. Fresh installs
+	# have no builder dirs yet (restorecon no-ops); re-runs migrate dirs
+	# labeled under an older module to the dedicated types.
+	"$RESTORECON" /usr/bin/rootlesskit 2>/dev/null || true
+	"$RESTORECON" -R /run/docker-helper-builder 2>/dev/null || true
+	"$RESTORECON" -R /var/lib/docker-helper-builder 2>/dev/null || true
 	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true
 	"$RESTORECON" -R /var/lib/docker-helper 2>/dev/null || true
 	"$RESTORECON" /run/docker-helper 2>/dev/null || true

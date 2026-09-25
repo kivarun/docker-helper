@@ -410,7 +410,16 @@ The deployment requires exactly one supported enforcing backend:
   managed boundaries are stored there, outside config.json. These managed
   boundaries are MAC state, not authorization roots;
 - SELinux confines the daemon as `docker_helper_t` and containers
-  as the MCS-constrained `docker_helper_container_t` type.
+  as the MCS-constrained `docker_helper_container_t` type. The builder
+  backend service (`docker-helper-builder.service`) is bound to its own
+  dedicated domain `docker_helper_builder_t` through the unit's
+  `SELinuxContext=` (no exec-type auto-transition of the shared
+  `docker_helper_exec_t` to the builder domain); the builder carries its
+  own private runtime/state types (`docker_helper_builder_runtime_t`,
+  `docker_helper_builder_state_t`) and the daemon's access into the
+  builder trees is limited to the manager-socket transport. The builder
+  domain holds no helper config, no admin token, no Session workspace
+  types, and no Docker socket access.
 
 Neither backend, both backends, and permissive SELinux fail closed. SELinux
 workspace access is type-based and does not reproduce AppArmor's per-path

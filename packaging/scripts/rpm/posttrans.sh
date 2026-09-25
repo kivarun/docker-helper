@@ -54,6 +54,10 @@ if command -v restorecon >/dev/null 2>&1; then
   # backend); apply the shipped docker_helper_bindfs_exec_t file context
   # so the confined daemon can exec the projection worker.
   restorecon /usr/bin/bindfs 2>/dev/null || true
+  # rootlesskit is an explicit RPM Requires (builder backend runtime); apply
+  # the shipped docker_helper_rootlesskit_exec_t file context so the
+  # confined builder manager can exec its launch vehicle.
+  restorecon /usr/bin/rootlesskit 2>/dev/null || true
   restorecon -R /etc/docker-helper 2>/dev/null || true
   restorecon -R /var/lib/docker-helper 2>/dev/null || true
   # Relabel only the helper-owned /run/docker-helper dir itself to
@@ -62,6 +66,15 @@ if command -v restorecon >/dev/null 2>&1; then
   # recursive relabel through them would relabel the actual workspace files
   # to docker_helper_runtime_t, corrupting the SELinux workspace model.
   restorecon /run/docker-helper 2>/dev/null || true
+  # P5-S1 builder-owned trees (the dedicated docker_helper_builder_runtime_t /
+  # docker_helper_builder_state_t types). Recursive here is safe: the builder
+  # runtime/state trees contain only builder-owned objects (manager/op
+  # sockets, pid files, per-op BuildKit state) — no workspace bind-mount
+  # aliases live under these stems. Fresh installs created no builder dirs
+  # yet (restorecon no-ops); upgrades/reinstalls migrate dirs labeled under
+  # an older module to the dedicated types.
+  restorecon -R /run/docker-helper-builder 2>/dev/null || true
+  restorecon -R /var/lib/docker-helper-builder 2>/dev/null || true
 fi
 
 # Deferred restart: only when %post recorded the service as active before
